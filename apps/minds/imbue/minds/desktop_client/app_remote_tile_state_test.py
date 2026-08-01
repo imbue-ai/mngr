@@ -147,3 +147,43 @@ def test_cloud_tile_state_reports_materialization_errors(tmp_path: Path) -> None
     state, detail = _compute_cloud_tile_state(resolver, store, email, record)
     assert state == "error"
     assert detail is not None and "decrypt" in detail
+
+
+def test_cloud_tile_state_stays_connecting_when_a_dropped_pre_start_error_set_no_freshness(
+    tmp_path: Path,
+) -> None:
+    """A pre-start snapshot whose error was dropped must not make the host look unreachable.
+
+    Regression: the backlog replay dropped a provider's pre-start error but still
+    recorded that snapshot's time, so the provider read as healthy-with-zero-hosts and
+    a leased, perfectly reachable workspace rendered "unreachable" until a fresh
+    snapshot landed. Freshness withheld -> the verdict stays "connecting".
+    """
+    email = f"tile-{uuid4().hex}@example.com"
+    store = _make_profiled_store(tmp_path, make_fake_imbue_cloud_cli())
+    record = _cloud_record(email, f"host-{uuid4().hex}", f"agent-{uuid4().hex}")
+    key_path = store.imbue_cloud_host_ssh_key_path(email, record.host_id)
+    assert key_path is not None
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text("materialized-key")
+    resolver = make_resolver_with_data()
+    provider_name = ProviderInstanceName(imbue_cloud_provider_name_for_account(email))
+
+    # The replay shape: error dropped to None, but the snapshot carried no usable state.
+    resolver.update_providers(
+        provider_name=provider_name,
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        is_snapshot_state_current=False,
+    )
+    assert _compute_cloud_tile_state(resolver, store, email, record) == ("connecting", None)
+
+    # A genuine post-start snapshot does record freshness, so the verdict can advance.
+    resolver.update_providers(
+        provider_name=provider_name,
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=6),
+    )
+    assert _compute_cloud_tile_state(resolver, store, email, record) == ("unreachable", None)

@@ -137,7 +137,13 @@ class _PreStartErrorDropLogger(MutableModel):
     """
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _tally_by_error_by_provider_name: dict[ProviderInstanceName, dict[DiscoveryError, _DroppedPreStartErrorTally]] = (
+    # Keyed by ``(type_name, message)`` rather than by the whole ``DiscoveryError``,
+    # matching the shared ``DiscoveryErrorLogSuppressor``: an error also carries a
+    # captured traceback, and folding that into the key would split one wedged
+    # provider's tally the moment its traceback varied -- restoring exactly the
+    # line-per-cycle flood this collapser exists to prevent, in lines that read
+    # identically (only the message is printed).
+    _tally_by_error_by_provider_name: dict[ProviderInstanceName, dict[tuple[str, str], _DroppedPreStartErrorTally]] = (
         PrivateAttr(default_factory=dict)
     )
 
@@ -145,13 +151,16 @@ class _PreStartErrorDropLogger(MutableModel):
         self, provider_name: ProviderInstanceName, error: DiscoveryError, snapshot_at: datetime
     ) -> None:
         """Tally one dropped pre-start error, to be logged when the provider's replay ends."""
+        error_key = (error.type_name, error.message)
         with self._lock:
             tally_by_error = self._tally_by_error_by_provider_name.setdefault(provider_name, {})
-            previous = tally_by_error.get(error)
+            previous = tally_by_error.get(error_key)
             if previous is None:
-                tally_by_error[error] = _DroppedPreStartErrorTally(error=error, count=1, last_snapshot_at=snapshot_at)
+                tally_by_error[error_key] = _DroppedPreStartErrorTally(
+                    error=error, count=1, last_snapshot_at=snapshot_at
+                )
             else:
-                tally_by_error[error] = previous.model_copy_update(
+                tally_by_error[error_key] = previous.model_copy_update(
                     to_update(previous.field_ref().count, previous.count + 1),
                     to_update(previous.field_ref().last_snapshot_at, snapshot_at),
                 )
@@ -471,6 +480,17 @@ class EnvelopeStreamConsumer(MutableModel):
             # flap (as they do across a multi-day gap) logs afresh after every
             # clean cycle in between.
             error = event.error
+            # Dropping the error must also drop the snapshot's claim to freshness.
+            # ``last_snapshot_at`` is what tells a consumer "discovery has reported this
+            # provider", and the cloud-tile state reads a recorded time plus no error as
+            # proof the provider is healthy -- so recording it here would launder a
+            # provider that was broken for the whole gap into a healthy one reporting
+            # zero hosts, and every workspace on it would render "unreachable" (a
+            # positive claim that discovery looked and the host was gone) instead of
+            # "connecting" (we do not know yet). That is exactly what happened to a
+            # leased, perfectly healthy staging host whose provider had been failing for
+            # ~25h. Leave freshness unset until a genuine post-start snapshot lands.
+            is_snapshot_state_current = True
             if event.discovery_finished_at < self.started_at:
                 if error is not None:
                     self._pre_start_drop_logger.record_dropped_error(
@@ -479,6 +499,7 @@ class EnvelopeStreamConsumer(MutableModel):
                         snapshot_at=event.discovery_finished_at,
                     )
                     error = None
+                    is_snapshot_state_current = False
             else:
                 self._pre_start_drop_logger.flush_provider(event.provider_name)
             # A per-provider snapshot is also a discovery event, so update_providers
@@ -499,6 +520,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 error=error,
                 last_snapshot_at=event.discovery_finished_at,
                 clean_snapshot_host_ids=clean_snapshot_host_ids,
+                is_snapshot_state_current=is_snapshot_state_current,
             )
         else:
             self._record_incremental_event(event)

@@ -125,12 +125,13 @@ from imbue.minds.utils.output import write_stdout_line
 # ``ci-`` map to the ``ci`` tier (CI-orchestrator-minted ephemeral envs),
 # and everything else maps to the ``dev`` tier. Mirrors the spec's
 # hard-coded tier mapping and lets ``minds env deploy`` / ``destroy``
-# dispatch on env name alone. The individual ``_PRODUCTION_ENV_NAME`` /
-# ``_STAGING_ENV_NAME`` / ``_DEV_TIER`` / ``_CI_TIER`` constants + the
-# ``_tier_for_env_name`` mapper live in ``_activated_env.py`` so
-# ``minds pool`` (which also needs to derive the tier for its
-# Vault-scoped pool-ssh / DSN reads) can share them without an
-# env.py -> pool.py back-reference.
+# dispatch on env name alone. The individual tier constants and the
+# ``tier_for_env_name`` mapper are defined in
+# ``imbue.mngr_imbue_cloud.primitives`` (one source of truth shared with
+# the bake-time box-exclusivity guard) and re-exported from
+# ``_activated_env.py``, so ``minds pool`` (which also needs to derive
+# the tier for its Vault-scoped pool-ssh / DSN reads) can share them
+# without an env.py -> pool.py back-reference.
 _RESERVED_TIER_ENV_NAMES: Final[frozenset[str]] = frozenset({"production", "staging"})
 
 # Env vars unset by ``deactivate``. Includes every var that any

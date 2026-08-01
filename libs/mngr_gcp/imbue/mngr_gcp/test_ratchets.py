@@ -119,7 +119,7 @@ def test_prevent_functools_partial() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(1))
+    rc.check_async_await(_DIR, snapshot(0))
 
 
 # --- Naming conventions ---

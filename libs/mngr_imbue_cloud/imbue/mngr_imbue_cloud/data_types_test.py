@@ -1,5 +1,6 @@
 import pytest
 
+from imbue.mngr_imbue_cloud.data_types import BoxTierAudit
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.primitives import FastMode
@@ -113,3 +114,25 @@ def test_parse_build_args_rejects_unknown_region() -> None:
 def test_parse_build_args_rejects_empty_region() -> None:
     with pytest.raises(ValueError, match="region"):
         parse_imbue_cloud_build_args(["region="])
+
+
+def _audit(*, authorized_key_count: int = 1, foreign_tier_slices: tuple[str, ...] = ()) -> BoxTierAudit:
+    return BoxTierAudit(
+        server_id="11111111-1111-1111-1111-111111111111",
+        public_address="203.0.113.10",
+        slot_count=6,
+        box_used_slots=2,
+        authorized_key_count=authorized_key_count,
+        foreign_tier_slices=foreign_tier_slices,
+    )
+
+
+def test_box_tier_audit_is_exclusive_only_with_one_key_and_no_foreign_slices() -> None:
+    assert _audit().is_exclusive_to_tier
+    assert not _audit(authorized_key_count=2).is_exclusive_to_tier
+    assert not _audit(foreign_tier_slices=("mngr-slice-dev-xiaq-" + "a" * 32 + "-data",)).is_exclusive_to_tier
+
+
+def test_box_tier_audit_serializes_the_exclusivity_verdict() -> None:
+    # The verdict is what `just audit-boxes` readers act on, so it must be in the JSON.
+    assert _audit().model_dump(mode="json")["is_exclusive_to_tier"] is True

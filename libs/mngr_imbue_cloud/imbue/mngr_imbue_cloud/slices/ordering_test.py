@@ -1,3 +1,4 @@
+import time
 from typing import cast
 
 import pytest
@@ -6,12 +7,14 @@ from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.slices.ordering import _ReinstallStartAttempt
 from imbue.mngr_imbue_cloud.slices.ordering import _looks_like_service_name
+from imbue.mngr_imbue_cloud.slices.ordering import _read_address_tolerating_missing_service
 from imbue.mngr_imbue_cloud.slices.ordering import build_box_host_key_postinstall_script
 from imbue.mngr_imbue_cloud.slices.ordering import derive_server_specs
 from imbue.mngr_imbue_cloud.slices.ordering import extract_order_id
 from imbue.mngr_imbue_cloud.slices.ordering import select_eco_option_codes
 from imbue.mngr_imbue_cloud.slices.ordering import start_os_reinstall
 from imbue.mngr_imbue_cloud.slices.ordering import summarize_checkout_prices
+from imbue.mngr_imbue_cloud.slices.ordering import wait_for_dedicated_server_address
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_vps.errors import VpsApiError
 
@@ -314,3 +317,101 @@ def test_reinstall_start_attempt_propagates_non_transient_error() -> None:
     fatal = VpsApiError(404, "OVH API POST /dedicated/server/ns1.example/reinstall returned error: not found")
     with pytest.raises(VpsApiError):
         _reinstall_attempt(_RaisingReinstallClient(fatal))()
+
+
+class _ScriptedDedicatedServerClient:
+    """Fake OVH client returning a scripted sequence of dedicated-server GET outcomes.
+
+    Each entry is either a ``VpsApiError`` to raise or a body dict to return, so a test
+    can reproduce the real delivery sequence: 404 while OVH has not published the
+    service, then a body with no ``ip``, then the assigned address. A call past the end
+    of the script fails the test rather than inventing a response, so a regression that
+    polls more times than the scenario describes says so instead of spinning until the
+    poll loop times out.
+    """
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self._outcomes = list(outcomes)
+        self.call_count = 0
+
+    def call_api(self, method: str, path: str, **body: object) -> dict:
+        self.call_count += 1
+        assert self._outcomes, f"unscripted call {self.call_count}: {method} {path}"
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, VpsApiError):
+            raise outcome
+        return cast(dict, outcome)
+
+
+def _not_found() -> VpsApiError:
+    return VpsApiError(404, "OVH API GET /dedicated/server/ns1.example returned error: This service does not exist")
+
+
+def test_read_address_tolerating_missing_service_treats_a_404_as_not_ready_yet() -> None:
+    # The real race: OVH assigns the serviceName on the order before the service is
+    # queryable, so the first reads 404. Inside the grace window that is "not yet".
+    client = _ScriptedDedicatedServerClient([_not_found()])
+    result = _read_address_tolerating_missing_service(
+        cast(OvhVpsClient, client), "ns1.example", grace_started_at=time.monotonic(), visibility_grace_seconds=600.0
+    )
+    assert result is None
+
+
+def test_read_address_tolerating_missing_service_raises_once_the_grace_window_has_passed() -> None:
+    # A serviceName that never materializes must surface promptly rather than polling
+    # silently until the 4h delivery timeout.
+    client = _ScriptedDedicatedServerClient([_not_found()])
+    with pytest.raises(BareMetalProvisioningError) as exc_info:
+        _read_address_tolerating_missing_service(
+            cast(OvhVpsClient, client),
+            "ns1.example",
+            grace_started_at=time.monotonic() - 601.0,
+            visibility_grace_seconds=600.0,
+        )
+    # The message must name the window that was actually applied, not a module default.
+    assert "ns1.example was still not queryable 600s" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, VpsApiError)
+
+
+def test_read_address_tolerating_missing_service_propagates_non_404_errors() -> None:
+    # Only absence is a race; auth/quota/server errors are real and must not be swallowed.
+    client = _ScriptedDedicatedServerClient([VpsApiError(403, "forbidden")])
+    with pytest.raises(VpsApiError) as exc_info:
+        _read_address_tolerating_missing_service(
+            cast(OvhVpsClient, client),
+            "ns1.example",
+            grace_started_at=time.monotonic(),
+            visibility_grace_seconds=600.0,
+        )
+    assert exc_info.value.status_code == 403
+
+
+def test_read_address_tolerating_missing_service_returns_none_when_published_without_an_ip() -> None:
+    client = _ScriptedDedicatedServerClient([{"state": "ok"}])
+    result = _read_address_tolerating_missing_service(
+        cast(OvhVpsClient, client), "ns1.example", grace_started_at=time.monotonic(), visibility_grace_seconds=600.0
+    )
+    assert result is None
+
+
+def test_read_address_tolerating_missing_service_returns_the_address_once_assigned() -> None:
+    client = _ScriptedDedicatedServerClient([{"ip": "51.81.154.217"}])
+    result = _read_address_tolerating_missing_service(
+        cast(OvhVpsClient, client), "ns1.example", grace_started_at=time.monotonic(), visibility_grace_seconds=600.0
+    )
+    assert result == "51.81.154.217"
+
+
+def test_wait_for_dedicated_server_address_polls_through_a_404_to_the_address() -> None:
+    # End-to-end through the poll loop: 404, then no-ip, then the address -- the exact
+    # sequence a real delivery produced, which previously aborted on the first 404.
+    client = _ScriptedDedicatedServerClient([_not_found(), {"state": "ok"}, {"ip": "51.81.154.217"}])
+    address = wait_for_dedicated_server_address(
+        cast(OvhVpsClient, client),
+        service_name="ns1.example",
+        timeout_seconds=30.0,
+        visibility_grace_seconds=600.0,
+        poll_interval_seconds=0.01,
+    )
+    assert address == "51.81.154.217"
+    assert client.call_count == 3

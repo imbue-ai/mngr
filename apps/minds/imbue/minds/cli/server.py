@@ -2,9 +2,12 @@
 
 Mirrors the ``minds pool`` wrapper (see :mod:`imbue.minds.cli.pool`): from the
 activated minds env it resolves the host_pool DSN (Vault for staging/production,
-per-env secrets.toml for dev/ci) and, for ``prep``, injects the tier's
+per-env secrets.toml for dev/ci) and, for every command that SSHes a box
+(``prep``, and ``list --verify-occupancy``), injects the tier's
 POOL_SSH_PRIVATE_KEY from Vault into the admin subprocess -- so operators never
 hand-export MINDS_HOST_POOL_DSN or the pool key to inspect or (re-)prep boxes.
+``list --verify-occupancy`` also forwards the activated env name, which is what
+tells the admin side which slices on a box belong to a foreign tier.
 The remaining ``admin server`` subcommands (order / register / setup / ...) also
 need OVH supplier credentials and stay unwrapped.
 
@@ -25,15 +28,19 @@ from imbue.minds.cli.pool import run_imbue_cloud_admin_command
 from imbue.minds.envs.primitives import VaultReadError
 
 
-def build_server_list_admin_args(*, database_url: str | None) -> list[str]:
+def build_server_list_admin_args(*, database_url: str | None, env_name: str, is_occupancy_verified: bool) -> list[str]:
     """Compose the ``mngr imbue_cloud admin server list`` argv.
 
     ``--database-url`` forwarded only when non-None (dev auto-resolves it from the
     activated env's secrets.toml; staging/production pass the Vault-resolved DSN).
+    ``--verify-occupancy`` additionally carries ``--env-name`` so the admin side can
+    tell which slices on a box belong to a foreign tier.
     """
     args = ["list"]
     if database_url is not None:
         args.extend(["--database-url", database_url])
+    if is_occupancy_verified:
+        args.extend(["--verify-occupancy", "--env-name", env_name])
     return args
 
 
@@ -73,15 +80,42 @@ def server() -> None:
     type=str,
     help=DATABASE_URL_HELP,
 )
-def server_list(database_url: str | None) -> None:
+@click.option(
+    "--verify-occupancy",
+    "is_occupancy_verified",
+    is_flag=True,
+    default=False,
+    help=(
+        "SSH each box and report its REAL occupancy plus any cross-tier contamination. "
+        "The DB-derived table counts only this env's own rows, so it undercounts a box "
+        "shared with another env. The pool SSH key is resolved from the tier's Vault entry."
+    ),
+)
+def server_list(database_url: str | None, is_occupancy_verified: bool) -> None:
     """List bare-metal servers with per-server and fleet slot accounting.
 
     Forwards to ``mngr imbue_cloud admin server list``, resolving the host_pool
-    DSN from the activated env exactly like ``minds pool list``.
+    DSN from the activated env exactly like ``minds pool list``. With
+    ``--verify-occupancy`` it also injects the tier's pool SSH key so the admin
+    side can read each box's true occupancy.
     """
     env_name = require_activated_env_name()
-    args = build_server_list_admin_args(database_url=resolve_host_pool_dsn(env_name, database_url))
-    raise_on_admin_command_failure("server", "list", run_imbue_cloud_admin_command("server", args, extra_env=None))
+    extra_env: dict[str, str] | None = None
+    if is_occupancy_verified:
+        try:
+            extra_env = {POOL_PRIVATE_KEY_ENV_VAR: read_pool_private_key_from_vault(env_name)}
+        except VaultReadError as exc:
+            raise click.ClickException(
+                f"Could not read the pool SSH private key from Vault for env {env_name!r}: {exc}"
+            ) from exc
+    args = build_server_list_admin_args(
+        database_url=resolve_host_pool_dsn(env_name, database_url),
+        env_name=env_name,
+        is_occupancy_verified=is_occupancy_verified,
+    )
+    raise_on_admin_command_failure(
+        "server", "list", run_imbue_cloud_admin_command("server", args, extra_env=extra_env)
+    )
 
 
 @server.command(name="prep")

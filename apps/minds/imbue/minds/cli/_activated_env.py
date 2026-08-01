@@ -26,6 +26,9 @@ from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_env_activated
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_deploy_config
+from imbue.mngr_imbue_cloud.primitives import PRODUCTION_TIER
+from imbue.mngr_imbue_cloud.primitives import STAGING_TIER
+from imbue.mngr_imbue_cloud.primitives import tier_for_env_name as _canonical_tier_for_env_name
 
 # Env var the activation exports set to pin every ``modal`` CLI
 # shellout to a specific workspace, regardless of which profile is
@@ -35,29 +38,20 @@ from imbue.minds.config.loader import load_deploy_config
 # reverts cleanly.
 MODAL_PROFILE_ENV_VAR: Final[str] = "MODAL_PROFILE"
 
-PRODUCTION_ENV_NAME: Final[str] = "production"
-STAGING_ENV_NAME: Final[str] = "staging"
-DEV_TIER: Final[str] = "dev"
-CI_TIER: Final[str] = "ci"
+PRODUCTION_ENV_NAME: Final[str] = PRODUCTION_TIER
+STAGING_ENV_NAME: Final[str] = STAGING_TIER
 
 
 def tier_for_env_name(env_name: str) -> str:
-    """Hard-coded env-name -> tier mapping.
+    """Env-name -> tier mapping, re-exported from ``mngr_imbue_cloud.primitives``.
 
-    ``production`` -> ``production``; ``staging`` -> ``staging``;
-    names starting with ``ci-`` -> ``ci`` (the CI-orchestrator-minted
-    ephemeral envs); everything else (the convention is
-    ``dev-<user>-<suffix>``) -> ``dev``. Shared by ``minds env``
-    (deploy/destroy dispatch) and ``minds pool`` (tier-scoped Vault
-    reads for the OVH admin credentials).
+    Shared by ``minds env`` (deploy/destroy dispatch), ``minds pool`` (tier-scoped
+    Vault reads), and -- crucially -- the bake-time box-exclusivity guard in
+    ``mngr_imbue_cloud``. It delegates rather than keeping a second copy: two
+    implementations of "which tier is this env" could drift, and the guard would
+    then disagree with the CLI about what counts as a cross-tier bake.
     """
-    if env_name == PRODUCTION_ENV_NAME:
-        return PRODUCTION_ENV_NAME
-    if env_name == STAGING_ENV_NAME:
-        return STAGING_ENV_NAME
-    if env_name.startswith(f"{CI_TIER}-"):
-        return CI_TIER
-    return DEV_TIER
+    return _canonical_tier_for_env_name(env_name)
 
 
 def modal_profile_for_tier_or_none(tier: str) -> str | None:

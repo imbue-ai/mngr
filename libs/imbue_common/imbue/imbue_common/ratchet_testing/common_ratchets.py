@@ -180,7 +180,14 @@ PREVENT_ASYNC_AWAIT = RegexRatchetRule(
         "are almost no valid exceptions. Write blocking, synchronous code instead (poll with wait_for, "
         "use threads via ConcurrencyGroup if you need concurrency)."
     ),
-    pattern_string=r"\basync\s+def\b|\bawait\b",
+    # The pattern requires what actually follows the keyword in Python -- whitespace before
+    # the awaited expression, or an opening paren -- rather than a bare word boundary. A bare
+    # boundary also matches prose: ``await-delivery`` is a real CLI subcommand
+    # (``mngr imbue_cloud admin server await-delivery``), so every comment, docstring, and help
+    # string naming it counts as an async usage. NB: this file is scanned by this rule, so write
+    # any prose here with the keyword never followed by a space or an open paren, or the rule
+    # counts its own explanation.
+    pattern_string=r"\basync\s+def\b|\bawait\s|\bawait\(",
 )
 
 PREVENT_PANDAS_IMPORT = RegexRatchetRule(

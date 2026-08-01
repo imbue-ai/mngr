@@ -17,6 +17,18 @@ SuperTokens account, OAuth clients, bare-metal box supplier account
 (currently OVH), Anthropic key, and pool-management SSH keypair. There
 is zero cross-tier reach.
 
+That extends to bare-metal boxes: a box belongs to exactly one tier.
+Sharing one *within* a tier is fine and routine (several `dev-<user>`
+envs on one dev box); sharing one *across* tiers is not, because each
+tier has its own pool keypair. A box serving two tiers is a box both
+tiers' keys can SSH, so each tier's operators and connector gain
+`limactl` -- and so root -- over the other's workspaces, and neither
+tier's reap will ever reclaim the other's slices. Baking a slice
+onto a box that carries another tier's slices -- or whose lima user
+authorizes more than that one tier's pool key -- is refused before
+anything is carved. `just audit-boxes` reports the same condition
+without needing a bake to fail.
+
 ## Per-env data root
 
 Every minds env owns one data root:

@@ -919,6 +919,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
         error: DiscoveryError | None,
         last_snapshot_at: datetime,
         clean_snapshot_host_ids: tuple[str, ...] | None = None,
+        # False when this snapshot tells us nothing current about the provider, so its
+        # time must not advance the provider's freshness. Only the pre-start replay
+        # passes False -- see the caller in ``forward_cli`` for why.
+        is_snapshot_state_current: bool = True,
     ) -> None:
         """Merge one provider's discovery snapshot into provider state. Thread-safe.
 
@@ -941,6 +945,14 @@ class MngrCliBackendResolver(BackendResolverInterface):
         the set is positively gone and pruned (and the pruned topology
         persisted). Callers MUST pass None for an errored snapshot -- the
         provider's hosts are unreachable, not absent.
+
+        ``is_snapshot_state_current=False`` records everything except the
+        provider's freshness. ``last_snapshot_at`` answers "has discovery had
+        its chance to report this provider yet", and consumers read a recorded
+        time as proof that it has -- so a snapshot that carries no usable state
+        must not set it, or the provider reads as healthy-and-empty rather than
+        not-yet-known. It still bumps ``_last_event_at``, which only tracks that
+        *some* discovery traffic arrived.
         """
         path = self.last_good_agents_path
         topology_to_write: _LastGoodAgentTopology | None = None
@@ -951,7 +963,8 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 self._error_by_provider_name[provider_name] = error
             else:
                 self._error_by_provider_name.pop(provider_name, None)
-            self._last_snapshot_at_by_provider[provider_name] = last_snapshot_at
+            if is_snapshot_state_current:
+                self._last_snapshot_at_by_provider[provider_name] = last_snapshot_at
             if self._last_event_at is None or last_snapshot_at > self._last_event_at:
                 self._last_event_at = last_snapshot_at
             if (

@@ -140,6 +140,15 @@ class DiscoveryError(FrozenModel):
     type_name: str = Field(description="The type name of the exception (e.g. 'RuntimeError')")
     message: str = Field(description="The error message")
     provider_name: ProviderInstanceName = Field(description="The provider instance associated with the error")
+    # Without this a provider outage is undiagnosable after the fact: the snapshot is the
+    # only durable record of the failure (nothing logs a traceback around it), and a
+    # message alone can be useless -- an OSError raised without a filename serializes to
+    # a bare "[Errno 2] No such file or directory", which names neither the file nor the
+    # code that opened it. Optional so replayed snapshots written before this field
+    # existed still parse.
+    traceback_text: str | None = Field(
+        default=None, description="Formatted traceback of the exception, when one was available"
+    )
 
 
 class FullDiscoverySnapshotEvent(EventEnvelope):

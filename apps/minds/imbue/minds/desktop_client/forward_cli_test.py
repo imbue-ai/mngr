@@ -111,10 +111,17 @@ def _replay_consumer() -> EnvelopeStreamConsumer:
     )
 
 
-def _stale_error(message: str = "Docker state container is stopped", provider_name: str = "local") -> DiscoveryError:
+def _stale_error(
+    message: str = "Docker state container is stopped",
+    provider_name: str = "local",
+    traceback_text: str | None = None,
+) -> DiscoveryError:
     """The kind of already-outdated provider error a pre-start snapshot carries."""
     return DiscoveryError(
-        type_name="ProviderUnavailableError", message=message, provider_name=ProviderInstanceName(provider_name)
+        type_name="ProviderUnavailableError",
+        message=message,
+        provider_name=ProviderInstanceName(provider_name),
+        traceback_text=traceback_text,
     )
 
 
@@ -428,6 +435,41 @@ def test_pre_start_snapshot_error_is_dropped_but_topology_merges() -> None:
     assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
 
 
+def test_pre_start_snapshot_with_a_dropped_error_records_no_provider_freshness() -> None:
+    """Dropping a pre-start error must also withhold that snapshot's freshness.
+
+    Regression: the drop cleared the error but still recorded ``last_snapshot_at``, so
+    a provider that had been failing for the whole gap read as healthy-with-zero-hosts.
+    Consumers treat a recorded time plus no error as proof discovery reported the
+    provider, which turned "we do not know yet" into a positive "unreachable" verdict
+    for every workspace on it. A pre-start snapshot that was CLEAN is a real
+    observation and still records freshness.
+    """
+    consumer = _replay_consumer()
+    provider_name = ProviderInstanceName("local")
+
+    # Pre-start + errored -> error dropped AND freshness withheld.
+    _dispatch_replayed_snapshot(
+        consumer, _stale_error("provider was wedged all gap"), cycle=0, agents=(_make_agent(_AGENT_ID_1),)
+    )
+    assert consumer.resolver.get_provider_errors() == {}
+    assert consumer.resolver.get_last_snapshot_at_for_provider(provider_name) is None
+
+    # A genuine post-start snapshot does record freshness.
+    _dispatch_live_snapshot(consumer, agents=(_make_agent(_AGENT_ID_1),))
+    assert consumer.resolver.get_last_snapshot_at_for_provider(provider_name) == consumer.started_at + timedelta(
+        seconds=30
+    )
+
+
+def test_clean_pre_start_snapshot_still_records_provider_freshness() -> None:
+    """A pre-start snapshot with no error is a real observation, so it keeps its freshness."""
+    consumer = _replay_consumer()
+    provider_name = ProviderInstanceName("local")
+    _dispatch_replayed_clean_snapshot(consumer, cycle=0)
+    assert consumer.resolver.get_last_snapshot_at_for_provider(provider_name) == _DISCOVERY_FINISHED_AT
+
+
 def test_repeated_pre_start_error_drops_log_one_counted_line_when_replay_ends() -> None:
     """A long backlog of identical pre-start errors logs one counted line, and only once replay ends.
 
@@ -477,6 +519,25 @@ def test_clean_pre_start_snapshot_does_not_split_a_providers_tally() -> None:
     lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
     assert len(lines) == 1
     assert "8x Could not connect to the endpoint URL" in lines[0]
+
+
+def test_pre_start_drops_of_one_error_collapse_even_when_their_tracebacks_differ() -> None:
+    """Differing captured tracebacks must not split one provider's tally.
+
+    A discovery error carries a captured traceback, which is diagnostic detail rather
+    than error identity: the logged line reports only the message, so tallying per
+    traceback would emit a run of identical-looking lines -- the very flood the
+    collapser exists to prevent.
+    """
+    consumer = _replay_consumer()
+    with capture_loguru(level="INFO") as log_output:
+        for cycle in range(6):
+            error = _stale_error("Could not connect to the endpoint URL", traceback_text=f"Traceback ... line {cycle}")
+            _dispatch_replayed_snapshot(consumer, error, cycle)
+        _dispatch_live_snapshot(consumer)
+    lines = [line for line in log_output.getvalue().splitlines() if "pre-start provider error" in line]
+    assert len(lines) == 1
+    assert "6x Could not connect to the endpoint URL" in lines[0]
 
 
 def test_alternating_pre_start_errors_are_tallied_separately() -> None:

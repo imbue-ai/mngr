@@ -29,6 +29,7 @@ from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.utils.error_utils import format_exception_traceback
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
@@ -226,10 +227,13 @@ class _ProviderDiscoveryPoller(MutableModel):
 
     def _emit_error_snapshot(self, started_at: datetime, exc: BaseException) -> None:
         cause = exc.__cause__ if isinstance(exc, ProviderError) and exc.__cause__ is not None else exc
+        # The snapshot is the only durable record of this failure -- nothing logs a
+        # traceback around it -- so carry one, matching the cause we name above.
         error = DiscoveryError(
             type_name=type(cause).__name__,
             message=str(cause),
             provider_name=self.provider.name,
+            traceback_text=format_exception_traceback(cause),
         )
         write_provider_discovery_snapshot(
             self.mngr_ctx.config,

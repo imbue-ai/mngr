@@ -205,10 +205,16 @@ Boxes whose images predate the docker preinstall (2026-06-16) are unaffected
 
 - Dev bare-metal boxes are **shared across dev envs** (one box can carry
   slices for several `dev-<user>` envs, and `just list-servers` slot
-  accounting only counts the activated env's own DB rows -- trust the bake's
-  cross-env occupancy guard / `--dry-run`, not the fleet table, for free
-  slots). Re-prepping a shared box upgrades lima for everyone's slices on it;
-  running VMs are untouched, but give the other devs a heads-up.
+  accounting only counts the activated env's own DB rows -- trust `just
+  audit-boxes`, the bake's cross-env occupancy guard, or `--dry-run`, not the
+  fleet table, for free slots). Re-prepping a shared box upgrades lima for
+  everyone's slices on it; running VMs are untouched, but give the other devs
+  a heads-up.
+- Sharing is only legitimate **within** a tier. A box carrying slices from two
+  different tiers (e.g. a `dev-<user>` slice on a staging box) is refused at
+  bake time, as is a box whose lima user authorizes more than the one tier
+  pool key that `prep` writes. `just audit-boxes` surfaces both without a
+  failed bake.
 - To put a dev-env lease on the fast path from a *released* desktop binary,
   bake with `--from-tag <minds-vX.Y.Z>` (i.e. `just bake-slice-prod`, which is
   env-agnostic despite the name) so the row's `repo_branch_or_tag` equals the

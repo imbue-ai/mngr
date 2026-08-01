@@ -228,6 +228,19 @@ List the rows (with the tier activated):
 just list-pool-hosts
 ```
 
+Audit the boxes themselves (real occupancy across every env, plus any
+cross-tier contamination):
+
+```bash
+just audit-boxes
+```
+
+`just list-servers`'s slot columns come from the activated env's own
+`pool_hosts` rows, so a box shared with another env reads as emptier than it
+is. `audit-boxes` SSHes each box instead, and flags a box that a bake would
+now refuse: one carrying another *tier's* slices, or one whose lima user
+authorizes more than the single pool key `prep` writes.
+
 ## Step 6: Verify
 
 ```bash

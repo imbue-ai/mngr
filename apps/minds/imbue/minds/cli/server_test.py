@@ -15,11 +15,23 @@ from imbue.minds.cli.server import server
 
 
 def test_build_server_list_admin_args_forwards_dsn_when_present() -> None:
-    assert build_server_list_admin_args(database_url=None) == ["list"]
-    assert build_server_list_admin_args(database_url="postgres://x") == [
+    assert build_server_list_admin_args(database_url=None, env_name="staging", is_occupancy_verified=False) == ["list"]
+    assert build_server_list_admin_args(
+        database_url="postgres://x", env_name="staging", is_occupancy_verified=False
+    ) == [
         "list",
         "--database-url",
         "postgres://x",
+    ]
+
+
+def test_build_server_list_admin_args_carries_env_name_when_verifying_occupancy() -> None:
+    # The admin side needs the env name to decide which slices are foreign-tier.
+    assert build_server_list_admin_args(database_url=None, env_name="staging", is_occupancy_verified=True) == [
+        "list",
+        "--verify-occupancy",
+        "--env-name",
+        "staging",
     ]
 
 

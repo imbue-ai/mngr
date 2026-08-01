@@ -1,10 +1,16 @@
 import pytest
 
+from imbue.mngr_imbue_cloud.primitives import CI_TIER
+from imbue.mngr_imbue_cloud.primitives import DEV_TIER
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import InvalidImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import InvalidR2BucketAccess
+from imbue.mngr_imbue_cloud.primitives import PRODUCTION_TIER
 from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
+from imbue.mngr_imbue_cloud.primitives import STAGING_TIER
+from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 from imbue.mngr_imbue_cloud.primitives import slugify_account
+from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 
 
 def test_r2_bucket_access_normalizes_case() -> None:
@@ -40,3 +46,27 @@ def test_slugify_account_is_filesystem_safe() -> None:
 def test_slugify_account_rejects_pure_punctuation() -> None:
     with pytest.raises(InvalidImbueCloudAccount):
         slugify_account("@@@")
+
+
+def test_tier_for_env_name_maps_the_shared_tiers_to_themselves() -> None:
+    assert tier_for_env_name("production") == PRODUCTION_TIER
+    assert tier_for_env_name("staging") == STAGING_TIER
+
+
+def test_tier_for_env_name_maps_ci_prefixed_envs_to_the_ci_tier() -> None:
+    assert tier_for_env_name("ci-20260518t140212z") == CI_TIER
+
+
+def test_tier_for_env_name_maps_everything_else_to_the_dev_tier() -> None:
+    assert tier_for_env_name("dev-josh") == DEV_TIER
+    assert tier_for_env_name("dev-alice-3") == DEV_TIER
+    # A "ci" substring that is not the tier prefix must not win.
+    assert tier_for_env_name("dev-ci-leftover") == DEV_TIER
+
+
+def test_is_box_exclusive_to_tier_requires_one_key_and_no_foreign_slices() -> None:
+    assert is_box_exclusive_to_tier(authorized_key_count=1, foreign_tier_slice_count=0)
+    # An extra key hands another tier SSH into the box; a missing one means prep never ran.
+    assert not is_box_exclusive_to_tier(authorized_key_count=2, foreign_tier_slice_count=0)
+    assert not is_box_exclusive_to_tier(authorized_key_count=0, foreign_tier_slice_count=0)
+    assert not is_box_exclusive_to_tier(authorized_key_count=1, foreign_tier_slice_count=1)

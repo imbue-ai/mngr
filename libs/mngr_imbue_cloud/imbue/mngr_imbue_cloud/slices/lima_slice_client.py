@@ -16,7 +16,9 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
+from imbue.mngr_imbue_cloud.slices.bare_metal import count_authorized_key_lines
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.lima_slice import CONTAINER_SSH_PORT_PLACEHOLDER
@@ -364,6 +366,25 @@ class LimaSliceVpsClient(VpsClientInterface):
             if name:
                 names.add(name)
         return names
+
+    def count_authorized_keys(self) -> int:
+        """Number of public keys authorized for the box's lima service user.
+
+        Reads the service user's ``authorized_keys`` and counts it with
+        :func:`count_authorized_key_lines`. ``build_box_prep_script`` writes that
+        file with a single-key overwrite (``cat > ``, never an append), so any count
+        other than 1 means a key was added out of band -- which is how a box ends up
+        reachable by a tier that does not own it.
+        """
+        read_rc, read_out, read_err = self.run_on_box(
+            "cat ~/.ssh/authorized_keys", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="read-authorized-keys"
+        )
+        if read_rc != 0:
+            raise BareMetalProvisioningError(
+                f"could not read ~/.ssh/authorized_keys for {self.box_ssh_user} on {self.box_address} "
+                f"(exit {read_rc}): {read_err.strip()}"
+            )
+        return count_authorized_key_lines(read_out)
 
     def destroy_disk(self, disk_name: str) -> None:
         """Delete a lima data disk on the box, unlocking it first so a leaked locked disk still goes.

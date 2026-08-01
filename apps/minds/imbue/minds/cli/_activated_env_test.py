@@ -6,14 +6,14 @@ from pathlib import Path
 import click
 import pytest
 
-from imbue.minds.cli._activated_env import CI_TIER
-from imbue.minds.cli._activated_env import DEV_TIER
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import PRODUCTION_ENV_NAME
 from imbue.minds.cli._activated_env import STAGING_ENV_NAME
 from imbue.minds.cli._activated_env import require_deploy_mode_activation
 from imbue.minds.cli._activated_env import tier_for_env_name
 from imbue.minds.cli._activated_env import validate_modal_profile_exists_in_modal_toml
+from imbue.mngr_imbue_cloud.primitives import CI_TIER
+from imbue.mngr_imbue_cloud.primitives import DEV_TIER
 
 
 def test_tier_for_env_name_production() -> None:

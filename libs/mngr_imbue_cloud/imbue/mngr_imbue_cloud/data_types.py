@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
+from pydantic import computed_field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_imbue_cloud.errors import InvalidBuildArgError
@@ -21,6 +22,7 @@ from imbue.mngr_imbue_cloud.primitives import R2AccessKeyId
 from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
+from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 
 
 class PoolHostDestroyTarget(FrozenModel):
@@ -79,6 +81,65 @@ class SliceBakeReport(FrozenModel):
     succeeded: int = Field(description="Slices baked and inserted into the pool")
     failed: int = Field(description="Slices that failed to bake (their VMs are rolled back/reaped)")
     slices: tuple[SliceBakeOutcome, ...] = Field(description="Per-slice outcomes, in completion order")
+
+
+class BoxTierAudit(FrozenModel):
+    """What one bare-metal box actually carries, read over SSH rather than from the DB.
+
+    The slot accounting in ``admin server list`` counts only the querying env's own
+    ``pool_hosts`` rows, so another env's slices -- and in particular another
+    *tier's* -- are invisible to it. This is the on-box truth: every env's slices,
+    plus the two ways a box drifts across tiers.
+    """
+
+    server_id: str = Field(description="The bare_metal_servers row id of the audited box")
+    public_address: str = Field(description="SSH-reachable public address the audit reached the box at")
+    slot_count: int = Field(description="Slices the box holds when full")
+    box_used_slots: int = Field(description="Slice resources actually on the box, across every env (plus legacy)")
+    authorized_key_count: int = Field(description="Public keys authorized for the box's lima service user")
+    foreign_tier_slices: tuple[str, ...] = Field(
+        description="Slice resources on the box stamped for an env belonging to another tier, sorted"
+    )
+
+    @computed_field
+    @property
+    def is_exclusive_to_tier(self) -> bool:
+        """Whether a bake onto this box would pass the tier-exclusivity guard."""
+        return is_box_exclusive_to_tier(
+            authorized_key_count=self.authorized_key_count,
+            foreign_tier_slice_count=len(self.foreign_tier_slices),
+        )
+
+
+class UnauditedBox(FrozenModel):
+    """A box the audit could not read, and why.
+
+    Reported rather than raised: a fleet audit exists to find boxes in a bad
+    state, so one unreachable box must not cost the operator every other box's
+    verdict. An unaudited box is explicitly NOT a clean one.
+    """
+
+    server_id: str = Field(description="The bare_metal_servers row id of the box that could not be read")
+    public_address: str | None = Field(description="The box's recorded address (None when the row has none)")
+    reason: str = Field(description="Why the audit could not read the box")
+
+
+class BoxTierAuditReport(FrozenModel):
+    """The summary ``admin server list --verify-occupancy`` emits: per-box audits plus counts."""
+
+    env_name: str | None = Field(description="Env whose tier the boxes were audited against (None when not given)")
+    is_foreign_tier_checked: bool = Field(
+        description=(
+            "Whether the foreign-tier-slice half of the audit ran. False without an env name: "
+            "the tier to compare against is then unknown, so an empty foreign_tier_slices means "
+            "'not checked', NOT 'clean'."
+        )
+    )
+    exclusive: int = Field(description="Boxes that belong solely to this tier")
+    contaminated: int = Field(description="Boxes a bake would now refuse (foreign-tier slice or extra key)")
+    unaudited: int = Field(description="Boxes that could not be read, so their state is unknown")
+    boxes: tuple[BoxTierAudit, ...] = Field(description="Per-box audits, in fleet-table order")
+    unaudited_boxes: tuple[UnauditedBox, ...] = Field(description="Boxes that could not be read, in fleet-table order")
 
 
 class PaidListEntry(FrozenModel):

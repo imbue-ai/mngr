@@ -298,9 +298,16 @@ def test_poller_emits_error_snapshot_on_exception(temp_host_dir: Path, temp_mngr
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
-    assert snapshots[0].error is not None
-    assert snapshots[0].error.provider_name == provider.name
+    error = snapshots[0].error
+    assert error is not None
+    assert error.provider_name == provider.name
     assert snapshots[0].agents == ()
+    # The snapshot is the only durable record of a failed poll -- nothing logs a
+    # traceback around it -- so it must carry one naming the code that raised.
+    assert error.traceback_text is not None
+    assert error.traceback_text.startswith("Traceback (most recent call last):")
+    assert "discover_hosts_and_agents_within_timeouts" in error.traceback_text
+    assert "provider exploded during discovery" in error.traceback_text
 
 
 @pytest.mark.allow_warnings(match=r"discovery is slow|discovery timed out")

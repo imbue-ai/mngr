@@ -52,6 +52,7 @@ from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import with_tolerant_paths
+from imbue.mngr.utils.error_utils import format_exception_traceback
 from imbue.mngr.utils.pydantic_utils import unwrap_optional
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
@@ -123,6 +124,14 @@ class ErrorInfo(FrozenModel):
     )
     # Verbose, multi-line remediation guidance (from MngrError.user_help_text), if any.
     help_text: str | None = Field(default=None, description="Verbose remediation guidance for the user")
+    # The message alone is often not enough to locate a failure: an OSError raised
+    # without a filename stringifies to a bare "[Errno 2] No such file or directory",
+    # naming neither the file nor the code that opened it. Discovery swallows the
+    # exception into a snapshot without logging a traceback anywhere, so if we don't
+    # capture it here it is gone for good.
+    traceback_text: str | None = Field(
+        default=None, description="Formatted traceback of the exception, when one was available"
+    )
 
     @classmethod
     def build(cls, exception: BaseException) -> "ErrorInfo":
@@ -132,6 +141,7 @@ class ErrorInfo(FrozenModel):
             message=str(exception),
             is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
             help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
+            traceback_text=format_exception_traceback(exception),
         )
 
 
@@ -153,6 +163,7 @@ class ProviderErrorInfo(ErrorInfo):
             provider_name=provider_name,
             is_provider_inaccessible=isinstance(exception, ProviderUnavailableError),
             help_text=exception.user_help_text if isinstance(exception, MngrError) else None,
+            traceback_text=format_exception_traceback(exception),
             short_reason=exception.short_reason if isinstance(exception, ProviderUnavailableError) else None,
             short_remediation=exception.short_remediation if isinstance(exception, ProviderUnavailableError) else None,
         )
@@ -406,6 +417,7 @@ def _build_provider_snapshot_state(
                 type_name=error_info.exception_type,
                 message=error_info.message,
                 provider_name=error_info.provider_name,
+                traceback_text=error_info.traceback_text,
             )
 
     candidate_names = list_provider_names_to_load(mngr_ctx)

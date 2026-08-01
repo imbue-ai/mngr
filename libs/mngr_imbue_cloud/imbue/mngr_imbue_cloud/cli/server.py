@@ -27,6 +27,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import AbstractSet
 from typing import Any
 from typing import Final
 from typing import TypeVar
@@ -60,15 +61,19 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
+from imbue.mngr_imbue_cloud.data_types import BoxTierAudit
+from imbue.mngr_imbue_cloud.data_types import BoxTierAuditReport
 from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyOutcome
 from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyReport
 from imbue.mngr_imbue_cloud.data_types import SliceBakeOutcome
 from imbue.mngr_imbue_cloud.data_types import SliceBakeReport
 from imbue.mngr_imbue_cloud.data_types import SlicePricingRow
+from imbue.mngr_imbue_cloud.data_types import UnauditedBox
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceBakeTerminatedError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
+from imbue.mngr_imbue_cloud.primitives import EXPECTED_AUTHORIZED_KEY_COUNT
 from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
 from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_DELIVERED
@@ -76,6 +81,8 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
+from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
+from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
@@ -88,6 +95,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
 from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
+from imbue.mngr_imbue_cloud.slices.bare_metal import foreign_tier_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import POOL_HOST_STATUS_LEASED
@@ -120,6 +128,7 @@ from imbue.mngr_imbue_cloud.slices.ordering import wait_for_order_service_name
 from imbue.mngr_imbue_cloud.slices.ordering import wait_for_os_reinstall
 from imbue.mngr_imbue_cloud.slices.pricing import compute_slice_pricing_rows
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
+from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -311,9 +320,131 @@ def prep_box(
     logger.info("Box {} prepped: qemu+lima installed, {} ready, OS image staged", server_address, lima_service_user)
 
 
+def audit_box_against_tier(
+    *,
+    server_to_audit: BareMetalServer,
+    env_name: str | None,
+    private_key_path: Path,
+) -> BoxTierAudit:
+    """Report a box's REAL occupancy plus any cross-tier contamination on it.
+
+    The DB-derived slot accounting in ``list`` counts only the querying env's own
+    rows, so a slice belonging to another env -- and in particular another *tier* --
+    is invisible to it. This SSHes the box and reports what is actually there, which
+    is the only way to see a foreign-tier slice or a hand-added SSH key short of a
+    bake refusing to run.
+    """
+    client = LimaSliceVpsClient(
+        box_address=str(server_to_audit.public_address),
+        box_ssh_user=server_to_audit.lima_service_user or "limahost",
+        private_key_path=str(private_key_path),
+        box_host_public_key=server_to_audit.box_host_public_key,
+    )
+    disk_names = client.list_disk_names()
+    return BoxTierAudit(
+        server_id=str(server_to_audit.id),
+        public_address=str(server_to_audit.public_address),
+        slot_count=server_to_audit.slot_count,
+        box_used_slots=count_slice_resource_names(disk_names),
+        authorized_key_count=client.count_authorized_keys(),
+        foreign_tier_slices=tuple(sorted(foreign_tier_slice_names(disk_names, env_name)))
+        if env_name is not None
+        else (),
+    )
+
+
+def audit_fleet_against_tier(
+    *,
+    capacities: Sequence[BareMetalServerCapacity],
+    env_name: str | None,
+    private_key_path: Path,
+) -> BoxTierAuditReport:
+    """Audit every box in the fleet, reporting -- never raising on -- the ones that cannot be read.
+
+    A box that is down, mid-reinstall, or has no pinned host key must not cost the
+    operator every other box's verdict: this command exists precisely to find boxes
+    in a bad state, so an unreadable one is an entry in the report (and a logged
+    warning), not an abort.
+    """
+    audits: list[BoxTierAudit] = []
+    unaudited: list[UnauditedBox] = []
+    for capacity in capacities:
+        server_to_audit = capacity.server
+        if not server_to_audit.public_address:
+            unaudited.append(
+                UnauditedBox(
+                    server_id=str(server_to_audit.id),
+                    public_address=None,
+                    reason="the row has no public_address, so the box cannot be reached",
+                )
+            )
+            continue
+        try:
+            audits.append(
+                audit_box_against_tier(
+                    server_to_audit=server_to_audit, env_name=env_name, private_key_path=private_key_path
+                )
+            )
+        # ``OSError`` too: auditing a box is not purely a remote call. It writes the
+        # box's pinned host key to a known_hosts file and spawns ``ssh``, so a local
+        # I/O failure on one box would otherwise cost every other box its verdict --
+        # which is precisely what this command promises never to do. (The same
+        # reason ``LimaSliceVpsClient._best_effort_destroy`` catches it.)
+        except (LimaCommandError, BareMetalProvisioningError, OSError) as exc:
+            logger.warning("Could not audit box {} ({}): {}", server_to_audit.id, server_to_audit.public_address, exc)
+            unaudited.append(
+                UnauditedBox(
+                    server_id=str(server_to_audit.id),
+                    public_address=server_to_audit.public_address,
+                    reason=str(exc),
+                )
+            )
+    return build_box_tier_audit_report(env_name=env_name, audits=audits, unaudited=unaudited)
+
+
+def build_box_tier_audit_report(
+    *,
+    env_name: str | None,
+    audits: Sequence[BoxTierAudit],
+    unaudited: Sequence[UnauditedBox],
+) -> BoxTierAuditReport:
+    """Aggregate per-box audits into the summary ``list --verify-occupancy`` emits."""
+    contaminated_count = sum(1 for audit in audits if not audit.is_exclusive_to_tier)
+    return BoxTierAuditReport(
+        env_name=env_name,
+        is_foreign_tier_checked=env_name is not None,
+        exclusive=len(audits) - contaminated_count,
+        contaminated=contaminated_count,
+        unaudited=len(unaudited),
+        boxes=tuple(audits),
+        unaudited_boxes=tuple(unaudited),
+    )
+
+
 @server.command(name="list")
 @click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
-def list_servers(database_url: str | None) -> None:
+@click.option(
+    "--verify-occupancy",
+    "is_occupancy_verified",
+    is_flag=True,
+    default=False,
+    help=(
+        "SSH each box and report its REAL occupancy plus any cross-tier contamination "
+        "(foreign-tier slices, extra authorized SSH keys). The plain table counts only "
+        "this env's own DB rows, so it undercounts a shared box. Needs POOL_SSH_PRIVATE_KEY."
+    ),
+)
+@click.option(
+    "--env-name",
+    "env_name",
+    default=None,
+    help=(
+        "[--verify-occupancy] Activated env name, used to decide which slices are foreign-tier. "
+        "Without it there is no tier to compare against, so only the authorized-key half of the "
+        "audit runs (`minds server list --verify-occupancy` always passes it)."
+    ),
+)
+def list_servers(database_url: str | None, is_occupancy_verified: bool, env_name: str | None) -> None:
     """List bare-metal servers with per-server and fleet slot accounting (from the DB)."""
     conn = psycopg2.connect(resolve_pool_database_url(database_url))
     try:
@@ -321,6 +452,29 @@ def list_servers(database_url: str | None) -> None:
     finally:
         conn.close()
     logger.info("\n{}", _format_capacity_table(capacities))
+    if not is_occupancy_verified:
+        return
+    with _pool_private_key_path() as private_key_path:
+        report = audit_fleet_against_tier(capacities=capacities, env_name=env_name, private_key_path=private_key_path)
+    emit_json(report.model_dump(mode="json"))
+    if not report.is_foreign_tier_checked:
+        logger.warning(
+            "No --env-name given, so only the authorized-key half of the audit ran: an empty "
+            "foreign_tier_slices above means NOT CHECKED, not clean."
+        )
+    if report.contaminated:
+        logger.warning(
+            "{} of {} audited box(es) are NOT exclusive to this tier -- a bake onto them will refuse. "
+            "See the JSON above.",
+            report.contaminated,
+            len(report.boxes),
+        )
+    if report.unaudited:
+        logger.warning(
+            "{} box(es) could not be read, so their occupancy and tier state are UNKNOWN (not clean). "
+            "See unaudited_boxes in the JSON above.",
+            report.unaudited,
+        )
 
 
 @server.command(name="register")
@@ -1289,6 +1443,82 @@ def _resolve_vendored_mngr_source(*, mngr_source: str | None, repo_root: Path, i
     return repo_root
 
 
+def assert_box_is_exclusive_to_tier(
+    *,
+    server: BareMetalServer,
+    env_name: str | None,
+    box_disk_names: AbstractSet[str],
+    authorized_key_count: int,
+) -> None:
+    """Refuse to bake unless this box belongs solely to the activated env's tier.
+
+    Tier isolation is a stated invariant (``apps/minds/docs/environments.md``:
+    "There is zero cross-tier reach"), but nothing used to enforce it at the moment
+    it matters. Two independent ways a box drifts across tiers, both caught here
+    before a single slice is carved:
+
+    * a **foreign-tier slice** already on the box -- the box is then reachable by
+      both tiers' pool keys, which is the "zero cross-tier reach" boundary itself:
+      each tier's operators and connector gain ``limactl``, and so root, over the
+      other's workspaces (and neither tier's env-scoped reap reclaims the other's
+      leaks); and
+    * a **foreign key** in the lima service user's ``authorized_keys`` -- prep
+      writes that file with a single-key overwrite, so a second key can only have
+      been added out of band, and it hands another tier SSH access to this box (and
+      thus, via ``limactl``, to every workspace running on it).
+
+    The key check needs no comparison against our own public key: reaching this
+    point means we already authenticated with *this* tier's pool key, so if exactly
+    one key is authorized, that key is necessarily ours.
+
+    ``env_name`` is None only for a legacy un-stamped bake, whose tier is
+    unknowable; the slice check is skipped in that case, but the key check -- which
+    does not depend on our tier -- still applies.
+    """
+    if authorized_key_count != EXPECTED_AUTHORIZED_KEY_COUNT:
+        # Both directions refuse the bake, but they mean opposite things and have
+        # opposite remedies, so say which one happened. Re-prepping is safe when the
+        # file is empty (there is no other key to destroy) and destructive when it
+        # holds someone else's key: prep writes authorized_keys with a single-key
+        # OVERWRITE, so it would revoke that holder's access to a box whose slices --
+        # which this branch raises before ever looking at -- are still running.
+        if authorized_key_count < EXPECTED_AUTHORIZED_KEY_COUNT:
+            reason = (
+                "that file is empty, so the box was never prepped (or its authorized_keys was clobbered). "
+                f"Run `just prep-server {server.id}` (idempotent) to write this tier's key."
+            )
+        else:
+            reason = (
+                "`admin server prep` writes that file with a single-key overwrite, so the extra key(s) were "
+                "added out of band and give another tier SSH access to this box. Inspect them with "
+                "`ssh-keygen -lf ~/.ssh/authorized_keys` on the box. Do NOT re-prep before checking the box "
+                "for another tier's slices (`just audit-boxes`): prep overwrites authorized_keys, which would "
+                "cut the other key's owner off from slices that are still running here."
+            )
+        raise click.UsageError(
+            f"server {server.id} ({server.public_address}) authorizes {authorized_key_count} SSH keys for "
+            f"user {server.lima_service_user or 'limahost'}, expected exactly "
+            f"{EXPECTED_AUTHORIZED_KEY_COUNT} (this tier's pool key). {reason}"
+        )
+    if env_name is None:
+        return
+    foreign_names = foreign_tier_slice_names(box_disk_names, env_name)
+    if is_box_exclusive_to_tier(
+        authorized_key_count=authorized_key_count, foreign_tier_slice_count=len(foreign_names)
+    ):
+        return
+    foreign_list = ", ".join(sorted(foreign_names))
+    raise click.UsageError(
+        f"server {server.id} ({server.public_address}) already carries slices from another tier, so it "
+        f"cannot also host '{env_name}' (tier '{tier_for_env_name(env_name)}') slices: {foreign_list}. "
+        "Tiers are isolated by construction -- each has its own pool keypair, and there is meant to be zero "
+        "cross-tier reach -- so a box serving both is a box each tier's operators can SSH (and via limactl "
+        "control) the other's workspaces on, and neither tier's reap will ever reclaim the other's slices. "
+        "Retire the foreign slices from their OWN env (`just destroy-pool-hosts <row-id>` with that env "
+        "activated) or bake onto a box belonging to this tier."
+    )
+
+
 def allocate_slices(
     *,
     count: int,
@@ -1363,7 +1593,17 @@ def allocate_slices(
             private_key_path=str(private_key_path),
             box_host_public_key=server.box_host_public_key,
         )
-        box_used_slots = count_slice_resource_names(occupancy_client.list_disk_names())
+        box_disk_names = occupancy_client.list_disk_names()
+        # Enforce tier isolation before anything is carved: a box shared across tiers
+        # is reachable by both tiers' pool keys, so each tier's operators and connector
+        # get limactl -- and so root -- over the other's workspaces.
+        assert_box_is_exclusive_to_tier(
+            server=server,
+            env_name=env_name,
+            box_disk_names=box_disk_names,
+            authorized_key_count=occupancy_client.count_authorized_keys(),
+        )
+        box_used_slots = count_slice_resource_names(box_disk_names)
         free_slots = max(0, server.slot_count - box_used_slots)
         if free_slots < count:
             raise click.UsageError(

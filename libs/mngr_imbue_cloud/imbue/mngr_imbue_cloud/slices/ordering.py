@@ -8,6 +8,7 @@ client-driven steps are exercised live against a real order.
 """
 
 import base64
+import time
 from collections import defaultdict
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -53,6 +54,15 @@ _USER_SELECTED_OPTION_FAMILIES: Final[tuple[str, ...]] = ("memory", "storage")
 
 _DELIVERY_POLL_INTERVAL_SECONDS: Final[float] = 60.0
 _DELIVERY_TIMEOUT_SECONDS: Final[float] = 4 * 60 * 60.0
+# OVH assigns a serviceName on the ORDER before that service becomes queryable under
+# ``/dedicated/server``, so a read in the gap 404s with "This service does not exist".
+# That is the same "not delivered yet" condition as a missing IP, not a bad name -- and
+# failing on it aborts the entire delivery wait for a race that clears itself. The
+# window is short (observed ~1 minute on a real order), so tolerate 404s for this long
+# and then treat them as real, rather than letting a permanently-wrong serviceName sit
+# silently until the 4h delivery timeout.
+_SERVICE_VISIBILITY_GRACE_SECONDS: Final[float] = 15 * 60.0
+_HTTP_STATUS_NOT_FOUND: Final[int] = 404
 _REINSTALL_POLL_INTERVAL_SECONDS: Final[float] = 30.0
 _REINSTALL_TIMEOUT_SECONDS: Final[float] = 60 * 60.0
 _TERMINAL_TASK_STATUSES: Final[frozenset[str]] = frozenset({"done", "ovhError", "customerError", "cancelled"})
@@ -369,10 +379,49 @@ def wait_for_order_service_name(
 
 
 def get_dedicated_server_address(client: OvhVpsClient, service_name: str) -> str | None:
-    """Return the dedicated server's public IP once OVH has assigned one, else None."""
+    """Return the dedicated server's public IP once OVH has assigned one, else None.
+
+    Raises ``VpsApiError`` (404) while a freshly-delivered service is not yet queryable.
+    Callers polling through delivery want :func:`wait_for_dedicated_server_address`,
+    which tolerates that window.
+    """
     info = client.call_api("GET", f"/dedicated/server/{service_name}")
     address = info.get("ip")
     return str(address) if address else None
+
+
+def _read_address_tolerating_missing_service(
+    client: OvhVpsClient,
+    service_name: str,
+    *,
+    grace_started_at: float,
+    visibility_grace_seconds: float,
+) -> str | None:
+    """One delivery poll: the IP, or None while the service is absent or has no IP yet.
+
+    Collapses "OVH has not published this service yet" (404) into the same
+    not-ready-yet signal as "published but no IP assigned", so a single poll loop
+    covers both. A 404 more than ``visibility_grace_seconds`` after
+    ``grace_started_at`` (a ``time.monotonic()`` stamp taken when the wait began)
+    stops being a race and is raised, so a permanently-wrong serviceName surfaces
+    promptly instead of polling until the delivery timeout.
+    """
+    try:
+        return get_dedicated_server_address(client, service_name)
+    except VpsApiError as exc:
+        if exc.status_code != _HTTP_STATUS_NOT_FOUND:
+            raise
+        if time.monotonic() > grace_started_at + visibility_grace_seconds:
+            raise BareMetalProvisioningError(
+                f"dedicated server {service_name} was still not queryable "
+                f"{visibility_grace_seconds:.0f}s after OVH assigned its serviceName; "
+                "the order may have been assigned a name that never materialized"
+            ) from exc
+        logger.debug(
+            "Dedicated server {} is not queryable yet (OVH 404); still within the delivery grace window",
+            service_name,
+        )
+        return None
 
 
 def wait_for_dedicated_server_address(
@@ -380,13 +429,25 @@ def wait_for_dedicated_server_address(
     *,
     service_name: str,
     timeout_seconds: float = _DELIVERY_TIMEOUT_SECONDS,
+    visibility_grace_seconds: float = _SERVICE_VISIBILITY_GRACE_SECONDS,
+    poll_interval_seconds: float = _DELIVERY_POLL_INTERVAL_SECONDS,
 ) -> str:
-    """Poll until the delivered server has a reachable public IP. Raises on timeout."""
+    """Poll until the delivered server has a reachable public IP. Raises on timeout.
+
+    Tolerates the propagation gap after OVH assigns the serviceName, during which
+    ``/dedicated/server/<name>`` 404s -- see ``_SERVICE_VISIBILITY_GRACE_SECONDS``.
+    """
+    grace_started_at = time.monotonic()
     with log_span("Waiting for dedicated server {} to report an IP", service_name):
         address, _polls, _elapsed = poll_for_value(
-            lambda: get_dedicated_server_address(client, service_name),
+            lambda: _read_address_tolerating_missing_service(
+                client,
+                service_name,
+                grace_started_at=grace_started_at,
+                visibility_grace_seconds=visibility_grace_seconds,
+            ),
             timeout=timeout_seconds,
-            poll_interval=_DELIVERY_POLL_INTERVAL_SECONDS,
+            poll_interval=poll_interval_seconds,
         )
     if address is None:
         raise BareMetalProvisioningError(

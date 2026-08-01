@@ -1242,6 +1242,8 @@ mngr imbue_cloud admin server list [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
+| `--verify-occupancy` | boolean | SSH each box and report its REAL occupancy plus any cross-tier contamination (foreign-tier slices, extra authorized SSH keys). The plain table counts only this env's own DB rows, so it undercounts a shared box. Needs POOL_SSH_PRIVATE_KEY. | `False` |
+| `--env-name` | text | [--verify-occupancy] Activated env name, used to decide which slices are foreign-tier. Without it there is no tier to compare against, so only the authorized-key half of the audit runs (`minds server list --verify-occupancy` always passes it). | None |
 
 ## mngr imbue_cloud admin server register
 

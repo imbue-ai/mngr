@@ -17,6 +17,7 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_FAILED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 
 # RAM overhead is modeled in two parts so a box's slot count reflects what it can
 # REALISTICALLY run without overcommitting RAM:
@@ -318,6 +319,47 @@ def count_slice_resource_names(names: AbstractSet[str]) -> int:
     cannot collectively over-subscribe it.
     """
     return sum(1 for name in names if name.startswith(SLICE_LIMA_INSTANCE_PREFIX))
+
+
+@pure
+def count_authorized_key_lines(authorized_keys_text: str) -> int:
+    """Number of public keys an ``authorized_keys`` file authorizes.
+
+    Blank lines and ``#`` comments carry no key, so they do not count;
+    everything else is one authorized key. A correctly prepped box yields exactly
+    :data:`EXPECTED_AUTHORIZED_KEY_COUNT` -- ``build_box_prep_script`` writes the
+    file with a single-key overwrite (``cat >``, never an append) -- so any other
+    count means a key was added out of band, which is how a box ends up reachable
+    by a tier that does not own it.
+    """
+    return sum(1 for line in authorized_keys_text.splitlines() if line.strip() and not line.strip().startswith("#"))
+
+
+@pure
+def foreign_tier_slice_names(box_names: AbstractSet[str], env_name: str) -> set[str]:
+    """Slice resources on the box whose env stamp belongs to a DIFFERENT tier than ``env_name``.
+
+    Box sharing is legitimate *within* a tier -- several ``dev-<user>`` envs
+    routinely carve slices on one dev box, which is why occupancy is read from the
+    box rather than from one env's rows. It is never legitimate *across* tiers,
+    and the reason is the pool keypair, not the database: a box carrying two
+    tiers' slices is a box both tiers' pool keys can SSH, which is precisely the
+    "zero cross-tier reach" boundary (see ``apps/minds/docs/environments.md``) --
+    each tier's operators and connector gain limactl, and so root, over the
+    other's workspaces. Separate ``host_pool`` databases do not distinguish the
+    two cases: every dev env has its own database too, and the orphan reap is
+    scoped by env rather than by tier either way.
+
+    Legacy un-stamped slices (``mngr-slice-<host-hex>``, no env) have no knowable
+    tier, so they are excluded here: they still count toward occupancy, but a name
+    that predates env stamping is not evidence of a cross-tier bake.
+    """
+    expected_tier = tier_for_env_name(env_name)
+    return {
+        name
+        for name in box_names
+        if (owner := slice_name_env_owner(name)) is not None and tier_for_env_name(owner) != expected_tier
+    }
 
 
 @pure

@@ -6,8 +6,29 @@ from typing import Self
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.pure import pure
 
 IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
+
+# The minds environment tiers. Every env name maps to exactly one tier, and every
+# bare-metal box belongs to exactly one tier. Tiers are isolated by construction --
+# each has its own pool-management SSH keypair, and there is meant to be zero
+# cross-tier reach. Sharing a box WITHIN a tier is fine and routine (several
+# ``dev-<user>`` envs on one dev box); sharing one ACROSS tiers puts both tiers'
+# pool keys on the box, handing each tier's operators and connector ``limactl`` --
+# and so root -- over the other's workspaces, which is what
+# ``assert_box_is_exclusive_to_tier`` refuses.
+PRODUCTION_TIER: Final[str] = "production"
+STAGING_TIER: Final[str] = "staging"
+DEV_TIER: Final[str] = "dev"
+CI_TIER: Final[str] = "ci"
+
+# Public keys a correctly prepped box authorizes for its lima service user: exactly
+# the one pool-management key of the tier that owns the box.
+# ``bare_metal_prep.build_box_prep_script`` writes ``authorized_keys`` with a
+# single-key overwrite (``cat >``, never an append), so any other count means a key
+# was added out of band.
+EXPECTED_AUTHORIZED_KEY_COUNT: Final[int] = 1
 
 # OVH-US datacenters the imbue_cloud host pool can land VPSes in. Used to
 # validate the ``region`` create-path knob client-side (the connector itself
@@ -35,6 +56,39 @@ class ImbueCloudAccount(NonEmptyStr):
         if not _EMAIL_RE.match(stripped):
             raise InvalidImbueCloudAccount(f"Not a valid email address: '{value}'")
         return super().__new__(cls, stripped)
+
+
+@pure
+def tier_for_env_name(env_name: str) -> str:
+    """The tier a minds env name belongs to.
+
+    ``production`` and ``staging`` are each their own tier; a ``ci-`` prefix marks
+    the CI orchestrator's ephemeral envs; every other name (by convention
+    ``dev-<user>``) is a dev env. This is the canonical definition --
+    ``imbue.minds.cli._activated_env`` re-exports it rather than keeping a second
+    copy, so the box-exclusivity guard and the minds CLI can never disagree about
+    which tier an env belongs to.
+    """
+    if env_name == PRODUCTION_TIER:
+        return PRODUCTION_TIER
+    if env_name == STAGING_TIER:
+        return STAGING_TIER
+    if env_name.startswith(f"{CI_TIER}-"):
+        return CI_TIER
+    return DEV_TIER
+
+
+@pure
+def is_box_exclusive_to_tier(*, authorized_key_count: int, foreign_tier_slice_count: int) -> bool:
+    """Whether a bare-metal box belongs solely to the tier reading it.
+
+    The one definition of the rule, so the bake-time guard
+    (``assert_box_is_exclusive_to_tier``) and the read-only audit
+    (``admin server list --verify-occupancy``, which tells operators a bake would
+    refuse) can never disagree. A box is exclusive when it authorizes exactly the
+    owning tier's pool key and carries no slice stamped for an env in another tier.
+    """
+    return authorized_key_count == EXPECTED_AUTHORIZED_KEY_COUNT and foreign_tier_slice_count == 0
 
 
 class SuperTokensUserId(NonEmptyStr):

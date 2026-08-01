@@ -1,6 +1,7 @@
 import pytest
 
 from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_lima.errors import LimaCommandError
@@ -109,6 +110,23 @@ def test_list_disk_names_parses_jsonl_names() -> None:
     disk_json = '{"name": "mngr-slice-aaa-data"}\n{"name": "mngr-slice-bbb-data"}\n'
     client = _recording_client({"limactl disk list --json": (0, disk_json, "")})
     assert client.list_disk_names() == {"mngr-slice-aaa-data", "mngr-slice-bbb-data"}
+
+
+def test_count_authorized_keys_counts_the_service_users_file() -> None:
+    keys = "ssh-ed25519 AAAApool pool@mngr\nssh-ed25519 AAAAother someone@elsewhere\n"
+    client = _recording_client({"authorized_keys": (0, keys, "")})
+    assert client.count_authorized_keys() == 2
+    assert any("cat ~/.ssh/authorized_keys" in cmd for cmd in client.recorded_commands)
+
+
+def test_count_authorized_keys_raises_when_the_file_cannot_be_read() -> None:
+    # A failed read must not pass for a count: the tier guard reads exactly 1 as
+    # proof the box is reachable by this tier alone, so an unreadable file has to
+    # refuse loudly rather than resolve to some number.
+    client = _recording_client({"authorized_keys": (1, "", "Permission denied")})
+    with pytest.raises(BareMetalProvisioningError) as exc_info:
+        client.count_authorized_keys()
+    assert "Permission denied" in str(exc_info.value)
 
 
 def test_destroy_disk_unlocks_then_force_deletes() -> None:
