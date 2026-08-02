@@ -40,6 +40,9 @@ UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
         "imbue-mngr-behaviors",
         # End-to-end test helper used only by mngr's own test suite (not an mngr plugin).
         "skitwright",
+        # Deploy-time conventions shared by our internal Modal apps (remote_service_connector,
+        # modal_litellm); shipped into their containers as a source mount, never to PyPI.
+        "modal-app-kit",
     }
 )
 
