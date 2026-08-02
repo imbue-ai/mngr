@@ -54,6 +54,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_TRAILING_
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_TYPING_BUILTIN_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_UNDERSCORE_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_UNITTEST_MOCK_IMPORTS
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_UNPINNED_MODAL_PIP_INSTALL
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_WHILE_TRUE
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_YAML_USAGE
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
@@ -354,6 +355,13 @@ def check_direct_subprocess(
 ) -> None:
     chunks = check_ratchet_rule(PREVENT_DIRECT_SUBPROCESS, source_dir, excluded_patterns)
     assert len(chunks) <= max_count, PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
+
+
+# --- Modal images ---
+
+
+def check_unpinned_modal_pip_install(source_dir: Path, max_count: int) -> None:
+    assert_ratchet(PREVENT_UNPINNED_MODAL_PIP_INSTALL, source_dir, max_count)
 
 
 # --- AST-based ratchets ---

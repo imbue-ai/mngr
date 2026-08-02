@@ -8,10 +8,14 @@ pool-host queries, the latter for the LiteLLM proxy's Prisma-managed
 backing store). Both DSNs come from the same per-env Neon project.
 """
 
+import pytest
 from pydantic import SecretStr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.per_env_deploy import _modal_profile_token_workspace
 from imbue.minds.envs.per_env_deploy import _select_deployed_app_id
+from imbue.minds.envs.per_env_deploy import _verify_image_requirements_fresh
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
 from imbue.minds.envs.per_env_deploy import modal_token_reprovision_hint
 from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
@@ -68,6 +72,19 @@ def test_compute_per_env_overrides_does_not_override_unrelated_services() -> Non
         supertokens_record=_fake_supertokens_record(),
     )
     assert set(overrides.keys()) == {"supertokens", "neon", "litellm", "litellm-connector"}
+
+
+def test_verify_image_requirements_fresh_passes_for_committed_exports() -> None:
+    """The committed exports must match uv.lock, so the preflight passes on a clean checkout."""
+    with ConcurrencyGroup(name="image-requirements-fresh-test") as cg:
+        _verify_image_requirements_fresh("remote-service-connector", cg)
+        _verify_image_requirements_fresh("modal-litellm", cg)
+
+
+def test_verify_image_requirements_fresh_raises_when_export_is_missing() -> None:
+    with ConcurrencyGroup(name="image-requirements-missing-test") as cg:
+        with pytest.raises(ModalDeployError):
+            _verify_image_requirements_fresh("no-such-package", cg)
 
 
 def test_select_deployed_app_id_matches_description_name_shape() -> None:

@@ -36,6 +36,8 @@ from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import info_span
+from imbue.imbue_common.modal_image_requirements import image_requirements_export_command
+from imbue.imbue_common.modal_image_requirements import image_requirements_path
 from imbue.imbue_common.pure import pure
 from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
@@ -81,6 +83,7 @@ _PLACEHOLDER_VALUE: Final[str] = "unpopulated"
 _MODAL_DEPLOY_TIMEOUT_SECONDS: Final[float] = 600.0
 _MODAL_SECRET_TIMEOUT_SECONDS: Final[float] = 60.0
 _MODAL_ENV_CREATE_TIMEOUT_SECONDS: Final[float] = 60.0
+_IMAGE_REQUIREMENTS_EXPORT_TIMEOUT_SECONDS: Final[float] = 60.0
 
 # Env-var names the deployed modal apps read at module load to pin
 # their warm-pool size. Kept here (one name per app) so the deploy
@@ -153,6 +156,42 @@ def _litellm_app_file() -> Path:
 
 def _connector_app_file() -> Path:
     return _repo_root() / "apps" / "remote_service_connector" / "imbue" / "remote_service_connector" / "app.py"
+
+
+def _verify_image_requirements_fresh(package_name: str, parent_cg: ConcurrencyGroup) -> None:
+    """Refuse to deploy when the app's committed image export no longer matches uv.lock.
+
+    The Modal image installs exactly the committed hash-locked
+    ``image_requirements.txt``; deploying from a checkout where that export
+    has drifted from ``uv.lock`` (a stale branch, a skipped-CI merge) would
+    silently ship package versions nobody reviewed. Replays the same offline
+    ``uv export`` the drift tests use and byte-compares.
+    """
+    repo_root = _repo_root()
+    committed_path = image_requirements_path(repo_root, package_name)
+    if not committed_path.is_file():
+        raise ModalDeployError(
+            f"Missing committed image requirements export at {committed_path}; "
+            "run `just export-image-requirements` and commit the result."
+        )
+    command = image_requirements_export_command(package_name)
+    cg = parent_cg.make_concurrency_group(name=f"image-requirements-export-{package_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            timeout=_IMAGE_REQUIREMENTS_EXPORT_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            cwd=repo_root,
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(f"`{' '.join(command)}` failed (exit {result.returncode}): {stderr}")
+    if result.stdout != committed_path.read_text():
+        raise ModalDeployError(
+            f"{committed_path} is stale relative to uv.lock; the image would install versions "
+            "that differ from the committed, reviewed export. Run `just export-image-requirements` "
+            "and commit the result before deploying."
+        )
 
 
 def per_env_connector_url(name: DevEnvName, modal_workspace: str, *, tier: str) -> AnyUrl:
@@ -340,6 +379,7 @@ def deploy_litellm_proxy(
     "use Modal's own default".
     """
     app_file = _litellm_app_file()
+    _verify_image_requirements_fresh("modal-litellm", parent_cg)
     with info_span(
         "Running LiteLLM Prisma schema migration against {} "
         "(~30-60s first run while Modal builds the image, ~5-15s thereafter; idempotent)",
@@ -472,6 +512,7 @@ def deploy_remote_service_connector(
     Modal Secrets minted by this deploy. Missing the id at the app's module
     load is a hard failure (the app raises ``DeployIdMissingError``).
     """
+    _verify_image_requirements_fresh("remote-service-connector", parent_cg)
     with info_span("modal deploy rsc-{} into env {!r} (strategy={})", tier, modal_env, strategy.value):
         return _deploy_modal_app(
             app_file=_connector_app_file(),

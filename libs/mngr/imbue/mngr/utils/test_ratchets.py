@@ -330,3 +330,10 @@ def test_prevent_code_in_init_files() -> None:
             'hookimpl = pluggy.HookimplMarker("mngr")',
         },
     )
+
+
+# --- Modal images ---
+
+
+def test_prevent_unpinned_modal_pip_install() -> None:
+    rc.check_unpinned_modal_pip_install(_DIR, snapshot(0))

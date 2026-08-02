@@ -277,3 +277,10 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 def test_prevent_bare_tmux_targets() -> None:
     rc.check_bare_tmux_targets(_DIR, snapshot(0))
+
+
+# --- Modal images ---
+
+
+def test_prevent_unpinned_modal_pip_install() -> None:
+    rc.check_unpinned_modal_pip_install(_DIR, snapshot(0))

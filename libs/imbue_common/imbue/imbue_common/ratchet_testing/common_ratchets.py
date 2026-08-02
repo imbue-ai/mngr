@@ -536,6 +536,22 @@ PREVENT_HARDCODED_GUARDED_BINARY = RegexRatchetRule(
 )
 
 
+# --- Modal images ---
+
+PREVENT_UNPINNED_MODAL_PIP_INSTALL = RegexRatchetRule(
+    rule_name="unpinned Modal image pip installs",
+    rule_description=(
+        "Do not pass bare package names to Image.pip_install / Image.uv_pip_install when building "
+        "Modal images: packages then resolve at image-build time, so what ships depends on when the "
+        "image happens to rebuild instead of on reviewed, committed state. Install from a committed "
+        "hash-locked export instead: declare the ==-pinned set in the app's [dependency-groups] "
+        "image, regenerate image_requirements.txt with `just export-image-requirements`, and build "
+        "the image with imbue.modal_app_kit.image.pinned_image. See libs/modal_app_kit/README.md."
+    ),
+    pattern_string=r"\.(uv_)?pip_install\(\s*(\*|f?[\"'])",
+)
+
+
 # --- Terminal management ---
 
 PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(

@@ -314,3 +314,10 @@ def test_prevent_code_in_init_files() -> None:
     # line plus its ``import pluggy`` are tracked here as one violation
     # of the otherwise-strict no-code-in-init rule.
     rc.check_code_in_init_files(_DIR, snapshot(1))
+
+
+# --- Modal images ---
+
+
+def test_prevent_unpinned_modal_pip_install() -> None:
+    rc.check_unpinned_modal_pip_install(_DIR, snapshot(0))

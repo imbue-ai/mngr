@@ -277,3 +277,10 @@ def test_prevent_hardcoded_guarded_binary() -> None:
 
 def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
+
+
+# --- Modal images ---
+
+
+def test_prevent_unpinned_modal_pip_install() -> None:
+    rc.check_unpinned_modal_pip_install(_DIR, snapshot(0))

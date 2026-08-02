@@ -94,6 +94,15 @@ deploy-apt-mirror:
 test-apt-mirror-worker:
   cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
 
+# Regenerate the committed hash-locked image_requirements.txt exports that the
+# Modal service images (remote_service_connector, modal_litellm) install from.
+# Run after changing an app's [dependency-groups] image pins or relocking
+# uv.lock; per-app drift tests and the `minds env deploy` preflight fail until
+# the committed exports match uv.lock again.
+[group("mngr dev")]
+export-image-requirements:
+    uv run python -c "from pathlib import Path; from imbue.imbue_common.modal_image_requirements import IMAGE_PINNED_PACKAGE_NAMES; from imbue.modal_app_kit.testing import regenerate_image_requirements; print('\n'.join(str(p) for p in regenerate_image_requirements(Path.cwd(), IMAGE_PINNED_PACKAGE_NAMES)))"
+
 # Diffs against the real base branch, so it must run on a real checkout
 # (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
 # sandbox has no base ref and the check would pass vacuously. Bare `python`

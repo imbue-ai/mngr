@@ -287,3 +287,14 @@ def test_prevent_per_file_host_upload() -> None:
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(1))
+
+
+# --- Modal images ---
+
+
+# Existing violations: routes/example.py and routes/snapshot_and_shutdown.py
+# build their helper-app images with an unpinned uv_pip_install("fastapi[standard]").
+# Pinning the mngr_modal built-in images is a known follow-up (see
+# blueprint/pin-modal-service-images/); do not add new violations.
+def test_prevent_unpinned_modal_pip_install() -> None:
+    rc.check_unpinned_modal_pip_install(_DIR, snapshot(2))
