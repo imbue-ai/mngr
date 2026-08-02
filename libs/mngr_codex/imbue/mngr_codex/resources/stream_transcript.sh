@@ -73,10 +73,15 @@ _save_offset() {
     echo "$2" > "$OFFSET_DIR/$1"
 }
 
-# Read the current rollout path the hook recorded (empty if not yet recorded).
-_current_rollout_path() {
+# Set _CURRENT_ROLLOUT_PATH to the rollout path the hook recorded, or empty when
+# no turn has opened one yet. Assigns to a global via the read builtin instead of
+# printing for a command substitution to capture, so discovering the path costs
+# no forks at all -- at a one-second poll that subshell was most of an idle cycle.
+_CURRENT_ROLLOUT_PATH=""
+_read_current_rollout_path() {
+    _CURRENT_ROLLOUT_PATH=""
     if [ -f "$TRANSCRIPT_PATH_FILE" ]; then
-        head -n 1 "$TRANSCRIPT_PATH_FILE"
+        read -r _CURRENT_ROLLOUT_PATH < "$TRANSCRIPT_PATH_FILE" || true
     fi
 }
 
@@ -85,9 +90,10 @@ _current_rollout_path() {
 # basename is the natural key; any residual unsafe character is replaced so the
 # token is always a valid single path component.
 _offset_key_for_path() {
-    # printf (not echo) so no trailing newline is fed to tr (which would
-    # otherwise become a trailing `_` in the key).
-    printf '%s' "$(basename "$1")" | tr -c 'A-Za-z0-9._-' '_'
+    # Parameter expansion rather than basename piped through tr: both are exact
+    # bash equivalents of those tools here, and this runs on every poll cycle.
+    local name="${1##*/}"
+    printf '%s' "${name//[^A-Za-z0-9._-]/_}"
 }
 
 # Append new lines from the current rollout to the output verbatim.
@@ -154,8 +160,8 @@ _record_rollout_offset() {
 }
 
 _run_one_cycle() {
-    local rollout_path
-    rollout_path=$(_current_rollout_path)
+    _read_current_rollout_path
+    local rollout_path="$_CURRENT_ROLLOUT_PATH"
     # No rollout path recorded yet (no turn has opened) -> nothing to stream.
     if [ -z "$rollout_path" ]; then
         return

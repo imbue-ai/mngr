@@ -47,6 +47,14 @@ declare -A _FILE_BY_SID=()    # session_id -> resolved file path ("" if not yet 
 declare -A _OFFSET_BY_SID=()  # session_id -> lines already emitted from this session
 _KNOWN_HISTORY_LINES=0        # lines of the history file already processed
 
+# Line counts captured once at the top of each poll cycle by
+# _refresh_line_counts. Counting every tracked file in a single wc invocation
+# holds a poll cycle to one fork regardless of how many sessions the agent has
+# resumed through; counting them one file at a time made an idle agent's cost
+# grow with the length of its session history and never shrink.
+declare -A _LINES_BY_SID=()   # session_id -> line count observed this cycle
+_HISTORY_LINES_NOW=0          # line count of the history file observed this cycle
+
 # UUID lookup set, populated by mngr_transcript_build_id_set during
 # reconciliation and cleared once reconciliation finishes.
 declare -A _MNGR_TRANSCRIPT_ID_SET=()
@@ -66,6 +74,48 @@ _line_count() {
     else
         echo 0
     fi
+}
+
+# Count the history file and every resolved session file in one wc invocation,
+# caching the results for the rest of the cycle. Any file wc could not report on
+# is simply left out of the cache, so its caller falls back to _line_count.
+_refresh_line_counts() {
+    _LINES_BY_SID=()
+    _HISTORY_LINES_NOW=0
+
+    local sid path count
+    local -a paths=()
+    local -A sid_by_path=()
+
+    if [ -f "$SESSION_HISTORY" ]; then
+        paths+=("$SESSION_HISTORY")
+    fi
+    for sid in "${!_FILE_BY_SID[@]}"; do
+        path="${_FILE_BY_SID[$sid]}"
+        if [ -n "$path" ] && [ -f "$path" ]; then
+            paths+=("$path")
+            sid_by_path["$path"]="$sid"
+        fi
+    done
+
+    [ "${#paths[@]}" -gt 0 ] || return 0
+
+    # `wc -l` prints "<count> <path>" per file, plus a trailing "<count> total"
+    # line when given more than one. The path is the last field, so a path
+    # containing spaces survives the read intact, and the "total" line matches
+    # no tracked path and is therefore ignored.
+    local counts_output
+    counts_output=$(wc -l "${paths[@]}" 2>/dev/null || true)
+    while read -r count path; do
+        if [ "$path" = "$SESSION_HISTORY" ]; then
+            _HISTORY_LINES_NOW=$count
+        else
+            sid="${sid_by_path[$path]:-}"
+            if [ -n "$sid" ]; then
+                _LINES_BY_SID[$sid]=$count
+            fi
+        fi
+    done <<< "$counts_output"
 }
 
 _load_stored_offset() {
@@ -106,7 +156,8 @@ _try_resolve_file() {
 
 # Check a session file for new lines and append them to the output.
 # The shared mngr_transcript_emit_lines_range uses sed with a bounded range
-# to avoid a TOCTOU race: wc -l captures the line count at time T1, and
+# to avoid a TOCTOU race: the line count is captured at time T1 (by this
+# cycle's _refresh_line_counts, or directly when running outside a cycle), and
 # sed reads exactly lines offset+1..file_lines. If Claude appends more
 # lines between T1 and the sed read, those extra lines are NOT emitted
 # (they'll be picked up on the next poll cycle), and the saved offset
@@ -116,8 +167,15 @@ _emit_new_lines() {
     local session_file="${_FILE_BY_SID[$sid]}"
     local offset="${_OFFSET_BY_SID[$sid]}"
 
+    # Use the count captured for this cycle when there is one; fall back to a
+    # direct count for callers outside a poll cycle (the startup backlog pass)
+    # and for sessions discovered after the cycle's counts were taken.
     local file_lines
-    file_lines=$(_line_count "$session_file")
+    if [ -n "${_LINES_BY_SID[$sid]+exists}" ]; then
+        file_lines="${_LINES_BY_SID[$sid]}"
+    else
+        file_lines=$(_line_count "$session_file")
+    fi
 
     if [ "$file_lines" -le "$offset" ]; then
         return
@@ -137,8 +195,8 @@ _emit_new_lines() {
 _check_for_new_sessions() {
     [ -f "$SESSION_HISTORY" ] || return 0
 
-    local current_lines
-    current_lines=$(_line_count "$SESSION_HISTORY")
+    # Counted by _refresh_line_counts at the top of this cycle.
+    local current_lines="$_HISTORY_LINES_NOW"
     [ "$current_lines" -le "$_KNOWN_HISTORY_LINES" ] && return 0
 
     local start=$((_KNOWN_HISTORY_LINES + 1))
@@ -193,6 +251,9 @@ _initialize() {
 # -- Poll cycle (shared by main loop and single-pass mode) --
 
 _run_one_cycle() {
+    # One wc pass covers the history file and every resolved session file, so
+    # the rest of this cycle needs no further counting forks.
+    _refresh_line_counts
     _check_for_new_sessions
 
     for sid in "${!_FILE_BY_SID[@]}"; do
