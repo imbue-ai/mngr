@@ -394,29 +394,19 @@ class LiteLLMKeyInfo(FrozenModel):
     user_id: str | None = None
 
 
-class TunnelInfo(FrozenModel):
-    """A Cloudflare tunnel record."""
+class ShareInfo(FrozenModel):
+    """One workspace's self-hosted share record (the relay-based sharing model)."""
 
-    tunnel_name: str
-    tunnel_id: str
-    token: SecretStr | None = None
-    services: tuple[str, ...] = ()
-
-
-class ServiceInfo(FrozenModel):
-    """A service forwarded over a Cloudflare tunnel."""
-
-    service_name: str
-    service_url: str
-    hostname: str
-
-
-class AuthPolicy(FrozenModel):
-    """Cloudflare Access policy expressed as allowed emails / IDPs."""
-
-    emails: tuple[str, ...] = ()
-    email_domains: tuple[str, ...] = ()
-    require_idp: tuple[str, ...] = ()
+    host_id: str = Field(description="The workspace's host coordinate (host-<32hex>)")
+    workspace_domain: str = Field(description="The share's registrable base, host-<hex>.<user>.<region>.<domain>")
+    region: str = Field(description="Relay region code the share is served from")
+    state: str = Field(description="'active' while shared; 'inactive' after unshare")
+    relay_endpoint: str | None = Field(default=None, description="host:port the workspace's frpc dials")
+    relay_token: SecretStr | None = Field(
+        default=None, description="Opaque per-share relay token; returned once at share-enable"
+    )
+    last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel Login stamp")
+    cert_not_after: str | None = Field(default=None, description="Expiry of the newest issued certificate")
 
 
 class R2BucketInfo(FrozenModel):
@@ -484,8 +474,6 @@ class AccountEntitlementValues(FrozenModel):
     """The quota values an account currently holds (mirrors the connector's PlanEntitlements)."""
 
     max_remote_workspaces: int = Field(description="Max concurrent pool-host leases (running or stopped)")
-    max_tunnels: int = Field(description="Max Cloudflare tunnels")
-    max_services_per_tunnel: int = Field(description="Max forwarded services per tunnel")
     max_buckets: int = Field(description="Max R2 buckets")
     max_total_bucket_bytes: int = Field(description="Max total bytes across all the account's buckets")
     monthly_llm_spend_usd: float = Field(description="Monthly LLM spend cap in USD (rolling)")
@@ -496,7 +484,6 @@ class AccountUsageInfo(FrozenModel):
     """Live usage numbers for an account (mirrors the connector's AccountUsage)."""
 
     remote_workspaces: int = Field(description="Current pool-host leases")
-    tunnels: int = Field(description="Current Cloudflare tunnels")
     buckets: int = Field(description="Current R2 buckets")
     total_bucket_bytes: int = Field(description="Total bytes across the account's buckets")
     llm_spend_usd_this_period: float = Field(description="LiteLLM aggregate spend in the current budget period")

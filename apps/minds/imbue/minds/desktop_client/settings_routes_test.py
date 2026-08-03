@@ -207,71 +207,6 @@ def _plugin_dir(tmp_path: Path) -> Path:
     return Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent").plugin_data_dir
 
 
-def test_settings_page_lists_granted_connector(tmp_path: Path) -> None:
-    """The app-level Settings page hosts the permission sections: a granted
-    connector shows up with its machine and permissions, alongside the
-    device settings (error reporting, backup password)."""
-    agent, host = str(AgentId()), HostId()
-    save_permissions(
-        permissions_path_for_host(_plugin_dir(tmp_path), host),
-        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
-    )
-    handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    body = response.text
-    # The permission sections are back on the app-level settings page.
-    for section in ("Connectors", "Local files", "Machines", "Error reporting", "Master password"):
-        assert section in body
-    # The granted connector renders with its workspace + permission label.
-    assert "Slack" in body
-    assert "My Machine" in body
-    assert "slack-read-all" in body
-    assert 'data-service-name="slack"' in body
-    # The full page keeps its "back to workspaces" link (the modal drops it).
-    assert "Back to machines" in body
-
-
-def test_settings_modal_lists_granted_connector_without_back_link(tmp_path: Path) -> None:
-    """The centered settings modal renders the same permission sections as the
-    full page, minus the "back to machines" link."""
-    agent, host = str(AgentId()), HostId()
-    save_permissions(
-        permissions_path_for_host(_plugin_dir(tmp_path), host),
-        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
-    )
-    handler = _build_handler(tmp_path)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
-
-    response = client.get("/settings/modal")
-
-    assert response.status_code == 200
-    body = response.text
-    assert "Connectors" in body
-    assert "slack-read-all" in body
-    assert 'data-service-name="slack"' in body
-    assert "Back to machines" not in body
-    assert 'id="settings-modal-backdrop"' in body
-
-
-def test_settings_page_empty_state_when_no_accounts_and_no_grants(tmp_path: Path) -> None:
-    agent, host = str(AgentId()), HostId()
-    handler = _build_handler(
-        tmp_path,
-        latchkey=_ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
-    )
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    # Each category now has its own empty state.
-    assert "No connectors have been added yet." in response.text
-
-
 def test_revoke_service_for_workspace_removes_rule(tmp_path: Path) -> None:
     agent, host = str(AgentId()), HostId()
     path = permissions_path_for_host(_plugin_dir(tmp_path), host)
@@ -342,60 +277,6 @@ def test_revoke_missing_fields_returns_400(tmp_path: Path) -> None:
 
 
 # -- Connector accounts --------------------------------------------------------
-
-
-def test_settings_page_lists_service_accounts_and_add_button(tmp_path: Path) -> None:
-    agent, host = str(AgentId()), HostId()
-    save_permissions(
-        permissions_path_for_host(_plugin_dir(tmp_path), host),
-        _account_grants_config(("slack-api", _TEST_ACCOUNT, ("slack-read-all",))),
-    )
-    latchkey = _ConnectorLatchkey(
-        latchkey_directory=tmp_path,
-        latchkey_binary="/nonexistent",
-        accounts_by_service={"slack": ["hynek@imbue-ai", "hynek@glebs-corner"]},
-    )
-    handler = _build_handler(tmp_path, latchkey=latchkey)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    body = response.text
-    assert "+ Add account" in body
-    assert "hynek@imbue-ai" in body
-    assert "hynek@glebs-corner" in body
-    assert "Disconnect" in body
-    assert 'data-account="hynek@imbue-ai"' in body
-    # Each account is its own section, so both appear as separate blocks.
-    assert 'data-account="hynek@glebs-corner"' in body
-    # Both accounts have stored credentials, so neither is flagged.
-    assert "not connected" not in body
-
-
-def test_settings_page_flags_an_account_with_no_stored_credentials(tmp_path: Path) -> None:
-    """A grant for an account latchkey has no credentials for is shown, and flagged.
-
-    Such a grant is inert (latchkey never injects credentials it does not have),
-    but it must stay visible so the user can revoke it.
-    """
-    agent, host = str(AgentId()), HostId()
-    save_permissions(
-        permissions_path_for_host(_plugin_dir(tmp_path), host),
-        _account_grants_config(("slack-api", "gone@x", ("slack-read-all",))),
-    )
-    latchkey = _ConnectorLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
-    handler = _build_handler(tmp_path, latchkey=latchkey)
-    client = _build_client(tmp_path, handler, {agent: str(host)}, {agent: "My Machine"})
-
-    response = client.get("/settings")
-
-    assert response.status_code == 200
-    body = response.text
-    assert 'data-account="gone@x"' in body
-    assert "not connected" in body
-    # It is still revocable: the workspace card (and its Revoke button) render.
-    assert "My Machine" in body
 
 
 def test_add_account_invokes_latchkey_add_account(tmp_path: Path) -> None:

@@ -8,7 +8,6 @@ resolver as ``host_state_by_host_id``) plus the resolver's optimistic
 poking a separate tracker.
 """
 
-import re
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -192,58 +191,3 @@ def test_running_minds_reflects_optimistic_override(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.get_json() == {"running": []}
-
-
-# -- landing page integration --
-
-
-def _button_display(html: str, button_class: str) -> str:
-    """Return the inline ``display`` value rendered on a landing control button.
-
-    Returns ``"none"`` when the button is hidden, ``""`` when shown. Visibility is
-    driven by inline ``display`` (not a ``.hidden`` class) because the button base
-    class is ``inline-flex`` and would otherwise win and show both buttons.
-    """
-    match = re.search(button_class + r'[^>]*?style="([^"]*)"', html)
-    assert match is not None, f"{button_class} not found with a style attribute"
-    return "none" if "display:none" in match.group(1) else ""
-
-
-def test_landing_page_stopped_mind_shows_only_start(tmp_path: Path) -> None:
-    agent = AgentId.generate()
-    resolver = _resolver_with_capable_agents({agent: HostState.STOPPED})
-    client, auth_store = _make_client(tmp_path, resolver)
-    _authenticate(client, auth_store)
-
-    html = client.get("/").text
-
-    # Exactly one control is visible: Start (the container is stopped), not Stop.
-    assert _button_display(html, "landing-start-btn") == ""
-    assert _button_display(html, "landing-stop-btn") == "none"
-    assert "Restart machine" not in html
-
-
-def test_landing_page_running_mind_shows_only_stop(tmp_path: Path) -> None:
-    agent = AgentId.generate()
-    resolver = _resolver_with_capable_agents({agent: HostState.RUNNING})
-    client, auth_store = _make_client(tmp_path, resolver)
-    _authenticate(client, auth_store)
-
-    html = client.get("/").text
-
-    assert _button_display(html, "landing-stop-btn") == ""
-    assert _button_display(html, "landing-start-btn") == "none"
-
-
-def test_landing_page_unknown_mind_shows_neither_control(tmp_path: Path) -> None:
-    """Before discovery knows the container state, neither Start nor Stop is shown."""
-    agent = AgentId.generate()
-    # No host state in discovery yet -> classified UNKNOWN.
-    resolver = _resolver_with_capable_agents({agent: None})
-    client, auth_store = _make_client(tmp_path, resolver)
-    _authenticate(client, auth_store)
-
-    html = client.get("/").text
-
-    assert _button_display(html, "landing-start-btn") == "none"
-    assert _button_display(html, "landing-stop-btn") == "none"

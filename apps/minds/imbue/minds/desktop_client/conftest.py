@@ -5,19 +5,27 @@ from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
+from flask import Flask
+from flask.testing import FlaskClient
 from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import ServiceLogRecord
 from imbue.minds.desktop_client.backend_resolver import parse_agents_from_json
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_records
+from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthAccount
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -25,7 +33,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudVerificationStatus
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
-from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.testing import device_id_for_test
@@ -57,8 +65,8 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
     The ``mngr_caller`` defaults to a :class:`RecordingMngrCaller` (rather than
     the process-wide warm-process caller) so any code that reaches through
-    ``cli.mngr_caller`` -- e.g. the tunnel-token injection in the sharing flow --
-    is a fast in-memory no-op instead of spawning a real ``mngr`` process.
+    ``cli.mngr_caller`` is a fast in-memory no-op instead of spawning a real
+    ``mngr`` process.
     """
 
     mngr_caller: MngrCaller = Field(default_factory=RecordingMngrCaller)
@@ -70,11 +78,15 @@ class FakeImbueCloudCli(ImbueCloudCli):
         default=False,
         description="When True, auth_list raises ImbueCloudCliError (simulates a transient subprocess failure)",
     )
-    tunnels_by_account: dict[str, dict[str, str]] = Field(
-        default_factory=dict, description="account email -> {agent_id: tunnel_name}"
+    shares_by_account: dict[str, dict[str, str]] = Field(
+        default_factory=dict, description="account email -> {host_id: share state}"
     )
-    deleted_tunnel_names: list[str] = Field(
-        default_factory=list, description="Every tunnel name delete_tunnel was called with, in order"
+    deleted_share_host_ids: list[str] = Field(
+        default_factory=list, description="Every host id delete_share was called with, in order"
+    )
+    is_share_lookup_failing: bool = Field(
+        default=False,
+        description="When True, get_share_status raises ImbueCloudCliError (simulates a connector hiccup)",
     )
 
     signup_session_to_return: ImbueCloudAuthSession | None = Field(
@@ -162,22 +174,28 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def remove_account(self, user_id: str) -> None:
         self.accounts_to_return = [a for a in self.accounts_to_return if a.user_id != user_id]
 
-    # -- In-memory tunnels (drives the teardown tests) --
+    # -- In-memory machine shares (drives the teardown tests) --
 
-    def add_tunnel(self, account: str, agent_id: str) -> None:
-        self.tunnels_by_account.setdefault(account, {})[agent_id] = f"fake--{agent_id[:16]}"
+    def add_share(self, account: str, host_id: str) -> None:
+        self.shares_by_account.setdefault(account, {})[host_id] = "active"
 
-    def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
-        tunnel_name = self.tunnels_by_account.get(account, {}).get(agent_id)
-        if tunnel_name is None:
+    def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
+        if self.is_share_lookup_failing:
+            raise ImbueCloudCliError("fake transient share lookup failure")
+        state = self.shares_by_account.get(account, {}).get(host_id)
+        if state is None:
             return None
-        return TunnelInfo(tunnel_name=tunnel_name, tunnel_id=f"id-{tunnel_name}")
+        return ShareCliInfo(
+            host_id=host_id,
+            workspace_domain=f"{host_id}.owner1234.us1.shares.example",
+            region="us1",
+            state=state,
+            relay_endpoint="relay-us1.shares.example:7000",
+        )
 
-    def delete_tunnel(self, account: str, tunnel_name: str) -> None:
-        self.deleted_tunnel_names.append(tunnel_name)
-        for agent_id, name in list(self.tunnels_by_account.get(account, {}).items()):
-            if name == tunnel_name:
-                del self.tunnels_by_account[account][agent_id]
+    def delete_share(self, *, account: str, host_id: str) -> None:
+        self.deleted_share_host_ids.append(host_id)
+        self.shares_by_account.get(account, {}).pop(host_id, None)
 
     # -- In-memory storage-cleanup backend (drives the backup-trim tests) --
 
@@ -322,6 +340,33 @@ def make_session_store_for_test(data_dir: Path, cli: ImbueCloudCli | None = None
     return MultiAccountSessionStore(data_dir=data_dir, cli=effective_cli, record_store=record_store)
 
 
+def build_desktop_client_for_test(
+    tmp_path: Path,
+    is_authenticated: bool,
+    backend_resolver: BackendResolverInterface | None = None,
+    **create_kwargs: Any,
+) -> tuple[FlaskClient, Flask, FileAuthStore]:
+    """Build a desktop-client Flask app over a fresh ``FileAuthStore`` and return its test client.
+
+    ``backend_resolver`` defaults to a bare ``MngrCliBackendResolver``; any extra
+    keyword arguments are forwarded to ``create_desktop_client``. When
+    ``is_authenticated`` is True the returned client already carries a valid
+    session cookie signed with the auth store's key.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    effective_resolver = backend_resolver if backend_resolver is not None else MngrCliBackendResolver()
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=effective_resolver,
+        http_client=None,
+        **create_kwargs,
+    )
+    client = app.test_client()
+    if is_authenticated:
+        client.set_cookie(SESSION_COOKIE_NAME, create_session_cookie(signing_key=auth_store.get_signing_key()))
+    return client, app, auth_store
+
+
 @pytest.fixture
 def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
     """Root ``ConcurrencyGroup`` for tests that construct an ``AgentCreator``.
@@ -382,9 +427,16 @@ def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None, 
     return json.dumps({"agents": [_agent(agent_id) for agent_id in agent_ids]})
 
 
-def make_service_log(service: str, url: str) -> str:
-    """Build a single JSONL line matching the services/events.jsonl format."""
-    return json.dumps({"service": service, "url": url}) + "\n"
+def make_service_log(service: str, url: str, label: str = "") -> str:
+    """Build a single JSONL line matching the services/events.jsonl format.
+
+    ``label`` is the service's origin label (``<name>-<rand>``); omit it for the
+    legacy (label-less) shape.
+    """
+    entry: dict[str, str] = {"service": service, "url": url}
+    if label:
+        entry["label"] = label
+    return json.dumps(entry) + "\n"
 
 
 def seed_provider_snapshots(
@@ -457,9 +509,12 @@ def make_resolver_with_data(
         for agent_id_str, log_content in service_logs.items():
             records = parse_service_log_records(log_content)
             services: dict[str, str] = {}
+            labels: dict[str, str] = {}
             for record in records:
                 if isinstance(record, ServiceLogRecord):
                     services[str(record.service)] = record.url
-            resolver.update_services(AgentId(agent_id_str), services)
+                    if record.label:
+                        labels[str(record.service)] = record.label
+            resolver.update_services(AgentId(agent_id_str), services, labels)
 
     return resolver

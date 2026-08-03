@@ -3,7 +3,7 @@
 These were extracted from ``app.py`` so that both the browser-facing create
 routes (in ``app.py``) and the agent-facing ``/api/v1/workspaces`` create
 route (in ``api_v1.py``) can build the same backup request, the same
-post-create-attempt tunnel/account callback, and resolve/persist the same region.
+post-create-attempt account-association callback, and resolve/persist the same region.
 ``api_v1.py`` cannot import ``app.py`` (``app.py`` imports ``api_v1.py``'s
 blueprint factory, which would be a cycle), so this lower-level module is the
 single home both import.
@@ -12,18 +12,12 @@ single home both import.
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
@@ -32,7 +26,6 @@ from imbue.minds.desktop_client.region_preference import known_regions_for_provi
 from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.primitives import BackupProvider
@@ -113,70 +106,11 @@ def persist_region_for_launch_mode(
         logger.debug("Failed to persist region {} for provider {}: {}", region, provider_key, exc)
 
 
-# -- Post-create-attempt tunnel + account-association callback --
-
-
-def _run_tunnel_setup(
-    agent_id: AgentId,
-    imbue_cloud_cli: ImbueCloudCli,
-    account_email: str,
-    notification_dispatcher: NotificationDispatcher,
-    agent_display_name: str,
-) -> None:
-    """Create a Cloudflare tunnel via the plugin and inject its token into the agent.
-
-    Runs on a detached thread scheduled by ``OnCreatedCallback`` on
-    the desktop client's root ``ConcurrencyGroup``. Failures are logged via
-    loguru and surfaced to the user via ``notification_dispatcher``.
-
-    The plugin owns all tunnel state (token, services, auth policy);
-    minds keeps no local cache. ``create_tunnel`` is idempotent on the
-    connector side, so re-injecting on every agent (re)create attempt just
-    delivers the existing token rather than rotating.
-    """
-    try:
-        info = imbue_cloud_cli.create_tunnel(account=account_email, agent_id=str(agent_id))
-    except ImbueCloudCliError as exc:
-        logger.warning("Failed to create tunnel for {}: {}", agent_id, exc)
-        _notify_tunnel_failure(
-            notification_dispatcher=notification_dispatcher,
-            agent_display_name=agent_display_name,
-            error_message=str(exc),
-        )
-        return
-    if info.token is None:
-        logger.warning("Tunnel created for {} but no token returned", agent_id)
-        return
-    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value(), imbue_cloud_cli.mngr_caller)
-    logger.debug("Injected tunnel token into agent {}", agent_id)
-
-
-def _notify_tunnel_failure(
-    notification_dispatcher: NotificationDispatcher,
-    agent_display_name: str,
-    error_message: str,
-) -> None:
-    """Dispatch an OS notification for a tunnel-setup failure (no rate limit).
-
-    ``NotificationDispatcher.dispatch`` spawns its own background thread or
-    subprocess per channel and swallows channel-specific errors internally,
-    so a top-level ``except`` wrapper here would only mask genuine bugs.
-    """
-    notification_dispatcher.dispatch(
-        NotificationRequest(
-            title="Tunnel setup failed",
-            message=(
-                f"Couldn't set up the Cloudflare tunnel for '{agent_display_name}'. "
-                f"Sharing may be unavailable. Error: {error_message}"
-            ),
-            urgency=NotificationUrgency.NORMAL,
-        ),
-        agent_display_name=agent_display_name,
-    )
+# -- Post-create-attempt account-association callback --
 
 
 class OnCreatedCallback(MutableModel):
-    """Callable that records the workspace<->account association and schedules Cloudflare tunnel setup.
+    """Callable that records the workspace<->account association.
 
     ``__call__`` is the single hook that runs once the inner ``mngr create``
     has returned the canonical ``AgentId`` -- before this refactor minds
@@ -187,24 +121,11 @@ class OnCreatedCallback(MutableModel):
     do the ``associate_workspace`` call here, where ``agent_id`` is
     guaranteed canonical.
 
-    The tunnel-setup work is scheduled on a detached thread on the root
-    ``ConcurrencyGroup`` so the agent-create-attempt thread can flip status to
-    ``DONE`` without waiting on a multi-second Cloudflare round-trip.
+    Sharing is machine-level and user-initiated in the self-hosted relay
+    design, so nothing tunnel-related happens at create time anymore.
     """
 
     session_store: MultiAccountSessionStore = Field(frozen=True, description="Session store for account lookup")
-    imbue_cloud_cli: ImbueCloudCli = Field(
-        frozen=True,
-        description="CLI wrapper for `mngr imbue_cloud tunnels create`.",
-    )
-    root_concurrency_group: ConcurrencyGroup = Field(
-        frozen=True,
-        description="Root group on which the detached tunnel task is scheduled.",
-    )
-    notification_dispatcher: NotificationDispatcher = Field(
-        frozen=True,
-        description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
-    )
     backend_resolver: BackendResolverInterface = Field(
         frozen=True,
         description=(
@@ -218,7 +139,7 @@ class OnCreatedCallback(MutableModel):
         default="",
         description=(
             "Account that owns this workspace. Empty when no account is selected (private "
-            "workspace), in which case no association is recorded and no tunnel is set up."
+            "workspace), in which case no association is recorded."
         ),
     )
     display_name: str = Field(
@@ -259,34 +180,10 @@ class OnCreatedCallback(MutableModel):
         # (~30s+) writes an unrelated change.
         if isinstance(self.backend_resolver, MngrCliBackendResolver):
             self.backend_resolver.notify_change()
-        account = self.session_store.get_account_for_workspace(str(agent_id))
-        if account is None:
-            # The account vanished between selection and now (logout?). The
-            # association above is still in place; we just skip the tunnel.
-            return
-        # ``build_on_created_callback`` doesn't have easy access to the
-        # user-chosen name at this point (see ``backend_resolver``), so fall
-        # back to the short form of the agent id for the notification copy.
-        agent_display_name = str(agent_id)[:8]
-        self.root_concurrency_group.start_new_thread(
-            target=_run_tunnel_setup,
-            kwargs={
-                "agent_id": agent_id,
-                "imbue_cloud_cli": self.imbue_cloud_cli,
-                "account_email": str(account.email),
-                "notification_dispatcher": self.notification_dispatcher,
-                "agent_display_name": agent_display_name,
-            },
-            name=f"tunnel-setup-{agent_id}",
-            # is_checked=False so that a failing tunnel task does not poison
-            # the root CG for unrelated strands; failures are surfaced via
-            # notifications + loguru from within ``_run_tunnel_setup``.
-            is_checked=False,
-        )
 
 
 class CreateOnCreatedCallback(MutableModel):
-    """Post-create-attempt hook that runs the tunnel/account callback, then persists the region.
+    """Post-create-attempt hook that runs the account-association callback, then persists the region.
 
     Composing these two effects into one callable (rather than a nested closure
     at each create call site) keeps the shared create orchestration in one place
@@ -296,7 +193,7 @@ class CreateOnCreatedCallback(MutableModel):
     base_callback: OnCreatedCallback | None = Field(
         frozen=True,
         default=None,
-        description="Tunnel/account-association callback, or None when no account is selected.",
+        description="Account-association callback, or None when no account is selected.",
     )
     minds_config: MindsConfig | None = Field(
         frozen=True, default=None, description="Config used to persist the chosen region as the new default."
@@ -318,7 +215,7 @@ def build_create_on_created_callback(
     display_name: str = "",
     color: str | None = None,
 ) -> CreateOnCreatedCallback:
-    """Build the composed post-create-attempt callback (tunnel/account injection + region persistence)."""
+    """Build the composed post-create-attempt callback (account association + region persistence)."""
     return CreateOnCreatedCallback(
         base_callback=build_on_created_callback(
             account_id,
@@ -338,32 +235,21 @@ def build_on_created_callback(
     color: str | None = None,
     is_cloud_row: bool = False,
 ) -> OnCreatedCallback | None:
-    """Build a callback that injects the tunnel token after agent create attempt.
+    """Build a callback that records the account association after an agent create attempt.
 
-    Returns None if no account is selected (nothing to inject).
+    Returns None if no account is selected (nothing to record).
     """
     if not account_id:
         return None
 
     session_store: MultiAccountSessionStore | None = get_state().session_store
-    imbue_cloud_cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    root_concurrency_group: ConcurrencyGroup | None = get_state().root_concurrency_group
-    notification_dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
 
-    if (
-        session_store is None
-        or imbue_cloud_cli is None
-        or root_concurrency_group is None
-        or notification_dispatcher is None
-    ):
+    if session_store is None:
         return None
 
     return OnCreatedCallback(
         session_store=session_store,
-        imbue_cloud_cli=imbue_cloud_cli,
-        root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         backend_resolver=backend_resolver,
         account_id=account_id,
         display_name=display_name,

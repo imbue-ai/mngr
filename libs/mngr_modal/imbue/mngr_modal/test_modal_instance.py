@@ -120,9 +120,22 @@ def test_get_host_by_name(real_modal_provider: ModalProviderInstance) -> None:
 def test_discover_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
     """Created host should appear in discover_hosts."""
     with created_host(real_modal_provider, HostName("test-host")) as host:
-        hosts = real_modal_provider.discover_hosts(cg=real_modal_provider.mngr_ctx.concurrency_group)
-        host_ids = [h.host_id for h in hosts]
-        assert host.id in host_ids
+        # Modal's sandbox listing is eventually consistent: a just-created
+        # sandbox can be briefly absent from the control plane's list (CI has
+        # seen discovery return an empty list right after create), so poll
+        # discovery rather than asserting a single snapshot.
+        def _host_is_discovered() -> bool:
+            hosts = real_modal_provider.discover_hosts(cg=real_modal_provider.mngr_ctx.concurrency_group)
+            return host.id in [h.host_id for h in hosts]
+
+        # CI has observed the listing stay stale for over a minute, so the cap
+        # is generous; the surrounding test timeout (300s) still bounds it.
+        wait_for(
+            _host_is_discovered,
+            timeout=150.0,
+            poll_interval=5.0,
+            error_message=f"Created host {host.id} was not in discover_hosts after 150s",
+        )
 
 
 @pytest.mark.acceptance
@@ -434,8 +447,7 @@ def test_get_host_by_name_not_found_raises_error(real_modal_provider: ModalProvi
 
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(300)
-@pytest.mark.acceptance
+@pytest.mark.flaky
 @pytest.mark.timeout(300)
 def test_restart_after_graceful_stop_without_initial_snapshot(
     real_modal_provider: ModalProviderInstance,

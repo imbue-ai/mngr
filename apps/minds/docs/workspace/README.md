@@ -12,7 +12,7 @@ The template repository (e.g. [default-workspace-template](https://github.com/im
 - `CLAUDE.md` -- instructions for the Claude agent
 - `.agents/skills/` -- skills available to the agent
 - `system/scripts/` -- utility scripts (forward_port.py, layout.py, etc.)
-- `system/apps/` -- everything tab-openable (system_interface, terminal, browser, and user-built apps); `system/services/` -- tab-less background services (app_watcher, cloudflare_tunnel, host_backup, ...); `system/libs/` -- support libraries (bootstrap, ...)
+- `system/apps/` -- everything tab-openable (system_interface, terminal, browser, and user-built apps); `system/services/` -- tab-less background services (app_watcher, share_gateway, host_backup, ...); `system/libs/` -- support libraries (bootstrap, ...)
 - `data/` -- gitignored workspace data (documents, uploads, memories, per-app data, machine state, secrets)
 
 ## Key files
@@ -36,8 +36,8 @@ directory=/home/user/workspace
 autostart=true
 autorestart=true
 
-[program:cloudflared]
-command=uv run cloudflare-tunnel
+[program:share-gateway]
+command=uv run share-gateway
 directory=/home/user/workspace
 autostart=true
 autorestart=true
@@ -62,10 +62,17 @@ global = true
 
 ### data/.secrets
 
-Contains environment variable exports injected by the desktop client:
+Contains environment variable exports injected by the desktop client.
+While sharing is enabled, `data/.secrets/share.env` holds the share
+materials the share-gateway service watches for (alongside
+`data/.secrets/share_grants.toml`, the grants document gating access):
 
 ```bash
-export CLOUDFLARE_TUNNEL_TOKEN=eyJ...
+export SHARE_WORKSPACE_DOMAIN=host-<hex>.<user>.us1.example.com
+export SHARE_RELAY_ENDPOINT=relay-us1.example.com:7000
+export SHARE_RELAY_TOKEN=...
+export SHARE_CONNECTOR_URL=https://...
+export SHARE_BROKER_URL=https://...
 ```
 
 ## How apps register ports
@@ -78,4 +85,4 @@ python3 system/scripts/forward_port.py --url http://localhost:7681 --name termin
 python3 system/scripts/forward_port.py --remove --name old-app
 ```
 
-The app watcher service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for the desktop client to discover. (Cloudflare forwarding registration happens on the minds side when the user enables sharing -- not in the watcher.)
+The app watcher service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for the desktop client to discover. (Share registration happens on the minds side when the user enables sharing -- not in the watcher.)

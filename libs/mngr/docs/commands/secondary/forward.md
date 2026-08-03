@@ -9,12 +9,14 @@
 mngr forward [--service NAME | --forward-port REMOTE_PORT] [OPTIONS]
 ```
 
-Forward web traffic to agents via <agent>.localhost subdomains [experimental].
+Forward web traffic to workspaces via <host-id>.localhost origins [experimental].
 
 Runs a local HTTP/WS proxy that serves
-``<agent-id>.localhost:<port>/*`` and byte-forwards each request to the
-configured backend (a service URL discovered via ``mngr observe``/``mngr event``,
-or a fixed remote port). Remote agents are reached via SSH tunnels.
+``[<service>.]<host-id>.localhost:<port>/*`` and byte-forwards each request to
+the matching backend: the bare origin goes to the configured backend (a
+service URL discovered via ``mngr observe``/``mngr event``, or a fixed remote
+port), and ``<service>.`` origins go to that agent-registered service. Remote
+agents are reached via SSH tunnels.
 
 Authentication uses a one-time login URL printed on stderr; in subprocess
 mode the same URL is also emitted on stdout as a JSONL ``login_url`` event.
@@ -63,7 +65,10 @@ mngr forward [OPTIONS]
 | `--preauth-cookie` | text | Pre-shared cookie value accepted in lieu of an OTP-issued cookie. | None |
 | `--open-browser`, `--no-open-browser` | boolean | Open the printed login URL in the system browser. | `False` |
 | `--allow-host-loopback` | boolean | Permit dialing host loopback (localhost / 127.0.0.0/8 / ::1) when an agent's registered URL is loopback and no SSH tunnel exists. Off by default: any agent whose SSH info hasn't been published returns a 502 instead of silently serving whatever else is bound to that port on the host. Pass this flag only for setups that intentionally run agents directly on the host. | `False` |
-| `--use-http2` | boolean | Terminate TLS and negotiate HTTP/2 (via ALPN) instead of serving plain HTTP/1.1. Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. The proxy generates a fresh self-signed cert at startup, so only clients that trust it (the minds desktop app) should enable this; a human browser will see a cert warning. | `False` |
+| `--use-http2` | boolean | Terminate TLS and negotiate HTTP/2 (via ALPN) instead of serving plain HTTP/1.1. Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. Server leaf certs are minted per startup from a persistent local CA under the plugin state dir; trust the CA once via --trust-ca to browse without cert warnings (the minds desktop app trusts programmatically and needs no install). | `False` |
+| `--browser-bridge-token` | text | Opaque spawn-time secret enabling the /_bridge route: a host application 302s an already-authenticated browser to /_bridge?token=...&next=... to obtain the bare-origin session cookie without consuming an OTP. | None |
+| `--embedder-origin` | text | Origin (scheme://host[:port]) allowed to embed workspace content in an iframe. Repeatable. Without it, the appended frame-ancestors policy denies all external embedding ('self' + the workspace's own origin family only). | None |
+| `--trust-ca` | boolean | Install the plugin's persistent local CA into this platform's trust stores (macOS login keychain / Linux per-user NSS) so plain browsers accept the proxy's TLS, then exit. One-time, user-consented; intended for the local browser testing/dev surface. | `False` |
 
 ## Examples
 

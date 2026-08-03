@@ -1,15 +1,15 @@
 // Layer-0 smoke: confirm minds.app launches to a usable state.
 //
-// A successful launch can land on either:
-//   - the projects list / home (when the runner has prior auth state, like
-//     a logged-in dev machine), where a "Create" link is visible, or
-//   - the welcome / login splash (vanilla macos-latest CI runner with no
-//     auth state), which renders a "Log In" link and a "Continue without
-//     an account" button.
+// A successful launch can land on any of the SPA's cold-start routes:
+//   - the machines list / home (a runner with prior auth state, like a
+//     logged-in dev machine),
+//   - the first-run welcome splash (vanilla macos-latest CI runner),
+//   - the once-per-install error-reporting notice, or
+//   - a restored workspace window (dev machine with saved session state).
 //
-// Either landing proves the cold-launch path completed: Electron came up,
-// the Python backend bound its port, and the content view rendered.
-// Accept both; do NOT require a particular auth state.
+// Any of these landings proves the cold-launch path completed: Electron
+// came up, the Python backend bound its port, and a real SPA page rendered.
+// Accept all of them; do NOT require a particular auth state.
 
 const { test, expect } = require('./fixtures');
 
@@ -23,14 +23,19 @@ test('main window launches to a usable state (Create or Welcome)', async ({ mind
   let content;
   try {
     content = await pickContentWindow(app, { timeoutMs: 3 * 60 * 1000 });
-    // Identify the splash by stable structural hooks (skip-account button
-    // id / login link href), not visible copy or role, so a wording or
-    // link-vs-button redesign can't break this smoke test. The logged-in
-    // path shows a "Create" link.
-    const welcomeSplash = content.locator('#skip-account-btn, a[href="/auth/login"]');
-    const createLink = content.getByRole('link', { name: /^create$/i });
-    await expect(welcomeSplash.or(createLink).first())
-      .toBeVisible({ timeout: 2 * 60 * 1000 });
+    // Identify a usable landing by stable structural hooks, not visible
+    // copy, so wording redesigns can't break this smoke test. Each hook only
+    // renders on a successfully-loaded real SPA page (the persistent
+    // titlebar #minds-titlebar deliberately does NOT count: it also renders
+    // on the RouteError page, so it can't prove a good landing):
+    //   #landing-minds-settings  the home page's fixed settings launcher
+    //   #welcome-signup-btn      the first-run welcome splash (three-choice gate)
+    //   #consent-continue        the error-reporting notice
+    //   #content-frame           the workspace surface (restored session)
+    const landingMarker = content.locator(
+      '#landing-minds-settings, #welcome-signup-btn, #consent-continue, #content-frame'
+    );
+    await expect(landingMarker.first()).toBeVisible({ timeout: 2 * 60 * 1000 });
   } finally {
     // Attach a final screenshot of whichever page we resolved (content if
     // we got it, else the chrome fallback). The shared playwright config

@@ -81,8 +81,6 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import DevEnvNotFoundError
 from imbue.minds.envs.primitives import InvalidDevEnvNameError
 from imbue.minds.envs.primitives import VaultReadError
-from imbue.minds.envs.providers.cloudflare_tunnels import delete_tunnels as real_delete_cloudflare_tunnels
-from imbue.minds.envs.providers.cloudflare_tunnels import list_tunnels_for_env as real_list_cloudflare_tunnels_for_env
 from imbue.minds.envs.providers.modal_env import delete_modal_env as real_delete_modal_env
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.neon_db import create_neon_project
@@ -325,18 +323,6 @@ def _cleanup_state_container_for_provider(name: DevEnvName, cg: ConcurrencyGroup
     cleanup_env_state_container(name, parent_concurrency_group=cg)
 
 
-def _list_cloudflare_tunnels_for_env_for_provider(
-    name: DevEnvName, account_id: str, api_token: SecretStr
-) -> tuple[str, ...]:
-    return real_list_cloudflare_tunnels_for_env(name, account_id=account_id, api_token=api_token)
-
-
-def _delete_cloudflare_tunnels_for_provider(
-    tunnel_ids: tuple[str, ...], account_id: str, api_token: SecretStr
-) -> None:
-    real_delete_cloudflare_tunnels(tunnel_ids, account_id=account_id, api_token=api_token)
-
-
 def _build_real_providers() -> Providers:
     """Wire the provider modules into the Providers bundle.
 
@@ -374,8 +360,6 @@ def _build_real_providers() -> Providers:
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,
         ensure_generation_id=_ensure_generation_id_for_provider,
         delete_generation_id=_delete_generation_id_for_provider,
-        list_cloudflare_tunnels_for_env=_list_cloudflare_tunnels_for_env_for_provider,
-        delete_cloudflare_tunnels=_delete_cloudflare_tunnels_for_provider,
     )
 
 

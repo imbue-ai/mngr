@@ -59,15 +59,15 @@ from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
 from imbue.minds.desktop_client.api_models import EmptyResponse
-from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import MachineSharingRequest
+from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
-from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import TimezoneResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
@@ -157,16 +157,12 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("POST", "/api/v1/workspaces/{agent_id}/ssh"): _RouteModels(
         request_model=EstablishSshRequest, response_model=SshConnectionResponse
     ),
-    ("PATCH", "/api/v1/workspaces/{agent_id}/sharing/{service_name}"): _RouteModels(),
-    ("PUT", "/api/v1/workspaces/{agent_id}/sharing/{service_name}"): _RouteModels(
-        request_model=EnableSharingRequest, response_model=SharingToggleResponse
+    ("GET", "/api/v1/machines/{host_id}/sharing"): _RouteModels(response_model=MachineSharingResponse),
+    ("PUT", "/api/v1/machines/{host_id}/sharing"): _RouteModels(
+        request_model=MachineSharingRequest, response_model=MachineSharingResponse
     ),
-    ("DELETE", "/api/v1/workspaces/{agent_id}/sharing/{service_name}"): _RouteModels(
-        response_model=SharingToggleResponse
-    ),
-    ("GET", "/api/v1/workspaces/{agent_id}/sharing/{service_name}/readiness"): _RouteModels(
-        response_model=SharingReadinessResponse
-    ),
+    ("DELETE", "/api/v1/machines/{host_id}/sharing"): _RouteModels(response_model=MachineSharingResponse),
+    ("GET", "/api/v1/machines/{host_id}/sharing/readiness"): _RouteModels(response_model=SharingReadinessResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/backup-service/update"): _RouteModels(
         request_model=BackupServiceUpdateRequest, response_model=OperationHandleResponse, success_status=202
     ),

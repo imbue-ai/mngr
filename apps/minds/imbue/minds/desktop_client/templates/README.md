@@ -25,7 +25,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | Component | Role |
 |---|---|
 | `Base` | Universal HTML scaffold (html/head/body, compiled Tailwind v4 sheet `app.min.css`). Every page wraps in this. |
-| `OverlaySurface` | Base variant for edge-to-edge transparent pages in the shared overlay WebContentsView (the overlay host + the hosted modals). Pins the `no-scrollbar-gutter` opt-out and the transparent body so overlays always paint to the window edge; new overlay surfaces should wrap in this, not `Base`. |
+| `OverlaySurface` | Base variant for edge-to-edge transparent pages hosted as overlay-layer modal iframes (see `static/overlay_layer.js`). Pins the `no-scrollbar-gutter` opt-out and the transparent body so overlays always paint to the window edge; new overlay surfaces should wrap in this, not `Base`. |
 | `PageContainer` | Centered `max-w-[720px]` body wrapper. Default for in-app settings-style pages (Landing, Accounts, WorkspaceSettings, Sharing, Destroying). |
 | `PageNarrowContainer` | Centered, narrow page layout for auth flow + form pages. Width/padding only -- no surface chrome. `padding="default"` (`p-8`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `app.css` for the shared shell. |
@@ -88,7 +88,7 @@ generated exactly as they are in a template. Rule of thumb:
   both sides. Prefer `@apply` over hand-written CSS values so spacing /
   type / radius still resolve through the scale (and its ratchets) rather
   than drifting into raw magic numbers. See `.minds-tooltip`, shared by the
-  overlay backend (`overlay.js`) and the in-page backend
+  overlay-layer backend (`overlay_layer.js`) and the in-page backend
   (`tooltip_triggers.js`).
 
 Most recipe classes below predate this guidance and use raw token CSS
@@ -99,7 +99,7 @@ instead (e.g. `.minds-tooltip`):
 | Class | Role |
 |---|---|
 | `.minds-card` | Card surface (bg-surface-primary, border-default, rounded-lg). Match `Card.jinja`. |
-| `.minds-tooltip` | Custom tooltip bubble (uses `@apply`). Shared appearance for the overlay tooltip (`overlay.js`) and the in-page fallback (`tooltip_triggers.js`); positioning is set per-backend in JS. |
+| `.minds-tooltip` | Custom tooltip bubble (uses `@apply`). Shared appearance for the overlay-layer tooltip (`overlay_layer.js`) and the in-page fallback (`tooltip_triggers.js`); positioning is set per-backend in JS. |
 | `.spinner` / `.spinner-accent` / `.spinner-inverse` | Animated circular spinner (token-driven ring/top; `-accent` uses the accent token; `-inverse` derives from `currentColor`). Match `Spinner.jinja`. |
 | `.code-pill` | Inline `<code>` pill (bg-fill-subtle, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing workspace rows + Destroying. |

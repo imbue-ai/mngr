@@ -1,9 +1,9 @@
 {#def accounts, default_account_id, enabled_by_user_id #}
 {#
-  Centered "Manage Accounts" modal page, hosted in the desktop client's
-  shared modal WebContentsView. Opened from the home screen's bottom-left
-  account launcher and the workspace switcher's account entry. The full-page
-  twin (pages.Accounts) remains as the browser-mode fallback.
+  Centered "Manage Accounts" modal page, hosted as an overlay-layer iframe
+  in the chrome shell. Opened from the home screen's bottom-left account
+  launcher and the workspace switcher's account entry. The full-page twin
+  (pages.Accounts) remains as the standalone fallback.
 
   Account actions reuse the existing POST routes (/accounts/set-default,
   /accounts/<id>/logout) via fetch + a reload of this page, so the redirect
@@ -168,8 +168,8 @@
     });
 
     // Swap the overlay to the sign-in modal; after a successful sign-in it
-    // lands the content view on home, where the account launcher reflects
-    // the new account.
+    // lands the shell on home, where the account launcher reflects the new
+    // account.
     window.openAddAccount = function () {
       if (window.minds && window.minds.openSigninModal) window.minds.openSigninModal("/");
       else window.location.href = "/auth/login";

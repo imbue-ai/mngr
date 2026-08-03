@@ -1,7 +1,7 @@
-{#def agent_id, tab, anchor_x=None, anchor_y=None, anchor_height=None, accent="" #}
+{#def agent_id, tab, host_id="", anchor_x=None, anchor_y=None, anchor_height=None, accent="" #}
 {#
   The workspace-options panel: the overlay chrome shared by the Share machine
-  and Machine settings tabs. Hosted in the shared overlay WebContentsView by
+  and Machine settings tabs. Hosted as an overlay-layer modal iframe by
   pages.WorkspaceOptionsModal.
 
   It has two presentations, chosen by whether an anchor was supplied.
@@ -17,8 +17,8 @@
   reads as hanging from the tabs.
 
   The anchor is measured by chrome.js on that strip and packed into this page's
-  URL by the Electron main process -- the same trick the workspace switcher menu
-  uses. The chrome view hides its own icon-tabs (body.ws-options-open) while the
+  URL by the overlay layer -- the same trick the workspace switcher menu uses.
+  The chrome shell hides its own icon-tabs (body.ws-options-open) while the
   panel is up, so the strip here stands in for them rather than doubling them.
 
   CENTERED (no anchor: opened from the workspace list, where there is no strip
@@ -35,8 +35,11 @@
   ("settings", "settings", "Machine settings"),
 ] -%}
 {%- set _is_docked = anchor_x is not none and anchor_y is not none and anchor_height is not none -%}
+{# data-host-id feeds the no-shell dismiss fallback: the plugin's /goto/
+   route is host-keyed, so the agent id alone cannot build a workspace URL. #}
 <div id="ws-options-backdrop"
      data-agent-id="{{ agent_id }}"
+     data-host-id="{{ host_id }}"
      class="fixed inset-0 bg-surface-overlay"></div>
 {# pointer-events are off on the region so clicks around the card (and, when
    docked, between it and the tabs) fall through to the backdrop's dismiss

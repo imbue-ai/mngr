@@ -138,7 +138,7 @@ def test_prevent_async_await() -> None:
     # inherently async (FastAPI WS handler): racing the two relay legs with
     # asyncio.wait and explicitly closing the client leg when the backend
     # dies, so a send-quiet client cannot be left half-open forever.
-    rc.check_async_await(_DIR, snapshot(50))
+    rc.check_async_await(_DIR, snapshot(51))
 
 
 # --- Hardcoded paths ---
@@ -163,7 +163,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(27))
+    rc.check_trailing_comments(_DIR, snapshot(29))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -267,7 +267,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(7))
+    rc.check_inline_functions(_DIR, snapshot(8))
 
 
 def test_prevent_underscore_imports() -> None:

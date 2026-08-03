@@ -1,6 +1,6 @@
 # mngr_imbue_cloud
 
-Provider backend plugin and CLI for Imbue Cloud, the imbue-team-hosted leasing service for pre-provisioned pool hosts. All functionality is reachable through `mngr` commands: auth, account plans/quotas, host leasing, LiteLLM virtual keys, R2 buckets, and Cloudflare tunnels.
+Provider backend plugin and CLI for Imbue Cloud, the imbue-team-hosted leasing service for pre-provisioned pool hosts. All functionality is reachable through `mngr` commands: auth, account plans/quotas, host leasing, LiteLLM virtual keys, R2 buckets, and workspace shares.
 
 ## Configuration
 
@@ -33,7 +33,7 @@ which checks verification status and, on success, promotes the pending session (
 
 ## Account plans and quotas
 
-Every account has a plan ("explorer" by default; "ally" grants higher limits and requires a paid-listed email) whose quotas cap resource use: remote workspaces, tunnels, services per tunnel, buckets, total bucket storage, monthly LLM spend, and synced workspaces. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit.
+Every account has a plan ("explorer" by default; "ally" grants higher limits and requires a paid-listed email) whose quotas cap resource use: remote workspaces, buckets, total bucket storage, monthly LLM spend, and synced workspaces. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit. Workspace sharing (`mngr imbue_cloud shares`, self-hosted relays with workspace-terminated TLS) is capped separately at 50 shared workspaces per account rather than through a plan entitlement.
 
 ```bash
 # Show the plan, entitlement values, and live usage.

@@ -51,6 +51,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.templates import DEFAULT_ACCOUNT_LABEL
 from imbue.minds.desktop_client.latchkey.handlers.templates import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.handlers.templates import PermissionAccountChoice
+from imbue.minds.desktop_client.latchkey.handlers.templates import WILDCARD_PERMISSION_UI_LABEL
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -60,7 +61,12 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import UiPermissionAccountChoice
+from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
+from imbue.minds.desktop_client.request_handler import UiUnknownScopeDetail
+from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
@@ -74,6 +80,7 @@ from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
+from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -719,6 +726,54 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             selected_account_value=selected_account,
             will_open_browser=will_open_browser,
             mngr_forward_origin=mngr_forward_origin,
+        )
+
+    def build_request_detail_payload(
+        self,
+        req_event: RequestEvent,
+        backend_resolver: BackendResolverInterface,
+    ) -> RequestDetailPayload:
+        """Typed twin of :meth:`render_request_detail_fragment` (same derivation, no HTML)."""
+        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
+            return UiUnsupportedDetail(message="Unsupported request type")
+        service_info = self.services_catalog.get_by_scope(req_event.scope)
+        if service_info is None:
+            return UiUnknownScopeDetail(request_id=str(req_event.event_id), scope=req_event.scope)
+
+        parsed_id = AgentId(req_event.agent_id)
+        ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
+        host_id = _resolve_host_id(backend_resolver, parsed_id)
+
+        latchkey_service_info = self.latchkey.services_info(service_info.name)
+        account_choices, selected_account = _build_account_choices(latchkey_service_info.accounts, req_event.account)
+        pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions, selected_account)
+        selected_status_by_account = {
+            entry.account: entry.credential_status for entry in latchkey_service_info.accounts
+        }
+        selected_status = selected_status_by_account.get(selected_account)
+        will_open_browser = (
+            selected_status is None or _needs_account_credential_setup(selected_status)
+        ) and _supports_browser_auth(latchkey_service_info)
+
+        return UiPredefinedPermissionDetail(
+            request_id=str(req_event.event_id),
+            agent_id=req_event.agent_id,
+            ws_name=ws_name,
+            rationale=req_event.rationale,
+            scope=service_info.scope,
+            display_name=service_info.display_name,
+            permission_schemas=tuple(service_info.permission_schemas),
+            description_by_permission_name=dict(service_info.description_by_permission_name),
+            checked_permissions=tuple(pre_checked),
+            account_choices=tuple(
+                UiPermissionAccountChoice(value=choice.value, label=choice.label, hint=choice.hint)
+                for choice in account_choices
+            ),
+            selected_account_value=selected_account,
+            new_account_value=NEW_ACCOUNT_FORM_VALUE,
+            wildcard_permission=WILDCARD_PERMISSION_NAME,
+            wildcard_label=WILDCARD_PERMISSION_UI_LABEL,
+            will_open_browser=will_open_browser,
         )
 
     def apply_grant_request(

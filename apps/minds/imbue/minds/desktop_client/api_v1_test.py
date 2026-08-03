@@ -6,6 +6,8 @@ import shlex
 import threading
 import time
 from collections.abc import Callable
+from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -16,12 +18,14 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from flask.testing import FlaskClient
+from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
@@ -52,7 +56,7 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import TunnelInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
@@ -69,6 +73,7 @@ from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.testing import stub_mngr_host_dir
+from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -1318,6 +1323,7 @@ def _build_client(
     session_store: MultiAccountSessionStore | None = None,
     http_client: httpx.Client | None = None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
+    client_env_config: ClientEnvConfig | None = None,
 ) -> FlaskClient:
     """Build a desktop-client test client with the /api/v1 surface and the given deps."""
     app = create_desktop_client(
@@ -1333,6 +1339,7 @@ def _build_client(
         session_store=session_store,
         system_interface_health_tracker=system_interface_health_tracker,
         mngr_caller=RecordingMngrCaller(),
+        client_env_config=client_env_config,
     )
     return app.test_client()
 
@@ -1347,63 +1354,62 @@ def _write_fake_mngr(directory: Path) -> str:
 
 
 class FakeSharingCli(FakeImbueCloudCli):
-    """In-memory ``ImbueCloudCli`` double for the sharing routes.
+    """In-memory ``ImbueCloudCli`` double for the machine-sharing routes.
 
-    Returns canned tunnel / service / policy data and records mutating calls,
-    so the sharing status/enable/disable routes can be exercised without
-    shelling out to ``mngr imbue_cloud``.
+    Returns canned share data and records mutating calls, so the sharing
+    status/enable/disable routes can be exercised without shelling out to
+    ``mngr imbue_cloud``.
     """
 
-    tunnel: TunnelInfo | None = None
-    service_entries: list[dict[str, Any]] = Field(default_factory=list)
-    service_auth: dict[str, Any] = Field(default_factory=dict)
-    removed_services: list[str] = Field(default_factory=list)
-    added_services: list[str] = Field(default_factory=list)
-    enabled_policies: list[dict[str, Any]] = Field(default_factory=list)
-    enable_sharing_error_stderr: str | None = Field(
-        default=None, description="When set, enable_sharing raises an ImbueCloudCliError carrying this stderr"
+    share: ShareCliInfo | None = None
+    created_shares: list[str] = Field(default_factory=list)
+    deleted_shares: list[str] = Field(default_factory=list)
+    create_share_error: str | None = Field(
+        default=None, description="When set, create_share raises an ImbueCloudCliError with this message"
     )
 
-    def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
-        return self.tunnel
-
-    def create_tunnel(self, *, account: str, agent_id: str, default_policy: Any = None) -> TunnelInfo:
-        assert self.tunnel is not None
-        return self.tunnel
-
-    def enable_sharing(
-        self,
-        *,
-        account: str,
-        agent_id: str,
-        service_name: str,
-        service_url: str,
-        policy: Any,
-    ) -> tuple[TunnelInfo, dict[str, Any]]:
-        if self.enable_sharing_error_stderr is not None:
-            error = ImbueCloudCliError("tunnels enable-sharing failed (exit 1); see the desktop client logs")
-            error.stderr = self.enable_sharing_error_stderr
-            raise error
-        assert self.tunnel is not None
-        self.added_services.append(service_name)
-        self.enabled_policies.append(dict(policy))
-        hostname = next(
-            (e.get("hostname") for e in self.service_entries if e.get("service_name") == service_name),
-            "share.example.com",
+    def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
+        if self.share is None:
+            return None
+        # The status document never carries the relay token (only create does).
+        return ShareCliInfo(
+            host_id=self.share.host_id,
+            workspace_domain=self.share.workspace_domain,
+            region=self.share.region,
+            state=self.share.state,
+            relay_endpoint=self.share.relay_endpoint,
+            relay_token=None,
+            last_tunnel_login_at=self.share.last_tunnel_login_at,
+            cert_not_after=self.share.cert_not_after,
         )
-        return self.tunnel, {"service_name": service_name, "service_url": service_url, "hostname": hostname}
 
-    def list_services(self, account: str, tunnel_name: str) -> list[dict[str, Any]]:
-        return list(self.service_entries)
+    def create_share(self, *, account: str, host_id: str) -> ShareCliInfo:
+        if self.create_share_error is not None:
+            raise ImbueCloudCliError(self.create_share_error)
+        self.created_shares.append(host_id)
+        self.share = ShareCliInfo(
+            host_id=host_id,
+            workspace_domain=f"{host_id}.owner1234.us1.shares.example",
+            region="us1",
+            state="active",
+            relay_endpoint="relay-us1.shares.example:7000",
+            relay_token=SecretStr("relay-token-abc"),
+        )
+        return self.share
 
-    def get_service_auth(self, account: str, tunnel_name: str, service_name: str) -> dict[str, Any]:
-        return dict(self.service_auth)
-
-    def remove_service(self, account: str, tunnel_name: str, service_name: str) -> None:
-        self.removed_services.append(service_name)
-
-    def delete_tunnel(self, account: str, tunnel_name: str) -> None:
-        return None
+    def delete_share(self, *, account: str, host_id: str) -> None:
+        self.deleted_shares.append(host_id)
+        if self.share is not None:
+            self.share = ShareCliInfo(
+                host_id=self.share.host_id,
+                workspace_domain=self.share.workspace_domain,
+                region=self.share.region,
+                state="inactive",
+                relay_endpoint=self.share.relay_endpoint,
+                relay_token=self.share.relay_token,
+                last_tunnel_login_at=self.share.last_tunnel_login_at,
+                cert_not_after=self.share.cert_not_after,
+            )
 
 
 def _associated_session_store(
@@ -1761,7 +1767,13 @@ def test_desktop_running_workspaces_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-# -- Sharing sub-resource --
+# -- Machine sharing --
+
+_TEST_HOST_ID = "host-00000000000000000000000000000000"
+_TEST_CLIENT_ENV_CONFIG = ClientEnvConfig(
+    connector_url=AnyUrl("https://connector.shares.example"),
+    litellm_proxy_url=AnyUrl("https://llm.shares.example"),
+)
 
 
 def _sharing_client(
@@ -1773,185 +1785,359 @@ def _sharing_client(
     email: str = "owner@example.com",
     service_logs: dict[str, str] | None = None,
     mngr_binary: str = "mngr",
+    http_client: httpx.Client | None = None,
 ) -> FlaskClient:
     resolver = make_resolver_with_data(make_agents_json(agent_id), service_logs=service_logs)
     store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email=email)
-    return _build_client(tmp_path, resolver, imbue_cloud_cli=cli, session_store=store, mngr_binary=mngr_binary)
-
-
-def _fake_sharing_cli(tunnel: TunnelInfo | None = None, **kwargs: Any) -> FakeSharingCli:
-    return FakeSharingCli(
-        connector_url=FAKE_CONNECTOR_URL,
-        tunnel=tunnel,
-        **kwargs,
+    return _build_client(
+        tmp_path,
+        resolver,
+        imbue_cloud_cli=cli,
+        session_store=store,
+        mngr_binary=mngr_binary,
+        http_client=http_client,
+        client_env_config=_TEST_CLIENT_ENV_CONFIG,
     )
 
 
-def test_sharing_status_enabled(tmp_path: Path) -> None:
+def _fake_sharing_cli(**kwargs: Any) -> FakeSharingCli:
+    return FakeSharingCli(connector_url=FAKE_CONNECTOR_URL, **kwargs)
+
+
+def _recorded_mngr_calls(cli: FakeSharingCli) -> list[list[str]]:
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    return caller.calls
+
+
+def _active_share(host_id: str = _TEST_HOST_ID) -> ShareCliInfo:
+    return ShareCliInfo(
+        host_id=host_id,
+        workspace_domain=f"{host_id}.owner1234.us1.shares.example",
+        region="us1",
+        state="active",
+        relay_endpoint="relay-us1.shares.example:7000",
+    )
+
+
+def test_machine_sharing_status_disabled_when_no_share(tmp_path: Path) -> None:
     agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", services=("web",)),
-        service_entries=[{"service_name": "web", "hostname": "share.example.com"}],
-        service_auth={"emails": ["owner@example.com"]},
-    )
+    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli())
+
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["enabled"] is False
+    assert body["url"] is None
+
+
+def test_machine_sharing_status_enabled(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout=grants_toml))
     client = _sharing_client(tmp_path, agent_id, cli)
 
-    response = client.get(f"/api/v1/workspaces/{agent_id}/sharing/web", headers=_auth_header())
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
 
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["enabled"] is True
-    assert body["url"] == "https://share.example.com"
-    assert body["policy"]["emails"] == ["owner@example.com"]
+    assert body["workspace_domain"] == f"{_TEST_HOST_ID}.owner1234.us1.shares.example"
+    assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+    # The grants document survives the exec envelope round trip.
+    assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
 
 
-def test_sharing_status_disabled_when_no_tunnel(tmp_path: Path) -> None:
+def test_machine_sharing_status_reports_unknown_grants_when_the_read_fails(tmp_path: Path) -> None:
+    # A shared machine whose grants exec never lands must report grants: null
+    # (unknown), not an empty policy: the pane would otherwise render every
+    # grantee as revoked and let an edit replace a policy nobody ever saw.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(tunnel=None)
+    cli = _fake_sharing_cli(share=_active_share())
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = MngrCallResult(returncode=1, stderr="agent offline")
     client = _sharing_client(tmp_path, agent_id, cli)
 
-    response = client.get(f"/api/v1/workspaces/{agent_id}/sharing/web", headers=_auth_header())
-
-    assert response.status_code == 200
-    assert json.loads(response.data)["enabled"] is False
-
-
-def test_sharing_enable_returns_json(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=("web",))
-    )
-    # The tunnel-token injection runs `mngr exec` through ``cli.mngr_caller``,
-    # which the fake CLI defaults to an in-memory RecordingMngrCaller -- a fast
-    # no-op, so no real ``mngr`` process is spawned.
-    client = _sharing_client(
-        tmp_path,
-        agent_id,
-        cli,
-        service_logs={str(agent_id): make_service_log("web", "http://127.0.0.1:9000")},
-    )
-
-    response = client.put(
-        f"/api/v1/workspaces/{agent_id}/sharing/web",
-        headers=_auth_header(),
-        json={"emails": ["viewer@example.com"]},
-    )
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
 
     assert response.status_code == 200
     body = json.loads(response.data)
     assert body["enabled"] is True
-    # The enable response carries the share URL so the editor can start the
-    # readiness poll without a follow-up status fetch.
-    assert body["url"] == "https://share.example.com"
-    assert "web" in cli.added_services
-    assert cli.enabled_policies == [{"emails": ["viewer@example.com"]}]
+    assert body["grants"] is None
 
 
-def test_sharing_enable_translates_transient_cloudflare_access_error(tmp_path: Path) -> None:
-    # A Cloudflare Access-API 5xx that escapes the connector's retries should
-    # read as "temporary problem, try again", not a raw exit-code error.
+class _GrantsReadCaller(RecordingMngrCaller):
+    """Recording caller that answers the grants read with a proper exec JSON envelope.
+
+    The real read unwraps ``mngr exec --format json`` output, so a canned raw
+    string cannot stand in for it; ``grants_stdout`` is the remote ``cat``'s
+    own output ('' plays the absent-file case, unparseable text a corrupted
+    document). Every other call keeps the canned default result.
+    """
+
+    grants_stdout: str = Field(default="", description="The remote cat's stdout inside the envelope")
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        if any("cat" in part and "share_grants.toml" in part for part in argv):
+            envelope = {"results": [{"agent": "a", "stdout": self.grants_stdout, "stderr": "", "success": True}]}
+            return MngrCallResult(returncode=0, stdout=json.dumps(envelope))
+        return result
+
+
+def test_machine_sharing_status_reports_unknown_grants_when_the_document_is_malformed(tmp_path: Path) -> None:
+    # A malformed grants file must read back as grants: null (unknown), never
+    # as an empty policy -- the pane would render every grantee revoked and a
+    # save from that state would erase grants nobody ever saw.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(
-        tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=()),
-    )
-    cli.enable_sharing_error_stderr = (
-        '{"error": "Connector error 500: {\\"detail\\":{\\"errors\\":[{\\"code\\":10001,'
-        '\\"message\\":\\"access.api.error.internal_server_error\\"}]}}"}'
-    )
-    client = _sharing_client(
-        tmp_path,
-        agent_id,
-        cli,
-        service_logs={str(agent_id): make_service_log("web", "http://127.0.0.1:9000")},
-    )
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout="not toml [["))
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["enabled"] is True
+    assert body["grants"] is None
+
+
+def test_machine_sharing_put_refuses_to_replace_a_malformed_grants_document(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout="not toml [["))
+    client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
-        f"/api/v1/workspaces/{agent_id}/sharing/web",
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
         headers=_auth_header(),
-        json={"emails": ["viewer@example.com"]},
+        json={"workspace": {"emails": ["viewer@example.com"]}},
     )
 
     assert response.status_code == 502
     body = json.loads(response.data)
-    assert "temporary problem" in body["error"]
-    assert "try again" in body["error"]
-    assert "exit 1" not in body["error"]
+    assert "disable sharing" in body["error"].lower()
+    # The corrupted document was left untouched: no grants write was issued.
+    recorded = _recorded_mngr_calls(cli)
+    assert not any("share_grants.toml" in " ".join(argv) and "printf" in " ".join(argv) for argv in recorded)
 
 
-def test_sharing_enable_rejects_empty_emails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # An enable with no emails is rejected (422) rather than silently creating an
-    # unprotected, never-ready public share: the request is refused before any
-    # tunnel/service side effects.
+def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> None:
     agent_id = AgentId()
-    cli = _fake_sharing_cli(tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", token=SecretStr("token"), services=()))
-    fake_mngr_dir = tmp_path / "bin"
-    _write_fake_mngr(fake_mngr_dir)
-    monkeypatch.setenv("PATH", f"{fake_mngr_dir}{os.pathsep}{os.environ['PATH']}")
-    client = _sharing_client(
-        tmp_path,
-        agent_id,
-        cli,
-        service_logs={str(agent_id): make_service_log("web", "http://127.0.0.1:9000")},
-    )
-
-    response = client.put(
-        f"/api/v1/workspaces/{agent_id}/sharing/web",
-        headers=_auth_header(),
-        json={"emails": []},
-    )
-
-    assert response.status_code == 422
-    assert not cli.added_services
-
-
-def test_sharing_disable_returns_json(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(tunnel=TunnelInfo(tunnel_name="tn", tunnel_id="ti", services=("web",)))
+    cli = _fake_sharing_cli()
     client = _sharing_client(tmp_path, agent_id, cli)
 
-    response = client.delete(f"/api/v1/workspaces/{agent_id}/sharing/web", headers=_auth_header())
+    response = client.put(
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
+        headers=_auth_header(),
+        json={"workspace": {"emails": ["viewer@example.com"], "email_domains": ["partner.org"]}},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["enabled"] is True
+    assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+    assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
+    assert cli.created_shares == [_TEST_HOST_ID]
+    # The materials + grants writes ride over the recording mngr caller: one
+    # exec for the grants file, one for share.env.
+    recorded = _recorded_mngr_calls(cli)
+    assert any("share_grants.toml" in " ".join(argv) for argv in recorded)
+    assert any("share.env" in " ".join(argv) for argv in recorded)
+
+
+def test_machine_sharing_put_on_active_share_updates_grants_without_rotation(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    # The guard read before the replace sees no existing document (fresh envelope).
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
+        headers=_auth_header(),
+        json={"workspace": {"emails": ["viewer@example.com"]}},
+    )
+
+    assert response.status_code == 200
+    assert cli.created_shares == []
+    recorded = _recorded_mngr_calls(cli)
+    assert any("share_grants.toml" in " ".join(argv) for argv in recorded)
+    assert not any("share.env" in " ".join(argv) and "printf" in " ".join(argv) for argv in recorded)
+
+
+class _SharePresenceProbeFailingCaller(RecordingMngrCaller):
+    """Recording caller whose share-materials presence probe reports absent.
+
+    Every other mngr call (grants + share.env writes) still succeeds, so the
+    repair path can be observed end to end.
+    """
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        if any("test -f" in part for part in argv):
+            return MngrCallResult(returncode=1)
+        return result
+
+
+def test_machine_sharing_put_reprovisions_an_active_share_whose_materials_are_missing(tmp_path: Path) -> None:
+    """An enable that failed between the connector create and the injection must be repairable.
+
+    The connector then reports the share "active" while the workspace has no
+    relay token, so a grants-only update could never bring the tunnel up.
+    Re-enabling has to take the full provisioning path (the connector reuses
+    the share row and rotates the token) and inject the materials.
+    """
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_SharePresenceProbeFailingCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
+        headers=_auth_header(),
+        json={"workspace": {"emails": ["viewer@example.com"]}},
+    )
+
+    assert response.status_code == 200
+    assert cli.created_shares == [_TEST_HOST_ID]
+    recorded = _recorded_mngr_calls(cli)
+    assert any("share_grants.toml" in " ".join(argv) for argv in recorded)
+    assert any("share.env" in " ".join(argv) and "printf" in " ".join(argv) for argv in recorded)
+
+
+def test_machine_sharing_put_rejects_empty_grants(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli()
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
+        headers=_auth_header(),
+        json={"workspace": {"emails": [], "email_domains": []}},
+    )
+
+    assert response.status_code == 400
+    assert cli.created_shares == []
+
+
+def test_machine_sharing_put_surfaces_connector_errors(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(create_share_error="shares create failed (exit 1)")
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
+        headers=_auth_header(),
+        json={"workspace": {"emails": ["viewer@example.com"]}},
+    )
+
+    assert response.status_code == 502
+    assert "Could not enable sharing" in json.loads(response.data)["error"]
+
+
+def test_machine_sharing_delete_disables(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.delete(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
 
     assert response.status_code == 200
     assert json.loads(response.data)["enabled"] is False
-    assert "web" in cli.removed_services
+    assert cli.deleted_shares == [_TEST_HOST_ID]
+    recorded = _recorded_mngr_calls(cli)
+    assert any("rm -f" in " ".join(argv) for argv in recorded)
 
 
-def test_sharing_status_requires_bearer(tmp_path: Path) -> None:
+def test_machine_sharing_delete_is_idempotent(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli()
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.delete(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert cli.deleted_shares == []
+
+
+def test_machine_sharing_requires_bearer(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
 
-    response = client.get(f"/api/v1/workspaces/{agent_id}/sharing/web")
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing")
 
     assert response.status_code == 401
 
 
-def test_sharing_readiness_reports_ready_on_access_redirect(tmp_path: Path) -> None:
+def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_path: Path) -> None:
     agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share())
+    probed_hosts: list[str] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(302, headers={"location": "https://team.cloudflareaccess.com/login"})
+        probed_hosts.append(request.url.host)
+        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
 
     http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
-    resolver = make_resolver_with_data(make_agents_json(agent_id))
-    client = _build_client(tmp_path, resolver, http_client=http_client)
-
-    response = client.get(
-        f"/api/v1/workspaces/{agent_id}/sharing/web/readiness?url=https://share.example.com",
-        headers=_auth_header(),
+    # The shell's label must be known for readiness -- the probe hits the shell's
+    # label origin, not the bare machine domain (which does not route on a share).
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        http_client=http_client,
+        service_logs={
+            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+        },
     )
+
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
     assert json.loads(response.data) == {"ready": True}
+    # It probed the shell LABEL origin, never the bare machine domain.
+    assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
 
 
-def test_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None:
+def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: Path) -> None:
+    # Enabled share, but the workspace has not registered its shell service yet,
+    # so there is no routable origin to probe -- report not-ready.
     agent_id = AgentId()
-    client = _client_with_workspace(tmp_path, agent_id)
+    cli = _fake_sharing_cli(share=_active_share())
+    client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx.Client())
 
-    response = client.get(
-        f"/api/v1/workspaces/{agent_id}/sharing/web/readiness?url=https://share.example.com",
-        headers=_auth_header(),
-    )
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"ready": False}
+
+
+def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(), http_client=httpx.Client())
+
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"ready": False}
+
+
+def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli(share=_active_share()))
+
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
     assert json.loads(response.data) == {"ready": False}

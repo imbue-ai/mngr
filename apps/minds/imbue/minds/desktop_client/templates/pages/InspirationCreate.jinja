@@ -52,7 +52,7 @@
     }
     window.dismissInspirationModal = closeModalIfAny;
 
-    // Navigate the MAIN content view and dismiss the modal. Never plain
+    // Navigate the shell underneath and dismiss the modal. Never plain
     // ``window.location`` in modal mode: that would load the destination inside
     // the overlay iframe (a window inside a window).
     function leaveTo(url) {
@@ -1029,7 +1029,7 @@
               <div class="flex flex-col gap-1.5">
                 {% for row in machine_rows %}
                   {% set accent_style = "--workspace-accent: " ~ row.accent ~ ";" %}
-                  {% set goto_href = mngr_forward_origin ~ "/goto/" ~ row.agent_id ~ "/" %}
+                  {% set goto_href = mngr_forward_origin ~ "/goto/" ~ (row.host_id or row.agent_id) ~ "/" %}
                   <Card layout="row" interactive
                         extra="accent-spine relative overflow-hidden"
                         :style="accent_style"

@@ -90,13 +90,14 @@
     }
 
     function previewChromeAccent(hex) {
-      // Optimistic local repaint: the workspace-settings page is a trusted local
-      // page on the chrome surface, so it calls the shell bridge directly; main
-      // retargets this bundle's chrome view. Cross-machine sync still happens via
-      // the normal SSE flow; this just shortcuts the local-window paint so the
-      // user sees their pick immediately instead of waiting for ``mngr label`` +
-      // the SSE round-trip. Falls through silently in browser mode (no bridge) --
-      // the SSE path still updates the bar a tick later.
+      // Optimistic local repaint: the workspace-settings page is a trusted
+      // local page inside the chrome shell, so it calls the shell bridge
+      // directly and the shell repaints its own titlebar. Cross-machine sync
+      // still happens via the normal SSE flow; this just shortcuts the local
+      // paint so the user sees their pick immediately instead of waiting for
+      // ``mngr label`` + the SSE round-trip. Falls through silently on a
+      // standalone page load (no bridge) -- the SSE path still updates the
+      // bar a tick later.
       if (typeof hex !== 'string') return;
       // Only the accent is sent; the chrome derives the contrasting titlebar
       // foreground from it in pure CSS (see .titlebar-surface in app.css).
@@ -225,9 +226,9 @@
   var unlinkCancelBtn = document.getElementById('unlink-cancel-btn');
   var unlinkConfirmBtn = document.getElementById('unlink-confirm-btn');
   if (disassociateBtn && unlinkDialog && unlinkCancelBtn && unlinkConfirmBtn) {
-    // Unlinking tears down every tunnel for this machine and cannot be undone
-    // by linking again, so it is confirmed first -- the same shape the destroy
-    // control uses.
+    // Unlinking tears down the machine's share (revoking its links) and
+    // cannot be undone by linking again, so it is confirmed first -- the same
+    // shape the destroy control uses.
     disassociateBtn.addEventListener('click', function () {
       unlinkDialog.classList.remove('hidden');
     });

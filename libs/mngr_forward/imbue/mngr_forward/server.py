@@ -1,19 +1,27 @@
-"""FastAPI app for ``mngr forward``: auth + subdomain HTTP/WS forwarding.
+"""FastAPI app for ``mngr forward``: auth + workspace-origin HTTP/WS forwarding.
 
 Adapted from the subdomain-forwarding portions of minds' desktop client.
 Application-specific routes (create form, accounts, sharing, request inbox,
 telegram, chrome, etc.) stay in the host application; the plugin only handles:
 
 - the bare-origin login flow (``/login``, ``/authenticate``, ``/`` debug index)
-- the ``/goto/<agent>/`` cookie-bridge to per-subdomain auth
-- the ``/_subdomain_auth`` token-redemption handler on each subdomain
-- byte-level HTTP forwarding for ``<agent-id>.localhost``
-- WebSocket forwarding for ``<agent-id>.localhost``
+- the ``/goto/<host-id>/`` cookie-bridge to workspace-domain auth
+- the ``/_subdomain_auth`` token-redemption handler on each workspace origin
+- byte-level HTTP forwarding for ``[<service>.]host-<hex>.localhost``
+- WebSocket forwarding for ``[<service>.]host-<hex>.localhost``
 - the host-header middleware that routes the above
+
+Every workspace (host) owns a family of origins: the bare
+``host-<hex>.localhost`` origin serves the configured shell service, and
+each registered service owns ``<name>.host-<hex>.localhost`` (deeper labels
+route to the same service -- they are the service's own sub-origin space).
+One domain-scoped session cookie covers the whole family.
 """
 
 import asyncio
 import ipaddress
+import re
+import secrets
 import socket as socket_module
 import threading
 from collections.abc import AsyncGenerator
@@ -45,6 +53,7 @@ from loguru import logger
 from websockets import ClientConnection
 
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.auth import AuthStoreInterface
 from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
@@ -52,11 +61,17 @@ from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.cookie import verify_subdomain_auth_token
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
+from imbue.mngr_forward.embedding import EmbedderOrigin
+from imbue.mngr_forward.embedding import build_frame_ancestors_policy
 from imbue.mngr_forward.envelope import EnvelopeWriter
+from imbue.mngr_forward.errors import MngrForwardError
 from imbue.mngr_forward.loading_page import render_loading_page
-from imbue.mngr_forward.primitives import FORWARD_SUBDOMAIN_PATTERN
+from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
+from imbue.mngr_forward.primitives import ParsedForwardHost
+from imbue.mngr_forward.primitives import ServiceLabel
+from imbue.mngr_forward.primitives import parse_forward_host
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -66,6 +81,16 @@ from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
 _SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
+
+
+# Strict shape for the /goto/{host_id} path segment: the exact (lowercased)
+# ``host-<32hex>`` coordinate FORWARD_SUBDOMAIN_PATTERN routes.
+_GOTO_HOST_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"host-[a-f0-9]{32}")
+
+# One sub-origin label of a service's deeper origin space: the per-label
+# charset FORWARD_SUBDOMAIN_PATTERN routes (looser than ServiceLabel, which
+# applies only to the service name itself).
+_SUB_ORIGIN_LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9_-]+")
 
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {"transfer-encoding", "content-encoding", "content-length"}
@@ -132,6 +157,63 @@ def _render_index_page(
 # -- Auth helpers ----------------------------------------------------------
 
 
+def _append_partitioned_to_last_set_cookie(response: Response) -> None:
+    """Append ``; Partitioned`` to the most recently written ``Set-Cookie`` header.
+
+    ``http.cookies`` (which starlette's ``set_cookie`` serializes through)
+    only learned the ``Partitioned`` attribute in Python 3.14, so on earlier
+    interpreters the attribute must be appended to the raw header.
+    """
+    for index in range(len(response.raw_headers) - 1, -1, -1):
+        header_key, header_value = response.raw_headers[index]
+        if header_key == b"set-cookie":
+            response.raw_headers[index] = (header_key, header_value + b"; Partitioned")
+            return
+    raise MngrForwardError("No Set-Cookie header to mark Partitioned")
+
+
+def _set_forward_session_cookie(
+    response: Response,
+    cookie_value: str,
+    use_http2: bool,
+    domain: str | None = None,
+) -> None:
+    """Set the plugin session cookie with embedding-compatible attributes.
+
+    On the TLS path (``use_http2``) the cookie is ``SameSite=None; Secure;
+    Partitioned`` so it is sent from inside a cross-site iframe (the minds
+    chrome embeds workspace origins; the top-level page is a different site).
+    ``Partitioned`` keys the jar by the embedding top-level site in browsers
+    that block unpartitioned third-party cookies; browsers without CHIPS
+    support ignore the attribute. The plain-HTTP path keeps ``Lax``
+    (``SameSite=None`` requires ``Secure``), so embedding is unsupported
+    there -- top-level navigation keeps working as before.
+    """
+    if use_http2:
+        response.set_cookie(
+            key=MNGR_FORWARD_SESSION_COOKIE_NAME,
+            value=cookie_value,
+            path="/",
+            domain=domain,
+            httponly=True,
+            samesite="none",
+            secure=True,
+        )
+        # starlette's ``partitioned=`` kwarg needs the Python 3.14 SimpleCookie,
+        # so the attribute is appended to the just-written header directly.
+        _append_partitioned_to_last_set_cookie(response)
+    else:
+        response.set_cookie(
+            key=MNGR_FORWARD_SESSION_COOKIE_NAME,
+            value=cookie_value,
+            path="/",
+            domain=domain,
+            httponly=True,
+            samesite="lax",
+            secure=False,
+        )
+
+
 def _is_authenticated(
     cookies: Mapping[str, str],
     auth_store: AuthStoreInterface,
@@ -149,43 +231,38 @@ def _is_authenticated(
     )
 
 
-def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
-    """Return the agent ID if ``host_header`` is ``agent-<hex>.localhost(:port)``."""
-    if not host_header:
-        return None
-    match = FORWARD_SUBDOMAIN_PATTERN.match(host_header)
-    if match is None:
-        return None
-    try:
-        return AgentId(match.group(1))
-    except ValueError:
-        return None
+def _unauthenticated_subdomain_response(
+    request: Request,
+    port: int,
+    use_http2: bool,
+    host_info: ParsedForwardHost,
+) -> Response:
+    """Redirect HTML navigations to the workspace's /goto/ bridge; 403 for everything else.
 
-
-def _unauthenticated_subdomain_response(request: Request, port: int, use_http2: bool) -> Response:
-    """Redirect HTML navigations to the agent's /goto/ bridge; 403 for everything else.
-
-    The bridge re-mints a fresh subdomain auth token using the bare-origin
+    The bridge re-mints a fresh workspace auth token using the bare-origin
     session cookie (which the host app refreshes on every restart) and
-    sets a new subdomain cookie before bouncing the browser back. Without
-    this, an agent-subdomain cookie that fails verification (stale
+    sets a new domain-scoped workspace cookie before bouncing the browser
+    back. Without this, a workspace cookie that fails verification (stale
     signing key after a host-app restart, expired window) would land the
     user on the bare-origin landing instead of self-healing into the
     workspace.
 
-    Falls back to the bare-origin landing if the host header does not
-    carry an ``agent-<hex>.localhost`` we can parse.
+    Service origins (``<name>.host-<hex>.localhost``) carry their label
+    chain through the bridge via ``service`` so the final bounce returns to
+    the exact origin (and path) that was requested; the cookie the bridge
+    sets is domain-scoped to ``host-<hex>.localhost`` so one hop covers the
+    shell and every service subtree.
     """
     accept = request.headers.get("accept", "")
     if "text/html" not in accept:
         return Response(status_code=403, content="Not authenticated")
     scheme = "https" if use_http2 else "http"
-    host_header = request.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        location = f"{scheme}://localhost:{port}/"
-    else:
-        location = f"{scheme}://localhost:{port}/goto/{agent_id}/"
+    next_url = request.url.path
+    if request.url.query:
+        next_url = f"{next_url}?{request.url.query}"
+    location = f"{scheme}://localhost:{port}/goto/{host_info.host_id_str}/?next={quote(next_url, safe='')}"
+    if host_info.service_labels is not None:
+        location = f"{location}&service={host_info.service_labels}"
     return Response(status_code=302, headers={"Location": location})
 
 
@@ -546,30 +623,38 @@ def _sanitize_next_url(value: str) -> str:
 
 def _handle_subdomain_auth_bridge(
     request: Request,
-    agent_id: AgentId,
+    host_info: ParsedForwardHost,
     auth_store: AuthStoreInterface,
     use_http2: bool,
 ) -> Response:
+    """Redeem a /goto/ token and set the workspace session cookie.
+
+    The cookie is scoped with ``Domain=host-<hex>.localhost`` (the parsed
+    ``workspace_domain`` of whichever origin the bridge ran on), so a single
+    bridge hop authenticates the bare shell origin and every service origin
+    (``<name>.host-<hex>.localhost``) at any depth.
+    """
     token = request.query_params.get("token", "")
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
     signing_key = auth_store.get_signing_key()
-    if not verify_subdomain_auth_token(token=token, signing_key=signing_key, agent_id=str(agent_id)):
+    if not verify_subdomain_auth_token(
+        token=token, signing_key=signing_key, workspace_host_id=str(host_info.host_id_str)
+    ):
         return Response(status_code=403, content="Invalid or expired subdomain auth token")
     cookie_value = create_session_cookie(signing_key=signing_key)
     response = Response(status_code=302, headers={"Location": next_url})
-    response.set_cookie(
-        key=MNGR_FORWARD_SESSION_COOKIE_NAME,
-        value=cookie_value,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=use_http2,
+    _set_forward_session_cookie(
+        response,
+        cookie_value=cookie_value,
+        use_http2=use_http2,
+        domain=str(host_info.workspace_domain),
     )
     return response
 
 
 async def _handle_workspace_forward_http(
     request: Request,
+    host_info: ParsedForwardHost,
     auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     tunnel_manager: SSHTunnelManager,
@@ -582,22 +667,40 @@ async def _handle_workspace_forward_http(
     envelope_writer: EnvelopeWriter,
     use_http2: bool,
 ) -> Response:
-    host_header = request.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        return Response(status_code=404)
-
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
-        return _handle_subdomain_auth_bridge(request, agent_id, auth_store, use_http2)
+        return _handle_subdomain_auth_bridge(request, host_info, auth_store, use_http2)
 
     if not _is_authenticated(
         cookies=request.cookies,
         auth_store=auth_store,
         preauth_cookie_value=preauth_cookie_value,
     ):
-        return _unauthenticated_subdomain_response(request, listen_port, use_http2)
+        return _unauthenticated_subdomain_response(request, listen_port, use_http2, host_info)
 
-    target = resolver.resolve(agent_id)
+    agent_id = resolver.resolve_agent_for_host(str(host_info.host_id_str))
+    if agent_id is None:
+        # No known agent on this host yet (discovery still warming up, or the
+        # host is gone). There is no agent to attribute a failure envelope to,
+        # so just serve the auto-retrying loader.
+        return _service_unavailable_response(request)
+
+    if host_info.service_name is None:
+        # Bare origin: redirect HTML navigations to the shell service's own
+        # label origin, keeping the local grammar identical to a share (where
+        # the bare domain cannot be served at all). Non-HTML requests (the
+        # workspace readiness probe, assets) fall through to serving the shell
+        # directly, so nothing that is not a top-level navigation is disrupted.
+        shell_label = resolver.shell_origin_label(agent_id)
+        if shell_label is not None and "text/html" in request.headers.get("accept", ""):
+            scheme = "https" if use_http2 else "http"
+            next_path = request.url.path
+            if request.url.query:
+                next_path = f"{next_path}?{request.url.query}"
+            location = f"{scheme}://{shell_label}.{host_info.workspace_domain}:{listen_port}{next_path}"
+            return Response(status_code=302, headers={"Location": location})
+        target = resolver.resolve(agent_id)
+    else:
+        target = resolver.resolve_by_origin_label(agent_id, host_info.service_name)
     if target is None:
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         return _service_unavailable_response(request)
@@ -652,6 +755,7 @@ async def _handle_workspace_forward_http(
 
 async def _handle_workspace_forward_websocket(
     websocket: WebSocket,
+    host_info: ParsedForwardHost,
     auth_store: AuthStoreInterface,
     resolver: ForwardResolver,
     tunnel_manager: SSHTunnelManager,
@@ -659,12 +763,6 @@ async def _handle_workspace_forward_websocket(
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
 ) -> None:
-    host_header = websocket.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        await websocket.close(code=4004, reason="Unknown host")
-        return
-
     if not _is_authenticated(
         cookies=websocket.cookies,
         auth_store=auth_store,
@@ -673,7 +771,17 @@ async def _handle_workspace_forward_websocket(
         await websocket.close(code=4003, reason="Not authenticated")
         return
 
-    target = resolver.resolve(agent_id)
+    agent_id = resolver.resolve_agent_for_host(str(host_info.host_id_str))
+    if agent_id is None:
+        await websocket.close(code=1013, reason="Backend not yet available")
+        return
+
+    # A websocket to a service origin routes by its label; to the bare origin
+    # it maps to the shell (no redirect -- there is no navigation to redirect).
+    if host_info.service_name is None:
+        target = resolver.resolve(agent_id)
+    else:
+        target = resolver.resolve_by_origin_label(agent_id, host_info.service_name)
     if target is None:
         # Mirror the HTTP path: an unresolved backend is a backend failure a
         # consumer must hear about. A loaded SPA whose only live channel is a
@@ -836,14 +944,37 @@ def _handle_authenticate(
     signing_key = auth_store.get_signing_key()
     cookie_value = create_session_cookie(signing_key=signing_key)
     response = Response(status_code=307, headers={"Location": "/"})
-    response.set_cookie(
-        key=MNGR_FORWARD_SESSION_COOKIE_NAME,
-        value=cookie_value,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=use_http2,
-    )
+    _set_forward_session_cookie(response, cookie_value=cookie_value, use_http2=use_http2)
+    return response
+
+
+def _handle_browser_bridge(
+    request: Request,
+    auth_store: AuthStoreInterface,
+    browser_bridge_token: str | None,
+    use_http2: bool,
+) -> Response:
+    """Redeem the spawn-time browser-bridge token and set the bare-origin cookie.
+
+    A host application (minds) that spawned the plugin with
+    ``--browser-bridge-token`` 302s an already-authenticated browser here so
+    it obtains a bare-origin plugin session without consuming an OTP -- the
+    browser twin of the Electron shell's programmatic preauth cookie
+    injection. The token compare is constant-time; when the flag was never
+    passed the route does not exist (404).
+    """
+    if browser_bridge_token is None:
+        return Response(status_code=404)
+    token = request.query_params.get("token", "")
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str, and the
+    # token comes straight from the query string.
+    if not token or not secrets.compare_digest(token.encode("utf-8"), browser_bridge_token.encode("utf-8")):
+        return Response(status_code=403, content="Invalid browser bridge token")
+    next_url = _sanitize_next_url(request.query_params.get("next", "/"))
+    signing_key = auth_store.get_signing_key()
+    cookie_value = create_session_cookie(signing_key=signing_key)
+    response = Response(status_code=302, headers={"Location": next_url})
+    _set_forward_session_cookie(response, cookie_value=cookie_value, use_http2=use_http2)
     return response
 
 
@@ -864,23 +995,34 @@ def _handle_debug_index(
         return HTMLResponse(content=html)
     agents = []
     for agent_id in resolver.list_known_agent_ids():
+        host_id = resolver.get_host_for_agent(agent_id)
         target = resolver.resolve(agent_id)
-        if target is None:
+        if host_id is None:
             agents.append(
                 {
                     "agent_id": str(agent_id),
+                    "host_id": "",
+                    "is_unresolved": True,
+                    "reason": "(no host known yet)",
+                }
+            )
+        elif target is None:
+            agents.append(
+                {
+                    "agent_id": str(agent_id),
+                    "host_id": host_id,
                     "is_unresolved": True,
                     "reason": "(no service URL yet)",
                 }
             )
         else:
-            agents.append({"agent_id": str(agent_id), "is_unresolved": False, "reason": ""})
+            agents.append({"agent_id": str(agent_id), "host_id": host_id, "is_unresolved": False, "reason": ""})
     html = _render_index_page(env, agents=agents, port=listen_port)
     return HTMLResponse(content=html)
 
 
 def _handle_goto_workspace(
-    agent_id: str,
+    host_id: str,
     request: Request,
     auth_store: AuthStoreInterface,
     preauth_cookie_value: str | None,
@@ -893,17 +1035,40 @@ def _handle_goto_workspace(
         preauth_cookie_value=preauth_cookie_value,
     ):
         return Response(status_code=302, headers={"Location": "/"})
-    try:
-        parsed_id = AgentId(agent_id)
-    except ValueError:
+    # ``HostId`` alone is too lax for a value interpolated into the redirect
+    # hostname (``int(hex, 16)`` accepts newlines / underscores / ``0x`` and
+    # preserves case, which the lowercased subdomain parse then never matches),
+    # so require the exact ``host-<32hex>`` shape the subdomain pattern routes.
+    normalized_host_id = host_id.lower()
+    if _GOTO_HOST_ID_PATTERN.fullmatch(normalized_host_id) is None:
         return Response(status_code=404)
+    parsed_id = HostId(normalized_host_id)
+    # An optional ``service`` carries the dotted label chain of the origin
+    # that bounced here (e.g. ``svc`` or ``sub.svc``) so the bridge -- and
+    # its final redirect -- run on that exact origin. Only the LAST label is a
+    # service name; deeper labels are that service's own sub-origin space,
+    # which FORWARD_SUBDOMAIN_PATTERN routes with the looser hostname-label
+    # charset (a sub-origin like ``a--b`` must bounce back to its own origin,
+    # not 404 mid-login). Anything outside either rule is a crafted URL.
+    service_param = request.query_params.get("service", "")
+    service_host_prefix = ""
+    if service_param:
+        *sub_origin_labels, service_label = service_param.split(".")
+        if any(_SUB_ORIGIN_LABEL_PATTERN.fullmatch(label) is None for label in sub_origin_labels):
+            return Response(status_code=404)
+        try:
+            validated_service = ServiceLabel(service_label)
+        except ValueError:
+            return Response(status_code=404)
+        service_host_prefix = ".".join([*sub_origin_labels, str(validated_service)]) + "."
     signing_key = auth_store.get_signing_key()
-    token = create_subdomain_auth_token(signing_key=signing_key, agent_id=str(parsed_id))
+    token = create_subdomain_auth_token(signing_key=signing_key, workspace_host_id=str(parsed_id))
     next_url = _sanitize_next_url(request.query_params.get("next", "/"))
     encoded_next = quote(next_url, safe="")
     scheme = "https" if use_http2 else "http"
     location = (
-        f"{scheme}://{parsed_id}.localhost:{listen_port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
+        f"{scheme}://{service_host_prefix}{parsed_id}.localhost:{listen_port}"
+        f"{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
     )
     return Response(status_code=302, headers={"Location": location})
 
@@ -955,6 +1120,8 @@ def create_forward_app(
     on_listening: Callable[[], None] | None = None,
     allow_host_loopback: bool = False,
     use_http2: bool = False,
+    browser_bridge_token: str | None = None,
+    embedder_origins: tuple[EmbedderOrigin, ...] = (),
 ) -> FastAPI:
     """Create the FastAPI app for ``mngr forward``.
 
@@ -971,6 +1138,11 @@ def create_forward_app(
     ``https``/``wss`` and its session cookie is marked ``Secure``. It does not
     itself enable TLS -- the serve path does -- but the two must agree so the
     URLs the browser is told to visit match the scheme the socket speaks.
+
+    ``browser_bridge_token`` enables the ``/_bridge`` route (see
+    ``_handle_browser_bridge``); ``embedder_origins`` extends the
+    ``frame-ancestors`` policy appended to every proxied workspace response
+    beyond the default 'self' + workspace-family deny-external posture.
     """
     env = _build_jinja_env()
 
@@ -991,11 +1163,12 @@ def create_forward_app(
     @app.middleware("http")
     async def _subdomain_routing_middleware(request: Request, call_next: Any) -> Response:
         host_header = request.headers.get("host", "")
-        agent_id = _parse_workspace_subdomain(host_header)
-        if agent_id is None:
+        host_info = parse_forward_host(host_header)
+        if host_info is None:
             return await call_next(request)
-        return await _handle_workspace_forward_http(
+        response = await _handle_workspace_forward_http(
             request=request,
+            host_info=host_info,
             auth_store=auth_store,
             resolver=resolver,
             tunnel_manager=tunnel_manager,
@@ -1008,6 +1181,20 @@ def create_forward_app(
             envelope_writer=envelope_writer,
             use_http2=use_http2,
         )
+        # The proxy owns embedding policy for every workspace origin: APPEND a
+        # frame-ancestors CSP header (never modify what the service sent --
+        # multiple CSP headers compose by intersection). This is the one
+        # narrowly-blessed deviation from pure byte-forwarding.
+        response.headers.append(
+            "content-security-policy",
+            build_frame_ancestors_policy(
+                host_info=host_info,
+                listen_port=listen_port,
+                use_http2=use_http2,
+                embedder_origins=embedder_origins,
+            ),
+        )
+        return response
 
     @app.get("/login")
     def _login(one_time_code: str, request: Request) -> Response:
@@ -1039,11 +1226,20 @@ def create_forward_app(
             listen_port=listen_port,
         )
 
-    @app.get("/goto/{agent_id}/")
-    @app.get("/goto/{agent_id}")
-    def _goto(agent_id: str, request: Request) -> Response:
+    @app.get(BROWSER_BRIDGE_PATH)
+    def _browser_bridge(request: Request) -> Response:
+        return _handle_browser_bridge(
+            request=request,
+            auth_store=auth_store,
+            browser_bridge_token=browser_bridge_token,
+            use_http2=use_http2,
+        )
+
+    @app.get("/goto/{host_id}/")
+    @app.get("/goto/{host_id}")
+    def _goto(host_id: str, request: Request) -> Response:
         return _handle_goto_workspace(
-            agent_id=agent_id,
+            host_id=host_id,
             request=request,
             auth_store=auth_store,
             preauth_cookie_value=preauth_cookie_value,
@@ -1055,11 +1251,13 @@ def create_forward_app(
     async def _subdomain_ws(websocket: WebSocket, path: str) -> None:
         del path
         host_header = websocket.headers.get("host", "")
-        if _parse_workspace_subdomain(host_header) is None:
+        host_info = parse_forward_host(host_header)
+        if host_info is None:
             await websocket.close(code=4004, reason="Unknown host")
             return
         await _handle_workspace_forward_websocket(
             websocket=websocket,
+            host_info=host_info,
             auth_store=auth_store,
             resolver=resolver,
             tunnel_manager=tunnel_manager,

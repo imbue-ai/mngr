@@ -1,0 +1,133 @@
+// The SPA route table: real hub paths (mirroring the legacy Flask routes so
+// deep links, Electron session restore, and muscle memory keep working) plus
+// /workspace/<id>, the workspace content surface. Every route renders inside the
+// persistent Shell; a route change updates the titlebar context, accent, and
+// the channel's client_state registration.
+
+import m from "mithril";
+import { Shell } from "./views/shell/Shell";
+import { workspaceDisplayIdFromPath, workspaceSurfaceIdFromPath } from "./views/shell/classify";
+import type { ShellState } from "./views/shell/shell-state";
+import { DevStyleguide } from "./views/pages/DevStyleguide";
+import { AccountsPage } from "./views/pages/AccountsPage";
+import { AiKeysPage } from "./views/pages/AiKeysPage";
+import { ConsentPage } from "./views/pages/ConsentPage";
+import { CreateInspirationPage } from "./views/pages/CreateInspirationPage";
+import { CreatePage } from "./views/pages/CreatePage";
+import { CreatingPage } from "./views/pages/CreatingPage";
+import { DestroyedWorkspacesPage } from "./views/pages/DestroyedWorkspacesPage";
+import { DestroyingPage } from "./views/pages/DestroyingPage";
+import { HelpPage } from "./views/pages/HelpPage";
+import { InboxPage } from "./views/pages/InboxPage";
+import { LandingPage } from "./views/pages/LandingPage";
+import { RecoveryPage } from "./views/pages/RecoveryPage";
+import { SettingsPage } from "./views/pages/SettingsPage";
+import { WelcomePage } from "./views/pages/WelcomePage";
+import { WorkspaceBackupsPage } from "./views/pages/WorkspaceBackupsPage";
+import { WorkspaceOptionsPage } from "./views/pages/WorkspaceOptionsPage";
+import { WorkspaceSettingsRedirect } from "./views/pages/WorkspaceSettingsRedirect";
+import { RouteError } from "./views/pages/RouteError";
+
+interface RouteEntry {
+  path: string;
+  component: m.ComponentTypes;
+}
+
+const ROUTE_ENTRIES: RouteEntry[] = [
+  { path: "/", component: LandingPage },
+  { path: "/create", component: CreatePage },
+  { path: "/create/inspiration", component: CreateInspirationPage },
+  { path: "/creating/:agentId", component: CreatingPage },
+  { path: "/settings", component: SettingsPage },
+  { path: "/settings/ai-keys", component: AiKeysPage },
+  { path: "/accounts", component: AccountsPage },
+  { path: "/workspaces/destroyed", component: DestroyedWorkspacesPage },
+  // The workspace content surface (SPA twin of the deleted /_chrome wrapper).
+  // Accepts agent- OR host-scoped ids: cold-start restore navigates with a
+  // host-scoped id before the snapshot provides the alias mapping.
+  { path: "/workspace/:workspaceId", component: LandingPage },
+  // Legacy URL: redirects into the options overlay's settings tab.
+  { path: "/workspace/:agentId/settings", component: WorkspaceSettingsRedirect },
+  // The options overlay: rendered by the Shell OVER the workspace surface.
+  { path: "/workspace/:agentId/options", component: WorkspaceOptionsPage },
+  { path: "/workspace/:agentId/backups", component: WorkspaceBackupsPage },
+  { path: "/inbox", component: InboxPage },
+  { path: "/destroying/:agentId", component: DestroyingPage },
+  { path: "/agents/:agentId/recovery", component: RecoveryPage },
+  { path: "/help", component: HelpPage },
+  { path: "/welcome", component: WelcomePage },
+  { path: "/consent", component: ConsentPage },
+  { path: "/_dev/styleguide", component: DevStyleguide },
+];
+
+export function mountRouter(root: Element, shell: ShellState): void {
+  const resolvers: m.RouteDefs = {};
+
+  const wrap = (component: m.ComponentTypes): m.RouteResolver => ({
+    onmatch: () => component,
+    render(vnode) {
+      const path = shell.currentRoutePath();
+      // The surface id (bare workspace OR its options overlay) keeps the
+      // WorkspaceFrame mounted across overlay open/close, so opening Share /
+      // Settings never tears down and reloads the workspace iframe.
+      const workspaceParam = workspaceSurfaceIdFromPath(path);
+      shell.handleRouteChanged(path);
+      return m(Shell, {
+        shell,
+        routePath: path,
+        workspaceParam,
+        content: vnode,
+      });
+    },
+  });
+
+  for (const entry of ROUTE_ENTRIES) {
+    resolvers[entry.path] = wrap(entry.component);
+  }
+  // Genuinely unknown in-app paths render the friendly RouteError surface
+  // rather than dead-ending (the SPA twin of the legacy 404 page).
+  resolvers["/:notFound..."] = wrap(RouteError);
+
+  m.route.prefix = "";
+  m.route(root as HTMLElement, "/", resolvers);
+}
+
+/** Port of chrome.js's navigateContent for URLs arriving from outside the
+ * router (Electron shell-navigate asks, notifications, deeplinks). */
+export function navigateExternalUrl(shell: ShellState, url: string): void {
+  const workspaceAnyId = parseWorkspaceIdFromUrl(url);
+  if (workspaceAnyId !== null) {
+    shell.enterWorkspace(workspaceAnyId);
+    return;
+  }
+  try {
+    const parsed = new URL(url, window.location.origin);
+    m.route.set(parsed.pathname + parsed.search);
+  } catch {
+    m.route.set("/");
+  }
+}
+
+export function parseWorkspaceIdFromUrl(urlString: string): string | null {
+  if (!urlString) return null;
+  try {
+    const base = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+    const parsed = new URL(urlString, base);
+    const hostMatch = parsed.hostname.match(/^(?:[a-z0-9_-]+\.)*(host-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    const pathMatch = (parsed.pathname + parsed.search).match(
+      /^\/(?:goto|forward-bridge)(?:[/?]\S*?)?\/?(host-[a-f0-9]+)(?:\/|$|%2F)/i,
+    );
+    if (pathMatch) return pathMatch[1];
+    const plainGoto = parsed.pathname.match(/^\/goto\/((?:agent|host)-[a-f0-9]+)(?:\/|$)/i);
+    if (plainGoto) return plainGoto[1];
+    const displayMatch = workspaceDisplayIdFromPath(parsed.pathname);
+    if (displayMatch !== null) return displayMatch;
+    // Stale persisted URLs from pre-SPA sessions still carry the old wrapper
+    // shape; accept them so restore never drops a window on upgrade.
+    const chromeMatch = parsed.pathname === "/_chrome" ? parsed.searchParams.get("agent") : null;
+    return chromeMatch;
+  } catch {
+    return null;
+  }
+}

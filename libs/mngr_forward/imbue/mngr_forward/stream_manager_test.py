@@ -283,6 +283,35 @@ def test_event_services_updates_resolver(
     assert event_envs[0]["agent_id"] == str(TEST_AGENT_ID_1)
 
 
+def test_event_services_label_routes_origin_label_to_service(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A services event carrying a label makes the resolver route that label origin
+    to the service; an event without a label falls back to routing under the name."""
+    manager, resolver, _buf, counter = setup
+    discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
+    manager._on_observe_output(discover_line + "\n", is_stdout=True)  # noqa: SLF001
+
+    labeled = json.dumps(
+        {
+            "source": "services",
+            "service": "terminal",
+            "url": "http://127.0.0.1:7681",
+            "label": "terminal-term1111",
+        }
+    )
+    manager._on_event_output(labeled + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
+    by_label = resolver.resolve_by_origin_label(TEST_AGENT_ID_1, "terminal-term1111")
+    assert by_label is not None
+    assert str(by_label.url).rstrip("/") == "http://127.0.0.1:7681"
+
+    unlabeled = json.dumps({"source": "services", "service": "web", "url": "http://127.0.0.1:5000"})
+    manager._on_event_output(unlabeled + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
+    fallback = resolver.resolve_by_origin_label(TEST_AGENT_ID_1, "web")
+    assert fallback is not None
+    assert str(fallback.url).rstrip("/") == "http://127.0.0.1:5000"
+
+
 def test_event_non_services_passthrough_only(
     setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
 ) -> None:

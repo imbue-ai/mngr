@@ -1,4 +1,4 @@
-{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, accent="", crumb_workspace_name="", crumb_agent_id="", active_tab="", page_label="", show_back=False, body_class="", body_style="", head="", scripts="" #}
+{#def title="Minds", is_mac=None, is_authenticated=False, mngr_forward_origin=None, is_agent_content_surface=False, accent="", crumb_workspace_name="", crumb_agent_id="", boot_workspace_id="", active_tab="", page_label="", show_back=False, body_class="", body_style="", head="", scripts="" #}
 {#
   Shared trusted app shell: the fixed breadcrumb titlebar + browser-mode floating
   workspace switcher + accent / chrome.js wiring, wrapping a page body passed in
@@ -39,11 +39,12 @@
 
   ``is_mac`` (traffic-light spacer + hidden window controls) and
   ``mngr_forward_origin`` (the body data attribute chrome.js reads to build
-  ``/goto/<agent>/`` links) default to the live-request catalog globals so a
+  ``/goto/<host-id>/`` links) default to the live-request catalog globals so a
   trusted page need not thread them through its render function; pages.Chrome
-  passes them explicitly. In Electron mode the browser-mode switcher block is
-  hidden via JS; the content is a separate WebContentsView and window.minds
-  exposes IPC adapters. ``head`` / ``scripts`` let a page append its own head
+  passes them explicitly. Workspace content renders in the sandboxed
+  cross-origin #content-frame iframe (pages.Chrome), and overlay_layer.js
+  assembles ``window.minds`` for the desktop app and plain browsers alike.
+  ``head`` / ``scripts`` let a page append its own head
   tags / script tags after the shell's own (workspace_accent.js,
   backup_health.js, sidebar_workspace_row.js, chrome.js).
 #}
@@ -100,8 +101,18 @@
 {{ head }}
 {%- endif %}
 {% endset %}
-{% set _body_attrs %}data-is-mac="{{ 'true' if _is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ _mngr_forward_origin }}"{% endset %}
+{% set _body_attrs %}data-is-mac="{{ 'true' if _is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ _mngr_forward_origin }}"{% if is_agent_content_surface and (boot_workspace_id or crumb_agent_id) %} data-boot-workspace-id="{{ boot_workspace_id or crumb_agent_id }}"{% endif %}{% endset %}
 {% set _scripts %}
+{# The embed contract module (an ESM file, shared verbatim with the workspace
+   UI) is exposed to the classic shell scripts as window.MindsEmbedContract.
+   Module scripts and deferred classic scripts execute in document order after
+   parsing, so the ordering here is what guarantees overlay_layer.js and
+   chrome.js see the contract. #}
+<script type="module">
+  import * as contract from "/_static/embed_contract.js";
+  window.MindsEmbedContract = contract;
+</script>
+<script src="/_static/overlay_layer.js" defer></script>
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/backup_health.js" defer></script>
 <script src="/_static/sidebar_workspace_row.js" defer></script>
@@ -204,25 +215,12 @@
     </div>
   </div>
 
-  {# Browser-mode floating workspace-switcher menu: full-screen transparent
-     backdrop (#sidebar-backdrop) with a floating dark menu (#sidebar-menu)
-     positioned at toggle time by chrome.js using the workspace-switcher
-     button's getBoundingClientRect + a caller-chosen offset. Clicks on
-     the backdrop and Escape close the menu (handled by chrome.js). In
-     Electron this whole block is hidden via JS; the switcher page
-     (Sidebar.jinja) is loaded into the shared modal WebContentsView and
-     uses the same #sidebar-backdrop / #sidebar-menu shape with the
-     /_static/sidebar.js renderer. Both modes share the position model:
-     menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
-     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
-     px-2 for the hover highlight's inset. #}
-  <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
-    <div id="sidebar-menu"
-         class="dark absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary shadow-overlay overflow-hidden">
-      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
-      <SidebarBottom />
-    </div>
-  </div>
+  {# The in-DOM overlay layer: every modal surface (workspace switcher menu,
+     inbox, help, sign-in, settings, accounts, plan, inspiration, workspace
+     options) is a same-origin iframe mounted here by overlay_layer.js --
+     identical in the desktop app and plain-browser mode. Hidden (display:none)
+     while nothing is open so it never intercepts pointer events. #}
+  <div id="overlay-root" class="fixed inset-0 z-[200]" style="display: none"></div>
 
   {# The swappable page body. chrome.js's swap engine replaces this element
      (and #local-page-scripts) in place for hub-page navigation, leaving the

@@ -20,18 +20,12 @@ const base = require('@playwright/test');
 
 const DEFAULT_APP_PATH = '/Applications/Minds.app/Contents/MacOS/Minds';
 
-// Minds' BaseWindow has multiple WebContentsViews. Trusted local pages (login /
-// home / create / settings) now render in the CHROME view itself -- it navigates
-// among the local backend routes (`http://localhost:<port>/`, `/create`, ...),
-// carrying the titlebar with them -- while the `/_chrome` URL is only the
-// titlebar-only wrapper shown while agent content floats in the separate content
-// view. So the user-facing local UI is the window whose URL is a backend origin
-// but NOT `/_chrome`; that is what we pick here (the content view, meanwhile,
-// hosts only `agent-<id>.localhost` workspace content, which is not a bare
-// localhost origin). `_pick_content_page` in e2e_workspace_runner.py is the
-// Python twin.
+// Each Minds window is a single web context now (the chrome page, which hosts
+// hub pages, the sandboxed workspace iframe, and the in-DOM overlay layer), so
+// the user-facing UI is simply the window whose URL is on the backend origin --
+// including `/_chrome`, the wrapper the page sits on while displaying a
+// workspace. `_pick_content_page` in e2e_workspace_runner.py is the Python twin.
 const _BACKEND_ORIGIN_RE = /^http:\/\/localhost:\d+(?:\/|$)/;
-const _CHROME_PATH_RE = /^http:\/\/localhost:\d+\/_chrome(?:\/|$|\?)/;
 
 // The URL of the document currently in `page`, read from the document.
 //
@@ -56,7 +50,7 @@ async function pickContentWindow(app, { timeoutMs = 60 * 1000 } = {}) {
   while (Date.now() < deadline) {
     const wins = app.windows();
     last = await Promise.all(wins.map(liveUrl));
-    const idx = last.findIndex((u) => _BACKEND_ORIGIN_RE.test(u) && !_CHROME_PATH_RE.test(u));
+    const idx = last.findIndex((u) => _BACKEND_ORIGIN_RE.test(u));
     if (idx !== -1) return wins[idx];
     await new Promise((r) => setTimeout(r, 500));
   }

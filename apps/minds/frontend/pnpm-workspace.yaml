@@ -1,0 +1,12 @@
+# This directory is its own pnpm workspace root, independent of the Electron
+# package's workspace at apps/minds/ -- the two lockfiles never interact.
+packages:
+  - "."
+
+# Supply-chain hardening, mirroring apps/minds/pnpm-workspace.yaml: refuse to
+# install any version published less than 14 days ago (20160 minutes),
+# including transitive dependencies. Only bites during resolution; frozen
+# installs replay the existing lockfile unaffected.
+minimumReleaseAge: 20160
+onlyBuiltDependencies:
+  - esbuild

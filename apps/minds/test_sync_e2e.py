@@ -20,6 +20,7 @@ env's seeded paid domain, so imbue-cloud backups (R2 provisioning) work.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -47,8 +48,8 @@ from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
-from imbue.minds.desktop_client.e2e_workspace_runner import _agent_id_from_subdomain
 from imbue.minds.desktop_client.e2e_workspace_runner import _backend_origin_from_page
+from imbue.minds.desktop_client.e2e_workspace_runner import _host_id_from_subdomain
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import electron_app_session
@@ -323,17 +324,40 @@ def _unwrapped_dek(bundle: SyncKeyBundle, password: str) -> bytes:
 def _create_unassociated_workspace(runtime: _SyncE2ERuntime) -> str:
     """Drive the real create form (signed out, local preset) and return the agent id."""
     workspace_name = f"synce2e-{get_short_random_string()}"
-    created_agent_ids: list[str] = []
+    created_host_ids: list[str] = []
     create_workspace_via_electron(
         runtime.template_path,
         workspace_name,
         find_free_port(),
         host_config_dir=runtime.host_config_root,
-        on_workspace_ready=lambda page: created_agent_ids.append(_agent_id_from_subdomain(page.url)),
+        on_workspace_ready=lambda page: created_host_ids.append(_host_id_from_subdomain(page.url)),
     )
-    assert created_agent_ids, "The create flow finished without a workspace URL"
-    logger.info("Created workspace {} -> {}", workspace_name, created_agent_ids[0])
-    return created_agent_ids[0]
+    assert created_host_ids, "The create flow finished without a workspace URL"
+    agent_id = _agent_id_for_host_id(runtime, created_host_ids[0])
+    logger.info("Created workspace {} -> {} (host {})", workspace_name, agent_id, created_host_ids[0])
+    return agent_id
+
+
+def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
+    """Map the workspace host coordinate (from content URLs) to its agent id via ``mngr list``.
+
+    Content URLs are host-keyed while the app's records, settings routes, and
+    sync records stay agent-keyed, so the flow needs this translation once.
+    """
+    result = subprocess.run(
+        ["uv", "run", "mngr", "list", "--format", "json"],
+        env={**os.environ, "MNGR_HOST_DIR": str(runtime.host_config_root), "MNGR_PREFIX": runtime.mngr_prefix},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    for raw in data.get("agents", []) if isinstance(data, dict) else []:
+        host = raw.get("host") if isinstance(raw.get("host"), dict) else {}
+        if host.get("id") == host_id and raw.get("id"):
+            return str(raw["id"])
+    raise AssertionError(f"No agent on host {host_id!r} in `mngr list` output")
 
 
 def _sign_in_via_ui(page: Page, email: str, password: str) -> str:

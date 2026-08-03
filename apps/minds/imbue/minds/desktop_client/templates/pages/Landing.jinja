@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, account_email="", extra_account_count=0, remote_workspaces=[], locked_account_emails=[], create_attempt_rows=[] #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, agent_host_ids={}, account_email="", extra_account_count=0, remote_workspaces=[], locked_account_emails=[], create_attempt_rows=[] #}
 {#
   Landing page: list of accessible workspaces with per-row health and backup
   status. Subscribes to the chrome SSE so the page reloads
@@ -126,13 +126,13 @@
         goToRecovery('/agents/' + encodeURIComponent(agentId)
           + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart');
       } else if (window.minds && window.minds.navigateContent) {
-        // Trusted local page on the chrome surface: hand the workspace (agent)
-        // URL to the shell bridge so it opens in the caged content view (and
-        // focuses an existing window already on this workspace) instead of
-        // navigating the chrome view's OWN frame into untrusted agent content.
+        // Trusted local page in the chrome shell: hand the workspace (agent)
+        // URL to the shell bridge so it opens in the sandboxed #content-frame
+        // iframe instead of navigating the shell's OWN frame into untrusted
+        // agent content.
         window.minds.navigateContent(ret);
       } else {
-        // Plain browser (no shell): full-page navigate to the workspace URL.
+        // Standalone page load (no shell): full-page navigate to the workspace URL.
         window.location = ret;
       }
     };
@@ -966,7 +966,10 @@
              JinjaX component attributes are literal strings by default; the
              ':' prefix turns one into a Python expression. #}
           {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "#0b292b") ~ ";" %}
-          {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
+          {# The plugin's /goto/ route is host-keyed; fall back to the agent id
+             only when no host coordinate is known (same degrade as the
+             inspiration page's rows). #}
+          {% set goto_href = mngr_forward_origin ~ "/goto/" ~ (agent_host_ids.get(agent_id | string) or agent_id) ~ "/" %}
           {% set destroying_href = "/destroying/" ~ agent_id %}
           {% set supports_shutdown = (agent_id | string) in shutdown_capable_agent_ids %}
           {% set mind_state = mind_liveness_by_agent_id.get(agent_id | string, "UNKNOWN") %}

@@ -40,9 +40,11 @@ from imbue.mngr_forward.auth import FileAuthStore
 from imbue.mngr_forward.data_types import ForwardListSnapshot
 from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
+from imbue.mngr_forward.embedding import EmbedderOrigin
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.errors import ForwardManualConfigError
 from imbue.mngr_forward.errors import ForwardSubprocessError
+from imbue.mngr_forward.errors import ForwardTrustError
 from imbue.mngr_forward.primitives import ForwardPort
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
@@ -53,9 +55,13 @@ from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.snapshot import mngr_list_snapshot
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.stream_manager import ForwardStreamManager
+from imbue.mngr_forward.tls import CA_CERT_FILENAME
 from imbue.mngr_forward.tls import InMemoryTLSConfig
+from imbue.mngr_forward.tls import LocalCertificateAuthority
 from imbue.mngr_forward.tls import build_server_ssl_context
-from imbue.mngr_forward.tls import generate_self_signed_cert
+from imbue.mngr_forward.tls import generate_server_credentials
+from imbue.mngr_forward.tls import load_or_create_local_ca
+from imbue.mngr_forward.trust import install_ca_into_trust_stores
 
 _DEFAULT_HOST: Final[str] = "127.0.0.1"
 _DEFAULT_PORT: Final[int] = 8421
@@ -82,6 +88,9 @@ class ForwardCliOptions(CommonCliOptions):
     open_browser: bool = False
     allow_host_loopback: bool = False
     use_http2: bool = False
+    browser_bridge_token: str | None = None
+    embedder_origin: tuple[str, ...] = ()
+    trust_ca: bool = False
 
 
 def _parse_reverse_specs(raw: tuple[str, ...]) -> tuple[ReverseTunnelSpec, ...]:
@@ -254,21 +263,64 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
     default=False,
     help=(
         "Terminate TLS and negotiate HTTP/2 (via ALPN) instead of serving plain HTTP/1.1. "
-        "Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. The proxy "
-        "generates a fresh self-signed cert at startup, so only clients that trust it (the minds "
-        "desktop app) should enable this; a human browser will see a cert warning."
+        "Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. Server leaf "
+        "certs are minted per startup from a persistent local CA under the plugin state dir; "
+        "trust the CA once via --trust-ca to browse without cert warnings (the minds desktop "
+        "app trusts programmatically and needs no install)."
+    ),
+)
+@click.option(
+    "--browser-bridge-token",
+    default=None,
+    envvar="MNGR_FORWARD_BROWSER_BRIDGE_TOKEN",
+    help=(
+        "Opaque spawn-time secret enabling the /_bridge route: a host application 302s an "
+        "already-authenticated browser to /_bridge?token=...&next=... to obtain the bare-origin "
+        "session cookie without consuming an OTP."
+    ),
+)
+@click.option(
+    "--embedder-origin",
+    multiple=True,
+    help=(
+        "Origin (scheme://host[:port]) allowed to embed workspace content in an iframe. "
+        "Repeatable. Without it, the appended frame-ancestors policy denies all external "
+        "embedding ('self' + the workspace's own origin family only)."
+    ),
+)
+@click.option(
+    "--trust-ca",
+    is_flag=True,
+    default=False,
+    help=(
+        "Install the plugin's persistent local CA into this platform's trust stores (macOS login "
+        "keychain / Linux per-user NSS) so plain browsers accept the proxy's TLS, then exit. "
+        "One-time, user-consented; intended for the local browser testing/dev surface."
     ),
 )
 @add_common_options
 @click.pass_context
 def forward(ctx: click.Context, **kwargs: Any) -> None:
-    """Forward web traffic to agents via <agent>.localhost subdomains [experimental]."""
+    """Forward web traffic to workspaces via [<service>.]<host-id>.localhost origins [experimental]."""
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="forward",
         command_class=ForwardCliOptions,
         is_format_template_supported=False,
     )
+
+    if opts.trust_ca:
+        # A standalone maintenance action: ensure the CA exists and install it
+        # into the platform trust stores, then exit (no server is started, so
+        # the --service/--forward-port requirement does not apply).
+        ca_dir = _resolve_plugin_state_dir(_resolve_mngr_host_dir(mngr_ctx)) / "ca"
+        load_or_create_local_ca(ca_dir)
+        try:
+            install_ca_into_trust_stores(mngr_ctx.concurrency_group, ca_dir / CA_CERT_FILENAME)
+        except ForwardTrustError as e:
+            raise click.ClickException(str(e)) from e
+        logger.info("Local CA trusted. Browsers now accept `mngr forward --use-http2` origins.")
+        return
 
     _validate_options(opts)
 
@@ -359,6 +411,11 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     def _on_listening() -> None:
         envelope_writer.emit_listening(host=opts.host, port=listen_port)
 
+    try:
+        embedder_origins = tuple(EmbedderOrigin(origin) for origin in opts.embedder_origin)
+    except ValueError as e:
+        raise click.UsageError(str(e)) from e
+
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
@@ -370,10 +427,13 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         on_listening=_on_listening,
         allow_host_loopback=opts.allow_host_loopback,
         use_http2=opts.use_http2,
+        browser_bridge_token=opts.browser_bridge_token,
+        embedder_origins=embedder_origins,
     )
 
+    ca = load_or_create_local_ca(plugin_state_dir / "ca") if opts.use_http2 else None
     try:
-        _serve_forward_app(app, listen_socket, use_http2=opts.use_http2)
+        _serve_forward_app(app, listen_socket, ca=ca)
     finally:
         listen_socket.close()
         if stream_manager is not None:
@@ -382,23 +442,24 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         envelope_writer.close()
 
 
-def _build_hypercorn_config(listen_socket: socket.socket, use_http2: bool) -> Config:
+def _build_hypercorn_config(listen_socket: socket.socket, ca: LocalCertificateAuthority | None) -> Config:
     """Build the hypercorn ``Config`` for serving over the already-bound socket.
 
-    When ``use_http2`` is set the config carries an in-memory TLS context
-    (HTTP/2 negotiated via ALPN); otherwise it is plain HTTP/1.1, matching the
-    previous uvicorn behaviour. The bound-but-not-listening socket is handed off
-    by file descriptor (``fd://``): hypercorn's ``asyncio.start_server`` performs
-    the ``listen()``, so there is no window where a different server could claim
+    When ``ca`` is provided (the ``--use-http2`` path) the config carries an
+    in-memory TLS context serving a fresh CA-signed leaf (HTTP/2 negotiated via
+    ALPN); otherwise it is plain HTTP/1.1, matching the previous uvicorn
+    behaviour. The bound-but-not-listening socket is handed off by file
+    descriptor (``fd://``): hypercorn's ``asyncio.start_server`` performs the
+    ``listen()``, so there is no window where a different server could claim
     the port. hypercorn closes the fd it wraps on shutdown, so we hand it a
     ``os.dup`` of the socket's fd and let the caller's ``finally`` close the
     original -- avoiding a double close.
     """
     config: Config
-    if use_http2:
+    if ca is not None:
         try:
-            cert_pem, key_pem = generate_self_signed_cert()
-            ssl_context = build_server_ssl_context(cert_pem, key_pem)
+            chain_pem, server_key_pem = generate_server_credentials(ca)
+            ssl_context = build_server_ssl_context(chain_pem, server_key_pem, ca)
         except (ValueError, ssl.SSLError, OSError) as e:
             # Naming TLS/HTTP-2 setup explicitly here makes the failure
             # diagnosable: minds' `wait_for_listening` will otherwise just time
@@ -493,7 +554,7 @@ def _run_serve_loop(
         runner.run(hypercorn_serve(app, config, shutdown_trigger=shutdown_trigger))
 
 
-def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) -> None:
+def _serve_forward_app(app: Any, listen_socket: socket.socket, ca: LocalCertificateAuthority | None) -> None:
     """Serve the forward app over the already-bound ``listen_socket`` via hypercorn.
 
     Passes ``shutdown_trigger=None``, which makes hypercorn install its own
@@ -507,7 +568,7 @@ def _serve_forward_app(app: Any, listen_socket: socket.socket, use_http2: bool) 
     abandoned connections are dropped rather than logged as unhandled-exception
     tracebacks.
     """
-    config = _build_hypercorn_config(listen_socket, use_http2)
+    config = _build_hypercorn_config(listen_socket, ca)
     _run_serve_loop(app, config, loop_factory=_BoundedSSLShutdownEventLoop, shutdown_trigger=None)
 
 
@@ -605,6 +666,8 @@ def _seed_resolver_from_snapshot(
     agent_ids = tuple(entry.agent_id for entry in kept.agents)
     resolver.update_known_agents(agent_ids)
     for entry in kept.agents:
+        if entry.host_id:
+            resolver.set_agent_host(entry.agent_id, entry.host_id)
         if entry.ssh_info is not None:
             resolver.update_ssh_info(entry.agent_id, entry.ssh_info)
     reverse_handler.setup_for_snapshot(
@@ -690,12 +753,14 @@ def _sleep_then_open_browser(url: str, delay: float = 1.0) -> None:
 
 CommandHelpMetadata(
     key="forward",
-    one_line_description="Forward web traffic to agents via <agent>.localhost subdomains [experimental]",
+    one_line_description="Forward web traffic to workspaces via <host-id>.localhost origins [experimental]",
     synopsis="mngr forward [--service NAME | --forward-port REMOTE_PORT] [OPTIONS]",
     description="""Runs a local HTTP/WS proxy that serves
-``<agent-id>.localhost:<port>/*`` and byte-forwards each request to the
-configured backend (a service URL discovered via ``mngr observe``/``mngr event``,
-or a fixed remote port). Remote agents are reached via SSH tunnels.
+``[<service>.]<host-id>.localhost:<port>/*`` and byte-forwards each request to
+the matching backend: the bare origin goes to the configured backend (a
+service URL discovered via ``mngr observe``/``mngr event``, or a fixed remote
+port), and ``<service>.`` origins go to that agent-registered service. Remote
+agents are reached via SSH tunnels.
 
 Authentication uses a one-time login URL printed on stderr; in subprocess
 mode the same URL is also emitted on stdout as a JSONL ``login_url`` event.

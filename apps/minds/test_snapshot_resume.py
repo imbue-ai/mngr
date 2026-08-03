@@ -35,6 +35,7 @@ import httpx
 import pytest
 import tomlkit
 from loguru import logger
+from playwright.sync_api import Frame
 from playwright.sync_api import Page
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -635,7 +636,7 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     return default_workspace_template_path, host_config_root
 
 
-def _sign_in_with_api_key_via_modal(page: Page, api_key: str) -> None:
+def _sign_in_with_api_key_via_modal(page: Page | Frame, api_key: str) -> None:
     """Drive the workspace's Claude sign-in modal through the API-key path.
 
     A freshly created workspace has no AI credentials, so the modal opens on
@@ -659,7 +660,7 @@ def _sign_in_with_api_key_via_modal(page: Page, api_key: str) -> None:
     logger.info("Signed in via the modal")
 
 
-def _sign_in_and_chat(page: Page, api_key: str, token: str) -> None:
+def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
     _sign_in_with_api_key_via_modal(page, api_key)
     _send_message_and_await_reply(page, token)
 

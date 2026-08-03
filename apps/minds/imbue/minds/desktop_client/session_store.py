@@ -40,7 +40,7 @@ class SuperTokensUserId(NonEmptyStr):
 
 
 class UserIdPrefix(NonEmptyStr):
-    """First 16 hex chars of a SuperTokens user ID, used for tunnel naming."""
+    """First 16 hex chars of a SuperTokens user ID, used to name per-account resources (e.g. R2 buckets)."""
 
     ...
 
@@ -69,7 +69,7 @@ class UserInfo(FrozenModel):
     user_id: SuperTokensUserId = Field(description="SuperTokens user ID")
     email: str = Field(description="User email address")
     display_name: str | None = Field(default=None, description="Display name from OAuth provider")
-    user_id_prefix: UserIdPrefix = Field(description="First 16 hex chars of user ID for tunnel naming")
+    user_id_prefix: UserIdPrefix = Field(description="First 16 hex chars of the user ID, used in resource names")
 
 
 def derive_user_id_prefix(user_id: str) -> UserIdPrefix:

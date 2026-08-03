@@ -21,6 +21,7 @@ services = [
     "neon",
     "pool-ssh",
     "supertokens",
+    "sharing",
 ]
 
 # Tier-shape flags consumed by `minds env deploy` / `destroy`. Production
@@ -35,7 +36,7 @@ tracks_generation = true
 
 # Per-app warm-pool sizes. Keep one container of each app alive so the
 # desktop client never pays a cold-boot penalty on auth / lease /
-# tunnel hits. Bump if you want more headroom for spiky traffic.
+# share hits. Bump if you want more headroom for spiky traffic.
 [min_containers]
 connector = 1
 litellm_proxy = 1
@@ -54,8 +55,6 @@ domains = ["imbue.com"]
 # via the admin API.
 [plans.explorer]
 max_remote_workspaces = 2
-max_tunnels = 50
-max_services_per_tunnel = 10
 max_buckets = 5
 max_total_bucket_gb = 50
 monthly_llm_spend_usd = 0
@@ -63,8 +62,6 @@ max_active_synced_workspaces = 200
 
 [plans.ally]
 max_remote_workspaces = 10
-max_tunnels = 50
-max_services_per_tunnel = 10
 max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000

@@ -39,6 +39,7 @@ dependencies = [
     "werkzeug>=3.0",
     "wsgidav>=4.3",
     "sentry-sdk>=2.59.0",
+    "simple-websocket>=1.0",
     "traceback-with-variables>=2.0",
 ]
 license = {text = "FCL-1.0-MIT"}
@@ -63,18 +64,26 @@ imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
 
-# Force-include the compiled Tailwind stylesheet for the desktop client. It is
-# built from static/app.css by `just minds-css` (pnpm run build:css) and is
-# gitignored, so hatchling would otherwise omit it from the wheel. `scripts/
-# build.js` rebuilds it before packaging the Electron app.
+# Force-include the compiled Tailwind stylesheet + built SPA bundle for the
+# desktop client. Both are gitignored build artifacts, so hatchling would
+# otherwise omit them from the wheel. app.min.css is built from static/app.css
+# by `just minds-css` (pnpm run build:css); static/ui/ is built from frontend/
+# by the custom wheel build hook below (hatch_build.py).
 [tool.hatch.build]
 artifacts = [
     "imbue/minds/desktop_client/static/app.min.css",
+    "imbue/minds/desktop_client/static/ui/**",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
 exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+
+# Build the frontend bundle (frontend/ -> static/ui/) when packaging a real
+# wheel. The hook skips editable builds (`uv sync`) so dev/CI environments
+# without node are unaffected; see hatch_build.py.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:
@@ -106,9 +115,6 @@ omit = [
   "*/tests/*",
   "*/conftest.py",
   "*/utils/testing.py",
-  # Cloudflare tunnel token inject/clear shell out via `mngr exec` -- exercised
-  # via acceptance/release tests. The path constant is pinned in the *_test.py.
-  "*/desktop_client/tunnel_token_injection.py",
   # SuperTokens routes require a live Core connection -- tested via release test.
   "*/desktop_client/supertokens_routes.py",
   # Docker state-container teardown shells out to the `docker` CLI and needs a
@@ -136,7 +142,9 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/"]
+# hatch_build.py imports hatchling, which exists only inside hatchling's
+# isolated build environment (never in the dev venv), so ty cannot resolve it.
+exclude = ["scripts/", "hatch_build.py"]
 
 [tool.pyright]
 venvPath = "../.."

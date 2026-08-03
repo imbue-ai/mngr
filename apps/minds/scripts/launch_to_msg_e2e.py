@@ -33,7 +33,7 @@ Flow:
      (bong) (screenshots 13-16)
   6. Home-page tiles check: navigate to /, assert BOTH tiles render
      (screenshot 17)
-  6b. Click W1's tile, assert URL carries W1's specific agent-<hex>.localhost
+  6b. Click W1's tile, assert URL carries W1's specific host-<hex>.localhost
      -- exercises the tile.onclick + /goto/ route, not URL navigation
      (screenshot 17b)
   6c. /accounts page smoke: navigate to /accounts, assert renders
@@ -758,14 +758,14 @@ def live_url(target: Page | Frame) -> str:
 
 
 def find_chat_window(ctx: BrowserContext, host: str | None = None) -> Page | None:
-    """Find the content view showing an agent chat (``agent-<hex>.localhost``).
+    """Find the content view showing an agent chat (``host-<hex>.localhost``).
 
-    Pass ``host`` (e.g. ``agent-1f90…``) to pin the match to one workspace;
+    Pass ``host`` (e.g. ``host-1f90…``) to pin the match to one workspace;
     without it any open workspace matches, which is wrong once a second
     workspace exists.
     """
 
-    pat = re.compile(re.escape(host) + r"\.localhost") if host else re.compile(r"agent-[a-f0-9]+\.localhost")
+    pat = re.compile(re.escape(host) + r"\.localhost") if host else re.compile(r"(?:agent|host)-[a-f0-9]+\.localhost")
     for w in all_pages(ctx):
         with contextlib.suppress(Exception):
             if pat.search(live_url(w)):
@@ -776,11 +776,10 @@ def find_chat_window(ctx: BrowserContext, host: str | None = None) -> Page | Non
 def find_inbox_frame(ctx: BrowserContext) -> tuple[Page, Frame] | None:
     """Locate the open inbox: the (owner page, frame at /inbox) pair, or None.
 
-    The inbox renders as an iframe inside the warm overlay host
-    (``/_chrome/overlay``): ``openModal`` sends ``show-modal`` to overlay.js,
-    which mounts a modal iframe at ``/inbox`` -- the modal view's own URL
-    never changes. A page's main frame is included in ``page.frames``, so a
-    window navigated directly to ``/inbox`` also matches.
+    The inbox renders as a modal iframe mounted in the chrome page's in-DOM
+    overlay layer (``overlay_layer.js``) -- the window's own URL never
+    changes. A page's main frame is included in ``page.frames``, so a window
+    navigated directly to ``/inbox`` also matches.
     """
     for w in all_pages(ctx):
         with contextlib.suppress(Exception):
@@ -791,25 +790,15 @@ def find_inbox_frame(ctx: BrowserContext) -> tuple[Page, Frame] | None:
 
 
 def pick_chrome_page(ctx: BrowserContext, origin: str, timeout: float = 30.0) -> Page:
-    """Return the window's chrome view -- the surface trusted local pages render on.
+    """Return a window's chrome page -- the surface trusted local pages render on.
 
-    An Electron window is several WebContentsViews and CDP's page ordering
-    follows attach timing, so ``ctx.pages[0]`` is a coin flip. They are told
-    apart by what each holds:
-
-    * **chrome view** -- every trusted local page (``/welcome``, ``/``,
-      ``/create``, ``/accounts``, the settings screens) and, while a workspace
-      is displayed, the ``/_chrome`` agent wrapper. This is the one to drive.
-    * **overlay** -- the always-warm modal host, pinned to ``/_chrome/overlay``.
-      main.js keeps it collapsed and reloads it, so driving it breaks
-      screenshots and navigation.
-    * **content view** -- agent content on ``https://…:8421`` (``about:blank``
-      until a workspace opens), a different origin entirely.
-
-    So the chrome view is the loopback page on the backend port (pages use
-    ``localhost`` while ``wait_backend_url`` reports ``127.0.0.1``) that is not
-    the overlay. Matching the ``/_chrome`` wrapper too is deliberate: after a
-    restart that reopens a workspace, the wrapper is all the chrome view holds,
+    After the single-web-context collapse each Electron window is ONE page
+    (workspace content lives in a cross-origin iframe inside it), but CDP can
+    still surface multiple targets (several windows, shell.html takeovers on
+    ``file://``). The chrome page is the loopback page on the backend port
+    (pages use ``localhost`` while ``wait_backend_url`` reports
+    ``127.0.0.1``). Matching the ``/_chrome`` wrapper too is deliberate: after
+    a restart that reopens a workspace, the wrapper is all the window holds,
     and it is still where local navigation belongs.
     """
     backend_port = urllib.parse.urlsplit(origin).port
@@ -818,11 +807,7 @@ def pick_chrome_page(ctx: BrowserContext, origin: str, timeout: float = 30.0) ->
         for p in all_pages(ctx):
             with contextlib.suppress(Exception):
                 parts = urllib.parse.urlsplit(live_url(p))
-                if (
-                    parts.hostname in ("localhost", "127.0.0.1")
-                    and parts.port == backend_port
-                    and not parts.path.startswith("/_chrome/overlay")
-                ):
+                if parts.hostname in ("localhost", "127.0.0.1") and parts.port == backend_port:
                     return p
         _sleep(0.5)
     urls = [live_url(p) for p in all_pages(ctx)]
@@ -876,6 +861,28 @@ def open_workspace_via_tile(
     # the navigate-content bridge -- not the pixel it was clicked at.
     click_in_chrome(chrome, f'text="{host_name}"', timeout=10_000)
     return wait_for_chat_window(ctx, label=label, timeout=60.0, host=host)
+
+
+def agent_id_for_workspace_coordinate(win: Page, coordinate: str) -> str:
+    """Map a workspace coordinate (agent- or host-keyed) to the agent id minds records use.
+
+    Content URLs carry host ids (``host-<hex>.localhost`` origins, ``/goto/<host-id>/``)
+    while the ``/workspace/<id>/...`` pages and the destroy-operation API are
+    agent-keyed, so a coordinate extracted from a URL must be translated
+    through the workspace list (whose rows carry both ids).
+    """
+    if coordinate.startswith("agent-"):
+        return coordinate
+    listing = win.evaluate(
+        """async () => {
+            const r = await fetch('/api/v1/workspaces');
+            return await r.json();
+        }"""
+    )
+    for row in listing.get("workspaces", []):
+        if row.get("host_id") == coordinate:
+            return str(row["agent_id"])
+    raise E2EFailure(f"No workspace row with host_id {coordinate!r} to translate to an agent id")
 
 
 # --- per-workspace helpers ---
@@ -1101,7 +1108,7 @@ def _create_workspace_and_first_message(
     # view, so creating W2 repoints the very page W1 is still showing -- an
     # unpinned wait would match W1 mid-handoff and run W2's first-message check
     # against W1's transcript, which already holds its own reply and so passes.
-    created_host_match = re.search(r"(agent-[a-f0-9]+)", done_redirect_url)
+    created_host_match = re.search(r"((?:agent|host)-[a-f0-9]+)", done_redirect_url)
     created_host = created_host_match.group(1) if created_host_match else None
     logger.info("[{}] create attempt DONE; waiting for the app to open {}", label, created_host or "the workspace")
     chat = wait_for_chat_window(ctx, label=label, host=created_host)
@@ -1724,15 +1731,15 @@ def run_e2e() -> int:
 
             # Iter 13 (click tile to navigate): real users open chat by
             # clicking the workspace tile, not by typing the chat URL. The
-            # tile's onclick handler routes through /goto/<agent_id>/ which
-            # mngr_forward translates into the agent-<hex>.localhost host.
+            # tile's onclick handler routes through /goto/<host-id>/ which
+            # mngr_forward translates into the host-<hex>.localhost origin.
             # Click W1's tile, wait for the URL to carry W1's SPECIFIC
-            # agent_id, snap, then navigate back to home so the destroy
+            # coordinate, snap, then navigate back to home so the destroy
             # flow below proceeds from a known starting page.
             logger.info("=== iter 13: click W1 tile to navigate to chat ===")
-            w1_hex_match = re.search(r"//(agent-[a-f0-9]+)\.localhost", w1_result.chat_url)
+            w1_hex_match = re.search(r"//((?:agent|host)-[a-f0-9]+)\.localhost", w1_result.chat_url)
             if not w1_hex_match:
-                raise E2EFailure(f"[tile-click] could not extract W1 agent_id from {w1_result.chat_url!r}")
+                raise E2EFailure(f"[tile-click] could not extract W1 coordinate from {w1_result.chat_url!r}")
             w1_agent_host = w1_hex_match.group(1)
             # Exact-text match: HOST_NAME (e.g. "e2e172219") is a substring
             # of HOST_NAME_2 (e.g. "e2e172219-b"), so a regex/substring
@@ -1762,7 +1769,7 @@ def run_e2e() -> int:
             # page read-only and assert the danger-zone button renders.
             # Catches regressions specific to W1's settings rendering.
             logger.info("=== iter 17: W1 settings page renders ===")
-            win.goto(origin + f"/workspace/{w1_agent_host}/settings")
+            win.goto(origin + f"/workspace/{agent_id_for_workspace_coordinate(win, w1_agent_host)}/settings")
             win.wait_for_selector("#destroy-btn", state="visible", timeout=15_000)
             snap_page(win, "17d-w1-settings-page")
             w1_settings_body = win.evaluate("document.body.innerText")
@@ -1782,10 +1789,10 @@ def run_e2e() -> int:
             # would, and proves destroy of one workspace doesn't cascade
             # into another.
             logger.info("=== destroy W2 via UI (gear -> settings -> Destroy) ===")
-            m = re.search(r"//(agent-[a-f0-9]+)\.localhost", w2_chat_url)
+            m = re.search(r"//((?:agent|host)-[a-f0-9]+)\.localhost", w2_chat_url)
             if not m:
-                raise E2EFailure(f"[w2-destroy] could not extract agent_id from {w2_chat_url!r}")
-            w2_agent_id = m.group(1)
+                raise E2EFailure(f"[w2-destroy] could not extract a workspace coordinate from {w2_chat_url!r}")
+            w2_agent_id = agent_id_for_workspace_coordinate(win, m.group(1))
             logger.info("[w2-destroy] agent_id={}", w2_agent_id)
 
             # Navigate to W2's settings page directly. The home tile's gear
@@ -2048,7 +2055,7 @@ def run_e2e() -> int:
             # succeed on the first try.
             # The restore may already have reopened W1 on the content view; if
             # it came back on home instead, open it the way a user would.
-            w1_host_match = re.search(r"//(agent-[a-f0-9]+)\.localhost", w1_result.chat_url)
+            w1_host_match = re.search(r"//((?:agent|host)-[a-f0-9]+)\.localhost", w1_result.chat_url)
             w1_host = w1_host_match.group(1) if w1_host_match else None
             chat = find_chat_window(ctx, w1_host) or open_workspace_via_tile(
                 ctx, win, host_name=HOST_NAME, label="w1-after-relaunch", host=w1_host

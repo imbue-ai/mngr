@@ -54,7 +54,10 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import UiFileSharingPermissionDetail
+from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.webdav import get_file_sharing_roots
@@ -256,6 +259,27 @@ class FileSharingGrantHandler(RequestEventHandler):
             allowed_roots_json=json.dumps([str(root) for root in self.share_roots]),
             home_dir=str(self.home_dir),
             mngr_forward_origin=mngr_forward_origin,
+        )
+
+    def build_request_detail_payload(
+        self,
+        req_event: RequestEvent,
+        backend_resolver: BackendResolverInterface,
+    ) -> RequestDetailPayload:
+        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
+            return UiUnsupportedDetail(message="Unsupported request type")
+        parsed_agent_id = AgentId(req_event.agent_id)
+        ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
+        return UiFileSharingPermissionDetail(
+            request_id=str(req_event.event_id),
+            agent_id=req_event.agent_id,
+            ws_name=ws_name,
+            rationale=req_event.rationale,
+            file_path=req_event.path,
+            access=req_event.access,
+            access_human_label=_access_human_label(req_event.access),
+            allowed_roots=tuple(str(root) for root in self.share_roots),
+            home_dir=str(self.home_dir),
         )
 
     def apply_grant_request(

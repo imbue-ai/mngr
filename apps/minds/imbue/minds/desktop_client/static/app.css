@@ -334,7 +334,7 @@ html.no-scrollbar-gutter {
 }
 /*
  * Both shell modes lock the document to the viewport: the agent surface fills
- * it with a fixed content view / iframe, and local pages scroll inside
+ * it with the fixed workspace iframe, and local pages scroll inside
  * #local-page-scroll -- a container pinned below the fixed 38px titlebar (see
  * ChromeShell.jinja). So the DOCUMENT never scrolls on any minds page, the
  * titlebar never shares an edge with a scrollbar, and its buttons never shift

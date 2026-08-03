@@ -253,7 +253,7 @@ env-specific data that's accumulated inside operator-managed shared
 resources". For staging destroy this means:
 
 1. `mngr destroy` every agent under `~/.minds-staging/mngr/agents/`
-   so containers / pool hosts / tunnels stop cleanly before their
+   so containers / pool hosts stop cleanly before their
    cloud resources go away.
 2. `modal app stop` both deployed apps in the tier's Modal env.
 3. `modal secret delete` every per-tier Modal Secret (`<service>-staging`).
@@ -263,13 +263,9 @@ resources". For staging destroy this means:
 5. Wipe the Neon DB by running `DROP SCHEMA public CASCADE; CREATE
    SCHEMA public;` against `DATABASE_URL` from Vault (the DB itself
    + its DSN stay valid).
-6. Enumerate and delete every Cloudflare tunnel tagged with
-   `metadata.env = "staging"` (created via the connector's
-   `cf_create_tunnel` -- see "Tier generation id + activate auto-wipe"
-   below).
-7. Delete the tier generation id from Vault (so the next deploy mints
+6. Delete the tier generation id from Vault (so the next deploy mints
    a fresh one).
-8. Only after every cloud-side step succeeds, `rmdir`
+7. Only after every cloud-side step succeeds, `rmdir`
    `~/.minds-staging/`. On any partial failure the env root stays so
    the operator can re-run `destroy` to pick up where things broke
    (rather than silently leaking expensive cloud resources because
@@ -278,8 +274,7 @@ resources". For staging destroy this means:
 Dev env destroy follows the same shape but operates on the per-dev
 Modal env / Neon DB / SuperTokens app (which deploy created outright,
 so destroy deletes them outright too rather than wiping data inside).
-The Cloudflare-tunnel + mngr-agent + env-root-removal steps are
-identical.
+The mngr-agent + env-root-removal steps are identical.
 
 ## Tier generation id + activate auto-wipe
 

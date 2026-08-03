@@ -63,13 +63,6 @@
       "path": { "kind": "targeted", "suffix": "/(health|restart)$" },
       "display_name": "Recover a workspace",
       "description": "Check the selected workspace's health and restart its services or host."
-    },
-    {
-      "permission": "minds-workspaces-sharing",
-      "method": ["GET", "PUT", "DELETE"],
-      "path": { "kind": "targeted", "suffix": "/sharing/[^/]+(/readiness)?$" },
-      "display_name": "Manage a workspace's sharing",
-      "description": "View and change Cloudflare sharing for the selected workspace's services."
     }
   ]
 }

@@ -49,12 +49,6 @@ def build_account_plan_view(info: dict[str, Any]) -> dict[str, Any]:
             "note": "Stopped remote machines still count until destroyed.",
         },
         {
-            "label": "Shared links (tunnels)",
-            "used": str(_int_field(usage, "tunnels")),
-            "limit": str(_int_field(entitlements, "max_tunnels")),
-            "note": f"Up to {_int_field(entitlements, 'max_services_per_tunnel')} shared services per machine.",
-        },
-        {
             "label": "Backup storage",
             "used": format_gb(_int_field(usage, "total_bucket_bytes")),
             "limit": format_gb(_int_field(entitlements, "max_total_bucket_bytes")),

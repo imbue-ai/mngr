@@ -154,7 +154,7 @@
       {% elif current_account %}
         <p class="type-body text-primary mb-3">Linked to <strong>{{ current_account.email }}</strong>.</p>
         <Notice variant="warn">
-          Unlinking will remove all sharing (tunnels) for this machine.
+          Unlinking stops all sharing for this machine and revokes its links.
           You will need to set up sharing again after linking it back.
         </Notice>
         {# The wait is reported inside the button (workspace_settings.js swaps
@@ -272,13 +272,13 @@
   </div>
 </Modal>
 
-{# Unlink confirmation. Unlinking tears down every tunnel for this machine,
+{# Unlink confirmation. Unlinking tears down the machine's share,
    which is not obvious from a button labelled "Unlink" and cannot be undone by
    pressing it again -- sharing has to be set up from scratch afterwards. Same
    shape as the destroy confirmation below it. #}
 <Modal id="unlink-dialog">
   <h2 class="type-heading text-primary mb-3">Unlink this machine?</h2>
-  <p class="type-body text-primary mb-4">This removes all sharing (tunnels) for <strong>{{ ws_name }}</strong>. You will need to set up sharing again after linking it back.</p>
+  <p class="type-body text-primary mb-4">This stops all sharing for <strong>{{ ws_name }}</strong> and revokes its links. You will need to set up sharing again after linking it back.</p>
   <div class="flex justify-end gap-3">
     <Button variant="secondary" id="unlink-cancel-btn">Cancel</Button>
     <Button variant="danger" id="unlink-confirm-btn">Unlink</Button>

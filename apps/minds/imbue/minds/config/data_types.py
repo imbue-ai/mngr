@@ -99,6 +99,15 @@ class ClientEnvConfig(FrozenModel):
             "is verified against. Required alongside `lima_image_base_url`."
         ),
     )
+    accounts_base_url: AnyUrl | None = Field(
+        default=None,
+        description=(
+            "Base URL of the accounts broker shared-workspace visitors sign in through "
+            "(production: https://accounts.imbue.com). None falls back to `connector_url` "
+            "(the broker is served by the connector app, so the plain connector URL works "
+            "wherever no dedicated accounts domain exists yet, e.g. dev envs)."
+        ),
+    )
 
 
 class DeploySecretsConfig(FrozenModel):
@@ -229,7 +238,7 @@ class MinContainersConfig(FrozenModel):
     specific service) gets the cheapest possible warm pool. Staging /
     production override to ``1`` in their committed ``deploy.toml`` so
     the desktop client doesn't pay a cold-boot penalty on auth / lease
-    / tunnel hits.
+    / share hits.
     """
 
     connector: NonNegativeInt = Field(
@@ -303,8 +312,6 @@ class PlanQuotasConfig(FrozenModel):
     """
 
     max_remote_workspaces: NonNegativeInt = Field(description="Max concurrent pool-host leases (running or stopped)")
-    max_tunnels: NonNegativeInt = Field(description="Max Cloudflare tunnels")
-    max_services_per_tunnel: NonNegativeInt = Field(description="Max forwarded services per tunnel")
     max_buckets: NonNegativeInt = Field(description="Max R2 buckets")
     max_total_bucket_gb: NonNegativeInt = Field(description="Max total GB across all the account's buckets")
     monthly_llm_spend_usd: NonNegativeFloat = Field(
@@ -316,8 +323,6 @@ class PlanQuotasConfig(FrozenModel):
         """The connector-table column values for this plan (storage converted to bytes)."""
         return {
             "max_remote_workspaces": int(self.max_remote_workspaces),
-            "max_tunnels": int(self.max_tunnels),
-            "max_services_per_tunnel": int(self.max_services_per_tunnel),
             "max_buckets": int(self.max_buckets),
             "max_total_bucket_bytes": int(self.max_total_bucket_gb) * 1024**3,
             "monthly_llm_spend_usd": float(self.monthly_llm_spend_usd),

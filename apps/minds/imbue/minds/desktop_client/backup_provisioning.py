@@ -2,9 +2,9 @@
 
 This is the reusable "configure backups for host X" operation. It runs
 asynchronously after ``mngr create`` returns the canonical host id (the
-desktop client schedules it on a detached thread, mirroring the Cloudflare
-tunnel-token injection), but nothing here is creation-specific: the same
-entry point can be re-applied to any already-created host later.
+desktop client schedules it on a detached thread), but nothing here is
+creation-specific: the same entry point can be re-applied to any
+already-created host later.
 
 The key idea: minds initializes the restic repository itself (from the
 machine running minds) and gives each workspace its own random repository

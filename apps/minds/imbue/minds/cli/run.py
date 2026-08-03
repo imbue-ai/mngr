@@ -458,8 +458,13 @@ def run(
     seed_laptop_agent_types_for_minds(mngr_host_dir)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
+        # The chrome page embeds workspace origins in an iframe, so the proxy's
+        # frame-ancestors policy must allow the minds origin. Both loopback
+        # spellings are listed: Electron navigates by 127.0.0.1 while the
+        # printed browser login URL uses localhost.
+        embedder_origins=(f"http://localhost:{port}", f"http://127.0.0.1:{port}"),
     )
-    consumer, preauth_cookie = start_mngr_forward(
+    consumer, preauth_cookie, browser_bridge_token = start_mngr_forward(
         config=forward_config,
         resolver=backend_resolver,
     )
@@ -655,6 +660,7 @@ def run(
         server_port=port,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
+        mngr_forward_browser_bridge_token=browser_bridge_token,
         output_format=output_format,
         root_concurrency_group=root_concurrency_group,
         system_interface_health_tracker=system_interface_health_tracker,

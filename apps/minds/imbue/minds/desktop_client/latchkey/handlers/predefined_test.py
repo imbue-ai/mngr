@@ -6,11 +6,13 @@ from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -27,14 +29,20 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
+from imbue.minds.desktop_client.request_handler import UiUnknownScopeDetail
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
+from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
+from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import save_permissions
 
 # An entered ConcurrencyGroup for the handlers built in this module. Handlers
 # now require one (their message sender dispatches the nudge on a tracked
@@ -1221,3 +1229,163 @@ def test_build_account_choices_keeps_a_single_sign_in_option_when_nothing_is_con
 
     assert [(choice.value, choice.label) for choice in choices] == [(NEW_ACCOUNT_FORM_VALUE, "Sign in")]
     assert selected == NEW_ACCOUNT_FORM_VALUE
+
+
+def test_build_request_detail_payload_mirrors_the_fragment_derivation(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="missing")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="need to read a channel",
+    )
+
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+    )
+
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    assert payload.request_id == str(event.event_id)
+    assert payload.scope == "slack-api"
+    assert "slack-read-all" in payload.permission_schemas
+    assert "slack-read-all" in payload.checked_permissions
+    assert payload.rationale == "need to read a channel"
+    # MISSING credentials + a browser auth option: approving will pop a
+    # browser sign-in, exactly as the fragment's progress notice promises.
+    assert payload.will_open_browser is True
+    assert payload.new_account_value
+    assert payload.wildcard_label == "all"
+    account_values = [choice.value for choice in payload.account_choices]
+    assert payload.selected_account_value in account_values
+
+
+class _FixedHostResolver(StaticBackendResolver):
+    """Static resolver reporting one parseable ``HostId`` for every agent.
+
+    The default ``StaticBackendResolver`` reports the ``"localhost"``
+    placeholder, which is not a valid :class:`HostId`, so the pre-check
+    derivation skips its existing-grants lookup. This subclass lets tests
+    exercise that lookup against a seeded per-host permissions file.
+    """
+
+    fixed_host_id: HostId = Field(description="Host id the resolver reports for every agent.")
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id=str(self.fixed_host_id))
+
+
+def _seed_default_account_grant(tmp_path: Path, host_id: HostId, permissions: tuple[str, ...]) -> None:
+    """Write the per-host permissions file production would write for a default-account Slack grant.
+
+    Goes through :func:`build_account_grant` so the file carries the generated
+    schema pinning the rule to the unnamed default account -- which is what the
+    pre-check's grant reader inspects (it never interprets rule keys).
+    """
+    rule_key, granted, schemas = build_account_grant("slack-api", "", permissions)
+    save_permissions(
+        permissions_path_for_host(tmp_path / "mngr_latchkey", host_id),
+        LatchkeyPermissionsConfig(rules=({rule_key: list(granted)},), schemas=schemas),
+    )
+
+
+def test_build_request_detail_payload_pre_checks_the_union_of_existing_grants_and_request(tmp_path: Path) -> None:
+    """The pre-check is existing grants for the selected account plus the agent's request.
+
+    Approving without modification grants the union: what the agent is asking
+    for on top of what its account already has. Permissions that are neither
+    granted nor requested stay unchecked.
+    """
+    handler = _build_handler(tmp_path, credential_status="valid")
+    host_id = HostId()
+    _seed_default_account_grant(tmp_path, host_id, ("slack-chat-read",))
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        permissions=("slack-write-all",),
+        rationale="need to post an update",
+    )
+
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=_FixedHostResolver(url_by_agent_and_service={}, fixed_host_id=host_id),
+    )
+
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    # Catalog order is preserved: the requested permission precedes the
+    # previously-granted one because that is their catalog order. The
+    # never-requested ``slack-read-all`` (and the wildcard) stay unchecked.
+    assert payload.checked_permissions == ("slack-write-all", "slack-chat-read")
+
+
+def test_build_request_detail_payload_offers_but_never_auto_checks_the_wildcard(tmp_path: Path) -> None:
+    """The catch-all ``any`` schema is offered as an option but never auto-added to the pre-check.
+
+    Neither the agent's request for a specific permission nor an existing
+    specific grant may pull the wildcard in; the user must opt into it
+    explicitly.
+    """
+    handler = _build_handler(tmp_path, credential_status="valid")
+    host_id = HostId()
+    _seed_default_account_grant(tmp_path, host_id, ("slack-chat-read",))
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="need to read a channel",
+    )
+
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=_FixedHostResolver(url_by_agent_and_service={}, fixed_host_id=host_id),
+    )
+
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    assert WILDCARD_PERMISSION_NAME in payload.permission_schemas
+    assert WILDCARD_PERMISSION_NAME not in payload.checked_permissions
+    assert set(payload.checked_permissions) == {"slack-read-all", "slack-chat-read"}
+
+
+def test_build_request_detail_payload_with_empty_request_and_no_grants_pre_checks_nothing(tmp_path: Path) -> None:
+    """With nothing granted and nothing requested, the pre-check is empty.
+
+    The Approve button then stays disabled until the user ticks a permission
+    by hand.
+    """
+    handler = _build_handler(tmp_path, credential_status="valid")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        permissions=(),
+        rationale="no specific permissions named",
+    )
+
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=_FixedHostResolver(url_by_agent_and_service={}, fixed_host_id=HostId()),
+    )
+
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    assert payload.checked_permissions == ()
+
+
+def test_build_request_detail_payload_reports_unknown_scopes(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="not-a-real-scope",
+        rationale="whatever",
+    )
+
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+    )
+
+    if not isinstance(payload, UiUnknownScopeDetail):
+        pytest.fail(f"expected a unknown_scope detail payload, got {payload!r}")
+    assert payload.scope == "not-a-real-scope"

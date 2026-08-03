@@ -52,6 +52,7 @@ secrets/minds/<tier>/litellm
 secrets/minds/<tier>/litellm-connector
 secrets/minds/<tier>/neon
 secrets/minds/<tier>/pool-ssh
+secrets/minds/<tier>/sharing
 secrets/minds/<tier>/supertokens
 ```
 
@@ -72,7 +73,13 @@ supplier API calls):
 ```
 secrets/minds/<tier>/ovh          # OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET,
                                   #   OVH_CONSUMER_KEY (shared per-tier bare-metal box
-                                  #   supplier credentials, for `mngr imbue_cloud admin server`)
+                                  #   supplier credentials, for `mngr imbue_cloud admin server`);
+                                  #   OVH_CLOUD_PROJECT_ID (the Public Cloud project that
+                                  #   share-relay instances are provisioned in)
+secrets/minds/<tier>/relay-ssh    # RELAY_SSH_PRIVATE_KEY, RELAY_SSH_PUBLIC_KEY (the tier's
+                                  #   share-relay SSH keypair; sourced by the operator for
+                                  #   `just provision-share-relay` / `just deploy-share-relay`
+                                  #   so relays can be redeployed from any machine)
 ```
 
 The dev-tier `neon-admin` token must have *project-create* scope on

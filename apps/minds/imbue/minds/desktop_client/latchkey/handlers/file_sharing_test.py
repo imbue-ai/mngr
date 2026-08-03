@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Final
 
 import httpx
+import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
 
@@ -26,6 +27,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_file_sharing_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.request_handler import UiFileSharingPermissionDetail
 from imbue.mngr.primitives import AgentId
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
@@ -689,18 +691,26 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
 # -- Wiring through the Flask dispatcher --
 
 
-def test_inbox_detail_route_dispatches_to_handler(tmp_path: Path) -> None:
-    """GET /inbox/detail/<id> for a file-sharing event routes to FileSharingGrantHandler."""
+def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     event = create_latchkey_file_sharing_permission_request_event(
         agent_id=str(AgentId()),
-        path="/home/user/x.txt",
+        path="/home/user/important.txt",
         access="READ",
-        rationale="r",
+        rationale="summarize the doc",
     )
-    inbox = RequestInbox().add_request(event)
-    client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.get(f"/inbox/detail/{event.event_id}")
-    assert response.status_code == 200
-    assert "/home/user/x.txt" in response.text
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+    )
+
+    if not isinstance(payload, UiFileSharingPermissionDetail):
+        pytest.fail(f"expected a file_sharing detail payload, got {payload!r}")
+    assert payload.request_id == str(event.event_id)
+    assert payload.file_path == "/home/user/important.txt"
+    assert payload.access == "READ"
+    assert payload.access_human_label == "read-only"
+    assert payload.rationale == "summarize the doc"
+    assert str(handler.home_dir) == payload.home_dir
+    assert payload.allowed_roots == tuple(str(root) for root in handler.share_roots)

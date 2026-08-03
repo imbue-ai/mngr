@@ -66,12 +66,126 @@ def test_resolve_port_strategy_returns_fixed_url(ssh_info: RemoteSSHInfo) -> Non
     assert target.ssh_info == ssh_info
 
 
+def test_resolve_named_service_returns_its_url() -> None:
+    """A service origin resolves to that service's registered URL, not the shell's."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(
+        TEST_AGENT_ID_1,
+        {"system_interface": "http://127.0.0.1:9100", "terminal": "http://127.0.0.1:7681"},
+    )
+    target = resolver.resolve(TEST_AGENT_ID_1, "terminal")
+    assert target is not None
+    assert str(target.url).rstrip("/") == "http://127.0.0.1:7681"
+
+
+def test_resolve_named_service_returns_none_when_unregistered() -> None:
+    """An unknown-but-plausible service on a known agent is unroutable (loading page)."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:9100"})
+    assert resolver.resolve(TEST_AGENT_ID_1, "nonexistent") is None
+
+
+def test_resolve_by_origin_label_maps_label_back_to_service() -> None:
+    """A ``<label>.host-<hex>`` origin resolves via the label -> name map to the service's URL."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(
+        TEST_AGENT_ID_1,
+        {"system_interface": "http://127.0.0.1:9100", "terminal": "http://127.0.0.1:7681"},
+    )
+    resolver.update_service_labels(
+        TEST_AGENT_ID_1,
+        {"system_interface-shell111": "system_interface", "terminal-term1111": "terminal"},
+    )
+    target = resolver.resolve_by_origin_label(TEST_AGENT_ID_1, "terminal-term1111")
+    assert target is not None
+    assert str(target.url).rstrip("/") == "http://127.0.0.1:7681"
+
+
+def test_resolve_by_origin_label_falls_back_to_treating_label_as_name() -> None:
+    """A label with no mapping (label-less/legacy service) routes under its own name."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(TEST_AGENT_ID_1, {"terminal": "http://127.0.0.1:7681"})
+    target = resolver.resolve_by_origin_label(TEST_AGENT_ID_1, "terminal")
+    assert target is not None
+    assert str(target.url).rstrip("/") == "http://127.0.0.1:7681"
+
+
+def test_shell_origin_label_returns_the_shell_services_label() -> None:
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_service_labels(
+        TEST_AGENT_ID_1,
+        {"system_interface-shell111": "system_interface", "terminal-term1111": "terminal"},
+    )
+    assert resolver.shell_origin_label(TEST_AGENT_ID_1) == "system_interface-shell111"
+
+
+def test_shell_origin_label_is_none_before_labels_known_and_in_port_mode() -> None:
+    service_resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    service_resolver.add_known_agent(TEST_AGENT_ID_1)
+    assert service_resolver.shell_origin_label(TEST_AGENT_ID_1) is None
+
+    port_resolver = ForwardResolver(strategy=ForwardPortStrategy(remote_port=PositiveInt(8080)))
+    port_resolver.add_known_agent(TEST_AGENT_ID_1)
+    port_resolver.update_service_labels(TEST_AGENT_ID_1, {"system_interface-shell111": "system_interface"})
+    assert port_resolver.shell_origin_label(TEST_AGENT_ID_1) is None
+
+
+def test_resolve_named_service_works_in_port_strategy_mode() -> None:
+    """Manual port mode still resolves named services from the registered map;
+    only the bare origin maps to the fixed port."""
+    resolver = ForwardResolver(strategy=ForwardPortStrategy(remote_port=PositiveInt(8080)))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_services(TEST_AGENT_ID_1, {"terminal": "http://127.0.0.1:7681"})
+    named = resolver.resolve(TEST_AGENT_ID_1, "terminal")
+    assert named is not None
+    assert str(named.url).rstrip("/") == "http://127.0.0.1:7681"
+    bare = resolver.resolve(TEST_AGENT_ID_1)
+    assert bare is not None
+    assert str(bare.url).rstrip("/") == "http://127.0.0.1:8080"
+
+
+def test_resolve_agent_for_host_maps_host_coordinate() -> None:
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.set_agent_host(TEST_AGENT_ID_1, "host-aaaa")
+    assert resolver.resolve_agent_for_host("host-aaaa") == TEST_AGENT_ID_1
+    assert resolver.resolve_agent_for_host("host-bbbb") is None
+    assert resolver.get_host_for_agent(TEST_AGENT_ID_1) == "host-aaaa"
+
+
+def test_resolve_agent_for_host_is_deterministic_with_multiple_agents() -> None:
+    """Two known agents on one host resolve to the lexicographically-smallest id."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.add_known_agent(TEST_AGENT_ID_2)
+    resolver.set_agent_host(TEST_AGENT_ID_1, "host-shared")
+    resolver.set_agent_host(TEST_AGENT_ID_2, "host-shared")
+    expected = min(str(TEST_AGENT_ID_1), str(TEST_AGENT_ID_2))
+    assert str(resolver.resolve_agent_for_host("host-shared")) == expected
+
+
+def test_resolve_agent_for_host_ignores_unknown_agents() -> None:
+    """A host mapping for an agent that is no longer known must not resolve."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.set_agent_host(TEST_AGENT_ID_1, "host-cccc")
+    resolver.remove_known_agent(TEST_AGENT_ID_1)
+    assert resolver.resolve_agent_for_host("host-cccc") is None
+
+
 def test_update_known_agents_drops_state_for_removed() -> None:
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.set_agent_host(TEST_AGENT_ID_1, "host-dddd")
     resolver.update_services(TEST_AGENT_ID_1, {"system_interface": "http://127.0.0.1:1"})
     resolver.update_known_agents((TEST_AGENT_ID_2,))
     assert resolver.resolve(TEST_AGENT_ID_1) is None
+    assert resolver.resolve_agent_for_host("host-dddd") is None
     assert resolver.list_known_agent_ids() == (TEST_AGENT_ID_2,)
 
 

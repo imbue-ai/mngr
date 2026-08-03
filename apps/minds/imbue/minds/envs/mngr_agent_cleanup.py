@@ -2,8 +2,8 @@
 
 ``minds env destroy`` calls this before tearing down cloud-side
 infrastructure: if the env has any active agents, they reference cloud
-resources (Docker containers, pool hosts, Modal sandboxes, Cloudflare
-tunnels). Tearing down those resources without first destroying the
+resources (Docker containers, pool hosts, Modal sandboxes). Tearing
+down those resources without first destroying the
 agents leaves orphan mngr state pointing at dead URLs / containers,
 which surfaces later as confusing errors when the operator next
 ``mngr list``s the env.

@@ -1,13 +1,11 @@
 """Typed wrapper around the ``mngr imbue_cloud …`` CLI surface.
 
 Every operation that minds previously did via direct HTTP calls into the
-``remote_service_connector`` (auth, host pool, LiteLLM keys, Cloudflare
-tunnels) now runs as an invocation of ``mngr imbue_cloud …`` handed to a
+``remote_service_connector`` (auth, host pool, LiteLLM keys, workspace
+shares) now runs as an invocation of ``mngr imbue_cloud …`` handed to a
 :class:`~imbue.minds.utils.mngr_caller.MngrCaller`, which runs it in a
 pre-warmed, single-use ``mngr`` process. This avoids re-paying the
-multi-second interpreter + plugin-import startup on every call (which matters
-for the sharing flow, where a single user action fires several sequential
-``mngr imbue_cloud tunnels …`` invocations).
+multi-second interpreter + plugin-import startup on every call.
 
 The plugin always emits a JSON document on stdout for the success case and a
 JSON ``{"error": ...}`` document on stderr for the failure case (see
@@ -170,13 +168,17 @@ class LiteLLMKeyMaterial(FrozenModel):
     base_url: AnyUrl
 
 
-class TunnelInfo(FrozenModel):
-    """Result of `mngr imbue_cloud tunnels create` / list entry."""
+class ShareCliInfo(FrozenModel):
+    """Result of `mngr imbue_cloud shares create` / `shares status`."""
 
-    tunnel_name: str
-    tunnel_id: str
-    token: SecretStr | None = None
-    services: tuple[str, ...] = ()
+    host_id: str
+    workspace_domain: str
+    region: str
+    state: str
+    relay_endpoint: str | None = None
+    relay_token: SecretStr | None = None
+    last_tunnel_login_at: str | None = None
+    cert_not_after: str | None = None
 
 
 class R2BucketKeyMaterial(FrozenModel):
@@ -575,149 +577,41 @@ class ImbueCloudCli(MutableModel):
         return self._expect_success(result, "keys litellm show")
 
     # ------------------------------------------------------------------
-    # Tunnels
+    # Shares (self-hosted relays)
     # ------------------------------------------------------------------
 
-    def create_tunnel(
-        self,
-        *,
-        account: str,
-        agent_id: str,
-        default_policy: Mapping[str, Any] | None = None,
-    ) -> TunnelInfo:
-        args: list[str] = ["tunnels", "create", agent_id, "--account", account]
-        if default_policy is not None:
-            args.extend(["--policy", _json.dumps(dict(default_policy))])
-        result = self._run(args, cg_name="imbue-cloud-tunnels-create")
-        body = self._expect_success(result, "tunnels create")
-        return TunnelInfo.model_validate(body)
-
-    def list_tunnels(self, account: str) -> list[TunnelInfo]:
+    def create_share(self, *, account: str, host_id: str) -> ShareCliInfo:
+        """Enable sharing for a workspace host; the returned relay token is only ever returned here."""
         result = self._run(
-            ["tunnels", "list", "--account", account],
-            cg_name="imbue-cloud-tunnels-list",
+            ["shares", "create", host_id, "--account", account],
+            cg_name="imbue-cloud-shares-create",
         )
-        body = self._expect_success(result, "tunnels list")
-        if isinstance(body, list):
-            return [TunnelInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
-        return []
-
-    def delete_tunnel(self, account: str, tunnel_name: str) -> None:
-        result = self._run(
-            ["tunnels", "delete", tunnel_name, "--account", account],
-            cg_name="imbue-cloud-tunnels-delete",
-        )
-        self._expect_success(result, "tunnels delete")
-
-    def enable_sharing(
-        self,
-        *,
-        account: str,
-        agent_id: str,
-        service_name: str,
-        service_url: str,
-        policy: Mapping[str, Any],
-    ) -> tuple[TunnelInfo, dict[str, Any]]:
-        """Enable (or update) sharing for one service via a single connector call.
-
-        Wraps ``tunnels enable-sharing``: the connector ensures the tunnel,
-        adds the service, and applies the Access policy in one request.
-        Returns the tunnel (with cloudflared token) and the service dict
-        (``service_name`` / ``service_url`` / ``hostname``), so the caller
-        needs no follow-up status reads.
-        """
-        result = self._run(
-            [
-                "tunnels",
-                "enable-sharing",
-                agent_id,
-                service_name,
-                service_url,
-                "--policy",
-                _json.dumps(dict(policy)),
-                "--account",
-                account,
-            ],
-            cg_name="imbue-cloud-enable-sharing",
-        )
-        body = self._expect_success(result, "tunnels enable-sharing")
-        tunnel_raw = body.get("tunnel") if isinstance(body, dict) else None
-        service_raw = body.get("service") if isinstance(body, dict) else None
-        if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
+        body = self._expect_success(result, "shares create")
+        if not isinstance(body, dict) or not body.get("workspace_domain"):
             # Describe only the body's shape, never its contents: a well-formed
-            # "tunnel" half carries the cloudflared token, which must not leak
-            # into an error message that reaches logs and the sharing UI.
+            # body carries the relay token, which must not leak into an error
+            # message that reaches logs and the sharing UI.
             shape = f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
-            raise ImbueCloudCliError(
-                f"Malformed enable-sharing output: expected 'tunnel' and 'service' objects, got {shape}"
-            )
-        return TunnelInfo.model_validate(tunnel_raw), service_raw
+            raise ImbueCloudCliError(f"Malformed shares create output: expected a share object, got {shape}")
+        return ShareCliInfo.model_validate({"state": "active", **body})
 
-    def list_services(self, account: str, tunnel_name: str) -> list[dict[str, Any]]:
+    def delete_share(self, *, account: str, host_id: str) -> None:
         result = self._run(
-            ["tunnels", "services", "list", tunnel_name, "--account", account],
-            cg_name="imbue-cloud-services-list",
+            ["shares", "delete", host_id, "--account", account],
+            cg_name="imbue-cloud-shares-delete",
         )
-        body = self._expect_success(result, "tunnels services list")
-        if isinstance(body, list):
-            return body
-        return []
+        self._expect_success(result, "shares delete")
 
-    def remove_service(self, account: str, tunnel_name: str, service_name: str) -> None:
+    def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
+        """The share's status document, or None when this workspace has never been shared."""
         result = self._run(
-            ["tunnels", "services", "remove", tunnel_name, service_name, "--account", account],
-            cg_name="imbue-cloud-services-remove",
+            ["shares", "status", host_id, "--account", account],
+            cg_name="imbue-cloud-shares-status",
         )
-        self._expect_success(result, "tunnels services remove")
-
-    def set_tunnel_auth(self, account: str, tunnel_name: str, policy: Mapping[str, Any]) -> None:
-        result = self._run(
-            ["tunnels", "auth", "set", tunnel_name, _json.dumps(dict(policy)), "--account", account],
-            cg_name="imbue-cloud-tunnel-auth-set",
-        )
-        self._expect_success(result, "tunnels auth set")
-
-    def get_tunnel_auth(self, account: str, tunnel_name: str) -> dict[str, Any]:
-        result = self._run(
-            ["tunnels", "auth", "get", tunnel_name, "--account", account],
-            cg_name="imbue-cloud-tunnel-auth-get",
-        )
-        return self._expect_success(result, "tunnels auth get")
-
-    def get_service_auth(self, account: str, tunnel_name: str, service_name: str) -> dict[str, Any]:
-        """Read the per-service auth policy from a tunnel.
-
-        Wraps ``mngr imbue_cloud tunnels auth get <tunnel_name> --service <name>``.
-        Returns the same ``AuthPolicy`` JSON shape as :meth:`get_tunnel_auth`.
-        """
-        result = self._run(
-            ["tunnels", "auth", "get", tunnel_name, "--service", service_name, "--account", account],
-            cg_name="imbue-cloud-service-auth-get",
-        )
-        return self._expect_success(result, "tunnels auth get --service")
-
-    def find_tunnel_for_agent(self, account: str, agent_id: str) -> TunnelInfo | None:
-        """Return the tunnel registered for ``agent_id`` under ``account``, or None.
-
-        Delegates to the connector's O(1) ``tunnels find-by-agent`` lookup,
-        which resolves the exact tunnel via Cloudflare's server-side name
-        filter (2 Cloudflare calls) instead of enumerating every tunnel and
-        fetching each one's config -- the old ``list_tunnels`` path was O(n)
-        in the number of tunnels on the account and dominated the sharing
-        flow's latency.
-
-        Returning ``None`` lets the sharing-status route distinguish
-        "tunnel doesn't exist yet" (the user hasn't enabled sharing) from
-        "tunnel exists but no service is registered for this name".
-        """
-        result = self._run(
-            ["tunnels", "find-by-agent", agent_id, "--account", account],
-            cg_name="imbue-cloud-tunnels-find-by-agent",
-        )
-        body = self._expect_success(result, "tunnels find-by-agent")
-        if body is None:
+        body = self._expect_success(result, "shares status")
+        if not isinstance(body, dict) or body.get("state") in (None, "", "none"):
             return None
-        return TunnelInfo.model_validate(body)
+        return ShareCliInfo.model_validate(body)
 
     # ------------------------------------------------------------------
     # R2 buckets (one per workspace; used to back up the host_dir via restic)

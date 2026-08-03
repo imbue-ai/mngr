@@ -71,10 +71,12 @@ from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.utils.secret_redaction import redact_secret_env_assignments
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
+from imbue.mngr_forward.testing import make_in_memory_test_ca
 from imbue.mngr_forward.tls import build_server_ssl_context
-from imbue.mngr_forward.tls import generate_self_signed_cert
+from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
@@ -1135,9 +1137,10 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
     # The readiness probe dials the proxy over https (minds always runs it with
     # HTTP/2), so the stand-in server must speak TLS to match -- otherwise the
     # probe's TLS handshake fails against a plain-HTTP socket. Reuse the proxy's
-    # own self-signed cert helpers so the test exercises the real https path.
-    cert_pem, key_pem = generate_self_signed_cert()
-    ssl_context = build_server_ssl_context(cert_pem, key_pem)
+    # own CA-backed cert helpers so the test exercises the real https path.
+    ca = make_in_memory_test_ca()
+    chain_pem, key_pem = generate_server_credentials(ca)
+    ssl_context = build_server_ssl_context(chain_pem, key_pem, ca)
     server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1178,8 +1181,9 @@ def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None
     creator = _make_test_creator(tmp_path, mngr_forward_port=0, preauth_cookie="anything")
     log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
+    host_id = HostId.generate()
     started = time.monotonic()
-    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
+    creator._wait_for_workspace_ready(aid, host_id, log_sink, creator.workspace_ready_timeout_seconds)
     # Returns immediately -- no network calls, no log lines.
     assert time.monotonic() - started < 0.1
     assert log_sink.appended_line_count == 0
@@ -1190,8 +1194,9 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
     creator = _make_test_creator(tmp_path, mngr_forward_port=8421, preauth_cookie="")
     log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
+    host_id = HostId.generate()
     started = time.monotonic()
-    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
+    creator._wait_for_workspace_ready(aid, host_id, log_sink, creator.workspace_ready_timeout_seconds)
     assert time.monotonic() - started < 0.1
     assert log_sink.appended_line_count == 0
 
@@ -1214,7 +1219,7 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
         # answers it without any ``*.localhost`` name resolution. Construct a
         # plausible-looking AgentId so the Host header is well-formed.
         aid = AgentId.generate()
-        creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
+        creator._wait_for_workspace_ready(aid, HostId.generate(), log_sink, creator.workspace_ready_timeout_seconds)
     finally:
         server.shutdown()
     drained = list(log_sink.read_chunk(0, timeout_seconds=0.0).lines)
@@ -1253,7 +1258,9 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
             probe_timeout_seconds=0.5,
             system_interface_health_tracker=tracker,
         )
-        creator._wait_for_workspace_ready(aid, CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds)
+        creator._wait_for_workspace_ready(
+            aid, HostId.generate(), CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds
+        )
     finally:
         server.shutdown()
     # ``record_probe_success`` de-enrolled the agent, so it is no longer a
@@ -1277,12 +1284,12 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
         captured.append(request)
         return httpx.Response(200, text="ok")
 
-    aid = AgentId.generate()
+    host_id = HostId.generate()
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         status = probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
-            agent_id=aid,
+            workspace_host_id=str(host_id),
             probe_timeout_seconds=0.5,
             client=client,
         )
@@ -1290,9 +1297,9 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
     assert status == 200
     assert len(captured) == 1
     assert captured[0].url.path == "/"
-    # The agent vhost rides the Host header, not the URL host, so the probe
-    # does not depend on ``*.localhost`` resolution.
-    assert captured[0].headers["host"] == f"{aid}.localhost"
+    # The workspace vhost rides the Host header, not the URL host, so the
+    # probe does not depend on ``*.localhost`` resolution.
+    assert captured[0].headers["host"] == f"{host_id}.localhost"
 
 
 def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
@@ -1312,7 +1319,7 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
         status = probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
-            agent_id=AgentId.generate(),
+            workspace_host_id=str(HostId.generate()),
             probe_timeout_seconds=0.5,
             client=client,
         )
@@ -1337,7 +1344,7 @@ def test_probe_workspace_uses_https_scheme() -> None:
         probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
-            agent_id=AgentId.generate(),
+            workspace_host_id=str(HostId.generate()),
             probe_timeout_seconds=0.5,
             client=client,
         )
@@ -1347,11 +1354,11 @@ def test_probe_workspace_uses_https_scheme() -> None:
 
 
 def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
-    """The /goto redirect URL the UI navigates to uses the proxy's https scheme."""
+    """The /goto redirect URL the UI navigates to uses the proxy's https scheme and the host id."""
     creator = _make_test_creator(tmp_path, mngr_forward_port=8421)
-    aid = AgentId.generate()
-    url = creator._build_redirect_url(aid)
-    assert url == f"https://localhost:8421/goto/{aid}/"
+    host_id = HostId.generate()
+    url = creator._build_redirect_url(host_id)
+    assert url == f"https://localhost:8421/goto/{host_id}/"
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
@@ -1369,7 +1376,7 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
         log_sink = CreateAttemptLogSink()
         aid = AgentId.generate()
         started = time.monotonic()
-        creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
+        creator._wait_for_workspace_ready(aid, HostId.generate(), log_sink, creator.workspace_ready_timeout_seconds)
         elapsed = time.monotonic() - started
     finally:
         server.shutdown()

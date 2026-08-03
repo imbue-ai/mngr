@@ -92,8 +92,9 @@ from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
 from imbue.minds.desktop_client.api_models import EmptyResponse
-from imbue.minds.desktop_client.api_models import EnableSharingRequest
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import MachineSharingRequest
+from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import OkResponse
 from imbue.minds.desktop_client.api_models import OperationHandleResponse
 from imbue.minds.desktop_client.api_models import PatchWorkspaceRequest
@@ -101,8 +102,8 @@ from imbue.minds.desktop_client.api_models import ProviderToggleResponse
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
+from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
-from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import StopStateContainerResponse
 from imbue.minds.desktop_client.api_models import TimezoneResponse
@@ -141,12 +142,14 @@ from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sharing_handler import EmptyGrantsError
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
-from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
-from imbue.minds.desktop_client.sharing_handler import get_sharing_status
-from imbue.minds.desktop_client.sharing_handler import is_probeable_share_url
-from imbue.minds.desktop_client.sharing_handler import probe_share_url_readiness
+from imbue.minds.desktop_client.sharing_handler import enable_sharing
+from imbue.minds.desktop_client.sharing_handler import get_active_share
+from imbue.minds.desktop_client.sharing_handler import get_sharing
+from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
+from imbue.minds.desktop_client.sharing_handler import resolve_share_probe_host
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -183,7 +186,6 @@ from imbue.minds.primitives import CONFIGURED_GCP_MACHINE_TYPES
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
-from imbue.minds.primitives import ServiceName
 from imbue.minds.primitives import default_docker_runtime
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
@@ -937,13 +939,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     ``host_name`` is auto-resolved to the next free ``workspace-N`` (the form no
     longer asks for a name).
 
-    Backup provisioning and Cloudflare tunnel injection match the desktop UI's
+    Backup provisioning and account association match the desktop UI's
     create flow: the optional ``backup_*`` fields (``backup_provider``,
     ``backup_api_key_env``) build the same restic
     setup request, and -- when an ``account_id`` is given -- the same
-    post-create-attempt callback associates the peer with the account and injects a
-    Cloudflare tunnel token. Both reuse the shared helpers in
-    ``workspace_create`` so the two front doors stay in lockstep.
+    post-create-attempt callback associates the peer with the account.
+    Both reuse the shared helpers in ``workspace_create`` so the two
+    front doors stay in lockstep.
     """
     agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
@@ -1077,8 +1079,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
 
     # Resolve the effective region (honoring a valid submitted value, else the
     # provider default) and, on a successful create, build the post-create-attempt
-    # callback that injects the Cloudflare tunnel token + associates the account
-    # and persists the chosen region -- exactly as the create form does.
+    # callback that associates the account and persists the chosen region --
+    # exactly as the create form does.
     minds_config = get_state().minds_config
     if matching is not None:
         # A BYOK account's placement (region, or GCE zone) is pinned per entry --
@@ -2627,64 +2629,129 @@ def _handle_dismiss_create_attempt(create_attempt_id: str) -> EmptyResponse | Re
     return EmptyResponse()
 
 
-# -- Sharing sub-resource routes --
+# -- Machine sharing routes --
+
+
+def _grants_document_from_request(body: MachineSharingRequest) -> SharingGrantsDocument:
+    return SharingGrantsDocument(workspace=body.workspace, services=dict(body.services))
+
+
+def _grants_to_plain(
+    grants: SharingGrantsDocument,
+) -> tuple[dict[str, list[str]], dict[str, dict[str, list[str]]]]:
+    workspace = {"emails": list(grants.workspace.emails), "email_domains": list(grants.workspace.email_domains)}
+    services = {
+        name: {"emails": list(entry.emails), "email_domains": list(entry.email_domains)}
+        for name, entry in grants.services.items()
+    }
+    return workspace, services
+
+
+def _optional_str(document: dict[str, object], key: str) -> str | None:
+    value = document.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _sharing_document_to_response(document: dict[str, object]) -> MachineSharingResponse:
+    raw_grants = document.get("grants")
+    # None means the grants read did not land (unknown, NOT empty) -- pass it
+    # through so the client can refuse to edit an unseen policy.
+    grants: SharingGrantsDocument | None
+    if raw_grants is None:
+        grants = None
+    else:
+        grants = (
+            SharingGrantsDocument.model_validate(raw_grants)
+            if isinstance(raw_grants, dict)
+            else SharingGrantsDocument()
+        )
+    return MachineSharingResponse(
+        host_id=str(document.get("host_id", "")),
+        enabled=bool(document.get("enabled", False)),
+        workspace_domain=_optional_str(document, "workspace_domain"),
+        url=_optional_str(document, "url"),
+        region=_optional_str(document, "region"),
+        last_tunnel_login_at=_optional_str(document, "last_tunnel_login_at"),
+        cert_not_after=_optional_str(document, "cert_not_after"),
+        grants=grants,
+    )
 
 
 @require_api_or_cookie_auth
-def _handle_sharing_status(agent_id: str, service_name: str) -> Response:
-    """Return current sharing status for a service: ``{enabled, url, policy}``."""
+@API_SPEC.validate(resp=json_response_model(MachineSharingResponse))
+def _handle_machine_sharing_get(host_id: str) -> MachineSharingResponse:
+    """Return the machine's sharing document: status + the grants in force."""
     state = get_state()
-    status = get_sharing_status(
-        AgentId(agent_id), ServiceName(service_name), state.imbue_cloud_cli, state.session_store
-    )
-    return _json_response(status)
+    document = get_sharing(host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store)
+    return _sharing_document_to_response(document)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=MachineSharingRequest, resp=json_response_model(MachineSharingResponse))
+def _handle_machine_sharing_put(host_id: str) -> MachineSharingResponse | Response:
+    """Enable sharing (or update the grants) for a machine. Body: the grants document."""
+    body = MachineSharingRequest.model_validate(request.get_json(silent=True, force=True) or {})
+    workspace_grants, service_grants = _grants_to_plain(_grants_document_from_request(body))
+    state = get_state()
+    try:
+        # Serialized per machine: the desktop-side JS only serializes writes
+        # within one pane, so two panes/windows editing one machine would
+        # otherwise interleave their full-document replaces.
+        with state.machine_sharing_locks.get_lock(host_id):
+            document = enable_sharing(
+                host_id=host_id,
+                workspace_grants=workspace_grants,
+                service_grants=service_grants,
+                backend_resolver=state.backend_resolver,
+            )
+    except EmptyGrantsError as exc:
+        # A grants document naming nobody is a request-validation failure,
+        # not an upstream fault. 400 rather than 422: spectree reserves 422
+        # for its own request-schema validation errors.
+        return _json_error(str(exc), 400)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return _sharing_document_to_response(document)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(MachineSharingResponse))
+def _handle_machine_sharing_delete(host_id: str) -> MachineSharingResponse | Response:
+    """Disable sharing for a machine (revokes the relay token; live viewers are cut)."""
+    state = get_state()
+    try:
+        # Same per-machine serialization as the PUT: a disable racing a grants
+        # write must not interleave with its materials removal.
+        with state.machine_sharing_locks.get_lock(host_id):
+            disable_sharing(host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return MachineSharingResponse(host_id=host_id, enabled=False)
 
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(SharingReadinessResponse))
-def _handle_sharing_readiness(agent_id: str, service_name: str) -> SharingReadinessResponse:
-    """Probe a shared service's hostname to see if Cloudflare Access is live yet.
+def _handle_machine_sharing_readiness(host_id: str) -> SharingReadinessResponse:
+    """Probe whether the machine's shared hostname is live end to end yet.
 
-    The hostname to probe comes from the ``url`` query param; restricted to
-    public ``https`` URLs to avoid an SSRF vector. Contract: ``{"ready": bool}``.
+    The domain to probe comes from the connector's share record for this
+    machine, never from caller input. Contract: ``{"ready": bool}``.
     """
-    probe_url = request.args.get("url", "")
-    http_client = get_state().http_client
-    if http_client is None or not is_probeable_share_url(probe_url):
-        return SharingReadinessResponse(ready=False)
-    return SharingReadinessResponse(ready=probe_share_url_readiness(http_client, probe_url))
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(json=EnableSharingRequest, resp=json_response_model(SharingToggleResponse))
-def _handle_sharing_enable(agent_id: str, service_name: str) -> SharingToggleResponse | Response:
-    """Enable or update sharing for a service. Body: ``{"emails": [...]}``."""
-    parsed_id = AgentId(agent_id)
-    # The spectree model validates that ``emails`` (when present) is a list of strings.
-    body = request.get_json(silent=True, force=True) or {}
-    emails = [str(email) for email in body.get("emails", [])]
-    try:
-        _tunnel, share_url = enable_sharing_via_cloudflare(
-            agent_id=parsed_id,
-            service_name=ServiceName(service_name),
-            emails=emails,
-            backend_resolver=get_state().backend_resolver,
-        )
-    except SharingError as exc:
-        return _json_error(str(exc), 502)
-    return SharingToggleResponse(agent_id=str(parsed_id), service_name=service_name, enabled=True, url=share_url)
-
-
-@require_api_or_cookie_auth
-@API_SPEC.validate(resp=json_response_model(SharingToggleResponse))
-def _handle_sharing_disable(agent_id: str, service_name: str) -> SharingToggleResponse | Response:
-    """Disable sharing for a service (removes it from its tunnel; the tunnel persists)."""
     state = get_state()
-    try:
-        disable_sharing(AgentId(agent_id), ServiceName(service_name), state.imbue_cloud_cli, state.session_store)
-    except SharingError as exc:
-        return _json_error(str(exc), 502)
-    return SharingToggleResponse(agent_id=agent_id, service_name=service_name, enabled=False)
+    http_client = state.http_client
+    if http_client is None:
+        return SharingReadinessResponse(ready=False)
+    # Only the connector-side share status is needed here; the full sharing
+    # document would also exec into the workspace for grants each poll.
+    share = get_active_share(host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store)
+    if share is None or not share.workspace_domain:
+        return SharingReadinessResponse(ready=False)
+    # Probe the shell's routable label origin, not the bare machine domain
+    # (which does not route on a share). Not-ready until the shell label is known.
+    probe_host = resolve_share_probe_host(state.backend_resolver, state.session_store, host_id, share.workspace_domain)
+    if probe_host is None:
+        return SharingReadinessResponse(ready=False)
+    return SharingReadinessResponse(ready=probe_share_readiness(http_client, probe_host))
 
 
 # -- Desktop namespace routes (cookie-or-bearer; no agent verb) --
@@ -3149,28 +3216,29 @@ def create_api_v1_blueprint() -> Blueprint:
         methods=["DELETE"],
     )
 
-    # Sharing sub-resource. Gated by ``minds-workspaces-sharing`` at the gateway.
+    # Machine sharing. Desktop-only surface (cookie or API auth); agents get
+    # deny-all at the gateway (no latchkey verb maps the machines namespace).
     blueprint.add_url_rule(
-        "/workspaces/<agent_id>/sharing/<service_name>",
-        view_func=_handle_sharing_status,
-        endpoint="sharing_status",
+        "/machines/<host_id>/sharing",
+        view_func=_handle_machine_sharing_get,
+        endpoint="machine_sharing_get",
         methods=["GET"],
     )
     blueprint.add_url_rule(
-        "/workspaces/<agent_id>/sharing/<service_name>/readiness",
-        view_func=_handle_sharing_readiness,
+        "/machines/<host_id>/sharing/readiness",
+        view_func=_handle_machine_sharing_readiness,
         methods=["GET"],
     )
     blueprint.add_url_rule(
-        "/workspaces/<agent_id>/sharing/<service_name>",
-        view_func=_handle_sharing_enable,
-        endpoint="sharing_enable",
+        "/machines/<host_id>/sharing",
+        view_func=_handle_machine_sharing_put,
+        endpoint="machine_sharing_put",
         methods=["PUT"],
     )
     blueprint.add_url_rule(
-        "/workspaces/<agent_id>/sharing/<service_name>",
-        view_func=_handle_sharing_disable,
-        endpoint="sharing_disable",
+        "/machines/<host_id>/sharing",
+        view_func=_handle_machine_sharing_delete,
+        endpoint="machine_sharing_delete",
         methods=["DELETE"],
     )
 

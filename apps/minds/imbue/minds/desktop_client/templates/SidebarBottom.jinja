@@ -1,11 +1,9 @@
 {#
-  Shared bottom of the floating workspace-switcher menu: just the "New
-  workspace" CTA. Rendered inside Chrome.jinja (browser-mode inline menu)
-  and Sidebar.jinja (the switcher page loaded into the shared modal
-  WebContentsView in Electron) so the markup and classes live in one place
-  (the icon is the shared Icon16 ``plus`` glyph). The button id
-  (#sidebar-new-workspace) is wired up in chrome.js and sidebar.js
-  respectively.
+  Bottom of the floating workspace-switcher menu: just the "New workspace"
+  CTA. Rendered inside Sidebar.jinja (the switcher page mounted as an
+  overlay-layer iframe; see overlay_layer.js), split out so the markup and
+  classes live in one place (the icon is the shared Icon16 ``plus`` glyph).
+  The button id (#sidebar-new-workspace) is wired up in sidebar.js.
 
   This element is a direct flex child of #sidebar-menu (JinjaX inlines the
   component), so the panel's ``gap-0.5`` (2px) supplies the spacing above it.

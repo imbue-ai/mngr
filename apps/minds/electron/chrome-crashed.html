@@ -1,58 +1,51 @@
 <!DOCTYPE html>
 <!--
-  Chrome (titlebar) crash strip / failed-load error page.
+  Window crash / failed-load error page.
 
-  Loaded LOCALLY into the chrome view by main.js in two cases:
-    * the view's renderer process dies (render-process-gone) -- only the top
-      ~38px band is visible (the content view overlays the rest), so the UI is
-      a single compact row anchored to that titlebar-height band;
-    * a chrome-surface load failed after retries (did-fail-load, loaded with
-      ?reason=load-failed) -- a local page owned the surface, so this page
-      fills the whole window and the copy switches to a load-failure message.
+  Loaded LOCALLY into the window by main.js in two cases:
+    * the window's renderer process dies (render-process-gone) -- the whole
+      window (titlebar, page, workspace iframe) is gone, so this page owns the
+      full window with a centered message;
+    * a top-level load failed after retries (did-fail-load, loaded with
+      ?reason=load-failed) -- same surface, and the copy switches to a
+      load-failure message.
 
-  Runs under preload.js (the trusted first-party window.minds bridge), so the
+  Runs under preload.js (the trusted first-party window.mindsNative bridge), so the
   Reload button drives the shell directly:
-    * Reload -> window.minds.reloadChrome() -> reload-chrome IPC (re-loads the
+    * Reload -> window.mindsNative.reloadChrome() -> reload-chrome IPC (re-loads the
       failed URL when one is recorded, else /_chrome)
 
-  Stateless: it does NOT auto-reload (if /_chrome is what crashed, that would loop),
-  matching the content crash page -- the user is the loop-breaker.
+  Stateless: it does NOT auto-reload (if /_chrome is what crashed, that would loop)
+  -- the user is the loop-breaker.
 -->
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Menu bar crashed</title>
+  <title>Minds stopped responding</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    /* Fill the view with the brand deep-maroon so the parts that peek through the
-       inset frame match; only the top strip actually shows the row. */
+    /* Brand deep-maroon surface, matching the shell loading/error screens. */
     html, body { height: 100%; background: #492222; overflow: hidden; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       color: #E9ECD9;
       user-select: none;
-    }
-    .bar {
-      /* Matches TITLEBAR_HEIGHT in main.js -- the only visible slice of this view.
-         Centered so the row clears the macOS traffic lights on the left and any
-         custom window controls on the right. */
-      height: 38px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 12px;
-      padding: 0 16px;
-      font-size: 13px;
-      /* Only the visible titlebar strip is draggable -- NOT the whole body. The
-         chrome view is a full-window underlay, and macOS unions -webkit-app-region
-         across all views in a window, so a body-wide drag region would turn the
-         entire window (including the content view's crash-page Reload button, when
-         both crash at once) into a drag surface and swallow its clicks. Scoping drag
-         to this 38px strip (which never overlaps the content view) keeps the window
-         movable without capturing clicks meant for the content view below. */
+      /* The window's normal draggable titlebar died with the renderer, so the
+         whole error surface drags; the button opts out below. */
       -webkit-app-region: drag;
     }
-    .msg { opacity: 0.9; white-space: nowrap; }
+    .card {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding: 0 16px;
+      font-size: 13px;
+      text-align: center;
+    }
+    .msg { opacity: 0.9; }
     button {
       -webkit-app-region: no-drag;
       font: inherit;
@@ -70,18 +63,18 @@
   </style>
 </head>
 <body>
-  <div class="bar">
-    <span class="msg" id="msg">The menu bar stopped responding.</span>
+  <div class="card">
+    <span class="msg" id="msg">This window stopped responding.</span>
     <button id="reload" type="button">Reload</button>
   </div>
   <script>
     // Failed-load callers pass ?reason=load-failed (see the header comment);
-    // the default copy belongs to the renderer-crash strip.
+    // the default copy belongs to the renderer-crash case.
     if (new URLSearchParams(window.location.search).get('reason') === 'load-failed') {
       document.getElementById('msg').textContent = 'This screen failed to load.';
     }
     document.getElementById('reload').addEventListener('click', function () {
-      if (window.minds && window.minds.reloadChrome) window.minds.reloadChrome();
+      if (window.mindsNative && window.mindsNative.reloadChrome) window.mindsNative.reloadChrome();
     });
   </script>
 </body>

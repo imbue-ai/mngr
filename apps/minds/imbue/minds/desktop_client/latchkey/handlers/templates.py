@@ -37,8 +37,8 @@ from imbue.mngr_latchkey.workspace_permissions import WorkspaceVerb
 # The catch-all ``any`` permission is stored and submitted verbatim (it is
 # Detent's wildcard schema), but users find ``all`` clearer, so the dialog
 # shows this label in its place while the underlying checkbox value stays
-# ``any``.
-_WILDCARD_PERMISSION_LABEL = "all"
+# ``any``. Public: the typed inbox-detail payload carries it to the SPA.
+WILDCARD_PERMISSION_UI_LABEL: Final[str] = "all"
 
 # Form value of the predefined dialog's "sign a new account in" choice. Chosen
 # to be implausible as a real account name, but the grant flow does not rely on
@@ -113,7 +113,7 @@ def render_predefined_permission_dialog(
         selected_account_value=selected_account_value,
         new_account_value=NEW_ACCOUNT_FORM_VALUE,
         wildcard_permission=WILDCARD_PERMISSION_NAME,
-        wildcard_label=_WILDCARD_PERMISSION_LABEL,
+        wildcard_label=WILDCARD_PERMISSION_UI_LABEL,
         will_open_browser=will_open_browser,
         mngr_forward_origin=mngr_forward_origin,
     )

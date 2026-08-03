@@ -19,3 +19,11 @@ class ForwardAuthError(MngrForwardError):
 
 class ForwardSubprocessError(MngrForwardError):
     """Raised when an ``mngr observe`` / ``mngr event`` subprocess fails to spawn."""
+
+
+class ForwardTLSError(MngrForwardError):
+    """Raised when the TLS material (local CA or server leaf) cannot be built or loaded."""
+
+
+class ForwardTrustError(MngrForwardError):
+    """Raised when the local CA cannot be installed into the platform trust stores."""

@@ -1,9 +1,9 @@
 {#def intro="", return_to="/create", default_to_signup=True, can_restore=False #}
 {#
-  Sign-in modal page, hosted in the desktop client's shared modal
-  WebContentsView -- the same overlay layer as the other centered modals -- so
+  Sign-in modal page, hosted as an overlay-layer iframe in the chrome shell
+  -- the same overlay layer as the other centered modals -- so
   it covers the whole window including the title bar (rather than sitting
-  inside the content view like an in-page dialog). Opened from the create
+  inside the page content like an in-page dialog). Opened from the create
   screen when a signed-out user presses "Create" with the Imbue Cloud preset
   selected, from the welcome splash's Sign Up / Log In buttons, from the home
   screen's account launcher when signed out, and from the Manage Accounts
@@ -16,14 +16,14 @@
   Transparent body + a dim backdrop reveal the screen behind it; the
   centered card holds the shared auth form (``auth.AuthForm``). All form
   interactivity lives in ``static/auth.js``; the inline script below tells it
-  how to route post-auth navigations: they must land in the *content* view
-  behind this overlay and dismiss the modal -- not reload the overlay itself.
-  In Electron that goes through ``window.minds``; as a plain standalone page
-  (browser fallback) it navigates normally.
+  how to route post-auth navigations: they must land in the shell *behind*
+  this overlay and dismiss the modal -- not reload the overlay itself.
+  Inside the shell that goes through ``window.minds``; as a plain standalone
+  page (fallback) it navigates normally.
 
   ``intro`` is the explanatory copy shown under each tab heading (why the user
   is being asked to sign in). ``return_to`` is where a successful sign-in (or
-  a dismissal without signing in) lands the content view; the route validates
+  a dismissal without signing in) lands the shell; the route validates
   it as a safe local path before it reaches this template.
 #}
 {% set _scripts %}
@@ -36,13 +36,14 @@
     // dismissal; this makes a COMPLETED sign-in hand back the same way.
     window.MINDS_AUTH_CAN_RESTORE = {{ can_restore | tojson }};
 
-    // How auth.js performs those navigations. In the Electron modal overlay the
-    // form runs in its own WebContentsView, so navigations must target the
-    // content view behind the modal (navigateContent also dismisses the modal).
-    // Without the bridge (standalone page) we just navigate this page.
+    // How auth.js performs those navigations. This form runs in an
+    // overlay-layer iframe, so navigations must target the shell behind the
+    // modal through the bridge and then close the modal (the overlay layer
+    // keeps modals mounted across content navigations). Without the bridge
+    // (standalone page) we just navigate this page.
     window.MINDS_AUTH_NAV = function (url) {
       // Signing in was a detour from a panel the user was working in, so hand
-      // back to it rather than navigating the content view out from under it.
+      // back to it rather than navigating the shell out from under it.
       // completeModalDetour reveals the panel AND re-renders it: the panel was
       // rendered before this sign-in, so its prompt is still asking for the
       // account that now exists. A plain dismissal (the X, Escape) goes through
@@ -51,11 +52,15 @@
         window.minds.completeModalDetour();
         return;
       }
-      if (window.minds && window.minds.navigateContent) window.minds.navigateContent(url);
-      else window.location.href = url;
+      if (window.minds && window.minds.navigateContent) {
+        window.minds.navigateContent(url);
+        if (window.minds.closeModal) window.minds.closeModal();
+      } else {
+        window.location.href = url;
+      }
     };
 
-    // Escape is handled by the Electron main process for any modal-view page.
+    // Escape is handled by the overlay layer's per-iframe keydown handler.
     window.dismissSigninModal = function () {
       if (window.minds && window.minds.closeModal) window.minds.closeModal();
       else window.location.href = window.MINDS_AUTH_RETURN_TO || "/";
@@ -69,7 +74,7 @@
     }
 
     // "Forgot password?" must not navigate this overlay: a sign-in completed
-    // inside the modal view would strand the whole app there.
+    // inside the modal iframe would strand the whole app there.
     var forgotLink = document.querySelector('a[href="/auth/forgot-password"]');
     if (forgotLink) {
       forgotLink.addEventListener("click", function (e) {

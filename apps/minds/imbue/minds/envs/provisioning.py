@@ -108,10 +108,8 @@ from imbue.minds.errors import MindError
 # in the per-env ``litellm-connector-<tier>`` Modal Secret. For dev-tier
 # deploys this is the per-developer dev env name (e.g. ``dev-josh-3``); for
 # tier deploys it's the tier itself (``staging`` / ``production``).
-# Used by ``cf_create_tunnel`` to tag every Cloudflare tunnel the
-# connector creates with the owning env, so ``minds env destroy`` can
-# enumerate + delete only that env's tunnels (vs walking every tunnel
-# on the shared dev-tier CF account).
+# Used by the connector to scope env-owned resources (e.g. the pool-host
+# cleanup cron audits only this env's lima slices).
 MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
 
 # Env-var name the deployed connector reads at request time to drive
@@ -294,10 +292,6 @@ EnsureGenerationIdFn = Callable[[str, ConcurrencyGroup], str]
 # (tier_vault_prefix, cg) -> None. Removes the generation Vault entry
 # so the next deploy mints a fresh one. Used by tier destroys.
 DeleteGenerationIdFn = Callable[[str, ConcurrencyGroup], None]
-# (name, account_id, api_token) -> tuple of tunnel uuids matching env.
-ListCloudflareTunnelsFn = Callable[[DevEnvName, str, SecretStr], tuple[str, ...]]
-# (tunnel_ids, account_id, api_token) -> None. Deletes the listed tunnels.
-DeleteCloudflareTunnelsFn = Callable[[tuple[str, ...], str, SecretStr], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
 # (name, cg) -> None. Removes the env's mngr Docker state container +
 # backing volume, targeting the one exact container by name. No-op when
@@ -433,18 +427,6 @@ class Providers(FrozenModel):
         description=(
             "(tier_vault_prefix, cg) -> None. Removes secrets/minds/<tier>/generation so the "
             "next deploy mints a fresh id (triggers activate-time auto-wipe on every dev's machine)."
-        ),
-    )
-    list_cloudflare_tunnels_for_env: ListCloudflareTunnelsFn = Field(
-        description=(
-            "(name, account_id, api_token) -> tuple of cloudflare tunnel uuids whose metadata.env "
-            "equals the env name. Used by destroy to enumerate the env's tunnels."
-        ),
-    )
-    delete_cloudflare_tunnels: DeleteCloudflareTunnelsFn = Field(
-        description=(
-            "(tunnel_ids, account_id, api_token) -> None. Deletes the listed cloudflare tunnels. "
-            "Idempotent per-tunnel (404 -> success)."
         ),
     )
 
@@ -1188,23 +1170,18 @@ def destroy_env(
     Steps, in order, for every env type:
 
     1. ``mngr destroy`` every agent under ``~/.minds-<name>/mngr/agents/``
-       so their cloud resources (Docker containers, pool hosts,
-       Cloudflare tunnels) stop cleanly before being torn down.
-       Skipped when ``keep_agents=True``.
-    2. Enumerate + delete every Cloudflare tunnel with
-       ``metadata.env=<name>`` (filtered by env name; the tag the
-       connector sets at create time encodes the owning env, not the
-       tier).
-    3. Clear SuperTokens app data (tier-dependent: delete the app
+       so their cloud resources (Docker containers, pool hosts) stop
+       cleanly before being torn down. Skipped when ``keep_agents=True``.
+    2. Clear SuperTokens app data (tier-dependent: delete the app
        outright for dev / wipe its users for shared tiers).
-    4. Clear Neon DB data (tier-dependent: delete the DB outright for
+    3. Clear Neon DB data (tier-dependent: delete the DB outright for
        dev / DROP SCHEMA for shared tiers).
-    5. Clear Modal infra (tier-dependent: delete the Modal env outright
+    4. Clear Modal infra (tier-dependent: delete the Modal env outright
        for dev / stop apps + delete secrets for shared tiers).
-    6. For shared tiers only: delete the tier generation id from Vault
+    5. For shared tiers only: delete the tier generation id from Vault
        so the next deploy mints a fresh one + every dev's next
        ``activate`` sees a mismatch and auto-wipes their local state.
-    7. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
+    6. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
        succeeded. On any failure, the env root stays so the operator
        can re-run ``destroy`` to pick up where things broke (rather
        than silently leaking expensive cloud resources because the
@@ -1212,11 +1189,11 @@ def destroy_env(
 
     Proceeds even when the env root is missing on disk. The local env
     root is a convenience pointer; the cloud-side resources are keyed
-    off the env *name* (Modal env, Neon project, SuperTokens app,
-    Cloudflare tunnel tags), all of which we can clean
-    up by name without needing the local directory. This makes destroy
-    safe to re-run after an operator who manually ``rm -rf``'d the env
-    root would otherwise be locked out of the cloud cleanup.
+    off the env *name* (Modal env, Neon project, SuperTokens app), all
+    of which we can clean up by name without needing the local
+    directory. This makes destroy safe to re-run after an operator who
+    manually ``rm -rf``'d the env root would otherwise be locked out of
+    the cloud cleanup.
     """
     env_root_was_present = env_root_exists(name)
     if not env_root_was_present:
@@ -1234,7 +1211,7 @@ def destroy_env(
     modal_env_for_tier_ops = _resolve_modal_env(name=name, lifecycle=lifecycle, deploy_config=deploy_config)
 
     # Step 1: mngr agents first, so their docker containers / pool
-    # hosts / tunnels stop cleanly before we tear down the cloud
+    # hosts stop cleanly before we tear down the cloud
     # resources they reference.
     if keep_agents:
         logger.warning(
@@ -1261,23 +1238,7 @@ def destroy_env(
         with info_span("Cleaning up Docker state container for env {!r}", str(name)):
             providers.cleanup_state_container(name, parent_concurrency_group)
 
-    # Step 2: Cloudflare tunnels tagged with this env. Keyed off env
-    # NAME (not tier), since dev envs share the dev-tier CF account and
-    # we want to find only this specific env's tunnels.
-    with info_span("Cleaning up Cloudflare tunnels tagged for env {!r}", str(name)):
-        cf_vault_values = providers.read_per_env_secret_values(
-            "cloudflare",
-            tier_vault_prefix,
-            {},
-            parent_concurrency_group,
-        )
-        deleted_tunnels = _cleanup_cloudflare_tunnels_for_env(
-            name, cloudflare_vault_values=cf_vault_values, providers=providers
-        )
-        if deleted_tunnels:
-            logger.info("Deleted {} Cloudflare tunnel(s) for env {!r}", deleted_tunnels, str(name))
-
-    # Step 3: SuperTokens (dev deletes the per-env app outright; shared
+    # Step 2: SuperTokens (dev deletes the per-env app outright; shared
     # tiers wipe users via delete + recreate of the same app id).
     if lifecycle.creates_resources:
         with info_span("Deleting SuperTokens app for env {!r}", str(name)):
@@ -1296,7 +1257,7 @@ def destroy_env(
             )
             _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
 
-    # Step 4: Neon (dev deletes the per-env *project* outright -- atomic
+    # Step 3: Neon (dev deletes the per-env *project* outright -- atomic
     # teardown of both DBs + roles + endpoints; shared tiers DROP SCHEMA
     # on the operator-managed DB they keep across destroy/redeploy).
     if lifecycle.creates_resources:
@@ -1312,7 +1273,7 @@ def destroy_env(
             )
             _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
 
-    # Step 5: Modal (dev deletes the per-env Modal env outright which
+    # Step 4: Modal (dev deletes the per-env Modal env outright which
     # cascade-deletes its apps / secrets / volumes; shared tiers stop
     # the deployed apps + delete per-tier Modal Secrets so the next
     # deploy re-pushes fresh values from Vault).
@@ -1336,7 +1297,7 @@ def destroy_env(
                 parent_cg=parent_concurrency_group,
             )
 
-    # Step 6: generation id removal -- ONLY for tiers that use generation
+    # Step 5: generation id removal -- ONLY for tiers that use generation
     # tracking (driven by ``deploy_config.lifecycle.tracks_generation``).
     # For dev, there is no generation Vault entry to remove. Production
     # destroy is hard-refused at the CLI today, so this path is only
@@ -1345,7 +1306,7 @@ def destroy_env(
         with info_span("Deleting tier {!r} generation id from Vault", tier):
             providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
 
-    # Step 7: env root removal LAST, only on full success.
+    # Step 6: env root removal LAST, only on full success.
     delete_env_root(name)
 
 
@@ -1375,32 +1336,6 @@ def _wipe_supertokens_for_tier(
     app_id = app_id_from_connection_uri(connection_uri)
     core_base_url = connection_uri.rsplit(f"/appid-{app_id}", 1)[0]
     providers.wipe_supertokens_app_data(app_id, core_base_url, SecretStr(api_key_str))
-
-
-def _cleanup_cloudflare_tunnels_for_env(
-    name: DevEnvName,
-    *,
-    cloudflare_vault_values: dict[str, str],
-    providers: Providers,
-) -> int:
-    """List + delete every Cloudflare tunnel whose metadata.env equals ``name``.
-
-    Returns the count of tunnels deleted. Raises :class:`MindError`
-    when the cloudflare Vault entry is missing the keys we need; the
-    caller propagates so destroy aborts and the operator can fix
-    Vault rather than silently leaking tunnels.
-    """
-    account_id = cloudflare_vault_values.get("CLOUDFLARE_ACCOUNT_ID", "")
-    api_token = cloudflare_vault_values.get("CLOUDFLARE_API_TOKEN", "")
-    if not account_id or not api_token:
-        raise MindError(
-            f"Cannot enumerate Cloudflare tunnels for env {str(name)!r}: cloudflare Vault entry "
-            "is missing CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_API_TOKEN."
-        )
-    tunnel_ids = providers.list_cloudflare_tunnels_for_env(name, account_id, SecretStr(api_token))
-    if tunnel_ids:
-        providers.delete_cloudflare_tunnels(tunnel_ids, account_id, SecretStr(api_token))
-    return len(tunnel_ids)
 
 
 def _wipe_neon_for_tier(

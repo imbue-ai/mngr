@@ -5,7 +5,7 @@ This is the primary flow for how a user would create a workspace for the first t
 3. User visits the login URL to authenticate (sets a global session cookie)
 4. Since no workspaces exist, the landing page shows a creation form with fields for workspace name, git repository URL (or local path), branch, and launch mode (DOCKER/LIMA/VULTR/AWS/IMBUE_CLOUD/MODAL)
 5. User fills in the form and clicks Create
-6. The desktop client clones the repository to a temp directory (if a URL) or uses the local path directly, and runs `mngr create system-services@<host> --new-host --no-connect --label workspace_display_name=<name> --label is_primary=true --template main --template <mode>` (the agent id is read back from the `created` JSONL event rather than pre-generated). If Cloudflare credentials are configured, it also creates a tunnel and injects the tunnel token into the agent.
+6. The desktop client clones the repository to a temp directory (if a URL) or uses the local path directly, and runs `mngr create system-services@<host> --new-host --no-connect --label workspace_display_name=<name> --label is_primary=true --template main --template <mode>` (the agent id is read back from the `created` JSONL event rather than pre-generated).
 7. While creating, the user sees a progress page that polls for status
 8. When creation completes, the user is redirected to their workspace's web interface at `/agents/<agent-id>/web/`
 

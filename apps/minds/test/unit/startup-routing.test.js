@@ -15,7 +15,51 @@ const { decideStartupRoute } = require('../../electron/startup-routing');
 
 test('unauthenticated -> welcome regardless of other state', () => {
   assert.equal(
-    decideStartupRoute({ authenticated: false, hasAccounts: true, workspaceCount: 5, restorableCount: 3 }),
+    decideStartupRoute({
+      authenticated: false,
+      hasAccounts: true,
+      workspaceCount: 5,
+      restorableCount: 3,
+      needsConsent: true,
+    }),
+    'welcome',
+  );
+});
+
+test('unacknowledged consent notice -> consent, before create and restore', () => {
+  assert.equal(
+    decideStartupRoute({
+      authenticated: true,
+      hasAccounts: true,
+      workspaceCount: 0,
+      restorableCount: 0,
+      needsConsent: true,
+    }),
+    'consent',
+  );
+  // Consent outranks restore too: the notice is once-per-install and must
+  // not be skippable by having restorable windows.
+  assert.equal(
+    decideStartupRoute({
+      authenticated: true,
+      hasAccounts: true,
+      workspaceCount: 3,
+      restorableCount: 2,
+      needsConsent: true,
+    }),
+    'consent',
+  );
+});
+
+test('functionally empty stays welcome even when consent is unacknowledged (legacy precedence)', () => {
+  assert.equal(
+    decideStartupRoute({
+      authenticated: true,
+      hasAccounts: false,
+      workspaceCount: 0,
+      restorableCount: 0,
+      needsConsent: true,
+    }),
     'welcome',
   );
 });

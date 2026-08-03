@@ -77,7 +77,11 @@ def test_prevent_broad_exception_catch() -> None:
     # source of truth, so a single unprocessable request must be logged (with
     # traceback) and skipped rather than allowed to kill the thread, which would
     # silently stop every future permission request from reaching the UI.
-    rc.check_broad_exception_catch(_DIR, snapshot(10))
+    # ``UiStatePublisher._run_publish_loop`` carries the same main-loop guard for
+    # the same reason: it is the only publisher of chrome state, so an unexpected
+    # exception in one pass must be logged (with traceback) and survived rather
+    # than silently freezing every window's state for the process lifetime.
+    rc.check_broad_exception_catch(_DIR, snapshot(11))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -175,7 +179,7 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    rc.check_async_await(_DIR, snapshot(11))
+    rc.check_async_await(_DIR, snapshot(13))
 
 
 # --- Hardcoded paths ---
@@ -309,6 +313,12 @@ def test_prevent_direct_subprocess() -> None:
     excluded = TEST_FILE_PATTERNS + (
         "testing.py",
         "scripts/*.py",
+        # ``hatch_build.py`` runs inside hatchling's isolated build
+        # environment, where the repo's concurrency_group wrapper is not
+        # importable -- it is a build-time script in the same spirit as
+        # ``scripts/*.py`` above, just anchored at the package root where
+        # hatchling requires it to live.
+        "hatch_build.py",
         "*/latchkey/_spawn.py",
         "*/desktop_client/forward_cli.py",
         # ``destroying.py`` spawns a detached ``bash -c '<mngr destroy ...>'``

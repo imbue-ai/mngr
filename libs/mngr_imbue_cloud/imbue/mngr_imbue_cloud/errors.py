@@ -39,8 +39,8 @@ class ImbueCloudKeyError(ImbueCloudError):
     """Raised when a LiteLLM key operation fails."""
 
 
-class ImbueCloudTunnelError(ImbueCloudError):
-    """Raised when a Cloudflare tunnel operation fails."""
+class ImbueCloudShareError(ImbueCloudError):
+    """Raised when a self-hosted share operation fails."""
 
 
 class ImbueCloudPaidListError(ImbueCloudError):

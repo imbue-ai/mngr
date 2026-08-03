@@ -127,7 +127,7 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     of letting the helper construct a one-shot client per call.
 
     The proxy serves TLS (HTTP/2), so cert verification is disabled: these
-    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
+    probes dial ``127.0.0.1`` with a ``Host: host-<hex>.localhost`` header, so
     hostname verification could never pass, and the cert is a self-signed
     ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
@@ -143,7 +143,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) ->
     """Issue a single GET through ``probe_client`` and return the status code.
 
     ``probe_url`` targets loopback directly; ``host_header`` carries the
-    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
+    ``host-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
     as an explicit ``Host`` header rather than in the URL keeps the probe from
     depending on ``*.localhost`` name resolution, which is not available on a
     bare Linux host (only loopback ``localhost`` itself reliably resolves).
@@ -163,11 +163,11 @@ def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) ->
 def probe_workspace_through_plugin(
     mngr_forward_port: int,
     preauth_cookie: str,
-    agent_id: AgentId,
+    workspace_host_id: str,
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
-    """Issue a single probe through the plugin to the agent's inner web server.
+    """Issue a single probe through the plugin to the workspace's inner web server.
 
     Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Returns the HTTP status code
     observed (a 200 means some web server is up and answering on the inner
@@ -176,13 +176,16 @@ def probe_workspace_through_plugin(
     (create attempt flow) and the system-interface-health tracker's background
     probe loop so both paths agree on what "ready" means.
 
+    ``workspace_host_id`` is the mngr host id (``host-<hex>``) the plugin
+    routes workspace origins on.
+
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
     one-shot client is constructed for this single probe -- fine for
     one-off / sporadic callers but wasteful in a loop.
     """
     probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
-    host_header = f"{agent_id}.localhost"
+    host_header = f"{workspace_host_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)
     with make_workspace_probe_client(
@@ -1747,7 +1750,7 @@ class AgentCreator(MutableModel):
         frozen=True,
         description=(
             "Dispatcher for surfacing failures from background tasks (e.g. the detached "
-            "Cloudflare tunnel setup task) to the user as OS notifications."
+            "backup-provisioning task) to the user as OS notifications."
         ),
     )
     lima_image_gate: LimaImageCreateGate | None = Field(
@@ -2627,7 +2630,7 @@ class AgentCreator(MutableModel):
                     canonical_id, time.monotonic() + ready_timeout_seconds
                 )
                 try:
-                    self._wait_for_workspace_ready(canonical_id, log_sink, ready_timeout_seconds)
+                    self._wait_for_workspace_ready(canonical_id, canonical_host_id, log_sink, ready_timeout_seconds)
                 finally:
                     self.system_interface_health_tracker.end_create_attempt_grace(canonical_id)
 
@@ -2639,13 +2642,13 @@ class AgentCreator(MutableModel):
                 # would land on FastAPI's default ``{"detail":"Not Found"}``
                 # response instead of being bridged into the agent
                 # subdomain. The plugin owns ``/goto/<agent>/``.
-                redirect_url = self._build_redirect_url(canonical_id)
+                redirect_url = self._build_redirect_url(canonical_host_id)
 
                 # Publish the canonical id + DONE atomically so the UI sees
                 # both at once. ``on_created`` runs after publication so any
-                # downstream consumer (e.g. ``OnCreatedCallback``, which kicks
-                # off the Cloudflare tunnel + workspace association) can rely on
-                # the canonical id.
+                # downstream consumer (e.g. ``OnCreatedCallback``, which records
+                # the workspace<->account association) can rely on the
+                # canonical id.
                 with self._lock:
                     self._canonical_agent_ids[cid_str] = canonical_id
                     self._statuses[cid_str] = AgentCreateAttemptStatus.DONE
@@ -2656,7 +2659,7 @@ class AgentCreator(MutableModel):
                     on_created(canonical_id, canonical_host_id)
 
                 # Configure restic backups asynchronously on a detached
-                # thread (mirrors the Cloudflare tunnel-token path): bucket
+                # thread: bucket
                 # create attempt + injection is a multi-second round-trip we don't
                 # want to block the redirect on, and a failure here is
                 # non-fatal to the already-created workspace. Skipped (no
@@ -2900,22 +2903,23 @@ class AgentCreator(MutableModel):
                 agent_display_name=str(agent_id)[:8],
             )
 
-    def _build_redirect_url(self, agent_id: AgentId) -> str:
+    def _build_redirect_url(self, host_id: HostId) -> str:
         """Build the absolute URL the UI should navigate to after the create attempt.
 
-        Always points at the plugin's ``/goto/<agent>/`` route, never minds'
+        Always points at the plugin's ``/goto/<host-id>/`` route, never minds'
         bare origin -- minds doesn't serve ``/goto/`` and would 404. When
         ``mngr_forward_port`` isn't configured (test fixtures, etc.), falls
         back to the relative form so legacy callers that don't set the field
         keep working.
         """
         if self.mngr_forward_port == 0:
-            return f"/goto/{agent_id}/"
-        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
+            return f"/goto/{host_id}/"
+        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{host_id}/"
 
     def _wait_for_workspace_ready(
         self,
         agent_id: AgentId,
+        host_id: HostId,
         log_sink: CreateAttemptLogSink,
         # The readiness window for this create: ``workspace_ready_timeout_seconds``
         # normally, or the longer build-in-VM window for an imageless Lima create.
@@ -2923,7 +2927,7 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
-        Probes the plugin on loopback (with the agent's ``agent-<hex>.localhost``
+        Probes the plugin on loopback (with the workspace's ``host-<hex>.localhost``
         vhost in the ``Host`` header) and the preauth cookie set, treating any
         200 as ready. Other status codes (typically
         503 from the plugin's auto-refresh page when the system_interface
@@ -2953,7 +2957,7 @@ class AgentCreator(MutableModel):
                 status = probe_workspace_through_plugin(
                     mngr_forward_port=self.mngr_forward_port,
                     preauth_cookie=self.mngr_forward_preauth_cookie,
-                    agent_id=agent_id,
+                    workspace_host_id=str(host_id),
                     probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
                     client=probe_client,
                 )

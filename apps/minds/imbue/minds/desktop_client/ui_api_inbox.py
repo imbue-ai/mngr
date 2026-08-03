@@ -1,0 +1,220 @@
+"""/ui/api routes owned by tranche T5 (inbox/latchkey/help).
+
+The SPA inbox reads a typed card list + per-kind typed detail payloads and
+submits grants/denies to the legacy ``/requests/<id>/grant|deny`` routes (the
+handlers' form contracts are unchanged). The card/detail derivation mirrors
+the legacy SSR helpers in ``app.py`` (``_build_inbox_cards`` /
+``_handle_inbox_detail_fragment``); the duplication is deliberate and small
+-- importing them from ``app.py`` would be a circular import (``app`` imports
+``ui_api`` imports this module) -- and the legacy copies are deleted with the
+rest of the SSR surface in the final cleanup phase.
+"""
+
+import json
+import os
+from typing import Literal
+
+from flask import Blueprint
+from flask import Response
+from flask import request
+from pydantic import Field
+
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.request_events import RequestEvent
+from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_handler import RequestDetailPayload
+from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import find_handler_for_event
+from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.mngr.primitives import AgentId
+
+
+class UiInboxCard(FrozenModel):
+    """One pending-request row in the SPA inbox's left list."""
+
+    id: str = Field(description="Request event id (selection + grant/deny routes key on it)")
+    kind_label: str = Field(description="Short lower-case request-kind label (e.g. 'permission')")
+    ws_name: str = Field(description="Workspace display name the request came from")
+    display_name: str = Field(description="Secondary label (e.g. the friendly service name)")
+    accent: str = Field(description="Workspace accent hex for the card's selection edge")
+
+
+class UiInboxListResponse(FrozenModel):
+    """The SPA inbox's card list (most-recent-first, displayable requests only)."""
+
+    cards: tuple[UiInboxCard, ...] = Field(description="Pending request cards in display order")
+    auto_open: bool = Field(description="Current auto-open-on-new-request preference")
+
+
+class UiInboxUnavailableDetail(FrozenModel):
+    """Detail payload for a request that can no longer be acted on."""
+
+    kind: Literal["unavailable"] = "unavailable"
+    message: str = Field(description="Supporting copy explaining why (may be empty)")
+
+
+class UiInboxDetailResponse(FrozenModel):
+    """Envelope for the right-pane detail payload (discriminated by ``detail.kind``)."""
+
+    detail: RequestDetailPayload | UiInboxUnavailableDetail = Field(description="The per-kind detail payload")
+
+
+class UiInboxAutoOpenRequest(FrozenModel):
+    """Body of POST /ui/api/inbox/auto-open."""
+
+    enabled: bool = Field(description="Whether the inbox should auto-open on new requests")
+
+
+def _is_inbox_request_authenticated() -> bool:
+    """Session-cookie check; mirrors ``ui_api.is_ui_request_authenticated``.
+
+    Duplicated (5 lines) because ``ui_api`` imports this module at load time,
+    so importing back would be circular. Consolidated in the final cleanup
+    phase alongside the other per-area copies.
+    """
+    if os.getenv("SKIP_AUTH", "0") == "1":
+        return True
+    signing_key = get_state().auth_store.get_signing_key()
+    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_value is None:
+        return False
+    return verify_session_cookie(cookie_value=cookie_value, signing_key=signing_key)
+
+
+def _json_response(payload: FrozenModel, status_code: int = 200) -> Response:
+    return Response(payload.model_dump_json(), status=status_code, mimetype="application/json")
+
+
+def _json_error(message: str, status_code: int) -> Response:
+    return Response(json.dumps({"error": message}), status=status_code, mimetype="application/json")
+
+
+def _displayable_pending_requests(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> list[RequestEvent]:
+    """Pending requests whose originating agent's host is currently resolvable.
+
+    Twin of the legacy helper in ``app.py`` (kept in lockstep until the SSR
+    surface is deleted): requests from since-vanished workspaces would render
+    as meaningless hex ids, so they are hidden until their host reappears.
+    """
+    pending = inbox.get_pending_requests() if inbox else []
+    displayable: list[RequestEvent] = []
+    for req in pending:
+        try:
+            agent_id = AgentId(req.agent_id)
+        except InvalidRandomIdError:
+            continue
+        if backend_resolver.get_agent_display_info(agent_id) is not None:
+            displayable.append(req)
+    return displayable
+
+
+def _resolved_workspace_accent(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
+    stored = backend_resolver.get_workspace_color(agent_id)
+    return stored if stored is not None else DEFAULT_WORKSPACE_COLOR
+
+
+def _build_inbox_card(
+    req: RequestEvent,
+    handlers: tuple[RequestEventHandler, ...],
+    backend_resolver: BackendResolverInterface,
+    primary_agent_id_by_ws_name: dict[str, str],
+) -> UiInboxCard:
+    handler = find_handler_for_event(handlers, req)
+    if handler is not None:
+        kind_label = handler.kind_label()
+        display_name = handler.display_name_for_event(req)
+    else:
+        # Unknown request type: still surfaced so the user sees something is
+        # wrong (it cannot be rendered or resolved without a handler).
+        kind_label = "request"
+        display_name = ""
+    parsed_id = AgentId(req.agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
+    if not ws_name:
+        info = backend_resolver.get_agent_display_info(parsed_id)
+        ws_name = info.agent_name if info else req.agent_id[:16]
+    # Accent follows the homepage tile for the workspace: requests are filed
+    # by the system-services sibling agent, so resolve through the
+    # user-facing agent that shares the workspace name.
+    primary_agent_id_str = primary_agent_id_by_ws_name.get(ws_name)
+    accent = (
+        _resolved_workspace_accent(backend_resolver, AgentId(primary_agent_id_str))
+        if primary_agent_id_str is not None
+        else DEFAULT_WORKSPACE_COLOR
+    )
+    return UiInboxCard(
+        id=str(req.event_id), kind_label=kind_label, ws_name=ws_name, display_name=display_name, accent=accent
+    )
+
+
+def _handle_inbox_list() -> Response:
+    if not _is_inbox_request_authenticated():
+        return _json_error("Not authenticated", status_code=401)
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    handlers: tuple[RequestEventHandler, ...] = state.request_event_handlers
+    pending = _displayable_pending_requests(state.request_inbox, backend_resolver)
+    primary_agent_id_by_ws_name: dict[str, str] = {}
+    for aid in backend_resolver.list_known_workspace_ids():
+        wn = backend_resolver.get_workspace_name(aid)
+        if wn and wn not in primary_agent_id_by_ws_name:
+            primary_agent_id_by_ws_name[wn] = str(aid)
+    cards = tuple(_build_inbox_card(req, handlers, backend_resolver, primary_agent_id_by_ws_name) for req in pending)
+    minds_config: MindsConfig | None = state.minds_config
+    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+    return _json_response(UiInboxListResponse(cards=cards, auto_open=auto_open))
+
+
+def _handle_inbox_detail(request_id: str) -> Response:
+    if not _is_inbox_request_authenticated():
+        return _json_error("Not authenticated", status_code=401)
+    state = get_state()
+    inbox: RequestInbox | None = state.request_inbox
+    if inbox is None:
+        return _json_response(UiInboxDetailResponse(detail=UiInboxUnavailableDetail(message="")))
+    req_event = inbox.get_request_by_id(request_id)
+    if req_event is None:
+        return _json_response(
+            UiInboxDetailResponse(
+                detail=UiInboxUnavailableDetail(message="It may have expired, or it was opened from an old link.")
+            )
+        )
+    if inbox.is_request_resolved(request_id):
+        return _json_response(
+            UiInboxDetailResponse(detail=UiInboxUnavailableDetail(message="It has already been processed."))
+        )
+    handlers: tuple[RequestEventHandler, ...] = state.request_event_handlers
+    handler = find_handler_for_event(handlers, req_event)
+    if handler is None:
+        return _json_error(f"No handler registered for request type {req_event.request_type!r}", status_code=500)
+    payload = handler.build_request_detail_payload(req_event=req_event, backend_resolver=state.backend_resolver)
+    return _json_response(UiInboxDetailResponse(detail=payload))
+
+
+def _handle_inbox_auto_open() -> Response:
+    if not _is_inbox_request_authenticated():
+        return _json_error("Not authenticated", status_code=401)
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict) or "enabled" not in body:
+        return _json_error("Request body must be a JSON object with 'enabled'", status_code=400)
+    parsed = UiInboxAutoOpenRequest(enabled=bool(body["enabled"]))
+    minds_config: MindsConfig | None = get_state().minds_config
+    if minds_config is not None:
+        minds_config.set_auto_open_requests_panel(parsed.enabled)
+    return Response(json.dumps({"ok": True}), mimetype="application/json")
+
+
+def register_inbox_routes(blueprint: Blueprint) -> None:
+    """Register this area's /ui/api routes on the shared /ui blueprint."""
+    blueprint.add_url_rule("/api/inbox", view_func=_handle_inbox_list, methods=["GET"])
+    blueprint.add_url_rule("/api/inbox/<request_id>/detail", view_func=_handle_inbox_detail, methods=["GET"])
+    blueprint.add_url_rule("/api/inbox/auto-open", view_func=_handle_inbox_auto_open, methods=["POST"])

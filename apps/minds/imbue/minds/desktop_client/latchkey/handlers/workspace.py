@@ -51,7 +51,11 @@ from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
+from imbue.minds.desktop_client.request_handler import UiWorkspacePermissionDetail
+from imbue.minds.desktop_client.request_handler import UiWorkspaceVerbChoice
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
@@ -187,6 +191,38 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
             target_workspace_name=target_name,
             show_target_choice=bool(target_name),
             mngr_forward_origin=mngr_forward_origin,
+        )
+
+    def build_request_detail_payload(
+        self,
+        req_event: RequestEvent,
+        backend_resolver: BackendResolverInterface,
+    ) -> RequestDetailPayload:
+        if not isinstance(req_event, LatchkeyWorkspacePermissionRequestEvent):
+            return UiUnsupportedDetail(message="Unsupported request type")
+        parsed_agent_id = AgentId(req_event.agent_id)
+        ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
+        target_name = _resolve_target_name(backend_resolver, req_event.target_workspace_id)
+        requested = set(req_event.permissions)
+        checked = tuple(verb.permission for verb in WORKSPACE_VERBS if verb.permission in requested)
+        return UiWorkspacePermissionDetail(
+            request_id=str(req_event.event_id),
+            agent_id=req_event.agent_id,
+            ws_name=ws_name,
+            rationale=req_event.rationale,
+            verbs=tuple(
+                UiWorkspaceVerbChoice(
+                    permission=verb.permission,
+                    display_name=verb.display_name,
+                    description=verb.description,
+                    is_targeted=verb.is_targeted,
+                )
+                for verb in WORKSPACE_VERBS
+            ),
+            checked_permissions=checked,
+            target_workspace_id=req_event.target_workspace_id,
+            target_workspace_name=target_name,
+            show_target_choice=bool(target_name),
         )
 
     def apply_grant_request(

@@ -57,22 +57,20 @@ excludes the whole `apps/minds` tree by path.
   `test_deploy_new_version`, `test_deploy_auto_rollback_on_broken_healthcheck`,
   `test_deploy_then_destroy_round_trip`.
 - `@pytest.mark.minds_services` (run against a pre-stood-up shared env):
-  `test_logged_in_smoke`, `test_realistic_signup_verify_signin_create_tunnel_signout`
-  (currently `skip`), `test_litellm_spend_tracking_via_local_workspace`
+  `test_logged_in_smoke`, `test_litellm_spend_tracking_via_local_workspace`
   (currently `skip`).
 
 ### 1.4 JS / Electron tests (`apps/minds/test/`)
 
-- **Node unit** (`test/unit/startup-routing.test.js`): 7 `node --test` cases for
-  startup routing. Run via `pnpm test:unit`. **Not in any CI workflow.**
+- **Node unit** (`test/unit/*.test.js`): `node --test` suites for the pure
+  Electron-shell helpers (startup routing, surface routing, deeplinks, session
+  persistence, log handling, the embed contract). Run via `pnpm test:unit`.
+  **Not in any CI workflow.**
 - **Playwright e2e** (`test/e2e/`, `playwright.config.js`, `pnpm test:e2e`):
   - `macos-launch.spec.js` -- launches the installed `/Applications/Minds.app`
-    via the `mindsApp` fixture. **The only JS spec wired into CI** (in
-    `minds-launch-to-msg.yml`).
-  - `landing-stopped-mind-restart.spec.js` and `recovery-redirect.spec.js` --
-    fast DOM-level renderer-contract tests (plain browser `page`, no
-    Electron/Docker/backend; shell out to `uv` to render the real Jinja). Run
-    locally only; **not in CI.**
+    via the `mindsApp` fixture. **The only JS spec** (wired into CI in
+    `minds-launch-to-msg.yml`). The legacy renderer-contract specs were
+    deleted with the pre-SPA shell scripts they drove.
 
 ### 1.5 CI map
 
@@ -293,7 +291,7 @@ environment today:
     through the hub-brokered loopback endpoint. The broker itself is implemented;
     the local->local half can run in the snapshot stage (proposal 2b below),
     while the remote-caller half needs a cloud host so it stays release-only.
-16. **imbue_cloud create + backup/tunnel parity** [deployment] -- already covered
+16. **imbue_cloud create + backup parity** [deployment] -- already covered
     in spirit by the `minds_deployment`/`minds_services` suites.
 
 ## Note on testability gaps

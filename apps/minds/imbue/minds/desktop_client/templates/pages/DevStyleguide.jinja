@@ -508,9 +508,9 @@
        (@theme --radius-*) plus the built-in rounded-full / rounded-none; a
        ratchet holds the set. The one exception is the chrome content surface
        that tucks under the colored titlebar (Chrome.jinja's #content-frame),
-       which keeps a structural ``rounded-[12px]`` -- that 12px matches
-       Electron's ``CONTENT_CORNER_RADIUS`` and the OS window's outer rounding,
-       so both browser-mode iframe and Electron WebContentsView nest the same. #}
+       which keeps a structural ``rounded-[12px]`` -- that 12px matches the
+       OS window's outer rounding, so the workspace iframe nests the same in
+       the desktop app and plain browsers. #}
     <section id="radius" class="scroll-mt-8 mb-12">
       <h2 class="type-heading text-primary mb-1">Corner radius</h2>
       <p class="type-helper text-secondary mb-4">
@@ -859,8 +859,8 @@
       <div class="mt-0.5 type-helper text-secondary font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
     </section>
 
-    {# Sidebar items. The sidebar is a floating menu (shared modal
-       WebContentsView in Electron, inline overlay in browser). Each row
+    {# Sidebar items. The sidebar is a floating menu mounted as an
+       overlay-layer iframe in the chrome shell. Each row
        is built by the shared window.mindsSidebarRow.buildRow helper; the
        styleguide renders its samples through that exact builder (see
        dev_styleguide.js) so this catalog can't drift from the live menu.
@@ -869,7 +869,7 @@
       <h2 class="type-heading text-primary mb-2">Sidebar items</h2>
       <div id="styleguide-sidebar-rows"
            class="dark w-[280px] flex flex-col gap-0.5 p-1 rounded-lg border border-subtle bg-surface-primary overflow-hidden"></div>
-      <div class="mt-1 type-helper text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New machine" / "Manage account(s)" rows below the machine list.</div>
+      <div class="mt-1 type-helper text-secondary font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder used by static/sidebar.js; SidebarBottom.jinja supplies the "New machine" / "Manage account(s)" rows below the machine list.</div>
     </section>
 
     {# Accent spine. The left stripe is the only surface in the catalog that

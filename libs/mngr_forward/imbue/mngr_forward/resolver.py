@@ -1,6 +1,6 @@
-"""Resolves ``<agent-id>.localhost`` requests to a backend ``ProxyTarget``.
+"""Resolves ``[<service>.]host-<hex>.localhost`` requests to a backend ``ProxyTarget``.
 
-Holds three pieces of state, all updated externally:
+Holds four pieces of state, all updated externally:
 
 - The configured forwarding strategy: either ``ForwardServiceStrategy`` (look
   up a named service URL per agent) or ``ForwardPortStrategy`` (forward to a
@@ -9,10 +9,14 @@ Holds three pieces of state, all updated externally:
   ``mngr event`` stream's ``services`` source.
 - ``ssh_by_agent``: per-agent SSH info, populated from the ``mngr observe``
   stream's ``HOST_SSH_INFO`` events; absent for local agents.
+- ``host_by_agent``: which host each known agent runs on, populated from
+  discovery (or the ``--no-observe`` snapshot). Hostnames name *hosts*, so
+  ``resolve_agent_for_host`` maps the Host-header coordinate back to the
+  agent whose registered services should serve it.
 
-The single public method ``resolve(agent_id)`` returns ``None`` when the
-agent is unknown, the requested service URL is not yet discovered, or the
-agent has no SSH info but the strategy requires one.
+``resolve(agent_id, service_name)`` returns ``None`` when the agent is
+unknown, the requested service URL is not yet discovered, or the agent has
+no SSH info but the strategy requires one.
 """
 
 import threading
@@ -65,7 +69,13 @@ class ForwardResolver(MutableModel):
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    # Per-agent origin label -> service name. Origins are ``<label>.host-<hex>``
+    # where the label is unguessable (``<name>-<rand>``); grants and the backend
+    # service map stay keyed by name, so an incoming label is mapped back here.
+    # A service with no distinct label routes under its own name (label == name).
+    _label_to_name_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _ssh_by_agent: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
+    _host_by_agent: dict[str, str] = PrivateAttr(default_factory=dict)
     _known_agent_ids: set[str] = PrivateAttr(default_factory=set)
     _initial_discovery_done: bool = PrivateAttr(default=False)
 
@@ -95,6 +105,8 @@ class ForwardResolver(MutableModel):
                 if self._services_by_agent.pop(aid_str, None) is not None:
                     services_changed = True
                 self._ssh_by_agent.pop(aid_str, None)
+                self._host_by_agent.pop(aid_str, None)
+                self._label_to_name_by_agent.pop(aid_str, None)
             self._known_agent_ids = new_set
             self._initial_discovery_done = True
             if services_changed:
@@ -124,6 +136,8 @@ class ForwardResolver(MutableModel):
             self._known_agent_ids.discard(aid_str)
             services_changed = self._services_by_agent.pop(aid_str, None) is not None
             self._ssh_by_agent.pop(aid_str, None)
+            self._host_by_agent.pop(aid_str, None)
+            self._label_to_name_by_agent.pop(aid_str, None)
             if services_changed:
                 snapshot = self._snapshot_services_locked()
         if snapshot is not None:
@@ -141,6 +155,48 @@ class ForwardResolver(MutableModel):
             self._services_by_agent[str(agent_id)] = dict(services)
             snapshot = self._snapshot_services_locked()
         self._publish_services_snapshot(snapshot)
+
+    def update_service_labels(self, agent_id: AgentId, label_to_name: dict[str, str]) -> None:
+        """Replace the known origin-label -> service-name map for a single agent.
+
+        Not emitted or persisted -- labels are re-derived live from the same
+        service event stream that feeds ``update_services``.
+        """
+        with self._lock:
+            self._label_to_name_by_agent[str(agent_id)] = dict(label_to_name)
+
+    def resolve_by_origin_label(self, agent_id: AgentId, origin_label: str) -> ProxyTarget | None:
+        """Resolve a ``<label>.host-<hex>`` service origin to its backend.
+
+        Maps the (unguessable) origin label back to its service name, then
+        resolves by name. A label with no known mapping falls back to being
+        treated as the name itself, so a service registered without a distinct
+        label (or a plain non-minds agent) still resolves at its own origin.
+        """
+        with self._lock:
+            service_name = self._label_to_name_by_agent.get(str(agent_id), {}).get(origin_label, origin_label)
+        return self.resolve(agent_id, service_name)
+
+    def shell_origin_label(self, agent_id: AgentId) -> str | None:
+        """The origin label of the configured shell service, for the bare-origin redirect.
+
+        Returns None in port-forward mode (no shell service) or before the
+        shell's label has been discovered, in which case the bare origin is
+        served directly rather than redirected.
+        """
+        match self.strategy:
+            case ForwardServiceStrategy(service_name=shell_service_name):
+                with self._lock:
+                    label_to_name = self._label_to_name_by_agent.get(str(agent_id), {})
+                    for label, name in label_to_name.items():
+                        if name == shell_service_name:
+                            return label
+                return None
+            case ForwardPortStrategy():
+                return None
+            case _ as unreachable:  # pragma: no cover
+                assert_never(unreachable)
+                raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
 
     def seed_services(self, services_by_agent: dict[str, dict[str, str]]) -> None:
         """Seed the per-agent service map from a last-known cache at startup.
@@ -173,6 +229,32 @@ class ForwardResolver(MutableModel):
         with self._lock:
             self._ssh_by_agent[str(agent_id)] = ssh_info
 
+    def set_agent_host(self, agent_id: AgentId, host_id_str: str) -> None:
+        """Record which host an agent runs on (from discovery or a list snapshot)."""
+        with self._lock:
+            self._host_by_agent[str(agent_id)] = host_id_str
+
+    def resolve_agent_for_host(self, host_id_str: str) -> AgentId | None:
+        """Map a Host-header ``host-<hex>`` coordinate to the agent that serves it.
+
+        When several known agents share the host (possible in general, though
+        the plugin's CEL filters usually reduce to one per host), the choice
+        is deterministic: the lexicographically-smallest agent id wins.
+        """
+        with self._lock:
+            candidates = sorted(
+                aid
+                for aid, host in self._host_by_agent.items()
+                if host == host_id_str and aid in self._known_agent_ids
+            )
+        if not candidates:
+            return None
+        return AgentId(candidates[0])
+
+    def get_host_for_agent(self, agent_id: AgentId) -> str | None:
+        with self._lock:
+            return self._host_by_agent.get(str(agent_id))
+
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
         """All currently-known agent IDs (sorted for stable ordering)."""
         with self._lock:
@@ -186,8 +268,16 @@ class ForwardResolver(MutableModel):
         with self._lock:
             return self._ssh_by_agent.get(str(agent_id))
 
-    def resolve(self, agent_id: AgentId) -> ProxyTarget | None:
-        """Resolve ``agent_id`` to a backend ``ProxyTarget``, or None if unroutable."""
+    def resolve(self, agent_id: AgentId, service_name: str | None = None) -> ProxyTarget | None:
+        """Resolve ``(agent_id, service_name)`` to a backend ``ProxyTarget``, or None if unroutable.
+
+        ``service_name`` is the label parsed from a service origin
+        (``<name>.host-<hex>.localhost``); ``None`` means the bare workspace
+        origin, which maps to the configured strategy (the shell service in
+        service mode, the fixed port in manual mode). A named service is
+        looked up directly in the agent's registered service map, so any
+        registered service is reachable at its own origin.
+        """
         with self._lock:
             aid_str = str(agent_id)
             if aid_str not in self._known_agent_ids:
@@ -195,18 +285,23 @@ class ForwardResolver(MutableModel):
             ssh_info = self._ssh_by_agent.get(aid_str)
             services = self._services_by_agent.get(aid_str, {})
 
-        match self.strategy:
-            case ForwardServiceStrategy(service_name=service_name):
-                url = services.get(service_name)
-                if url is None:
-                    return None
-                return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
-            case ForwardPortStrategy(remote_port=remote_port):
-                # Manual mode: target ``127.0.0.1:<remote_port>`` on the agent's
-                # host. Local agents reach this directly; remote agents go via
-                # an SSH ``direct-tcpip`` tunnel.
-                url = f"http://127.0.0.1:{remote_port}"
-                return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
-            case _ as unreachable:  # pragma: no cover
-                assert_never(unreachable)
-                raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
+        # The bare origin maps to the configured strategy: the shell service in
+        # service mode, the fixed port in manual mode.
+        if service_name is None:
+            match self.strategy:
+                case ForwardServiceStrategy(service_name=shell_service_name):
+                    service_name = shell_service_name
+                case ForwardPortStrategy(remote_port=remote_port):
+                    # Manual mode: target ``127.0.0.1:<remote_port>`` on the
+                    # agent's host. Local agents reach this directly; remote
+                    # agents go via an SSH ``direct-tcpip`` tunnel.
+                    url = f"http://127.0.0.1:{remote_port}"
+                    return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)
+                case _ as unreachable:  # pragma: no cover
+                    assert_never(unreachable)
+                    raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
+
+        url = services.get(service_name)
+        if url is None:
+            return None
+        return ProxyTarget(url=BackendUrl(url), ssh_info=ssh_info)

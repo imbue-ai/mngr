@@ -40,6 +40,10 @@
     // formal light/dark UX lands in a later stage. Absent flag => light.
     try { if (localStorage.getItem('minds-theme') === 'dark') document.documentElement.classList.add('dark'); } catch (e) {}
   </script>
+  {# Pages hosted as same-origin modal iframes inside the chrome page's
+     overlay layer resolve the shell bridge (window.minds) from their parent
+     BEFORE their own scripts run. A no-op for top-level pages. #}
+  <script src="/_static/modal_bridge.js"></script>
   {# Frontend (browser) Sentry error reporting. Emitted only when reporting is
      enabled and a real DSN is configured for the environment; the payload is
      resolved by the backend (imbue/minds/utils/sentry/frontend.py). Loaded
@@ -59,10 +63,10 @@
   {{ scripts }}
   {# Custom tooltips for any element carrying ``data-tooltip``. Wires the
      triggers on every page and picks a render backend by environment: the
-     overlay surface where the ``window.minds`` bridge exists (the chrome
-     titlebar + the overlay modal pages), or an in-page bubble otherwise (e.g.
-     the landing workspace-row buttons in the bridge-less content view). See
-     templates/README.md's "CSS classes for JS-rendered surfaces" note. #}
+     overlay layer where the ``window.minds`` bridge exists (the chrome shell
+     + the hosted modal pages), or an in-page bubble on a bridge-less
+     standalone page load. See templates/README.md's "CSS classes for
+     JS-rendered surfaces" note. #}
   <script src="/_static/tooltip_triggers.js" defer></script>
 </body>
 </html>

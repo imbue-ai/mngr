@@ -94,6 +94,53 @@ deploy-apt-mirror:
 test-apt-mirror-worker:
   cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
 
+
+# Render a sharing-relay region's on-disk config (frps.toml, nftables.conf, the
+# :80 redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see
+# apps/share_relay/README.md. CONTENT_DOMAIN is the env's content apex
+# (imbueminds.com / minds-staging.com / minds-dev.com); PLUGIN_AUTH_URL is the
+# connector's /frps/auth endpoint for that env.
+[group("share-relay ops")]
+render-share-relay region content_domain plugin_auth_url out_dir:
+  uv run share-relay render --region {{region}} --content-domain {{content_domain}} \
+    --plugin-auth-url {{plugin_auth_url}} --out-dir {{out_dir}}
+
+# Create one relay instance on OVH Public Cloud (reads OVH_* + OVH_CLOUD_PROJECT_ID
+# from the env; values live in Vault under secrets/minds/<tier>/ovh).
+[group("share-relay ops")]
+provision-share-relay env_name region ovh_region ssh_public_key_file:
+  uv run share-relay provision --env-name {{env_name}} --region {{region}} \
+    --ovh-region {{ovh_region}} --ssh-public-key-file {{ssh_public_key_file}}
+
+# Install/refresh a relay host's software + config (pinned frps, nftables,
+# :80 redirector, healthcheck) and restart its services. plugin_auth_url must
+# include the shared-secret path segment: https://<connector>/frps/auth/<secret>
+# (the secret lives in Vault under secrets/minds/<tier>/sharing/FRPS_AUTH_SECRET).
+[group("share-relay ops")]
+deploy-share-relay host region content_domain plugin_auth_url:
+  uv run share-relay deploy --host {{host}} --region {{region}} \
+    --content-domain {{content_domain}} --plugin-auth-url {{plugin_auth_url}}
+
+# Point the region's DNS at a relay IP: relay.<region>.<domain> + *.<region>.<domain>
+# gray-cloud A records (reads CLOUDFLARE_API_TOKEN + CLOUDFLARE_ZONE_ID from the env).
+[group("share-relay ops")]
+dns-share-relay region content_domain ip:
+  uv run share-relay dns --region {{region}} --content-domain {{content_domain}} --ip {{ip}}
+
+# List / destroy relay instances in the OVH Public Cloud project.
+[group("share-relay ops")]
+list-share-relays:
+  uv run share-relay list
+
+[group("share-relay ops")]
+destroy-share-relay instance_id:
+  uv run share-relay destroy --instance-id {{instance_id}}
+
+# Run the share_relay test suite.
+[group("share-relay test")]
+test-share-relay:
+  uv run pytest apps/share_relay
+
 # Regenerate the committed hash-locked image_requirements.txt exports that the
 # Modal service images (remote_service_connector, modal_litellm) install from.
 # Run after changing an app's [dependency-groups] image pins or relocking

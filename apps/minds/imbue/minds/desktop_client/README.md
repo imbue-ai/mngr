@@ -2,12 +2,28 @@
 
 The local desktop client is a Flask app that handles authentication and traffic forwarding. It is the gateway through which users access all their workspaces.
 
-> For UI / template work (JinjaX components, the primitive catalog,
-> visual-diff workflow, JinjaX gotchas), see
-> [`templates/README.md`](templates/README.md) -- read that BEFORE adding
-> inline Tailwind to a template.
+> **UI is a Mithril single-page app.** The user-facing UI is a client-rendered
+> Mithril SPA under [`../../../frontend/`](../../../frontend) (its own
+> Vite/TypeScript/Tailwind package, built into `static/ui/` at wheel-build
+> time). Flask serves the SPA's `index.html` for every hub route and exposes a
+> session-authed JSON surface at `/ui/api/*` plus one WebSocket per window at
+> `/ui/ws`. The WebSocket carries all live state (workspaces, accounts,
+> providers, requests, per-workspace health, discovery health, and one-shot
+> events) from a single edge-driven publisher (`ui_publisher.py`) through a
+> per-client-queue broadcaster (`ui_channel.py`); the handshake is driven
+> directly with `simple_websocket` (no flask-sock, so the session check runs
+> before the socket is hijacked) on top of the cheroot gateway adapter in
+> `ws_gateway.py`. First paint is seeded from a bootstrap document inlined
+> into the served page.
+>
+> The legacy server-rendered JinjaX pages (`templates/`, `templates.py`) and
+> the vanilla-JS `static/*.js` are being removed; new UI work belongs in the
+> `frontend/` package, not in a template. The `/_chrome/events` SSE stream is
+> no longer consumed by any UI -- its payloads ride the WebSocket now (the
+> route itself, and the broker bridge that feeds the publisher, go away with
+> the legacy deletion follow-up).
 
-Each workspace already runs its own `system_interface`, which serves the dockview UI and exposes its services under `/service/<name>/...` paths (handling Service Worker bootstrap, path rewriting, cookie scoping, and WebSocket shims internally). The desktop client's job is to route browser traffic for `<agent-id>.localhost:PORT/*` to the correct system interface -- it does not rewrite paths or inject anything itself.
+Each workspace already runs its own `system_interface`, which serves the dockview UI at the workspace's bare origin; every other registered service owns its own origin (`<service>.host-<hex>.localhost:PORT/`), so nothing proxies or rewrites service traffic. The desktop client's job is to route browser traffic for `[<service>.]host-<hex>.localhost:PORT/*` to the right in-workspace backend -- it does not rewrite paths or inject anything itself.
 
 This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible locally.
 
@@ -17,7 +33,7 @@ Authentication is global (one session grants access to all agents). The desktop 
 
 - **Signing key**: generated once on first server start, stored at `{data_directory}/signing_key`. Used to sign all auth cookies.
 - **One-time codes**: a login code is generated and printed to the terminal when the server starts. Codes are stored in `{data_directory}/one_time_codes.json` and can only be used once.
-- **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. It is issued with `Domain=localhost` when the request host is `localhost` or an `<agent-id>.localhost` subdomain, so the browser carries it across all workspace subdomains with a single sign-in.
+- **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. It is issued with `Domain=localhost` when the request host is `localhost` or a `host-<hex>.localhost` workspace subdomain, so the browser carries it across all workspace subdomains with a single sign-in.
 
 ## Local desktop client routes
 
@@ -61,22 +77,22 @@ Authentication is global (one session grants access to all agents). The desktop 
     page becomes the record-backed detail view: retry + discard for an interrupted
     create attempt, persisted error + log tail + dismiss for a failed one
 
-`<agent-id>.localhost:PORT/*` (subdomain catch-all, requires auth):
+`[<service>.]host-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize
-    `<agent-id>.localhost(:port)` hosts and byte-forward the HTTP or
-    WebSocket request to that workspace's system_interface (resolved
-    via the backend resolver, optionally through an SSH tunnel). Unknown
-    subdomains return 404; unauthenticated HTML navigations redirect to
-    the bare-origin landing page so the user can sign in.
+    `[<service>.]host-<hex>.localhost(:port)` hosts and byte-forward the
+    HTTP or WebSocket request to that workspace's matching backend: the
+    bare origin reaches the system_interface, `<service>.` origins reach
+    that registered service (resolved via the backend resolver, optionally
+    through an SSH tunnel). Unknown hosts return 404; unauthenticated HTML
+    navigations redirect to the bare-origin landing page so the user can
+    sign in.
 
 ## Proxying design
 
-Because the desktop client only byte-forwards requests to the per-workspace `system_interface`, each workspace keeps its own origin (an `<agent-id>.localhost` subdomain). Within each workspace origin, the system interface is responsible for multiplexing the workspace's individual services under `/service/<name>/...`:
+The desktop client only byte-forwards requests. Each workspace owns a family of origins keyed by its host id: the bare `host-<hex>.localhost` origin serves the shell (system_interface), each registered service owns `<service>.host-<hex>.localhost`, and deeper labels route to the same service (its own sub-origin space for multi-origin apps). Services therefore run unmodified -- root-absolute URLs, WebSockets, cookies, and service workers all work as written; nothing rewrites anything. One session cookie scoped `Domain=host-<hex>.localhost` (set by the forwarder's `/goto/` bridge, with `SameSite=None; Secure; Partitioned` so it is sent from inside the chrome's cross-site iframe) covers the whole family.
 
-- On first navigation to a service, the system interface returns a bootstrap page that installs a Service Worker scoped to `/service/<name>/`.
-- The SW intercepts all same-origin requests and rewrites paths to include the prefix.
-- HTML responses have a WebSocket shim injected to rewrite WS URLs.
-- Cookie paths in `Set-Cookie` headers are rewritten to scope under the service prefix.
-- WebSocket connections are proxied bidirectionally.
+## The SPA shell and the workspace iframe
 
-See `service_dispatcher.py` in the system_interface (at `default-workspace-template/system/apps/system_interface/imbue/system_interface/`) for the service-side implementation.
+The user-facing UI is one web context per window (both in the desktop app and in a plain browser): the Mithril SPA shell, which renders the titlebar, the hub pages (Home, Create, Settings, ... routed client-side by `frontend/src/router.ts`), the sandboxed cross-origin iframe that displays workspace content (`frontend/src/views/shell/WorkspaceFrame.ts`), and in-DOM Mithril modals. Workspace entry goes through `GET /forward-bridge?next=/goto/<host-id>/`: minds verifies its own session and 302s to the forward plugin's `/_bridge` with a spawn-time secret, which sets the plugin's bare-origin cookie and redirects onward -- the browser twin of the Electron shell's programmatic cookie injection.
+
+Shell<->workspace messaging flows exclusively through the embed contract (`static/embed_contract.js`, documented in `apps/minds/docs/embed-contract.md`); the forward plugin's appended `frame-ancestors` policy is what makes "being framed at all" proof the embedder was allowed.

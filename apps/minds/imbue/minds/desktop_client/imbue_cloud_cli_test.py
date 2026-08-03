@@ -32,12 +32,12 @@ def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
         stderr=traceback_stderr,
     )
     with pytest.raises(ImbueCloudCliError) as exc_info:
-        cli._expect_success(result, "tunnels list")
+        cli._expect_success(result, "shares list")
 
     message = str(exc_info.value)
     assert "Traceback" not in message
     assert "httpx.ConnectError" not in message
-    assert "tunnels list" in message
+    assert "shares list" in message
     # The full subprocess output is still available for server-side logging.
     assert "httpx.ConnectError" in exc_info.value.stderr
 
@@ -121,14 +121,14 @@ def test_run_routes_through_mngr_caller_with_home_cwd_and_connector_env() -> Non
     """``ImbueCloudCli`` hands each subcommand to its ``MngrCaller`` prefixed with
     ``imbue_cloud``, runs it from ``$HOME``, and layers the connector URL onto the
     env so the plugin reaches the right backend."""
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps([])))
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps({"state": "none"})))
     cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
 
-    cli.list_tunnels(account="owner@example.com")
+    cli.get_share_status(account="owner@example.com", host_id="host-abc")
 
     assert len(caller.recorded_calls) == 1
     recorded = caller.recorded_calls[0]
-    assert recorded.argv == ("imbue_cloud", "tunnels", "list", "--account", "owner@example.com")
+    assert recorded.argv == ("imbue_cloud", "shares", "status", "host-abc", "--account", "owner@example.com")
     assert recorded.cwd == Path.home()
     # The trailing slash is stripped so the plugin builds clean URLs.
     assert recorded.env_overrides == {_CONNECTOR_URL_SUBPROCESS_ENV: "https://connector.example"}
@@ -152,64 +152,22 @@ def test_parse_conflict_stored_returns_none_without_a_stored_row() -> None:
     assert _parse_conflict_stored("plain traceback text\nwithout any json\n") is None
 
 
-def test_find_tunnel_for_agent_uses_find_by_agent_subcommand() -> None:
-    """``find_tunnel_for_agent`` delegates to the connector's O(1) ``tunnels
-    find-by-agent`` lookup rather than listing every tunnel, and parses the
-    returned tunnel JSON."""
-    tunnel_json = {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "services": ["web"]}
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(tunnel_json)))
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    tunnel = cli.find_tunnel_for_agent(account="owner@example.com", agent_id="agent-abc123")
-
-    assert tunnel is not None
-    assert tunnel.tunnel_name == "owner--abc123"
-    assert tunnel.services == ("web",)
-    recorded = caller.recorded_calls[0]
-    assert recorded.argv == (
-        "imbue_cloud",
-        "tunnels",
-        "find-by-agent",
-        "agent-abc123",
-        "--account",
-        "owner@example.com",
-    )
-
-
-def test_find_tunnel_for_agent_returns_none_when_plugin_emits_null() -> None:
-    """When no tunnel exists for the agent, the plugin emits the JSON literal
-    ``null`` and ``find_tunnel_for_agent`` maps it to ``None``."""
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(None)))
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    assert cli.find_tunnel_for_agent(account="owner@example.com", agent_id="agent-abc123") is None
-
-
-def test_enable_sharing_malformed_output_error_omits_the_tunnel_token() -> None:
-    """A malformed enable-sharing payload (well-formed tunnel half, broken
-    service half) must not leak the cloudflared token into the exception
-    message -- it reaches the sharing UI's 502 body and the logs."""
-    body = {
-        "tunnel": {"tunnel_name": "owner--abc123", "tunnel_id": "t-1", "token": "SECRET-TUNNEL-TOKEN"},
-        "service": "nope",
-    }
+def test_create_share_malformed_output_error_omits_the_relay_token() -> None:
+    """A malformed shares-create payload (a body with a relay token but no
+    workspace_domain) must not leak the relay token into the exception
+    message -- it reaches the sharing UI's error body and the logs."""
+    body = {"host_id": "host-abc", "relay_token": "SECRET-RELAY-TOKEN"}
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(body)))
     cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
 
     with pytest.raises(ImbueCloudCliError) as exc_info:
-        cli.enable_sharing(
-            account="owner@example.com",
-            agent_id="agent-abc123",
-            service_name="web",
-            service_url="http://localhost:8080",
-            policy={"emails": ["a@b.com"]},
-        )
+        cli.create_share(account="owner@example.com", host_id="host-abc")
 
     message = str(exc_info.value)
-    assert "SECRET-TUNNEL-TOKEN" not in message
+    assert "SECRET-RELAY-TOKEN" not in message
     # The shape (keys) stays in the message so the failure is still debuggable.
-    assert "service" in message
-    assert "tunnel" in message
+    assert "relay_token" in message
+    assert "host_id" in message
 
 
 def test_auth_is_email_verified_parses_promotion_result() -> None:

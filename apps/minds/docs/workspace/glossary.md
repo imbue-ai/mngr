@@ -6,9 +6,9 @@ Key concepts in the minds system:
 
 - **creation**: anything a user makes in their workspace. Used only at the highest conceptual level; the working vocabulary is the kinds: *apps* (opened as tabs), *skills* (an *automation* is a skill run automatically on a schedule), *data* (documents, images, notes), and *customizations* (changes to any of the above).
 
-- **app**: something the user can open as a tab and interact with. Lives under `system/apps/<package>/` in the workspace, runs as a supervisord program, and registers its port in `data/.state/apps.toml` via `system/scripts/forward_port.py`. Each app gets a local URL (via the desktop client) and optionally a global URL (via Cloudflare tunnel). The built-in apps are the terminal, the browser, and the system interface (the special app that hosts the other tabs). Never "application" -- always "app".
+- **app**: something the user can open as a tab and interact with. Lives under `system/apps/<package>/` in the workspace, runs as a supervisord program, and registers its port in `data/.state/apps.toml` via `system/scripts/forward_port.py`. Each app gets a local URL (via the desktop client) and, while sharing is enabled, a shared URL (via the workspace's share through the self-hosted relay). The built-in apps are the terminal, the browser, and the system interface (the special app that hosts the other tabs). Never "application" -- always "app".
 
-- **service**: a background supervisord program with no tab (host-backup, cloudflared, the app watcher). Standalone services live under `system/services/`; a service that exists solely to support one app lives in that app's folder and is named `<app>-<role>`. "Web service" is retired vocabulary: a tab-openable thing is an app.
+- **service**: a background supervisord program with no tab (host-backup, the share-gateway, the app watcher). Standalone services live under `system/services/`; a service that exists solely to support one app lives in that app's folder and is named `<app>-<role>`. "Web service" is retired vocabulary: a tab-openable thing is an app.
 
 - **automation** [future]: a skill that runs automatically on a schedule, without the user asking. The scheduling primitive is landing separately; until then skills run when invoked.
 
@@ -36,7 +36,7 @@ Key concepts in the minds system:
 
 - **app watcher**: a background service that monitors `data/.state/apps.toml` and writes service events to `events/services/events.jsonl` so the desktop client can discover an agent's apps. (Forwarding reconciliation happens on the minds side, via the `mngr forward` plumbing -- not in the watcher.)
 
-- **cloudflare tunnel**: a persistent connection from the agent container to Cloudflare's network, managed by `cloudflared`. Enables global access to workspace apps protected by Cloudflare Access (Google OAuth, service tokens).
+- **share-gateway**: the background service that watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled. Who may access the share is controlled by the grants document (`data/.secrets/share_grants.toml`), which the desktop client rewrites as the user edits grants.
 
 - **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a name and URL for discovery. The desktop client's MngrStreamManager watches these events to discover agent backends. (The path and event vocabulary predate the app rename and are treated as plumbing.)
 

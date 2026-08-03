@@ -14,7 +14,6 @@ const assert = require('node:assert/strict');
 const {
   parseDeeplink,
   deeplinkTargetPath,
-  deeplinkModalPath,
   extractDeeplinkUrlFromArgv,
   MAX_DEEPLINK_LENGTH,
 } = require('../../electron/deeplink');
@@ -43,11 +42,10 @@ test('git_url only', () => {
     gitUrl: 'https://github.com/imbue-ai/example',
     branch: '',
   });
-  // A repo-carrying link is an Inspiration link: the content-nav target is the
-  // Create from Inspiration page (used outside a machine), and the modal path
-  // is the in-machine variant (main.js picks between them by context).
+  // A repo-carrying link is an Inspiration link: the target is the Create
+  // from Inspiration page, which offers both creating a new machine and
+  // adding the Inspiration to an existing one.
   assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample');
-  assert.equal(deeplinkModalPath(url), '/create/inspiration/modal?git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample');
 });
 
 test('branch only', () => {
@@ -62,15 +60,11 @@ test('both params', () => {
     branch: 'v1.2.3',
   });
   assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fgithub.com%2Fa%2Fb&branch=v1.2.3');
-  assert.equal(deeplinkModalPath(url), '/create/inspiration/modal?git_url=https%3A%2F%2Fgithub.com%2Fa%2Fb&branch=v1.2.3');
 });
 
 test('empty-string params behave like absent ones', () => {
   assert.equal(deeplinkTargetPath('minds://create?git_url=&branch='), '/create');
   assert.equal(deeplinkTargetPath('minds://create?git_url=%20%20'), '/create');
-  // No repo -> not an Inspiration -> no modal.
-  assert.equal(deeplinkModalPath('minds://create?git_url=&branch='), null);
-  assert.equal(deeplinkModalPath('minds://create?git_url=%20%20'), null);
 });
 
 test('git_url containing its own query survives the decode/re-encode round trip', () => {
@@ -78,28 +72,9 @@ test('git_url containing its own query survives the decode/re-encode round trip'
   const url = 'minds://create?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc';
   assert.equal(parseDeeplink(url).gitUrl, 'https://host/repo.git?token=abc');
   assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc');
-  assert.equal(deeplinkModalPath(url), '/create/inspiration/modal?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc');
 });
 
-// -- deeplinkModalPath --
-
-test('deeplinkModalPath is null for non-Inspiration links', () => {
-  // No repo (bare, branch-only, empty), and non-create actions, never open the modal.
-  assert.equal(deeplinkModalPath('minds://create'), null);
-  assert.equal(deeplinkModalPath('minds://create?branch=main'), null);
-  assert.equal(deeplinkModalPath('minds://'), null);
-  assert.equal(deeplinkModalPath('minds://elsewhere?git_url=x'), null);
-  assert.equal(deeplinkModalPath(null), null);
-});
-
-test('deeplinkModalPath re-encodes branch and ignores unknown params', () => {
-  assert.equal(
-    deeplinkModalPath('minds://create?git_url=https%3A%2F%2Fa%2Fb&branch=feat%2Fx%20y&evil=1'),
-    '/create/inspiration/modal?git_url=https%3A%2F%2Fa%2Fb&branch=feat%2Fx+y'
-  );
-});
-
-test('modal allowlist property: output is null or the fixed modal path', () => {
+test('target allowlist property: output is null or a fixed create path', () => {
   const inputs = [
     'minds://create?git_url=x&branch=y',
     'minds://create?git_url=javascript%3Aalert(1)',
@@ -109,8 +84,11 @@ test('modal allowlist property: output is null or the fixed modal path', () => {
     null,
   ];
   for (const input of inputs) {
-    const out = deeplinkModalPath(input);
-    assert.ok(out === null || out.startsWith('/create/inspiration/modal?'), `unexpected: ${out}`);
+    const out = deeplinkTargetPath(input);
+    assert.ok(
+      out === null || out === '/create' || out.startsWith('/create?') || out.startsWith('/create/inspiration?'),
+      `unexpected: ${out}`
+    );
   }
 });
 

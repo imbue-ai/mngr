@@ -40,6 +40,7 @@ import httpx
 from loguru import logger
 from playwright.sync_api import Browser
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -57,24 +58,20 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
 
 # The contentView page URL contains ``/_chrome`` only for the chrome
 # (sidebar/title-bar) view; the main content view never does. We match the
-# pure-localhost backend pages, not the ``agent-<id>.localhost`` proxy.
+# pure-localhost backend pages, not the ``host-<id>.localhost`` proxy.
 # The capturing group exposes the bare origin (``http://localhost:<port>``)
 # so :func:`_backend_origin_from_page` can reuse the same pattern instead of
 # re-encoding the localhost-origin contract a second time.
 _BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
-_CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/_chrome(?:/|$|\?)")
-# The modal overlay view loads ``/inbox`` (optionally with ``?selected=<id>``)
-# when the inbox modal is shown. Like the chrome views, it lives on the
-# backend origin but is not the content view; exclude it so the runner does
-# not pick it up if the modal has ever been opened.
-_INBOX_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/inbox(?:/|$|\?)")
 # The agent subdomain URL the create flow redirects to once the workspace's
 # ``system_interface`` is reachable. The desktop client wraps that origin in
 # the mngr_forward plugin, so the port may differ from the bare backend. The
 # scheme is ``https`` when the proxy serves TLS + HTTP/2 (the default) and
 # ``http`` otherwise, so accept both. (The bare minds backend origin stays
 # plain ``http`` -- see ``_BACKEND_ORIGIN_PATTERN``.)
-_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^https?://agent-[a-f0-9]+\.localhost:\d+(?:/|$)")
+_AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^https?://(?:[a-z0-9_-]+\.)*host-[a-f0-9]+\.localhost:\d+(?:/|$)"
+)
 
 # Default env identity when nothing is activated: a dedicated, inert
 # ``ci-snapshot`` tier (committed under
@@ -464,15 +461,15 @@ class _ElectronConnectError(RuntimeError):
 
 
 def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
-    """Return the Electron WebContentsView that serves the main content.
+    """Return the Electron window page that serves the chrome UI.
 
-    Electron's BaseWindow has multiple WebContentsView's (chrome view,
-    content view, sidebar, and a lazy modal overlay view). Each is its
-    own CDP page. The content view is the one whose URL is on the
-    backend origin and is not one of the chrome-owned surfaces: not
-    rooted at ``/_chrome`` (chrome / sidebar) and not the inbox modal
-    at ``/inbox``. We poll until that page exists because Electron
-    spawns the backend asynchronously after launch.
+    Each window is a single web context now (the chrome page, which hosts
+    hub pages, the workspace iframe, and the in-DOM overlay layer), so the
+    right page is simply the one on the backend origin -- including the
+    ``/_chrome`` wrapper, which IS the top-level page while a workspace is
+    displayed. We poll until that page exists because Electron spawns the
+    backend asynchronously after launch (the window sits on the file://
+    shell.html loading screen until then).
     """
     deadline = time.monotonic() + timeout_seconds
     last_observed: list[str] = []
@@ -483,10 +480,6 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
                 url = page.url
                 last_observed.append(url)
                 if not _BACKEND_ORIGIN_PATTERN.match(url):
-                    continue
-                if _CHROME_PATH_PATTERN.match(url):
-                    continue
-                if _INBOX_PATH_PATTERN.match(url):
                     continue
                 logger.info("Picked Electron content page at {}", url)
                 return page
@@ -623,21 +616,19 @@ def _read_failure_message(page: Page) -> str:
     return message or "unknown error: the '#error-message' element was empty"
 
 
-def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Page:
-    """Block until the create flow reaches the workspace or reports failure; return the workspace page.
+def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, timeout_seconds: int) -> Frame:
+    """Block until the create flow reaches the workspace or reports failure; return the workspace frame.
 
     The create flow has two mutually exclusive terminal states after the create
-    form is submitted, and after the content-in-chrome surface split they live on
-    DIFFERENT WebContentsViews (separate CDP pages):
+    form is submitted:
 
-    - **success**: the ready workspace opens on the CONTENT view -- its own page
-      on the ``agent-<id>.localhost`` origin. ``creating.js`` hands the ready
-      workspace's ``/goto`` URL to the ``window.minds`` bridge, which shows it on
-      the content surface while the chrome view that drove the form
-      (``creating_page``) returns to the ``/_chrome`` wrapper. (Before the split
-      the workspace loaded into the same page, so this waited on
-      ``creating_page.url``; now it scans every WebContentsView for the content
-      page that reached the agent subdomain.)
+    - **success**: the ready workspace opens inside the chrome page's sandboxed
+      content iframe on the ``host-<id>.localhost`` origin. ``creating.js``
+      hands the ready workspace's ``/goto`` URL to the ``window.minds`` bridge,
+      which navigates the window onto the ``/_chrome`` wrapper and arms the
+      iframe. This scans every page's FRAMES for the one that reached the
+      agent subdomain (the workspace is a cross-origin iframe now, not its own
+      CDP page).
     - **failure**: the loading screen's failure sub-view (``#failure-view``)
       becomes visible on ``creating_page`` (still showing the ``/creating``
       loader) -- ``creating.js``'s ``showFailure()`` un-hides it once the status
@@ -646,22 +637,23 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
     Polls both rather than only waiting for success, so a create attempt failure raises
     ``WorkspaceCreateAttemptFailedError`` with the surfaced error text immediately
     instead of hanging until ``timeout_seconds`` expires. Returns the workspace
-    (content-view) ``Page``; raises ``PlaywrightTimeoutError`` if neither state is
-    reached within the budget.
+    ``Frame``; raises ``PlaywrightTimeoutError`` if neither state is reached
+    within the budget.
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         for context in browser.contexts:
             for candidate in context.pages:
-                if _AGENT_SUBDOMAIN_PATTERN.search(candidate.url):
-                    return candidate
+                for frame in candidate.frames:
+                    if _AGENT_SUBDOMAIN_PATTERN.search(frame.url):
+                        return frame
         try:
             failure_is_visible = creating_page.is_visible("#failure-view")
         except PlaywrightError:
-            # The chrome view re-navigates to /_chrome the instant the bridge
-            # shows the workspace, which can destroy the execution context
-            # mid-check; loop so the next iteration re-scans the pages and finds
-            # the content view now on the agent subdomain.
+            # The window navigates onto the /_chrome wrapper the instant the
+            # bridge shows the workspace, which can destroy the execution
+            # context mid-check; loop so the next iteration re-scans the frames
+            # and finds the workspace iframe on the agent subdomain.
             failure_is_visible = False
         if failure_is_visible:
             raise WorkspaceCreateAttemptFailedError(
@@ -682,12 +674,12 @@ def _drive_create_flow(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
-) -> Page:
-    """Drive the create form to a ready workspace; return the workspace (content-view) page.
+) -> Frame:
+    """Drive the create form to a ready workspace; return the workspace frame.
 
-    ``page`` is the chrome-view page the form is driven on; the ready workspace
-    opens on the separate content view, whose page this returns (see
-    ``_wait_for_workspace_ready_or_failure``).
+    ``page`` is the chrome page the form is driven on; the ready workspace
+    opens inside that page's sandboxed content iframe, whose frame this
+    returns (see ``_wait_for_workspace_ready_or_failure``).
 
     Runs exactly once per successful Electron attach; any failure here is a real
     test failure (not a wedged-launch flake) and propagates to fail the test.
@@ -793,7 +785,7 @@ def _attempt_create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
-    on_workspace_ready: Callable[[Page], None] | None = None,
+    on_workspace_ready: Callable[[Frame], None] | None = None,
 ) -> None:
     """One Electron launch + CDP attach + create-flow drive.
 
@@ -801,7 +793,7 @@ def _attempt_create_workspace_via_electron(
     (a wedged Electron the caller should recover by relaunching). Errors from the
     create flow itself propagate unchanged so real test failures are not retried.
 
-    ``on_workspace_ready``, if given, is called with the workspace (content-view)
+    ``on_workspace_ready``, if given, is called with the workspace (content-iframe)
     page once the workspace's ``system_interface`` has rendered, while the browser
     is still connected (e.g. to send a chat message). Its exceptions propagate
     unchanged -- they are real failures, not launch flakes, so they are not
@@ -895,7 +887,7 @@ def create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
-    on_workspace_ready: Callable[[Page], None] | None = None,
+    on_workspace_ready: Callable[[Frame], None] | None = None,
 ) -> None:
     """Drive Electron to create a workspace from ``default_workspace_template_path``.
 
@@ -971,7 +963,13 @@ def create_workspace_via_electron(
 
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
 _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
-_TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src*="/service/terminal/"]'
+# Terminal panels are cross-origin iframes at the terminal service's own
+# origin (service-per-origin): the terminal's origin label is ``terminal-<rand>``
+# (a random per-service suffix), so the origin is
+# https://terminal-<rand>.host-<hex>.localhost:<port>/. Match the ``terminal-``
+# label prefix -- the trailing hyphen keeps it from matching an unrelated
+# service whose name merely starts with "terminal".
+_TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
 # The DEFAULT_WORKSPACE_TEMPLATE bootstrap creates the initial chat agent asynchronously after the
 # dockview first renders (it shows "Waiting for initial chat agent..." until
 # then), so the chat input can take a while to appear on a fresh first boot.
@@ -990,36 +988,25 @@ class WorkspaceFlowError(RuntimeError):
     """Raised when a step of the full Electron workspace flow does not reach its expected state."""
 
 
-def _flow_screenshot(page: Page, name: str) -> None:
-    """Save a screenshot for post-hoc debugging of a flow step; never raise."""
+def _flow_screenshot(target: Page | Frame, name: str) -> None:
+    """Save a screenshot for post-hoc debugging of a flow step; never raise.
+
+    Accepts either a Page or a Frame (the workspace surface is a frame of the
+    chrome page now); a frame's screenshot is taken from its owning page.
+    """
     try:
         _FLOW_SHOT_DIR.mkdir(parents=True, exist_ok=True)
         path = _FLOW_SHOT_DIR / f"{name}.png"
+        page = target.page if isinstance(target, Frame) else target
         page.screenshot(path=str(path), full_page=False)
         logger.info("Saved screenshot {}", path)
     except (PlaywrightError, OSError) as exc:
         logger.warning("Could not screenshot {}: {!r}", name, exc)
 
 
-def _pick_chrome_page(browser: Browser, timeout_seconds: int) -> Page:
-    """Return the Electron chrome WebContentsView (the ``/_chrome`` page)."""
-    deadline = time.monotonic() + timeout_seconds
-    observed: list[str] = []
-    while time.monotonic() < deadline:
-        observed = []
-        for context in browser.contexts:
-            for page in context.pages:
-                observed.append(page.url)
-                if _CHROME_PATH_PATTERN.match(page.url):
-                    logger.info("Picked Electron chrome page at {}", page.url)
-                    return page
-        threading.Event().wait(timeout=0.5)
-    raise WorkspaceFlowError(f"No /_chrome page within {timeout_seconds}s; observed: {observed}")
-
-
 def drive_create_docker_imbue_workspace(
     browser: Browser, page: Page, default_workspace_template_path: Path, workspace_name: str
-) -> Page:
+) -> Frame:
     """Fill + submit the create form for a local-Docker workspace with an Imbue account.
 
     Local Docker compute keeps the workspace on this machine; the selected
@@ -1028,8 +1015,8 @@ def drive_create_docker_imbue_workspace(
     synced Claude subscription credentials keeping the workspace
     authenticated. Backups are deferred to keep create fast.
 
-    ``page`` is the chrome-view page the form is driven on; returns the workspace
-    (content-view) page the ready workspace opens on.
+    ``page`` is the chrome page the form is driven on; returns the workspace
+    frame (the chrome page's content iframe) the ready workspace opens in.
     """
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
@@ -1090,16 +1077,41 @@ def drive_create_docker_imbue_workspace(
     return workspace_page
 
 
-def _agent_id_from_subdomain(url: str) -> str:
-    """Extract the ``agent-<hex>`` workspace id from an ``agent-<hex>.localhost`` URL."""
+def _host_id_from_subdomain(url: str) -> str:
+    """Extract the ``host-<hex>`` workspace coordinate from a workspace-origin URL."""
     if _AGENT_SUBDOMAIN_PATTERN.match(url) is None:
-        raise WorkspaceFlowError(f"Not an agent-subdomain URL: {url!r}")
-    # host is e.g. ``agent-<hex>.localhost:<port>``; the id is the first label.
-    host = url.split("://", 1)[1].split("/", 1)[0]
-    return host.split(".", 1)[0]
+        raise WorkspaceFlowError(f"Not a workspace-origin URL: {url!r}")
+    # host is e.g. ``[<service>.]host-<hex>.localhost:<port>``; the workspace
+    # coordinate is the ``host-`` label.
+    netloc = url.split("://", 1)[1].split("/", 1)[0]
+    for label in netloc.split("."):
+        if label.startswith("host-"):
+            return label
+    raise WorkspaceFlowError(f"No host-<hex> label in workspace-origin URL: {url!r}")
 
 
-def _send_message_and_await_reply(page: Page, token: str) -> None:
+def _agent_id_for_host(content_page: Page, backend_origin: str, host_id: str) -> str:
+    """Resolve the agent id for ``host_id`` via ``GET /api/v1/workspaces``.
+
+    Content URLs carry the host coordinate while the v1 API and the settings
+    routes are agent-keyed, so the flow needs this translation once.
+    """
+    content_page.goto(backend_origin + "/", wait_until="domcontentloaded")
+    rows = content_page.evaluate(
+        """(args) =>
+            fetch(args.origin + '/api/v1/workspaces')
+              .then((r) => (r.ok ? r.json() : []))
+              .then((body) => (Array.isArray(body.workspaces) ? body.workspaces : body))
+        """,
+        {"origin": backend_origin},
+    )
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("host_id") == host_id and row.get("agent_id"):
+            return str(row["agent_id"])
+    raise WorkspaceFlowError(f"No workspace with host id {host_id!r} in /api/v1/workspaces")
+
+
+def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     """Type a unique-token prompt into the dockview chat and wait for the reply to echo it."""
     logger.info("Waiting up to {}s for the initial chat agent / chat input", _CHAT_INPUT_TIMEOUT_SECONDS)
     page.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
@@ -1127,7 +1139,7 @@ def _send_message_and_await_reply(page: Page, token: str) -> None:
     _flow_screenshot(page, "04-reply-received")
 
 
-def _open_terminal(page: Page) -> None:
+def _open_terminal(page: Page | Frame) -> None:
     """Open a New terminal tab in the dockview and confirm the ttyd iframe renders."""
     add_button = "button.dockview-add-tab-button"
     empty_action = "button.dockview-empty-state-action"
@@ -1172,16 +1184,17 @@ def _verify_v1_lifecycle(content_page: Page, backend_origin: str, agent_id: str)
 
 
 def _navigate_home(browser: Browser, content_page: Page, backend_origin: str, workspace_name: str) -> None:
-    """Click the chrome Home button (re-picking the chrome view + retrying) and confirm the content view lands home.
+    """Click the titlebar Home button (retrying) and confirm the window lands home.
 
-    The chrome view is a separate WebContentsView whose ``#home-btn`` handler is
-    wired by chrome.js after load, and the chrome view reloads several times
-    during the flow -- so we re-pick it fresh each attempt and retry the click,
-    polling the content view's URL for the landing navigation.
+    The Home button lives on the same chrome page as everything else now; its
+    handler is wired by chrome.js after load, and the page can be mid-swap
+    when we click, so we retry, polling the page URL for the landing
+    navigation.
     """
+    del browser
     landing_targets = (backend_origin + "/", backend_origin)
     for attempt in range(1, _HOME_CLICK_ATTEMPTS + 1):
-        chrome_page = _pick_chrome_page(browser, 15)
+        chrome_page = content_page
         try:
             chrome_page.wait_for_selector("#home-btn", state="visible", timeout=10_000)
             chrome_page.click("#home-btn")
@@ -1226,8 +1239,8 @@ def _resolve_workspace_agent_id(content_page: Page, workspace_name: str) -> str:
 
 
 def _destroy_via_settings(content_page: Page, backend_origin: str, agent_id: str, workspace_name: str) -> None:
-    """Open the workspace settings page and run the destroy flow; confirm it leaves the list."""
-    settings_url = f"{backend_origin}/workspace/{agent_id}/settings"
+    """Open the machine-settings overlay and run the destroy flow; confirm it leaves the list."""
+    settings_url = f"{backend_origin}/workspace/{agent_id}/options?tab=settings"
     logger.info("Navigating to settings: {}", settings_url)
     content_page.goto(settings_url, wait_until="domcontentloaded")
     content_page.wait_for_selector("#destroy-btn", state="visible", timeout=15_000)
@@ -1264,7 +1277,7 @@ def _destroy_via_settings(content_page: Page, backend_origin: str, agent_id: str
     raise WorkspaceFlowError(f"Workspace {agent_id} still listed after {_DESTROY_TIMEOUT_SECONDS}s")
 
 
-def _run_flow_step(results: dict[str, str], name: str, page: Page, action: Callable[[], None]) -> None:
+def _run_flow_step(results: dict[str, str], name: str, page: Page | Frame, action: Callable[[], None]) -> None:
     """Run one flow step, recording PASS/FAIL and screenshotting on failure."""
     logger.info("=== {} ===", name)
     try:
@@ -1312,8 +1325,10 @@ def run_full_workspace_flow(
                     browser, content_page, default_workspace_template_path, workspace_name
                 )
                 results["STEP 1 create"] = "PASS"
-                agent_id = _agent_id_from_subdomain(workspace_page.url)
-                logger.info("Machine agent id (from subdomain): {}", agent_id)
+                workspace_host_id = _host_id_from_subdomain(workspace_page.url)
+                logger.info("Machine host id (from subdomain): {}", workspace_host_id)
+                agent_id = _agent_id_for_host(content_page, backend_origin, workspace_host_id)
+                logger.info("Machine agent id (via /api/v1/workspaces): {}", agent_id)
 
                 _run_flow_step(
                     results,

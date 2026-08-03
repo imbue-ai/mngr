@@ -814,6 +814,39 @@ def test_event_services_envelope_updates_resolver_services(consumer: EnvelopeStr
     assert consumer.resolver.get_backend_url(_AGENT_ID_1, _SERVICE_WEB) is None
 
 
+def test_event_services_envelope_carries_the_origin_label_to_the_resolver(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    # The services event now carries a per-service origin ``label``; it must reach
+    # the resolver so the Share tab can build the per-app link from it. A
+    # deregister clears both the url and the label.
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((_make_agent(_AGENT_ID_1),))))
+
+    register_payload = {
+        "timestamp": _TIMESTAMP,
+        "event_id": "evt-" + "0" * 32,
+        "type": "service_registered",
+        "source": "services",
+        "service": "terminal",
+        "url": "http://127.0.0.1:9100",
+        "label": "terminal-x7k9q2w1",
+    }
+    _dispatch(consumer, _event_envelope(_AGENT_ID_1, register_payload))
+    assert consumer.resolver.list_service_labels_for_agent(_AGENT_ID_1) == {
+        ServiceName("terminal"): "terminal-x7k9q2w1"
+    }
+
+    deregister_payload = {
+        "timestamp": _TIMESTAMP,
+        "event_id": "evt-" + "0" * 31 + "1",
+        "type": "service_deregistered",
+        "source": "services",
+        "service": "terminal",
+    }
+    _dispatch(consumer, _event_envelope(_AGENT_ID_1, deregister_payload))
+    assert consumer.resolver.list_service_labels_for_agent(_AGENT_ID_1) == {}
+
+
 def test_event_requests_envelope_dispatches_to_request_callback(consumer: EnvelopeStreamConsumer) -> None:
     fired: list[tuple[str, str]] = []
     consumer.resolver.add_on_request_callback(lambda aid_str, raw: fired.append((aid_str, raw)))
@@ -1002,25 +1035,29 @@ def test_build_forward_command_includes_use_http2_flag() -> None:
     proxy.
     """
     config = ForwardSubprocessConfig(service="system_interface")
-    command = _build_forward_command(config, preauth_cookie="a-secret")
+    command = _build_forward_command(config, preauth_cookie="a-secret", browser_bridge_token="b-secret")
     assert "--use-http2" in command
     # Core flags are always present alongside the TLS flag.
     assert command[:2] == [config.mngr_binary, "forward"]
     assert "--observe-via-file" in command
     assert command[command.index("--service") + 1] == "system_interface"
     assert command[command.index("--preauth-cookie") + 1] == "a-secret"
+    assert command[command.index("--browser-bridge-token") + 1] == "b-secret"
 
 
 def test_build_forward_command_threads_includes_and_reverse_specs() -> None:
-    """Agent-include and reverse specs are expanded into repeated flags."""
+    """Agent-include, reverse specs, and embedder origins expand into repeated flags."""
     config = ForwardSubprocessConfig(
         agent_include=("has(agent.labels.is_primary)", "agent.name == 'x'"),
         reverse_specs=("8420:8420",),
+        embedder_origins=("http://localhost:8420", "http://127.0.0.1:8420"),
     )
-    command = _build_forward_command(config, preauth_cookie="s")
+    command = _build_forward_command(config, preauth_cookie="s", browser_bridge_token="b")
     includes = [command[i + 1] for i, tok in enumerate(command) if tok == "--agent-include"]
     assert includes == ["has(agent.labels.is_primary)", "agent.name == 'x'"]
     assert command[command.index("--reverse") + 1] == "8420:8420"
+    embedders = [command[i + 1] for i, tok in enumerate(command) if tok == "--embedder-origin"]
+    assert embedders == ["http://localhost:8420", "http://127.0.0.1:8420"]
 
 
 # --- _redact_secrets ------------------------------------------------------
@@ -1050,6 +1087,14 @@ def test_redact_secrets_masks_preauth_cookie_value() -> None:
     # Other args must be untouched.
     assert "system_interface" in redacted
     assert "8421" in redacted
+
+
+def test_redact_secrets_masks_browser_bridge_token_value() -> None:
+    """The /forward-bridge secret is spawn-time argv too; it must never reach the log."""
+    command = ["/usr/bin/mngr", "forward", "--browser-bridge-token", "bridge-secret-value"]
+    redacted = _redact_secrets(command)
+    assert "bridge-secret-value" not in " ".join(redacted)
+    assert "--browser-bridge-token" in redacted
 
 
 def test_redact_secrets_is_a_no_op_when_flag_missing() -> None:

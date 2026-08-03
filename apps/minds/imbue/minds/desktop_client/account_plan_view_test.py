@@ -8,8 +8,6 @@ def _account_info() -> dict[str, object]:
         "available_plans": ["ally", "explorer"],
         "entitlements": {
             "max_remote_workspaces": 2,
-            "max_tunnels": 50,
-            "max_services_per_tunnel": 10,
             "max_buckets": 5,
             "max_total_bucket_bytes": 50 * 1024**3,
             "monthly_llm_spend_usd": 0.0,
@@ -17,7 +15,6 @@ def _account_info() -> dict[str, object]:
         },
         "usage": {
             "remote_workspaces": 1,
-            "tunnels": 3,
             "buckets": 2,
             "total_bucket_bytes": int(1.5 * 1024**3),
             "llm_spend_usd_this_period": 12.345,
@@ -41,8 +38,6 @@ def test_build_account_plan_view_maps_every_quota_row() -> None:
     rows_by_label = {row["label"]: row for row in view["usage_rows"]}
     assert rows_by_label["Remote machines"]["used"] == "1"
     assert rows_by_label["Remote machines"]["limit"] == "2"
-    assert rows_by_label["Shared links (tunnels)"]["used"] == "3"
-    assert "10" in rows_by_label["Shared links (tunnels)"]["note"]
     assert rows_by_label["Backup storage"]["used"] == "1.5 GB"
     assert rows_by_label["Backup storage"]["limit"] == "50.0 GB"
     assert rows_by_label["AI spend (Imbue Cloud)"]["used"] == "$12.35"
@@ -56,7 +51,6 @@ def test_build_account_plan_view_flags_over_storage_quota() -> None:
     over_info = _account_info()
     over_info["usage"] = {
         "remote_workspaces": 1,
-        "tunnels": 3,
         "buckets": 2,
         "total_bucket_bytes": 51 * 1024**3,
         "llm_spend_usd_this_period": 12.345,

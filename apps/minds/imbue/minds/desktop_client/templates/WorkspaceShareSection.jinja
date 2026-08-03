@@ -1,28 +1,34 @@
-{#def agent_id, ws_name, account_email="", has_account=True, accounts=[], app_services=[], whole_service="system_interface", selected_target="", panel_scroll=False #}
+{#def agent_id, ws_name, host_id="", account_email="", has_account=True, accounts=[], app_services=[], service_labels={}, whole_service="system_interface", selected_target="", panel_scroll=False #}
 {#
   The "Share machine" pane: pick a share target on the left, manage who can
   reach it on the right.
 
-  A target is either one of the workspace's registered services (share just
-  that app) or the whole machine, which is the workspace's own web UI service
-  (``whole_service``, i.e. system_interface -- what the desktop client itself
-  shows). Both go through the same per-service Cloudflare tunnel + Access
-  policy, so "Whole machine" is a real share target, not a special case.
+  Sharing is machine-level under the self-hosted relay: one share per machine
+  (one tunnel, one domain), governed by a grants document with a
+  workspace-level allow-list plus optional per-service lists. Each target here
+  is one scope of that document: "Whole machine" is the workspace scope
+  (admits everything, link = the machine domain), and each registered app is
+  its own scope (admits only that app's origin,
+  link = ``<app>.<machine domain>``).
 
   ``app_services`` is the workspace's registered services WITHOUT
   ``whole_service`` (that one is always rendered as the Whole machine entry,
-  whether or not it is registered yet). ``selected_target`` is the service to
-  open on; it defaults to the whole machine.
+  whether or not it is registered yet). ``service_labels`` maps each app
+  service name to its public origin hostname label (``<name>-<rand>``); it is
+  handed to workspace_options.js so a per-app link uses the service's real
+  origin label rather than its name (a service absent from it falls back to its
+  name). ``selected_target`` is the target to
+  open on; it defaults to the whole machine. ``host_id`` is the machine
+  coordinate the sharing API is keyed by; empty when the workspace has not
+  been discovered yet (the pane then reads as not-shared).
 
-  Each target keeps its own sharing state, so the right-hand pane is filled in
-  by /_static/workspace_options.js: it fetches a target's status the first time
-  that target is selected (each status read shells out to the imbue_cloud
-  connector, so reading every target up front would be several subprocesses
-  per open) and caches it for the rest of the panel's life.
+  The right-hand pane is filled in by /_static/workspace_options.js: one read
+  of the machine's sharing document covers every target at once, and every
+  edit rewrites that document (serialized, so targets cannot race each other).
 
-  The workspace must be associated with an account before anything can be
-  shared -- the Cloudflare tunnel is owned by that account -- so an
-  unassociated workspace gets the Associate prompt instead of the editor.
+  The workspace must be linked to an account before anything can be shared --
+  the machine share is owned by that account -- so an unlinked workspace gets
+  the link prompt instead of the editor.
 
   ``panel_scroll`` makes the right-hand panel the scroller (and pulls its
   scrollbar out to the card's edge with -mr-6, restoring the gutter with
@@ -95,14 +101,21 @@
       <section>
         <h3 class="type-body font-semibold text-primary">Who are you sharing with?</h3>
         {# Filled by workspace_options.js: the owner row first (never
-           removable -- the account owns the tunnel), then one row per
-           additional email. #}
+           removable -- the account owns the share), then one row per
+           additional email or domain. #}
         <div id="ws-share-emails" class="mt-3 flex flex-col gap-1.5"></div>
         <div class="mt-2 flex items-center gap-2">
-          <TextInput type="email" name="ws_share_new_email" id="ws-share-new-email"
-                     placeholder="Add email address" extra="flex-1"
+          <TextInput type="text" name="ws_share_new_email" id="ws-share-new-email"
+                     placeholder="Add email, or a domain to admit everyone at it" extra="flex-1"
                      onkeydown="if (event.key === 'Enter') { event.preventDefault(); wsShareAddEmail(); }" />
-          <Button variant="secondary" id="ws-share-add-btn" onclick="wsShareAddEmail()">Add</Button>
+          {# The pane JS swaps the button between these two variant class sets:
+             prominent (primary) while the input holds un-added text -- so Add
+             reads as the obvious next action -- and quiet (secondary) when
+             empty. The class strings ride on data attributes so the variant
+             recipes stay defined in templates.py alone. #}
+          <Button variant="secondary" id="ws-share-add-btn" onclick="wsShareAddEmail()"
+                  :data-variant-secondary="BTN_VARIANTS['secondary']"
+                  :data-variant-primary="BTN_VARIANTS['primary']">Add</Button>
         </div>
       </section>
 
@@ -160,17 +173,25 @@
                   class="shrink-0 inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 type-label text-secondary hover:bg-fill-hover hover:text-important cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-secondary">Disable</button>
         </div>
 
-        {# Cloudflare publishes a new hostname at its edge a minute or two after
-           the tunnel accepts it, so a freshly-enabled link 404s if opened right
-           away. workspace_options.js polls the readiness endpoint and shows
-           this until the link actually resolves. #}
+        {# A machine's first share takes a moment to come up end to end (the
+           workspace generates its key, a certificate is issued, the tunnel
+           connects), so a freshly-enabled link errors if opened right away.
+           workspace_options.js polls the readiness endpoint and shows this
+           until the link actually answers. #}
         <p id="ws-share-provisioning" class="hidden mt-2 type-helper text-secondary">
-          This link is not live yet. Cloudflare is still publishing it (usually 1-2 minutes).
+          This link is not live yet. The machine's share is still being set up (usually under two minutes).
         </p>
         <p id="ws-share-busy" class="hidden items-center gap-1.5 type-body text-secondary">
           <Spinner size="sm" /><span id="ws-share-busy-label">Saving changes...</span>
         </p>
         <p id="ws-share-error" class="hidden mt-2 type-body text-important" role="alert"></p>
+        {# Shown only with a LOAD failure (never with action failures, which
+           are retried by redoing the action): a status read that failed needs
+           its own affordance, because the editor stays locked until a clean
+           read lands and nothing else on screen re-triggers one. #}
+        <div id="ws-share-retry-row" class="hidden mt-2">
+          <Button variant="secondary" id="ws-share-retry-btn" onclick="wsShareRetryLoad()">Try again</Button>
+        </div>
       </div>
     </div>
   </div>
@@ -183,9 +204,11 @@
 <script id="ws-share-config" type="application/json">
 {
   "agentId": {{ agent_id | tojson }},
+  "hostId": {{ (host_id or '') | tojson }},
   "accountEmail": {{ (account_email or '') | tojson }},
   "wholeService": {{ whole_service | tojson }},
-  "selectedTarget": {{ (selected_target or whole_service) | tojson }}
+  "selectedTarget": {{ (selected_target or whole_service) | tojson }},
+  "serviceLabels": {{ (service_labels or {}) | tojson }}
 }
 </script>
 {% endif %}

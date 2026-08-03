@@ -28,6 +28,14 @@ module.exports = {
   use: {
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    // Video needs Playwright's ffmpeg download; disable on hosts without it.
+    video: process.env.MINDS_E2E_NO_VIDEO ? 'off' : 'retain-on-failure',
+    // For any spec that launches a plain chromium (none currently; the
+    // renderer-contract specs that did were deleted with the legacy shell):
+    // on hosts where Playwright's managed download is unavailable, point
+    // this at a system chromium/chrome binary.
+    launchOptions: process.env.MINDS_E2E_CHROMIUM_EXECUTABLE
+      ? { executablePath: process.env.MINDS_E2E_CHROMIUM_EXECUTABLE }
+      : {},
   },
 };

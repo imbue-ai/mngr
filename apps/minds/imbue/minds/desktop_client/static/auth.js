@@ -3,10 +3,10 @@
 (function () {
   // How to perform a post-auth navigation. The standalone auth page just
   // navigates this page (window.location). When this form is hosted in the
-  // create screen's sign-in modal -- its own WebContentsView in the desktop
-  // client's overlay layer -- the host page sets ``window.MINDS_AUTH_NAV`` to
-  // route the navigation to the content view *behind* the modal and dismiss the
-  // overlay; reloading this page would only reload the overlay.
+  // create screen's sign-in modal -- an overlay-layer iframe in the chrome
+  // shell -- the host page sets ``window.MINDS_AUTH_NAV`` to route the
+  // navigation to the shell *behind* the modal and dismiss the overlay;
+  // reloading this page would only reload the overlay.
   function authNavigate(url) {
     if (typeof window.MINDS_AUTH_NAV === 'function') window.MINDS_AUTH_NAV(url);
     else window.location.href = url;
@@ -15,7 +15,7 @@
   // What to do after a successful sign-in / OAuth. Always land via
   // /post-login so the server decides the destination in one hop: the
   // consent gate first when it is still unanswered, then the return path.
-  // (Navigating the content view straight to the return path let the
+  // (Navigating the shell straight to the return path let the
   // welcome screen and the consent gate fight over it after the modal
   // closed -- a flash of welcome, then consent, then the destination.)
   // The sign-in modal sets ``window.MINDS_AUTH_RETURN_TO`` (the create
@@ -249,15 +249,13 @@
   // Sign-in just completed in the external browser, which stole OS focus. Ask
   // the shell to bring the whole Minds app to the front (stealing focus back
   // from the browser) so the user lands in Minds instead of having to alt-tab.
-  // On the standalone /auth page (content view) there is no window.minds bridge,
-  // so we post an allowlisted message the content-relay preload forwards; in the
-  // sign-in modal (overlay view) the bridge is present.
+  // Every auth surface runs under the assembled shell bridge now (a hub page,
+  // or a modal iframe resolving the parent's bridge); in a plain browser the
+  // call is a harmless no-op.
   function bringMindsToFront() {
     try {
       if (window.minds && typeof window.minds.bringAppToFront === 'function') {
         window.minds.bringAppToFront();
-      } else {
-        window.postMessage({ type: 'minds:bring-app-to-front' }, '*');
       }
     } catch (e) { /* best-effort; never block sign-in on it */ }
   }

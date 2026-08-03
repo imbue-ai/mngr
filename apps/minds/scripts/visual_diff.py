@@ -29,6 +29,23 @@ Typical use:
 ``compare`` writes a single ``report-<a>-vs-<b>.html`` with a side-by-side
 table of screenshots + a per-scenario verdict (HTML structural diff +
 pixel diff threshold).
+
+``capture-spa`` captures the Mithril SPA instead of the JinjaX templates:
+it builds the frontend bundle, renders the SPA index page per route with a
+deterministic fixture ``UiBootstrap`` (built from the real wire models in
+``ui_models.py`` so fixtures can never drift from the schema), serves each
+route at its REAL path (the SPA router reads ``location.pathname``), and
+screenshots every route:
+
+    uv run apps/minds/scripts/visual_diff.py capture-spa --label spa-main
+    uv run apps/minds/scripts/visual_diff.py capture-spa --label spa-branch
+    uv run apps/minds/scripts/visual_diff.py compare spa-main spa-branch
+
+SPA scenarios are namespaced ``spa_<route-slug>`` so a legacy capture and an
+SPA capture never collide on names: comparing across the two modes lists
+every scenario as ``missing_in_a``/``missing_in_b`` (by design -- pixel
+comparison across different DOMs is meaningless); compare two SPA captures
+(or two legacy captures) for real verdicts.
 """
 
 import argparse
@@ -36,6 +53,7 @@ import difflib
 import html
 import http.server
 import json
+import os
 import re
 import shutil
 import socket
@@ -62,8 +80,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
@@ -79,7 +99,6 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_settings_modal_page
 from imbue.minds.desktop_client.templates import render_settings_page as render_app_settings_page
-from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_options_modal_page
@@ -89,6 +108,21 @@ from imbue.minds.desktop_client.templates_auth import render_check_email_page
 from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
 from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
 from imbue.minds.desktop_client.templates_auth import render_settings_page
+from imbue.minds.desktop_client.ui_api import read_vite_entry_tags
+from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
+from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
+from imbue.minds.desktop_client.ui_models import UiAccountsMessage
+from imbue.minds.desktop_client.ui_models import UiBootstrap
+from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
+from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
+from imbue.minds.desktop_client.ui_models import UiHealthMessage
+from imbue.minds.desktop_client.ui_models import UiProviderEntry
+from imbue.minds.desktop_client.ui_models import UiProvidersMessage
+from imbue.minds.desktop_client.ui_models import UiRequestsMessage
+from imbue.minds.desktop_client.ui_models import UiSnapshot
+from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
+from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
+from imbue.minds.errors import MindError
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import LaunchMode
@@ -362,32 +396,6 @@ def _build_scenarios() -> list[Scenario]:
                 anchor_x=214,
             ),
         ),
-        # -- Sharing editor ----------------------------------------------
-        Scenario(
-            name="sharing_no_account",
-            builder=lambda: render_sharing_editor(
-                agent_id=str(agent_a),
-                service_name="frontend",
-                title="Share frontend in alpha",
-                has_account=False,
-                accounts=(account_a,),
-                ws_name="alpha",
-            ),
-        ),
-        Scenario(
-            name="sharing_with_account",
-            builder=lambda: render_sharing_editor(
-                agent_id=str(agent_a),
-                service_name="frontend",
-                title="Share frontend in alpha",
-                mngr_forward_origin="http://localhost:8421",
-                initial_emails=["bob@example.com"],
-                has_account=True,
-                accounts=(account_a,),
-                ws_name="alpha",
-                account_email="alice@example.com",
-            ),
-        ),
         # -- Chrome (titlebar) -------------------------------------------
         Scenario(name="chrome_mac_unauth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=False)),
         Scenario(name="chrome_mac_auth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=True)),
@@ -566,6 +574,63 @@ def _serve_directory(root: Path) -> tuple[socketserver.TCPServer, threading.Thre
     return httpd, thread, port
 
 
+def _launch_chromium(pw: Any) -> tuple[Any, bool]:
+    """Launch Playwright's managed chromium, falling back to a system binary.
+
+    Playwright's downloaded chromium is unavailable on some host OS versions
+    (it refuses to install); a system chromium at a well-known path (or named
+    via ``MINDS_VISUAL_DIFF_CHROMIUM``) keeps the harness usable there. The
+    fallback launches with ``--no-sandbox`` because system chromiums in
+    containers/CI often lack the sandbox helper.
+
+    Returns ``(browser, is_full_page_reliable)``: system chromium builds have
+    been observed to paint only the first viewport of ``full_page=True``
+    screenshots (blank below the fold), so fallback captures must use the
+    viewport-resize path in :func:`_capture_full_page_screenshot` instead.
+    """
+    try:
+        return pw.chromium.launch(), True
+    except PlaywrightError as exc:
+        candidates = [
+            p
+            for p in (
+                os.getenv("MINDS_VISUAL_DIFF_CHROMIUM"),
+                "/usr/bin/chromium-browser",
+                "/usr/bin/chromium",
+                "/usr/bin/google-chrome",
+            )
+            if p is not None and Path(p).exists()
+        ]
+        if not candidates:
+            raise
+        logger.info("[capture] managed chromium unavailable ({}); using {}", type(exc).__name__, candidates[0])
+        return pw.chromium.launch(executable_path=candidates[0], args=["--no-sandbox"]), False
+
+
+# Upper bound for the viewport-resize screenshot path; pages taller than this
+# are clipped rather than ballooning the render surface.
+_MAX_SCREENSHOT_HEIGHT: Final[int] = 12000
+
+
+def _capture_full_page_screenshot(page: Any, path: Path, is_full_page_reliable: bool) -> None:
+    """Full-page screenshot that also works on system chromium builds.
+
+    The managed browser stitches ``full_page=True`` correctly; the system
+    fallback paints only the first viewport, so there we resize the viewport
+    to the document height, shoot without ``full_page``, and restore.
+    """
+    if is_full_page_reliable:
+        page.screenshot(path=str(path), full_page=True)
+        return
+    document_height = int(page.evaluate("document.body.scrollHeight"))
+    clamped_height = max(VIEWPORT_H, min(document_height, _MAX_SCREENSHOT_HEIGHT))
+    page.set_viewport_size({"width": VIEWPORT_W, "height": clamped_height})
+    try:
+        page.screenshot(path=str(path))
+    finally:
+        page.set_viewport_size({"width": VIEWPORT_W, "height": VIEWPORT_H})
+
+
 def _render_all_html(scenarios: list[Scenario], html_dir: Path) -> None:
     """Render every scenario's HTML to disk; log + record failures inline."""
     for sc in scenarios:
@@ -581,7 +646,7 @@ def _render_all_html(scenarios: list[Scenario], html_dir: Path) -> None:
 def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None:
     """Screenshot every scenario via Playwright."""
     with sync_playwright() as pw:
-        browser = pw.chromium.launch()
+        browser, is_full_page_reliable = _launch_chromium(pw)
         try:
             context = browser.new_context(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
             page = context.new_page()
@@ -604,7 +669,7 @@ def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None
                     )
                     for action in sc.interactions:
                         action(page)
-                    page.screenshot(path=str(png_dir / f"{sc.name}.png"), full_page=True)
+                    _capture_full_page_screenshot(page, png_dir / f"{sc.name}.png", is_full_page_reliable)
                     logger.info("[shot] {}", sc.name)
                 except _PLAYWRIGHT_EXCEPTIONS as exc:
                     logger.opt(exception=exc).warning("[shot fail] {}: {}", sc.name, type(exc).__name__)
@@ -664,6 +729,291 @@ def _do_capture(label: str) -> Path:
         httpd.server_close()
 
     logger.info("[capture] done: {}", output_dir)
+    return output_dir
+
+
+# -- SPA capture subcommand ------------------------------------------------
+
+# Default SPA routes to capture, with a stable slug per route (scenario name
+# is ``spa_<slug>``). One place, overridable via --routes. Stub pages are
+# legitimate baselines: a screenshot of the placeholder is the current truth.
+SPA_ROUTE_SLUGS: Final[tuple[tuple[str, str], ...]] = (
+    ("/", "home"),
+    ("/create", "create"),
+    ("/settings", "settings"),
+    ("/accounts", "accounts"),
+    ("/inbox", "inbox"),
+    ("/workspaces/destroyed", "workspaces_destroyed"),
+    ("/help", "help"),
+    ("/welcome", "welcome"),
+    ("/_dev/styleguide", "dev_styleguide"),
+)
+
+FRONTEND_DIR: Final[Path] = REPO_ROOT / "apps" / "minds" / "frontend"
+
+
+def _slug_for_spa_route(route: str) -> str:
+    if route == "/":
+        return "home"
+    return re.sub(r"[^a-z0-9]+", "_", route.strip("/").lower()).strip("_")
+
+
+def _build_spa_fixture_bootstrap() -> UiBootstrap:
+    """A deterministic bootstrap document exercising the main visual states.
+
+    Built from the real wire models so the fixture can never drift from the
+    schema -- a breaking model change fails this builder at capture time.
+    """
+    workspaces = (
+        UiWorkspaceEntry(
+            id="agent-00000000000000000000000000000001",
+            name="alpha",
+            accent="#7c9885",
+            host_id="host-00000000000000000000000000000001",
+            supports_shutdown=True,
+            liveness="RUNNING",
+            account="alice@example.com",
+        ),
+        UiWorkspaceEntry(
+            id="agent-00000000000000000000000000000002",
+            name="beta",
+            accent="#8a7ca8",
+            host_id="host-00000000000000000000000000000002",
+            supports_shutdown=True,
+            liveness="STOPPED",
+        ),
+        UiWorkspaceEntry(
+            id="create-attempt-00000000000000000000000000000001",
+            name="gamma",
+            accent="#a88a7c",
+            create_attempt_state="creating",
+        ),
+        UiWorkspaceEntry(
+            id="agent-00000000000000000000000000000004",
+            name="delta-remote",
+            accent="#7c88a8",
+            is_remote=True,
+            location="Alice's laptop",
+        ),
+    )
+    snapshot = UiSnapshot(
+        workspaces=UiWorkspacesMessage(
+            workspaces=workspaces,
+            destroying_agent_ids=(),
+            restorable_workspace_ids=(
+                "agent-00000000000000000000000000000001",
+                "host-00000000000000000000000000000001",
+            ),
+            remote_workspace_states={"agent-00000000000000000000000000000004": ""},
+        ),
+        accounts=UiAccountsMessage(has_accounts=True, account_email="alice@example.com", extra_account_count=1),
+        providers=UiProvidersMessage(
+            providers=(
+                UiProviderEntry(name="local", backend="local", status=ProviderPanelStatus.OK, is_enabled=True),
+                UiProviderEntry(
+                    name="modal",
+                    backend=None,
+                    status=ProviderPanelStatus.ERROR,
+                    is_enabled=True,
+                    error_type="AuthError",
+                    error_message="Modal token expired.",
+                ),
+            ),
+            last_event_at="2026-01-01T00:00:00+00:00",
+            last_full_snapshot_at="2026-01-01T00:00:00+00:00",
+        ),
+        requests=UiRequestsMessage(
+            count=2,
+            request_ids=(
+                "req-00000000000000000000000000000001",
+                "req-00000000000000000000000000000002",
+            ),
+            auto_open=True,
+        ),
+        health=(UiHealthMessage(agent_id="agent-00000000000000000000000000000002", status=AgentHealth.STUCK),),
+        discovery_health=UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
+    )
+    seed = UiBootstrapSeed(accent="#7c9885", is_mac=True, mngr_forward_origin="https://localhost:8421")
+    return UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=snapshot)
+
+
+def _render_spa_index_html(bootstrap: UiBootstrap) -> str:
+    """The SPA index page for a capture, mirroring ``ui_api.serve_spa_index``.
+
+    Keep this shape in sync with the real handler (same bootstrap inline, the
+    embed-contract script before the entry tags -- the shell consumes
+    ``window.MindsEmbedContract`` at module-evaluation time -- and the same
+    entry-tag source via ``read_vite_entry_tags``); the tag builder is
+    imported so hashed asset names always come from the live manifest.
+    """
+    entry_tags = read_vite_entry_tags()
+    if entry_tags is None:
+        raise SystemExit("frontend bundle missing after build; check pnpm output")
+    bootstrap_json = bootstrap.model_dump_json().replace("</", "<\\/")
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "  <head>\n"
+        '    <meta charset="utf-8">\n'
+        '    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        "    <title>minds</title>\n"
+        f"    <script>window.__MINDS_BOOTSTRAP__ = {bootstrap_json};</script>\n"
+        '    <script src="/_static/embed_contract.js"></script>\n'
+        f"    {entry_tags}\n"
+        "  </head>\n"
+        '  <body><div id="app"></div></body>\n'
+        "</html>\n"
+    )
+
+
+def _build_spa_bundle() -> None:
+    """Build frontend/ -> static/ui/ so the capture reflects this branch's source."""
+    minds_dir = REPO_ROOT / "apps" / "minds"
+    logger.info("[capture-spa] building the frontend bundle (pnpm install/generate/build)")
+    # install + generate first: node_modules/ and src/generated/ are both
+    # gitignored, so a bare pnpm build on a fresh checkout dies inside tsc
+    # with an opaque unresolved-module error. Same sequence as hatch_build.py
+    # and scripts/snapshot_minds_e2e_state.py.
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            ". scripts/select_node_version.sh && cd frontend"
+            " && pnpm install --frozen-lockfile && pnpm generate && pnpm build",
+        ],
+        cwd=str(minds_dir),
+        check=True,
+    )
+
+
+class SpaCaptureWiringError(MindError, TypeError):
+    """Raised when the SPA route handler is mounted on a non-capture server."""
+
+    ...
+
+
+class _SpaCaptureServer(socketserver.TCPServer):
+    """TCPServer that carries the SPA capture's route map + serving root.
+
+    Attributes are assigned right after construction (no __init__ override);
+    the handler reaches them through ``self.server`` with a cast, the typed
+    idiom for http.server's handler/server split.
+    """
+
+    spa_html_by_route: dict[str, Path]
+    spa_root_dir: Path
+
+
+class _SpaRouteHandler(_QuietStaticHandler):
+    """Serves the SPA index at each route's REAL path.
+
+    The SPA router reads ``location.pathname``, so ``/create`` must be served
+    at ``/create`` (not ``/html/spa_create.html``); everything else falls back
+    to static file serving rooted at the capture dir (``/_static/...``). The
+    route map and serving root ride on the :class:`_SpaCaptureServer`
+    instance. ``do_GET``'s name is the http.server API.
+    """
+
+    def do_GET(self) -> None:
+        server = self.server
+        if not isinstance(server, _SpaCaptureServer):
+            raise SpaCaptureWiringError(f"SPA route handler mounted on a non-capture server: {type(server)!r}")
+        capture_server = server
+        # SimpleHTTPRequestHandler reads ``self.directory`` at request time;
+        # binding it here (rather than a per-request factory) keeps the
+        # handler class module-level.
+        self.directory = str(capture_server.spa_root_dir)
+        html_by_route = capture_server.spa_html_by_route
+        route = self.path.split("?", 1)[0]
+        html_path = html_by_route.get(route)
+        if html_path is None:
+            super().do_GET()
+            return
+        body = html_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _screenshot_spa_routes(route_slugs: list[tuple[str, str]], png_dir: Path, port: int) -> None:
+    """Screenshot every SPA route once the app has mounted."""
+    with sync_playwright() as pw:
+        browser, is_full_page_reliable = _launch_chromium(pw)
+        try:
+            context = browser.new_context(
+                viewport={"width": VIEWPORT_W, "height": VIEWPORT_H}, reduced_motion="reduce"
+            )
+            page = context.new_page()
+            for route, slug in route_slugs:
+                # ``visual-diff=1`` marks the run so the shell can suppress
+                # nondeterministic chrome (e.g. a reconnecting indicator once
+                # the channel client exists).
+                separator = "&" if "?" in route else "?"
+                target = f"http://127.0.0.1:{port}{route}{separator}visual-diff=1"
+                try:
+                    page.goto(target, wait_until="load", timeout=15000)
+                    # Mounted = the app root has children. Stub pages count;
+                    # an empty app root means the bundle crashed, which times
+                    # out here and logs as a shot failure.
+                    page.wait_for_function(
+                        "() => { const el = document.getElementById('app'); return !!el && el.children.length > 0; }",
+                        timeout=10000,
+                    )
+                    _capture_full_page_screenshot(page, png_dir / f"spa_{slug}.png", is_full_page_reliable)
+                    logger.info("[shot] spa_{}", slug)
+                except _PLAYWRIGHT_EXCEPTIONS as exc:
+                    logger.opt(exception=exc).warning("[shot fail] spa_{}: {}", slug, type(exc).__name__)
+        finally:
+            browser.close()
+
+
+def _do_capture_spa(label: str, routes: list[str] | None, is_build_skipped: bool) -> Path:
+    output_dir = OUTPUT_ROOT / label
+    html_dir = output_dir / "html"
+    png_dir = output_dir / "png"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    html_dir.mkdir(parents=True)
+    png_dir.mkdir(parents=True)
+
+    if not is_build_skipped:
+        _build_spa_bundle()
+
+    # Same serving convention as the legacy mode: /_static resolves through a
+    # symlink into the live static dir (which now also contains ui/).
+    (output_dir / "_static").symlink_to(STATIC_DIR)
+
+    route_slugs = [(r, _slug_for_spa_route(r)) for r in routes] if routes else [(r, s) for r, s in SPA_ROUTE_SLUGS]
+    bootstrap = _build_spa_fixture_bootstrap()
+    index_html = _render_spa_index_html(bootstrap)
+
+    # One HTML artifact per route (identical bodies today, but per-route files
+    # keep the compare machinery's scenario model untouched and leave room for
+    # per-route bootstrap variations later).
+    html_by_route: dict[str, Path] = {}
+    for route, slug in route_slugs:
+        html_path = html_dir / f"spa_{slug}.html"
+        html_path.write_text(index_html)
+        html_by_route[route] = html_path
+
+    logger.info("[capture-spa] capturing {} routes -> {}", len(route_slugs), output_dir)
+    with socket.socket() as probe_socket:
+        probe_socket.bind(("127.0.0.1", 0))
+        port = probe_socket.getsockname()[1]
+    httpd = _SpaCaptureServer(("127.0.0.1", port), _SpaRouteHandler)
+    httpd.spa_html_by_route = html_by_route
+    httpd.spa_root_dir = output_dir
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _screenshot_spa_routes(route_slugs, png_dir, port)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    logger.info("[capture-spa] done: {}", output_dir)
     return output_dir
 
 
@@ -1062,6 +1412,25 @@ def main(argv: list[str] | None = None) -> int:
         help="output dir label (e.g. 'main', 'jinjax'); written to .visual-diff/<label>/",
     )
 
+    p_capture_spa = sub.add_parser(
+        "capture-spa", help="build the SPA bundle + screenshot every route with fixture data"
+    )
+    p_capture_spa.add_argument(
+        "--label",
+        required=True,
+        help="output dir label (e.g. 'spa-main'); written to .visual-diff/<label>/",
+    )
+    p_capture_spa.add_argument(
+        "--routes",
+        default=None,
+        help="comma-separated route paths to capture (default: the built-in SPA route list)",
+    )
+    p_capture_spa.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="reuse the existing static/ui bundle instead of running pnpm build",
+    )
+
     p_compare = sub.add_parser("compare", help="diff two captures, produce report.html")
     p_compare.add_argument("label_a", help="baseline label")
     p_compare.add_argument("label_b", help="comparison label")
@@ -1072,6 +1441,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "capture":
         _do_capture(args.label)
+        return 0
+    if args.cmd == "capture-spa":
+        routes = [r.strip() for r in args.routes.split(",") if r.strip()] if args.routes else None
+        _do_capture_spa(args.label, routes, args.skip_build)
         return 0
     if args.cmd == "compare":
         _do_compare(args.label_a, args.label_b)

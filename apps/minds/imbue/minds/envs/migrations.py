@@ -267,8 +267,6 @@ def apply_pool_hosts_migrations(
 # columns created by migration 014_plans_entitlements.sql.
 _PLAN_QUOTA_COLUMNS: Final[tuple[str, ...]] = (
     "max_remote_workspaces",
-    "max_tunnels",
-    "max_services_per_tunnel",
     "max_buckets",
     "max_total_bucket_bytes",
     "monthly_llm_spend_usd",

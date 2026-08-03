@@ -1,15 +1,15 @@
 {#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=-24, offset_y=2 #}
 {#
-  Standalone sidebar page loaded into the shared modal WebContentsView
-  when the user opens the sidebar. The modal view covers the full window
-  content area, the body is the transparent backdrop, and the floating
+  Standalone sidebar page mounted as an overlay-layer iframe (see
+  overlay_layer.js) when the user opens the sidebar. The iframe covers the
+  full window, the body is the transparent backdrop, and the floating
   panel is pinned at a position derived from the caller's trigger
   geometry. Clicks on the backdrop (anywhere outside the panel) dismiss
-  the modal via /_static/sidebar.js; the Escape key is handled by
-  main.js's modal before-input-event listener (see openModal in
-  electron/main.js), so this page does not install its own Escape
+  the modal via /_static/sidebar.js; the Escape key is handled by the
+  overlay layer's per-iframe keydown handler (see mountModalFrame in
+  overlay_layer.js), so this page does not install its own Escape
   handler. The panel's height comes from its own flex content -- no JS
-  measurement or Electron-side bounds math is needed.
+  measurement or bounds math is needed.
 
   Position model: the trigger (the chrome page's #workspace-switcher-btn
   in the titlebar breadcrumb) passes its viewport-relative rect (trigger_x,
@@ -17,8 +17,8 @@
   offset_y). The menu anchors its top-left at the trigger's bottom-left + offset:
     left = trigger_x + offset_x
     top  = trigger_y + trigger_h + offset_y
-  Because the chrome view and the modal view share the same window
-  coordinate space, the trigger's rect translates directly. The panel
+  Because the full-window iframe shares the shell's viewport coordinate
+  space, the trigger's rect translates directly. The panel
   carries a uniform 4px pad on all sides (``p-1``) with 2px between
   entries (``gap-0.5``); each row adds its own ``px-2`` for the hover
   highlight's inset. The default offset_x (-24) lines a row's workspace-name
@@ -31,7 +31,7 @@
   for the titlebar's first button without any caller customization.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
-  can build the cross-origin /goto/<agent>/ URL the plugin serves.
+  can build the cross-origin /goto/<host-id>/ URL the plugin serves.
 #}
 {% set _body_attrs %}data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
 {% set _scripts %}

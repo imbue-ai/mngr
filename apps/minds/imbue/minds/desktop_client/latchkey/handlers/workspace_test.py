@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Final
 
 import httpx
+import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
 
@@ -25,6 +26,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_workspace_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.request_handler import UiWorkspacePermissionDetail
 from imbue.mngr.primitives import AgentId
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
@@ -346,22 +348,50 @@ def test_deny_calls_gateway_delete_writes_response_notifies(tmp_path: Path) -> N
     assert sender.sent_messages and sender.sent_messages[0][0] == str(requester)
 
 
-def test_inbox_detail_route_dispatches_to_handler(tmp_path: Path) -> None:
+def test_build_request_detail_payload_mirrors_the_fragment_data(tmp_path: Path) -> None:
     handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
     target = AgentId()
     event = create_latchkey_workspace_permission_request_event(
         agent_id=str(AgentId()),
-        rationale="r",
+        rationale="manage my sibling machine",
         permissions=(PERM_WORKSPACES_DESTROY,),
         target_workspace_id=str(target),
     )
-    inbox = RequestInbox().add_request(event)
     resolver = _NamingBackendResolver(
         url_by_agent_and_service={},
         workspace_name_by_agent={str(target): "Target WS"},
     )
-    client = _build_authenticated_client(tmp_path, handler, inbox, resolver)
 
-    response = client.get(f"/inbox/detail/{event.event_id}")
-    assert response.status_code == 200
-    assert PERM_WORKSPACES_DESTROY in response.text
+    payload = handler.build_request_detail_payload(req_event=event, backend_resolver=resolver)
+
+    if not isinstance(payload, UiWorkspacePermissionDetail):
+        pytest.fail(f"expected a workspace detail payload, got {payload!r}")
+    assert payload.request_id == str(event.event_id)
+    assert payload.rationale == "manage my sibling machine"
+    assert payload.checked_permissions == (PERM_WORKSPACES_DESTROY,)
+    assert payload.target_workspace_id == str(target)
+    assert payload.target_workspace_name == "Target WS"
+    assert payload.show_target_choice is True
+    verb_permissions = [verb.permission for verb in payload.verbs]
+    assert PERM_WORKSPACES_DESTROY in verb_permissions
+    assert PERM_WORKSPACES_READ in verb_permissions
+
+
+def test_build_request_detail_payload_without_target_disables_target_choice(tmp_path: Path) -> None:
+    handler, _sender = _make_handler(tmp_path, lambda r: httpx.Response(204))
+    event = create_latchkey_workspace_permission_request_event(
+        agent_id=str(AgentId()),
+        rationale="broad access",
+        permissions=(PERM_WORKSPACES_DESTROY,),
+        target_workspace_id=None,
+    )
+
+    payload = handler.build_request_detail_payload(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+    )
+
+    if not isinstance(payload, UiWorkspacePermissionDetail):
+        pytest.fail(f"expected a workspace detail payload, got {payload!r}")
+    assert payload.target_workspace_id is None
+    assert payload.show_target_choice is False

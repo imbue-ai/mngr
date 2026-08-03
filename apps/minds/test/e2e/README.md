@@ -6,7 +6,7 @@ UI-driven E2E tests that launch a packaged `minds.app` Electron build and drive 
 
 | Driver | What it asserts | Needs lima? | Runs in |
 |---|---|---|---|
-| `macos-launch.spec.js` (Playwright) | App launches; chrome window renders; Python backend binds; the home "Create" link or the welcome splash ("Log In" link / "Continue without an account" button) is visible. Catches the `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression that Tart used to catch by hand. | no | `minds-launch-to-msg.yml` `macos_launch` job on `macos-latest`, twice-daily schedule + dispatch. ~5 min. |
+| `macos-launch.spec.js` (Playwright) | App launches; the window renders; Python backend binds; a real SPA landing page is visible (home settings launcher, welcome splash button, consent notice button, or the workspace iframe of a restored session). Catches the `_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS` class of regression that Tart used to catch by hand. | no | `minds-launch-to-msg.yml` `macos_launch` job on `macos-latest`, twice-daily schedule + dispatch. ~5 min. |
 | `scripts/launch_to_msg_e2e.py` (Python over CDP) | Drives the full Electron flow: launch → auth → create LIMA workspace → first agent message → assert nonce-verified reply. Also runs the slack-permission-flow sub-scenario (mock Slack via /etc/hosts + cert + socat, see below). | yes (nested virt) | `minds-launch-to-msg.yml` `verify` job on the self-hosted `minds-runner` MacBook. |
 
 ## Running locally
@@ -25,13 +25,18 @@ pnpm install
 # fast smoke (no lima):
 pnpm exec playwright test --config=test/e2e/playwright.config.js macos-launch.spec.js
 
-# chat round-trip (needs ANTHROPIC_API_KEY, 5-15 min):
-ANTHROPIC_API_KEY=sk-ant-... pnpm exec playwright test \
-  --config=test/e2e/playwright.config.js chat-roundtrip.spec.js
-
 # all specs:
 pnpm test:e2e
 ```
+
+`macos-launch.spec.js` is currently the only Playwright spec. The legacy
+renderer-contract specs (`embed-flow`, `local-swap`, `recovery-redirect`,
+`landing-stopped-mind-restart`) drove the pre-SPA shell scripts (chrome.js,
+overlay_layer.js) against a local harness server; they were deleted with
+those scripts in the Mithril SPA migration, along with the harness, and no
+SPA-shell Playwright equivalents exist yet (the SPA's own logic is covered
+by the vitest suites in `frontend/src/**/*.test.ts`). Set
+`MINDS_E2E_NO_VIDEO=1` if ffmpeg is missing on the host.
 
 Default target is `/Applications/Minds.app/Contents/MacOS/Minds`. Override via `MINDS_APP_PATH` to point at a downloaded pre-release build:
 
@@ -47,8 +52,8 @@ Each Playwright run sets a unique `MINDS_ROOT_NAME=minds-pw-<runId>` so `paths.j
 ## Authoring notes
 
 - `@playwright/test` and `playwright` must resolve to the same version (1.60.0 currently). pnpm pinning is explicit in `package.json` to prevent the dual-version dispatch error ("Playwright Test did not expect test() to be called here").
-- The chat panel itself is served from the in-VM `system_interface` and reaches the laptop via `mngr forward` → SSH tunnel. Playwright locator chain: `mainWindow.frameLocator('#content-frame')` for the chrome iframe.
-- minds.app uses `BaseWindow + WebContentsView` (not a single `BrowserWindow`); `app.firstWindow()` returns the chrome view at URL `/_chrome`, which renders only the title bar. For full-content screenshots use `pickContentWindow` from `fixtures.js` — it polls `app.windows()` for a page on the backend origin without the `_chrome` prefix.
+- The chat panel itself is served from the in-VM `system_interface` and reaches the laptop via `mngr forward` → SSH tunnel. Playwright locator chain: `mainWindow.frameLocator('#content-frame')` for the workspace iframe.
+- Each minds.app window is a single `BrowserWindow` whose page is the Mithril SPA served by the app server (titlebar, hub pages, the sandboxed workspace iframe, and in-DOM modals all live in that one web context). `pickContentWindow` from `fixtures.js` polls `app.windows()` for the page on the backend origin -- including `/workspace/<id>`, the SPA route a window sits on while displaying a workspace.
 - Traces + screenshots retained on failure under `test-results/playwright-html/`. View with `pnpm exec playwright show-report test-results/playwright-html`.
 
 ## Slack mock (self-hosted job only)

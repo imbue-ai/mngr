@@ -24,9 +24,8 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.sharing_handler import delete_tunnel_for_agent
+from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
-from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import WorkspaceSyncError
@@ -170,7 +169,7 @@ def disassociate_workspace_account(
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
 ) -> None:
-    """Unbind ``agent_id`` from its account and tear down its Cloudflare tunnel.
+    """Unbind ``agent_id`` from its account and tear down its share (if any).
 
     A no-op if no session store is configured or the workspace has no associated
     account. Raises :class:`WorkspaceAssociationError`: 403 for a leased
@@ -184,22 +183,33 @@ def disassociate_workspace_account(
     account = session_store.get_account_for_workspace(str(agent_id))
     if account is None:
         return
-    # Tear down the Cloudflare tunnel for this agent (if any). The plugin owns
-    # tunnel state; after deleting it server-side, also clear the token file
-    # inside the agent so its cloudflare-tunnel service stops cloudflared.
+    # Tear down the machine share for this workspace (if any): without an
+    # associated account there is nobody to make authenticated connector calls
+    # for it, so an active share must not outlive the association. The relay
+    # token dies with the connector-side delete; clearing the in-workspace
+    # materials also stops its share stack.
     if imbue_cloud_cli is not None:
-        delete_tunnel_for_agent(imbue_cloud_cli, str(account.email), agent_id)
-        # Unlike the destroy path, the agent is still running here, so its
-        # cloudflared has to be told to stop as well.
-        try:
-            clear_tunnel_token_from_agent(agent_id, imbue_cloud_cli.mngr_caller)
-        except ImbueCloudCliError as exc:
-            logger.warning("Failed to clear the tunnel token during disassociation: {}", exc)
+        display_info = backend_resolver.get_agent_display_info(agent_id)
+        host_id = str(display_info.host_id) if display_info is not None else ""
+        if not host_id.startswith("host-") and session_store.record_store is not None:
+            # Discovery misses a stopped workspace; its workspace record still
+            # carries the host coordinate, so the share can be revoked anyway.
+            found = session_store.record_store.find_active_record(str(agent_id))
+            if found is not None and found[1].host_id.startswith("host-"):
+                host_id = found[1].host_id
+        if host_id.startswith("host-"):
+            try:
+                share = imbue_cloud_cli.get_share_status(account=str(account.email), host_id=host_id)
+                if share is not None and share.state == "active":
+                    clear_share_materials_from_agent(agent_id, imbue_cloud_cli.mngr_caller)
+                    imbue_cloud_cli.delete_share(account=str(account.email), host_id=host_id)
+            except ImbueCloudCliError as exc:
+                logger.warning("Failed to delete the machine share during disassociation: {}", exc)
     try:
         session_store.disassociate_workspace(str(account.user_id), str(agent_id))
     except WorkspaceSyncError as exc:
         raise WorkspaceAssociationError(
-            f"Could not unlink this machine: {describe_connector_failure(exc)}", 502
+            f"Could not unlink this machine from the account: {describe_connector_failure(exc)}", 502
         ) from exc
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.notify_change()

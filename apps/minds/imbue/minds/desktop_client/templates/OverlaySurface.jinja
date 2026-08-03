@@ -1,8 +1,8 @@
 {#def title="Minds", body_class="bg-transparent text-primary font-sans antialiased", body_style="", body_attrs="", head="", scripts="" #}
 {#
-  Base variant for edge-to-edge transparent surfaces loaded into the shared
-  overlay WebContentsView: the overlay host and the modal pages it hosts
-  (workspace menu / inbox / help / sign-in), plus any future overlay surface.
+  Base variant for edge-to-edge transparent surfaces mounted as modal iframes
+  in the chrome shell's overlay layer (see overlay_layer.js): the workspace
+  menu / inbox / help / sign-in pages, plus any future overlay surface.
 
   The contract these pages share: they paint fixed full-viewport layers
   (their own dim backdrop or measured bubbles), never scroll at the document

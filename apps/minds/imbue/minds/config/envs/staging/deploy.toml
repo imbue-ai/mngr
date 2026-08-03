@@ -15,6 +15,7 @@ services = [
     "neon",
     "pool-ssh",
     "supertokens",
+    "sharing",
 ]
 
 [lifecycle]
@@ -25,7 +26,7 @@ tracks_generation = true
 
 [min_containers]
 # Keep one container of each app warm so the desktop client never pays
-# a cold-boot penalty on auth / lease / tunnel hits.
+# a cold-boot penalty on auth / lease / share hits.
 connector = 1
 litellm_proxy = 1
 
@@ -43,8 +44,6 @@ domains = ["imbue.com"]
 # via the admin API.
 [plans.explorer]
 max_remote_workspaces = 2
-max_tunnels = 50
-max_services_per_tunnel = 10
 max_buckets = 5
 max_total_bucket_gb = 50
 monthly_llm_spend_usd = 0
@@ -52,8 +51,6 @@ max_active_synced_workspaces = 200
 
 [plans.ally]
 max_remote_workspaces = 10
-max_tunnels = 50
-max_services_per_tunnel = 10
 max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000

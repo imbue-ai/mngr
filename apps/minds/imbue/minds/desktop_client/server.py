@@ -40,7 +40,6 @@ from types import FrameType
 from typing import Final
 
 import httpx
-from cheroot import wsgi
 from flask import Flask
 from loguru import logger
 
@@ -50,6 +49,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.region_preference import start_geo_detection
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.templates import warm_template_caches
+from imbue.minds.desktop_client.ws_gateway import create_websocket_aware_wsgi_server
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import flush_sentry_on_shutdown
 
@@ -57,12 +57,14 @@ from imbue.minds.utils.sentry.core import flush_sentry_on_shutdown
 # (mirrors the old FastAPI lifespan's httpx client timeout).
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
-# Worker-thread pool floor for the cheroot server. With keep-alive, each live
-# connection (page loads, static assets, and the long-lived SSE streams) holds
-# a worker thread for its lifetime, so the floor is sized above the handful of
-# connections a single Electron client keeps open to avoid pool-growth latency
-# during the startup burst. The pool still grows without bound above this floor
-# (``max=-1``) if needed.
+# Worker-thread pool size for the cheroot server. This is a HARD cap, not a
+# floor: cheroot's ThreadPool.grow() runs exactly once at startup with this
+# value and nothing in plain cheroot ever grows the pool afterwards (``max``
+# only bounds manual grow() calls). With keep-alive, each live connection --
+# page loads, static assets, every /ui/ws WebSocket, and the long-lived SSE
+# streams -- holds a worker thread for its lifetime, so this must comfortably
+# exceed windows x (1 WebSocket + a few keep-alive HTTP connections) plus the
+# transient operation-log streams.
 _SERVER_THREAD_POOL_SIZE: Final[int] = 50
 
 
@@ -112,6 +114,10 @@ def desktop_client_runtime(state: DesktopClientState, is_externally_managed_clie
             # Warmup failures must not poison the root group; the target swallows its own.
             is_checked=False,
         )
+        # Start the /ui channel publisher strand so connected SPA windows
+        # receive edge-driven state updates for the process lifetime.
+        if state.ui_publisher is not None:
+            state.ui_publisher.start(state.root_concurrency_group)
     try:
         yield
     finally:
@@ -129,6 +135,11 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # Signal SSE handlers to exit (idempotent: the signal handler set this first).
     state.shutdown_event.set()
     _wake_sse_handlers(state)
+    # Stop the channel publisher strand and evict any /ui/ws handlers that
+    # connected after the signal-path shutdown (both calls are idempotent).
+    if state.ui_publisher is not None:
+        state.ui_publisher.stop()
+    state.ui_channel_broadcaster.shutdown()
     if not is_externally_managed_client and state.http_client is not None:
         state.http_client.close()
     # SIGTERMs the mngr forward subprocess and closes its pipes so the reader
@@ -155,6 +166,15 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # still-in-flight strands (e.g. a detached tunnel-setup task) to finish.
     root_concurrency_group: ConcurrencyGroup | None = state.root_concurrency_group
     if root_concurrency_group is not None:
+        # Trigger the group's own shutdown event before exiting: the long-lived
+        # watcher strands (system-interface-health-probe, discovery-health-
+        # watchdog) loop on ``is_shutting_down()`` and can only wind down once
+        # this event is set -- without it the exit below always waited out its
+        # full timeout and abandoned them. Triggered here, after the ordered
+        # teardown above, because the group's strand-starting methods raise
+        # once it is shutting down and the steps above may still legitimately
+        # start cleanup work on the group.
+        root_concurrency_group.shutdown()
         logger.info("Exiting root concurrency group...")
         try:
             root_concurrency_group.__exit__(None, None, None)
@@ -180,8 +200,10 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
     # cheroot speaks HTTP/1.1 with keep-alive and streams responses without a
     # Content-Length chunk-by-chunk (our SSE generators), matching the wire
     # behavior of the prior uvicorn server -- see this module's docstring for
-    # why keep-alive is load-bearing for the Electron shell's startup.
-    server = wsgi.Server((host, port), app, numthreads=_SERVER_THREAD_POOL_SIZE)
+    # why keep-alive is load-bearing for the Electron shell's startup. The
+    # WebSocket-aware subclass additionally lets simple_websocket serve
+    # /ui/ws sessions on cheroot's sockets (see ws_gateway.py).
+    server = create_websocket_aware_wsgi_server((host, port), app, numthreads=_SERVER_THREAD_POOL_SIZE)
 
     def _handle_exit(signal_number: int, _frame: FrameType | None) -> None:
         logger.info("Received signal {}; beginning graceful shutdown", signal_number)
@@ -189,6 +211,10 @@ def serve_desktop_client(app: Flask, state: DesktopClientState, host: str, port:
         # their generators return cleanly instead of being cut off mid-stream.
         state.shutdown_event.set()
         _wake_sse_handlers(state)
+        # Push the sentinel to every /ui/ws handler for the same reason: a live
+        # WebSocket otherwise pins its worker thread until cheroot's
+        # shutdown_timeout expires (measured 5.5s naive vs 0.5s with the wake).
+        state.ui_channel_broadcaster.shutdown()
         # ``stop()`` blocks until the serve loop winds down and must run on a
         # different thread than the one calling ``serve()``.
         threading.Thread(target=server.stop, name="minds-server-shutdown", daemon=True).start()

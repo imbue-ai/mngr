@@ -47,6 +47,7 @@ from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.testing import TEST_AGENT_ID_1
 from imbue.mngr_forward.testing import TEST_AGENT_ID_2
+from imbue.mngr_forward.testing import make_in_memory_test_ca
 from imbue.mngr_forward.tls import InMemoryTLSConfig
 
 
@@ -191,10 +192,10 @@ def _fd_from_bind(config: Config) -> int:
 
 
 def test_build_hypercorn_config_plain_http_when_flag_off() -> None:
-    """Flag off yields a plain ``Config`` with no TLS, handed the socket by fd."""
+    """No CA yields a plain ``Config`` with no TLS, handed the socket by fd."""
     sock = _bind_listen_socket("127.0.0.1", None)
     try:
-        config = _build_hypercorn_config(sock, use_http2=False)
+        config = _build_hypercorn_config(sock, ca=None)
         dup_fd = _fd_from_bind(config)
         try:
             assert not isinstance(config, InMemoryTLSConfig)
@@ -211,10 +212,10 @@ def test_build_hypercorn_config_plain_http_when_flag_off() -> None:
 
 
 def test_build_hypercorn_config_enables_tls_when_flag_on() -> None:
-    """Flag on yields an ``InMemoryTLSConfig`` whose context is a real SSLContext."""
+    """A CA yields an ``InMemoryTLSConfig`` whose context is a real SSLContext."""
     sock = _bind_listen_socket("127.0.0.1", None)
     try:
-        config = _build_hypercorn_config(sock, use_http2=True)
+        config = _build_hypercorn_config(sock, ca=make_in_memory_test_ca())
         dup_fd = _fd_from_bind(config)
         try:
             assert isinstance(config, InMemoryTLSConfig)
@@ -359,7 +360,7 @@ def test_abandoned_tls_connection_is_torn_down_quickly_and_quietly(caplog: pytes
     """
     listen_socket = _bind_listen_socket("127.0.0.1", 0)
     listen_port = listen_socket.getsockname()[1]
-    config = _build_hypercorn_config(listen_socket, use_http2=True)
+    config = _build_hypercorn_config(listen_socket, ca=make_in_memory_test_ca())
     # Shrink the keep-alive so the server initiates the close (and thereby the
     # TLS shutdown) shortly after the client goes idle.
     config.keep_alive_timeout = 0.25

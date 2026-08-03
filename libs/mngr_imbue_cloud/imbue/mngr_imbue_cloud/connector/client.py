@@ -1,7 +1,8 @@
 """HTTP client for the remote_service_connector.
 
-One client wraps all four connector concerns (auth, hosts, keys, tunnels) so
-the CLI commands and provider can share a single httpx instance per account.
+One client wraps all the connector concerns (auth, hosts, keys, shares, ...)
+so the CLI commands and provider can share a single httpx instance per
+account.
 
 Authentication semantics:
 - Methods explicitly named ``*_auth_*`` (signin/signup/oauth/refresh) take no
@@ -26,7 +27,6 @@ from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_imbue_cloud.data_types import AccountInfo
-from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
@@ -37,12 +37,11 @@ from imbue.mngr_imbue_cloud.data_types import R2BucketCreateResult
 from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
-from imbue.mngr_imbue_cloud.data_types import ServiceInfo
+from imbue.mngr_imbue_cloud.data_types import ShareInfo
 from imbue.mngr_imbue_cloud.data_types import StorageCleanupGrant
 from imbue.mngr_imbue_cloud.data_types import StorageRecheckResult
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
-from imbue.mngr_imbue_cloud.data_types import TunnelInfo
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
@@ -56,23 +55,12 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudTunnelError
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
-
-# Tunnel-name convention mirrored from the connector
-# (``apps/remote_service_connector/.../app.py``): every tunnel is named
-# ``<user_id_prefix>--<agent-prefix>``, where ``<agent-prefix>`` is the first 16 hex
-# chars of the agent UUID (``"agent-"`` prefix stripped). Used only by the
-# ``find_tunnel_for_agent`` back-compat fallback, which enumerates tunnels and
-# matches on this trailing slug when the connector lacks the O(1) by-agent
-# endpoint. Keep in lockstep with the connector's ``TUNNEL_NAME_SEP`` /
-# ``_AGENT_ID_PREFIX_LENGTH``.
-_TUNNEL_NAME_SEP = "--"
-_AGENT_ID_PREFIX_LENGTH = 16
 
 # Transient-transport retry policy for connector calls. The connector is a
 # Modal app that scales to zero, so a call hitting a cold/scaling instance can
@@ -580,238 +568,56 @@ class ImbueCloudConnectorClient(MutableModel):
         self._check(response, ImbueCloudKeyError)
 
     # ------------------------------------------------------------------
-    # Tunnels (Cloudflare)
+    # Shares (self-hosted relays)
     # ------------------------------------------------------------------
 
-    def create_tunnel(
-        self,
-        access_token: SecretStr,
-        agent_id: str,
-        default_auth_policy: AuthPolicy | None,
-    ) -> TunnelInfo:
-        body: dict[str, Any] = {"agent_id": agent_id}
-        if default_auth_policy is not None:
-            body["default_auth_policy"] = _auth_policy_to_connector_body(default_auth_policy)
+    def create_share(self, access_token: SecretStr, host_id: str) -> ShareInfo:
+        """Enable sharing for one workspace; the returned relay token is only ever returned here."""
         response = self._send(
             "POST",
-            self._url("/tunnels"),
-            exc_cls=ImbueCloudTunnelError,
+            self._url("/shares"),
+            exc_cls=ImbueCloudShareError,
             headers=self._bearer(access_token),
-            json=body,
+            json={"host_id": host_id},
             timeout=self.timeout_seconds,
         )
-        body_json = self._check(response, ImbueCloudTunnelError)
-        return _parse_tunnel_info(body_json)
+        body = self._check(response, ImbueCloudShareError)
+        return _parse_share_info(body, state="active")
 
-    def list_tunnels(self, access_token: SecretStr) -> list[TunnelInfo]:
+    def delete_share(self, access_token: SecretStr, host_id: str) -> None:
         response = self._send(
-            "GET",
-            self._url("/tunnels"),
-            exc_cls=ImbueCloudTunnelError,
+            "DELETE",
+            self._url(f"/shares/{host_id}"),
+            exc_cls=ImbueCloudShareError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
-        body = self._check(response, ImbueCloudTunnelError)
-        if not isinstance(body, list):
-            return []
-        return [_parse_tunnel_info(entry) for entry in body if isinstance(entry, dict)]
+        self._check(response, ImbueCloudShareError)
 
-    def find_tunnel_for_agent(self, access_token: SecretStr, agent_id: str) -> TunnelInfo | None:
-        """Resolve the caller's tunnel for ``agent_id``, or ``None`` if there is none.
-
-        Fast path: ``GET /tunnels/by-agent/{agent_id}`` resolves the exact
-        tunnel through Cloudflare's server-side name filter (2 Cloudflare
-        calls) rather than enumerating every tunnel and fetching each one's
-        config. On that endpoint, HTTP 200 with ``null`` means "no tunnel for
-        this agent yet".
-
-        Back-compat: a connector deployed before this endpoint existed answers
-        the unknown route with a generic 404. Clients update independently of
-        (and often ahead of) the connector, so a 404 here is treated as "this
-        connector is too old" and we transparently fall back to the O(n)
-        ``GET /tunnels`` enumeration, matching on the ``<user_id_prefix>--<agent>``
-        name convention. This keeps sharing working during the rollout window;
-        once the connector is redeployed, every call takes the fast path.
-        """
+    def get_share_status(self, access_token: SecretStr, host_id: str) -> ShareInfo | None:
+        """The share's status document, or None when this workspace has never been shared."""
         response = self._send(
             "GET",
-            self._url(f"/tunnels/by-agent/{agent_id}"),
-            exc_cls=ImbueCloudTunnelError,
+            self._url(f"/shares/{host_id}/status"),
+            exc_cls=ImbueCloudShareError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
         if response.status_code == 404:
-            return self._find_tunnel_for_agent_via_list(access_token, agent_id)
-        body = self._check(response, ImbueCloudTunnelError)
-        if not body:
             return None
-        return _parse_tunnel_info(body)
+        body = self._check(response, ImbueCloudShareError)
+        return _parse_share_info(body, state=str(body.get("state", "")))
 
-    def _find_tunnel_for_agent_via_list(self, access_token: SecretStr, agent_id: str) -> TunnelInfo | None:
-        """O(n) fallback for connectors without the ``by-agent`` endpoint.
-
-        Enumerates the caller's tunnels and matches on the trailing
-        ``--<agent-prefix>`` slug the connector uses for tunnel names.
-        """
-        short_agent = agent_id.removeprefix("agent-")[:_AGENT_ID_PREFIX_LENGTH]
-        suffix = f"{_TUNNEL_NAME_SEP}{short_agent}"
-        for tunnel in self.list_tunnels(access_token):
-            if tunnel.tunnel_name.endswith(suffix):
-                return tunnel
-        return None
-
-    def delete_tunnel(self, access_token: SecretStr, tunnel_name: str) -> None:
-        response = self._send(
-            "DELETE",
-            self._url(f"/tunnels/{tunnel_name}"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            timeout=self.timeout_seconds,
-        )
-        self._check(response, ImbueCloudTunnelError)
-
-    def add_service(
-        self,
-        access_token: SecretStr,
-        tunnel_name: str,
-        service_name: str,
-        service_url: str,
-    ) -> ServiceInfo:
-        response = self._send(
-            "POST",
-            self._url(f"/tunnels/{tunnel_name}/services"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            json={"service_name": service_name, "service_url": service_url},
-            timeout=self.timeout_seconds,
-        )
-        body = self._check(response, ImbueCloudTunnelError)
-        return _parse_service_info(body)
-
-    def list_services(self, access_token: SecretStr, tunnel_name: str) -> list[ServiceInfo]:
+    def list_shares(self, access_token: SecretStr) -> list[ShareInfo]:
         response = self._send(
             "GET",
-            self._url(f"/tunnels/{tunnel_name}/services"),
-            exc_cls=ImbueCloudTunnelError,
+            self._url("/shares"),
+            exc_cls=ImbueCloudShareError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
-        body = self._check(response, ImbueCloudTunnelError)
-        if not isinstance(body, list):
-            return []
-        return [_parse_service_info(entry) for entry in body if isinstance(entry, dict)]
-
-    def enable_sharing(
-        self,
-        access_token: SecretStr,
-        agent_id: str,
-        service_name: str,
-        service_url: str,
-        policy: AuthPolicy,
-    ) -> tuple[TunnelInfo, ServiceInfo]:
-        """Enable (or update) sharing for one service in a single connector call.
-
-        Wraps ``POST /sharing/enable``, which ensures the tunnel exists
-        (idempotent), adds the service, and applies ``policy`` directly to
-        its Access Application -- replacing the previous create-tunnel +
-        add-service + set-service-auth three-call sequence. The returned
-        tunnel carries the cloudflared token, so no follow-up reads are
-        needed.
-        """
-        response = self._send(
-            "POST",
-            self._url("/sharing/enable"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            json={
-                "agent_id": agent_id,
-                "service_name": service_name,
-                "service_url": service_url,
-                "auth_policy": _auth_policy_to_connector_body(policy),
-            },
-            timeout=self.timeout_seconds,
-        )
-        body = self._check(response, ImbueCloudTunnelError)
-        tunnel_raw = body.get("tunnel")
-        service_raw = body.get("service")
-        if not isinstance(tunnel_raw, dict) or not isinstance(service_raw, dict):
-            # Describe only the body's shape, never its contents: a well-formed
-            # "tunnel" half carries the cloudflared token, which must not leak
-            # into an error message that ends up in CLI stderr and client logs.
-            raise ImbueCloudTunnelError(
-                f"Malformed /sharing/enable response: expected 'tunnel' and 'service' objects, "
-                f"got dict with keys {sorted(body)}"
-            )
-        return _parse_tunnel_info(tunnel_raw), _parse_service_info(service_raw)
-
-    def remove_service(self, access_token: SecretStr, tunnel_name: str, service_name: str) -> None:
-        response = self._send(
-            "DELETE",
-            self._url(f"/tunnels/{tunnel_name}/services/{service_name}"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            timeout=self.timeout_seconds,
-        )
-        self._check(response, ImbueCloudTunnelError)
-
-    def get_tunnel_auth(self, access_token: SecretStr, tunnel_name: str) -> AuthPolicy:
-        response = self._send(
-            "GET",
-            self._url(f"/tunnels/{tunnel_name}/auth"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            timeout=self.timeout_seconds,
-        )
-        body = self._check(response, ImbueCloudTunnelError)
-        return _parse_auth_policy(body)
-
-    def set_tunnel_auth(self, access_token: SecretStr, tunnel_name: str, policy: AuthPolicy) -> None:
-        response = self._send(
-            "PUT",
-            self._url(f"/tunnels/{tunnel_name}/auth"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            json=_auth_policy_to_connector_body(policy),
-            timeout=self.timeout_seconds,
-        )
-        self._check(response, ImbueCloudTunnelError)
-
-    def get_service_auth(
-        self,
-        access_token: SecretStr,
-        tunnel_name: str,
-        service_name: str,
-    ) -> AuthPolicy:
-        response = self._send(
-            "GET",
-            self._url(f"/tunnels/{tunnel_name}/services/{service_name}/auth"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            timeout=self.timeout_seconds,
-        )
-        body = self._check(response, ImbueCloudTunnelError)
-        return _parse_auth_policy(body)
-
-    def set_service_auth(
-        self,
-        access_token: SecretStr,
-        tunnel_name: str,
-        service_name: str,
-        policy: AuthPolicy,
-    ) -> None:
-        response = self._send(
-            "PUT",
-            self._url(f"/tunnels/{tunnel_name}/services/{service_name}/auth"),
-            exc_cls=ImbueCloudTunnelError,
-            headers=self._bearer(access_token),
-            json=_auth_policy_to_connector_body(policy),
-            timeout=self.timeout_seconds,
-        )
-        self._check(response, ImbueCloudTunnelError)
-
-    # ------------------------------------------------------------------
-    # Buckets (R2)
-    # ------------------------------------------------------------------
+        body = self._check(response, ImbueCloudShareError)
+        return [_parse_share_info(entry, state=str(entry.get("state", ""))) for entry in body.get("shares", [])]
 
     def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""
@@ -1162,7 +968,7 @@ class ImbueCloudConnectorClient(MutableModel):
     #
     # These take the fixed admin API key (NOT a SuperTokens
     # session token); the connector authenticates them against
-    # ``MINDS_ADMIN_KEY`` and rejects user / tunnel tokens.
+    # ``MINDS_ADMIN_KEY`` and rejects user tokens.
 
     def _list_paid_entries(
         self, admin_api_key: SecretStr, path: str, value_key: str, paid_only: bool
@@ -1285,101 +1091,16 @@ def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry
     )
 
 
-def _parse_tunnel_info(raw: dict[str, Any]) -> TunnelInfo:
-    """Best-effort coerce a connector tunnel dict into our TunnelInfo."""
-    services = raw.get("services") or ()
-    if isinstance(services, list):
-        # Connector returns either ['name1', 'name2'] or [{service_name: ...}, ...].
-        flat: list[str] = []
-        for entry in services:
-            if isinstance(entry, str):
-                flat.append(entry)
-            elif isinstance(entry, dict) and "service_name" in entry:
-                flat.append(str(entry["service_name"]))
-        services_tuple = tuple(flat)
-    else:
-        services_tuple = ()
-    token_value = raw.get("token") or raw.get("tunnel_token")
-    return TunnelInfo(
-        tunnel_name=str(raw.get("tunnel_name", raw.get("name", ""))),
-        tunnel_id=str(raw.get("tunnel_id", raw.get("id", ""))),
-        token=SecretStr(str(token_value)) if token_value else None,
-        services=services_tuple,
-    )
-
-
-def _parse_service_info(raw: dict[str, Any]) -> ServiceInfo:
-    return ServiceInfo(
-        service_name=str(raw.get("service_name", raw.get("name", ""))),
-        service_url=str(raw.get("service_url", raw.get("url", ""))),
-        hostname=str(raw.get("hostname", "")),
-    )
-
-
-def _auth_policy_to_connector_body(policy: AuthPolicy) -> dict[str, Any]:
-    """Translate the plugin's high-level ``AuthPolicy`` into the body shape
-    the connector accepts (Cloudflare-native ``{"rules": [...]}``).
-
-    The connector's ``AuthPolicy`` model wraps a list of Cloudflare Access
-    rule dicts (``{action, include}``) and is consumed both directly
-    (per-service Access policies) and via KV (default-tunnel policy). Our
-    high-level model carries flat allow-lists (emails, email domains,
-    required IDPs); this helper bundles everything into a single
-    ``allow`` rule whose ``include`` is the union of the three.
-
-    A policy with no allow-list members serializes to ``{"rules": []}``,
-    which the connector interprets as "no policy" without rejecting the
-    request body.
-    """
-    include: list[dict[str, Any]] = []
-    for email in policy.emails:
-        include.append({"email": {"email": email}})
-    for domain in policy.email_domains:
-        include.append({"email_domain": {"domain": domain}})
-    for idp_id in policy.require_idp:
-        include.append({"login_method": {"id": idp_id}})
-    if not include:
-        return {"rules": []}
-    return {"rules": [{"action": "allow", "include": include}]}
-
-
-def _parse_auth_policy(raw: dict[str, Any]) -> AuthPolicy:
-    """Translate the connector's ``{"rules": [...]}`` response back into
-    the plugin's high-level ``AuthPolicy``.
-
-    Walks every rule's ``include`` list and bins entries by Cloudflare
-    Access rule type (``email`` / ``email_domain`` / ``login_method``).
-    Unknown shapes are ignored rather than raising so a connector that
-    later adds a new include type doesn't break older plugin clients.
-    """
-    emails: list[str] = []
-    email_domains: list[str] = []
-    require_idp: list[str] = []
-    rules = raw.get("rules") or []
-    if not isinstance(rules, list):
-        return AuthPolicy()
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        include = rule.get("include") or []
-        if not isinstance(include, list):
-            continue
-        for entry in include:
-            if not isinstance(entry, dict):
-                continue
-            email_obj = entry.get("email")
-            if isinstance(email_obj, dict) and isinstance(email_obj.get("email"), str):
-                emails.append(email_obj["email"])
-                continue
-            domain_obj = entry.get("email_domain")
-            if isinstance(domain_obj, dict) and isinstance(domain_obj.get("domain"), str):
-                email_domains.append(domain_obj["domain"])
-                continue
-            login_obj = entry.get("login_method")
-            if isinstance(login_obj, dict) and isinstance(login_obj.get("id"), str):
-                require_idp.append(login_obj["id"])
-    return AuthPolicy(
-        emails=tuple(emails),
-        email_domains=tuple(email_domains),
-        require_idp=tuple(require_idp),
+def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
+    """Build a ShareInfo from a connector share payload (create/status/list shapes)."""
+    relay_token = body.get("relay_token")
+    return ShareInfo(
+        host_id=str(body.get("host_id", "")),
+        workspace_domain=str(body.get("workspace_domain", "")),
+        region=str(body.get("region", "")),
+        state=state or "active",
+        relay_endpoint=body.get("relay_endpoint"),
+        relay_token=SecretStr(relay_token) if relay_token else None,
+        last_tunnel_login_at=body.get("last_tunnel_login_at"),
+        cert_not_after=body.get("cert_not_after"),
     )

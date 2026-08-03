@@ -59,8 +59,8 @@ DYNAMIC_ENV_PREFIXES: Final[tuple[str, ...]] = ("dev", "ci")
 
 # By convention every dynamic env name starts with the tier prefix so the
 # derived ``MINDS_ROOT_NAME`` (``minds-<tier>-<rest>``) reads tier-first
-# everywhere it surfaces (mngr prefix, env root dir, Cloudflare tunnel
-# tag, Modal env name, etc). The pattern is enforced strictly so a typo
+# everywhere it surfaces (mngr prefix, env root dir, Modal env name,
+# etc). The pattern is enforced strictly so a typo
 # can't accidentally land state in a place that won't be cleaned up by
 # ``minds env destroy``. The shape itself is defined once, in the bootstrap
 # module (which also embeds it in MINDS_ROOT_NAME_PATTERN); this is just

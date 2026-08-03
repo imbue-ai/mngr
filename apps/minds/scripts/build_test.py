@@ -76,11 +76,17 @@ def built_wheels(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     wheels: dict[str, Path] = {}
     for name in WORKSPACE_PACKAGES:
         before = set(out_dir.iterdir())
+        # These tests assert packaging metadata (purity, test-file exclusion),
+        # not bundle contents; skip the SPA build so they run in sandboxes
+        # without node/pnpm.
+        build_env = dict(os.environ)
+        build_env["MINDS_SKIP_FRONTEND_BUNDLE"] = "1"
         subprocess.run(
             ["uv", "build", "--package", name, "--wheel", "--out-dir", str(out_dir)],
             cwd=MONOREPO_ROOT,
             check=True,
             capture_output=True,
+            env=build_env,
         )
         produced = [p for p in out_dir.iterdir() if p not in before and p.suffix == ".whl"]
         assert len(produced) == 1, f"Expected exactly one wheel for {name}, got {produced}"

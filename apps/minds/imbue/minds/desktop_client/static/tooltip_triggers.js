@@ -6,22 +6,21 @@
 // The trigger wiring is identical everywhere; only the render backend differs,
 // chosen once by environment:
 //
-//   * Overlay backend (window.minds.showTooltip present): the chrome titlebar
-//     and the modal pages hosted on the shared overlay surface hand the label
-//     + trigger rect to main over IPC, which renders the bubble on that surface
-//     -- floating above both chrome and workspace content (see overlay.js).
-//   * In-page backend (no bridge): first-party content-view pages (e.g. the
-//     landing page's workspace-row buttons) render the bubble themselves, as a
-//     ``position: fixed`` element appended to <body> so it escapes the
-//     workspace cards' ``overflow-hidden``. The content view deliberately lacks
-//     the window.minds bridge -- it also hosts foreign, untrusted workspace
-//     content -- so it cannot reach the overlay surface; it styles the bubble
-//     with the same shared ``.minds-tooltip`` class so the look matches.
+//   * Overlay backend (window.minds.showTooltip present): the chrome shell and
+//     the modal pages hosted in the overlay layer hand the label + trigger
+//     rect to the overlay layer (via the bridge for hosted iframes), which
+//     renders the bubble in the shell's top DOM layer -- floating above both
+//     chrome and the workspace iframe (see overlay_layer.js).
+//   * In-page backend (no bridge): a page loaded standalone (outside the
+//     chrome shell) renders the bubble itself, as a ``position: fixed``
+//     element appended to <body> so it escapes the workspace cards'
+//     ``overflow-hidden``; it styles the bubble with the same shared
+//     ``.minds-tooltip`` class so the look matches.
 //
 // An optional ``data-tooltip-shortcut`` populates the overlay payload's
 // ``shortcut`` field -- a forward hook for a keyboard-shortcut chip. Nothing
-// renders it yet (overlay.js drops the chip; there is no on-ramp chip size in
-// the design system), so it is a no-op until a real use arrives.
+// renders it yet (overlay_layer.js drops the chip; there is no on-ramp chip
+// size in the design system), so it is a no-op until a real use arrives.
 
 (function () {
   'use strict';
@@ -30,8 +29,8 @@
   var TOOLTIP_MARGIN = 6; // min gap from the window edges
   var TOOLTIP_GAP = 6; // gap between the trigger and the bubble
 
-  // Overlay backend: delegate rendering + positioning to the overlay surface
-  // (main measures/clamps and drives the view's bounds; see overlay.js).
+  // Overlay backend: delegate rendering + positioning to the overlay layer
+  // (which measures, clamps, and paints the bubble; see overlay_layer.js).
   function makeOverlayBackend() {
     return {
       show: function (el) {
@@ -51,9 +50,9 @@
   }
 
   // In-page backend: render + position the bubble on <body> ourselves. The
-  // positioning mirrors overlay.js (centered under the trigger, flipped above
-  // when it would overflow the bottom, clamped to the viewport) so the two
-  // backends behave the same.
+  // positioning mirrors overlay_layer.js (centered under the trigger, flipped
+  // above when it would overflow the bottom, clamped to the viewport) so the
+  // two backends behave the same.
   function makeInPageBackend() {
     var bubble = null;
     function ensureBubble() {
@@ -78,8 +77,8 @@
         // Measure at natural width (clear any width fixed by a prior show). Also
         // reset left/top to 0 first: the bubble is position:fixed, so a stale
         // large left from a prior show would cap its shrink-to-fit width at
-        // (viewport - left) and wrap the label, mis-measuring w/h (overlay.js
-        // resets the same way before measuring).
+        // (viewport - left) and wrap the label, mis-measuring w/h
+        // (overlay_layer.js resets the same way before measuring).
         b.style.width = '';
         b.style.left = '0';
         b.style.top = '0';

@@ -535,39 +535,22 @@ mngr imbue_cloud bucket keys list [OPTIONS] [BUCKET_NAME]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
-## mngr imbue_cloud tunnels
+## mngr imbue_cloud shares
 
 **Usage:**
 
 ```text
-mngr imbue_cloud tunnels [OPTIONS] COMMAND [ARGS]...
+mngr imbue_cloud shares [OPTIONS] COMMAND [ARGS]...
 ```
 **Options:**
 
 
-## mngr imbue_cloud tunnels create
+## mngr imbue_cloud shares create
 
 **Usage:**
 
 ```text
-mngr imbue_cloud tunnels create [OPTIONS] AGENT_ID
-```
-**Options:**
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--account` | text | Account email (defaults to the active account) | None |
-| `--policy` | text | Default Cloudflare Access policy as JSON, e.g. '{"emails":["a@example.com"]}' | None |
-| `--connector-url` | text | Override connector URL | None |
-
-## mngr imbue_cloud tunnels list
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels list [OPTIONS]
+mngr imbue_cloud shares create [OPTIONS] HOST_ID
 ```
 **Options:**
 
@@ -578,12 +561,12 @@ mngr imbue_cloud tunnels list [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
-## mngr imbue_cloud tunnels find-by-agent
+## mngr imbue_cloud shares delete
 
 **Usage:**
 
 ```text
-mngr imbue_cloud tunnels find-by-agent [OPTIONS] AGENT_ID
+mngr imbue_cloud shares delete [OPTIONS] HOST_ID
 ```
 **Options:**
 
@@ -594,29 +577,12 @@ mngr imbue_cloud tunnels find-by-agent [OPTIONS] AGENT_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
-## mngr imbue_cloud tunnels enable-sharing
+## mngr imbue_cloud shares status
 
 **Usage:**
 
 ```text
-mngr imbue_cloud tunnels enable-sharing [OPTIONS] AGENT_ID SERVICE_NAME SERVICE_URL
-```
-**Options:**
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--policy` | text | Cloudflare Access policy as JSON, e.g. '{"emails":["a@example.com"]}' | None |
-| `--account` | text | Account email (defaults to the active account) | None |
-| `--connector-url` | text | Override connector URL | None |
-
-## mngr imbue_cloud tunnels delete
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels delete [OPTIONS] TUNNEL_NAME
+mngr imbue_cloud shares status [OPTIONS] HOST_ID
 ```
 **Options:**
 
@@ -627,22 +593,12 @@ mngr imbue_cloud tunnels delete [OPTIONS] TUNNEL_NAME
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
-## mngr imbue_cloud tunnels services
+## mngr imbue_cloud shares list
 
 **Usage:**
 
 ```text
-mngr imbue_cloud tunnels services [OPTIONS] COMMAND [ARGS]...
-```
-**Options:**
-
-
-## mngr imbue_cloud tunnels services add
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels services add [OPTIONS] TUNNEL_NAME SERVICE_NAME SERVICE_URL
+mngr imbue_cloud shares list [OPTIONS]
 ```
 **Options:**
 
@@ -651,82 +607,6 @@ mngr imbue_cloud tunnels services add [OPTIONS] TUNNEL_NAME SERVICE_NAME SERVICE
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--account` | text | Account email (defaults to the active account) | None |
-| `--connector-url` | text | Override connector URL | None |
-
-## mngr imbue_cloud tunnels services list
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels services list [OPTIONS] TUNNEL_NAME
-```
-**Options:**
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--account` | text | Account email (defaults to the active account) | None |
-| `--connector-url` | text | Override connector URL | None |
-
-## mngr imbue_cloud tunnels services remove
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels services remove [OPTIONS] TUNNEL_NAME SERVICE_NAME
-```
-**Options:**
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--account` | text | Account email (defaults to the active account) | None |
-| `--connector-url` | text | Override connector URL | None |
-
-## mngr imbue_cloud tunnels auth
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels auth [OPTIONS] COMMAND [ARGS]...
-```
-**Options:**
-
-
-## mngr imbue_cloud tunnels auth get
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels auth get [OPTIONS] TUNNEL_NAME
-```
-**Options:**
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--account` | text | Account email (defaults to the active account) | None |
-| `--service` | text | If set, fetch the policy for this service instead of the tunnel default | None |
-| `--connector-url` | text | Override connector URL | None |
-
-## mngr imbue_cloud tunnels auth set
-
-**Usage:**
-
-```text
-mngr imbue_cloud tunnels auth set [OPTIONS] TUNNEL_NAME POLICY_JSON
-```
-**Options:**
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--account` | text | Account email (defaults to the active account) | None |
-| `--service` | text | If set, set the policy for this service instead of the tunnel default | None |
 | `--connector-url` | text | Override connector URL | None |
 
 ## mngr imbue_cloud sync

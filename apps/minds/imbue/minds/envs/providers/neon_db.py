@@ -13,8 +13,7 @@ databases on the default branch:
   inside ``deploy_litellm_proxy``.
 
 This shape matches every other dev-tier resource axis (one Modal env,
-one SuperTokens app, one Cloudflare-tunnel tag scope, one OVH IAM tag
-scope per dev env). Destroy is atomic: ``DELETE /projects/<id>``
+one SuperTokens app, one OVH IAM tag scope per dev env). Destroy is atomic: ``DELETE /projects/<id>``
 removes everything (branches, roles, both DBs, the project's pooler
 endpoint) in one call.
 

@@ -7,10 +7,11 @@
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
-    "prestart": "node scripts/ensure-binaries.js && pnpm run build:css",
+    "prestart": "node scripts/ensure-binaries.js && pnpm run build:css && pnpm run build:ui",
     "start": "concurrently -k -n css,electron -c blue,green \"pnpm:watch:css\" \"MINDS_DISABLE_CRASHPAD=1 electron .\"",
     "build": "node scripts/build.js",
     "build:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --minify",
+    "build:ui": "pnpm -C frontend install --frozen-lockfile && pnpm -C frontend run generate && pnpm -C frontend run build",
     "watch:css": "tailwindcss -i imbue/minds/desktop_client/static/app.css -o imbue/minds/desktop_client/static/app.min.css --watch",
     "dist": "pnpm build && pnpm exec todesktop build",
     "todesktop:beforeInstall": "./scripts/download-binaries.js",

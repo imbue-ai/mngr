@@ -3,7 +3,7 @@
 // Pure helpers for persisting the desktop client's window-state.json.
 //
 // Kept free of any `electron` imports (like startup-routing.js and
-// view-layout.js) so both pieces can be unit-tested under plain node -- see
+// surface-routing.js) so both pieces can be unit-tested under plain node -- see
 // ../test/unit/session-persistence.test.js. main.js wires these to the real
 // window set: it schedules a debounced save on window move/resize/navigation
 // and applies the empty-clobber guard inside saveSessionState.
