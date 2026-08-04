@@ -274,6 +274,13 @@ class KanpanPluginConfig(PluginConfig):
         "anything else (labels, host, age) matches no agent and stays at zero. '{total}' counts "
         "every agent; '{{' and '}}' are literal braces. Unset (default) shows nothing.",
     )
+    batch_concurrency: Annotated[int, Field(ge=1)] = Field(
+        default=4,
+        description="How many marked operations `x` runs at once. Marked agents are independent, so "
+        "they need not wait for each other -- a command that blocks (e.g. `mngr message` waiting on "
+        "an agent to accept) otherwise makes a batch take the sum of its parts. Raise it for more "
+        "overlap, or set 1 to run them strictly one at a time.",
+    )
     refresh_interval_seconds: float = Field(
         default=600.0,
         description="Seconds between periodic full refreshes (default 10 minutes)",

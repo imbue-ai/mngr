@@ -111,11 +111,12 @@ from imbue.mngr_kanpan.tui import _compute_board_column_widths
 from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _cycle_search
 from imbue.mngr_kanpan.tui import _dispatch_command
+from imbue.mngr_kanpan.tui import _ensure_batch_executor
 from imbue.mngr_kanpan.tui import _ensure_peek_executor
 from imbue.mngr_kanpan.tui import _ensure_peek_reply_executor
 from imbue.mngr_kanpan.tui import _ensure_prompt_executor
+from imbue.mngr_kanpan.tui import _execute_batch
 from imbue.mngr_kanpan.tui import _execute_marks
-from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
 from imbue.mngr_kanpan.tui import _find_entry_by_name
@@ -142,7 +143,8 @@ from imbue.mngr_kanpan.tui import _legend_width
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_readline_edit
 from imbue.mngr_kanpan.tui import _mark_color
-from imbue.mngr_kanpan.tui import _on_batch_item_poll
+from imbue.mngr_kanpan.tui import _nearest_surviving_name
+from imbue.mngr_kanpan.tui import _on_batch_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_stamp_tick
@@ -156,6 +158,7 @@ from imbue.mngr_kanpan.tui import _peek_body_markup
 from imbue.mngr_kanpan.tui import _prompted_mark_keys
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _rank_matches
+from imbue.mngr_kanpan.tui import _record_batch_result
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _refresh_stamp
 from imbue.mngr_kanpan.tui import _render_footer
@@ -169,6 +172,7 @@ from imbue.mngr_kanpan.tui import _search_rows
 from imbue.mngr_kanpan.tui import _set_footer_legend
 from imbue.mngr_kanpan.tui import _short_header
 from imbue.mngr_kanpan.tui import _show_transient_message
+from imbue.mngr_kanpan.tui import _shutdown_executors
 from imbue.mngr_kanpan.tui import _submit_batch_item
 from imbue.mngr_kanpan.tui import _submit_peek_reply
 from imbue.mngr_kanpan.tui import _submit_prompt
@@ -250,7 +254,6 @@ def _make_state(
         column_defs=list(_BUILTIN_COLUMN_DEFS),
         marks={},
         executing=False,
-        execute_status="",
         index_to_entry={},
         list_walker=None,
         focused_agent_name=None,
@@ -1405,8 +1408,8 @@ def test_dispatch_command_execute_key_with_marks(tmp_path: Path) -> None:
     # Should start batch execution (sets executing=True; with loop=None the
     # future is submitted but never polled, so executing stays True).
     assert state.executing is True
-    assert state.executor is not None
-    state.executor.shutdown(wait=True)
+    assert state.batch_executor is not None
+    state.batch_executor.shutdown(wait=True)
     assert marker.exists()
 
 
@@ -1421,8 +1424,8 @@ def test_dispatch_command_execute_user_override_of_delete_runs_shell(tmp_path: P
     execute_cmd = ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
     assert state.executing is True
-    assert state.executor is not None
-    state.executor.shutdown(wait=True)
+    assert state.batch_executor is not None
+    state.batch_executor.shutdown(wait=True)
     assert marker.exists()
 
 
@@ -1760,8 +1763,12 @@ def test_finish_batch_execution_empty_results() -> None:
 
 
 # =============================================================================
-# _on_batch_item_poll
+# Batch outcomes and the poll that collects them
 # =============================================================================
+
+
+def _completed(returncode: int, stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
 
 
 def _make_done_future(result: subprocess.CompletedProcess[str]) -> "Future[subprocess.CompletedProcess[str]]":
@@ -1772,54 +1779,34 @@ def _make_done_future(result: subprocess.CompletedProcess[str]) -> "Future[subpr
     return fut
 
 
-def test_on_batch_item_poll_future_done_success() -> None:
+def _batch_item(name: str = "agent-a", key: str = "c", **kwargs: Any) -> _BatchWorkItem:
+    return _BatchWorkItem(name=AgentName(name), key=key, cmd=CustomCommand(name="custom"), entry=None, **kwargs)
+
+
+def test_record_batch_result_clears_the_mark_on_success() -> None:
     state = _make_state()
-    state.executing = True
-    item = _BatchWorkItem(
-        name=AgentName("agent-a"),
-        key="c",
-        cmd=CustomCommand(name="custom"),
-        entry=None,
-    )
+    item = _batch_item()
     state.marks = {AgentName("agent-a"): "c"}
-    proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-    future = _make_done_future(proc)
-    mock_loop = _make_mock_loop()
-    _on_batch_item_poll(mock_loop, (state, future, [item], [], 0, item))
-    assert state.executing is False
+    results: list[_BatchItemResult] = []
+    _record_batch_result(state, item, _make_done_future(_completed(0)), results)
+    assert [r.is_success for r in results] == [True]
     assert AgentName("agent-a") not in state.marks
 
 
-def test_on_batch_item_poll_future_done_failure() -> None:
+def test_record_batch_result_keeps_the_mark_and_the_stderr_on_failure() -> None:
     state = _make_state()
-    state.executing = True
-    item = _BatchWorkItem(
-        name=AgentName("agent-a"),
-        key="c",
-        cmd=CustomCommand(name="custom"),
-        entry=None,
-    )
+    item = _batch_item()
     state.marks = {AgentName("agent-a"): "c"}
-    proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="something bad")
-    future = _make_done_future(proc)
-    mock_loop = _make_mock_loop()
     results: list[_BatchItemResult] = []
-    _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
-    assert len(results) == 1
+    _record_batch_result(state, item, _make_done_future(_completed(1, "something bad")), results)
     assert results[0].is_success is False
-    # The captured stderr is preserved as the failure detail.
     assert results[0].detail == "something bad"
+    # The surviving mark is the retry set.
+    assert AgentName("agent-a") in state.marks
 
 
-def test_on_batch_item_poll_timeout_reports_clear_detail() -> None:
+def test_record_batch_result_reports_a_timeout_in_words() -> None:
     state = _make_state()
-    state.executing = True
-    item = _BatchWorkItem(
-        name=AgentName("agent-a"),
-        key="c",
-        cmd=CustomCommand(name="custom"),
-        entry=None,
-    )
 
     def _raise_timeout() -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd=["mngr", "destroy"], timeout=60)
@@ -1827,55 +1814,49 @@ def test_on_batch_item_poll_timeout_reports_clear_detail() -> None:
     with ThreadPoolExecutor(max_workers=1) as pool:
         future: Future[subprocess.CompletedProcess[str]] = pool.submit(_raise_timeout)
         future.exception()
-        mock_loop = _make_mock_loop()
         results: list[_BatchItemResult] = []
-        _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
-    assert len(results) == 1
-    assert results[0].is_success is False
+        _record_batch_result(state, _batch_item(), future, results)
     assert results[0].detail == "timed out after 60s"
 
 
-def test_on_batch_item_poll_future_done_batch_names() -> None:
+def test_record_batch_result_clears_every_mark_the_delete_call_covered() -> None:
+    # The builtin delete puts all marked agents through one `mngr destroy`, so its single
+    # result stands for each of them.
     state = _make_state()
-    state.executing = True
-    item = _BatchWorkItem(
-        name=AgentName("a"),
-        key=_BUILTIN_COMMAND_KEY_DELETE,
-        cmd=CustomCommand(name="delete"),
-        entry=None,
-        batch_names=(AgentName("a"), AgentName("b")),
-    )
+    item = _batch_item(name="a", key=_BUILTIN_COMMAND_KEY_DELETE, batch_names=(AgentName("a"), AgentName("b")))
     state.marks = {AgentName("a"): _BUILTIN_COMMAND_KEY_DELETE, AgentName("b"): _BUILTIN_COMMAND_KEY_DELETE}
-    proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-    future = _make_done_future(proc)
-    mock_loop = _make_mock_loop()
     results: list[_BatchItemResult] = []
-    _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
-    assert AgentName("a") not in state.marks
-    assert AgentName("b") not in state.marks
+    _record_batch_result(state, item, _make_done_future(_completed(0)), results)
+    assert state.marks == {}
+    assert len(results) == 2
 
 
-def test_on_batch_item_poll_future_not_done() -> None:
+def test_on_batch_poll_keeps_watching_while_anything_is_still_running() -> None:
     state = _make_state()
     state.executing = True
-    item = _BatchWorkItem(
-        name=AgentName("agent-a"),
-        key="c",
-        cmd=CustomCommand(name="custom"),
-        entry=None,
-    )
     with ThreadPoolExecutor(max_workers=1) as pool:
         barrier = threading.Barrier(2)
 
         def _wait() -> subprocess.CompletedProcess[str]:
             barrier.wait()
-            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            return _completed(0)
 
         future: Future[subprocess.CompletedProcess[str]] = pool.submit(_wait)
         mock_loop = _make_mock_loop()
-        _on_batch_item_poll(mock_loop, (state, future, [item], [], 0, item))
+        _on_batch_poll(mock_loop, (state, [(_batch_item(), future)], [], 1))
+        # Still in flight, so the batch is not finished and the watch is rescheduled.
+        assert state.executing is True
         assert mock_loop._alarm_tracker.call_count >= 1
         barrier.wait()
+
+
+def test_on_batch_poll_finishes_once_the_last_one_lands() -> None:
+    state = _make_state()
+    state.executing = True
+    state.loop = _make_mock_loop()
+    results: list[_BatchItemResult] = []
+    _on_batch_poll(state.loop, (state, [(_batch_item(), _make_done_future(_completed(0)))], results, 1))
+    assert state.executing is False
 
 
 # =============================================================================
@@ -1957,23 +1938,18 @@ def test_run_shell_command_submits_future() -> None:
 
 
 # =============================================================================
-# _execute_next_in_batch: skipped item (future is None)
+# _execute_batch: skipped item (future is None)
 # =============================================================================
 
 
-def test_execute_next_in_batch_skipped_item() -> None:
+def test_execute_batch_reports_an_item_it_cannot_run_as_skipped() -> None:
+    # A command with nothing to run yields no future; it must still be accounted for,
+    # or the batch would quietly report fewer operations than were marked.
     state = _make_state()
-    state.executor = ThreadPoolExecutor(max_workers=1)
-    item = _BatchWorkItem(
-        name=AgentName("agent-a"),
-        key="c",
-        cmd=CustomCommand(name="noop"),
-        entry=None,
-    )
-    results: list[_BatchItemResult] = []
-    _execute_next_in_batch(state, [item], results, 0)
-    assert any("skipped" in r.detail for r in results)
-    state.executor.shutdown(wait=False)
+    item = _BatchWorkItem(name=AgentName("agent-a"), key="c", cmd=CustomCommand(name="noop"), entry=None)
+    _execute_batch(state, [item])
+    assert state.executing is False
+    assert any("skipped" in error for error in state.execute_errors)
 
 
 # =============================================================================
@@ -4209,9 +4185,9 @@ def _writes_input_per_agent(directory: Path) -> str:
 class _ImmediateExecutor(ThreadPoolExecutor):
     """Executor that runs the work inline, so a batch advances without real waiting.
 
-    Batch items run one at a time, each step driven by an alarm that polls the previous
-    future. Resolving futures on submission makes every poll conclusive on its first
-    look, so `_PumpLoop` can walk the whole batch deterministically.
+    A batch is watched by an alarm that collects whichever futures are done. Resolving them
+    on submission makes the first poll conclusive, so `_PumpLoop` walks the whole batch
+    deterministically.
     """
 
     def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
@@ -4261,7 +4237,7 @@ class _PumpLoop:
 def _make_batch_state(commands: dict[str, CustomCommand], marks: dict[str, str]) -> _KanpanState:
     state = _make_state(commands=commands)
     state.loop = _PumpLoop(state.frame)
-    state.executor = _ImmediateExecutor()
+    state.batch_executor = _ImmediateExecutor()
     state.frame.footer = Text("keybinding-bar")
     state.marks = {AgentName(name): key for name, key in marks.items()}
     return state
@@ -4428,3 +4404,178 @@ def test_a_failed_refresh_still_releases_the_outcome_it_was_carrying() -> None:
     _finish_refresh(cast(Any, state.loop), state)
     assert state.transient_message == "  note completed for agent-00"
     assert state.pending_completion_message is None
+
+
+# =============================================================================
+# Batch execution overlaps independent agents
+# =============================================================================
+
+
+class _RecordingExecutor(ThreadPoolExecutor):
+    """Executor that banks what it was handed and returns a future that never resolves."""
+
+    def __init__(self) -> None:
+        super().__init__(max_workers=1)
+        self.submitted_args: list[tuple[Any, ...]] = []
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
+        self.submitted_args.append(args)
+        return Future()
+
+
+def test_batch_submits_every_operation_before_collecting_any() -> None:
+    # Marked agents are independent, so the whole batch goes out at once and the pool's
+    # worker count is the only thing limiting overlap. None of these futures ever resolve,
+    # so anything that waited for one operation before starting the next would stop at the
+    # first agent.
+    state = _make_state()
+    state.executing = True
+    state.loop = _make_mock_loop()
+    executor = _RecordingExecutor()
+    state.batch_executor = executor
+    cmd = CustomCommand(name="message", command="true", markable=True)
+    work = [_BatchWorkItem(name=AgentName(name), key="M", cmd=cmd, entry=None) for name in ("a", "b", "c")]
+
+    _execute_batch(state, work)
+
+    assert [args[1] for args in executor.submitted_args] == ["a", "b", "c"]
+    assert state.action_label == "  Executing 0/3"
+    executor.shutdown(wait=False)
+
+
+def test_batch_progress_opens_with_an_unrunnable_item_already_counted() -> None:
+    # An item that yields no future is finished the moment the batch starts, and every
+    # later frame counts it as such, so the opening frame must too.
+    state = _make_state()
+    state.executing = True
+    state.loop = _make_mock_loop()
+    executor = _RecordingExecutor()
+    state.batch_executor = executor
+    runnable = CustomCommand(name="message", command="true", markable=True)
+    work = [
+        _BatchWorkItem(name=AgentName("a"), key="M", cmd=runnable, entry=None),
+        _BatchWorkItem(name=AgentName("b"), key="M", cmd=CustomCommand(name="noop"), entry=None),
+    ]
+
+    _execute_batch(state, work)
+
+    assert state.action_label == "  Executing 1/2"
+    executor.shutdown(wait=False)
+
+
+def test_the_batch_pool_runs_as_many_at_once_as_configured() -> None:
+    # A barrier only trips if all three are genuinely in flight together; with a pool of
+    # one, the first would wait for partners that never arrive.
+    state = _make_state()
+    state.batch_concurrency = 3
+    executor = _ensure_batch_executor(state)
+    barrier = threading.Barrier(3, timeout=5)
+
+    def _blocks_until_partners_arrive() -> int:
+        return barrier.wait()
+
+    futures = [executor.submit(_blocks_until_partners_arrive) for _ in range(3)]
+    assert sorted(f.result(timeout=5) for f in futures) == [0, 1, 2]
+    executor.shutdown(wait=True)
+
+
+def test_batch_concurrency_is_configurable_and_defaults_to_overlapping() -> None:
+    assert KanpanPluginConfig().batch_concurrency == 4
+    assert KanpanPluginConfig(batch_concurrency=1).batch_concurrency == 1
+    with pytest.raises(ValidationError):
+        KanpanPluginConfig(batch_concurrency=0)
+
+
+def test_batch_executor_is_kept_off_the_shared_refresh_executor() -> None:
+    # A long batch on the shared max_workers=1 executor would sit in front of the next
+    # board refresh.
+    state = _make_state()
+    state.executor = ThreadPoolExecutor(max_workers=1)
+    batch = _ensure_batch_executor(state)
+    assert batch is not state.executor
+    assert _ensure_batch_executor(state) is batch
+    state.executor.shutdown(wait=False)
+    batch.shutdown(wait=False)
+
+
+def test_batch_progress_counts_finished_work_rather_than_naming_one_item() -> None:
+    # With several in flight at once no single item stands for the batch, so the label
+    # reports how many are done.
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    done = _make_done_future(_completed(0))
+    running: Future[subprocess.CompletedProcess[str]] = Future()
+    _on_batch_poll(state.loop, (state, [(_batch_item("a"), done), (_batch_item("b"), running)], [], 2))
+    assert state.action_label == "  Executing 1/2"
+    running.cancel()
+
+
+def test_quitting_drops_batch_work_that_has_not_started() -> None:
+    # Quitting abandons the batch. Leaving its queue full would hold the process open past
+    # the teardown, since the interpreter joins thread-pool workers at exit.
+    state = _make_state()
+    state.batch_concurrency = 1
+    executor = _ensure_batch_executor(state)
+    has_started = threading.Event()
+    may_finish = threading.Event()
+
+    def _occupies_the_only_worker() -> None:
+        has_started.set()
+        assert may_finish.wait(timeout=5)
+
+    running = executor.submit(_occupies_the_only_worker)
+    assert has_started.wait(timeout=5)
+    queued = executor.submit(_occupies_the_only_worker)
+
+    _shutdown_executors(state)
+
+    assert queued.cancelled()
+    may_finish.set()
+    running.result(timeout=5)
+
+
+# =============================================================================
+# The board holds its place even when the focused row is the one that went away
+# =============================================================================
+
+
+def test_refresh_holds_the_view_when_the_focused_row_is_deleted() -> None:
+    # Executing a delete mark removes the row the board was anchored to. Without a
+    # replacement anchor a rebuilt ListBox renders from the top, so the board jumps --
+    # exactly when the user is watching to see the delete land.
+    state = _tall_board_state()
+    size = _board_body_size(state)
+    assert size is not None
+    # A row in the middle: deleting the last one legitimately pulls the view up, since
+    # there is then less content below to scroll through.
+    agent_rows = sorted(state.index_to_entry)
+    doomed_index = agent_rows[len(agent_rows) // 2]
+    state.list_walker.set_focus(doomed_index)
+    state.frame.body.change_focus(size, doomed_index, offset_inset=4)
+    top_before = state.frame.body.render(size, focus=True).text[0].decode(errors="replace").strip()
+    doomed = _get_focused_entry(state)
+    assert doomed is not None
+
+    assert state.snapshot is not None
+    survivors = tuple(e for e in state.snapshot.entries if e.name != doomed.name)
+    state.snapshot = make_board_snapshot(entries=survivors)
+    _refresh_display(state)
+
+    top_after = state.frame.body.render(size, focus=True).text[0].decode(errors="replace").strip()
+    assert top_after == top_before
+    # Selection lands on a surviving neighbour rather than nothing or the top of the board.
+    focused = _get_focused_entry(state)
+    assert focused is not None and focused.name != doomed.name
+
+
+def test_nearest_surviving_name_prefers_the_row_below() -> None:
+    order = [AgentName(f"agent-{i}") for i in range(5)]
+    present = {AgentName("agent-0"), AgentName("agent-3")}
+    # agent-2 is gone: agent-3 (below) wins over agent-0 (further above).
+    assert _nearest_surviving_name(order, AgentName("agent-2"), present) == AgentName("agent-3")
+    # With nothing below, it walks back up.
+    assert _nearest_surviving_name(order, AgentName("agent-4"), {AgentName("agent-1")}) == AgentName("agent-1")
+    # Nothing left to anchor to at all.
+    assert _nearest_surviving_name(order, AgentName("agent-2"), set()) is None
+    # A name that was never on the board cannot be located.
+    assert _nearest_surviving_name(order, AgentName("stranger"), present) is None

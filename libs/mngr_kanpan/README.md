@@ -262,6 +262,15 @@ markable = true
 refresh_afterwards = true
 ```
 
+Marked operations run several at a time, since marked agents are independent -- otherwise a batch costs the sum of its parts, which is painful for a command that waits on the agent (`mngr message` blocks until the agent accepts). Four run at once by default:
+
+```toml
+[plugins.kanpan]
+batch_concurrency = 8   # or 1 to run them strictly one at a time
+```
+
+The footer counts finished work (`Executing 2/5`) rather than naming one operation, since several are in flight. Batch work runs on its own worker pool, so a slow batch never delays a board refresh.
+
 ### Prompting for a value
 
 Set `prompt` to ask for a value before the command runs. Pressing the key floats a small bordered input in the middle of the board, captioned with the `prompt` text and titled with the agent it will act on; the text you type is passed to the command as the `MNGR_INPUT` environment variable.

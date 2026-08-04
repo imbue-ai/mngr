@@ -5,6 +5,7 @@ from collections.abc import Callable
 from collections.abc import Hashable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -446,7 +447,6 @@ class _KanpanState(MutableModel):
     marks: dict[AgentName, str] = {}
     # Active batch execution state
     executing: bool = False
-    execute_status: str = ""
     # Failures from the most recent batch execution, rendered at the bottom of
     # the board (like fetch errors) until the next execution clears them.
     execute_errors: tuple[str, ...] = ()
@@ -552,6 +552,11 @@ class _KanpanState(MutableModel):
     # A command's outcome, held until the refresh it asked for has repainted the board, so
     # the message and the rows it describes appear together instead of a second apart.
     pending_completion_message: str | None = None
+    # Executor for marked operations. Separate from the shared `executor` so a long batch
+    # cannot hold up a board refresh, and multi-worker so independent agents overlap.
+    batch_executor: ThreadPoolExecutor | None = None
+    # How many marked operations may be in flight at once (from plugin config).
+    batch_concurrency: int = 4
     # --- Search prompt (None input => closed) ---
     # The Frame's footer: a blank row above the belt. Focused while the prompt is open,
     # since Frame routes keys only to the part it has focus on.
@@ -921,10 +926,7 @@ def _run_shell_command_sync(command: str, agent_name: str, input_text: str) -> s
 
 
 def _start_batch_execution(state: _KanpanState, input_text_by_key: Mapping[str, str]) -> None:
-    """Begin executing all marked operations sequentially, with any prompted answers in hand."""
-    if state.executor is None:
-        state.executor = ThreadPoolExecutor(max_workers=1)
-
+    """Begin executing all marked operations, with any prompted answers in hand."""
     state.executing = True
     # Clear failures from any previous run so a fresh attempt starts clean.
     state.execute_errors = ()
@@ -970,8 +972,7 @@ def _start_batch_execution(state: _KanpanState, input_text_by_key: Mapping[str, 
             )
     work.extend(individual_work)
 
-    initial_results: list[_BatchItemResult] = []
-    _execute_next_in_batch(state, work, initial_results, 0)
+    _execute_batch(state, work)
 
 
 def _submit_batch_item(
@@ -1001,85 +1002,94 @@ def _submit_batch_item(
             assert_never(item.cmd)
 
 
-def _execute_next_in_batch(
+def _record_batch_result(
     state: _KanpanState,
-    work: list[_BatchWorkItem],
+    item: _BatchWorkItem,
+    future: Future[subprocess.CompletedProcess[str]],
     results: list[_BatchItemResult],
-    index: int,
 ) -> None:
-    """Execute the next item in the batch work queue."""
-    if index >= len(work):
+    """Bank one finished operation's outcome, clearing its mark only if it succeeded."""
+    label = _batch_item_label(item)
+    try:
+        result = future.result()
+        if result.returncode == 0:
+            # The builtin delete runs every marked agent through one `mngr destroy`, so
+            # its single result stands for all of them.
+            for name in item.batch_names or (item.name,):
+                results.append(_BatchItemResult(label=f"{item.cmd.name} {name}", is_success=True))
+                state.marks.pop(name, None)
+        else:
+            detail = result.stderr.strip() or f"exited with code {result.returncode}"
+            results.append(_BatchItemResult(label=label, is_success=False, detail=detail))
+    except subprocess.TimeoutExpired as e:
+        results.append(_BatchItemResult(label=label, is_success=False, detail=f"timed out after {e.timeout:g}s"))
+    except Exception as e:
+        results.append(_BatchItemResult(label=label, is_success=False, detail=str(e)))
+
+
+def _execute_batch(state: _KanpanState, work: list[_BatchWorkItem]) -> None:
+    """Start every marked operation, then watch them all finish.
+
+    Marked agents are independent, so the work goes out together and the executor's
+    worker count is what limits overlap.
+    """
+    executor = _ensure_batch_executor(state)
+    results: list[_BatchItemResult] = []
+    in_flight: list[tuple[_BatchWorkItem, Future[subprocess.CompletedProcess[str]]]] = []
+    for item in work:
+        future = _submit_batch_item(executor, item)
+        if future is None:
+            results.append(
+                _BatchItemResult(label=_batch_item_label(item), is_success=False, detail="skipped (not executable)")
+            )
+        else:
+            in_flight.append((item, future))
+
+    if not in_flight:
         _finish_batch_execution(state, results)
         return
 
-    item = work[index]
-    state.execute_status = f"  [{index + 1}/{len(work)}] "
-
-    assert state.executor is not None
-    future = _submit_batch_item(state.executor, item)
-    if future is None:
-        results.append(
-            _BatchItemResult(label=_batch_item_label(item), is_success=False, detail="skipped (not executable)")
-        )
-        _execute_next_in_batch(state, work, results, index + 1)
-        return
-
-    state.action_label = f"{state.execute_status}{_batch_item_label(item)}"
-    _render_footer(state)
+    _render_batch_progress(state, done_count=len(work) - len(in_flight), total=len(work))
     _ensure_animation_running(state)
-
     if state.loop is not None:
-        state.loop.set_alarm_in(
-            SPINNER_INTERVAL_SECONDS,
-            _on_batch_item_poll,
-            (state, future, work, results, index, item),
-        )
+        state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_poll, (state, in_flight, results, len(work)))
 
 
-def _on_batch_item_poll(
+def _render_batch_progress(state: _KanpanState, done_count: int, total: int) -> None:
+    """Show how far through the batch we are; with several in flight no single item stands for it."""
+    state.action_label = f"  Executing {done_count}/{total}"
+    _render_footer(state)
+
+
+def _on_batch_poll(
     loop: MainLoop,
     data: tuple[
         _KanpanState,
-        Future[subprocess.CompletedProcess[str]],
-        list[_BatchWorkItem],
+        list[tuple[_BatchWorkItem, Future[subprocess.CompletedProcess[str]]]],
         list[_BatchItemResult],
         int,
-        _BatchWorkItem,
     ],
 ) -> None:
-    """Poll for completion of a single batch item."""
-    state, future, work, results, index, item = data
+    """Collect whichever operations have finished, and keep watching the rest."""
+    state, in_flight, results, total = data
+    still_running: list[tuple[_BatchWorkItem, Future[subprocess.CompletedProcess[str]]]] = []
+    for item, future in in_flight:
+        if future.done():
+            _record_batch_result(state, item, future, results)
+        else:
+            still_running.append((item, future))
 
-    if future.done():
-        label = _batch_item_label(item)
-        try:
-            result = future.result()
-            if result.returncode == 0:
-                if item.batch_names:
-                    for n in item.batch_names:
-                        results.append(_BatchItemResult(label=f"{item.cmd.name} {n}", is_success=True))
-                        state.marks.pop(n, None)
-                else:
-                    results.append(_BatchItemResult(label=f"{item.cmd.name} {item.name}", is_success=True))
-                    state.marks.pop(item.name, None)
-            else:
-                detail = result.stderr.strip() or f"exited with code {result.returncode}"
-                results.append(_BatchItemResult(label=label, is_success=False, detail=detail))
-        except subprocess.TimeoutExpired as e:
-            results.append(_BatchItemResult(label=label, is_success=False, detail=f"timed out after {e.timeout:g}s"))
-        except Exception as e:
-            results.append(_BatchItemResult(label=label, is_success=False, detail=str(e)))
-
-        _execute_next_in_batch(state, work, results, index + 1)
+    if not still_running:
+        _finish_batch_execution(state, results)
         return
 
-    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_item_poll, data)
+    _render_batch_progress(state, done_count=total - len(still_running), total=total)
+    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_poll, (state, still_running, results, total))
 
 
 def _finish_batch_execution(state: _KanpanState, results: list[_BatchItemResult]) -> None:
     """Complete batch execution and show summary."""
     state.executing = False
-    state.execute_status = ""
     state.action_label = None
 
     ok_count = sum(1 for r in results if r.is_success)
@@ -2193,6 +2203,13 @@ def _run_shell_command(state: _KanpanState, cmd: CustomCommand) -> None:
     _launch_custom_command(state, state.executor, cmd, entry.name, "")
 
 
+def _ensure_batch_executor(state: _KanpanState) -> ThreadPoolExecutor:
+    """Return the batch executor, creating it on first use."""
+    if state.batch_executor is None:
+        state.batch_executor = ThreadPoolExecutor(max_workers=state.batch_concurrency)
+    return state.batch_executor
+
+
 def _ensure_prompt_executor(state: _KanpanState) -> ThreadPoolExecutor:
     """Return the single-worker prompted-command executor, creating it on first use."""
     if state.prompt_executor is None:
@@ -3187,6 +3204,27 @@ def _focused_row_offset(state: _KanpanState, size: tuple[int, int] | None) -> in
     return offset
 
 
+@pure
+def _nearest_surviving_name(
+    previous_order: Sequence[AgentName],
+    missing: AgentName,
+    present: AbstractSet[AgentName],
+) -> AgentName | None:
+    """The agent closest to `missing` in the old board order that is still on the board.
+
+    Searches outward from where the row used to be, preferring the one below it, which
+    is where the eye already is after the row it replaced went away.
+    """
+    if missing not in previous_order:
+        return None
+    start = previous_order.index(missing)
+    for distance in range(1, len(previous_order)):
+        for index in (start + distance, start - distance):
+            if 0 <= index < len(previous_order) and previous_order[index] in present:
+                return previous_order[index]
+    return None
+
+
 def _refresh_display(state: _KanpanState) -> None:
     """Rebuild the body display from the current snapshot."""
     # Save the currently focused agent name before rebuilding
@@ -3199,6 +3237,9 @@ def _refresh_display(state: _KanpanState) -> None:
     # ListBox where to draw it -- so without this the view jumps on every refresh.
     body_size = _board_body_size(state)
     previous_offset = _focused_row_offset(state, body_size)
+    # Board order as it stands, so a focused row that this refresh removes can hand its
+    # place to whichever neighbour survived rather than dropping the anchor entirely.
+    previous_order = tuple(entry.name for _index, entry in sorted(state.index_to_entry.items()))
 
     # Update field color palette from snapshot and register new entries with the screen
     field_palette, field_attr_names = _build_field_color_palette(state.snapshot)
@@ -3223,6 +3264,17 @@ def _refresh_display(state: _KanpanState) -> None:
     # Restore focus to the previously focused agent, at the height it was already at.
     if state.focused_agent_name is not None:
         restored_index = _focus_row_by_name(state, state.focused_agent_name)
+        if restored_index is None and state.search_input is None:
+            # The focused row is gone -- deleted, or filtered away. Anchoring on its
+            # nearest surviving neighbour keeps the board where the eye left it; with no
+            # anchor at all a fresh ListBox renders from the top. An open search anchors
+            # itself, back to the row it started from, so it is left to do that.
+            replacement = _nearest_surviving_name(
+                previous_order, state.focused_agent_name, {entry.name for entry in state.index_to_entry.values()}
+            )
+            if replacement is not None:
+                state.focused_agent_name = replacement
+                restored_index = _focus_row_by_name(state, replacement)
         if restored_index is not None and previous_offset is not None and body_size is not None:
             listbox.change_focus(body_size, restored_index, offset_inset=previous_offset)
 
@@ -3265,6 +3317,25 @@ def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
         elif isinstance(value, dict):
             result[key] = CustomCommand(**value)
     return result
+
+
+def _shutdown_executors(state: _KanpanState) -> None:
+    """Release every worker pool the board opened, without waiting on work still running.
+
+    A whole batch is submitted at once, so that queue can be deep. Its unstarted work is
+    cancelled: the interpreter joins thread-pool workers at exit, so anything left queued
+    would hold the process open until each abandoned operation had run.
+    """
+    if state.executor is not None:
+        state.executor.shutdown(wait=False)
+    if state.peek_executor is not None:
+        state.peek_executor.shutdown(wait=False)
+    if state.peek_reply_executor is not None:
+        state.peek_reply_executor.shutdown(wait=False)
+    if state.prompt_executor is not None:
+        state.prompt_executor.shutdown(wait=False)
+    if state.batch_executor is not None:
+        state.batch_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _build_command_map(mngr_ctx: MngrContext) -> dict[str, KanpanCommand]:
@@ -3343,6 +3414,7 @@ def run_kanpan(
         commands=commands,
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
+        batch_concurrency=plugin_config.batch_concurrency,
         staleness_threshold_seconds=plugin_config.effective_staleness_threshold_seconds(),
         mark_attr_names=mark_attr_names,
         column_defs=column_defs,
@@ -3389,11 +3461,4 @@ def run_kanpan(
             screen.write(_TITLE_STACK_POP)
             screen.flush()
             logger.enable("imbue")
-            if state.executor is not None:
-                state.executor.shutdown(wait=False)
-            if state.peek_executor is not None:
-                state.peek_executor.shutdown(wait=False)
-            if state.peek_reply_executor is not None:
-                state.peek_reply_executor.shutdown(wait=False)
-            if state.prompt_executor is not None:
-                state.prompt_executor.shutdown(wait=False)
+            _shutdown_executors(state)
