@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import CellDisplay
+from imbue.mngr_kanpan.data_source import CellRun
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import OldestCreatedNoInputsError
 from imbue.mngr_kanpan.data_source import StringField
@@ -34,6 +35,28 @@ def test_cell_display_defaults() -> None:
     assert cell.text == "hello"
     assert cell.url is None
     assert cell.color is None
+    assert cell.runs == ()
+
+
+def test_cell_display_accepts_runs_that_spell_out_its_text() -> None:
+    cell = CellDisplay(
+        text="#1, #2",
+        runs=(
+            CellRun(text="#1", url="https://example/pr/1"),
+            CellRun(text=", "),
+            CellRun(text="#2", url="https://example/pr/2"),
+        ),
+    )
+    assert "".join(run.text for run in cell.runs) == cell.text
+
+
+def test_cell_display_rejects_runs_that_disagree_with_its_text() -> None:
+    """Column widths are measured from `text` while the terminal shows the runs, so
+    the two drifting apart would silently misalign every later column.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        CellDisplay(text="#1, #2", runs=(CellRun(text="#1"),))
+    assert "runs spell '#1' but text is '#1, #2'" in str(exc_info.value)
 
 
 # === FieldValue ===

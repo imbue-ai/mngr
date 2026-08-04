@@ -1,7 +1,9 @@
 import json
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from enum import auto
+from pathlib import Path
 from typing import Annotated
 from typing import Any
 from typing import Final
@@ -23,7 +25,9 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_kanpan.data_source import CellDisplay
+from imbue.mngr_kanpan.data_source import CellRun
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
 from imbue.mngr_kanpan.data_source import FIELD_PR
@@ -35,6 +39,9 @@ from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
 from imbue.mngr_kanpan.data_types import DataSourceConfig
+from imbue.mngr_kanpan.worktree_branches import MAX_BRANCHES_PER_AGENT
+from imbue.mngr_kanpan.worktree_branches import read_worktree_branches
+from imbue.mngr_kanpan.worktree_branches import select_agent_branches
 
 # GitHub's search connection caps `first` at 100 results per page, and the
 # search API as a whole returns at most the first 1000 results (10 pages) for
@@ -51,6 +58,14 @@ _PAGE_RETRY_BASE_WAIT_SECONDS: Final[float] = 1.0
 _PAGE_RETRY_MIN_WAIT_SECONDS: Final[float] = 1.0
 _PAGE_RETRY_MAX_WAIT_SECONDS: Final[float] = 8.0
 _STDERR_EXCERPT_LENGTH: Final[int] = 200
+
+_SEARCH_CLAUSE_JOINER: Final[str] = " OR "
+_BRANCH_CLAUSE_PREFIX: Final[str] = "head:"
+# GitHub answers a search query of roughly 19,000 characters with an empty
+# response body, and that failure costs the board every column this source
+# fetches, not just the one that widened the query. Worktree branches are
+# admitted only while the query stays this far under that ceiling.
+_MAX_SEARCH_QUERY_LENGTH: Final[int] = 12000
 
 
 class GitHubBoardFetchError(KanpanDataSourceError):
@@ -76,6 +91,20 @@ class PrState(UpperCaseStrEnum):
     OPEN = auto()
     CLOSED = auto()
     MERGED = auto()
+
+    @property
+    def color(self) -> str | None:
+        """Color for a PR in this state, matching the board's section headings.
+
+        An open PR takes the default foreground: it is live work, and the
+        column's leading entry has never been colored. Merged and closed PRs
+        borrow the colors their sections already use, so a PR listed away from
+        its section still reads as finished or abandoned.
+        """
+        return {
+            PrState.MERGED: "light magenta",
+            PrState.CLOSED: "dark gray",
+        }.get(self)
 
 
 class CiStatus(UpperCaseStrEnum):
@@ -114,7 +143,57 @@ class CiStatus(UpperCaseStrEnum):
             return cls.UNKNOWN
 
 
-class PrField(FieldValue):
+# Separates consecutive PR numbers within the PR cell.
+_PR_SEPARATOR: Final[str] = ", "
+
+
+class AdditionalPrReference(FrozenModel):
+    """A pull request on one of an agent's worktree branches other than its recorded one."""
+
+    number: int = Field(description="PR number")
+    url: str = Field(description="PR URL")
+    state: PrState = Field(description="PR state (open/closed/merged)")
+
+
+class PrColumnField(FieldValue):
+    """Common shape for every value the PR column can hold.
+
+    The cell leads with whatever the branch mngr recorded for the agent
+    resolved to -- that branch's pull request, a create-PR link, or a
+    fetch-failure marker -- and then lists the pull requests found on the other
+    branches that agent's worktree has hosted, each colored by its own state.
+    Leading with the recorded branch keeps the cell's first entry the same PR
+    the board sections the row by.
+    """
+
+    additional_prs: tuple[AdditionalPrReference, ...] = Field(
+        default=(),
+        description="PRs on the agent's other worktree branches, highest priority first. "
+        "Empty when that agent has no other branch carrying one, which is the common case.",
+    )
+
+    def _cell_led_by(self, leading_run: CellRun) -> CellDisplay:
+        """Build this field's cell from its leading run plus one run per additional PR.
+
+        With no additional PRs the cell carries no runs at all, so the common
+        case of one PR renders exactly the single-hyperlink cell it always has.
+        """
+        if not self.additional_prs:
+            return CellDisplay(text=leading_run.text, url=leading_run.url, color=leading_run.color)
+        runs = [leading_run]
+        for additional_pr in self.additional_prs:
+            runs.append(CellRun(text=_PR_SEPARATOR))
+            runs.append(
+                CellRun(
+                    text=f"#{additional_pr.number}",
+                    url=additional_pr.url,
+                    color=additional_pr.state.color,
+                )
+            )
+        return CellDisplay(text="".join(run.text for run in runs), runs=tuple(runs))
+
+
+class PrField(PrColumnField):
     """GitHub pull request field value."""
 
     kind: Literal["pr"] = Field(default="pr", description="Discriminator tag")
@@ -126,7 +205,7 @@ class PrField(FieldValue):
     head_branch: str = Field(description="Head branch name of the PR")
 
     def display(self) -> CellDisplay:
-        return CellDisplay(text=f"#{self.number}", url=self.url)
+        return self._cell_led_by(CellRun(text=f"#{self.number}", url=self.url))
 
     def env_vars(self, key: str) -> dict[str, str]:
         return {
@@ -154,17 +233,17 @@ class CiField(FieldValue):
 _CI_ADAPTER: TypeAdapter[FieldValue] = TypeAdapter(CiField)
 
 
-class CreatePrUrlField(FieldValue):
+class CreatePrUrlField(PrColumnField):
     """URL to create a new PR for a branch."""
 
     kind: Literal["create_pr_url"] = Field(default="create_pr_url", description="Discriminator tag")
     url: str = Field(description="URL to create a PR")
 
     def display(self) -> CellDisplay:
-        return CellDisplay(text="+PR", url=self.url)
+        return self._cell_led_by(CellRun(text="+PR", url=self.url))
 
 
-class PrFetchFailedField(FieldValue):
+class PrFetchFailedField(PrColumnField):
     """Sentinel placed in the FIELD_PR slot when the PR fetch failed and no
     usable historical PR data is available to fall back to.
 
@@ -180,7 +259,7 @@ class PrFetchFailedField(FieldValue):
     repo: str = Field(description="Repo path that failed to load (e.g. 'org/repo')")
 
     def display(self) -> CellDisplay:
-        return CellDisplay(text="?", color="light red")
+        return self._cell_led_by(CellRun(text="?", color="light red"))
 
 
 class ConflictsField(FieldValue):
@@ -376,24 +455,31 @@ def _summarize_failed_response(response: Any, stderr_excerpt: str) -> str:
     return f"stderr: {stderr_excerpt}" if stderr_excerpt else "no data returned"
 
 
-def _build_board_graphql(repo_branches: Sequence[tuple[str, str]], after: str | None = None) -> str:
-    """Build the GraphQL document that fetches one page of every requested (repo, branch).
+@pure
+def _build_search_query(repos: Sequence[str], branches: Sequence[str]) -> str:
+    """Build the GitHub search query string covering every requested repo and branch.
 
     GitHub's search query syntax treats multiple `repo:` and `head:`
     qualifiers within a single `search()` call as OR, which is the
     SQL `WHERE repo IN (...) AND head IN (...)` equivalent. That lets a
     single `search()` cover every (repo, branch) pair without aliasing
     one subquery per pair.
+    """
+    repo_clause = _SEARCH_CLAUSE_JOINER.join(f"repo:{repo}" for repo in sorted(set(repos)))
+    branch_clause = _SEARCH_CLAUSE_JOINER.join(f"{_BRANCH_CLAUSE_PREFIX}{branch}" for branch in sorted(set(branches)))
+    return f"type:pr author:@me ({repo_clause}) ({branch_clause})"
+
+
+def _build_board_graphql(repo_branches: Sequence[tuple[str, str]], after: str | None = None) -> str:
+    """Build the GraphQL document that fetches one page of every requested (repo, branch).
 
     `first: 100` is GitHub's hard per-page cap. When the matched set exceeds
     one page, the caller follows `pageInfo.endCursor` and re-invokes this with
     `after` set to fetch subsequent pages.
     """
-    repos = sorted({rb[0] for rb in repo_branches})
-    branches = sorted({rb[1] for rb in repo_branches})
-    repo_clause = " OR ".join(f"repo:{r}" for r in repos)
-    branch_clause = " OR ".join(f"head:{b}" for b in branches)
-    search_query = f"type:pr author:@me ({repo_clause}) ({branch_clause})"
+    search_query = _build_search_query(
+        [repo for repo, _branch in repo_branches], [branch for _repo, branch in repo_branches]
+    )
     # json.dumps gives a properly escaped, double-quoted GraphQL string literal.
     quoted_search = json.dumps(search_query)
     after_clause = f", after: {json.dumps(after)}" if after is not None else ""
@@ -603,7 +689,7 @@ class GitHubDataSource(FrozenModel):
     def columns(self) -> dict[str, str]:
         cols: dict[str, str] = {}
         if self.config.pr:
-            cols[FIELD_PR] = "PR"
+            cols[FIELD_PR] = "PRS"
         if self.config.ci:
             cols[FIELD_CI] = "CI"
         if self.config.conflicts:
@@ -654,13 +740,10 @@ class GitHubDataSource(FrozenModel):
                 agent_repos[agent.name] = cached_repo_field.path
                 agent_created[agent.name] = cached_repo_field.created
 
-        # Collect every (repo, branch) pair we need to look up.
-        repo_branches: list[tuple[str, str]] = []
-        for agent in agents:
-            agent_repo = agent_repos.get(agent.name)
-            branch = agent.initial_branch
-            if agent_repo is not None and branch is not None:
-                repo_branches.append((agent_repo, branch))
+        repo_branches, extra_branches_by_agent, lookup_errors = _plan_branch_lookup(
+            agents, agent_repos, self.config, cg
+        )
+        errors.extend(lookup_errors)
 
         if not repo_branches:
             return {}, errors
@@ -676,36 +759,221 @@ class GitHubDataSource(FrozenModel):
         fields: dict[AgentName, dict[str, FieldValue]] = {}
         for agent in agents:
             agent_repo = agent_repos.get(agent.name)
-            branch = agent.initial_branch
-            if agent_repo is None or branch is None:
+            if agent_repo is None:
                 continue
-
-            # `this_created` is the staleness time for any field we synthesize
-            # for this agent: it reflects how stale the (repo, branch) lookup
-            # is (now if from labels, cached.created if we fell back to the
-            # cache). The PR data itself was fetched just now, but its
-            # attribution to this agent rides on a possibly-stale mapping.
-            this_created = agent_created[agent.name]
-            pr_info = board.prs.get((agent_repo, branch))
-
-            if pr_info is not None:
-                agent_fields = _compute_pr_fields(pr_info, this_created, self.config)
-            elif not fetch_failed:
-                # Fetch succeeded; branch genuinely has no PR yet.
-                agent_fields = _compute_no_pr_fields(agent_repo, branch, this_created, self.config)
-            else:
-                # Fetch errored. Use a cached PrField if one matches this branch,
-                # otherwise show a PrFetchFailedField sentinel.
-                agent_fields = _compute_failed_fetch_fields(
-                    cached_fields, agent.name, branch, agent_repo, this_created, self.config
-                )
-
+            agent_fields = _compute_agent_fields(
+                board,
+                cached_fields,
+                agent,
+                agent_repo,
+                extra_branches_by_agent.get(agent.name, ()),
+                # `agent_created` is the staleness time for any field we
+                # synthesize for this agent: it reflects how stale the
+                # (repo, branch) lookup is (now if from labels,
+                # cached.created if we fell back to the cache). The PR data
+                # itself was fetched just now, but its attribution to this
+                # agent rides on a possibly-stale mapping.
+                agent_created[agent.name],
+                self.config,
+                is_fetch_failed=fetch_failed,
+            )
             if agent_fields:
                 fields[agent.name] = agent_fields
 
         return fields, errors
 
 
+def _plan_branch_lookup(
+    agents: Sequence[AgentDetails],
+    agent_repos: Mapping[AgentName, str],
+    config: GitHubDataSourceConfig,
+    cg: ConcurrencyGroup,
+) -> tuple[list[tuple[str, str]], dict[AgentName, tuple[str, ...]], list[str]]:
+    """Decide which (repo, branch) pairs one board refresh looks up.
+
+    Returns the pairs to query, the extra branches backing each agent's PR
+    cell, and any errors to surface on the board.
+
+    An agent contributes neither branches nor query length unless its repo
+    resolved and mngr recorded a branch for it, because the PR cell is built
+    around that recorded branch and there is no cell at all without one. Every
+    remaining agent's recorded branch is queried unconditionally: it leads that
+    agent's PR cell and it is what the board sections the row by. The extra
+    branches widen the lookup to the rest of the agent's worktree history,
+    resolved inline rather than from a cached field so a newly checked-out
+    branch shows its PR on this refresh instead of the next one.
+    """
+    lookup_agents = [agent for agent in agents if agent.name in agent_repos and agent.initial_branch is not None]
+    worktree_branches = _resolve_worktree_branches(lookup_agents, cg) if config.pr else {}
+    required_pairs: list[tuple[str, str]] = [
+        (agent_repos[agent.name], agent.initial_branch) for agent in lookup_agents if agent.initial_branch is not None
+    ]
+    extra_branches, dropped_branch_count = _select_branches_within_query_budget(
+        list(agent_repos.values()), [branch for _repo, branch in required_pairs], worktree_branches
+    )
+
+    errors: list[str] = []
+    if dropped_branch_count > 0:
+        errors.append(
+            f"too many branches to look up: dropped {dropped_branch_count} worktree "
+            f"{'branch' if dropped_branch_count == 1 else 'branches'} to keep the GitHub search "
+            "query within the length GitHub accepts; some agents' additional PRs may be missing"
+        )
+
+    repo_branches: list[tuple[str, str]] = list(required_pairs)
+    for agent in lookup_agents:
+        for branch in extra_branches.get(agent.name, ()):
+            repo_branches.append((agent_repos[agent.name], branch))
+    return repo_branches, extra_branches, errors
+
+
+def _compute_agent_fields(
+    board: FetchBoardResult,
+    cached_fields: dict[AgentName, dict[str, FieldValue]],
+    agent: AgentDetails,
+    agent_repo: str,
+    extra_branches: Sequence[str],
+    this_created: datetime,
+    config: GitHubDataSourceConfig,
+    is_fetch_failed: bool,
+) -> dict[str, FieldValue]:
+    """Build every field this data source contributes for one agent.
+
+    The PR slot -- and the CI / conflicts / unresolved fields that hang off it
+    -- is keyed off the branch mngr recorded for the agent. The PRs on that
+    agent's other worktree branches ride along inside the same PR slot, so the
+    column reports every branch's PR without the row's section or
+    any of the other columns changing meaning.
+    """
+    agent_fields: dict[str, FieldValue] = {}
+
+    branch = agent.initial_branch
+    if branch is None:
+        return agent_fields
+
+    additional_prs = _resolve_additional_prs(board, agent_repo, branch, extra_branches)
+    pr_info = board.prs.get((agent_repo, branch))
+    if pr_info is not None:
+        agent_fields.update(_compute_pr_fields(pr_info, additional_prs, this_created, config))
+    elif not is_fetch_failed:
+        # Fetch succeeded; branch genuinely has no PR yet.
+        agent_fields.update(_compute_no_pr_fields(agent_repo, branch, additional_prs, this_created, config))
+    else:
+        # Fetch errored. Use a cached PrField if one matches this branch,
+        # otherwise show a PrFetchFailedField sentinel. The cached field
+        # carries the additional PRs it was built with, so the whole cell
+        # stays one consistent snapshot.
+        agent_fields.update(
+            _compute_failed_fetch_fields(cached_fields, agent.name, branch, agent_repo, this_created, config)
+        )
+    return agent_fields
+
+
+@pure
+def _resolve_additional_prs(
+    board: FetchBoardResult,
+    agent_repo: str,
+    recorded_branch: str,
+    extra_branches: Sequence[str],
+) -> tuple[AdditionalPrReference, ...]:
+    """Collect the PRs on an agent's worktree branches other than its recorded one.
+
+    Ordered by branch priority. A branch that never became a PR contributes
+    nothing, which is what keeps the reflog's over-broad branch list from
+    filling the cell; a branch whose PR is merged or closed is kept, because
+    what that worktree shipped or abandoned is exactly what the column is for.
+    """
+    references: list[AdditionalPrReference] = []
+    for branch in extra_branches:
+        if branch == recorded_branch:
+            continue
+        pr_info = board.prs.get((agent_repo, branch))
+        if pr_info is None:
+            continue
+        references.append(AdditionalPrReference(number=pr_info.number, url=pr_info.url, state=pr_info.state))
+    return tuple(references)
+
+
+def _resolve_worktree_branches(
+    agents: Sequence[AgentDetails],
+    cg: ConcurrencyGroup,
+) -> dict[AgentName, tuple[str, ...]]:
+    """Resolve, per agent, the branches whose PRs belong in that agent's PR cell.
+
+    Priority order is the checked-out branch, then the branch mngr recorded for
+    the agent, then the rest of the worktree's checkout history most recent
+    first. The recorded branch outranks the reflog because it is the one piece
+    of this that is recorded rather than inferred.
+
+    Only a local work dir carries a readable branch history; every other agent
+    falls back to its recorded branch alone.
+    """
+    work_dir_by_agent: dict[AgentName, Path] = {
+        agent.name: agent.work_dir
+        for agent in agents
+        if agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists()
+    }
+    worktrees_by_work_dir = read_worktree_branches(list(work_dir_by_agent.values()), cg)
+
+    branches_by_agent: dict[AgentName, tuple[str, ...]] = {}
+    for agent in agents:
+        work_dir = work_dir_by_agent.get(agent.name)
+        worktree = worktrees_by_work_dir.get(work_dir) if work_dir is not None else None
+        candidate_refs: list[str | None] = [None if worktree is None else worktree.current_branch]
+        candidate_refs.append(agent.initial_branch)
+        if worktree is not None:
+            candidate_refs.extend(worktree.previously_checked_out_branches)
+        branches = select_agent_branches(candidate_refs, MAX_BRANCHES_PER_AGENT)
+        if branches:
+            branches_by_agent[agent.name] = branches
+    return branches_by_agent
+
+
+@pure
+def _select_branches_within_query_budget(
+    repos: Sequence[str],
+    required_branches: Sequence[str],
+    branches_by_agent: Mapping[AgentName, tuple[str, ...]],
+) -> tuple[dict[AgentName, tuple[str, ...]], int]:
+    """Trim each agent's worktree branches to what one search query can carry.
+
+    Returns the trimmed mapping and how many distinct branches were dropped.
+
+    Every branch in `required_branches` is queried regardless of budget.
+    Worktree branches are then admitted round-robin by priority rank -- every
+    agent's highest-priority branch before any agent's second -- so a board that
+    overruns the budget loses breadth evenly instead of leaving the agents at the
+    end of the list with nothing.
+
+    A query GitHub refuses fails the whole board fetch, PR and CI columns
+    included, so the budget is measured against the query the board will send.
+    """
+    admitted: set[str] = set(required_branches)
+    dropped: set[str] = set()
+    query_length = len(_build_search_query(repos, sorted(admitted)))
+    ranks = range(max((len(branches) for branches in branches_by_agent.values()), default=0))
+    for rank in ranks:
+        for branches in branches_by_agent.values():
+            if rank >= len(branches):
+                continue
+            branch = branches[rank]
+            if branch in admitted:
+                continue
+            # A shorter branch later in the walk can still fit after this one did not.
+            clause_length = len(_SEARCH_CLAUSE_JOINER) + len(_BRANCH_CLAUSE_PREFIX) + len(branch)
+            if query_length + clause_length > _MAX_SEARCH_QUERY_LENGTH:
+                dropped.add(branch)
+                continue
+            admitted.add(branch)
+            query_length += clause_length
+    selected = {
+        agent_name: tuple(branch for branch in branches if branch in admitted)
+        for agent_name, branches in branches_by_agent.items()
+    }
+    return selected, len(dropped)
+
+
+@pure
 def _get_cached_repo_field(
     cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName
 ) -> RepoPathField | None:
@@ -729,21 +997,33 @@ def _build_create_pr_url(repo_path: str, branch: str) -> str:
 def _compute_no_pr_fields(
     agent_repo: str,
     branch: str,
+    additional_prs: tuple[AdditionalPrReference, ...],
     this_created: datetime,
     config: GitHubDataSourceConfig,
 ) -> dict[str, FieldValue]:
     """Build the per-agent fields when the fetch succeeded but the agent's
     branch has no PR yet -- emit a CreatePrUrlField so the agent renders a
     'Create PR' link in the FIELD_PR slot.
+
+    The agent's other worktree branches can still have PRs, so the cell reads
+    `+PR, #110`: the recorded branch has nothing to open yet, and #110 came out
+    of the same worktree.
     """
     if not config.pr:
         return {}
-    return {FIELD_PR: CreatePrUrlField(url=_build_create_pr_url(agent_repo, branch), created=this_created)}
+    return {
+        FIELD_PR: CreatePrUrlField(
+            url=_build_create_pr_url(agent_repo, branch),
+            additional_prs=additional_prs,
+            created=this_created,
+        )
+    }
 
 
 @pure
 def _compute_pr_fields(
     pr_info: PrInfo,
+    additional_prs: tuple[AdditionalPrReference, ...],
     this_created: datetime,
     config: GitHubDataSourceConfig,
 ) -> dict[str, FieldValue]:
@@ -751,7 +1031,9 @@ def _compute_pr_fields(
     fields when the agent's (repo, branch) lookup resolved to a real PR.
 
     Conflicts and unresolved are only emitted for OPEN PRs -- closed and merged
-    PRs don't expose a meaningful conflict-or-unresolved status to act on.
+    PRs don't expose a meaningful conflict-or-unresolved status to act on. They
+    describe the recorded branch's PR alone; the additional PRs ride in the
+    FIELD_PR slot and do not feed any other column.
     """
     agent_fields: dict[str, FieldValue] = {}
     if config.pr:
@@ -762,6 +1044,7 @@ def _compute_pr_fields(
             title=pr_info.title,
             state=pr_info.state,
             head_branch=pr_info.head_branch,
+            additional_prs=additional_prs,
             created=this_created,
         )
     if config.ci:

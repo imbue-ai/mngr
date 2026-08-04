@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -10,8 +11,10 @@ from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
 from tenacity import wait_none
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
 from imbue.mngr_kanpan.data_source import FIELD_PR
@@ -26,25 +29,32 @@ from imbue.mngr_kanpan.data_sources.github import GitHubBoardFetchError
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
+from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrInfo
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.github import UnresolvedField
 from imbue.mngr_kanpan.data_sources.github import _MAX_SEARCH_PAGES
+from imbue.mngr_kanpan.data_sources.github import _MAX_SEARCH_QUERY_LENGTH
 from imbue.mngr_kanpan.data_sources.github import _PAGE_FETCH_ATTEMPTS
 from imbue.mngr_kanpan.data_sources.github import _build_board_graphql
 from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
 from imbue.mngr_kanpan.data_sources.github import _build_prs_from_nodes
+from imbue.mngr_kanpan.data_sources.github import _build_search_query
 from imbue.mngr_kanpan.data_sources.github import _check_unresolved_threads
 from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_field
 from imbue.mngr_kanpan.data_sources.github import _parse_board_page
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_node
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_state
+from imbue.mngr_kanpan.data_sources.github import _select_branches_within_query_budget
 from imbue.mngr_kanpan.data_sources.github import _summarize_failed_response
 from imbue.mngr_kanpan.data_sources.github import fetch_board
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
+from imbue.mngr_kanpan.testing import make_additional_pr
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
 from imbue.mngr_kanpan.testing import make_pr_field
+
+_ADDITIONAL_PRS_CREATED = datetime(2028, 1, 1, 0, 0, 20, tzinfo=timezone.utc)
 
 # --- shared builders for the combined-query response shape ---
 
@@ -884,3 +894,486 @@ def test_pr_info_construct() -> None:
     )
     assert info.number == 1
     assert info.state == PrState.OPEN
+
+
+# === the PR column's additional PRs ===
+
+
+def test_pr_field_display_links_each_pr_number_separately() -> None:
+    """Every PR number is its own run with its own url, so the renderer can make each
+    one individually clickable, and the joined text stays the cell's visible width.
+    """
+    field = make_pr_field(
+        number=2392,
+        state=PrState.MERGED,
+        additional_prs=(make_additional_pr(2482),),
+        created=_ADDITIONAL_PRS_CREATED,
+    )
+    cell = field.display()
+    assert cell.text == "#2392, #2482"
+    assert [(run.text, run.url) for run in cell.runs] == [
+        ("#2392", "https://github.com/org/repo/pull/2392"),
+        (", ", None),
+        ("#2482", "https://github.com/org/repo/pull/2482"),
+    ]
+
+
+def test_pr_field_display_colors_each_additional_pr_by_its_state() -> None:
+    """The row's section reports the leading PR's state, so only the additional ones
+    need to carry theirs -- and they carry it in the colors the sections already use.
+    """
+    field = make_pr_field(
+        number=100,
+        additional_prs=(
+            make_additional_pr(101, PrState.OPEN),
+            make_additional_pr(102, PrState.MERGED),
+            make_additional_pr(103, PrState.CLOSED),
+        ),
+        created=_ADDITIONAL_PRS_CREATED,
+    )
+    cell = field.display()
+    assert cell.text == "#100, #101, #102, #103"
+    assert [(run.text, run.color) for run in cell.runs if run.url is not None] == [
+        ("#100", None),
+        ("#101", None),
+        ("#102", "light magenta"),
+        ("#103", "dark gray"),
+    ]
+
+
+def test_pr_field_display_without_additional_prs_is_a_plain_single_link_cell() -> None:
+    """A board without the option on must render precisely the cell it always has:
+    one url on the cell itself and no runs for the renderer to lay out.
+    """
+    cell = make_pr_field(number=7, created=_ADDITIONAL_PRS_CREATED).display()
+    assert cell.text == "#7"
+    assert cell.url == "https://github.com/org/repo/pull/7"
+    assert cell.runs == ()
+
+
+def test_create_pr_url_field_display_lists_additional_prs_after_the_create_link() -> None:
+    """The recorded branch having nothing to open yet does not hide the PRs the same
+    worktree has on its other branches.
+    """
+    field = CreatePrUrlField(
+        url="https://github.com/org/repo/compare/mngr/fresh?expand=1",
+        additional_prs=(make_additional_pr(110),),
+        created=_ADDITIONAL_PRS_CREATED,
+    )
+    cell = field.display()
+    assert cell.text == "+PR, #110"
+    assert [(run.text, run.url) for run in cell.runs] == [
+        ("+PR", "https://github.com/org/repo/compare/mngr/fresh?expand=1"),
+        (", ", None),
+        ("#110", "https://github.com/org/repo/pull/110"),
+    ]
+
+
+def test_pr_fetch_failed_field_display_keeps_its_marker_and_color() -> None:
+    field = PrFetchFailedField(repo="org/repo", created=_ADDITIONAL_PRS_CREATED)
+    cell = field.display()
+    assert cell.text == "?"
+    assert cell.color == "light red"
+    assert cell.runs == ()
+
+
+# === GitHubDataSource PR column wiring ===
+
+
+def test_github_data_source_pr_column_is_the_prs_column() -> None:
+    """One column, always. It holds however many PRs the agent's worktree branches have,
+    which is usually one.
+    """
+    ds = GitHubDataSource()
+    assert ds.columns[FIELD_PR] == "PRS"
+    assert FIELD_PR in ds.field_types
+
+
+def test_github_data_source_has_no_pr_column_when_the_pr_field_is_off() -> None:
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=False))
+    assert FIELD_PR not in ds.columns
+
+
+# === GitHubDataSource.compute, additional PRs ===
+
+
+def _additional_prs_data_source() -> GitHubDataSource:
+    """A data source with the per-PR extra columns off, so tests read the PR slot alone."""
+    return GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+
+
+def _make_agent_worktree(main_repo: Path, work_dir: Path, branch: str) -> None:
+    """Add a linked worktree on its own new branch, the way mngr checks out an agent."""
+    run_git_command(main_repo, "worktree", "add", "-b", branch, str(work_dir))
+
+
+def _log_gh_invocations(tmp_path: Path, gh_response_path: Path, fake_gh_script: Path) -> Path:
+    """Extend the stand-in `gh` to record one line per invocation, and return that log.
+
+    The GraphQL document spans many lines, so each invocation's arguments are
+    flattened onto one line and the log's line count is the invocation count.
+    """
+    gh_argv_log = tmp_path / "gh_argv.log"
+    fake_gh_script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s " "$@" | tr -d "\\n" >> "{gh_argv_log}"\n'
+        f'printf "\\n" >> "{gh_argv_log}"\n'
+        f'exec cat "{gh_response_path}"\n'
+    )
+    return gh_argv_log
+
+
+def test_compute_lists_a_follow_up_branch_pr_the_recorded_branch_misses(
+    temp_git_repo: Path, tmp_path: Path, test_cg: ConcurrencyGroup, gh_response_path: Path
+) -> None:
+    """An agent whose worktree moved on to a second branch has two PRs, but mngr
+    recorded only the first. The PR cell leads with the recorded branch -- the PR the
+    board sections the row by -- and then lists the one the board used to miss.
+    """
+    work_dir = tmp_path / "agent_worktree"
+    _make_agent_worktree(temp_git_repo, work_dir, "mngr/first-change")
+    run_git_command(work_dir, "checkout", "-b", "mngr/follow-up")
+    gh_response_path.write_text(
+        _make_board_response(
+            nodes=[
+                _make_pr_node(head_branch="mngr/first-change", number=2392),
+                _make_pr_node(head_branch="mngr/follow-up", number=2482, is_draft=True),
+            ]
+        )
+    )
+    agent = make_agent_details(
+        name="a1",
+        initial_branch="mngr/first-change",
+        work_dir=work_dir,
+        labels={"remote": "git@github.com:org/repo.git"},
+    )
+
+    fields, errors = _additional_prs_data_source().compute(
+        agents=(agent,), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
+    )
+
+    assert errors == []
+    pr_field = fields[agent.name][FIELD_PR]
+    assert isinstance(pr_field, PrField)
+    assert pr_field.number == 2392
+    assert [additional.number for additional in pr_field.additional_prs] == [2482]
+    assert pr_field.display().text == "#2392, #2482"
+
+
+def test_compute_lists_a_merged_pr_and_omits_a_branch_that_never_became_one(
+    temp_git_repo: Path, tmp_path: Path, test_cg: ConcurrencyGroup, gh_response_path: Path
+) -> None:
+    """PRs are listed whatever their state -- what a worktree shipped is exactly what
+    the column is for -- while a branch checked out in passing that never became a PR
+    contributes nothing, which is what keeps the reflog's branch list from turning
+    into noise.
+    """
+    work_dir = tmp_path / "agent_worktree"
+    _make_agent_worktree(temp_git_repo, work_dir, "mngr/recorded-work")
+    run_git_command(work_dir, "checkout", "-b", "mngr/shipped")
+    run_git_command(work_dir, "checkout", "-b", "mngr/abandoned")
+    run_git_command(work_dir, "checkout", "mngr/recorded-work")
+    gh_response_path.write_text(
+        _make_board_response(
+            nodes=[
+                _make_pr_node(head_branch="mngr/recorded-work", number=2482),
+                _make_pr_node(head_branch="mngr/shipped", number=2392, state="MERGED"),
+            ]
+        )
+    )
+    agent = make_agent_details(
+        name="a1",
+        initial_branch="mngr/recorded-work",
+        work_dir=work_dir,
+        labels={"remote": "git@github.com:org/repo.git"},
+    )
+
+    fields, _errors = _additional_prs_data_source().compute(
+        agents=(agent,), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
+    )
+
+    pr_field = fields[agent.name][FIELD_PR]
+    assert isinstance(pr_field, PrField)
+    assert pr_field.number == 2482
+    # `mngr/abandoned` has no PR, so it contributes nothing at all.
+    assert [(additional.number, additional.state) for additional in pr_field.additional_prs] == [
+        (2392, PrState.MERGED)
+    ]
+    assert pr_field.display().text == "#2482, #2392"
+
+
+def test_compute_queries_every_worktree_branch_in_the_one_request(
+    temp_git_repo: Path, tmp_path: Path, test_cg: ConcurrencyGroup, gh_response_path: Path, fake_gh_script: Path
+) -> None:
+    """The extra branches ride along in the board's single GraphQL request rather
+    than costing one `gh` invocation each.
+    """
+    work_dir = tmp_path / "agent_worktree"
+    _make_agent_worktree(temp_git_repo, work_dir, "mngr/first-change")
+    run_git_command(work_dir, "checkout", "-b", "mngr/follow-up")
+    gh_response_path.write_text(_make_board_response(nodes=[]))
+    agent = make_agent_details(
+        name="a1",
+        initial_branch="mngr/first-change",
+        work_dir=work_dir,
+        labels={"remote": "git@github.com:org/repo.git"},
+    )
+    gh_argv_log = _log_gh_invocations(tmp_path, gh_response_path, fake_gh_script)
+
+    _additional_prs_data_source().compute(agents=(agent,), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg))
+
+    invocations = gh_argv_log.read_text().splitlines()
+    assert len(invocations) == 1
+    assert "head:mngr/first-change" in invocations[0]
+    assert "head:mngr/follow-up" in invocations[0]
+
+
+def test_compute_queries_no_branches_for_an_agent_with_none_recorded(
+    temp_git_repo: Path, tmp_path: Path, test_cg: ConcurrencyGroup, gh_response_path: Path, fake_gh_script: Path
+) -> None:
+    """mngr records no branch for an agent created on a pre-existing one, and the PR
+    cell is built around the recorded branch, so such an agent has no cell to fill.
+    Reading its worktree and widening the shared query for it would spend a budget
+    other agents need on a result nothing renders.
+    """
+    branchless_work_dir = tmp_path / "branchless_worktree"
+    _make_agent_worktree(temp_git_repo, branchless_work_dir, "mngr/unrecorded-work")
+    recorded_work_dir = tmp_path / "recorded_worktree"
+    _make_agent_worktree(temp_git_repo, recorded_work_dir, "mngr/recorded-work")
+    gh_response_path.write_text(_make_board_response(nodes=[]))
+    branchless_agent = make_agent_details(
+        name="a1",
+        initial_branch=None,
+        work_dir=branchless_work_dir,
+        labels={"remote": "git@github.com:org/repo.git"},
+    )
+    recorded_agent = make_agent_details(
+        name="a2",
+        initial_branch="mngr/recorded-work",
+        work_dir=recorded_work_dir,
+        labels={"remote": "git@github.com:org/repo.git"},
+    )
+    gh_argv_log = _log_gh_invocations(tmp_path, gh_response_path, fake_gh_script)
+
+    fields, _errors = _additional_prs_data_source().compute(
+        agents=(branchless_agent, recorded_agent), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
+    )
+
+    assert branchless_agent.name not in fields
+    invocations = gh_argv_log.read_text().splitlines()
+    assert len(invocations) == 1
+    assert "head:mngr/recorded-work" in invocations[0]
+    assert "mngr/unrecorded-work" not in invocations[0]
+
+
+def test_compute_falls_back_to_the_recorded_branch_without_a_local_worktree(
+    test_cg: ConcurrencyGroup, gh_response_path: Path
+) -> None:
+    """A remote agent exposes no worktree to read branches from, so its cell is just
+    the PR on the branch mngr recorded -- exactly what it was before this option.
+    """
+    gh_response_path.write_text(_make_board_response(nodes=[_make_pr_node(head_branch="mngr/remote-work", number=17)]))
+    agent = make_agent_details(
+        name="a1",
+        initial_branch="mngr/remote-work",
+        provider_name="some-remote-provider",
+        labels={"remote": "git@github.com:org/repo.git"},
+    )
+
+    fields, _errors = _additional_prs_data_source().compute(
+        agents=(agent,), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
+    )
+
+    pr_field = fields[agent.name][FIELD_PR]
+    assert isinstance(pr_field, PrField)
+    assert pr_field.number == 17
+    assert pr_field.additional_prs == ()
+
+
+def test_compute_carries_the_cached_pr_cell_whole_through_a_failed_fetch() -> None:
+    """The additional PRs live in the same field as the recorded branch's PR, so the
+    existing cached-PR fallback carries the whole cell as one consistent snapshot --
+    there is no second value that could survive while its neighbour did not.
+    """
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    cached_pr = make_pr_field(
+        number=7,
+        head_branch="branch-1",
+        additional_prs=(make_additional_pr(42),),
+        created=_ADDITIONAL_PRS_CREATED,
+    )
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = ProcessError(
+        command=("gh", "api", "graphql"), returncode=1, stdout="", stderr="boom"
+    )
+
+    fields, errors = _additional_prs_data_source().compute(
+        agents=(agent,),
+        cached_fields={agent.name: {FIELD_PR: cached_pr}},
+        mngr_ctx=make_mngr_ctx_with_cg(cg),
+    )
+
+    assert len(errors) > 0
+    assert fields[agent.name][FIELD_PR] == cached_pr
+
+
+def test_compute_drops_a_cached_pr_cell_recorded_against_another_branch() -> None:
+    """A cached cell built while the agent was on a different recorded branch describes
+    work it has moved off, so it is dropped rather than misattributed -- additional PRs
+    and all.
+    """
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    cached_pr = make_pr_field(
+        number=7,
+        head_branch="some-other-branch",
+        additional_prs=(make_additional_pr(42),),
+        created=_ADDITIONAL_PRS_CREATED,
+    )
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = ProcessError(
+        command=("gh", "api", "graphql"), returncode=1, stdout="", stderr="boom"
+    )
+
+    fields, _errors = _additional_prs_data_source().compute(
+        agents=(agent,),
+        cached_fields={agent.name: {FIELD_PR: cached_pr}},
+        mngr_ctx=make_mngr_ctx_with_cg(cg),
+    )
+
+    assert isinstance(fields[agent.name][FIELD_PR], PrFetchFailedField)
+
+
+def test_compute_degrades_to_the_recorded_branch_when_the_work_dir_is_not_a_repo(
+    tmp_path: Path, test_cg: ConcurrencyGroup, gh_response_path: Path, fake_gh_script: Path
+) -> None:
+    """A work dir git cannot read yields no branch history, and the cell falls back to
+    exactly the single-PR cell the column has always shown -- no error, no empty cell.
+    """
+    work_dir = tmp_path / "not_a_repo"
+    work_dir.mkdir()
+    gh_response_path.write_text(_make_board_response(nodes=[_make_pr_node(head_branch="mngr/only", number=5)]))
+    agent = make_agent_details(
+        name="a1",
+        initial_branch="mngr/only",
+        work_dir=work_dir,
+        labels={"remote": "git@github.com:org/repo.git"},
+    )
+    gh_argv_log = _log_gh_invocations(tmp_path, gh_response_path, fake_gh_script)
+
+    fields, errors = _additional_prs_data_source().compute(
+        agents=(agent,), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
+    )
+
+    assert errors == []
+    pr_field = fields[agent.name][FIELD_PR]
+    assert isinstance(pr_field, PrField)
+    assert pr_field.number == 5
+    assert pr_field.additional_prs == ()
+    cell = pr_field.display()
+    assert cell.text == "#5"
+    assert cell.url == "https://github.com/org/repo/pull/5"
+    assert cell.runs == ()
+    assert len(gh_argv_log.read_text().splitlines()) == 1
+
+
+# === _select_branches_within_query_budget ===
+
+_BUDGET_REPO = "org/repo"
+
+
+def _make_budget_inputs(
+    agent_count: int, branches_per_agent: int
+) -> tuple[list[str], dict[AgentName, tuple[str, ...]]]:
+    """Build one board's worth of recorded branches and worktree branches.
+
+    Each agent's worktree branches lead with its own recorded branch, the way
+    `_resolve_worktree_branches` orders them.
+    """
+    required_branches: list[str] = []
+    branches_by_agent: dict[AgentName, tuple[str, ...]] = {}
+    for agent_index in range(agent_count):
+        recorded = f"mngr/agent-{agent_index:04d}-recorded-work"
+        required_branches.append(recorded)
+        branches_by_agent[AgentName(f"a{agent_index}")] = (
+            recorded,
+            *(f"mngr/agent-{agent_index:04d}-extra-{rank:02d}" for rank in range(branches_per_agent - 1)),
+        )
+    return required_branches, branches_by_agent
+
+
+def test_select_branches_within_query_budget_keeps_everything_when_it_fits() -> None:
+    required_branches, branches_by_agent = _make_budget_inputs(agent_count=5, branches_per_agent=4)
+
+    selected, dropped_branch_count = _select_branches_within_query_budget(
+        [_BUDGET_REPO], required_branches, branches_by_agent
+    )
+
+    assert selected == branches_by_agent
+    assert dropped_branch_count == 0
+
+
+def test_select_branches_within_query_budget_never_drops_a_recorded_branch() -> None:
+    """The row's section and its CI column are keyed off the recorded branch, so
+    widening the lookup for the additional PRs must never cost the board a branch it
+    already looked up.
+    """
+    required_branches, branches_by_agent = _make_budget_inputs(agent_count=200, branches_per_agent=8)
+
+    selected, dropped_branch_count = _select_branches_within_query_budget(
+        [_BUDGET_REPO], required_branches, branches_by_agent
+    )
+
+    assert dropped_branch_count > 0
+    kept = {branch for branches in selected.values() for branch in branches}
+    assert set(required_branches) <= kept
+
+
+def test_select_branches_within_query_budget_spends_it_round_robin_across_agents() -> None:
+    """An overrunning board loses breadth evenly: every agent gets its
+    highest-priority worktree branch before any agent gets its second.
+    """
+    required_branches, branches_by_agent = _make_budget_inputs(agent_count=100, branches_per_agent=8)
+
+    selected, dropped_branch_count = _select_branches_within_query_budget(
+        [_BUDGET_REPO], required_branches, branches_by_agent
+    )
+
+    assert dropped_branch_count > 0
+    extras_kept_per_agent = [len(branches) - 1 for branches in selected.values()]
+    assert min(extras_kept_per_agent) >= 1
+    assert max(extras_kept_per_agent) - min(extras_kept_per_agent) <= 1
+
+
+def test_select_branches_within_query_budget_keeps_the_query_short_enough_for_github() -> None:
+    """GitHub answers an over-long search query with an empty body, which fails the
+    whole board fetch -- PR and CI columns included, not just the multi-PR one.
+    """
+    required_branches, branches_by_agent = _make_budget_inputs(agent_count=100, branches_per_agent=8)
+
+    selected, dropped_branch_count = _select_branches_within_query_budget(
+        [_BUDGET_REPO], required_branches, branches_by_agent
+    )
+
+    assert dropped_branch_count > 0
+    queried_branches = [*required_branches, *(branch for branches in selected.values() for branch in branches)]
+    assert len(_build_search_query([_BUDGET_REPO], queried_branches)) <= _MAX_SEARCH_QUERY_LENGTH
+
+
+def test_select_branches_within_query_budget_admits_nothing_when_recorded_branches_fill_it() -> None:
+    """A board whose recorded branches alone overrun the budget is already broken for
+    reasons the multi-PR column did not cause; it must not make matters worse.
+    """
+    required_branches, branches_by_agent = _make_budget_inputs(agent_count=800, branches_per_agent=8)
+
+    selected, dropped_branch_count = _select_branches_within_query_budget(
+        [_BUDGET_REPO], required_branches, branches_by_agent
+    )
+
+    assert dropped_branch_count > 0
+    assert all(branches == (branches[0],) for branches in selected.values())
+
+
+def test_select_branches_within_query_budget_on_no_worktree_branches() -> None:
+    required_branches, _branches_by_agent = _make_budget_inputs(agent_count=3, branches_per_agent=1)
+
+    assert _select_branches_within_query_budget([_BUDGET_REPO], required_branches, {}) == ({}, 0)

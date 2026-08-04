@@ -71,7 +71,7 @@ Pass `--format json` (or `--format jsonl`) to skip the TUI and print a single bo
 `--format json` emits one object with `columns`, `sections`, `errors`, and `fetch_time_seconds`:
 
 - `columns` lists the displayed columns in board order (mirroring `column_order`). Headers are the plain column titles.
-- `sections` groups agents the same way the board does, in `section_order`, omitting empty sections. Each entry carries both `cells` (the pre-rendered text/url/color shown on the board) and `fields` (the structured underlying values -- e.g. the PR number as an integer -- so consumers don't have to parse display text).
+- `sections` groups agents the same way the board does, in `section_order`, omitting empty sections. Each entry carries both `cells` (the pre-rendered text/url/color shown on the board, plus `runs` for cells that link more than one thing) and `fields` (the structured underlying values -- e.g. the PR number as an integer -- so consumers don't have to parse display text).
 - Sections you exclude from a custom `section_order` are omitted from the output too, matching what the board shows.
 
 `--format jsonl` emits one agent record per line (each the same shape as an `entries` element, in board order), followed by one `{"event": "error", "message": "..."}` line per fetch error. Use it for streaming/line-oriented consumers; the column and section-order metadata that `json` carries is omitted.
@@ -101,6 +101,40 @@ enabled = true
 # conflicts = true
 # unresolved = true
 ```
+
+#### The PRS column
+
+The `pr` column lists the pull requests on every branch an agent's worktree has checked out. mngr records one branch per agent when it creates it, but a worktree is a checkout and can host any number of branches over its life -- stacked or follow-up work opens further PRs from the same worktree, and the board used to be blind to all of them.
+
+```
+  NAME        STATE    GIT           PRS                                 CI       REPO
+  bundle      STOPPED  [7 unpushed]  #2376                               success  imbue-ai/mngr
+  mngr-msg    STOPPED  [up to date]  #2392, #2482                        success  imbue-ai/mngr
+  release40   STOPPED  [up to date]  #158, #248, #250, #247, #209, #210  success  imbue-ai/mngr-internal
+  dev-bundle  STOPPED  [not pushed]  +PR, #110                           success  imbue-ai/mngr-internal
+```
+
+There is nothing to turn on, and one PR is the ordinary case: an agent with a single branch renders `#2376` exactly as it always has, one cell with one hyperlink. The column only grows for a worktree that has been on more than one branch.
+
+Note what that does and does not claim. These are branches the worktree has *had checked out*, which is not the same as branches it *produced*: check out a colleague's branch to look at it and its PR joins this agent's cell, because a reflog cannot tell working from visiting. The lookup also matches your own PRs rather than PRs this particular agent opened.
+
+The cell is never abridged, so an agent on six branches makes the column as wide as its six PR numbers -- and because a column is sized to its widest cell, that width applies to every row. The board clips at the terminal's right edge, so a wide board can push the columns after `PRS` out of view until the window is widened. Listing every PR is the point of the column; the alternative is a count you cannot open.
+
+Each PR number is its own clickable hyperlink. The cell leads with the branch mngr recorded -- the PR the row's section and its `CI`, `CONFLICTS` and `UNRESOLVED` columns all describe -- so nothing else about the row changes meaning; the rest follow in priority order. `dev-bundle` shows the shape when the recorded branch has no PR yet: `+PR` still opens the create-PR page, and `#110` came out of the same worktree.
+
+PRs are listed whatever their state, as the column has always done for a single PR. Only the entries after the first are colored, since the section heading already reports the leading PR's state: a merged PR takes the magenta of `Done` and a closed one the grey of `Cancelled`, so a finished PR listed away from its section still reads as finished. A muted or stale row still greys out whole.
+
+The branch list is the agent's recorded branch plus its worktree's HEAD reflog, in this priority order: the checked-out branch, the recorded branch, then the rest of the checkout history most recent first.
+
+Everything about it degrades to the single-PR cell rather than to an error: an agent with no local work dir, a work dir git cannot read, a repository with no reflog, a branch with no PR, and a failed fetch all fall back to what the column showed before. Reading the branch history costs one `git rev-parse` per agent work dir and one `git for-each-ref` per *repository* -- worktrees of one repository share a branch list, so a board full of agents on one repo asks for it once.
+
+The extra PRs ride along in the board's existing search query rather than costing a request per branch or per agent; the board pages that one query 100 PRs at a time, so the only round trip this can add is a page the wider match set needs.
+
+Each branch is another clause in that one query, and GitHub refuses a query past a certain length, so the extra branches are capped twice: per agent, and board-wide by how long the query is getting. Recorded branches are never dropped -- only the extra ones are, evenly across agents, and the board reports how many when it happens. A board big enough to hit the cap therefore loses breadth in this column rather than its `CI` column.
+
+That cap covers the query's length only. GitHub's search API separately returns at most its first 1000 results, and a wider query matches more PRs, so a very large board that already sits near that ceiling can be pushed over it. That truncates the fetch rather than failing it: the agents whose PR fell past the ceiling show `?`.
+
+The reflog infers rather than records which branches belong to an agent: a branch checked out once in passing shows up, and git expires reflog entries after 90 days by default, so a long-idle branch drops out. Branches are read against the repository's actual branch list, so a tag or an abbreviated commit checked out along the way cannot take a slot from a branch that has a PR, and a branch that never became a PR contributes nothing at all.
 
 ### Shell command data sources
 
@@ -222,7 +256,7 @@ section_order = ["STILL_COOKING", "PR_DRAFT", "PR_BEING_REVIEWED", "PR_MERGED", 
 
 Valid section names are: `PR_MERGED`, `PR_CLOSED`, `PR_BEING_REVIEWED`, `PR_DRAFT`, `STILL_COOKING`, `PRS_FAILED`, `MUTED`. Sections not listed in `section_order` are omitted.
 
-The PR column displays clickable hyperlinks (OSC 8) in terminals that support them. When an agent has a PR, the column shows `#<number>` linked to the PR URL. When no PR exists but the branch is pushable, it shows `+PR` linked to the create-PR URL.
+The PR column displays clickable hyperlinks (OSC 8) in terminals that support them. When an agent has a PR, the column shows `#<number>` linked to the PR URL. When no PR exists but the branch is pushable, it shows `+PR` linked to the create-PR URL. Each PR number in the cell links separately.
 
 ## Refresh behavior
 

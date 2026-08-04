@@ -8,6 +8,7 @@ from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
+from typing import Final
 from typing import assert_never
 
 from loguru import logger
@@ -47,6 +48,8 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.logging import CLEAR_SCREEN
 from imbue.mngr_kanpan.data_source import BoolField
+from imbue.mngr_kanpan.data_source import CellDisplay
+from imbue.mngr_kanpan.data_source import CellRun
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
@@ -78,10 +81,13 @@ DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
 # resolves the threshold from KanpanPluginConfig.effective_staleness_threshold_seconds().
 DEFAULT_STALENESS_THRESHOLD_SECONDS: float = STALENESS_FRACTION_OF_REFRESH_INTERVAL * DEFAULT_REFRESH_INTERVAL_SECONDS
 
+# The column carrying the agent name, which is also where a dired-style mark renders.
+_NAME_COLUMN: Final[str] = "name"
+
 # Default column order when column_order is not explicitly configured.
 # User-configured label/shell columns are appended after these.
 DEFAULT_COLUMN_ORDER: tuple[str, ...] = (
-    "name",
+    _NAME_COLUMN,
     "state",
     "commits_ahead",
     "pr",
@@ -352,7 +358,14 @@ class _HyperlinkText(Text):
 
 
 class _SelectableRow(Columns):
-    """A Columns widget that is selectable, allowing it to receive focus."""
+    """A Columns widget that is selectable, allowing it to receive focus.
+
+    `name_cell` is the row's name column widget, so a mark can be redrawn into
+    it without rebuilding the row. It is None when the board shows no name
+    column, or when that column is not a single piece of text.
+    """
+
+    name_cell: Text | None = None
 
     def selectable(self) -> bool:
         return True
@@ -642,11 +655,9 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None)
         name_markup = _flatten_markup_to_attr(name_markup, "muted")
     attr_map_widget = state.list_walker[walker_idx]
     row: _SelectableRow = attr_map_widget.original_widget
-    # The first column of a row built by `_build_agent_row` is always the name
-    # cell, which is a `Text` (or `_HyperlinkText` subclass); urwid types
-    # `.contents` only as `Widget`, so this downcast is safe by construction.
-    name_text: Text = row.contents[0][0]  # ty: ignore[invalid-assignment]
-    name_text.set_text(name_markup)
+    if row.name_cell is None:
+        return
+    row.name_cell.set_text(name_markup)
 
 
 def _toggle_mark(state: _KanpanState, key: str) -> None:
@@ -2381,7 +2392,7 @@ def _field_cell_markup(entry: AgentBoardEntry, field_key: str) -> str | tuple[Ha
     if cell is None:
         return ""
     if cell.color is not None:
-        return (f"field_{field_key}_{cell.color.replace(' ', '_')}", cell.text)
+        return (_field_color_attr(field_key, cell.color), cell.text)
     return cell.text
 
 
@@ -2416,7 +2427,11 @@ class _FieldCellMarkupFn(FrozenModel):
 # Built-in column definitions for name and state (always present)
 _BUILTIN_COLUMN_DEFS: list[_ColumnDef] = [
     _ColumnDef(
-        name="name", header="  NAME", text_fn=_get_name_cell_text, markup_fn=_get_name_cell_markup, flexible=False
+        name=_NAME_COLUMN,
+        header="  NAME",
+        text_fn=_get_name_cell_text,
+        markup_fn=_get_name_cell_markup,
+        flexible=False,
     ),
     _ColumnDef(
         name="state", header="STATE", text_fn=_get_state_cell_text, markup_fn=_get_state_cell_markup, flexible=False
@@ -2518,7 +2533,8 @@ def _build_field_color_palette(
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
     """Build palette entries for field-based column colors.
 
-    Scans all cells in the snapshot for colors and creates palette entries.
+    Scans every cell in the snapshot for colors -- both a cell's own color and
+    the colors its individual runs ask for -- and creates palette entries.
     """
     entries: list[tuple[str, str, str]] = []
     attr_names: list[str] = []
@@ -2529,12 +2545,15 @@ def _build_field_color_palette(
 
     for entry in snapshot.entries:
         for field_key, cell in entry.cells.items():
-            if cell.color is not None:
-                attr = f"field_{field_key}_{cell.color.replace(' ', '_')}"
+            cell_colors = [cell.color, *(run.color for run in cell.runs)]
+            for color in cell_colors:
+                if color is None:
+                    continue
+                attr = _field_color_attr(field_key, color)
                 if attr not in seen:
                     seen.add(attr)
-                    entries.append((attr, cell.color, ""))
-                    entries.append((f"{attr}_focus", f"{cell.color},standout", ""))
+                    entries.append((attr, color, ""))
+                    entries.append((f"{attr}_focus", f"{color},standout", ""))
                     attr_names.append(attr)
 
     return entries, tuple(attr_names)
@@ -2585,7 +2604,7 @@ def _build_agent_row(
     raw_markup: dict[str, str | tuple[Hashable, str] | list[str | tuple[Hashable, str]]] = {
         defn.name: defn.markup_fn(entry) for defn in column_defs
     }
-    raw_markup["name"] = _get_name_cell_markup(entry, mark)
+    raw_markup[_NAME_COLUMN] = _get_name_cell_markup(entry, mark)
 
     # Muted agents: flatten all markup to gray
     if entry.section == BoardSection.MUTED:
@@ -2602,21 +2621,115 @@ def _build_agent_row(
             else:
                 cell_markup[k] = v
 
-    cols: list[tuple[int, Text] | Text] = []
+    cols: list[tuple[int, Text | Columns] | Text | Columns] = []
+    name_cell: Text | None = None
     for defn in column_defs:
-        cell = entry.cells.get(defn.name)
-        cell_url = cell.url if cell is not None else None
-        if cell_url:
-            hyperlink_widget = _HyperlinkText(cell_markup[defn.name])
-            hyperlink_widget._hyperlink_url = cell_url
-            widget = hyperlink_widget
-        else:
-            widget = Text(cell_markup[defn.name])
-        if defn.flexible:
+        width = None if defn.flexible else widths[defn.name]
+        widget = _build_cell_widget(cell_markup[defn.name], entry.cells.get(defn.name), width, defn.name)
+        if defn.name == _NAME_COLUMN and isinstance(widget, Text):
+            name_cell = widget
+        if width is None:
             cols.append(widget)
         else:
-            cols.append((widths[defn.name], widget))
-    return _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
+            cols.append((width, widget))
+    row = _SelectableRow(cols, dividechars=_COL_DIVIDER_CHARS)
+    row.name_cell = name_cell
+    return row
+
+
+def _build_cell_widget(
+    markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]],
+    cell: CellDisplay | None,
+    width: int | None,
+    field_key: str,
+) -> Text | Columns:
+    """Build the urwid widget for one cell of an agent row.
+
+    A cell whose runs carry their own URLs renders as a `Columns` of one widget
+    per run, so each run becomes its own terminal hyperlink and takes its own
+    color; anything else is a single `Text`, hyperlinked as a whole when the
+    cell carries a URL. `width` is the column's fixed width, or None for the
+    flexible last column.
+    """
+    if cell is None:
+        return Text(markup)
+    if any(run.url for run in cell.runs):
+        return _build_multi_link_cell(cell.runs, field_key, _cell_markup_attr(markup), width)
+    if cell.url:
+        hyperlink_widget = _HyperlinkText(markup)
+        hyperlink_widget._hyperlink_url = cell.url
+        return hyperlink_widget
+    return Text(markup)
+
+
+@pure
+def _field_color_attr(field_key: str, color: str) -> str:
+    """Palette attribute name for a color a field cell or one of its runs asked for."""
+    return f"field_{field_key}_{color.replace(' ', '_')}"
+
+
+@pure
+def _run_color_attr(field_key: str, run: CellRun) -> str | None:
+    """Palette attribute for a run's own color, or None when it takes the default."""
+    if run.color is None:
+        return None
+    return _field_color_attr(field_key, run.color)
+
+
+@pure
+def _cell_markup_attr(
+    markup: str | tuple[Hashable, str] | list[str | tuple[Hashable, str]],
+) -> Hashable | None:
+    """The single attribute a flattened field cell's markup carries, if any.
+
+    A field cell arrives here either as plain text or as one attributed span,
+    the span being the `muted` / `stale` attribute the row-level flatten
+    produced. Returning it lets a multi-run cell apply that one attribute to
+    every run, so a muted or stale row stays uniform.
+    """
+    if isinstance(markup, tuple):
+        return markup[0]
+    return None
+
+
+def _build_multi_link_cell(
+    runs: Sequence[CellRun],
+    field_key: str,
+    flattened_attr: Hashable | None,
+    width: int | None,
+) -> Columns:
+    """Lay a cell's runs out side by side so each carries its own hyperlink and color.
+
+    Every run is sized to its own visible text, so the escape bytes an
+    `_HyperlinkText` injects never count towards the layout. A fixed-width
+    column gets an explicit filler for whatever the runs leave over; the
+    flexible column lets its last run absorb the remainder instead.
+
+    `flattened_attr` is the row-level `muted` / `stale` attribute when one
+    applies; it overrides every run's own color, so a de-emphasized row does not
+    keep some runs at full brightness.
+    """
+    run_widths = [len(run.text) for run in runs]
+    cols: list[tuple[int, Text] | Text] = []
+    for idx, run in enumerate(runs):
+        run_attr = flattened_attr if flattened_attr is not None else _run_color_attr(field_key, run)
+        run_markup = run.text if run_attr is None else (run_attr, run.text)
+        if run.url:
+            hyperlink_widget = _HyperlinkText(run_markup)
+            hyperlink_widget._hyperlink_url = run.url
+            widget: Text = hyperlink_widget
+        else:
+            widget = Text(run_markup)
+        is_flexible_tail = width is None and idx == len(runs) - 1
+        if is_flexible_tail:
+            cols.append(widget)
+        else:
+            cols.append((run_widths[idx], widget))
+    if width is not None:
+        filler_width = width - sum(run_widths)
+        if filler_width > 0:
+            cols.append((filler_width, Text("")))
+    return Columns(cols, dividechars=0)
 
 
 def _format_section_heading(section: BoardSection, count: int) -> list[str | tuple[Hashable, str]]:

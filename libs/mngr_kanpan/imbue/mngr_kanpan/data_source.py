@@ -11,6 +11,7 @@ from loguru import logger
 from pydantic import Field
 from pydantic import TypeAdapter
 from pydantic import ValidationError
+from pydantic import model_validator
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
@@ -36,12 +37,41 @@ class OldestCreatedNoInputsError(KanpanDataSourceError, ValueError):
     ...
 
 
+class CellRunsTextMismatchError(KanpanDataSourceError, ValueError):
+    """Raised when a CellDisplay's runs do not concatenate back to its text."""
+
+    ...
+
+
+class CellRun(FrozenModel):
+    """One separately hyperlinkable, separately colored segment of a cell's display text."""
+
+    text: str = Field(description="Visible text for this segment")
+    url: str | None = Field(default=None, description="Optional hyperlink URL for this segment alone")
+    color: str | None = Field(default=None, description="Optional urwid color attribute name for this segment alone")
+
+
 class CellDisplay(FrozenModel):
     """Everything the column renderer needs for one cell."""
 
     text: str = Field(description="Display text for the cell")
     url: str | None = Field(default=None, description="Optional hyperlink URL")
     color: str | None = Field(default=None, description="Optional urwid color attribute name")
+    runs: tuple[CellRun, ...] = Field(
+        default=(),
+        description="Segment breakdown of `text` for cells carrying more than one hyperlink. "
+        "Empty for cells that hyperlink `text` as a whole (via `url`) or not at all. "
+        "When non-empty, the concatenated run texts equal `text`, so column widths "
+        "computed from `text` still measure exactly what the terminal displays.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_runs_reconstruct_text(self) -> "CellDisplay":
+        if self.runs:
+            joined = "".join(run.text for run in self.runs)
+            if joined != self.text:
+                raise CellRunsTextMismatchError(f"CellDisplay runs spell {joined!r} but text is {self.text!r}")
+        return self
 
 
 class FieldValue(FrozenModel):

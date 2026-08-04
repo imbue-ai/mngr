@@ -14,6 +14,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_kanpan.data_sources.github import AdditionalPrReference
 from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -83,6 +84,7 @@ def make_pr_field(
     state: PrState = PrState.OPEN,
     is_draft: bool = False,
     head_branch: str = "test-branch",
+    additional_prs: tuple[AdditionalPrReference, ...] = (),
 ) -> PrField:
     """Create a PrField for testing."""
     return PrField(
@@ -92,8 +94,14 @@ def make_pr_field(
         url=f"https://github.com/org/repo/pull/{number}",
         head_branch=head_branch,
         is_draft=is_draft,
+        additional_prs=additional_prs,
         created=created,
     )
+
+
+def make_additional_pr(number: int, state: PrState = PrState.OPEN) -> AdditionalPrReference:
+    """Create a reference to a PR on one of an agent's other worktree branches."""
+    return AdditionalPrReference(number=number, url=f"https://github.com/org/repo/pull/{number}", state=state)
 
 
 def make_board_snapshot(

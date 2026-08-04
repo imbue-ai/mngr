@@ -1,6 +1,7 @@
 """Unit tests for the kanpan TUI."""
 
 import io
+import re
 import subprocess
 import threading
 from collections.abc import Sequence
@@ -32,10 +33,13 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_CI
+from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
+from imbue.mngr_kanpan.data_sources.github import PrField
+from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
 from imbue.mngr_kanpan.data_types import ActionBuiltinRole
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -46,6 +50,7 @@ from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.testing import make_additional_pr
 from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
@@ -71,6 +76,7 @@ from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
 from imbue.mngr_kanpan.tui import _LEGEND_SEPARATOR
 from imbue.mngr_kanpan.tui import _SEARCH_QUERY_MIN_COLS
+from imbue.mngr_kanpan.tui import _SelectableRow
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
 from imbue.mngr_kanpan.tui import _build_agent_row
@@ -2385,6 +2391,228 @@ def test_handle_peek_key_left_falls_through_to_reply_edit() -> None:
 
 
 # =============================================================================
+# _build_agent_row terminal hyperlinks
+# =============================================================================
+
+_OSC8_SEQUENCE_PATTERN = re.compile(rb"\x1b\]8;;[^\x1b]*\x1b\\")
+_HYPERLINK_CREATED = datetime(2027, 1, 1, 0, 0, 20, tzinfo=timezone.utc)
+
+
+def _make_prs_def(is_flexible: bool = False) -> _ColumnDef:
+    """Build a column def for the PR field, mirroring runtime construction."""
+    return _ColumnDef(
+        name=FIELD_PR,
+        header="PRS",
+        text_fn=_FieldCellTextFn(field_key=FIELD_PR),
+        markup_fn=_FieldCellMarkupFn(field_key=FIELD_PR),
+        flexible=is_flexible,
+    )
+
+
+def _make_multi_pr_field(leading_number: int, *additional: tuple[int, PrState]) -> PrField:
+    """A PR field whose cell lists the recorded branch's PR plus additional ones."""
+    return make_pr_field(
+        number=leading_number,
+        additional_prs=tuple(make_additional_pr(number, state) for number, state in additional),
+        created=_HYPERLINK_CREATED,
+    )
+
+
+def _render_row(row: Any, width: int) -> tuple[bytes, bytes]:
+    """Render a row and return what the terminal receives, with and without OSC 8 escapes."""
+    rendered = b"".join(
+        text for row_content in row.render((width,)).content() for _attr, _charset, text in row_content
+    )
+    return rendered, _OSC8_SEQUENCE_PATTERN.sub(b"", rendered)
+
+
+def _osc8_link(url: str, text: str) -> bytes:
+    """The exact byte sequence a terminal reads as `text` hyperlinked to `url`."""
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\".encode()
+
+
+def test_build_agent_row_links_each_open_pr_number_to_its_own_pr() -> None:
+    """Every PR number in the multi-PR cell is separately clickable: each is wrapped
+    in its own OSC 8 sequence, and the separator between them is outside both links.
+    """
+    prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
+    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+
+    row = _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0)
+    rendered, _visible = _render_row(row, 60)
+
+    assert _osc8_link("https://github.com/org/repo/pull/2482", "#2482") in rendered
+    assert _osc8_link("https://github.com/org/repo/pull/2392", "#2392") in rendered
+    assert b"\x1b\\, \x1b]8" in rendered
+
+
+def test_build_agent_row_multi_link_column_width_ignores_the_escape_bytes() -> None:
+    """The escape bytes an OSC 8 link injects are invisible, so the column must be
+    sized -- and every later column aligned -- by the visible text alone.
+    """
+    prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
+    linked_entry = _make_entry(name="agent-a", fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    plain_entry = _make_entry(name="agent-b")
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
+    widths = _compute_board_column_widths((linked_entry, plain_entry), column_defs)
+    assert widths[FIELD_PR] == len("#2482, #2392")
+
+    rendered_rows = [
+        _render_row(
+            _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0),
+            60,
+        )
+        for entry in (linked_entry, plain_entry)
+    ]
+
+    linked_rendered, linked_visible = rendered_rows[0]
+    _plain_rendered, plain_visible = rendered_rows[1]
+    # The linked row carries more bytes than it shows, yet occupies the same columns.
+    assert len(linked_rendered) > len(linked_visible)
+    assert len(linked_visible) == len(plain_visible) == 60
+    assert linked_visible.decode().rstrip() == "  agent-a  RUNNING  #2482, #2392"
+
+
+def test_build_agent_row_multi_link_cell_in_the_flexible_last_column() -> None:
+    """The flexible last column has no fixed width, so its final run absorbs the
+    remaining space; the link must still stop at the visible text.
+    """
+    prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
+    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def(is_flexible=True)]
+    widths = _compute_board_column_widths((entry,), column_defs)
+
+    row = _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0)
+    rendered, visible = _render_row(row, 60)
+
+    assert _osc8_link("https://github.com/org/repo/pull/2392", "#2392") in rendered
+    assert len(visible) == 60
+
+
+def test_build_agent_row_colors_each_run_by_its_own_state() -> None:
+    """A merged or closed PR listed away from its section carries its state in its
+    color, and the runs around it keep theirs.
+    """
+    prs = _make_multi_pr_field(100, (101, PrState.MERGED), (102, PrState.CLOSED))
+    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+
+    row = _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0)
+    rendered_content = [segment for row_content in row.render((60,)).content() for segment in row_content]
+    # A linked segment carries its OSC 8 escapes; the visible text is what identifies it.
+    visible_by_attr = [
+        (_OSC8_SEQUENCE_PATTERN.sub(b"", text).decode(), attr) for attr, _charset, text in rendered_content
+    ]
+    attr_by_number = {visible: attr for visible, attr in visible_by_attr if visible in ("#100", "#101", "#102")}
+
+    assert attr_by_number == {
+        "#100": None,
+        "#101": "field_pr_light_magenta",
+        "#102": "field_pr_dark_gray",
+    }
+
+
+def test_build_field_color_palette_registers_the_colors_runs_ask_for() -> None:
+    """A run's color only renders if the palette carries it, focus variant included."""
+    prs = _make_multi_pr_field(100, (101, PrState.MERGED))
+    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+
+    palette_entries, attr_names = _build_field_color_palette(make_board_snapshot(entries=(entry,)))
+
+    assert "field_pr_light_magenta" in attr_names
+    assert ("field_pr_light_magenta", "light magenta", "") in palette_entries
+    assert ("field_pr_light_magenta_focus", "light magenta,standout", "") in palette_entries
+
+
+def test_build_agent_row_stale_multi_link_cell_greys_every_run() -> None:
+    """A stale cell greys out as a whole; splitting it into per-link runs, each with
+    its own color, must not leave some of them at full brightness.
+    """
+    prs = _make_multi_pr_field(2482, (2392, PrState.MERGED))
+    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+
+    row = _build_agent_row(
+        entry,
+        widths,
+        column_defs,
+        now=_HYPERLINK_CREATED + timedelta(seconds=3600),
+        staleness_threshold_seconds=1800.0,
+    )
+    rendered_content = [segment for row_content in row.render((60,)).content() for segment in row_content]
+
+    linked_attrs = {attr for attr, _charset, text in rendered_content if b"#2482" in text or b"#2392" in text}
+    assert linked_attrs == {"stale"}
+
+
+def test_build_agent_row_muted_multi_link_cell_greys_every_run() -> None:
+    """Same for a muted row: the whole-row flatten must win over each run's own color
+    so the row stays one continuous band of grey.
+    """
+    prs = _make_multi_pr_field(2482, (2392, PrState.MERGED))
+    entry = _make_entry(section=BoardSection.MUTED, fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
+    widths = _compute_board_column_widths((entry,), column_defs)
+
+    row = _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0)
+    rendered_content = [segment for row_content in row.render((60,)).content() for segment in row_content]
+
+    linked_attrs = {attr for attr, _charset, text in rendered_content if b"#2482" in text or b"#2392" in text}
+    assert linked_attrs == {"muted"}
+
+
+def test_build_agent_row_single_url_cell_still_links_the_whole_cell() -> None:
+    """A cell carrying one url and no runs -- the single-PR column -- keeps
+    hyperlinking its whole text.
+    """
+    pr = make_pr_field(number=7, created=_HYPERLINK_CREATED)
+    entry = _make_entry(fields={FIELD_PR: pr}, cells={FIELD_PR: pr.display()})
+    column_defs = [
+        *_BUILTIN_COLUMN_DEFS,
+        _ColumnDef(
+            name=FIELD_PR,
+            header="PR",
+            text_fn=_FieldCellTextFn(field_key=FIELD_PR),
+            markup_fn=_FieldCellMarkupFn(field_key=FIELD_PR),
+            flexible=False,
+        ),
+    ]
+    widths = _compute_board_column_widths((entry,), column_defs)
+
+    row = _build_agent_row(entry, widths, column_defs, now=_HYPERLINK_CREATED, staleness_threshold_seconds=1800.0)
+    rendered, _visible = _render_row(row, 60)
+
+    assert _osc8_link("https://github.com/org/repo/pull/7", "#7") in rendered
+
+
+def test_update_row_mark_with_a_multi_link_cell_ahead_of_the_name_column() -> None:
+    """A multi-link cell renders as nested columns rather than a single piece of text,
+    so marking a row must find the name cell rather than assume it comes first.
+    """
+    prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
+    entry = _make_entry(name="agent-a", fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    snapshot = make_board_snapshot(entries=(entry,))
+    state = _make_state(snapshot=snapshot)
+    column_defs = [_make_prs_def(), *_BUILTIN_COLUMN_DEFS]
+    walker, idx_map = _build_board_widgets(snapshot, column_defs)
+    state.list_walker = walker
+    state.index_to_entry = idx_map
+    agent_idx = next(k for k, v in idx_map.items() if v.name == AgentName("agent-a"))
+
+    _update_row_mark(state, agent_idx, "d")
+
+    marked_row = walker[agent_idx]
+    assert isinstance(marked_row, AttrMap)
+    row = marked_row.original_widget
+    assert isinstance(row, _SelectableRow)
+    assert row.name_cell is not None
+    assert row.name_cell.text.startswith("d")
+
+
 # Search
 # =============================================================================
 

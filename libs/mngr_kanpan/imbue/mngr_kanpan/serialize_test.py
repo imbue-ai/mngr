@@ -5,6 +5,7 @@ from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_source import CellDisplay
+from imbue.mngr_kanpan.data_source import CellRun
 from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -128,7 +129,43 @@ def test_board_snapshot_to_json_entry_includes_cells_and_metadata() -> None:
     assert dumped["state"] == "WAITING"
     assert dumped["branch"] == "mngr/agent-x"
     assert dumped["section"] == "PR_MERGED"
-    assert dumped["cells"]["pr"] == {"text": "#7", "url": "https://example/pr/7", "color": "light green"}
+    assert dumped["cells"]["pr"] == {
+        "text": "#7",
+        "url": "https://example/pr/7",
+        "color": "light green",
+        "runs": [],
+    }
+
+
+def test_board_snapshot_to_json_entry_includes_per_run_cell_urls() -> None:
+    """A multi-link cell dumps each run's own text and url, so JSON consumers can
+    reach every linked PR without re-parsing the joined display text.
+    """
+    entry = AgentBoardEntry(
+        name=AgentName("agent-x"),
+        state=AgentLifecycleState.WAITING,
+        provider_name=ProviderInstanceName("local"),
+        section=BoardSection.STILL_COOKING,
+        cells={
+            "pr": CellDisplay(
+                text="#7, #9",
+                runs=(
+                    CellRun(text="#7", url="https://example/pr/7"),
+                    CellRun(text=", "),
+                    CellRun(text="#9", url="https://example/pr/9", color="light magenta"),
+                ),
+            )
+        },
+    )
+    snapshot = make_board_snapshot(entries=(entry,))
+    result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
+    dumped_cell = result["sections"][0]["entries"][0]["cells"]["pr"]
+    assert dumped_cell["text"] == "#7, #9"
+    assert dumped_cell["runs"] == [
+        {"text": "#7", "url": "https://example/pr/7", "color": None},
+        {"text": ", ", "url": None, "color": None},
+        {"text": "#9", "url": "https://example/pr/9", "color": "light magenta"},
+    ]
 
 
 def test_board_snapshot_to_json_serializes_full_field_payload() -> None:
