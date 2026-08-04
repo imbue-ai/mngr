@@ -92,6 +92,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
+from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -926,6 +927,17 @@ def provider_instance_name_for_launch(
             # reachable only through a bring-your-own-key account block, which the
             # ``cloud_account`` short-circuit above already returned.
             raise MngrCommandError(f"{launch_mode.value} mode requires a cloud account")
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def latchkey_gateway_location_for_launch(launch_mode: LaunchMode) -> LatchkeyGatewayLocation:
+    """Select the intended gateway topology before the workspace host exists."""
+    match launch_mode:
+        case LaunchMode.DOCKER | LaunchMode.LIMA | LaunchMode.MODAL:
+            return LatchkeyGatewayLocation.DESKTOP
+        case LaunchMode.VULTR | LaunchMode.IMBUE_CLOUD | LaunchMode.AWS | LaunchMode.GCP | LaunchMode.AZURE:
+            return LatchkeyGatewayLocation.VPS
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -2463,7 +2475,7 @@ class AgentCreator(MutableModel):
                 # won't have its own permissions file. The user can
                 # recover by fixing the latchkey installation and
                 # re-creating the agent.
-                latchkey_setup = self._prepare_latchkey_or_warn(log_sink)
+                latchkey_setup = self._prepare_latchkey_or_warn(log_sink, launch_mode)
 
                 # No prepare step here: a bring-your-own-key account's cloud
                 # scaffolding (AWS security group + state bucket, GCP/Azure
@@ -2820,6 +2832,7 @@ class AgentCreator(MutableModel):
     def _prepare_latchkey_or_warn(
         self,
         log_sink: CreateAttemptLogSink,
+        launch_mode: LaunchMode,
     ) -> AgentLatchkeySetup:
         """Run :func:`prepare_agent_latchkey` and downgrade its errors to warnings.
 
@@ -2829,7 +2842,11 @@ class AgentCreator(MutableModel):
         fix the latchkey installation and re-create the agent.
         """
         try:
-            return prepare_agent_latchkey(self.latchkey, is_tunneled=True)
+            return prepare_agent_latchkey(
+                self.latchkey,
+                is_tunneled=True,
+                gateway_location=latchkey_gateway_location_for_launch(launch_mode),
+            )
         except LatchkeyError as e:
             logger.warning("Failed to prepare latchkey wiring: {}", e)
             log_sink.put("[minds] Warning: latchkey wiring skipped: {}".format(e))

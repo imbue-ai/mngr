@@ -20,6 +20,7 @@ from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
+from imbue.mngr_latchkey.store import opaque_handles_for_host
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import point_opaque_handle_at_host
@@ -135,6 +136,21 @@ def test_link_opaque_permissions_preserves_existing_grants_on_recreation(tmp_pat
     # Opaque path is a symlink and reads back the existing grants.
     assert opaque_path.is_symlink()
     assert json.loads(opaque_path.read_text()) == {"rules": [{"slack-api": ["slack-read-all"]}]}
+
+
+def test_opaque_handles_for_host_returns_only_symlinks_to_requested_host(tmp_path: Path) -> None:
+    first_host_id = HostId()
+    second_host_id = HostId()
+    first_handle = new_opaque_permissions_path(tmp_path)
+    second_handle = new_opaque_permissions_path(tmp_path)
+    save_permissions(first_handle, LatchkeyPermissionsConfig())
+    save_permissions(second_handle, LatchkeyPermissionsConfig())
+    link_opaque_permissions_to_host(tmp_path, first_handle, first_host_id)
+    link_opaque_permissions_to_host(tmp_path, second_handle, second_host_id)
+    (opaque_permissions_dir(tmp_path) / SHARED_SCHEMAS_FILENAME).write_text("{}")
+
+    assert opaque_handles_for_host(tmp_path, first_host_id) == [first_handle]
+    assert opaque_handles_for_host(tmp_path, HostId()) == []
 
 
 def test_link_opaque_permissions_survives_save_permissions_atomic_replace(tmp_path: Path) -> None:

@@ -43,7 +43,6 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 {
   "env": {
     "LATCHKEY_GATEWAY": "...",
-    "LATCHKEY_GATEWAY_SECONDARY": "...",
     "LATCHKEY_GATEWAY_PASSWORD": "...",
     "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "...",
     "LATCHKEY_DISABLE_COUNTING": "1"
@@ -52,6 +51,11 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 }
 ```
 
+The example above is the desktop-gateway shape. With
+``--gateway-location VPS``, the permissions-override entry is omitted and the
+VPS gateway authorizes native workspace requests with its synchronized default
+permissions file.
+
 Pipe the ``env`` values into ``mngr create --host-env KEY=VALUE``
 so every agent on the host inherits the same gateway wiring, then
 call ``mngr latchkey link-permissions`` with the
@@ -59,8 +63,8 @@ call ``mngr latchkey link-permissions`` with the
 ``mngr create`` returns it. The gateway URL is always the constant
 agent-side loopback URL (``http://127.0.0.1:1989``); there is no
 on-host (DEV) mode -- a running ``mngr latchkey forward`` is
-expected to bridge the agent's loopback port back to the shared
-gateway on the desktop.
+expected to bridge the agent's loopback port to the selected desktop or VPS
+gateway.
 
 **Usage:**
 
@@ -89,6 +93,7 @@ mngr latchkey create-agent-env [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--gateway-location` | choice (`DESKTOP` &#x7C; `VPS`) | Location of the workspace's active gateway (desktop or VPS). | `DESKTOP` |
 | `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
 | `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
 
@@ -215,11 +220,11 @@ Long-running foreground process that:
    supervises it: a background health check respawns it (reusing its
    original port) if the subprocess dies mid-session, so a crashed
    gateway does not silently take agent traffic down.
-3. Spawns ``mngr observe --discovery-only --quiet`` and, for every
-   agent discovered, opens a reverse SSH tunnel that bridges the
-   agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` to the host-side
-   gateway port. Agents discovered without SSH info are left to
-   reach the gateway via whatever direct route exists.
+3. Spawns ``mngr observe --discovery-only --quiet`` and exposes exactly
+   one gateway at each agent's fixed loopback URL: the desktop gateway
+   for local workspaces, or the VPS gateway for remote workspaces. The
+   latter forwards Minds-owned extension routes back to the desktop over
+   a separate VPS-loopback tunnel.
 4. On agent destruction, drops that agent's reverse tunnel.
 5. On SIGINT/SIGTERM, terminates the observe subprocess, all reverse
    tunnels, *and* the shared gateway. The coupled-lifetime semantics

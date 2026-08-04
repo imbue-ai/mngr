@@ -3,15 +3,14 @@
 Exposes two callables:
 
 * :class:`LatchkeyDiscoveryHandler` -- on every agent discovery, ensures
-  the shared desktop ``latchkey gateway`` subprocess is up and makes it
-  reachable on the agent's loopback ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``.
-  Agents whose host *also* has an accessible outer host (the VPS -- e.g.
-  imbue_cloud / vps_docker) additionally get a VPS-resident gateway
-  provisioned and reverse-tunneled into their container on a distinct
-  ``127.0.0.1:INNER_PORT`` (see :func:`provision_remote_gateway`), so they
-  can reach both the desktop gateway and the VPS gateway at once. Agents
-  discovered without SSH info are expected to reach the gateway via
-  whatever direct route exists.
+  the shared desktop ``latchkey gateway`` subprocess is up and exposes exactly
+  one gateway on the agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. Local
+  workspaces receive the desktop gateway directly. Remote workspaces receive
+  the VPS gateway, while a separate desktop-to-VPS tunnel lets its forwarding
+  extension reach Minds-owned endpoints on the desktop. A workspace whose
+  gateway location cannot be resolved yet receives *neither*: guessing the
+  desktop gateway would half-work while exposing it to a workspace that is not
+  entitled to it (see ``_warn_unresolved_gateway_route``).
 * :class:`LatchkeyDestructionHandler` -- on every agent destruction,
   tears down the reverse tunnel that belongs to that agent so the
   manager's health-check loop doesn't keep spinning paramiko transports
@@ -51,11 +50,15 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.loader import load_config
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -66,6 +69,7 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.remote_gateway import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
@@ -146,6 +150,14 @@ class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
                 self.on_host_permissions_changed(host_id_str)
 
 
+class _GatewayRoute(FrozenModel):
+    """Successfully-resolved gateway route for one workspace host."""
+
+    outer_ssh_info: RemoteSSHInfo | None = Field(
+        description="Remote outer-host SSH endpoint, or None when the workspace uses the desktop gateway directly"
+    )
+
+
 class LatchkeyDiscoveryHandler(MutableModel):
     """Discovery callback that ensures the shared Latchkey gateway is running and tunnels it in.
 
@@ -198,6 +210,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # A failed pass is *not* recorded here, so it retries on the next cycle.
     _provisioned_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Successful route resolutions are static for a host and can be reused on
+    # every discovery cycle. Failures are deliberately absent so the next cycle
+    # retries once a late lease/provider record becomes visible.
+    _gateway_route_by_host_id: dict[str, _GatewayRoute] = PrivateAttr(default_factory=dict)
+    # host_ids already warned about an unresolvable gateway route, so the warning
+    # is emitted once per host rather than on every discovery cycle.
+    _unresolved_route_hosts: set[str] = PrivateAttr(default_factory=set)
 
     def __call__(
         self,
@@ -262,28 +281,35 @@ class LatchkeyDiscoveryHandler(MutableModel):
         provider_name: str,
         host_side_port: int,
     ) -> None:
-        """Worker-thread entry point that wires the gateway(s) into the agent.
-
-        Every SSH-reachable agent gets the desktop-side gateway reverse-tunneled
-        onto its ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` (this runs inline here
-        since it is fast). Agents whose host *also* has an accessible outer host
-        (the VPS -- e.g. imbue_cloud / vps_docker) additionally get a VPS-resident
-        gateway provisioned and reverse-tunneled onto a distinct
-        ``127.0.0.1:INNER_PORT``, so they can reach both gateways at once. That
-        heavy provisioning is thrown onto its own fire-and-forget CG thread
-        (which then owns clearing the pending flag); local agents clear it here.
-
-        The two paths are independent -- the agent reaches the desktop gateway on
-        ``AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on ``INNER_PORT`` at the
-        same time -- so each is attempted with its own error handling and a
-        failure of one never prevents the other.
-        """
+        """Worker-thread entry point that chooses and wires one workspace gateway."""
         is_pending_handed_off = False
         try:
-            self._setup_desktop_gateway_reachability(agent_id, ssh_info, host_side_port)
-            is_pending_handed_off = self._maybe_dispatch_remote_gateway_provisioning(
-                agent_id, host_id, ssh_info, provider_name
-            )
+            route = self._resolve_gateway_route(host_id, provider_name)
+            if route is None:
+                # Unresolved (not cached, so the next cycle retries). We wire
+                # *nothing*: an unresolved route means we do not know which
+                # gateway this workspace belongs to, and guessing the desktop one
+                # is not a safe guess -- see
+                # ``_warn_unresolved_gateway_route`` for why.
+                self._warn_unresolved_gateway_route(host_id, provider_name)
+            elif route.outer_ssh_info is None:
+                # Confirmed desktop workspace (the provider has no outer host,
+                # or its outer is this very machine): the normal local path.
+                self._setup_desktop_gateway_reachability(agent_id, ssh_info, host_side_port)
+            else:
+                # Drop a desktop->container tunnel opened by an earlier cycle
+                # before the outer host was resolvable; otherwise it holds 1989
+                # and the VPS->container tunnel cannot bind there.
+                self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+                self._setup_desktop_gateway_reachability_on_vps(
+                    agent_id,
+                    host_id,
+                    route.outer_ssh_info,
+                    host_side_port,
+                )
+                is_pending_handed_off = self._maybe_dispatch_remote_gateway_provisioning(
+                    agent_id, host_id, ssh_info, provider_name
+                )
         finally:
             # The provisioning thread owns clearing the pending flag once the
             # heavy work finishes; otherwise (local agents, or provisioning was
@@ -335,6 +361,35 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 e,
             )
 
+    def _setup_desktop_gateway_reachability_on_vps(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        outer_ssh_info: RemoteSSHInfo,
+        host_side_port: int,
+    ) -> None:
+        """Expose the desktop gateway on the VPS loopback for the proxy extension.
+
+        The VPS currently has a one-to-one relationship with its workspace and
+        main agent. Tagging the tunnel with that agent id preserves the normal
+        destruction behavior: stopping or destroying the agent tears down the
+        now-unused desktop-to-VPS tunnel.
+        """
+        try:
+            self.tunnel_manager.setup_reverse_tunnel(
+                ssh_info=outer_ssh_info,
+                local_port=host_side_port,
+                remote_port=DESKTOP_GATEWAY_VPS_PORT,
+                agent_id=str(agent_id),
+            )
+        except (SSHTunnelError, OSError, paramiko.SSHException) as e:
+            logger.opt(exception=e).error(
+                "Failed to expose the desktop Latchkey gateway on VPS port {} for host {}: {}",
+                DESKTOP_GATEWAY_VPS_PORT,
+                host_id,
+                e,
+            )
+
     def _maybe_dispatch_remote_gateway_provisioning(
         self,
         agent_id: AgentId,
@@ -352,13 +407,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
         not tear down the shared supervisor; the CG's ObservableThread logs any
         uncaught failure at error level so it is never silently missed.
 
-        Independent of the desktop-side reachability tunnel: a failure there
-        does not prevent this provisioning, since the agent can reach the VPS
-        gateway on ``127.0.0.1:INNER_PORT`` even when the desktop gateway tunnel
-        is down.
+        Independent of the desktop-to-VPS extension tunnel: a failure there
+        does not prevent provisioning the VPS gateway for third-party calls.
         """
-        if not self._host_has_outer_host(host_id, provider_name):
-            return False
         host_id_str = str(host_id)
         with self._remote_hosts_lock:
             if host_id_str in self._provisioned_hosts:
@@ -407,24 +458,174 @@ class LatchkeyDiscoveryHandler(MutableModel):
             return False
         return True
 
-    def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
-        """Cheaply decide whether the agent's host has an accessible outer host (the VPS).
+    def _resolve_gateway_route(self, host_id: HostId, provider_name: str) -> _GatewayRoute | None:
+        """Resolve whether the workspace uses the desktop or VPS gateway.
 
-        Uses the connection-free ``outer_host_id_for``; any failure (unknown
-        host, provider construction error) is treated as 'no outer' so the agent
-        falls back to the desktop-side reverse tunnel.
+        Returns ``None`` when the answer is not knowable *yet*; that is never
+        cached, so the next discovery cycle retries. Only answers derived from an
+        opened outer host are cached, since those are static for the host: the
+        provider has no outer at all (modal, local, ssh, docker-over-tcp), its
+        outer is this very machine, or it is a genuinely remote VPS.
+
+        Deliberately *not* keyed off the cheap ``outer_host_id_for`` pre-check:
+        that returns ``None`` both for "this provider has no outer" and for "the
+        outer is not known yet" (``mngr_vps`` returns ``None`` while the host
+        record has no VPS IP -- routine in the first minutes of a create).
+        Caching that as "desktop" pinned a VPS workspace to the desktop gateway
+        for the rest of the supervisor's lifetime, so its VPS gateway was never
+        provisioned at all. A provider whose outer is not resolvable yet raises
+        (``HostNotFoundError``) from ``outer_host_for`` instead, which lands in
+        the retryable branch below.
         """
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            cached = self._gateway_route_by_host_id.get(host_id_str)
+        if cached is not None:
+            return cached
+
         try:
-            provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
-            return provider.outer_host_id_for(host_id) is not None
+            provider = self._provider_for_route(provider_name)
+            try:
+                route = self._resolve_route_via_provider(provider, host_id)
+            except HostNotFoundError:
+                # This supervisor holds one long-lived provider instance, and
+                # some providers cache their whole host/lease listing on it with
+                # no expiry (e.g. imbue_cloud's ``_leased_hosts_cache``). A host
+                # leased *after* that listing was taken is then permanently
+                # invisible: every new workspace would fall back to the desktop
+                # gateway (and never get a VPS gateway) until the app restarts.
+                # So treat "not found" as "our listing may be older than this
+                # host" and look again on fresh data.
+                logger.debug(
+                    "Host {} not in provider {}'s cached listing; refreshing it and retrying",
+                    host_id,
+                    provider_name,
+                )
+                provider.reset_caches()
+                route = self._resolve_route_via_provider(provider, host_id)
+            if route is None:
+                return None
         except (MngrError, OSError) as e:
             logger.debug(
-                "Could not determine outer host for host {} via provider {}; treating as non-VPS: {}",
+                "Could not resolve latchkey gateway route for host {} via provider {}: {}",
                 host_id,
                 provider_name,
                 e,
             )
-            return False
+            return None
+
+        with self._remote_hosts_lock:
+            self._gateway_route_by_host_id[host_id_str] = route
+            self._unresolved_route_hosts.discard(host_id_str)
+        return route
+
+    def _provider_for_route(self, provider_name: str) -> ProviderInstanceInterface:
+        """Return the provider instance route resolution should ask (a seam for tests)."""
+        return get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
+
+    def _resolve_route_via_provider(
+        self, provider: ProviderInstanceInterface, host_id: HostId
+    ) -> _GatewayRoute | None:
+        """Resolve the route from an opened outer host, or ``None`` if it has no SSH endpoint."""
+        with provider.outer_host_for(host_id) as outer:
+            if outer is None or outer.is_local:
+                return _GatewayRoute(outer_ssh_info=None)
+            connection_info = outer.get_ssh_connection_info()
+            if connection_info is None:
+                return None
+            user, hostname, port, key_path = connection_info
+            return _GatewayRoute(outer_ssh_info=RemoteSSHInfo(user=user, host=hostname, port=port, key_path=key_path))
+
+    def reload_provider_config(self) -> None:
+        """Re-read the provider set from settings and forget cached route resolutions.
+
+        The supervisor loads its :class:`MngrContext` once, at startup, and every
+        route resolution goes through ``get_provider_instance`` against that
+        snapshot. A provider instance the desktop client registers *later* (the
+        user adds a cloud or imbue_cloud account mid-session) is therefore
+        invisible here: resolution fails for every agent on it, the workspace is
+        served by the desktop gateway, and its VPS gateway is never provisioned
+        at all -- until the whole app is restarted. The desktop client already
+        SIGHUPs this supervisor on every provider-set change to bounce the ``mngr
+        observe`` child; this brings the supervisor's own view along with it.
+
+        Only the provider mapping is taken from the freshly-loaded config. Every
+        other setting stays as resolved at startup, because ``--setting``
+        overrides are applied *after* ``load_config`` and would otherwise be
+        silently dropped here. A failed reload leaves the current provider set in
+        place: a stale provider set still serves every workspace that was already
+        resolvable.
+        """
+        providers = self._load_provider_instance_configs()
+        if providers is None:
+            return
+        config = self.mngr_ctx.config.model_copy_update(
+            to_update(self.mngr_ctx.config.field_ref().providers, providers)
+        )
+        # A fresh context object also invalidates ``get_provider_instance``'s
+        # cache, which is keyed by ``(name, id(mngr_ctx))``.
+        self.mngr_ctx = self.mngr_ctx.model_copy_update(to_update(self.mngr_ctx.field_ref().config, config))
+        with self._remote_hosts_lock:
+            # Routes resolved against the previous provider set may have been
+            # decided by a provider that has since been (re)configured.
+            self._gateway_route_by_host_id.clear()
+        logger.info("Reloaded the latchkey provider set ({} provider instance(s))", len(providers))
+
+    def _load_provider_instance_configs(self) -> dict[ProviderInstanceName, ProviderInstanceConfig] | None:
+        """Read the current provider-instance blocks from settings, or ``None`` on failure."""
+        try:
+            reloaded = load_config(self.mngr_ctx.pm, self.mngr_ctx.concurrency_group)
+        except (MngrError, OSError) as e:
+            logger.opt(exception=e).warning(
+                "Could not reload the latchkey provider set; keeping the one loaded at startup: {}", e
+            )
+            return None
+        return dict(reloaded.config.providers)
+
+    def _warn_unresolved_gateway_route(self, host_id: HostId, provider_name: str) -> None:
+        """Surface an unresolvable gateway route once per host, loudly.
+
+        Nothing is wired for such a host: its in-container gateway port stays
+        unbound, so its latchkey calls fail with connection-refused until a later
+        cycle resolves the route. That is deliberately worse-looking than
+        tunnelling the desktop gateway in as a guess, which is what this used to
+        do, because for a VPS-backed workspace that guess is actively harmful:
+
+        * It half-works, and therefore hides the problem. Requests that are not
+          permission-checked (the ``/latchkey/`` RPC) succeed, while every
+          third-party call and extension route is denied -- the workspace has no
+          permissions-override JWT (its policy lives on the VPS), so the desktop
+          gateway evaluates it against its deny-all default file.
+        * It exposes the desktop gateway to the workspace. ``/latchkey/`` is
+          gated by the shared password alone, so the workspace can enumerate the
+          user's services, accounts and credential status, and start auth flows
+          on the user's own machine.
+        * It squats the container's ``AGENT_SIDE_LATCHKEY_PORT``, which the
+          VPS->container tunnel has to bind, so provisioning then has to tear
+          down a tunnel we opened ourselves.
+
+        Resolution normally succeeds on the first try for desktop workspaces
+        (their providers answer without network I/O), so "unresolved" almost
+        always means the provider lookup itself failed -- i.e. we know nothing
+        about this host, and wiring nothing is the honest response.
+
+        Warn on the first occurrence per host and drop to debug afterwards, so a
+        persistent problem is visible without flooding the log on every cycle.
+        """
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            is_first = host_id_str not in self._unresolved_route_hosts
+            self._unresolved_route_hosts.add(host_id_str)
+        message = (
+            "Could not resolve the latchkey gateway route for host {} via provider {}; "
+            "leaving its latchkey gateway unwired until this resolves (its in-container "
+            "gateway port stays closed, so latchkey calls will fail there). Check that "
+            "provider {} is configured in the settings this supervisor loaded."
+        )
+        if is_first:
+            logger.warning(message, host_id, provider_name, provider_name)
+        else:
+            logger.debug(message, host_id, provider_name, provider_name)
 
     def _run_remote_gateway_provisioning(
         self,
@@ -473,6 +674,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # loopback port here; otherwise the two coincide and we fall back.
                 loopback_ssh_port = provider.get_container_loopback_ssh_port(host_id)
                 container_ssh_port = loopback_ssh_port if loopback_ssh_port is not None else ssh_info.port
+                desktop_permissions_override = self.latchkey.create_permissions_override_jwt(
+                    permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+                )
                 provision_remote_gateway(
                     outer,
                     host_id=host_id,
@@ -480,6 +684,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     container_ssh_port=container_ssh_port,
                     latchkey_directory=self.latchkey.latchkey_directory,
                     gateway_password=self.latchkey.derive_gateway_password(),
+                    desktop_permissions_override=desktop_permissions_override,
                 )
                 # Initial sync for the freshly-provisioned host, reusing the
                 # open outer connection: permissions first, then credentials.

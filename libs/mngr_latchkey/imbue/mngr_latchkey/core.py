@@ -161,10 +161,20 @@ _GATEWAY_PASSWORD_SENTINEL_PATH: Final[str] = "/__minds_gateway_password__/senti
 _ENV_EXTENSION_PERMISSIONS_ROOT: Final[str] = "LATCHKEY_EXTENSION_PERMISSIONS_ROOT"
 
 # Subdirectory of ``LATCHKEY_DIRECTORY`` from which the upstream
-# ``latchkey gateway`` (>= 2.9.0) loads ``.mjs`` extension files. This
-# package drops its bundled ``permissions.mjs`` and
-# ``permission_requests.mjs`` files there at gateway-spawn time.
+# ``latchkey gateway`` (>= 2.9.0) loads ``.mjs`` extension files.
 _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
+
+# The desktop and VPS gateways intentionally load disjoint extension sets. The
+# desktop owns all stateful Minds endpoints; the VPS loads only the transparent
+# forwarder that sends those endpoint families back to the desktop gateway.
+DESKTOP_GATEWAY_EXTENSION_FILENAMES: Final[tuple[str, ...]] = (
+    "minds_api_proxy.mjs",
+    "permission_requests.mjs",
+    "permissions.mjs",
+    "services.json",
+    "workspace_permissions.json",
+)
+REMOTE_GATEWAY_EXTENSION_FILENAME: Final[str] = "desktop_gateway_proxy.mjs"
 
 # Filename of the upstream latchkey CLI's JSON config file, directly under
 # ``LATCHKEY_DIRECTORY``. Latchkey (>= 3.1.0) reads its ``settings`` block --
@@ -565,7 +575,10 @@ def _build_gateway_env(
     return env
 
 
-_BUNDLED_EXTENSION_SUFFIXES: Final[tuple[str, ...]] = (".mjs", ".json")
+def bundled_gateway_extension_content(filename: str) -> str:
+    """Read one explicitly selected bundled gateway extension file."""
+    resource = resources.files("imbue.mngr_latchkey.extensions").joinpath(filename)
+    return resource.read_text(encoding="utf-8")
 
 
 def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
@@ -584,13 +597,12 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     """
     extensions_dir = latchkey_directory / _GATEWAY_EXTENSIONS_SUBDIR
     extensions_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    source_package = resources.files("imbue.mngr_latchkey.extensions")
-    for entry in source_package.iterdir():
-        name = entry.name
-        if not any(name.endswith(suffix) for suffix in _BUNDLED_EXTENSION_SUFFIXES):
-            continue
-        destination = extensions_dir / name
-        destination.write_text(entry.read_text(encoding="utf-8"), encoding="utf-8")
+    # Never let the desktop load the VPS-only forwarder: it would proxy these
+    # routes back to itself. Remove a stale copy left by a partial/older install.
+    (extensions_dir / REMOTE_GATEWAY_EXTENSION_FILENAME).unlink(missing_ok=True)
+    for filename in DESKTOP_GATEWAY_EXTENSION_FILENAMES:
+        destination = extensions_dir / filename
+        destination.write_text(bundled_gateway_extension_content(filename), encoding="utf-8")
     return extensions_dir
 
 

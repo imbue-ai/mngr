@@ -262,7 +262,7 @@ and embedders. Most callers only need the CLI above.
 
 ## Gateway HTTP extensions
 
-`mngr latchkey forward` drops three `.mjs` extensions into
+`mngr latchkey forward` drops three desktop-only `.mjs` extensions into
 `<latchkey-directory>/extensions/`. All expose plain HTTP endpoints
 on the gateway's listen port and authenticate the caller via two
 headers:
@@ -376,6 +376,33 @@ authentication of its own beyond the gateway's normal permission
 check (against the synthetic `latchkey-self.invalid` URL). Restricting
 which paths an agent can reach through the proxy is therefore a job
 for the agent's `latchkey_permissions.json`.
+
+### Remote desktop-gateway proxy extension
+
+Remote workspaces expose the VPS-resident gateway at the same
+`http://127.0.0.1:1989` URL local workspaces use. Third-party requests terminate
+there so the VPS can inject its synchronized credential subset. The VPS gateway
+loads one dedicated `desktop_gateway_proxy.mjs` extension for the endpoint
+families whose state remains on the user's computer: `/permissions`,
+`/permission-requests`, and `/minds-api-proxy` (including all subpaths). It
+forwards those requests to the desktop gateway over a desktop-to-VPS reverse
+tunnel, preserving the gateway password and replacing any caller-supplied
+permissions override with a dedicated desktop-target JWT held by the proxy.
+Native VPS requests carry no override and are authorized by the gateway's
+synchronized default `~/.latchkey/permissions.json`.
+
+The workspace therefore always has one gateway URL and one agent-side skill.
+If the user's computer is offline, third-party calls through the VPS gateway
+continue to work, while desktop-owned extension routes fail with a clear HTTP
+502 response.
+
+Workspaces created *before* this one-gateway rollout still carry a
+permissions-override JWT in their host env file, naming a desktop-side opaque
+handle path. Upstream latchkey resolves that override before dispatching
+anything (including extension routes) and answers HTTP 400 when the named file
+is absent, so `remote_gateway._materialize_legacy_override_targets` symlinks
+those paths at the VPS `permissions.json`. That shim is temporary and can be
+deleted once no live workspace predates the rollout.
 
 ### `permissions` extension
 
@@ -521,6 +548,7 @@ remains importable for embedders such as the minds desktop client.
 ```python
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.agent_setup import (
+    LatchkeyGatewayLocation,
     prepare_agent_latchkey,
     finalize_host_permissions,
 )
@@ -537,10 +565,15 @@ latchkey = Latchkey(
 latchkey.initialize()
 
 # (a) Pre-create env vars + opaque permissions handle for a new host.
-setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
-# setup.env: LATCHKEY_GATEWAY[_SECONDARY,_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
-#   LATCHKEY_GATEWAY_SECONDARY (tunneled mode only) is the agent's URL for the
-#   per-VPS gateway: http://127.0.0.1:<INNER_PORT>
+setup = prepare_agent_latchkey(
+    latchkey,
+    is_tunneled=True,
+    gateway_location=LatchkeyGatewayLocation.VPS,
+)
+# setup.env: LATCHKEY_GATEWAY[_PASSWORD,_DISABLE_COUNTING]
+# Desktop-gateway setups also include LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE.
+# LATCHKEY_GATEWAY is always http://127.0.0.1:1989 for tunneled workspaces.
+# Discovery realizes the desktop or VPS location selected before creation.
 # setup.opaque_permissions_path: pass to finalize_host_permissions later
 
 # ... mngr create returns the canonical host id ...

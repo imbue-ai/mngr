@@ -1,8 +1,8 @@
 """Provision the latchkey CLI (and its runtime prerequisites) on a remote VPS.
 
-Where the rest of the package reverse-tunnels a desktop-side gateway into
-each agent, this module installs the upstream ``latchkey`` CLI directly on
-the agent's outer host (the VPS) and runs a gateway there.
+Remote workspaces receive the gateway managed here, while local workspaces
+receive the desktop gateway directly. The VPS gateway handles third-party
+calls itself and forwards Minds-owned endpoint families back to the desktop.
 
 The VPS-resident gateway and the VPS->container reverse SSH tunnel are both
 long-running processes that must survive crashes and VM pause/resume. Rather
@@ -44,7 +44,9 @@ from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.core import bundled_gateway_extension_content
 from imbue.mngr_latchkey.core import merge_hidden_builtin_services
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -54,6 +56,7 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import SHARED_SCHEMAS_FILENAME
 from imbue.mngr_latchkey.store import load_permissions
+from imbue.mngr_latchkey.store import opaque_handles_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
@@ -95,18 +98,18 @@ _CURL_STAGED_SUFFIX: Final[str] = ".new"
 # dotfile in ``/usr/local/bin`` is never picked up by a PATH lookup.
 _CURL_VERSION_STAMP_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/.latchkey-curl-version"
 
-# Port inside the container on which the VPS-resident gateway is reachable (the
-# VPS->container reverse tunnel binds it). Deliberately distinct from
-# ``AGENT_SIDE_LATCHKEY_PORT``, which the desktop-side gateway's own reverse
-# tunnel already binds inside the container: a VPS agent reaches the desktop
-# gateway on ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on
-# ``127.0.0.1:INNER_PORT`` at the same time, so the two must not collide.
-INNER_PORT: Final[int] = AGENT_SIDE_LATCHKEY_PORT + 1
+# Port on the VPS loopback where the desktop gateway is reverse-tunneled. The
+# VPS-only extension forwards Minds-owned endpoint families here.
+DESKTOP_GATEWAY_VPS_PORT: Final[int] = 1988
 
-# Port the latchkey gateway binds to on the VPS's loopback (passed as
-# ``LATCHKEY_GATEWAY_PORT``). The reverse tunnel forwards the container's
-# ``INNER_PORT`` to this port, so the gateway never has to leave VPS loopback.
-OUTER_PORT: Final[int] = 1989
+# Port the latchkey gateway binds to on the VPS's loopback. The VPS->container
+# reverse tunnel exposes it at the same fixed agent-side port local workspaces
+# use, so every workspace has one gateway URL: http://127.0.0.1:1989.
+OUTER_PORT: Final[int] = AGENT_SIDE_LATCHKEY_PORT
+
+# A pre-supervisord build exposed the VPS gateway at container port 1990. Keep
+# that value only for identifying and killing its legacy nohup tunnel.
+_LEGACY_INNER_PORT: Final[int] = AGENT_SIDE_LATCHKEY_PORT + 1
 
 # Major Node.js version installed via NodeSource. The latchkey CLI is an npm
 # package, so it needs a reasonably recent Node runtime; the Debian-shipped
@@ -144,6 +147,8 @@ _REMOTE_LATCHKEY_DIR_NAME: Final[str] = ".latchkey"
 # local per-host file is named ``latchkey_permissions.json``; on the VPS it
 # becomes the gateway's single ``permissions.json``.
 _REMOTE_PERMISSIONS_FILENAME: Final[str] = "permissions.json"
+_REMOTE_EXTENSIONS_DIR_NAME: Final[str] = "extensions"
+_REMOTE_EXTENSION_CANDIDATE_SUFFIX: Final[str] = ".candidate"
 
 # Quick remote command (e.g. resolving ``$HOME``); a few seconds of slack
 # covers a cold SSH channel without masking a hung connection.
@@ -201,6 +206,7 @@ _TMPFS_SECRETS_DIR: Final[Path] = Path("/run/mngr-latchkey")
 _RAM_BACKED_FILESYSTEM_TYPES: Final[frozenset[str]] = frozenset({"tmpfs", "ramfs"})
 _GATEWAY_ENCRYPTION_KEY_FILENAME: Final[str] = "gateway_encryption_key"
 _GATEWAY_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
+_DESKTOP_PERMISSIONS_OVERRIDE_FILENAME: Final[str] = "desktop_permissions_override"
 
 # supervisord drop-in program directory (the distro ``supervisor`` package's
 # ``supervisord.conf`` includes ``conf.d/*.conf``) and the program names /
@@ -659,12 +665,85 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
             is_atomic=True,
         )
 
+    content_bytes = content.encode("utf-8")
     remote_path = remote_dir / _REMOTE_PERMISSIONS_FILENAME
     with log_span("Syncing latchkey permissions for host {} to VPS {} ({})", host_id, host.get_name(), remote_path):
-        # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
-        # the gateway never reads a half-written file mid-sync. (``write_text_file``
-        # has no atomic mode, hence the explicit ``write_file`` with encoded bytes.)
-        host.write_file(remote_path, content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
+        # Requests originating in a VPS-backed workspace carry no override JWT,
+        # so this synchronized default file is their authorization policy.
+        host.write_file(remote_path, content_bytes, mode=_REMOTE_FILE_MODE, is_atomic=True)
+
+    _materialize_legacy_override_targets(host, remote_dir, plugin_data_dir(latchkey_directory), host_id)
+
+
+# =============================================================================
+# TEMPORARY legacy shim -- delete once no workspace predates the one-gateway rollout
+# =============================================================================
+
+
+def _materialize_legacy_override_targets(
+    host: OuterHostInterface,
+    remote_dir: Path,
+    data_dir: Path,
+    host_id: HostId,
+) -> None:
+    """Point a legacy workspace's override-JWT target path at the VPS permissions file.
+
+    TEMPORARY. Workspaces created *before* the one-gateway rollout have
+    ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE`` baked into their host env file at
+    ``mngr create`` time, and that JWT names a desktop-side opaque handle path.
+    Upstream latchkey resolves the override *before* it dispatches anything --
+    both for ``/gateway/<url>`` and for extension routes -- and answers HTTP 400
+    when the named file is absent, so such a workspace would lose all latchkey
+    access the moment its gateway moves onto the VPS (the forwarding extension
+    never even runs, so its own header replacement cannot save it).
+
+    Symlinking each of those paths at ``~/.latchkey/permissions.json`` makes the
+    legacy override resolve to exactly the policy the VPS gateway would have
+    applied anyway. The shared schemas file is linked beside it too, since detent
+    resolves the permissions file's bare ``include`` relative to the referencing
+    file's own directory.
+
+    Workspaces created after the rollout send no override header at all, so this
+    is dead weight for them: delete this function, its call site, and
+    :func:`~imbue.mngr_latchkey.store.opaque_handles_for_host` once every live
+    workspace postdates the rollout.
+    """
+    opaque_paths = opaque_handles_for_host(data_dir, host_id)
+    if not opaque_paths:
+        return
+
+    permissions_target_q = shlex.quote(str(remote_dir / _REMOTE_PERMISSIONS_FILENAME))
+    schemas_target_q = shlex.quote(str(remote_dir / SHARED_SCHEMAS_FILENAME))
+    script_lines = ["set -e"]
+    for opaque_path in opaque_paths:
+        if not opaque_path.is_absolute():
+            raise RemoteGatewayError(f"Opaque permissions path must be absolute: {opaque_path}")
+        script_lines.extend(
+            (
+                f"mkdir -p {shlex.quote(str(opaque_path.parent))}",
+                # ``-sfn`` keeps this idempotent and never dereferences an
+                # existing link into its target directory.
+                f"ln -sfn {permissions_target_q} {shlex.quote(str(opaque_path))}",
+                f"ln -sfn {schemas_target_q} {shlex.quote(str(opaque_path.parent / SHARED_SCHEMAS_FILENAME))}",
+            )
+        )
+
+    with log_span(
+        "Linking {} legacy override path(s) for host {} to the VPS permissions file on {}",
+        len(opaque_paths),
+        host_id,
+        host.get_name(),
+    ):
+        # One batched command: every remote round-trip is a network hop.
+        result = host.execute_idempotent_command(
+            "\n".join(script_lines), timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS
+        )
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to link legacy latchkey override paths on VPS {}: {}".format(
+                host.get_name(), result.stderr.strip() or result.stdout.strip()
+            )
+        )
 
 
 def _build_supervisor_program_config(program_name: str, command: str, log_path: str, start_retries: int) -> str:
@@ -714,22 +793,29 @@ def _build_supervisor_program_config(program_name: str, command: str, log_path: 
     )
 
 
-def _reload_supervisor_programs(host: OuterHostInterface, host_name: str, program_name: str) -> None:
-    """Apply a freshly-written supervisord drop-in and ensure ``program_name`` is running.
+def _reload_supervisor_programs(
+    host: OuterHostInterface,
+    host_name: str,
+    program_name: str,
+    *,
+    restart: bool = False,
+) -> None:
+    """Apply a supervisord drop-in and ensure ``program_name`` runs with current inputs.
 
-    ``reread`` reloads the config files and ``update`` (re)starts new/changed
-    programs and stops removed ones -- idempotent, so an unchanged config never
-    needlessly bounces a healthy program. ``update`` does not, however, restart
-    a program that is merely STOPPED/FATAL (e.g. a gateway that went FATAL after
-    a reboot wiped its tmpfs secrets) when its config is unchanged, so a
-    best-effort ``start`` follows: it brings such a program back up with the
-    freshly-written secrets, and is a harmless no-op (``|| true``) when the
-    program is already running. ``program_name`` is a fixed internal literal, so
-    it is interpolated directly. Raises :class:`RemoteGatewayError` if the
-    reread/update fails.
+    ``reread`` reloads the config files and ``update`` applies changed program
+    definitions. A best-effort ``start`` recovers a STOPPED/FATAL unchanged
+    program. When ``restart`` is true, the running process is deliberately
+    bounced so updates made outside the supervisord config itself (such as the
+    gateway's tmpfs secrets and wrapper environment) take effect immediately.
+    ``program_name`` is a fixed internal literal, so it is interpolated directly.
     """
+    ensure_running = (
+        f"(supervisorctl restart {program_name} || supervisorctl start {program_name})"
+        if restart
+        else f"(supervisorctl start {program_name} || true)"
+    )
     result = host.execute_idempotent_command(
-        f"supervisorctl reread && supervisorctl update && (supervisorctl start {program_name} || true)",
+        f"supervisorctl reread && supervisorctl update && {ensure_running}",
         timeout_seconds=_SUPERVISOR_COMMAND_TIMEOUT_SECONDS,
     )
     if not result.success:
@@ -802,12 +888,55 @@ def _ensure_remote_hidden_builtin_services(host: OuterHostInterface, remote_dir:
     host.write_file(config_path, content.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
-def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_file_path: Path) -> str:
+def _ensure_remote_gateway_extension(host: OuterHostInterface, remote_dir: Path) -> None:
+    """Install the VPS-only desktop-gateway proxy.
+
+    The caller restarts the gateway after writing all wrapper inputs, so the new
+    extension and any updated secrets take effect together.
+    """
+    extensions_dir = remote_dir / _REMOTE_EXTENSIONS_DIR_NAME
+    destination = extensions_dir / REMOTE_GATEWAY_EXTENSION_FILENAME
+    candidate = destination.with_name(destination.name + _REMOTE_EXTENSION_CANDIDATE_SUFFIX)
+    content = bundled_gateway_extension_content(REMOTE_GATEWAY_EXTENSION_FILENAME).encode("utf-8")
+    host.write_file(candidate, content, mode=_REMOTE_FILE_MODE, is_atomic=True)
+
+    extensions_dir_q = shlex.quote(str(extensions_dir))
+    destination_q = shlex.quote(str(destination))
+    candidate_q = shlex.quote(str(candidate))
+    script = "\n".join(
+        (
+            "set -e",
+            f"mkdir -p {extensions_dir_q}",
+            f"chmod 700 {extensions_dir_q}",
+            f"if [ ! -f {destination_q} ] || ! cmp -s {candidate_q} {destination_q}; then",
+            f"  mv {candidate_q} {destination_q}",
+            f"  chmod {_REMOTE_FILE_MODE} {destination_q}",
+            "else",
+            f"  rm -f {candidate_q}",
+            "fi",
+        )
+    )
+    result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to install the latchkey desktop-gateway proxy extension on VPS {}: {}".format(
+                host.get_name(), result.stderr.strip() or result.stdout.strip()
+            )
+        )
+
+
+def _build_gateway_run_script(
+    outer_port: int,
+    key_file_path: Path,
+    password_file_path: Path,
+    desktop_permissions_override_file_path: Path,
+    desktop_gateway_url: str,
+) -> str:
     """Build the wrapper script supervisord runs to launch ``latchkey gateway``.
 
     supervisord invokes this as ``/bin/sh <script>``. It reads the encryption
-    key and the gateway listen password from their two 0600 tmpfs files into
-    ``LATCHKEY_ENCRYPTION_KEY`` / ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` and
+    key, gateway listen password, and desktop-target permissions override from
+    0600 tmpfs files into their respective environment variables and
     ``exec``s the gateway (so supervisord tracks the gateway PID directly, not a
     wrapping shell). Reading the secrets from files -- rather than baking them
     into the supervisord ``command=`` line -- keeps them out of the config file
@@ -836,6 +965,7 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
     """
     key_q = shlex.quote(str(key_file_path))
     password_q = shlex.quote(str(password_file_path))
+    desktop_permissions_override_q = shlex.quote(str(desktop_permissions_override_file_path))
     return "\n".join(
         (
             "#!/bin/sh",
@@ -847,19 +977,22 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
             # Refuse to start with missing secrets (tmpfs wiped by a reboot):
             # exit non-zero so supervisord records a failed start instead of
             # launching a keyless gateway.
-            f"if [ ! -s {key_q} ] || [ ! -s {password_q} ]; then",
+            f"if [ ! -s {key_q} ] || [ ! -s {password_q} ] || [ ! -s {desktop_permissions_override_q} ]; then",
             '  echo "latchkey gateway secrets are missing (tmpfs cleared by a reboot?); awaiting re-provision" >&2',
             "  exit 1",
             "fi",
-            # Read both secrets from their 0600 files into the environment; only
+            # Read the secrets from their 0600 files into the environment; only
             # the file paths (not the secrets) ever appear in this script.
             f'LATCHKEY_ENCRYPTION_KEY="$(cat {key_q})"',
             f'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(cat {password_q})"',
+            f'LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE="$(cat {desktop_permissions_override_q})"',
             "export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD",
+            "export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE",
             f"export LATCHKEY_GATEWAY_PORT={outer_port}",
             "export LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1",
             "export LATCHKEY_DISABLE_COUNTING=1",
             "export LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1",
+            f"export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_URL={shlex.quote(desktop_gateway_url)}",
             # Route latchkey through the bundled dispatch curl (installed by
             # _build_ensure_installed_script): requests carrying the
             # X-Imbue-Impersonate marker header get Chrome TLS impersonation
@@ -872,7 +1005,10 @@ def _build_gateway_run_script(outer_port: int, key_file_path: Path, password_fil
 
 
 def _ensure_latchkey_gateway_running(
-    host: OuterHostInterface, latchkey_directory: Path, gateway_password: str
+    host: OuterHostInterface,
+    latchkey_directory: Path,
+    gateway_password: str,
+    desktop_permissions_override: str,
 ) -> None:
     """Register (and start) the ``latchkey gateway`` as a supervisord program on the VPS.
 
@@ -880,8 +1016,8 @@ def _ensure_latchkey_gateway_running(
     VPS loopback on ``OUTER_PORT`` and applies it via ``reread``/``update``, so
     supervisord keeps the gateway running and restarts it if it crashes. The
     local latchkey encryption key (from ``<latchkey_directory>/encryption_key``)
-    and ``gateway_password`` (the desktop-derived shared password) are written
-    to two 0600 files in a tmpfs directory (:data:`_TMPFS_SECRETS_DIR`); a
+    plus ``gateway_password`` and ``desktop_permissions_override`` are written
+    to 0600 files in a tmpfs directory (:data:`_TMPFS_SECRETS_DIR`); a
     wrapper script (on the normal disk) reads them into the gateway's
     environment at launch, so the secrets never appear in the supervisord config
     or a process listing.
@@ -904,6 +1040,7 @@ def _ensure_latchkey_gateway_running(
     # Secrets go in tmpfs (RAM); the wrapper + log stay on the normal disk.
     key_file_path = _TMPFS_SECRETS_DIR / _GATEWAY_ENCRYPTION_KEY_FILENAME
     password_file_path = _TMPFS_SECRETS_DIR / _GATEWAY_PASSWORD_FILENAME
+    desktop_permissions_override_file_path = _TMPFS_SECRETS_DIR / _DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
     run_script_path = remote_dir / _GATEWAY_RUN_SCRIPT_FILENAME
     log_path = remote_dir / _REMOTE_GATEWAY_LOG_FILENAME
     conf_path = _SUPERVISOR_CONFD_DIR / _GATEWAY_CONF_FILENAME
@@ -917,10 +1054,23 @@ def _ensure_latchkey_gateway_running(
     # gateway's config.json so agents see the same set as on the desktop.
     _ensure_remote_hidden_builtin_services(host, remote_dir)
 
-    # Write the two secrets (0600) into tmpfs and the wrapper that reads them.
+    # Write the secrets (0600) into tmpfs and the wrapper that reads them.
     host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=_REMOTE_FILE_MODE)
     host.write_file(password_file_path, gateway_password.encode("utf-8"), mode=_REMOTE_FILE_MODE)
-    run_script = _build_gateway_run_script(OUTER_PORT, key_file_path, password_file_path)
+    host.write_file(
+        desktop_permissions_override_file_path,
+        desktop_permissions_override.encode("utf-8"),
+        mode=_REMOTE_FILE_MODE,
+    )
+    _ensure_remote_gateway_extension(host, remote_dir)
+    desktop_gateway_url = f"http://127.0.0.1:{DESKTOP_GATEWAY_VPS_PORT}"
+    run_script = _build_gateway_run_script(
+        OUTER_PORT,
+        key_file_path,
+        password_file_path,
+        desktop_permissions_override_file_path,
+        desktop_gateway_url,
+    )
     host.write_file(run_script_path, run_script.encode("utf-8"), mode="0700")
 
     # Write the supervisord program config, then reread/update/start to apply it.
@@ -930,7 +1080,7 @@ def _ensure_latchkey_gateway_running(
     )
     with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, OUTER_PORT):
         host.write_file(conf_path, conf.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
-        _reload_supervisor_programs(host, host_name, _GATEWAY_PROGRAM_NAME)
+        _reload_supervisor_programs(host, host_name, _GATEWAY_PROGRAM_NAME, restart=True)
 
 
 def _build_reverse_tunnel_ssh_command(
@@ -1002,9 +1152,9 @@ def _ensure_latchkey_gateway_reachable_from_container(
 ) -> None:
     """Register (and start) the VPS->container reverse SSH tunnel as a supervisord program.
 
-    Binds the container's ``127.0.0.1:INNER_PORT`` and forwards it to the VPS's
+    Binds the container's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` and forwards it to the VPS's
     ``127.0.0.1:OUTER_PORT`` (where :func:`_ensure_latchkey_gateway_running`
-    started the gateway), so the agent's ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT``
+    started the gateway), so the agent's fixed ``LATCHKEY_GATEWAY`` URL
     reaches the VPS-resident gateway with no change to how the agent env is
     injected. supervisord keeps the tunnel up and restarts it if ssh exits (e.g.
     after a keepalive timeout on a resumed VM). The tunnel carries no secret, so
@@ -1019,7 +1169,7 @@ def _ensure_latchkey_gateway_reachable_from_container(
         container_ssh_user=container_ssh_user,
         container_ssh_port=container_ssh_port,
         container_ssh_key_path=container_ssh_key_path,
-        inner_port=INNER_PORT,
+        inner_port=AGENT_SIDE_LATCHKEY_PORT,
         outer_port=OUTER_PORT,
     )
     log_path = _resolve_remote_latchkey_directory(host) / _REMOTE_TUNNEL_LOG_FILENAME
@@ -1031,7 +1181,7 @@ def _ensure_latchkey_gateway_reachable_from_container(
     with log_span(
         "Ensuring latchkey gateway is reachable from the container on VPS {} (container:{} -> gateway:{})",
         host_name,
-        INNER_PORT,
+        AGENT_SIDE_LATCHKEY_PORT,
         OUTER_PORT,
     ):
         host.write_file(conf_path, conf.encode("utf-8"), mode=_REMOTE_FILE_MODE, is_atomic=True)
@@ -1167,7 +1317,8 @@ def _build_legacy_migration_script(forward_spec: str) -> str:
             # double-quoted inline -- ``shlex.quote`` would single-quote and thus
             # stop ``$HOME`` from expanding.
             f'rm -f "$HOME/.latchkey/{_GATEWAY_ENCRYPTION_KEY_FILENAME}" '
-            f'"$HOME/.latchkey/{_GATEWAY_PASSWORD_FILENAME}"',
+            f'"$HOME/.latchkey/{_GATEWAY_PASSWORD_FILENAME}" '
+            f'"$HOME/.latchkey/{_DESKTOP_PERMISSIONS_OVERRIDE_FILENAME}"',
         )
     )
 
@@ -1185,7 +1336,7 @@ def _migrate_legacy_remote_gateway_state(host: OuterHostInterface) -> None:
     behind. Idempotent: a no-op on an already-migrated or freshly-created VPS.
     Raises :class:`RemoteGatewayError` if the cleanup command fails.
     """
-    forward_spec = f"127.0.0.1:{INNER_PORT}:127.0.0.1:{OUTER_PORT}"
+    forward_spec = f"127.0.0.1:{_LEGACY_INNER_PORT}:127.0.0.1:{OUTER_PORT}"
     script = _build_legacy_migration_script(forward_spec)
     host_name = host.get_name()
     with log_span("Migrating any legacy nohup latchkey gateway/tunnel to supervisord on VPS {}", host_name):
@@ -1229,6 +1380,7 @@ def provision_remote_gateway(
     container_ssh_port: int,
     latchkey_directory: Path,
     gateway_password: str,
+    desktop_permissions_override: str,
 ) -> None:
     """Stand up a VPS-resident latchkey gateway and tunnel it into the agent's container.
 
@@ -1237,10 +1389,11 @@ def provision_remote_gateway(
     supervisord program bound to the VPS loopback (with the local encryption key
     from ``latchkey_directory`` so it can decrypt synced credentials, and
     ``gateway_password`` -- the desktop-derived shared password -- so it accepts
-    the same agent traffic the local gateway does), mint an ad-hoc
+    the same agent traffic the local gateway does, plus a desktop-target
+    permissions JWT for the forwarding extension), mint an ad-hoc
     VPS->container keypair, and register the VPS->container reverse tunnel as a
     second supervisord program so the agent's
-    ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`` reaches it. supervisord
+    ``LATCHKEY_GATEWAY=http://127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` reaches it. supervisord
     keeps both processes running and restarts them on failure. A VPS provisioned
     by an older (nohup + PID-file) build is migrated first: its detached gateway
     and tunnel are killed so they free ``OUTER_PORT`` and the container forward
@@ -1267,7 +1420,12 @@ def provision_remote_gateway(
     # old build's processes still hold OUTER_PORT and the container's forward
     # bind, which would make the new supervisord programs fail to start.
     _migrate_legacy_remote_gateway_state(host)
-    _ensure_latchkey_gateway_running(host, latchkey_directory, gateway_password)
+    _ensure_latchkey_gateway_running(
+        host,
+        latchkey_directory,
+        gateway_password,
+        desktop_permissions_override,
+    )
     container_name = _resolve_container_name_for_host(host, host_id)
     container_ssh_key_path = _ensure_container_tunnel_keypair(
         host, container_name=container_name, container_ssh_user=container_ssh_user

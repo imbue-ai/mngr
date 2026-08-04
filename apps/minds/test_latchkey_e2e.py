@@ -16,22 +16,18 @@ credentials at all:
    minds' agent creator uses: ``mngr latchkey create-agent-env`` ->
    ``mngr create --host-env ...`` -> ``mngr latchkey link-permissions``.
 3. ``mngr latchkey forward`` (the supervisor minds spawns) discovers the
-   agent, reverse-tunnels the desktop gateway into the workspace, provisions
-   the VPS-resident secondary gateway, and starts the remote-state watcher.
+   agent, provisions the VPS-resident gateway on the workspace's one fixed
+   gateway URL, tunnels the desktop gateway onto the VPS for extension
+   forwarding, and starts the remote-state watcher.
 
 Asserted end-to-end, from *inside* the workspace via ``mngr exec``:
 
-a. The desktop ("local") latchkey gateway is reachable on
-   ``$LATCHKEY_GATEWAY`` (``127.0.0.1:1989``): ``GET /permissions/self`` with
-   the injected password + permissions-override JWT returns the agent's
-   baseline permissions.
-b. The secondary (VPS-resident) gateway is reachable on
-   ``$LATCHKEY_GATEWAY_SECONDARY`` (``127.0.0.1:1990``) and its listen
-   password is wired to the same desktop-derived value (a wrong password is
-   answered differently from the right one). ``/permissions/self`` is not
-   asserted here: it is served by the bundled ``permissions.mjs`` extension,
-   which is only materialized for the desktop gateway -- the VPS gateway runs
-   the bare upstream ``latchkey gateway``.
+a. ``GET /permissions/self`` succeeds on ``$LATCHKEY_GATEWAY`` with the
+   injected password + permissions-override JWT, through the VPS gateway's
+   desktop-forwarding extension.
+b. A native ``/gateway/...`` request is served by that same VPS gateway and
+   its listen password is wired to the desktop-derived value. Nothing listens
+   on the retired port 1990.
 c. Updating the workspace's local ``latchkey_permissions.json`` (granting the
    ``slack-api`` scope, with slack credentials pre-seeded in the local store)
    makes the remote-state watcher push both the permissions
@@ -79,10 +75,8 @@ from imbue.mngr.utils.testing import is_port_open
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
-from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_SECONDARY
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
-from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import forward_events_log_path
@@ -572,7 +566,7 @@ def _curl_gateway_command(port: int, headers: dict[str, str], request_path: str)
 
 
 def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: Path) -> None:
-    """Remote workspace reaches both latchkey gateways; local permission edits auto-sync to the VPS."""
+    """Remote workspace uses one VPS gateway; desktop routes and local state sync still work."""
     # -- Prerequisites (hard failures once opted in; see _require) ----------
     _require(shutil.which("docker") is not None, "docker CLI not found")
     docker_probe = subprocess.run(["docker", "version"], capture_output=True, text=True, timeout=60)
@@ -604,13 +598,22 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
         agent_address: str | None = None
         try:
             # -- Step 1: latchkey env for the new workspace (minds' create flow) --
-            agent_env_result = _run_mngr(env, repo, "latchkey", "create-agent-env", *latchkey_flags)
+            agent_env_result = _run_mngr(
+                env,
+                repo,
+                "latchkey",
+                "create-agent-env",
+                "--gateway-location",
+                "VPS",
+                *latchkey_flags,
+            )
             assert agent_env_result.returncode == 0, f"create-agent-env failed:\n{agent_env_result.stderr}"
             agent_env_payload = json.loads(agent_env_result.stdout.strip().splitlines()[-1])
             latchkey_env: dict[str, str] = agent_env_payload["env"]
             opaque_path = agent_env_payload["opaque_permissions_path"]
             assert latchkey_env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
-            assert latchkey_env[ENV_LATCHKEY_GATEWAY_SECONDARY] == f"http://127.0.0.1:{INNER_PORT}"
+            assert "LATCHKEY_GATEWAY_SECONDARY" not in latchkey_env
+            assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in latchkey_env
 
             # Seed slack credentials into the local store *before* any grant,
             # so step (c)'s permission change is what ships them to the VPS.
@@ -659,12 +662,9 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert link_result.returncode == 0, f"link-permissions failed:\n{link_result.stderr}"
 
             # The workspace really carries the latchkey wiring in its host env.
-            env_probe = _exec_in_workspace(
-                env, repo, agent_address, f"printenv {ENV_LATCHKEY_GATEWAY} {ENV_LATCHKEY_GATEWAY_SECONDARY}"
-            )
+            env_probe = _exec_in_workspace(env, repo, agent_address, f"printenv {ENV_LATCHKEY_GATEWAY}")
             assert env_probe.returncode == 0, f"printenv probe failed:\n{env_probe.stderr}"
-            assert f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}" in env_probe.stdout
-            assert f"http://127.0.0.1:{INNER_PORT}" in env_probe.stdout
+            assert env_probe.stdout.strip() == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
 
             # -- Step 4: run the forward supervisor (gateway + discovery + provisioning + sync) --
             forward_log_path = tmp_path / "latchkey-forward.log"
@@ -685,15 +685,11 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 )
 
             password = latchkey_env[ENV_LATCHKEY_GATEWAY_PASSWORD]
-            override_jwt = latchkey_env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE]
 
-            # -- (a) the desktop gateway is reachable from inside the workspace --
+            # -- (a) the VPS gateway forwards desktop-owned extension routes --
             desktop_self_command = _curl_gateway_command(
                 AGENT_SIDE_LATCHKEY_PORT,
-                {
-                    "X-Latchkey-Gateway-Password": password,
-                    "X-Latchkey-Gateway-Permissions-Override": override_jwt,
-                },
+                {"X-Latchkey-Gateway-Password": password},
                 "/permissions/self",
             )
             # Content-based success check ("mngr exec" does not reliably
@@ -712,20 +708,16 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             # baseline carries the ``latchkey-self`` scope rule (the grant that
             # allowed this very /permissions/self read).
             assert "latchkey-self" in desktop_self.stdout, (
-                f"desktop gateway /permissions/self never succeeded from the workspace:\n"
+                f"remote gateway /permissions/self forwarding never succeeded from the workspace:\n"
                 f"stdout:\n{desktop_self.stdout}\nstderr:\n{desktop_self.stderr}\n"
                 f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
 
-            # -- (b) the secondary (VPS-resident) gateway is reachable from inside the workspace --
-            # The VPS gateway runs the bare upstream latchkey (no bundled
-            # extensions), so probe the gateway root rather than an extension
-            # endpoint: with the correct password curl must receive an HTTP
-            # response through the reverse tunnel.
+            # -- (b) native third-party routing terminates on the same VPS gateway --
             vps_gateway_probe_command = (
                 f"curl -sS -m 10 -o /dev/null -w '{_HTTP_STATUS_MARKER}%{{http_code}}' "
                 f"-H {shlex.quote(f'X-Latchkey-Gateway-Password: {password}')} "
-                f"http://127.0.0.1:{INNER_PORT}/"
+                f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}/gateway/https://example.com/"
             )
             vps_gateway_probe = _poll_workspace_probe(
                 env,
@@ -737,7 +729,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             )
             good_password_status_match = _HTTP_STATUS_PATTERN.search(vps_gateway_probe.stdout)
             assert good_password_status_match is not None, (
-                f"secondary gateway never became reachable on 127.0.0.1:{INNER_PORT} inside the workspace:\n"
+                f"VPS gateway never became reachable on 127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT} inside the workspace:\n"
                 f"stdout:\n{vps_gateway_probe.stdout}\nstderr:\n{vps_gateway_probe.stderr}\n"
                 f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
@@ -746,7 +738,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             wrong_password_command = (
                 f"curl -sS -m 10 -o /dev/null -w '{_HTTP_STATUS_MARKER}%{{http_code}}' "
                 f"-H {shlex.quote('X-Latchkey-Gateway-Password: definitely-wrong-95173')} "
-                f"http://127.0.0.1:{INNER_PORT}/"
+                f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}/gateway/https://example.com/"
             )
             wrong_password_probe = _exec_in_workspace(env, repo, agent_address, wrong_password_command)
             wrong_password_status_match = _HTTP_STATUS_PATTERN.search(wrong_password_probe.stdout)
@@ -755,9 +747,16 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 f"stdout:\n{wrong_password_probe.stdout}\nstderr:\n{wrong_password_probe.stderr}"
             )
             assert wrong_password_status_match.group(1) != good_password_status_match.group(1), (
-                "secondary gateway answered identical status codes for right and wrong gateway passwords "
+                "VPS gateway answered identical status codes for right and wrong gateway passwords "
                 f"({good_password_status_match.group(1)}); it is not enforcing the shared password"
             )
+            retired_port_probe = _exec_in_workspace(
+                env,
+                repo,
+                agent_address,
+                "curl -fsS -m 2 http://127.0.0.1:1990/ >/dev/null",
+            )
+            assert retired_port_probe.returncode != 0, "the retired secondary gateway port 1990 is still listening"
 
             # -- (c) local permissions.json edits auto-sync files onto the VPS outer host --
             # Precondition: initial provisioning synced the deny-all baseline

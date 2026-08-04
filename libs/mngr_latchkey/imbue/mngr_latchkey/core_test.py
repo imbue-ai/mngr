@@ -3,21 +3,32 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import psutil
 import pytest
 from loguru import logger
+from pydantic import Field
 from pydantic import PrivateAttr
 from watchdog.events import FileModifiedEvent
 from watchdog.observers import Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
@@ -41,8 +52,10 @@ from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.core import merge_hidden_builtin_services
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
+from imbue.mngr_latchkey.discovery import _GatewayRoute
 from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.remote_gateway import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.store import admin_permissions_path
@@ -440,12 +453,15 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     extensions_dir = tmp_path / "extensions"
-    assert not extensions_dir.exists()
+    extensions_dir.mkdir()
+    stale_remote_proxy = extensions_dir / "desktop_gateway_proxy.mjs"
+    stale_remote_proxy.write_text("// must not load on desktop\n")
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
         port = manager.start_gateway(cg)
         assert _wait_for_listening("127.0.0.1", port)
         mjs_files = sorted(p.name for p in extensions_dir.iterdir() if p.suffix == ".mjs")
         assert mjs_files == ["minds_api_proxy.mjs", "permission_requests.mjs", "permissions.mjs"]
+        assert not stale_remote_proxy.exists()
         # The destination files must be non-empty -- ``importlib.resources``
         # silently produces empty reads if the wheel does not actually
         # ship the .mjs payloads.
@@ -1223,13 +1239,18 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx
     assert tunnel_manager._calls == []
 
 
+# The VPS endpoint the stub handlers below resolve every host to.
+_VPS_OUTER_SSH_INFO = RemoteSSHInfo(user="root", host="vps.example.test", port=22, key_path=Path("/tmp/vps-key"))
+
+
 class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
     """Handler stub that forces the VPS branch and records provisioning instead of running it."""
 
     _provisioned: list[tuple[AgentId, HostId]] = PrivateAttr(default_factory=list)
 
-    def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
-        return True
+    def _resolve_gateway_route(self, host_id: HostId, provider_name: str) -> _GatewayRoute | None:
+        del host_id, provider_name
+        return _GatewayRoute(outer_ssh_info=_VPS_OUTER_SSH_INFO)
 
     def _run_remote_gateway_provisioning(
         self,
@@ -1249,10 +1270,262 @@ class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
                 self._pending_remote_agents.discard(str(agent_id))
 
 
-def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tunnel(
+def test_discovery_does_not_cache_an_unresolvable_gateway_route(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """An unresolvable route must be retried, never remembered as "use the desktop gateway".
+
+    A provider the supervisor cannot resolve (e.g. registered in settings after
+    it started) previously pinned the workspace to the desktop gateway for the
+    supervisor's whole lifetime, so its VPS gateway was never provisioned.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    host_id = HostId()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        assert handler._resolve_gateway_route(host_id, "not-a-configured-provider") is None
+        assert handler._gateway_route_by_host_id == {}
+        # Still unresolved (and still not cached) on the next cycle.
+        assert handler._resolve_gateway_route(host_id, "not-a-configured-provider") is None
+        assert handler._gateway_route_by_host_id == {}
+
+
+class _StaleListingProvider(MutableModel):
+    """Provider stub whose host listing is stale until ``reset_caches`` is called.
+
+    Models the shape of ``imbue_cloud``'s ``_leased_hosts_cache``: a whole-listing
+    cache with no expiry, so a host leased after the listing was taken is
+    invisible (``HostNotFoundError``) until the cache is dropped.
+    """
+
+    outer_ssh_info: RemoteSSHInfo = Field(description="SSH endpoint reported once the listing is fresh")
+    _is_listing_fresh: bool = PrivateAttr(default=False)
+    _reset_count: int = PrivateAttr(default=0)
+
+    def reset_caches(self) -> None:
+        self._reset_count += 1
+        self._is_listing_fresh = True
+
+    @contextmanager
+    def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
+        if not self._is_listing_fresh:
+            raise HostNotFoundError(ProviderInstanceName("stale"), host_id)
+        yield cast(OuterHostInterface, _StubOuterHost(ssh_connection_info=self.outer_ssh_info))
+
+
+class _StubOuterHost(MutableModel):
+    """Minimal non-local outer host exposing only what route resolution reads."""
+
+    ssh_connection_info: RemoteSSHInfo = Field(description="Endpoint returned by get_ssh_connection_info")
+
+    @property
+    def is_local(self) -> bool:
+        return False
+
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path]:
+        info = self.ssh_connection_info
+        return info.user, info.host, info.port, info.key_path
+
+
+class _StaleListingHandler(LatchkeyDiscoveryHandler):
+    """Handler that resolves routes through a single stale-listing provider stub."""
+
+    provider: _StaleListingProvider = Field(description="The stub provider every lookup returns")
+
+    def _provider_for_route(self, provider_name: str) -> ProviderInstanceInterface:
+        del provider_name
+        return cast(ProviderInstanceInterface, self.provider)
+
+
+def test_discovery_refreshes_a_stale_provider_listing_before_giving_up(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """A VPS agent gets BOTH the desktop reverse tunnel and the VPS-resident gateway provisioning."""
+    """A host missing from the provider's cached listing must trigger a refresh, not a fallback.
+
+    The supervisor keeps one long-lived provider instance, and some providers
+    cache their entire host listing on it with no expiry. Every workspace created
+    after that listing was taken then looked non-existent, so it was served by
+    the desktop gateway and never got a VPS gateway at all -- until the app was
+    restarted.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    host_id = HostId()
+    outer_ssh_info = RemoteSSHInfo(user="root", host="vps.example.test", port=22, key_path=tmp_path / "vps-key")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _StaleListingHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            provider=_StaleListingProvider(outer_ssh_info=outer_ssh_info),
+        )
+
+        route = handler._resolve_gateway_route(host_id, "imbue_cloud")
+
+        assert route is not None
+        assert route.outer_ssh_info == outer_ssh_info
+        assert handler.provider._reset_count == 1
+        # The now-known VPS route is cached, so the refresh happens once.
+        assert handler._gateway_route_by_host_id == {str(host_id): route}
+
+
+def test_discovery_caches_the_desktop_route_for_a_provider_without_an_outer_host(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A provider with no outer host at all is a static answer, so it is cached."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    host_id = HostId()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        route = handler._resolve_gateway_route(host_id, "local")
+        assert route is not None
+        assert route.outer_ssh_info is None
+        assert handler._gateway_route_by_host_id == {str(host_id): route}
+
+
+def test_discovery_warns_once_per_host_and_rearms_after_a_resolution(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The unresolved-route warning is per host, and re-arms once the route resolves.
+
+    A workspace served by the desktop gateway without a permissions override is
+    denied everything, so this must be visible -- but not once per discovery
+    cycle forever.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    host_id = HostId()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        handler._warn_unresolved_gateway_route(host_id, "not-a-configured-provider")
+        handler._warn_unresolved_gateway_route(host_id, "not-a-configured-provider")
+        assert handler._unresolved_route_hosts == {str(host_id)}
+
+        # A successful resolution re-arms the warning for a later failure.
+        assert handler._resolve_gateway_route(host_id, "local") is not None
+        assert handler._unresolved_route_hosts == set()
+
+
+class _ReloadingHandler(LatchkeyDiscoveryHandler):
+    """Handler whose provider-config reload returns a fixed synthetic provider set."""
+
+    def _load_provider_instance_configs(self) -> dict[ProviderInstanceName, ProviderInstanceConfig] | None:
+        return {
+            ProviderInstanceName("vultr-added-later"): ProviderInstanceConfig(backend=ProviderBackendName("vultr"))
+        }
+
+
+def test_reload_provider_config_picks_up_a_new_provider_and_forgets_routes(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """SIGHUP must refresh the supervisor's own provider view, not just the observe child.
+
+    Otherwise a workspace on a provider the desktop client registered mid-session
+    is unresolvable until the whole app restarts.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    host_id = HostId()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ReloadingHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # A route resolved against the previous provider set.
+        assert handler._resolve_gateway_route(host_id, "local") is not None
+        original_host_dir = handler.mngr_ctx.config.default_host_dir
+
+        handler.reload_provider_config()
+
+        assert ProviderInstanceName("vultr-added-later") in handler.mngr_ctx.config.providers
+        # Stale route verdicts are dropped so the new provider set is consulted.
+        assert handler._gateway_route_by_host_id == {}
+        # Only the provider mapping is replaced; the rest of the config survives.
+        assert handler.mngr_ctx.config.default_host_dir == original_host_dir
+
+
+class _RetryingProvisionRecordingHandler(_ProvisionRecordingHandler):
+    """Handler whose first route lookup fails and whose second resolves remote."""
+
+    _resolve_calls: int = PrivateAttr(default=0)
+
+    def _resolve_gateway_route(self, host_id: HostId, provider_name: str) -> _GatewayRoute | None:
+        self._resolve_calls += 1
+        if self._resolve_calls == 1:
+            return None
+        return super()._resolve_gateway_route(host_id, provider_name)
+
+
+def test_discovery_route_resolution_failure_wires_nothing_then_retries(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """An unresolved route wires no gateway at all, and the next cycle still resolves.
+
+    Guessing the desktop gateway would half-work (only its unchecked
+    ``/latchkey/`` RPC succeeds without a permissions override), expose it to a
+    workspace not entitled to it, and squat the container port the VPS tunnel
+    needs.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    agent_ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _RetryingProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        host_side_port = manager.start_gateway(cg)
+
+        handler._run_remote_setup(agent_id, host_id, agent_ssh_info, "imbue_cloud", host_side_port)
+        assert tunnel_manager._calls == []
+
+        handler._run_remote_setup(agent_id, host_id, agent_ssh_info, "imbue_cloud", host_side_port)
+        poll_event = threading.Event()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not handler._provisioned:
+            poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+
+        assert handler._resolve_calls == 2
+        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        # The only tunnel ever opened is the desktop->VPS one, once the route resolved.
+        assert tunnel_manager._calls == [
+            (_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, str(agent_id))
+        ]
+        assert handler._provisioned == [(agent_id, host_id)]
+        manager.stop_gateway()
+
+
+def test_discovery_handler_routes_remote_workspace_only_through_vps_gateway(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A VPS agent gets the remote gateway plus a desktop-to-VPS extension tunnel."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
@@ -1276,22 +1549,26 @@ def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tu
         while time.monotonic() < deadline and not handler._provisioned:
             poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
 
-        # Both paths ran: the desktop gateway is reverse-tunneled onto the
-        # agent-side port AND the VPS-resident gateway provisioning was dispatched.
-        assert tunnel_manager._calls == [(ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
+        # No desktop->container tunnel is opened. The only desktop tunnel lands
+        # on the VPS loopback where the remote extension can reach it, and is
+        # tagged with the agent id so normal stop/destruction cleanup removes it.
+        assert tunnel_manager._calls == [
+            (
+                _VPS_OUTER_SSH_INFO,
+                host_side_port,
+                DESKTOP_GATEWAY_VPS_PORT,
+                str(agent_id),
+            )
+        ]
+        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
 
 
-def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails(
+def test_discovery_handler_dispatches_vps_provisioning_when_desktop_to_vps_tunnel_fails(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """A desktop-side reverse-tunnel failure must not prevent VPS-resident gateway provisioning.
-
-    The two paths are independent (the agent reaches the desktop gateway on
-    ``AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on ``INNER_PORT`` at once),
-    so a failing desktop tunnel still leaves the VPS provisioning dispatched.
-    """
+    """A desktop-to-VPS tunnel failure must not prevent third-party gateway provisioning."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()

@@ -3,12 +3,11 @@
 The lifecycle for a new agent has three latchkey-aware steps:
 
 1. *Before* ``mngr create``: allocate an opaque permissions handle,
-   materialize it with a deny-all baseline, mint a permissions-override
-   JWT pointing at it, and assemble the env vars the agent needs
-   (``LATCHKEY_GATEWAY``, ``LATCHKEY_GATEWAY_SECONDARY``,
-   ``LATCHKEY_GATEWAY_PASSWORD``,
-   ``LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE``,
-   ``LATCHKEY_DISABLE_COUNTING``). See :func:`prepare_agent_latchkey`.
+   materialize it with a deny-by-default baseline, and assemble the env vars
+   the agent needs. Desktop-gateway workspaces also receive a
+   permissions-override JWT pointing at the handle; VPS-gateway workspaces use
+   the remote gateway's synchronized default permissions file instead. See
+   :func:`prepare_agent_latchkey`.
 
 2. *After* ``mngr create`` returns the canonical host id: replace the
    opaque handle with a symlink to the canonical host-keyed
@@ -34,6 +33,7 @@ steps that need a working ``Latchkey``.
 
 import re
 from collections.abc import Mapping
+from enum import auto
 from pathlib import Path
 from typing import Final
 
@@ -41,6 +41,7 @@ from pydantic import Field
 from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import AgentId
@@ -52,7 +53,6 @@ from imbue.mngr_latchkey.baseline_permissions import SCOPE_MINDS_API_PROXY_PER_A
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
@@ -66,12 +66,6 @@ from imbue.mngr_latchkey.store import save_permissions
 # Env-var names baked into the upstream latchkey CLI's wire contract.
 # Kept as constants so callers building ``--env`` flags do not have to repeat them.
 ENV_LATCHKEY_GATEWAY: Final[str] = "LATCHKEY_GATEWAY"
-# URL of the per-VPS "secondary" gateway as seen from *inside* the agent's
-# workspace container: the reverse tunnel set up at discovery time binds the
-# VPS-resident gateway onto the container's ``127.0.0.1:INNER_PORT``. Only live
-# for genuinely-remote (VPS-backed) hosts, but the URL is the agent's view
-# either way.
-ENV_LATCHKEY_GATEWAY_SECONDARY: Final[str] = "LATCHKEY_GATEWAY_SECONDARY"
 ENV_LATCHKEY_GATEWAY_PASSWORD: Final[str] = "LATCHKEY_GATEWAY_PASSWORD"
 ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE: Final[str] = "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE"
 # Suppresses the per-workspace daily ping latchkey emits otherwise; we
@@ -86,6 +80,13 @@ ENV_LATCHKEY_DISABLE_COUNTING: Final[str] = "LATCHKEY_DISABLE_COUNTING"
 SECRET_LATCHKEY_ENV_VAR_NAMES: Final[frozenset[str]] = frozenset(
     {ENV_LATCHKEY_GATEWAY_PASSWORD, ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}
 )
+
+
+class LatchkeyGatewayLocation(UpperCaseStrEnum):
+    """Gateway location selected for a workspace before its host is created."""
+
+    DESKTOP = auto()
+    VPS = auto()
 
 
 # Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
@@ -297,11 +298,11 @@ class AgentLatchkeySetup(FrozenModel):
         description=(
             "Environment variables to inject into the agent. Contains "
             f"``{ENV_LATCHKEY_GATEWAY}`` and ``{ENV_LATCHKEY_DISABLE_COUNTING}`` "
-            "whenever a gateway URL is available (plus "
-            f"``{ENV_LATCHKEY_GATEWAY_SECONDARY}`` in tunneled mode), plus "
-            f"``{ENV_LATCHKEY_GATEWAY_PASSWORD}`` and "
-            f"``{ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}`` whenever a real "
-            "``Latchkey`` is supplied. Empty only in the on-host degraded "
+            "whenever a gateway URL is available, plus "
+            f"``{ENV_LATCHKEY_GATEWAY_PASSWORD}`` whenever a real ``Latchkey`` is supplied. "
+            f"Desktop-gateway workspaces also contain ``{ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}``; "
+            "VPS-gateway workspaces rely on the gateway's synchronized default permissions file. "
+            "Empty only in the on-host degraded "
             "mode (``latchkey=None`` with ``is_tunneled=False``) where no "
             "live gateway port is knowable."
         ),
@@ -323,6 +324,7 @@ def prepare_agent_latchkey(
     latchkey: Latchkey | None,
     *,
     is_tunneled: bool,
+    gateway_location: LatchkeyGatewayLocation = LatchkeyGatewayLocation.DESKTOP,
     concurrency_group: ConcurrencyGroup | None = None,
 ) -> AgentLatchkeySetup:
     """Pre-create env vars + opaque permissions handle for a new agent.
@@ -345,6 +347,12 @@ def prepare_agent_latchkey(
       the spawned gateway subprocess; it must be supplied whenever
       ``latchkey is not None``.
 
+    ``gateway_location`` controls per-request authorization. Desktop-gateway
+    workspaces receive a permissions-override JWT targeting their desktop-side
+    host permissions file. VPS-gateway workspaces omit it and use the remote
+    gateway's synchronized default ``permissions.json``; its forwarding
+    extension adds a separate desktop-target JWT only on the desktop hop.
+
     ``latchkey=None`` is a degraded mode for tests / no-password-gateway
     setups: we still inject the constant agent-side gateway URL when
     ``is_tunneled=True`` (the URL alone is meaningful) but skip the
@@ -365,6 +373,8 @@ def prepare_agent_latchkey(
             but no ``concurrency_group`` is supplied (we need one to
             own the spawned gateway subprocess).
     """
+    if not is_tunneled and gateway_location is LatchkeyGatewayLocation.VPS:
+        raise LatchkeyError("A VPS latchkey gateway requires a tunneled workspace")
     if is_tunneled:
         gateway_url = f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
     elif latchkey is None:
@@ -380,20 +390,14 @@ def prepare_agent_latchkey(
         gateway_url = f"http://{latchkey.listen_host}:{gateway_port}"
 
     env: dict[str, str] = {ENV_LATCHKEY_GATEWAY: gateway_url}
-    if is_tunneled:
-        # Tunneled agents (containers/VMs/VPS) also get the secondary VPS-gateway
-        # URL: when the host turns out to be a remote VPS, the discovery handler
-        # reverse-tunnels that gateway onto the container's ``127.0.0.1:INNER_PORT``.
-        # For tunneled hosts that aren't VPS-backed nothing listens there, but the
-        # URL is the agent's view either way and consumers treat it as optional.
-        env[ENV_LATCHKEY_GATEWAY_SECONDARY] = f"http://127.0.0.1:{INNER_PORT}"
     opaque_path: Path | None = None
 
     if latchkey is not None:
         env[ENV_LATCHKEY_GATEWAY_PASSWORD] = latchkey.derive_gateway_password()
         opaque_path = new_opaque_permissions_path(latchkey.plugin_data_dir)
         save_permissions(opaque_path, AGENT_BASELINE_PERMISSIONS)
-        env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] = latchkey.create_permissions_override_jwt(opaque_path)
+        if gateway_location is LatchkeyGatewayLocation.DESKTOP:
+            env[ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE] = latchkey.create_permissions_override_jwt(opaque_path)
 
     # Always set the disable-counting flag whenever we're injecting a
     # gateway URL, so each agent doesn't get counted as a separate user

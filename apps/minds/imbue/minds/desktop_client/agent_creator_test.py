@@ -44,6 +44,7 @@ from imbue.minds.desktop_client.agent_creator import checkout_existing_branch
 from imbue.minds.desktop_client.agent_creator import classify_create_attempt_error
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
@@ -77,6 +78,7 @@ from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr_forward.testing import make_in_memory_test_ca
 from imbue.mngr_forward.tls import build_server_ssl_context
 from imbue.mngr_forward.tls import generate_server_credentials
+from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
@@ -526,6 +528,25 @@ def test_provider_instance_name_for_launch_local_backends() -> None:
     assert provider_instance_name_for_launch(LaunchMode.DOCKER) == "docker"
     assert provider_instance_name_for_launch(LaunchMode.LIMA) == "lima"
     assert provider_instance_name_for_launch(LaunchMode.VULTR) == "vultr"
+
+
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.MODAL])
+def test_latchkey_gateway_location_for_launch_uses_desktop(launch_mode: LaunchMode) -> None:
+    assert latchkey_gateway_location_for_launch(launch_mode) is LatchkeyGatewayLocation.DESKTOP
+
+
+@pytest.mark.parametrize(
+    "launch_mode",
+    [
+        LaunchMode.VULTR,
+        LaunchMode.IMBUE_CLOUD,
+        LaunchMode.AWS,
+        LaunchMode.GCP,
+        LaunchMode.AZURE,
+    ],
+)
+def test_latchkey_gateway_location_for_launch_uses_vps(launch_mode: LaunchMode) -> None:
+    assert latchkey_gateway_location_for_launch(launch_mode) is LatchkeyGatewayLocation.VPS
 
 
 def test_provider_instance_name_for_launch_aws_uses_cloud_account() -> None:

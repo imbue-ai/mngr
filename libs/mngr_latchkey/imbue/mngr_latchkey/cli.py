@@ -51,6 +51,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
@@ -105,6 +106,8 @@ class _LatchkeyCommonCliOptions(CommonCliOptions):
 
 class _CreateAgentEnvCliOptions(_LatchkeyCommonCliOptions):
     """Backing options object for ``mngr latchkey create-agent-env``."""
+
+    gateway_location: LatchkeyGatewayLocation = LatchkeyGatewayLocation.DESKTOP
 
 
 class _AdminJwtCliOptions(_LatchkeyCommonCliOptions):
@@ -243,6 +246,13 @@ def _build_initialized_latchkey(
 
 
 @click.command(name="create-agent-env")
+@click.option(
+    "--gateway-location",
+    type=click.Choice([location.value for location in LatchkeyGatewayLocation], case_sensitive=False),
+    default=LatchkeyGatewayLocation.DESKTOP.value,
+    show_default=True,
+    help="Location of the workspace's active gateway (desktop or VPS).",
+)
 @add_common_options
 @click.pass_context
 def _create_agent_env_command(ctx: click.Context, **kwargs: Any) -> None:
@@ -258,7 +268,11 @@ def _create_agent_env_command(ctx: click.Context, **kwargs: Any) -> None:
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
     try:
-        setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
+        setup = prepare_agent_latchkey(
+            latchkey,
+            is_tunneled=True,
+            gateway_location=opts.gateway_location,
+        )
     except (LatchkeyError, LatchkeyStoreError) as e:
         raise click.ClickException(f"prepare_agent_latchkey failed: {e}") from e
 
@@ -294,7 +308,6 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 {
   "env": {
     "LATCHKEY_GATEWAY": "...",
-    "LATCHKEY_GATEWAY_SECONDARY": "...",
     "LATCHKEY_GATEWAY_PASSWORD": "...",
     "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "...",
     "LATCHKEY_DISABLE_COUNTING": "1"
@@ -303,6 +316,11 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 }
 ```
 
+The example above is the desktop-gateway shape. With
+``--gateway-location VPS``, the permissions-override entry is omitted and the
+VPS gateway authorizes native workspace requests with its synchronized default
+permissions file.
+
 Pipe the ``env`` values into ``mngr create --host-env KEY=VALUE``
 so every agent on the host inherits the same gateway wiring, then
 call ``mngr latchkey link-permissions`` with the
@@ -310,8 +328,8 @@ call ``mngr latchkey link-permissions`` with the
 ``mngr create`` returns it. The gateway URL is always the constant
 agent-side loopback URL (``http://127.0.0.1:1989``); there is no
 on-host (DEV) mode -- a running ``mngr latchkey forward`` is
-expected to bridge the agent's loopback port back to the shared
-gateway on the desktop.""",
+expected to bridge the agent's loopback port to the selected desktop or VPS
+gateway.""",
     examples=(
         (
             "Wire env vars into mngr create",
@@ -638,7 +656,7 @@ def _run_forward_supervisor(
     # slow subprocess teardown/respawn never runs in signal context.
     mngr_ctx.concurrency_group.start_new_thread(
         target=_run_sighup_bounce_watcher,
-        args=(bounce_event, shutdown_event, consumer),
+        args=(bounce_event, shutdown_event, consumer, discovery_handler.reload_provider_config),
         name="latchkey-forward-sighup-watcher",
         daemon=True,
         is_checked=False,
@@ -717,19 +735,28 @@ def _run_sighup_bounce_watcher(
     bounce_event: threading.Event,
     shutdown_event: threading.Event,
     consumer: DiscoveryStreamConsumer,
+    reload_provider_config: Callable[[], None],
 ) -> None:
-    """Loop until shutdown: on each SIGHUP, bounce the observe child off the signal thread.
+    """Loop until shutdown: on each SIGHUP, refresh providers off the signal thread.
+
+    A SIGHUP means "the provider set changed", so both halves of this process
+    have to pick that up: the ``mngr observe`` child (which re-reads settings
+    when respawned, so events for a newly-added provider start arriving) *and*
+    this supervisor's own config snapshot, which every gateway-route resolution
+    goes through. Refreshing only the child left a workspace on a
+    just-registered provider unresolvable, hence silently served by the desktop
+    gateway with no VPS gateway provisioned at all until the app restarted.
 
     The signal handler only flips ``bounce_event``; this watcher consumes it and
-    does the actual subprocess teardown/respawn, keeping that work out of
-    signal-handler context (which must stay minimal and re-entrant-safe). The
+    does the actual reload and subprocess teardown/respawn, keeping that work out
+    of signal-handler context (which must stay minimal and re-entrant-safe). The
     loop exits once ``shutdown_event`` is set (checked after each wake), so it
     does not outlive the forward command.
 
-    A single bounce failing never tears the watcher down: any error from
-    ``bounce_observe`` is logged and the loop continues, so a later SIGHUP can
-    still refresh providers. A watcher that died on one bad bounce would make
-    every subsequent provider toggle a silent no-op for this supervisor's life.
+    A single bounce failing never tears the watcher down: any error is logged and
+    the loop continues, so a later SIGHUP can still refresh providers. A watcher
+    that died on one bad bounce would make every subsequent provider toggle a
+    silent no-op for this supervisor's life.
     """
     while not shutdown_event.is_set():
         bounce_event.wait()
@@ -737,6 +764,9 @@ def _run_sighup_bounce_watcher(
         if shutdown_event.is_set():
             return
         try:
+            # Reload first: the respawned child's very next snapshot should land
+            # on a handler that can already resolve the new provider.
+            reload_provider_config()
             consumer.bounce_observe()
         except Exception as e:
             # This watcher is a long-lived daemon thread: it must outlive any
@@ -844,11 +874,11 @@ CommandHelpMetadata(
    supervises it: a background health check respawns it (reusing its
    original port) if the subprocess dies mid-session, so a crashed
    gateway does not silently take agent traffic down.
-3. Spawns ``mngr observe --discovery-only --quiet`` and, for every
-   agent discovered, opens a reverse SSH tunnel that bridges the
-   agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` to the host-side
-   gateway port. Agents discovered without SSH info are left to
-   reach the gateway via whatever direct route exists.
+3. Spawns ``mngr observe --discovery-only --quiet`` and exposes exactly
+   one gateway at each agent's fixed loopback URL: the desktop gateway
+   for local workspaces, or the VPS gateway for remote workspaces. The
+   latter forwards Minds-owned extension routes back to the desktop over
+   a separate VPS-loopback tunnel.
 4. On agent destruction, drops that agent's reverse tunnel.
 5. On SIGINT/SIGTERM, terminates the observe subprocess, all reverse
    tunnels, *and* the shared gateway. The coupled-lifetime semantics

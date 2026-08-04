@@ -35,8 +35,8 @@ packages = ["imbue"]
 exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
 # ``.mjs`` files under ``imbue/mngr_latchkey/extensions/`` are picked up
 # by hatchling's default file selection (the package dir is included
-# verbatim modulo ``exclude``). They are copied into the spawned latchkey
-# gateway's extension directory at runtime by ``Latchkey._spawn_gateway``.
+# verbatim modulo ``exclude``). The desktop extension set is materialized by
+# ``Latchkey._spawn_gateway``; remote provisioning ships only the VPS proxy.
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }
