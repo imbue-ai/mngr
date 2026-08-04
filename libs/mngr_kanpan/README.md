@@ -4,7 +4,9 @@ All-seeing agent tracker. The name combines Sino-Japanese 看 (*kan*, "to look",
 
 Launch with `mngr kanpan`. Requires the `gh` CLI to be installed and authenticated.
 
-The footer shows the command keys (`r: refresh  m: mute  d: mark delete  x: execute  q: quit`); press `?` for an overlay listing every binding (`space` peek, `enter` attach, marks, and your configured commands). `Esc` closes it.
+The footer shows the command keys (`/: search  r: refresh  m: mute  d: mark delete  x: execute  q: quit  ?: more keys`); press `?` for an overlay listing every binding (`space` peek, `enter` attach, marks, and your configured commands). `Esc` closes it.
+
+On a terminal too narrow for the whole legend, bindings are dropped whole rather than clipped mid-word, starting from the left. `?: more keys` is listed last and so survives longest, since it is how the dropped keys can still be found.
 
 ## Attach, peek, and reply
 
@@ -18,6 +20,30 @@ Interact with an agent without leaving the board:
 - **Selections**: a text reply cannot move a selection cursor, and selection menus (e.g. `/login`) are not part of the transcript, so they do not appear in the peek; attach (`Enter`) to make the choice in the real session.
 
 These are builtins; they do not need any configuration.
+
+## Search
+
+Press `/` to jump to a row on a crowded board. A prompt opens in the footer and the selection moves to the best match as you type -- the board itself is never reordered or hidden.
+
+The query is matched case-insensitively against every column you can see, so you can jump by agent name, PR number, CI status, repo, or the value of any custom column: `/kanpan` finds an agent by name, `/#2531` finds the agent whose PR that is. Matches are ranked by name prefix, then name substring, then any other cell, and ties keep board order. The prompt shows which match you are on (`2/6`), or `no match`, in which case the selection stays where it was.
+
+| Key | Effect |
+|---|---|
+| `↑` / `↓` | move to the previous/next match |
+| `Enter` | close the prompt, leaving the match selected |
+| `Esc` | close the prompt and return to the row you started from |
+| `Backspace` | erase a character; on an empty query it erases the `/` too and cancels, same as `Esc` |
+| click a row | close the prompt and select the row you clicked |
+
+Backspace retraces exactly what you typed: erasing the query rewinds the selection to where the search started and leaves the prompt open, and only the next backspace takes the `/` with it. `Ctrl-U` kills back to the start of the query, for a retype without leaving the prompt.
+
+`Enter` only selects: it closes the prompt and leaves the match highlighted, it does not attach. Acting on the row is a separate keystroke afterwards, so `/mngr` `Enter` `Enter` attaches (`space` peeks, `d` marks).
+
+While the prompt is open it owns the keyboard, so `q` and the command keys type into the query instead of acting on the board. The prompt opens in the footer's status slot, taking the place of the refresh stamp rather than adding a row, so the board never shifts under the cursor; the belt beside it swaps the board's key legend for the prompt's and shows the match count, since none of the board keys fire until you close it. The query input takes the same readline editing as the peek reply input (`Ctrl-A`/`Ctrl-E`, `Ctrl-W`, `Ctrl-U`, word movement).
+
+Searching only moves the selection -- it leaves no filter behind, and a board refresh while the prompt is open re-runs the query against the new rows, leaving you on the match you were on unless it is no longer there. If such a refresh leaves the query with nothing to match, the selection falls back to the row you started from, so the highlight always shows what `Enter` would commit to. If it takes that row away too, `Esc` comes back to no selection at all rather than keeping the match, which is what `Enter` means.
+
+`/` is a builtin bound like any other command, so a custom command on `/` overrides it and `enabled = false` disables it, through `[plugins.kanpan.commands]`.
 
 ## Filtering
 

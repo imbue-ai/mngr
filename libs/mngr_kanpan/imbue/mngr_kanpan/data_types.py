@@ -145,6 +145,7 @@ class ActionBuiltinRole(UpperCaseStrEnum):
     MUTE = auto()
     UNMARK = auto()
     EXECUTE = auto()
+    SEARCH = auto()
 
 
 class MarkableBuiltinRole(UpperCaseStrEnum):
@@ -160,7 +161,7 @@ class MarkableBuiltinRole(UpperCaseStrEnum):
 
 
 class ActionBuiltinCommand(FrozenModel):
-    """A non-markable kanpan builtin (refresh, mute, unmark, execute).
+    """A non-markable kanpan builtin (refresh, mute, unmark, execute, search).
 
     Constructed only internally in ``tui._BUILTIN_COMMANDS``. The
     ``markable`` field is not modelled here: by construction these are
