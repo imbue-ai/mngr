@@ -123,7 +123,7 @@ The CLI separates two channels, following the same conventions as mngr:
 The desktop app bundles platform-specific binaries so users need zero prerequisites:
 
 - **uv**: Downloads Python, creates venvs, installs packages. Downloaded from GitHub releases during `pnpm build`.
-- **git**: Required for agent creation (cloning repos). A pinned, SHA256-verified [dugite-native](https://github.com/desktop/dugite-native) payload -- the relocatable git distribution GitHub Desktop builds for embedding in Electron apps -- downloaded during `pnpm build` (and re-run by ToDesktop's `beforeInstall` hook on the build server) per `apps/minds/scripts/git-manifest.json`. It is self-contained: the `git` binary plus its `libexec/git-core/` helpers, `share/git-core/templates/`, a system `etc/gitconfig`, and (on Linux) an `ssl/cacert.pem` CA bundle. Because the payload binaries bake in an empty prefix, the backend child environment must -- and does -- set `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, and `GIT_CONFIG_SYSTEM` (plus `GIT_SSL_CAINFO` on Linux); a bare `PATH` prepend is not sufficient. See [specs/minds-managed-git/concise.md](../../../specs/minds-managed-git/concise.md).
+- **git**: Required for agent creation (cloning repos). A pinned, SHA256-verified [dugite-native](https://github.com/desktop/dugite-native) payload -- the relocatable git distribution GitHub Desktop builds for embedding in Electron apps -- downloaded during `pnpm build` per `apps/minds/scripts/git-manifest.json`. It is self-contained: the `git` binary plus its `libexec/git-core/` helpers, `share/git-core/templates/`, a system `etc/gitconfig`, and (on Linux) an `ssl/cacert.pem` CA bundle. Because the payload binaries bake in an empty prefix, the backend child environment must -- and does -- set `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, and `GIT_CONFIG_SYSTEM` (plus `GIT_SSL_CAINFO` on Linux); a bare `PATH` prepend is not sufficient. See [specs/minds-managed-git/concise.md](../../../specs/minds-managed-git/concise.md).
 - **lima**: Required for the Lima launch mode (running agents in Linux VMs). Downloaded from GitHub releases during `pnpm build`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still run the VM itself via host QEMU.
 - **restic**: Per-workspace backup repositories. Downloaded from GitHub releases.
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image. Downloaded from GitHub releases. macOS/Linux only.
@@ -136,7 +136,12 @@ There is deliberately no bundled `qemu-img`. The pre-baked image is published, d
 
 `scripts/build.js` (`pnpm build`, the first half of `pnpm dist`) is the only stage whose output reaches the app. It runs on whichever machine invokes `pnpm dist` -- in CI, the arm64 `minds-runner` -- and downloads for its own `process.arch`. ToDesktop then packages the uploaded `resources/` into `Contents/Resources` via `extraResources`, which is what `paths.getResourcesDir()` resolves to (`process.resourcesPath`) in a packaged app.
 
-The `todesktop:beforeInstall` hook (`scripts/download-binaries.js`) also downloads binaries, but its output never reaches the app. ToDesktop runs it against `app-wrapper/app/`, so the packager folds those files into `app.asar`, which nothing reads at runtime; a packaged app therefore carries a second, dead copy of `resources/`. The hook still gates the build: a download failure inside it aborts `pnpm dist`. Its only remaining purpose is that failure mode, and the `resources/` tree it writes is dead weight.
+`extraResources` is the only channel that reaches the shipped app, so `appFiles` excludes `resources/` wholesale (`'!resources/**'`) -- anything it matched would be packed into `app.asar` as a second copy nothing reads.
+
+Two things would put that copy back, so neither is wired:
+
+- **`todesktop:beforeInstall`.** ToDesktop runs a hook script against `app-wrapper/app/`, so anything it downloads is folded into `app.asar`. Its agent is x86_64, so the binaries it fetches are Intel ones inside an arm64 app -- unreachable *and* unrunnable. `scripts/build.js` is the only stage whose output ships.
+- **`mac.additionalBinariesToSign`.** The builder's signing preflight rejects a listed path that is missing from the app-files upload, so every entry pins its subtree into that upload. It buys nothing: ToDesktop deep-signs every Mach-O under `Contents/Resources` with `mac.entitlements` whether or not it is listed.
 
 ### Why the image is raw
 
@@ -152,7 +157,7 @@ Raw costs no extra disk. On the real 20 GiB image the sparse raw occupies **4.9 
 
 ToDesktop publishes `arm64`, `x64`, and `universal` mac artifacts, but only arm64 works, and only it is fetched and verified by `.github/workflows/minds-launch-to-msg.yml`. In the published x64 app, `Contents/MacOS/Minds` is x86_64 while the bundled `uv`, `restic`, and `limactl` are arm64, so it cannot launch a VM.
 
-The cause is structural. `build.js` stages binaries for the arch of the machine it runs on, and all three mac artifacts are packaged from that one upload. The `beforeInstall` hook is the only stage that runs per-agent, and it is useless for this: its output lands in `app.asar`, and its agent is x86_64 anyway, so honoring it would put Intel binaries in the arm64 app.
+The cause is structural. `build.js` stages binaries for the arch of the machine it runs on, and all three mac artifacts are packaged from that one upload. ToDesktop's own build agent is x86_64, so nothing on the build server can supply arm64 bytes either.
 
 ToDesktop exposes no arch selection -- its config schema has no `mac.target`/`mac.arch`, and the CLI has no `--arch` -- so the x64 and universal artifacts cannot be turned off from this repo. Supporting Intel would need `build.js` to stage both arches (it already downloads per-arch; nothing forces it to fetch only its own) and either a per-arch `extraResources` mapping or `lipo`-merged universal binaries, plus a pre-baked x86_64 Lima image, without which an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM anyway. `git` is already universal, since `xcrun --find git` returns Apple's fat binary.
 

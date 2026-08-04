@@ -228,21 +228,16 @@ def _load_todesktop_config() -> dict:
 
 
 def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
-    """Guard: the ToDesktop signing config must give bundled limactl the
-    virtualization entitlement.
+    """Guard: the ToDesktop entitlements plist must grant virtualization.
 
     limactl needs ``com.apple.security.virtualization`` to use Apple's
-    Virtualization.framework. ToDesktop deep-signs every nested binary with
-    the app's ``mac.entitlements`` plist; if that plist omits the
-    entitlement, the re-signed limactl cannot start Lima VMs (VZ exits
-    instantly with empty errors) and agent creation fails. limactl must
-    also be in ``mac.additionalBinariesToSign`` so ToDesktop signs it
-    explicitly with that plist.
+    Virtualization.framework. ToDesktop deep-signs every Mach-O under
+    ``Contents/Resources`` with the app's ``mac.entitlements`` plist; if that
+    plist omits the entitlement, the re-signed limactl cannot start Lima VMs
+    (VZ exits instantly with empty errors) and agent creation fails.
     """
     todesktop = _load_todesktop_config()
-    mac = todesktop.get("mac", {})
-
-    entitlements_rel = mac.get("entitlements")
+    entitlements_rel = todesktop.get("mac", {}).get("entitlements")
     assert entitlements_rel, "todesktop.js must set mac.entitlements"
     entitlements = plistlib.loads((APP_ROOT / entitlements_rel).read_bytes())
     assert entitlements.get("com.apple.security.virtualization") is True, (
@@ -250,27 +245,41 @@ def test_bundled_limactl_is_signed_with_virtualization_entitlement() -> None:
         "without it the bundled limactl cannot start Lima VMs."
     )
 
-    additional = mac.get("additionalBinariesToSign", [])
-    assert any("limactl" in path for path in additional), (
-        "todesktop.js mac.additionalBinariesToSign must include the bundled "
-        f"limactl so it is signed with mac.entitlements; got {additional}."
+
+def test_todesktop_config_declares_no_signing_list() -> None:
+    """Guard: ``mac.additionalBinariesToSign`` must stay absent.
+
+    ToDesktop deep-signs every Mach-O under ``Contents/Resources`` with
+    ``mac.entitlements`` whether or not it is listed.
+
+    The list is not merely redundant. Every path in it must exist in the
+    uploaded app-files tree or the builder's signing preflight fails, which
+    is what forced ``appFiles`` to enumerate its exclusions instead of
+    excluding ``resources/`` wholesale -- and that enumeration is what put a
+    duplicate copy of the listed subtrees into ``app.asar``.
+    """
+    todesktop = _load_todesktop_config()
+    additional = todesktop.get("mac", {}).get("additionalBinariesToSign")
+    assert not additional, (
+        "todesktop.js must not set mac.additionalBinariesToSign; ToDesktop signs "
+        "Contents/Resources regardless, and each entry forces its subtree back "
+        f"into the appFiles upload and thus into app.asar. Got {additional}."
     )
 
 
-def test_bundled_desync_is_in_signing_list() -> None:
-    """Guard: the bundled desync must be signed by ToDesktop.
+def test_todesktop_before_install_hook_is_not_wired() -> None:
+    """Guard: ``todesktop:beforeInstall`` must stay out of package.json.
 
-    It is a Mach-O binary that ``build.js`` stages into ``resources/`` and
-    ToDesktop packages into ``Contents/Resources``. Under the hardened runtime
-    every shipped Mach-O must be code-signed with the app's Developer ID or
-    notarization rejects the build -- and notarization only runs in the release
-    pipeline, so a missing entry surfaces there rather than in PR CI.
+    ToDesktop runs that hook against ``app-wrapper/app/``, so whatever it
+    downloads is folded into ``app.asar`` -- which nothing reads, since
+    ``paths.getResourcesDir()`` resolves ``process.resourcesPath``. Worse, the
+    hook runs on ToDesktop's x86_64 mac agent, so its copies are Intel
+    binaries inside an arm64 app -- unreachable and unrunnable both.
     """
-    todesktop = _load_todesktop_config()
-    additional = todesktop.get("mac", {}).get("additionalBinariesToSign", [])
-    assert "resources/desync/desync" in additional, (
-        "todesktop.js mac.additionalBinariesToSign must include the bundled desync "
-        f"so ToDesktop signs it under the hardened runtime; got {additional}."
+    scripts = json.loads((APP_ROOT / "package.json").read_text()).get("scripts", {})
+    assert "todesktop:beforeInstall" not in scripts, (
+        "package.json must not wire todesktop:beforeInstall -- its output lands in "
+        "app.asar, is never read, and is built for the wrong architecture."
     )
 
 
@@ -930,40 +939,26 @@ def test_assert_upload_fits_todesktop_limit_enforces_the_limit(tmp_path: Path) -
     assert under.returncode == 0, f"700MB of app files must pass an 800MB limit:\nstderr:\n{under.stderr}"
 
 
-def test_todesktop_config_balances_app_files_exclusions_and_sign_paths() -> None:
-    """Drift guard: the appFiles exclusions must keep both failure modes impossible.
+def test_todesktop_config_excludes_resources_from_app_files() -> None:
+    """Drift guard: resources/ must reach the app only through extraResources.
 
-    Two constraints pull in opposite directions and both broke a cloud build
-    in 2026-07: (1) the heavy resources subtrees must be EXCLUDED from the
-    app-files upload or the tree uploads twice (extraResources uploads it
-    whole regardless; 701MB against the 600MB limit); (2) every
-    ``mac.additionalBinariesToSign`` path must remain INCLUDED, because the
-    builder's signing preflight fails with "The following
-    additionalBinariesToSign are missing" when its path is excluded, and
-    nothing recreates lima cloud-side.
+    ``extraResources`` uploads the tree whole regardless of the appFiles
+    globs, and it is the only channel that fills ``Contents/Resources`` --
+    what ``paths.getResourcesDir()`` reads. Anything appFiles also matches is
+    packed into ``app.asar``, where nothing reads it -- and it is charged to
+    the upload twice, which is what breached ``uploadSizeLimit`` in 2026-07.
     """
     config = _load_todesktop_config()
     app_files = config.get("appFiles")
     assert app_files is not None and "**" in app_files, "todesktop.js appFiles must include '**' for the app code"
-    excluded_prefixes = []
-    for glob in app_files:
-        if glob.startswith("!"):
-            assert glob.endswith("/**"), f"unexpected appFiles exclusion shape: {glob}"
-            excluded_prefixes.append(glob[1:].removesuffix("**"))
-    for heavy_subtree in ("resources/git/", "resources/latchkey/"):
-        assert any(heavy_subtree.startswith(prefix) for prefix in excluded_prefixes), (
-            f"todesktop.js appFiles must exclude {heavy_subtree} -- it already uploads whole "
-            "via extraResources, and double-uploading it is what hit 701MB in 2026-07"
-        )
-    for sign_path in config["mac"]["additionalBinariesToSign"]:
-        covering = [prefix for prefix in excluded_prefixes if sign_path.startswith(prefix)]
-        assert not covering, (
-            f"todesktop.js appFiles exclusions {covering} cover the additionalBinariesToSign "
-            f"path {sign_path}; the builder's signing preflight requires that file in the "
-            "app-files upload and fails the build without it"
-        )
+    exclusions = [glob for glob in app_files if glob.startswith("!")]
+    assert "!resources/**" in exclusions, (
+        "todesktop.js appFiles must exclude resources/ wholesale; extraResources already "
+        f"delivers it, and anything left in appFiles ships a dead copy in app.asar. Got {exclusions}."
+    )
     extra_resource_sources = [entry["from"] for entry in config.get("extraResources", [])]
     assert "resources/" in extra_resource_sources, (
-        "todesktop.js must keep uploading resources/ via extraResources; the appFiles "
-        "exclusions assume that channel delivers the staged binaries to the builder"
+        "todesktop.js must keep uploading resources/ via extraResources; it is the only "
+        "channel that reaches Contents/Resources, so excluding it from appFiles without "
+        "this entry would ship an app with no bundled binaries at all"
     )

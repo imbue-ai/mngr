@@ -8,36 +8,25 @@ module.exports = {
   appProtocolScheme: 'minds',
   icon: './electron/assets/icon.png',
   appPath: '.',
-  // resources/ already travels whole via `extraResources` below (the only
-  // channel that can carry its nested latchkey node_modules -- the app-files
-  // glob always strips **/node_modules); excluding the heavy subtrees here
-  // keeps the tree from uploading a second time through the app-files glob.
-  // The exclusions are enumerated rather than a blanket '!resources/**'
-  // because `mac.additionalBinariesToSign` paths must exist in the uploaded
-  // app-files tree (the builder's signing preflight rejects missing entries,
-  // and nothing recreates lima cloud-side), so subtrees holding a signed
-  // binary (lima/bin, restic, desync) stay in. scripts/build.js estimates the
-  // resulting upload and fails the build when it approaches uploadSizeLimit.
-  appFiles: [
-    '**',
-    '!resources/git/**',
-    '!resources/latchkey/**',
-    '!resources/lima/libexec/**',
-    '!resources/lima/share/**',
-    '!resources/uv/**',
-    '!resources/wheels/**',
-    '!resources/pyproject/**',
-  ],
+  // `extraResources` is the only channel that reaches the shipped app: it
+  // fills Contents/Resources, which paths.getResourcesDir() reads. Anything
+  // matching `appFiles` is packed into app.asar instead, which nothing reads
+  // at runtime, so resources/ is excluded wholesale. The app-files glob also
+  // strips **/node_modules at any depth, so it could not carry resources/
+  // latchkey's nested ones even if it were the delivery channel.
+  // scripts/build.js estimates the upload and fails the build when it
+  // approaches uploadSizeLimit.
+  appFiles: ['**', '!resources/**'],
   uploadSizeLimit: 650,
   nodeVersion: pkg.engines.node,
   pnpmVersion: pkg.engines.pnpm,
   extraResources: [{ from: 'resources/', to: '.' }],
+  // No `mac.additionalBinariesToSign`: ToDesktop deep-signs every Mach-O
+  // under Contents/Resources with this plist regardless of that list, and
+  // each entry would have to stay in the appFiles upload -- the builder's
+  // signing preflight rejects a listed path that is missing -- putting a
+  // second copy of its subtree in app.asar.
   mac: {
     entitlements: 'entitlements.mac.plist',
-    additionalBinariesToSign: [
-      'resources/lima/bin/limactl',
-      'resources/restic/restic',
-      'resources/desync/desync',
-    ],
   },
 };

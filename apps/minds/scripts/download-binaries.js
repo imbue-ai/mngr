@@ -1,9 +1,8 @@
 /**
  * Bundle the platform-specific uv and git binaries into
- * `<resourcesDir>/{uv,git}/`. Used in two contexts:
- * - `pnpm build` locally (binaries for the current machine).
- * - ToDesktop's `beforeInstall` hook on the build server (re-downloads for
- *   the runner's platform, replacing developer-machine bytes).
+ * `<resourcesDir>/{uv,git}/`, for the platform of the machine that runs it.
+ * Called by `pnpm build` (scripts/build.js) and, as a CLI, by
+ * `pnpm start`'s prestart hook via scripts/ensure-binaries.js.
  *
  * uv:  SHA256-verified download from astral-sh/uv releases.
  * git:
@@ -816,30 +815,21 @@ async function downloadBinaries(resourcesDir) {
   console.log('[download-binaries] Done.');
 }
 
-/**
- * ToDesktop `beforeInstall` hook entry point. Receives { appDir, pkgJsonPath, ... }.
- * Re-downloads binaries for the build server's platform.
- */
-async function beforeInstall({ appDir }) {
-  const resourcesDir = path.join(appDir, 'resources');
-  fs.mkdirSync(resourcesDir, { recursive: true });
-  await downloadBinaries(resourcesDir);
-}
-
-beforeInstall.downloadGit = downloadGit;
-beforeInstall.downloadUv = downloadUv;
-beforeInstall.downloadRestic = downloadRestic;
-beforeInstall.downloadDesync = downloadDesync;
-beforeInstall.downloadLatchkeyCurl = downloadLatchkeyCurl;
-beforeInstall.DATALIB_CURL_VERSION = DATALIB_CURL_VERSION;
-beforeInstall.DATALIB_CURL_VERSION_MARKER = DATALIB_CURL_VERSION_MARKER;
-beforeInstall.download = download;
-beforeInstall.convertGitPayloadSymlinksToShims = convertGitPayloadSymlinksToShims;
-beforeInstall.measureTreeAsArchived = measureTreeAsArchived;
-beforeInstall.assertTreeFitsUploadBudget = assertTreeFitsUploadBudget;
-beforeInstall.estimateToDesktopUploadBytes = estimateToDesktopUploadBytes;
-beforeInstall.assertUploadFitsToDesktopLimit = assertUploadFitsToDesktopLimit;
-module.exports = beforeInstall;
+module.exports = {
+  downloadGit,
+  downloadUv,
+  downloadRestic,
+  downloadDesync,
+  downloadLatchkeyCurl,
+  DATALIB_CURL_VERSION,
+  DATALIB_CURL_VERSION_MARKER,
+  download,
+  convertGitPayloadSymlinksToShims,
+  measureTreeAsArchived,
+  assertTreeFitsUploadBudget,
+  estimateToDesktopUploadBytes,
+  assertUploadFitsToDesktopLimit,
+};
 
 if (require.main === module) {
   const resourcesDir = process.argv[2] || path.join(path.resolve(__dirname, '..'), 'resources');
