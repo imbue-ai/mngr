@@ -2,28 +2,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
+from imbue.mngr_kanpan.data_types import entries_shown_on_board
+from imbue.mngr_kanpan.data_types import group_entries_by_section
 from imbue.mngr_kanpan.data_types import section_label
-
-
-@pure
-def _group_entries_by_section(
-    snapshot: BoardSnapshot,
-    section_order: Sequence[BoardSection],
-) -> list[tuple[BoardSection, list[AgentBoardEntry]]]:
-    """Group entries by section in display order, mirroring the TUI.
-
-    Sections are returned in ``section_order``; empty sections are omitted, and
-    entries within a section keep their snapshot order. Entries whose section is
-    not in ``section_order`` are dropped -- the same omission the TUI applies to
-    a customized ``section_order`` -- so the JSON represents what the board shows.
-    """
-    by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
-    for entry in snapshot.entries:
-        by_section.setdefault(entry.section, []).append(entry)
-    return [(section, by_section[section]) for section in section_order if by_section.get(section)]
 
 
 @pure
@@ -46,7 +29,7 @@ def board_snapshot_to_json(
             "label": section_label(section),
             "entries": [entry.model_dump(mode="json") for entry in entries],
         }
-        for section, entries in _group_entries_by_section(snapshot, section_order)
+        for section, entries in group_entries_by_section(snapshot, section_order)
     ]
     return {
         "columns": [{"key": key, "header": header} for key, header in columns],
@@ -68,8 +51,4 @@ def board_snapshot_to_jsonl_entries(
     self-contained agent record (it carries its own ``section``); the column and
     section-order metadata that JSON carries has no place in a flat stream.
     """
-    return [
-        entry.model_dump(mode="json")
-        for _section, entries in _group_entries_by_section(snapshot, section_order)
-        for entry in entries
-    ]
+    return [entry.model_dump(mode="json") for entry in entries_shown_on_board(snapshot, section_order)]

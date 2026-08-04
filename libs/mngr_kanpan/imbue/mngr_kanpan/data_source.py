@@ -17,9 +17,10 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentName
+from imbue.mngr_kanpan.errors import KanpanError
 
 
-class KanpanDataSourceError(Exception):
+class KanpanDataSourceError(KanpanError):
     """Base exception for kanpan data source errors."""
 
     ...

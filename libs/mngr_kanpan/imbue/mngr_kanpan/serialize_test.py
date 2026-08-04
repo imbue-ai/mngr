@@ -12,6 +12,7 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.serialize import board_snapshot_to_json
 from imbue.mngr_kanpan.serialize import board_snapshot_to_jsonl_entries
+from imbue.mngr_kanpan.testing import make_board_entry
 from imbue.mngr_kanpan.testing import make_board_snapshot
 
 _NOW = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -26,22 +27,9 @@ _SECTION_ORDER: tuple[BoardSection, ...] = (
 )
 
 
-def _make_entry(
-    name: str,
-    section: BoardSection,
-    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
-) -> AgentBoardEntry:
-    return AgentBoardEntry(
-        name=AgentName(name),
-        state=state,
-        provider_name=ProviderInstanceName("local"),
-        section=section,
-    )
-
-
 def test_board_snapshot_to_json_top_level_shape() -> None:
     snapshot = make_board_snapshot(
-        entries=(_make_entry("a", BoardSection.STILL_COOKING),),
+        entries=(make_board_entry("a", section=BoardSection.STILL_COOKING),),
         errors=("boom",),
         fetch_time_seconds=2.5,
     )
@@ -59,8 +47,8 @@ def test_board_snapshot_to_json_groups_by_section_in_order() -> None:
     # Entries given out of section_order; output must follow section_order.
     snapshot = make_board_snapshot(
         entries=(
-            _make_entry("cooking", BoardSection.STILL_COOKING),
-            _make_entry("merged", BoardSection.PR_MERGED),
+            make_board_entry("cooking", section=BoardSection.STILL_COOKING),
+            make_board_entry("merged", section=BoardSection.PR_MERGED),
         )
     )
     result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
@@ -69,7 +57,7 @@ def test_board_snapshot_to_json_groups_by_section_in_order() -> None:
 
 
 def test_board_snapshot_to_json_omits_empty_sections() -> None:
-    snapshot = make_board_snapshot(entries=(_make_entry("only", BoardSection.PR_MERGED),))
+    snapshot = make_board_snapshot(entries=(make_board_entry("only", section=BoardSection.PR_MERGED),))
     result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
     assert [s["section"] for s in result["sections"]] == ["PR_MERGED"]
 
@@ -79,8 +67,8 @@ def test_board_snapshot_to_json_drops_sections_not_in_order() -> None:
     # the TUI omitting sections a user left out of section_order).
     snapshot = make_board_snapshot(
         entries=(
-            _make_entry("kept", BoardSection.MUTED),
-            _make_entry("dropped", BoardSection.PR_CLOSED),
+            make_board_entry("kept", section=BoardSection.MUTED),
+            make_board_entry("dropped", section=BoardSection.PR_CLOSED),
         )
     )
     result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
@@ -91,8 +79,8 @@ def test_board_snapshot_to_json_drops_sections_not_in_order() -> None:
 def test_board_snapshot_to_json_section_labels() -> None:
     snapshot = make_board_snapshot(
         entries=(
-            _make_entry("m", BoardSection.PR_MERGED),
-            _make_entry("mute", BoardSection.MUTED),
+            make_board_entry("m", section=BoardSection.PR_MERGED),
+            make_board_entry("mute", section=BoardSection.MUTED),
         )
     )
     result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
@@ -104,8 +92,8 @@ def test_board_snapshot_to_json_section_labels() -> None:
 def test_board_snapshot_to_json_preserves_order_within_section() -> None:
     snapshot = make_board_snapshot(
         entries=(
-            _make_entry("first", BoardSection.STILL_COOKING),
-            _make_entry("second", BoardSection.STILL_COOKING),
+            make_board_entry("first", section=BoardSection.STILL_COOKING),
+            make_board_entry("second", section=BoardSection.STILL_COOKING),
         )
     )
     result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
@@ -199,9 +187,9 @@ def test_board_snapshot_to_json_serializes_full_field_payload() -> None:
 def test_jsonl_entries_flat_and_ordered() -> None:
     snapshot = make_board_snapshot(
         entries=(
-            _make_entry("cooking", BoardSection.STILL_COOKING),
-            _make_entry("merged", BoardSection.PR_MERGED),
-            _make_entry("muted", BoardSection.MUTED),
+            make_board_entry("cooking", section=BoardSection.STILL_COOKING),
+            make_board_entry("merged", section=BoardSection.PR_MERGED),
+            make_board_entry("muted", section=BoardSection.MUTED),
         )
     )
     entries = board_snapshot_to_jsonl_entries(snapshot, _SECTION_ORDER)
@@ -212,8 +200,8 @@ def test_jsonl_entries_flat_and_ordered() -> None:
 def test_jsonl_entries_drops_sections_not_in_order() -> None:
     snapshot = make_board_snapshot(
         entries=(
-            _make_entry("kept", BoardSection.PR_MERGED),
-            _make_entry("dropped", BoardSection.PR_CLOSED),
+            make_board_entry("kept", section=BoardSection.PR_MERGED),
+            make_board_entry("dropped", section=BoardSection.PR_CLOSED),
         )
     )
     entries = board_snapshot_to_jsonl_entries(snapshot, _SECTION_ORDER)

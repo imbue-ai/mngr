@@ -24,6 +24,7 @@ from urwid.widget.attr_map import AttrMap
 from urwid.widget.filler import Filler
 from urwid.widget.frame import Frame
 from urwid.widget.listbox import ListBox
+from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 
 from imbue.mngr.config.data_types import MngrContext
@@ -50,11 +51,14 @@ from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.header_status import compile_header_status
 from imbue.mngr_kanpan.testing import make_additional_pr
+from imbue.mngr_kanpan.testing import make_board_entry
 from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
+from imbue.mngr_kanpan.tui import HEADER_TITLE
 from imbue.mngr_kanpan.tui import PEEK_BODY_HEIGHT
 from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMANDS
@@ -86,6 +90,7 @@ from imbue.mngr_kanpan.tui import _build_data_source_column_defs
 from imbue.mngr_kanpan.tui import _build_field_color_palette
 from imbue.mngr_kanpan.tui import _build_focus_map
 from imbue.mngr_kanpan.tui import _build_footer
+from imbue.mngr_kanpan.tui import _build_header
 from imbue.mngr_kanpan.tui import _build_legend_bindings
 from imbue.mngr_kanpan.tui import _build_mark_palette
 from imbue.mngr_kanpan.tui import _build_peek_panel
@@ -137,6 +142,7 @@ from imbue.mngr_kanpan.tui import _rank_matches
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _refresh_stamp
 from imbue.mngr_kanpan.tui import _render_footer
+from imbue.mngr_kanpan.tui import _render_header_status
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _search_counter_text
@@ -198,27 +204,6 @@ def _make_mock_loop() -> Any:
     return SimpleNamespace(set_alarm_in=tracker, _alarm_tracker=tracker, screen=_MockScreen())
 
 
-def _make_entry(
-    name: str = "test-agent",
-    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
-    branch: str | None = None,
-    is_muted: bool = False,
-    section: BoardSection = BoardSection.STILL_COOKING,
-    fields: dict[str, FieldValue] | None = None,
-    cells: dict[str, CellDisplay] | None = None,
-) -> AgentBoardEntry:
-    return AgentBoardEntry(
-        name=AgentName(name),
-        state=state,
-        provider_name=ProviderInstanceName("local"),
-        branch=branch,
-        is_muted=is_muted,
-        section=section,
-        fields=fields or {},
-        cells=cells or {},
-    )
-
-
 def _make_state(
     snapshot: BoardSnapshot | None = None,
     commands: dict[str, CustomCommand] | None = None,
@@ -235,6 +220,7 @@ def _make_state(
         footer_left_text=footer_left_text,
         footer_left_attr=footer_left_attr,
         footer_right=footer_right,
+        header_status_text=Text(""),
         commands=commands or {},
         column_defs=list(_BUILTIN_COLUMN_DEFS),
         marks={},
@@ -268,28 +254,28 @@ def _make_state(
 
 
 def test_get_state_attr_running() -> None:
-    entry = _make_entry(state=AgentLifecycleState.RUNNING)
+    entry = make_board_entry(state=AgentLifecycleState.RUNNING)
     assert _get_state_attr(entry) == "state_running"
 
 
 def test_get_state_attr_waiting() -> None:
-    entry = _make_entry(state=AgentLifecycleState.WAITING)
+    entry = make_board_entry(state=AgentLifecycleState.WAITING)
     assert _get_state_attr(entry) == "state_attention"
 
 
 def test_get_state_attr_done() -> None:
-    entry = _make_entry(state=AgentLifecycleState.DONE)
+    entry = make_board_entry(state=AgentLifecycleState.DONE)
     assert _get_state_attr(entry) == ""
 
 
 def test_get_name_cell_markup_no_mark() -> None:
-    entry = _make_entry()
+    entry = make_board_entry()
     markup = _get_name_cell_markup(entry)
     assert markup == "  test-agent"
 
 
 def test_get_name_cell_markup_with_mark() -> None:
-    entry = _make_entry()
+    entry = make_board_entry()
     markup = _get_name_cell_markup(entry, mark_key="d")
     assert isinstance(markup, list)
     assert ("mark_d", "d") in markup
@@ -331,7 +317,7 @@ def test_build_board_widgets_empty_entries() -> None:
 
 
 def test_build_board_widgets_one_entry() -> None:
-    entry = _make_entry(section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 1
@@ -365,8 +351,8 @@ def test_build_board_widgets_execute_and_fetch_errors_share_one_block() -> None:
 
 
 def test_build_board_widgets_groups_by_section() -> None:
-    e1 = _make_entry(name="a", section=BoardSection.STILL_COOKING)
-    e2 = _make_entry(name="b", section=BoardSection.PR_MERGED)
+    e1 = make_board_entry(name="a", section=BoardSection.STILL_COOKING)
+    e2 = make_board_entry(name="b", section=BoardSection.PR_MERGED)
     snapshot = make_board_snapshot(entries=(e1, e2))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 2
@@ -562,8 +548,107 @@ def test_render_footer_is_single_writer_no_flicker() -> None:
     assert second.startswith("  Running deploy on agent-a")
 
 
+# =============================================================================
+# Header
+# =============================================================================
+
+
+def _render_header_lines(header: Pile, cols: int) -> list[str]:
+    """Render `header`'s first row at `cols` columns, as one string per screen line."""
+    return [line.decode() for line in header.contents[0][0].render((cols,)).text]
+
+
+def _render_header_rows(title: str, status: str, cols: int) -> list[str]:
+    """Render a header built for `title` and `status`, as one string per screen line."""
+    header, status_text = _build_header(title)
+    status_text.set_text(status)
+    return _render_header_lines(header, cols)
+
+
+def _render_header_row(title: str, status: str, cols: int) -> str:
+    """Render the header's first row at `cols` columns and return it as one line."""
+    return "".join(_render_header_rows(title, status, cols))
+
+
+@pytest.mark.parametrize("status", ["", "3 running / 45  ", "137 running / 402  "])
+def test_build_header_centres_the_title_whatever_the_status(status: str) -> None:
+    cols = 100
+    line = _render_header_row(HEADER_TITLE, status, cols)
+    start = line.index(HEADER_TITLE)
+    # The title's width in screen columns, which its double-width 看 puts above its
+    # character count.
+    title_width = Text(HEADER_TITLE).pack()[0]
+    # The title's own centre lands on the screen's centre, to within the half column
+    # an unequal split has to give to one side.
+    assert abs((start + start + title_width) / 2 - cols / 2) <= 0.5
+
+
+def test_build_header_shows_the_status_at_the_right_edge() -> None:
+    line = _render_header_row(HEADER_TITLE, "3 running / 45  ", 100)
+    assert line.rstrip().endswith("3 running / 45")
+
+
+def test_build_header_hides_a_status_too_wide_to_fit_whole() -> None:
+    # A right-aligned clip would drop the leading characters, so a status that
+    # does not fit is dropped whole rather than shown as a fragment of itself.
+    status = "137 running · 12 failing CI · 40 in review  "
+    line = _render_header_row(HEADER_TITLE, status, 80)
+    assert line.strip() == HEADER_TITLE
+
+
+@pytest.mark.parametrize("cols", [19, 16, 15, 13, 12, 10])
+def test_build_header_keeps_the_title_on_a_narrow_terminal(cols: int) -> None:
+    # A width urwid reserves for the cells either side of the title is a width it
+    # takes from the title itself, and it drops a column it cannot fit: the title
+    # must wrap on a narrow terminal, not vanish.
+    rows = _render_header_rows(HEADER_TITLE, "3 running / 45  ", cols)
+    assert " ".join(rows).split() == HEADER_TITLE.split()
+
+
+def test_render_header_status_writes_the_counts() -> None:
+    state = _make_state(
+        snapshot=make_board_snapshot(
+            entries=(
+                make_board_entry(name="a", state=AgentLifecycleState.RUNNING),
+                make_board_entry(name="b", state=AgentLifecycleState.STOPPED),
+            )
+        )
+    )
+    state.header_status = compile_header_status('{state == "RUNNING"} running / {total}')
+    _render_header_status(state)
+    assert state.header_status_text.text.strip() == "1 running / 2"
+
+
+def test_render_header_status_keeps_a_gap_from_the_title() -> None:
+    # The status cell starts in the column right after the packed title, so at the
+    # widths where the status has just enough room to be shown at all, the padding
+    # the writer adds is the only thing holding the two apart.
+    shown_status = "1 agents"
+    header, status_text = _build_header(HEADER_TITLE)
+    state = _make_state(snapshot=make_board_snapshot(entries=(make_board_entry(name="a"),)))
+    state.header_status = compile_header_status("{total} agents")
+    state.header_status_text = status_text
+    _render_header_status(state)
+
+    widths_showing_the_status: list[int] = []
+    for cols in range(60, 120):
+        line = "".join(_render_header_lines(header, cols))
+        if shown_status not in line:
+            continue
+        widths_showing_the_status.append(cols)
+        assert line.split(shown_status)[0].endswith("  "), f"status abuts the title at {cols} columns: {line!r}"
+    assert widths_showing_the_status != []
+
+
+def test_render_header_status_unconfigured_stays_empty() -> None:
+    state = _make_state(snapshot=make_board_snapshot(entries=(make_board_entry(),)))
+    state.header_status_text = Text("unexpected")
+    _render_header_status(state)
+    assert state.header_status_text.text == ""
+
+
 def test_update_snapshot_mute() -> None:
-    entry = _make_entry(is_muted=False)
+    entry = make_board_entry(is_muted=False)
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
     _update_snapshot_mute(state, AgentName("test-agent"), True)
     assert state.snapshot is not None
@@ -571,7 +656,7 @@ def test_update_snapshot_mute() -> None:
 
 
 def test_prune_orphaned_marks() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
     state.marks = {AgentName("agent-a"): "d", AgentName("agent-b"): "d"}
     _prune_orphaned_marks(state)
@@ -642,30 +727,30 @@ def test_input_handler_unknown_key_consumed() -> None:
 
 
 def test_field_cell_text_present() -> None:
-    entry = _make_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
+    entry = make_board_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
     assert _field_cell_text(entry, "ci") == "failure"
 
 
 def test_field_cell_text_absent() -> None:
-    entry = _make_entry()
+    entry = make_board_entry()
     assert _field_cell_text(entry, "ci") == ""
 
 
 def test_field_cell_markup_with_color() -> None:
-    entry = _make_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
+    entry = make_board_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
     markup = _field_cell_markup(entry, "ci")
     assert isinstance(markup, tuple)
     assert markup[1] == "failure"
 
 
 def test_field_cell_markup_no_color() -> None:
-    entry = _make_entry(cells={"pr": CellDisplay(text="#42")})
+    entry = make_board_entry(cells={"pr": CellDisplay(text="#42")})
     markup = _field_cell_markup(entry, "pr")
     assert markup == "#42"
 
 
 def test_field_cell_markup_absent() -> None:
-    entry = _make_entry()
+    entry = make_board_entry()
     assert _field_cell_markup(entry, "pr") == ""
 
 
@@ -747,7 +832,7 @@ def test_build_field_color_palette_none_snapshot() -> None:
 
 
 def test_build_field_color_palette_with_colors() -> None:
-    entry = _make_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
+    entry = make_board_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
     snapshot = make_board_snapshot(entries=(entry,))
     entries, names = _build_field_color_palette(snapshot)
     assert len(entries) == 2
@@ -755,7 +840,7 @@ def test_build_field_color_palette_with_colors() -> None:
 
 
 def test_build_field_color_palette_no_colors() -> None:
-    entry = _make_entry(cells={"pr": CellDisplay(text="#42")})
+    entry = make_board_entry(cells={"pr": CellDisplay(text="#42")})
     snapshot = make_board_snapshot(entries=(entry,))
     entries, names = _build_field_color_palette(snapshot)
     assert entries == []
@@ -847,7 +932,7 @@ def _ci_widget_attr(row: Any) -> str | None:
 def test_build_agent_row_stale_field_uses_stale_attr() -> None:
     now = datetime(2027, 1, 1, 0, 0, 4, tzinfo=timezone.utc)
     ci = CiField(status=CiStatus.FAILURE, created=now - timedelta(seconds=3600))
-    entry = _make_entry(
+    entry = make_board_entry(
         section=BoardSection.STILL_COOKING,
         fields={FIELD_CI: ci},
         cells={FIELD_CI: ci.display()},
@@ -861,7 +946,7 @@ def test_build_agent_row_stale_field_uses_stale_attr() -> None:
 def test_build_agent_row_fresh_field_keeps_color_attr() -> None:
     now = datetime(2027, 1, 1, 0, 0, 5, tzinfo=timezone.utc)
     ci = CiField(status=CiStatus.FAILURE, created=now - timedelta(seconds=60))
-    entry = _make_entry(
+    entry = make_board_entry(
         section=BoardSection.STILL_COOKING,
         fields={FIELD_CI: ci},
         cells={FIELD_CI: ci.display()},
@@ -876,7 +961,7 @@ def test_build_agent_row_muted_section_overrides_stale() -> None:
     """A muted row stays uniformly muted even if its fields are stale."""
     now = datetime(2027, 1, 1, 0, 0, 6, tzinfo=timezone.utc)
     ci = CiField(status=CiStatus.FAILURE, created=now - timedelta(seconds=3600))
-    entry = _make_entry(
+    entry = make_board_entry(
         section=BoardSection.MUTED,
         fields={FIELD_CI: ci},
         cells={FIELD_CI: ci.display()},
@@ -893,7 +978,7 @@ def test_build_agent_row_muted_section_overrides_stale() -> None:
 
 
 def test_carry_forward_fields_merges() -> None:
-    old_entry = _make_entry(
+    old_entry = make_board_entry(
         name="a",
         fields={
             "pr": make_pr_field(created=datetime(2027, 1, 1, 0, 0, 7, tzinfo=timezone.utc)),
@@ -908,7 +993,7 @@ def test_carry_forward_fields_merges() -> None:
             ).display(),
         },
     )
-    new_entry = _make_entry(
+    new_entry = make_board_entry(
         name="a",
         fields={
             "commits_ahead": CommitsAheadField(
@@ -933,7 +1018,7 @@ def test_carry_forward_fields_merges() -> None:
 
 
 def test_carry_forward_fields_new_agent() -> None:
-    new_entry = _make_entry(name="new-agent")
+    new_entry = make_board_entry(name="new-agent")
     old_snapshot = make_board_snapshot(entries=())
     new_snapshot = make_board_snapshot(entries=(new_entry,))
     result = _carry_forward_fields(old_snapshot, new_snapshot)
@@ -947,13 +1032,13 @@ def test_carry_forward_fields_new_agent() -> None:
 
 
 def test_field_cell_text_fn_call() -> None:
-    entry = _make_entry(cells={"pr": CellDisplay(text="#1")})
+    entry = make_board_entry(cells={"pr": CellDisplay(text="#1")})
     fn = _FieldCellTextFn(field_key="pr")
     assert fn(entry) == "#1"
 
 
 def test_field_cell_markup_fn_call() -> None:
-    entry = _make_entry(cells={"pr": CellDisplay(text="#1")})
+    entry = make_board_entry(cells={"pr": CellDisplay(text="#1")})
     fn = _FieldCellMarkupFn(field_key="pr")
     assert fn(entry) == "#1"
 
@@ -967,7 +1052,7 @@ def test_field_cell_markup_ci_failure_uses_color_attr() -> None:
     """CI FAILURE cell has color='light red', so markup uses field_ci_light_red attr."""
     ci = CiField(status=CiStatus.FAILURE, created=datetime(2027, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
     cell = ci.display()
-    entry = _make_entry(
+    entry = make_board_entry(
         fields={FIELD_CI: ci},
         cells={FIELD_CI: cell},
     )
@@ -981,7 +1066,7 @@ def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
     """CI PENDING cell has color='yellow', so markup uses field_ci_yellow attr."""
     ci = CiField(status=CiStatus.PENDING, created=datetime(2027, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     cell = ci.display()
-    entry = _make_entry(
+    entry = make_board_entry(
         fields={FIELD_CI: ci},
         cells={FIELD_CI: cell},
     )
@@ -995,7 +1080,7 @@ def test_field_cell_markup_ci_success_uses_color_attr() -> None:
     """CI SUCCESS cell has color='light green', so markup uses field_ci_light_green attr."""
     ci = CiField(status=CiStatus.SUCCESS, created=datetime(2027, 1, 1, 0, 0, 15, tzinfo=timezone.utc))
     cell = ci.display()
-    entry = _make_entry(
+    entry = make_board_entry(
         fields={FIELD_CI: ci},
         cells={FIELD_CI: cell},
     )
@@ -1018,7 +1103,7 @@ def test_compute_board_column_widths_empty_entries() -> None:
 
 
 def test_compute_board_column_widths_with_entries() -> None:
-    entry = _make_entry(name="a-long-agent-name-here")
+    entry = make_board_entry(name="a-long-agent-name-here")
     widths = _compute_board_column_widths((entry,), _BUILTIN_COLUMN_DEFS)
     # "  a-long-agent-name-here" is longer than "  NAME"
     assert widths["name"] > len("  NAME")
@@ -1030,7 +1115,7 @@ def test_compute_board_column_widths_with_entries() -> None:
 
 
 def test_build_board_widgets_with_marks() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
     marks = {AgentName("agent-a"): "d"}
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks=marks)
@@ -1038,16 +1123,16 @@ def test_build_board_widgets_with_marks() -> None:
 
 
 def test_build_board_widgets_muted_entry() -> None:
-    entry = _make_entry(name="muted-agent", is_muted=True, section=BoardSection.MUTED)
+    entry = make_board_entry(name="muted-agent", is_muted=True, section=BoardSection.MUTED)
     snapshot = make_board_snapshot(entries=(entry,))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 1
 
 
 def test_build_board_widgets_multiple_sections() -> None:
-    e1 = _make_entry(name="a", section=BoardSection.STILL_COOKING)
-    e2 = _make_entry(name="b", section=BoardSection.PR_BEING_REVIEWED)
-    e3 = _make_entry(name="c", section=BoardSection.PRS_FAILED)
+    e1 = make_board_entry(name="a", section=BoardSection.STILL_COOKING)
+    e2 = make_board_entry(name="b", section=BoardSection.PR_BEING_REVIEWED)
+    e3 = make_board_entry(name="c", section=BoardSection.PRS_FAILED)
     snapshot = make_board_snapshot(entries=(e1, e2, e3))
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
     assert len(idx_map) == 3
@@ -1066,7 +1151,7 @@ def test_update_row_mark_no_walker() -> None:
 
 def test_update_row_mark_no_entry_at_index() -> None:
     state = _make_state()
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
     state.snapshot = snapshot
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
@@ -1096,7 +1181,7 @@ def _make_state_with_walker(entries: tuple[AgentBoardEntry, ...]) -> _KanpanStat
 
 
 def test_toggle_mark_adds_mark() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     # Find the index of the agent entry
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
@@ -1107,7 +1192,7 @@ def test_toggle_mark_adds_mark() -> None:
 
 
 def test_toggle_mark_removes_existing_mark() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     state.marks[AgentName("agent-a")] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
@@ -1128,7 +1213,7 @@ def test_toggle_mark_no_walker() -> None:
 
 
 def test_unmark_focused_removes_mark() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     state.marks[AgentName("agent-a")] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
@@ -1138,7 +1223,7 @@ def test_unmark_focused_removes_mark() -> None:
 
 
 def test_unmark_focused_no_mark_is_noop() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
@@ -1151,7 +1236,7 @@ def test_unmark_focused_no_mark_is_noop() -> None:
 
 
 def test_unmark_all_clears_marks() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     state.marks[AgentName("agent-a")] = "d"
     _unmark_all(state)
@@ -1223,7 +1308,7 @@ def test_prune_orphaned_marks_with_orphans() -> None:
 
 
 def test_dispatch_command_markable_key_toggles_mark() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     commands: dict[str, KanpanCommand] = {"d": CustomCommand(name="delete", markable="light red")}
     state = _make_state_with_walker((entry,))
     state.commands = commands
@@ -1235,7 +1320,7 @@ def test_dispatch_command_markable_key_toggles_mark() -> None:
 
 
 def test_dispatch_command_unmark_key_removes_mark() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     state.marks[AgentName("agent-a")] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
@@ -1288,7 +1373,7 @@ def test_dispatch_command_execute_user_override_of_delete_runs_shell(tmp_path: P
 
 
 def test_refresh_display_updates_walker() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
     state = _make_state(snapshot=snapshot)
     _refresh_display(state)
@@ -1297,7 +1382,7 @@ def test_refresh_display_updates_walker() -> None:
 
 
 def test_refresh_display_restores_focus() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
     state = _make_state(snapshot=snapshot)
     state.focused_agent_name = AgentName("agent-a")
@@ -1311,6 +1396,20 @@ def test_refresh_display_none_snapshot() -> None:
     state.snapshot = None
     _refresh_display(state)
     assert state.list_walker is not None
+
+
+def test_refresh_display_writes_the_header_status() -> None:
+    """Every path that changes the board goes through _refresh_display, which owns the header."""
+    snapshot = make_board_snapshot(
+        entries=(
+            make_board_entry(name="a", state=AgentLifecycleState.RUNNING),
+            make_board_entry(name="b", state=AgentLifecycleState.STOPPED),
+        )
+    )
+    state = _make_state(snapshot=snapshot)
+    state.header_status = compile_header_status('{state == "RUNNING"} running / {total}')
+    _refresh_display(state)
+    assert state.header_status_text.text.strip() == "1 running / 2"
 
 
 # =============================================================================
@@ -1416,7 +1515,7 @@ def test_assemble_column_defs_empty_order_falls_back_to_builtins() -> None:
 
 
 def test_input_handler_U_key_clears_marks() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     state.marks = {AgentName("agent-a"): "d"}
     handler = _KanpanInputHandler(state=state)
@@ -1426,7 +1525,7 @@ def test_input_handler_U_key_clears_marks() -> None:
 
 
 def test_input_handler_command_key_dispatches() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
@@ -1437,8 +1536,8 @@ def test_input_handler_command_key_dispatches() -> None:
 
 
 def test_input_handler_up_key_not_first_passes_through() -> None:
-    entry1 = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    entry2 = _make_entry(name="agent-b", section=BoardSection.STILL_COOKING)
+    entry1 = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry2 = make_board_entry(name="agent-b", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry1, entry2))
     b_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-b"))
     state.list_walker.set_focus(b_idx)
@@ -1448,7 +1547,7 @@ def test_input_handler_up_key_not_first_passes_through() -> None:
 
 
 def test_input_handler_up_key_on_first_clears_focus() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     a_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(a_idx)
@@ -1481,7 +1580,7 @@ def test_is_focus_on_first_selectable_no_walker() -> None:
 
 
 def test_is_focus_on_first_selectable_at_first() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     a_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(a_idx)
@@ -1489,8 +1588,8 @@ def test_is_focus_on_first_selectable_at_first() -> None:
 
 
 def test_is_focus_on_first_selectable_at_non_first() -> None:
-    entry1 = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
-    entry2 = _make_entry(name="agent-b", section=BoardSection.STILL_COOKING)
+    entry1 = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry2 = make_board_entry(name="agent-b", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry1, entry2))
     b_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-b"))
     state.list_walker.set_focus(b_idx)
@@ -1508,7 +1607,7 @@ def test_get_focused_entry_no_walker() -> None:
 
 
 def test_get_focused_entry_with_focus() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     a_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(a_idx)
@@ -1528,7 +1627,7 @@ def test_get_focused_entry_no_focus() -> None:
 
 
 def test_update_row_mark_muted_entry() -> None:
-    entry = _make_entry(name="muted-agent", is_muted=True, section=BoardSection.MUTED)
+    entry = make_board_entry(name="muted-agent", is_muted=True, section=BoardSection.MUTED)
     snapshot = make_board_snapshot(entries=(entry,))
     state = _make_state(snapshot=snapshot)
     walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS)
@@ -1544,7 +1643,7 @@ def test_update_row_mark_muted_entry() -> None:
 
 
 def test_toggle_mark_push_no_work_dir_shows_message() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     commands = {
         _BUILTIN_COMMAND_KEY_PUSH: CustomCommand(name="mark push", markable="yellow"),
     }
@@ -1745,7 +1844,7 @@ def test_submit_batch_item_push_with_work_dir(tmp_path: Path) -> None:
 
 
 def test_submit_batch_item_push_no_work_dir() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     item = _BatchWorkItem(
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
@@ -1788,7 +1887,7 @@ def test_submit_batch_item_no_command_returns_none() -> None:
 
 
 def test_run_shell_command_submits_future() -> None:
-    entry = _make_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     a_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(a_idx)
@@ -1842,8 +1941,8 @@ def _extract_section_headings(walker: Any) -> list[str]:
 
 def test_build_board_widgets_default_section_order() -> None:
     entries = (
-        _make_entry(name="cooking"),
-        _make_entry(name="merged", section=BoardSection.PR_MERGED),
+        make_board_entry(name="cooking"),
+        make_board_entry(name="merged", section=BoardSection.PR_MERGED),
     )
     walker, _ = _build_board_widgets(make_board_snapshot(entries=entries), _BUILTIN_COLUMN_DEFS)
     headings = _extract_section_headings(walker)
@@ -1854,8 +1953,8 @@ def test_build_board_widgets_default_section_order() -> None:
 
 def test_build_board_widgets_custom_section_order_reverses() -> None:
     entries = (
-        _make_entry(name="cooking"),
-        _make_entry(name="merged", section=BoardSection.PR_MERGED),
+        make_board_entry(name="cooking"),
+        make_board_entry(name="merged", section=BoardSection.PR_MERGED),
     )
     reversed_order = (BoardSection.STILL_COOKING, BoardSection.PR_MERGED)
     walker, _ = _build_board_widgets(
@@ -1871,8 +1970,8 @@ def test_build_board_widgets_custom_section_order_reverses() -> None:
 
 def test_build_board_widgets_section_order_omits_unlisted() -> None:
     entries = (
-        _make_entry(name="cooking"),
-        _make_entry(name="merged", section=BoardSection.PR_MERGED),
+        make_board_entry(name="cooking"),
+        make_board_entry(name="merged", section=BoardSection.PR_MERGED),
     )
     only_merged = (BoardSection.PR_MERGED,)
     walker, index_to_entry = _build_board_widgets(
@@ -1980,7 +2079,7 @@ def test_peek_reply_executor_serializes_in_order() -> None:
 
 
 def test_close_peek_restores_footer_and_clears_state() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     original_footer = Text("keybinding-bar")
     state.frame.footer = original_footer
@@ -2005,7 +2104,7 @@ def test_close_peek_when_not_open_is_noop() -> None:
 
 
 def test_find_entry_by_name_found_and_missing() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     assert _find_entry_by_name(state, AgentName("agent-a")) is not None
     assert _find_entry_by_name(state, AgentName("nope")) is None
@@ -2013,7 +2112,7 @@ def test_find_entry_by_name_found_and_missing() -> None:
 
 
 def test_focus_row_by_name_moves_walker_focus() -> None:
-    entries = (_make_entry(name="agent-a"), _make_entry(name="agent-b"))
+    entries = (make_board_entry(name="agent-a"), make_board_entry(name="agent-b"))
     state = _make_state_with_walker(entries)
     _focus_row_by_name(state, AgentName("agent-b"))
     _, focus_idx = state.list_walker.get_focus()
@@ -2128,7 +2227,7 @@ def test_question_mark_opens_help_overlay_and_any_close_key_restores_board() -> 
 
 
 def test_update_peek_header_names_agent() -> None:
-    entry = _make_entry(name="agent-a", state=AgentLifecycleState.WAITING)
+    entry = make_board_entry(name="agent-a", state=AgentLifecycleState.WAITING)
     state = _make_state_with_walker((entry,))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
@@ -2137,7 +2236,7 @@ def test_update_peek_header_names_agent() -> None:
 
 
 def test_update_peek_header_missing_agent_falls_back() -> None:
-    state = _make_state_with_walker((_make_entry(name="agent-a"),))
+    state = _make_state_with_walker((make_board_entry(name="agent-a"),))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("gone")
     _update_peek_header(state)
@@ -2145,7 +2244,7 @@ def test_update_peek_header_missing_agent_falls_back() -> None:
 
 
 def test_refresh_display_updates_open_peek_header() -> None:
-    entry = _make_entry(name="agent-a", state=AgentLifecycleState.WAITING)
+    entry = make_board_entry(name="agent-a", state=AgentLifecycleState.WAITING)
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
@@ -2193,7 +2292,7 @@ def test_on_peek_capture_poll_reschedules_while_running() -> None:
 
 
 def test_handle_peek_key_esc_closes_panel() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     original_footer = Text("bar")
     state.frame.footer = original_footer
@@ -2223,7 +2322,7 @@ def test_handle_peek_key_unknown_passes_through() -> None:
 
 
 def test_toggle_peek_opens_panel_for_focused_agent() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     original_footer = Text("keybinding-bar")
     state.frame.footer = original_footer
@@ -2240,7 +2339,7 @@ def test_toggle_peek_opens_panel_for_focused_agent() -> None:
 
 
 def test_toggle_peek_closes_when_already_open() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     original_footer = Text("bar")
     state.frame.footer = original_footer
@@ -2252,7 +2351,7 @@ def test_toggle_peek_closes_when_already_open() -> None:
 
 
 def test_submit_peek_reply_empty_input_is_noop() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     _build_peek_panel(state)
     state.frame.footer = Text("panel")
@@ -2381,7 +2480,7 @@ def test_make_readline_edit_leaves_transpose_unbound() -> None:
 
 
 def test_handle_peek_key_left_falls_through_to_reply_edit() -> None:
-    entry = _make_entry(name="agent-a")
+    entry = make_board_entry(name="agent-a")
     state = _make_state_with_walker((entry,))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
@@ -2436,7 +2535,7 @@ def test_build_agent_row_links_each_open_pr_number_to_its_own_pr() -> None:
     in its own OSC 8 sequence, and the separator between them is outside both links.
     """
     prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
-    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    entry = make_board_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
     column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
     widths = _compute_board_column_widths((entry,), column_defs)
 
@@ -2453,8 +2552,8 @@ def test_build_agent_row_multi_link_column_width_ignores_the_escape_bytes() -> N
     sized -- and every later column aligned -- by the visible text alone.
     """
     prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
-    linked_entry = _make_entry(name="agent-a", fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
-    plain_entry = _make_entry(name="agent-b")
+    linked_entry = make_board_entry(name="agent-a", fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    plain_entry = make_board_entry(name="agent-b")
     column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
     widths = _compute_board_column_widths((linked_entry, plain_entry), column_defs)
     assert widths[FIELD_PR] == len("#2482, #2392")
@@ -2480,7 +2579,7 @@ def test_build_agent_row_multi_link_cell_in_the_flexible_last_column() -> None:
     remaining space; the link must still stop at the visible text.
     """
     prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
-    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    entry = make_board_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
     column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def(is_flexible=True)]
     widths = _compute_board_column_widths((entry,), column_defs)
 
@@ -2496,7 +2595,7 @@ def test_build_agent_row_colors_each_run_by_its_own_state() -> None:
     color, and the runs around it keep theirs.
     """
     prs = _make_multi_pr_field(100, (101, PrState.MERGED), (102, PrState.CLOSED))
-    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    entry = make_board_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
     column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
     widths = _compute_board_column_widths((entry,), column_defs)
 
@@ -2518,7 +2617,7 @@ def test_build_agent_row_colors_each_run_by_its_own_state() -> None:
 def test_build_field_color_palette_registers_the_colors_runs_ask_for() -> None:
     """A run's color only renders if the palette carries it, focus variant included."""
     prs = _make_multi_pr_field(100, (101, PrState.MERGED))
-    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    entry = make_board_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
 
     palette_entries, attr_names = _build_field_color_palette(make_board_snapshot(entries=(entry,)))
 
@@ -2532,7 +2631,7 @@ def test_build_agent_row_stale_multi_link_cell_greys_every_run() -> None:
     its own color, must not leave some of them at full brightness.
     """
     prs = _make_multi_pr_field(2482, (2392, PrState.MERGED))
-    entry = _make_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    entry = make_board_entry(fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
     column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
     widths = _compute_board_column_widths((entry,), column_defs)
 
@@ -2554,7 +2653,7 @@ def test_build_agent_row_muted_multi_link_cell_greys_every_run() -> None:
     so the row stays one continuous band of grey.
     """
     prs = _make_multi_pr_field(2482, (2392, PrState.MERGED))
-    entry = _make_entry(section=BoardSection.MUTED, fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    entry = make_board_entry(section=BoardSection.MUTED, fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
     column_defs = [*_BUILTIN_COLUMN_DEFS, _make_prs_def()]
     widths = _compute_board_column_widths((entry,), column_defs)
 
@@ -2570,7 +2669,7 @@ def test_build_agent_row_single_url_cell_still_links_the_whole_cell() -> None:
     hyperlinking its whole text.
     """
     pr = make_pr_field(number=7, created=_HYPERLINK_CREATED)
-    entry = _make_entry(fields={FIELD_PR: pr}, cells={FIELD_PR: pr.display()})
+    entry = make_board_entry(fields={FIELD_PR: pr}, cells={FIELD_PR: pr.display()})
     column_defs = [
         *_BUILTIN_COLUMN_DEFS,
         _ColumnDef(
@@ -2594,7 +2693,7 @@ def test_update_row_mark_with_a_multi_link_cell_ahead_of_the_name_column() -> No
     so marking a row must find the name cell rather than assume it comes first.
     """
     prs = _make_multi_pr_field(2482, (2392, PrState.OPEN))
-    entry = _make_entry(name="agent-a", fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
+    entry = make_board_entry(name="agent-a", fields={FIELD_PR: prs}, cells={FIELD_PR: prs.display()})
     snapshot = make_board_snapshot(entries=(entry,))
     state = _make_state(snapshot=snapshot)
     column_defs = [_make_prs_def(), *_BUILTIN_COLUMN_DEFS]
@@ -2676,10 +2775,12 @@ def _highlighted_names(state: _KanpanState) -> list[str]:
 
 
 _SEARCH_ENTRIES = (
-    _make_entry(name="lima-host-dir", section=BoardSection.PR_MERGED, cells={"pr": CellDisplay(text="#172")}),
-    _make_entry(name="kanpan-peek", section=BoardSection.PR_MERGED, cells={"pr": CellDisplay(text="#140")}),
-    _make_entry(name="kanpan-search", section=BoardSection.STILL_COOKING, cells={"pr": CellDisplay(text="")}),
-    _make_entry(name="release-candidate", section=BoardSection.STILL_COOKING, cells={"pr": CellDisplay(text="#118")}),
+    make_board_entry(name="lima-host-dir", section=BoardSection.PR_MERGED, cells={"pr": CellDisplay(text="#172")}),
+    make_board_entry(name="kanpan-peek", section=BoardSection.PR_MERGED, cells={"pr": CellDisplay(text="#140")}),
+    make_board_entry(name="kanpan-search", section=BoardSection.STILL_COOKING, cells={"pr": CellDisplay(text="")}),
+    make_board_entry(
+        name="release-candidate", section=BoardSection.STILL_COOKING, cells={"pr": CellDisplay(text="#118")}
+    ),
 )
 
 
@@ -2727,8 +2828,8 @@ def test_rank_matches(rows: tuple[tuple[AgentName, str], ...], query: str, expec
 
 def test_rank_matches_name_beats_other_cells() -> None:
     entries = (
-        _make_entry(name="other", cells={"pr": CellDisplay(text="#2531")}),
-        _make_entry(name="agent-2531", cells={"pr": CellDisplay(text="")}),
+        make_board_entry(name="other", cells={"pr": CellDisplay(text="#2531")}),
+        make_board_entry(name="agent-2531", cells={"pr": CellDisplay(text="")}),
     )
     rows = _search_rows(_make_search_state(entries))
     assert _rank_matches(rows, "2531") == (AgentName("agent-2531"), AgentName("other"))

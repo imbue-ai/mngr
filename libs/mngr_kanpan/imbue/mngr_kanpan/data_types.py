@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
 from typing import Annotated
@@ -9,6 +10,7 @@ from pydantic import SerializeAsAny
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -95,6 +97,32 @@ class BoardSnapshot(FrozenModel):
     entries: tuple[AgentBoardEntry, ...] = Field(description="All agent board entries")
     errors: tuple[str, ...] = Field(default=(), description="Errors encountered during fetch")
     fetch_time_seconds: float = Field(description="Time taken to fetch data")
+
+
+@pure
+def group_entries_by_section(
+    snapshot: BoardSnapshot,
+    section_order: Sequence[BoardSection],
+) -> list[tuple[BoardSection, list[AgentBoardEntry]]]:
+    """Group entries by section in display order.
+
+    Sections are returned in ``section_order``; empty sections are omitted, and
+    entries within a section keep their snapshot order. Entries whose section is
+    not in ``section_order`` are dropped, so the result is what the board shows.
+    """
+    by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
+    for entry in snapshot.entries:
+        by_section.setdefault(entry.section, []).append(entry)
+    return [(section, by_section[section]) for section in section_order if by_section.get(section)]
+
+
+@pure
+def entries_shown_on_board(
+    snapshot: BoardSnapshot,
+    section_order: Sequence[BoardSection],
+) -> tuple[AgentBoardEntry, ...]:
+    """The entries the board renders, in board order (by section, then snapshot order)."""
+    return tuple(entry for _section, entries in group_entries_by_section(snapshot, section_order) for entry in entries)
 
 
 class DataSourceConfig(FrozenModel):
@@ -218,6 +246,16 @@ class KanpanPluginConfig(PluginConfig):
         "Valid names: PR_MERGED, PR_CLOSED, PR_BEING_REVIEWED, STILL_COOKING, PRS_FAILED, MUTED. "
         "If None, defaults to: PR_MERGED, PR_CLOSED, PR_BEING_REVIEWED, STILL_COOKING, PRS_FAILED, MUTED. "
         "Sections not listed are omitted.",
+    )
+    header_status: str | None = Field(
+        default=None,
+        description="Text shown at the right of the header, e.g. "
+        "'{state == \"RUNNING\"} running / {total}'. Each braced CEL expression renders as the number "
+        "of agents the board is showing that it holds for, counted against the same entry shape "
+        "`--format json` emits (name, state, provider_name, work_dir, branch, is_muted, section, "
+        "fields, cells). That shape is narrower than what --include sees, so an expression naming "
+        "anything else (labels, host, age) matches no agent and stays at zero. '{total}' counts "
+        "every agent; '{{' and '}}' are literal braces. Unset (default) shows nothing.",
     )
     refresh_interval_seconds: float = Field(
         default=600.0,

@@ -67,6 +67,7 @@ from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
 from imbue.mngr_kanpan.data_types import SECTION_PREFIX
 from imbue.mngr_kanpan.data_types import SECTION_SUFFIX
 from imbue.mngr_kanpan.data_types import STALENESS_FRACTION_OF_REFRESH_INTERVAL
+from imbue.mngr_kanpan.data_types import group_entries_by_section
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
@@ -75,6 +76,9 @@ from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
 from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import save_field_cache
 from imbue.mngr_kanpan.fetcher import toggle_agent_mute
+from imbue.mngr_kanpan.header_status import HeaderStatus
+from imbue.mngr_kanpan.header_status import compile_header_status
+from imbue.mngr_kanpan.header_status import render_header_status
 
 DEFAULT_REFRESH_INTERVAL_SECONDS: float = 600.0
 # Fallback used by the dataclass default and a couple of tests; runtime always
@@ -106,6 +110,8 @@ PEEK_BODY_HEIGHT: int = 14
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "› "
 
+HEADER_TITLE: str = "Kanpan - all-seeing agent tracker - 看 πᾶν"
+
 # Slots in the footer belt: the status text (borrowed by the search prompt) and the key legend.
 _FOOTER_STATUS_SLOT: int = 0
 _FOOTER_LEGEND_SLOT: int = 1
@@ -124,6 +130,9 @@ _TITLE_STACK_POP: str = "\x1b[23;0t"
 _LEGEND_NBSP: str = "\u00a0"
 # Space between legend bindings, shared by the footer and the peek hint.
 _LEGEND_SEPARATOR: str = "  "
+# Gap the header keeps on either side of its status text, so a status that fits
+# is separated from the title as well as from the right edge.
+_HEADER_STATUS_PAD: str = "  "
 # Blank kept at the belt's right edge so the legend does not touch the terminal border.
 _LEGEND_TRAILING_PAD: str = "  "
 # Gap the footer Columns puts between the status slot and the legend.
@@ -357,6 +366,19 @@ class _HyperlinkText(Text):
         return _HyperlinkCanvas(inner=canvas, url=self._hyperlink_url)
 
 
+class _FitOrHideText(Text):
+    """Text that renders blank when the width it is given cannot hold it whole.
+
+    Right-aligned clipping drops leading characters, so a status too wide for its
+    column would otherwise read as a fragment of itself.
+    """
+
+    def render(self, size: tuple[int] | tuple[()], focus: bool = False) -> Any:
+        if size and size[0] < self.pack()[0]:
+            return Text("").render(size, focus)
+        return super().render(size, focus)
+
+
 class _SelectableRow(Columns):
     """A Columns widget that is selectable, allowing it to receive focus.
 
@@ -386,6 +408,8 @@ class _KanpanState(MutableModel):
     footer_left_text: Any  # urwid Text widget (left side of footer)
     footer_left_attr: Any  # urwid AttrMap wrapping footer_left_text
     footer_right: Any  # urwid Text widget (right side of footer)
+    # urwid Text widget carrying the header's rendered status text.
+    header_status_text: Any
     loop: Any = None  # urwid MainLoop, set after construction
     spinner_index: int = 0
     refresh_future: Future[FetchResult] | None = None
@@ -479,6 +503,8 @@ class _KanpanState(MutableModel):
     # Single-worker executor for replies, so several queued replies reach the agent
     # in submission order and their `mngr message` pastes cannot interleave.
     peek_reply_executor: ThreadPoolExecutor | None = None
+    # Compiled `header_status` template and its counts (None when unconfigured).
+    header_status: HeaderStatus | None = None
     # Every key binding shown by the `?` overlay, in display order.
     legend_bindings: list[tuple[str, str]] = []
     # The board's own belt legend, restored when a prompt stops borrowing the belt.
@@ -2109,6 +2135,31 @@ def _render_footer(state: _KanpanState) -> None:
     _render_footer_legend(state)
 
 
+def _build_header(title: str) -> tuple[Pile, _FitOrHideText]:
+    """Build the header -- the title centred on the screen -- and its status widget.
+
+    The two equal-weight cells split whatever the packed title leaves, so the
+    title stays centred however wide the status text grows. `min_width=0` leaves
+    them no width of their own, so the title keeps every column it needs and
+    wraps rather than vanishing on a narrow terminal.
+    """
+    status_text = _FitOrHideText("", align="right", wrap="clip")
+    header_items: list[Any] = [Text(""), ("pack", Text(title)), status_text]
+    header = Pile(
+        [
+            AttrMap(Columns(header_items, min_width=0), "header"),
+            Divider(),
+        ]
+    )
+    return header, status_text
+
+
+def _render_header_status(state: _KanpanState) -> None:
+    """Write the header's status widget from the current snapshot. The sole writer of that widget."""
+    text = render_header_status(state.header_status, state.snapshot, state.section_order)
+    state.header_status_text.set_text(f"{_HEADER_STATUS_PAD}{text}{_HEADER_STATUS_PAD}" if text else "")
+
+
 def _ensure_animation_running(state: _KanpanState) -> None:
     """Start the single spinner-animation tick if it is not already running."""
     if state.animation_alarm is None and state.loop is not None:
@@ -2782,18 +2833,9 @@ def _build_board_widgets(
     # Compute column widths from all entries
     col_widths = _compute_board_column_widths(snapshot.entries, column_defs)
 
-    # Group entries by section (pre-computed on each entry)
-    by_section: dict[BoardSection, list[AgentBoardEntry]] = {}
-    for entry in snapshot.entries:
-        by_section.setdefault(entry.section, []).append(entry)
-
     has_content = False
 
-    for section in section_order:
-        entries = by_section.get(section)
-        if not entries:
-            continue
-
+    for section, entries in group_entries_by_section(snapshot, section_order):
         # Add column header before the first section
         if not has_content:
             walker.append(_build_column_header(col_widths, column_defs))
@@ -2866,6 +2908,8 @@ def _refresh_display(state: _KanpanState) -> None:
     # An open peek panel's title shows live state; re-render it from the new entries.
     _update_peek_header(state)
 
+    _render_header_status(state)
+
     # Every row was just rebuilt, so an open search re-ranks against the new board,
     # keeping the user on the match they cycled to for as long as it still matches.
     if state.search_input is not None:
@@ -2936,6 +2980,9 @@ def run_kanpan(
     """Run the kanpan TUI board."""
     commands = _build_command_map(mngr_ctx)
     plugin_config = mngr_ctx.get_plugin_config("kanpan", KanpanPluginConfig)
+    # Compiled before the screen is taken, so a misconfigured template reports
+    # itself on the terminal rather than under the board.
+    header_status = compile_header_status(plugin_config.header_status)
 
     # Collect data sources and load cached fields from disk
     data_sources = collect_data_sources(mngr_ctx)
@@ -2950,15 +2997,10 @@ def run_kanpan(
     footer, footer_belt, footer_right = _build_footer(footer_left_attr)
 
     is_filtered = bool(include_filters or exclude_filters)
-    header_title = "Kanpan - all-seeing agent tracker - \u770b \u03c0\u1fb6\u03bd"
+    header_title = HEADER_TITLE
     if is_filtered:
         header_title += "  [filtered]"
-    header = Pile(
-        [
-            AttrMap(Text(header_title, align="center"), "header"),
-            Divider(),
-        ]
-    )
+    header, header_status_text = _build_header(header_title)
 
     initial_body = Filler(Pile([Text("Loading...")]), valign="top")
     frame = _BoardFrame(body=initial_body, header=header, footer=footer)
@@ -2989,6 +3031,8 @@ def run_kanpan(
         exclude_filters=exclude_filters,
         section_order=section_order,
         legend_bindings=legend_bindings,
+        header_status=header_status,
+        header_status_text=header_status_text,
         footer_legend=footer_legend,
         footer_pile=footer,
         footer_columns=footer_belt,

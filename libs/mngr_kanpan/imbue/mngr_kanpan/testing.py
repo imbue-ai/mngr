@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -14,10 +15,13 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_kanpan.data_source import CellDisplay
+from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_sources.github import AdditionalPrReference
 from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
+from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 
@@ -102,6 +106,29 @@ def make_pr_field(
 def make_additional_pr(number: int, state: PrState = PrState.OPEN) -> AdditionalPrReference:
     """Create a reference to a PR on one of an agent's other worktree branches."""
     return AdditionalPrReference(number=number, url=f"https://github.com/org/repo/pull/{number}", state=state)
+
+
+def make_board_entry(
+    name: str = "test-agent",
+    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
+    provider_name: str = "local",
+    branch: str | None = None,
+    is_muted: bool = False,
+    section: BoardSection = BoardSection.STILL_COOKING,
+    fields: Mapping[str, FieldValue] | None = None,
+    cells: Mapping[str, CellDisplay] | None = None,
+) -> AgentBoardEntry:
+    """Create an AgentBoardEntry for testing."""
+    return AgentBoardEntry(
+        name=AgentName(name),
+        state=state,
+        provider_name=ProviderInstanceName(provider_name),
+        branch=branch,
+        is_muted=is_muted,
+        section=section,
+        fields=dict(fields or {}),
+        cells=dict(cells or {}),
+    )
 
 
 def make_board_snapshot(

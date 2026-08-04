@@ -64,6 +64,34 @@ mngr kanpan --exclude 'state == "DONE"'
 
 When any filter is active, the header displays a `[filtered]` indicator.
 
+## Header status
+
+The right of the header can carry a line of your own text, built from counts over the agents on the board:
+
+```toml
+[plugins.kanpan]
+header_status = 'Running: {state == "RUNNING"}'
+```
+
+Each braced CEL expression renders as the number of agents it holds for; everything outside the braces is literal text, so the label goes wherever you want it. The expressions are the same language `--include` takes, evaluated against the entry shape `--format json` emits -- so a count can be taken against any board column, not just the agent state:
+
+```toml
+[plugins.kanpan]
+header_status = 'Running: {state == "RUNNING"} · Red: {cells.ci.text == "failure"} · Ahead: {fields.commits_ahead.count > 0} · Merged: {section == "PR_MERGED"}'
+```
+
+`cells.<column>.text` is the text a column shows, `fields.<column>` the structured value behind it, and `section` the board section. `{total}` counts every agent, though each section heading already carries its own count. Write `{{` and `}}` for literal braces.
+
+Use a single-quoted TOML string, since the expressions themselves contain double quotes.
+
+An agent with no value for the column a count names -- or whose value has no such member, as a `pr` column holding a fetch failure has no `state` -- is simply not counted. Counts run over the agents the board is showing, so they follow any active filter.
+
+A count sees the board entry, which is a narrower shape than `--include` sees. `--include` filters agents before the board is built and so reads the full agent (`labels.project`, `host.provider`, `age`, ...); a count reads only what the board holds: `name`, `state`, `provider_name`, `branch`, `work_dir`, `is_muted`, `section`, `fields`, `cells`. A count naming anything else matches no agent and stays at zero -- filter with `--project` or `--include` instead.
+
+The title stays centred on the screen whatever the status says. The status takes the space to the right of the title, and is dropped whole on a terminal too narrow to hold it -- a right-aligned clip would leave a fragment of itself.
+
+An unbalanced brace, or an expression that is not valid CEL, is reported when kanpan starts rather than once the board is up.
+
 ## JSON output
 
 Pass `--format json` (or `--format jsonl`) to skip the TUI and print a single board snapshot to stdout instead. This is a read-only one-shot intended for scripting: it fetches the board once (reusing the on-disk field cache, without writing it back) and exits. The same `--include`/`--exclude` filters apply.
