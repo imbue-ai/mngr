@@ -150,15 +150,32 @@ class CustomCommand(FrozenModel):
     name: str = Field(description="Display name shown in the status bar")
     command: str = Field(
         default="",
-        description="Shell command to run. MNGR_AGENT_NAME env var is set to the focused agent's name.",
+        description="Shell command to run. MNGR_AGENT_NAME env var is set to the focused agent's name, and "
+        "MNGR_INPUT to the text typed at the prompt (empty when `prompt` is unset).",
+    )
+    prompt: str = Field(
+        default="",
+        description="When non-empty, running the command first opens a one-line input using this text as "
+        "the caption; the submitted text is passed to the command as the MNGR_INPUT env var. Combined with "
+        "`markable`, the input is asked once when x executes and the answer applies to every marked agent.",
     )
     refresh_afterwards: bool = Field(default=False, description="Whether to trigger a board refresh after completion")
     enabled: bool = Field(default=True, description="Whether this command is active")
     markable: bool | str = Field(
         default=False,
-        description="If truthy, pressing the key marks agents for batch execution with x instead of running immediately."
+        description="If set to anything other than false, pressing the key marks agents for batch execution with x"
+        " instead of running immediately."
         " Set to a color name (e.g. 'light red') to customize the mark indicator color.",
     )
+
+    @property
+    def is_markable(self) -> bool:
+        """Whether pressing the key toggles a mark instead of running the command.
+
+        Any ``markable`` other than ``False`` marks; an empty color string marks too,
+        with an empty mark-indicator color.
+        """
+        return self.markable is not False
 
 
 class ActionBuiltinRole(UpperCaseStrEnum):

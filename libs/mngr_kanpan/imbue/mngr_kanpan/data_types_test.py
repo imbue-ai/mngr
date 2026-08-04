@@ -1,5 +1,6 @@
 from datetime import datetime
 from datetime import timezone
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -146,6 +147,47 @@ def test_board_snapshot_with_errors() -> None:
     assert len(snapshot.entries) == 0
     assert len(snapshot.errors) == 2
     assert snapshot.errors[0] == "Connection failed"
+
+
+def test_custom_command_prompt_defaults_to_empty() -> None:
+    # An empty prompt is the off switch: no separate boolean, no content validation.
+    command = CustomCommand(name="connect", command="mngr connect $MNGR_AGENT_NAME")
+    assert command.prompt == ""
+
+
+def test_custom_command_with_prompt_round_trips_through_toml_shape() -> None:
+    # `_load_user_commands` re-validates raw TOML dicts through `CustomCommand(**value)`.
+    raw_toml_entry: dict[str, Any] = {
+        "name": "tag",
+        "prompt": "tag: ",
+        "command": 'mngr label "$MNGR_AGENT_NAME" -l "tag=$MNGR_INPUT"',
+        "refresh_afterwards": True,
+    }
+    command = CustomCommand(**raw_toml_entry)
+    assert command.prompt == "tag: "
+    assert command.refresh_afterwards is True
+    assert command.model_dump()["prompt"] == "tag: "
+
+
+def test_custom_command_rejects_unknown_key() -> None:
+    misspelled_toml_entry: dict[str, Any] = {"name": "tag", "prmopt": "tag: "}
+    with pytest.raises(ValidationError):
+        CustomCommand(**misspelled_toml_entry)
+
+
+def test_custom_command_allows_prompt_with_markable_for_batch_prompting() -> None:
+    # Marking asks for the value once when `x` executes, so the pair is legal: the key
+    # press marks, and the prompt happens at execution rather than never opening.
+    for markable in (True, "light red", ""):
+        command = CustomCommand(name="tag", prompt="tag: ", command="echo hi", markable=markable)
+        assert command.prompt == "tag: "
+        assert command.is_markable is True
+
+
+def test_custom_command_allows_markable_without_prompt() -> None:
+    command = CustomCommand(name="stop", command="mngr stop $MNGR_AGENT_NAME", markable=True)
+    assert command.markable is True
+    assert command.prompt == ""
 
 
 def test_kanpan_plugin_config_staleness_threshold_default_unset() -> None:

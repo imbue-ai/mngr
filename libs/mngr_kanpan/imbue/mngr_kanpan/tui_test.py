@@ -41,6 +41,8 @@ from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import PrField
 from imbue.mngr_kanpan.data_sources.github import PrState
+from imbue.mngr_kanpan.data_sources.labels import LabelColumnConfig
+from imbue.mngr_kanpan.data_sources.labels import LabelsDataSource
 from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
 from imbue.mngr_kanpan.data_types import ActionBuiltinRole
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
@@ -53,8 +55,10 @@ from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
 from imbue.mngr_kanpan.header_status import compile_header_status
 from imbue.mngr_kanpan.testing import make_additional_pr
+from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_board_entry
 from imbue.mngr_kanpan.testing import make_board_snapshot
+from imbue.mngr_kanpan.testing import make_mngr_ctx
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
 from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
@@ -64,6 +68,7 @@ from imbue.mngr_kanpan.tui import _BUILTIN_COLUMN_DEFS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMANDS
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_DELETE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_EXECUTE
+from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_MUTE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_PUSH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_REFRESH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_SEARCH
@@ -83,6 +88,8 @@ from imbue.mngr_kanpan.tui import _SEARCH_QUERY_MIN_COLS
 from imbue.mngr_kanpan.tui import _SelectableRow
 from imbue.mngr_kanpan.tui import _assemble_column_defs
 from imbue.mngr_kanpan.tui import _batch_item_label
+from imbue.mngr_kanpan.tui import _binding_description
+from imbue.mngr_kanpan.tui import _board_body_size
 from imbue.mngr_kanpan.tui import _build_agent_row
 from imbue.mngr_kanpan.tui import _build_board_widgets
 from imbue.mngr_kanpan.tui import _build_command_map
@@ -98,6 +105,7 @@ from imbue.mngr_kanpan.tui import _cancel_peek_alarm
 from imbue.mngr_kanpan.tui import _carry_forward_fields
 from imbue.mngr_kanpan.tui import _clear_focus
 from imbue.mngr_kanpan.tui import _close_peek
+from imbue.mngr_kanpan.tui import _close_prompt
 from imbue.mngr_kanpan.tui import _close_search
 from imbue.mngr_kanpan.tui import _compute_board_column_widths
 from imbue.mngr_kanpan.tui import _compute_footer_display
@@ -105,46 +113,57 @@ from imbue.mngr_kanpan.tui import _cycle_search
 from imbue.mngr_kanpan.tui import _dispatch_command
 from imbue.mngr_kanpan.tui import _ensure_peek_executor
 from imbue.mngr_kanpan.tui import _ensure_peek_reply_executor
+from imbue.mngr_kanpan.tui import _ensure_prompt_executor
 from imbue.mngr_kanpan.tui import _execute_marks
 from imbue.mngr_kanpan.tui import _execute_next_in_batch
 from imbue.mngr_kanpan.tui import _field_cell_markup
 from imbue.mngr_kanpan.tui import _field_cell_text
 from imbue.mngr_kanpan.tui import _find_entry_by_name
 from imbue.mngr_kanpan.tui import _finish_batch_execution
+from imbue.mngr_kanpan.tui import _finish_refresh
 from imbue.mngr_kanpan.tui import _fit_legend
 from imbue.mngr_kanpan.tui import _flatten_markup_to_attr
+from imbue.mngr_kanpan.tui import _flush_pending_completion
 from imbue.mngr_kanpan.tui import _focus_row_by_name
 from imbue.mngr_kanpan.tui import _format_section_heading
 from imbue.mngr_kanpan.tui import _get_focused_entry
 from imbue.mngr_kanpan.tui import _get_name_cell_markup
 from imbue.mngr_kanpan.tui import _get_state_attr
 from imbue.mngr_kanpan.tui import _handle_peek_key
+from imbue.mngr_kanpan.tui import _handle_prompt_key
 from imbue.mngr_kanpan.tui import _handle_search_key
 from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
+from imbue.mngr_kanpan.tui import _is_modal_surface_open
 from imbue.mngr_kanpan.tui import _is_transcript_header
 from imbue.mngr_kanpan.tui import _last_nonempty_line
 from imbue.mngr_kanpan.tui import _legend_markup
 from imbue.mngr_kanpan.tui import _legend_width
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_readline_edit
+from imbue.mngr_kanpan.tui import _mark_color
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_stamp_tick
 from imbue.mngr_kanpan.tui import _on_transient_expire
+from imbue.mngr_kanpan.tui import _open_prompt
+from imbue.mngr_kanpan.tui import _open_prompt_for_command
 from imbue.mngr_kanpan.tui import _open_search
 from imbue.mngr_kanpan.tui import _packed_width
 from imbue.mngr_kanpan.tui import _peek_body_lines
 from imbue.mngr_kanpan.tui import _peek_body_markup
+from imbue.mngr_kanpan.tui import _prompted_mark_keys
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _rank_matches
 from imbue.mngr_kanpan.tui import _refresh_display
 from imbue.mngr_kanpan.tui import _refresh_stamp
 from imbue.mngr_kanpan.tui import _render_footer
 from imbue.mngr_kanpan.tui import _render_header_status
+from imbue.mngr_kanpan.tui import _report_after_refresh
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
+from imbue.mngr_kanpan.tui import _run_shell_command_sync
 from imbue.mngr_kanpan.tui import _search_counter_text
 from imbue.mngr_kanpan.tui import _search_rows
 from imbue.mngr_kanpan.tui import _set_footer_legend
@@ -152,6 +171,7 @@ from imbue.mngr_kanpan.tui import _short_header
 from imbue.mngr_kanpan.tui import _show_transient_message
 from imbue.mngr_kanpan.tui import _submit_batch_item
 from imbue.mngr_kanpan.tui import _submit_peek_reply
+from imbue.mngr_kanpan.tui import _submit_prompt
 from imbue.mngr_kanpan.tui import _toggle_mark
 from imbue.mngr_kanpan.tui import _toggle_peek
 from imbue.mngr_kanpan.tui import _unmark_all
@@ -202,6 +222,11 @@ class _MockScreen:
 def _make_mock_loop() -> Any:
     tracker = _CallTracker()
     return SimpleNamespace(set_alarm_in=tracker, _alarm_tracker=tracker, screen=_MockScreen())
+
+
+def _make_entry_from_fields(name: str, fields: dict[str, FieldValue]) -> AgentBoardEntry:
+    """An entry whose cells are rendered from its fields, the way the fetcher builds one."""
+    return make_board_entry(name=name, fields=fields, cells={key: field.display() for key, field in fields.items()})
 
 
 def _make_state(
@@ -444,6 +469,15 @@ def test_build_mark_palette_markable() -> None:
     entries, names = _build_mark_palette(commands)
     assert len(entries) == 2
     assert "mark_d" in names
+
+
+def test_custom_command_is_markable_agrees_with_mark_color() -> None:
+    # `CustomCommand.is_markable` gates the prompt/markable rejection, while
+    # `_mark_color(cmd) is not None` gates dispatch. They must answer identically for
+    # every `markable` shape, or a rejected pair slips through and swallows the prompt.
+    for markable in (False, True, "", "light red"):
+        cmd = CustomCommand(name="tag", command="true", markable=markable)
+        assert cmd.is_markable is (_mark_color(cmd) is not None)
 
 
 # =============================================================================
@@ -1015,6 +1049,31 @@ def test_carry_forward_fields_merges() -> None:
     ca_field = merged.fields["commits_ahead"]
     assert isinstance(ca_field, CommitsAheadField)
     assert ca_field.count == 5
+
+
+def test_carry_forward_fields_blanks_a_cleared_label_cell() -> None:
+    # What a user sees after clearing a label: the agent-only refresh that `refresh_afterwards`
+    # triggers blanks the cell. Both halves are driven -- the label source produces the fields,
+    # the merge lays them over the previous snapshot -- since either alone would still show
+    # the stale value.
+    source = LabelsDataSource(field_key="tag", config=LabelColumnConfig(header="TAG", label_key="tag"))
+    mngr_ctx = make_mngr_ctx()
+    name = AgentName("a")
+    tagged, _ = source.compute(
+        agents=(make_agent_details(name=str(name), labels={"tag": "blocked"}),),
+        cached_fields={},
+        mngr_ctx=mngr_ctx,
+    )
+    cleared, _ = source.compute(
+        agents=(make_agent_details(name=str(name), labels={}),),
+        cached_fields={},
+        mngr_ctx=mngr_ctx,
+    )
+    old_snapshot = make_board_snapshot(entries=(_make_entry_from_fields(str(name), tagged[name]),))
+    new_snapshot = make_board_snapshot(entries=(_make_entry_from_fields(str(name), cleared[name]),))
+    assert old_snapshot.entries[0].cells["tag"].text == "blocked"
+    merged = _carry_forward_fields(old_snapshot, new_snapshot).entries[0]
+    assert merged.cells["tag"].text == ""
 
 
 def test_carry_forward_fields_new_agent() -> None:
@@ -2214,7 +2273,7 @@ def test_stamp_tick_updates_footer_and_reschedules() -> None:
 def test_question_mark_opens_help_overlay_and_any_close_key_restores_board() -> None:
     state = _make_state()
     state.legend_bindings = [("space", "peek"), ("q", "quit"), ("?", "help")]
-    state.loop = SimpleNamespace(widget=state.frame, screen=_MockScreen())
+    state.loop = SimpleNamespace(widget=state.frame, set_alarm_in=_CallTracker(), screen=_MockScreen())
     handler = _KanpanInputHandler(state=state)
     assert handler("?") is True
     assert state.help_overlay is not None
@@ -2487,6 +2546,491 @@ def test_handle_peek_key_left_falls_through_to_reply_edit() -> None:
     # Left is cursor movement in the reply Edit, never a board return.
     assert _handle_peek_key(state, "left") is None
     assert state.peek_agent_name == AgentName("agent-a")
+
+
+# =============================================================================
+# Prompted commands
+# ======================================================================
+
+
+def _make_prompt_state(
+    cmd: CustomCommand,
+    key: str = "t",
+    agent_name: str = "agent-a",
+) -> _KanpanState:
+    """A state with one focused agent, `cmd` bound to `key`, and a loop to hold the overlay."""
+    entry = make_board_entry(name=agent_name, section=BoardSection.STILL_COOKING)
+    state = _make_state_with_walker((entry,))
+    state.commands = {**state.commands, key: cmd}
+    state.frame.footer = Text("keybinding-bar")
+    state.loop = SimpleNamespace(widget=state.frame, set_alarm_in=_CallTracker(), screen=_MockScreen())
+    agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName(agent_name))
+    state.list_walker.set_focus(agent_idx)
+    return state
+
+
+def _prompt_box(state: _KanpanState) -> Any:
+    """The LineBox inside the open prompt's centred overlay."""
+    return state.loop.widget.top_w
+
+
+def _writes_input_to(marker: Path) -> str:
+    """A shell command that records MNGR_AGENT_NAME and MNGR_INPUT to `marker`."""
+    return f'printf "%s|%s" "$MNGR_AGENT_NAME" "$MNGR_INPUT" > {marker}'
+
+
+def _drain_prompt_executor(state: _KanpanState) -> None:
+    assert state.prompt_executor is not None
+    state.prompt_executor.shutdown(wait=True)
+
+
+def test_run_shell_command_sync_sets_agent_name_and_input_env_vars() -> None:
+    result = _run_shell_command_sync('printf "%s|%s" "$MNGR_AGENT_NAME" "$MNGR_INPUT"', "agent-a", "needs review")
+    assert result.returncode == 0
+    assert result.stdout == "agent-a|needs review"
+
+
+def test_run_shell_command_sync_does_not_word_split_quoted_input() -> None:
+    # The value travels through the environment, never through the shell's parse phase,
+    # so a quoted expansion of a multi-word value stays one argument.
+    result = _run_shell_command_sync('printf "[%s]" "$MNGR_INPUT"', "agent-a", "two words")
+    assert result.stdout == "[two words]"
+
+
+def test_dispatch_prompted_command_opens_a_centred_overlay_over_the_board() -> None:
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    belt = state.frame.footer
+    _dispatch_command(state, "t", cmd)
+    assert state.open_prompt is not None
+    # The overlay floats over the board rather than taking the footer slot, so the
+    # keybinding belt is left untouched.
+    overlay = state.loop.widget
+    assert overlay is not state.frame
+    assert overlay.bottom_w is state.frame
+    assert state.frame.footer is belt
+    assert state.saved_footer is None
+    # Nothing has run yet.
+    assert state.prompt_executor is None
+    assert state.action_label is None
+
+
+def test_prompt_titles_the_agent_and_leaves_the_ask_to_the_caption() -> None:
+    # The caption is the command's own `prompt` text, so repeating the command name in
+    # the title just stutters ("tag . agent-a" above "tag: "). Title names the target.
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    _dispatch_command(state, "t", cmd)
+    assert state.open_prompt is not None
+    assert state.open_prompt.edit.caption == "tag: "
+    title = _prompt_box(state).title_widget.text
+    assert "agent-a" in title
+    assert "tag" not in title
+
+
+def test_prompt_panel_hint_advertises_apply_and_cancel() -> None:
+    # Enter/Esc are the prompt's only two actions and the hint is the sole place they
+    # are visible, since the keybinding belt is hidden while the prompt is open.
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    _dispatch_command(state, "t", cmd)
+    hint_text = _prompt_box(state).original_widget.original_widget.contents[1][0].text
+    assert "enter" in hint_text
+    assert "apply" in hint_text
+    assert "esc" in hint_text
+    assert "cancel" in hint_text
+
+
+def test_dispatch_non_prompted_command_runs_immediately() -> None:
+    cmd = CustomCommand(name="event", command="true")
+    state = _make_prompt_state(cmd)
+    _dispatch_command(state, "t", cmd)
+    assert state.open_prompt is None
+    assert state.executor is not None
+    state.executor.shutdown(wait=True)
+
+
+def test_open_prompt_for_command_without_focused_agent_does_nothing() -> None:
+    # Needing a target agent is a rule of the command case, not of the prompt utility.
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_state()
+    state.frame.footer = Text("keybinding-bar")
+    _open_prompt_for_command(state, cmd)
+    assert state.open_prompt is None
+    assert str(state.frame.footer.text) == "keybinding-bar"
+
+
+def test_prompt_enter_submits_typed_text_as_mngr_input(tmp_path: Path) -> None:
+    marker = tmp_path / "tag-value.txt"
+    cmd = CustomCommand(name="tag", prompt="tag: ", command=_writes_input_to(marker))
+    state = _make_prompt_state(cmd)
+    _dispatch_command(state, "t", cmd)
+    assert state.open_prompt is not None
+    state.open_prompt.edit.set_edit_text("needs review")
+    assert _handle_prompt_key(state, "enter") is True
+    _drain_prompt_executor(state)
+    assert marker.read_text() == "agent-a|needs review"
+    # Submitting closes the prompt before launching, so the footer's progress message shows.
+    assert state.open_prompt is None
+    assert state.action_label == "  Running tag on agent-a"
+
+
+def test_prompt_enter_on_empty_line_submits_empty_string(tmp_path: Path) -> None:
+    # Clearing a label is `mngr label X -l "tag="`, so an empty line must be deliverable
+    # rather than treated as a cancel.
+    marker = tmp_path / "cleared-value.txt"
+    cmd = CustomCommand(name="tag", prompt="tag: ", command=_writes_input_to(marker))
+    state = _make_prompt_state(cmd)
+    _dispatch_command(state, "t", cmd)
+    assert _handle_prompt_key(state, "enter") is True
+    _drain_prompt_executor(state)
+    assert marker.read_text() == "agent-a|"
+
+
+def test_prompt_esc_cancels_without_running(tmp_path: Path) -> None:
+    marker = tmp_path / "never-written.txt"
+    cmd = CustomCommand(name="tag", prompt="tag: ", command=_writes_input_to(marker))
+    state = _make_prompt_state(cmd)
+    _dispatch_command(state, "t", cmd)
+    assert state.open_prompt is not None
+    state.open_prompt.edit.set_edit_text("discarded")
+    assert _handle_prompt_key(state, "esc") is True
+    assert state.open_prompt is None
+    assert state.prompt_executor is None
+    assert not marker.exists()
+    # Cancelling is silent: no footer message and no in-progress label.
+    assert state.transient_message is None
+    assert state.action_label is None
+
+
+def test_prompt_ctrl_c_cancels_rather_than_exiting() -> None:
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    handler = _KanpanInputHandler(state=state)
+    assert handler("t") is True
+    assert state.open_prompt is not None
+    # Ctrl-C must not reach the quit branch while the prompt is open.
+    assert handler("ctrl c") is True
+    assert state.open_prompt is None
+    assert state.prompt_executor is None
+
+
+def test_prompt_gate_swallows_board_keys() -> None:
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    handler = _KanpanInputHandler(state=state)
+    handler("t")
+    assert state.open_prompt is not None
+    # Space, quit, a command key, and unmark-all are all board actions that must not
+    # fire while the user is typing.
+    for key in (" ", "q", "d", "U", "?", "r"):
+        handler(key)
+    assert state.open_prompt is not None
+    assert state.peek_agent_name is None
+    assert state.help_overlay is None
+    assert state.marks == {}
+
+
+def test_prompt_board_keys_become_text_and_only_actions_bubble_out() -> None:
+    # The gate is only half the routing: keys reach the input through urwid focus, and only
+    # the keys the Edit refuses reach the handler at all. Driving the frame exercises the
+    # whole Frame -> LineBox -> Pile -> Edit chain, which the handler-level tests skip.
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    state.frame.body = ListBox(state.list_walker)
+    _dispatch_command(state, "t", cmd)
+    assert state.open_prompt is not None
+    size = (80, 12)
+    overlay = state.loop.widget
+    for key in (" ", "q", "d", "U"):
+        assert overlay.keypress(size, key) is None
+    assert state.open_prompt.edit.get_edit_text() == " qdU"
+    for key in ("enter", "esc", "ctrl c"):
+        assert overlay.keypress(size, key) == key
+
+
+def test_close_prompt_hands_the_screen_back_to_the_board() -> None:
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    belt = state.frame.footer
+    _dispatch_command(state, "t", cmd)
+    assert state.loop.widget is not state.frame
+    _close_prompt(state)
+    assert state.open_prompt is None
+    # Leaving the overlay installed would leave the board unable to receive anything.
+    assert state.loop.widget is state.frame
+    # The prompt floats over the board, so the keybinding belt was never displaced.
+    assert state.frame.footer is belt
+    assert state.saved_footer is None
+
+
+def test_close_prompt_when_no_prompt_open_is_noop() -> None:
+    state = _make_state()
+    state.frame.footer = Text("keybinding-bar")
+    _close_prompt(state)
+    assert str(state.frame.footer.text) == "keybinding-bar"
+
+
+def test_submit_prompt_when_no_prompt_open_is_noop() -> None:
+    state = _make_state()
+    _submit_prompt(state)
+    assert state.prompt_executor is None
+    assert state.action_label is None
+
+
+def test_handle_prompt_key_printable_keys_fall_through_to_edit() -> None:
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    _dispatch_command(state, "t", cmd)
+    # Editing keys are already consumed by the Edit before reaching the handler, so it
+    # leaves them alone rather than treating them as prompt actions.
+    for key in ("z", "left", "right", "up", "down"):
+        assert _handle_prompt_key(state, key) is None
+    assert state.open_prompt is not None
+
+
+def test_open_prompt_captures_target_agent_against_later_focus_moves(tmp_path: Path) -> None:
+    # A periodic refresh landing mid-typing moves the board's focus; the command must
+    # still run against the agent that was focused when the prompt opened.
+    marker = tmp_path / "captured-agent.txt"
+    cmd = CustomCommand(name="tag", prompt="tag: ", command=_writes_input_to(marker))
+    entry_a = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    entry_b = make_board_entry(name="agent-b", section=BoardSection.STILL_COOKING)
+    state = _make_state_with_walker((entry_a, entry_b))
+    state.commands = {**state.commands, "t": cmd}
+    state.frame.footer = Text("keybinding-bar")
+    a_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
+    state.list_walker.set_focus(a_idx)
+    _dispatch_command(state, "t", cmd)
+    b_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-b"))
+    state.list_walker.set_focus(b_idx)
+    _submit_prompt(state)
+    _drain_prompt_executor(state)
+    assert marker.read_text() == "agent-a|"
+
+
+def test_prompted_command_uses_its_own_executor_not_the_shared_one() -> None:
+    # The shared executor is max_workers=1 and also serves board refreshes, so a prompted
+    # write against an unresponsive host must not queue ahead of a refresh.
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    state.executor = ThreadPoolExecutor(max_workers=1)
+    _dispatch_command(state, "t", cmd)
+    _submit_prompt(state)
+    assert state.prompt_executor is not None
+    assert state.prompt_executor is not state.executor
+    state.executor.shutdown(wait=False)
+    _drain_prompt_executor(state)
+
+
+def test_ensure_prompt_executor_is_created_once() -> None:
+    state = _make_state()
+    executor = _ensure_prompt_executor(state)
+    assert _ensure_prompt_executor(state) is executor
+    executor.shutdown(wait=False)
+
+
+def test_binding_description_marks_prompted_command_with_ellipsis() -> None:
+    assert _binding_description(CustomCommand(name="tag", prompt="tag: ", command="true")) == "tag…"
+    assert _binding_description(CustomCommand(name="event", command="true")) == "event"
+    assert _binding_description(_BUILTIN_COMMANDS[_BUILTIN_COMMAND_KEY_REFRESH]) == "refresh"
+
+
+def test_legend_bindings_mark_prompted_commands_in_overlay_and_footer() -> None:
+    commands: dict[str, KanpanCommand] = {
+        **_BUILTIN_COMMANDS,
+        "t": CustomCommand(name="tag", prompt="tag: ", command="true"),
+        _BUILTIN_COMMAND_KEY_MUTE: CustomCommand(name="silence", prompt="why: ", command="true"),
+    }
+    overlay_bindings, footer_legend = _build_legend_bindings(commands)
+    assert ("t", "tag…") in overlay_bindings
+    assert (_BUILTIN_COMMAND_KEY_MUTE, "silence…") in footer_legend
+
+
+def test_load_user_commands_accepts_prompt_with_markable() -> None:
+    config = KanpanPluginConfig.model_construct(
+        commands={"t": {"name": "tag", "prompt": "tag: ", "command": "true", "markable": True}},
+    )
+    loaded = _load_user_commands(make_mngr_ctx_with_config(config))
+    assert loaded["t"].prompt == "tag: "
+    assert loaded["t"].is_markable is True
+
+
+# =============================================================================
+# The prompt as a reusable utility (no custom command involved)
+# =============================================================================
+
+
+class _RecordingPromptHandler:
+    """Prompt handler standing in for a future built-in feature's action."""
+
+    def __init__(self) -> None:
+        self.submitted: list[str] = []
+
+    def __call__(self, input_text: str) -> None:
+        self.submitted.append(input_text)
+
+
+def _make_state_with_belt() -> _KanpanState:
+    """A state with a stand-in keybinding belt and a loop, with no agent focused."""
+    state = _make_state()
+    state.frame.footer = Text("keybinding-bar")
+    state.loop = SimpleNamespace(widget=state.frame, set_alarm_in=_CallTracker(), screen=_MockScreen())
+    return state
+
+
+def test_open_prompt_answers_an_arbitrary_handler_with_no_agent_or_command() -> None:
+    # The seam a future built-in feature (interactive filter, jump-to-agent, batch
+    # prompting) uses: no focused agent, no CustomCommand, no shell execution.
+    state = _make_state_with_belt()
+    handler = _RecordingPromptHandler()
+    _open_prompt(state, title=" filter ", caption="/", on_submit=handler)
+    assert state.open_prompt is not None
+    assert state.open_prompt.edit.caption == "/"
+    assert _prompt_box(state).title_widget.text.strip() == "filter"
+    state.open_prompt.edit.set_edit_text("state == RUNNING")
+    _submit_prompt(state)
+    assert handler.submitted == ["state == RUNNING"]
+    # Answering hands the screen back to the board and never touches the command machinery.
+    assert state.open_prompt is None
+    assert state.loop.widget is state.frame
+    assert state.prompt_executor is None
+    assert state.action_label is None
+
+
+def test_open_prompt_esc_cancels_without_calling_its_handler() -> None:
+    state = _make_state_with_belt()
+    handler = _RecordingPromptHandler()
+    _open_prompt(state, title=" filter ", caption="/", on_submit=handler)
+    assert _handle_prompt_key(state, "esc") is True
+    assert handler.submitted == []
+    assert state.open_prompt is None
+
+
+def test_open_prompt_refuses_to_stack_over_an_open_prompt() -> None:
+    # A second install would overwrite the saved keybinding belt with the first
+    # prompt's own panel, leaving the belt unrecoverable on close.
+    state = _make_state_with_belt()
+    first = _RecordingPromptHandler()
+    second = _RecordingPromptHandler()
+    _open_prompt(state, title=" first ", caption="1> ", on_submit=first)
+    first_overlay = state.loop.widget
+    _open_prompt(state, title=" second ", caption="2> ", on_submit=second)
+    assert state.loop.widget is first_overlay
+    assert state.open_prompt is not None
+    assert state.open_prompt.edit.caption == "1> "
+    _close_prompt(state)
+    assert state.loop.widget is state.frame
+
+
+# =============================================================================
+# Mouse gate: the board must not take clicks while a prompt is open
+# =============================================================================
+
+
+def _make_prompt_state_with_rows() -> _KanpanState:
+    """Prompt state whose frame has a real ListBox body, so clicks can hit rows."""
+    entries = (
+        make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING),
+        make_board_entry(name="agent-b", section=BoardSection.STILL_COOKING),
+    )
+    state = _make_state_with_walker(entries)
+    state.frame.body = ListBox(state.list_walker)
+    state.frame.footer = Text("keybinding-bar")
+    state.list_walker.set_focus(min(state.index_to_entry))
+    return state
+
+
+def test_board_listbox_still_moves_selection_on_a_raw_click_while_prompt_is_open() -> None:
+    # Why the gate exists: urwid dispatches mouse events by position, not focus, and
+    # ListBox.mouse_event changes focus as a side effect (note it reports unhandled).
+    # Filtering has to happen before the widget tree; `unhandled_input` runs too late.
+    state = _make_prompt_state_with_rows()
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    _dispatch_command(state, "t", cmd)
+    size = (80, 24)
+    state.frame.render(size, focus=True)
+    state.frame.mouse_event(size, "mouse press", 1, 10, 3, focus=True)
+    focused = _get_focused_entry(state)
+    assert focused is not None and focused.name == AgentName("agent-b")
+
+
+def test_mouse_gate_withholds_clicks_while_the_prompt_is_open() -> None:
+    state = _make_prompt_state_with_rows()
+    gate = _KanpanInputFilter(state=state)
+    click: tuple[str, int, int, int] = ("mouse press", 1, 10, 3)
+    # Closed prompt: the board owns the mouse as usual.
+    assert gate(["a", click], []) == ["a", click]
+    _dispatch_command(state, "t", CustomCommand(name="tag", prompt="tag: ", command="true"))
+    # Open prompt: the click never reaches the widget tree, but typing still does.
+    assert gate(["a", click], []) == ["a"]
+
+
+def test_mouse_gate_keeps_the_selection_put_while_the_prompt_is_open() -> None:
+    # End to end over the real dispatch path: filter first, then hand on what survives,
+    # exactly as MainLoop does.
+    state = _make_prompt_state_with_rows()
+    gate = _KanpanInputFilter(state=state)
+    _dispatch_command(state, "t", CustomCommand(name="tag", prompt="tag: ", command="true"))
+    size = (80, 24)
+    state.frame.render(size, focus=True)
+    for key in gate([("mouse press", 1, 10, 3)], []):
+        state.frame.mouse_event(size, *key, focus=True)
+    focused = _get_focused_entry(state)
+    assert focused is not None and focused.name == AgentName("agent-a")
+
+
+def test_mouse_gate_also_withholds_clicks_for_the_peek_panel_and_help_overlay() -> None:
+    # Every modal surface has the same hole: urwid routes the click positionally, so the
+    # board takes it while the panel holds the keyboard.
+    state = _make_prompt_state_with_rows()
+    gate = _KanpanInputFilter(state=state)
+    click: tuple[str, int, int, int] = ("mouse press", 1, 10, 3)
+    assert not _is_modal_surface_open(state)
+    assert gate(["a", click], []) == ["a", click]
+
+    state.peek_agent_name = AgentName("agent-a")
+    assert _is_modal_surface_open(state)
+    assert gate(["a", click], []) == ["a"]
+    state.peek_agent_name = None
+
+    state.help_overlay = object()
+    assert _is_modal_surface_open(state)
+    assert gate(["a", click], []) == ["a"]
+    state.help_overlay = None
+    assert gate(["a", click], []) == ["a", click]
+
+
+def test_peek_panel_keeps_the_selection_put_against_a_click() -> None:
+    state = _make_prompt_state_with_rows()
+    gate = _KanpanInputFilter(state=state)
+    _toggle_peek(state)
+    assert state.peek_agent_name == AgentName("agent-a")
+    size = (80, 24)
+    state.frame.render(size, focus=True)
+    for key in gate([("mouse press", 1, 10, 3)], []):
+        state.frame.mouse_event(size, *key, focus=True)
+    focused = _get_focused_entry(state)
+    assert focused is not None and focused.name == AgentName("agent-a")
+
+
+def test_prompt_overlay_renders_at_narrow_and_wide_terminals() -> None:
+    # The box is a fixed width floating over the board; it must not blow up when the
+    # terminal is narrower than that width, nor stretch when it is much wider.
+    cmd = CustomCommand(name="tag", prompt="tag: ", command="true")
+    state = _make_prompt_state(cmd)
+    state.frame.body = ListBox(state.list_walker)
+    _dispatch_command(state, "t", cmd)
+    overlay = state.loop.widget
+    for cols, rows in ((200, 40), (100, 24), (60, 16), (40, 12)):
+        canvas = overlay.render((cols, rows), focus=True)
+        assert canvas.cols() == cols
+        assert canvas.rows() == rows
+        rendered = [line.decode(errors="replace") for line in canvas.text]
+        assert any("tag:" in line for line in rendered), f"caption missing at {cols}x{rows}"
+        # Box is bounded, never full-width, whenever the terminal has room for it.
+        if cols > 60:
+            assert not any(line.strip().startswith("\u256d") and len(line.strip()) >= cols for line in rendered)
 
 
 # =============================================================================
@@ -3650,3 +4194,237 @@ def test_input_filter_refits_the_legend_on_a_window_resize() -> None:
     screen.cols = 200
     input_filter(["window resize"], [])
     assert "search" in _belt_text(state)
+
+
+# =============================================================================
+# Batch prompting: mark N agents, answer once, apply to all
+# =============================================================================
+
+
+def _writes_input_per_agent(directory: Path) -> str:
+    """A command that records its MNGR_INPUT under a per-agent filename."""
+    return f'printf "%s" "$MNGR_INPUT" > {directory}/"$MNGR_AGENT_NAME".txt'
+
+
+class _ImmediateExecutor(ThreadPoolExecutor):
+    """Executor that runs the work inline, so a batch advances without real waiting.
+
+    Batch items run one at a time, each step driven by an alarm that polls the previous
+    future. Resolving futures on submission makes every poll conclusive on its first
+    look, so `_PumpLoop` can walk the whole batch deterministically.
+    """
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
+        future: Future[Any] = Future()
+        # A real executor hands a failure back through the future rather than raising at
+        # the submit site. The board refresh that finishing a batch queues is the one
+        # failure expected here: it reaches for a live context this stub does not carry.
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except AttributeError as error:
+            future.set_exception(error)
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+
+class _PumpLoop:
+    """Loop stub that queues alarms instead of firing them, so a test can drain them."""
+
+    def __init__(self, widget: Any) -> None:
+        self.widget = widget
+        self.screen = _MockScreen()
+        self.pending: list[tuple[Any, Any]] = []
+
+    def set_alarm_in(self, _delay: float, callback: Any, data: Any = None) -> int:
+        self.pending.append((callback, data))
+        return len(self.pending)
+
+    def remove_alarm(self, _handle: Any) -> None:
+        pass
+
+    def drain_batch(self, state: _KanpanState, limit: int = 100) -> None:
+        """Fire queued alarms until the batch reports itself finished.
+
+        Stops there rather than draining everything: finishing queues a board refresh,
+        which has no live context here and would reschedule itself forever.
+        """
+        for _step in range(limit):
+            if not state.executing or not self.pending:
+                return
+            callback, data = self.pending.pop(0)
+            callback(self, data)
+        raise AssertionError("batch did not settle")
+
+
+def _make_batch_state(commands: dict[str, CustomCommand], marks: dict[str, str]) -> _KanpanState:
+    state = _make_state(commands=commands)
+    state.loop = _PumpLoop(state.frame)
+    state.executor = _ImmediateExecutor()
+    state.frame.footer = Text("keybinding-bar")
+    state.marks = {AgentName(name): key for name, key in marks.items()}
+    return state
+
+
+def test_batch_prompt_asks_once_and_applies_the_answer_to_every_marked_agent(tmp_path: Path) -> None:
+    cmd = CustomCommand(name="message", prompt="message: ", command=_writes_input_per_agent(tmp_path), markable=True)
+    state = _make_batch_state({"M": cmd}, {"agent-a": "M", "agent-b": "M", "agent-c": "M"})
+    _execute_marks(state)
+    # One prompt for the command, not one per agent, and it names how many it covers.
+    assert state.open_prompt is not None
+    assert "3 marked" in state.loop.widget.top_w.title_widget.text
+    assert state.executing is False
+    state.open_prompt.edit.set_edit_text("ship it")
+    _submit_prompt(state)
+    state.loop.drain_batch(state)
+    for name in ("agent-a", "agent-b", "agent-c"):
+        assert (tmp_path / f"{name}.txt").read_text() == "ship it"
+
+
+def test_batch_prompt_cancelled_runs_nothing_and_keeps_the_marks(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    cmd = CustomCommand(name="message", prompt="message: ", command=_writes_input_per_agent(out_dir), markable=True)
+    state = _make_batch_state({"M": cmd}, {"agent-a": "M", "agent-b": "M"})
+    _execute_marks(state)
+    assert state.open_prompt is not None
+    state.open_prompt.edit.set_edit_text("discarded")
+    _close_prompt(state)
+    # A half-applied batch would be worse than none: nothing ran, and the marks survive
+    # so the same set can be executed again.
+    assert state.executing is False
+    assert list(out_dir.iterdir()) == []
+    assert set(state.marks) == {AgentName("agent-a"), AgentName("agent-b")}
+
+
+def test_batch_prompts_once_per_marked_command_and_keeps_the_answers_apart(tmp_path: Path) -> None:
+    tag_dir, note_dir = tmp_path / "tag", tmp_path / "note"
+    tag_dir.mkdir()
+    note_dir.mkdir()
+    commands: dict[str, CustomCommand] = {
+        "T": CustomCommand(name="tag", prompt="tag: ", command=_writes_input_per_agent(tag_dir), markable=True),
+        "N": CustomCommand(name="note", prompt="note: ", command=_writes_input_per_agent(note_dir), markable=True),
+    }
+    state = _make_batch_state(commands, {"agent-a": "T", "agent-b": "N", "agent-c": "T"})
+    assert _prompted_mark_keys(state) == ("T", "N")
+    _execute_marks(state)
+    assert state.open_prompt is not None
+    state.open_prompt.edit.set_edit_text("blocked")
+    _submit_prompt(state)
+    # Answering the first opens the second rather than starting the batch early.
+    assert state.executing is False
+    assert state.open_prompt is not None
+    state.open_prompt.edit.set_edit_text("looks good")
+    _submit_prompt(state)
+    state.loop.drain_batch(state)
+    assert (tag_dir / "agent-a.txt").read_text() == "blocked"
+    assert (tag_dir / "agent-c.txt").read_text() == "blocked"
+    assert (note_dir / "agent-b.txt").read_text() == "looks good"
+
+
+def test_batch_execution_without_a_prompted_command_still_runs_straight_through(tmp_path: Path) -> None:
+    # No regression for plain markable commands: no prompt, and MNGR_INPUT is empty.
+    cmd = CustomCommand(name="stamp", command=_writes_input_per_agent(tmp_path), markable=True)
+    state = _make_batch_state({"S": cmd}, {"agent-a": "S"})
+    _execute_marks(state)
+    assert state.open_prompt is None
+    state.loop.drain_batch(state)
+    assert (tmp_path / "agent-a.txt").read_text() == ""
+
+
+def test_execute_marks_will_not_stack_a_second_prompt_over_a_collection_round() -> None:
+    cmd = CustomCommand(name="message", prompt="message: ", command="true", markable=True)
+    state = _make_batch_state({"M": cmd}, {"agent-a": "M"})
+    _execute_marks(state)
+    first_prompt = state.open_prompt
+    assert first_prompt is not None
+    # A second `x` would strand the first prompt behind the second.
+    _execute_marks(state)
+    assert state.open_prompt is first_prompt
+    assert state.executing is False
+
+
+# =============================================================================
+# Refresh: the view stays put, and the outcome arrives with the rows it describes
+# =============================================================================
+
+
+def _tall_board_state(count: int = 40) -> _KanpanState:
+    """A board taller than the screen, so scrolling is real."""
+    entries = tuple(make_board_entry(name=f"agent-{i:02d}") for i in range(count))
+    state = _make_state(snapshot=make_board_snapshot(entries=entries))
+    state.loop = SimpleNamespace(widget=state.frame, set_alarm_in=_CallTracker(), screen=_MockScreen(cols=80, rows=20))
+    state.frame.footer = Text("keybinding-bar")
+    _refresh_display(state)
+    return state
+
+
+def test_refresh_keeps_the_focused_row_at_the_same_height() -> None:
+    # A fresh ListBox starts scrolled to the top and moving the walker's focus does not
+    # tell it where to draw, so without the offset restore the view jumps on every
+    # refresh -- including the periodic one, under a cursor nobody touched.
+    state = _tall_board_state()
+    size = _board_body_size(state)
+    assert size is not None
+    late_index = max(state.index_to_entry)
+    state.list_walker.set_focus(late_index)
+    state.frame.body.change_focus(size, late_index, offset_inset=4)
+    state.frame.body.render(size, focus=True)
+    before = state.frame.body.get_focus_offset_inset(size)
+
+    _refresh_display(state)
+
+    state.frame.body.render(size, focus=True)
+    assert state.frame.body.get_focus_offset_inset(size) == before
+    focused = _get_focused_entry(state)
+    assert focused is not None and focused.name == AgentName(f"agent-{len(state.index_to_entry) - 1:02d}")
+
+
+def test_refreshed_board_shows_the_same_rows_it_showed_before() -> None:
+    state = _tall_board_state()
+    size = _board_body_size(state)
+    assert size is not None
+    state.list_walker.set_focus(max(state.index_to_entry))
+    state.frame.body.change_focus(size, max(state.index_to_entry), offset_inset=4)
+    before = [line.decode(errors="replace") for line in state.frame.body.render(size, focus=True).text]
+    _refresh_display(state)
+    after = [line.decode(errors="replace") for line in state.frame.body.render(size, focus=True).text]
+    assert after == before
+
+
+def test_a_repainting_command_reports_only_once_the_board_has_repainted() -> None:
+    # The outcome and the rows it describes should land together, not a second apart.
+    state = _tall_board_state()
+    _report_after_refresh(state, "  note completed for agent-00", state.loop)
+    # Held while the refresh is in flight, with the in-progress label still up.
+    assert state.pending_completion_message == "  note completed for agent-00"
+    assert state.transient_message is None
+    _flush_pending_completion(state)
+    assert state.transient_message == "  note completed for agent-00"
+    assert state.pending_completion_message is None
+    assert state.action_label is None
+
+
+def test_a_held_outcome_waits_rather_than_reporting_twice_when_a_refresh_is_running() -> None:
+    # `_start_local_refresh` early-returns while one is in flight. The outcome must ride
+    # that refresh out rather than being shown now and again when it lands.
+    state = _tall_board_state()
+    state.refresh_future = cast(Any, object())
+    _report_after_refresh(state, "  note completed for agent-00", state.loop)
+    assert state.transient_message is None
+    assert state.pending_completion_message == "  note completed for agent-00"
+
+
+def test_a_failed_refresh_still_releases_the_outcome_it_was_carrying() -> None:
+    # The flush sits past `_finish_refresh`'s try/finally, so a refresh that raised does
+    # not strand the message behind it.
+    state = _tall_board_state()
+    failed: Future[Any] = Future()
+    failed.set_exception(RuntimeError("discovery is down"))
+    state.refresh_future = failed
+    state.refresh_is_local_only = True
+    state.pending_completion_message = "  note completed for agent-00"
+    _finish_refresh(cast(Any, state.loop), state)
+    assert state.transient_message == "  note completed for agent-00"
+    assert state.pending_completion_message is None

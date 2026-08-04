@@ -262,6 +262,83 @@ markable = true
 refresh_afterwards = true
 ```
 
+### Prompting for a value
+
+Set `prompt` to ask for a value before the command runs. Pressing the key floats a small bordered input in the middle of the board, captioned with the `prompt` text and titled with the agent it will act on; the text you type is passed to the command as the `MNGR_INPUT` environment variable.
+
+```toml
+[plugins.kanpan.commands.R]
+name = "rename"
+prompt = "new name: "
+command = 'mngr rename "$MNGR_AGENT_NAME" "$MNGR_INPUT"'
+refresh_afterwards = true
+```
+
+- The input supports the same readline editing as the peek reply (`Ctrl-A`/`Ctrl-E`, `Ctrl-W`, `Ctrl-U`/`Ctrl-K`, `Option`/`Ctrl`+`←`/`→`).
+- `Enter` runs the command. **An empty line is a valid submission** -- it is how you clear a value -- so `Esc` (or `Ctrl-C`) is the way to cancel. Cancelling runs nothing and changes nothing.
+- The target agent is captured when the prompt opens, so a periodic refresh landing while you type cannot retarget the command.
+- Pressing the key with no agent focused does nothing.
+- Prompted commands carry a trailing `…` wherever their key is listed: the `?` overlay, and the footer belt in the case where the command overrides one of the keys the belt advertises.
+- The prompt is modal. Board keys type into it, and clicks on the board are ignored while it is open, so the selection cannot move out from under the agent named in the title. The board's own highlight is not drawn meanwhile, which is why the title names the target.
+- Always quote `"$MNGR_INPUT"` in your command. The value is passed through the environment rather than interpolated into the command string, but the command still runs under a shell, so an unquoted expansion is word-split and glob-expanded.
+### Prompting once for many agents
+
+Combine `prompt` with `markable` to answer once for a whole batch: press the key on each agent to mark it, press `x`, and the value you type is applied to every marked agent.
+
+```toml
+[plugins.kanpan.commands.M]
+name = "message"
+prompt = "message: "
+command = 'mngr message "$MNGR_AGENT_NAME" -m "$MNGR_INPUT"'
+markable = "light cyan"
+```
+
+- The prompt opens when `x` executes, not when you mark, and names how many agents it covers.
+- Mark different agents with different prompted commands and `x` asks for each in turn, one prompt per command, before anything runs.
+- `Esc` at any of those prompts runs **nothing at all** and leaves the marks, so a batch is never half-applied.
+- Failures keep their marks so you can retry, and a retry asks again rather than reusing the earlier answer -- the value may be exactly what went wrong, and the prompt is the only place you see what is about to be applied.
+- `refresh_afterwards` is redundant here: the batch path always refreshes when it finishes.
+
+### Example: a note per agent
+
+A prompted command that writes an agent label, plus a label-backed column that displays it, gives you one free-form line against each agent:
+
+```toml
+[plugins.kanpan.commands.w]
+name = "note"
+prompt = "note: "
+command = 'mngr label "$MNGR_AGENT_NAME" -l "note=$MNGR_INPUT"'
+refresh_afterwards = true
+
+[plugins.kanpan.columns.note]
+header = "NOTE"
+```
+
+Press `w` on an agent, type a line, press `Enter`; `refresh_afterwards` repaints the `NOTE` cell. Submitting an empty line blanks it.
+
+**This is one note, not a set of tags.** A label holds a single value, so pressing the key again replaces what was there -- there is no adding a second value or removing one of several. Name it accordingly: calling it a tag promises set semantics the mechanism does not have.
+
+For a *status* -- a small fixed vocabulary you want colored -- a prompt is the wrong tool, since you would retype the same few words. Bind each value to its own key instead, which needs no prompt at all:
+
+```toml
+[plugins.kanpan.commands.B]
+name = "blocked"
+command = 'mngr label "$MNGR_AGENT_NAME" -l "status=blocked"'
+refresh_afterwards = true
+
+[plugins.kanpan.columns.status]
+header = "STATUS"
+
+[plugins.kanpan.columns.status.colors]
+blocked = "light red"
+review = "yellow"
+```
+
+Two `mngr label` behaviours to know about, neither specific to kanpan:
+
+- **An empty value clears the display, not the label.** `mngr label` has no delete path, so an empty submission sets the key to the empty string. The cell blanks, but `--include 'has(labels.note)'` keeps matching that agent. Filter on the value (e.g. `labels.status == "blocked"`) rather than on presence.
+- **Use a bare identifier as the label key.** Filter expressions are CEL, where a key containing a dash parses as subtraction and silently matches zero agents. `note` works; `my-note` does not.
+
 ## Column order
 
 Control which columns appear and in what order:
@@ -291,7 +368,7 @@ The PR column displays clickable hyperlinks (OSC 8) in terminals that support th
 Kanpan uses two refresh strategies:
 
 - **Full refresh** (manual 'r' key, periodic 10-minute timer): runs all data sources. Only one can be in flight at a time -- pressing 'r' while a refresh is running is ignored.
-- **Agent-only refresh** (after push, delete, custom commands): runs only local data sources (repo_paths, git_info). Remote data (PR, CI) is carried forward from the previous snapshot.
+- **Agent-only refresh** (after push, delete, custom commands): runs every local data source -- `repo_paths`, `git_info`, and any label-backed column -- and carries the rest (PR, CI, shell columns) forward from the previous snapshot. Label-backed columns being local is why `refresh_afterwards` on a command that writes a label repaints that label's column.
 
 Both are configurable:
 

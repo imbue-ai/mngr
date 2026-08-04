@@ -3,6 +3,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from collections.abc import Hashable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
@@ -110,6 +111,9 @@ PEEK_BODY_HEIGHT: int = 14
 PEEK_REFRESH_SECONDS: float = 2.0
 PEEK_REPLY_PROMPT: str = "› "
 
+# Width of the centred prompt box. Fixed rather than a fraction of the terminal so one
+# short line of input does not stretch across a wide screen; urwid clips it on narrower ones.
+_PROMPT_WIDTH: int = 56
 HEADER_TITLE: str = "Kanpan - all-seeing agent tracker - 看 πᾶν"
 
 # Slots in the footer belt: the status text (borrowed by the search prompt) and the key legend.
@@ -128,8 +132,10 @@ _TITLE_STACK_POP: str = "\x1b[23;0t"
 # Within a legend binding (`enter: attach`), NBSP keeps the key and its
 # description on one line, so a narrow footer wraps between bindings only.
 _LEGEND_NBSP: str = "\u00a0"
-# Space between legend bindings, shared by the footer and the peek hint.
+# Space between bindings in the footer legend belt.
 _LEGEND_SEPARATOR: str = "  "
+# Space between bindings in a footer-slot panel's key hint (`enter: apply · esc: cancel`).
+_PANEL_HINT_SEPARATOR: str = " · "
 # Gap the header keeps on either side of its status text, so a status that fits
 # is separated from the title as well as from the right edge.
 _HEADER_STATUS_PAD: str = "  "
@@ -188,6 +194,10 @@ PALETTE = [
     ("peek_hint", "dark gray", ""),
     # Your own messages/replies, marked with `›`.
     ("peek_user", "dark blue", ""),
+    # Prompted-command input: its caption and its key hint. Styled independently of
+    # the peek panel even though both own the footer slot.
+    ("prompt_caption", "yellow,bold", ""),
+    ("prompt_hint", "dark gray", ""),
 ]
 
 # Display order: most mature first (like Linear), muted always last
@@ -397,6 +407,22 @@ class _SelectableRow(Columns):
         return key
 
 
+class _OpenPrompt(FrozenModel):
+    """An open one-line input over the footer, and what to do with the text it collects.
+
+    Must stay above ``_KanpanState``: ``tui`` has no ``from __future__ import
+    annotations``, so pydantic resolves the referencing field's annotation at
+    class-definition time.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    edit: ReadlineEdit
+    # Everything the action needs is bound into the handler when the prompt opens, so a
+    # refresh landing mid-typing cannot change what the answer applies to.
+    on_submit: Callable[[str], None]
+
+
 class _KanpanState(MutableModel):
     """Mutable state for the kanpan TUI."""
 
@@ -478,7 +504,9 @@ class _KanpanState(MutableModel):
     # --- Peek panel (None name => panel closed) ---
     # Name of the agent currently shown in the peek panel.
     peek_agent_name: AgentName | None = None
-    # Original frame footer (keybinding bar), restored when the panel closes.
+    # Original frame footer (keybinding bar), restored when the peek panel or the
+    # prompt closes. Shared because the two are mutually exclusive: the peek gate
+    # precedes command dispatch, and the prompt gate precedes the peek key.
     saved_footer: Any = None
     # Widgets owned by the open panel (set while peek_agent_name is not None).
     peek_box: Any = None
@@ -515,6 +543,15 @@ class _KanpanState(MutableModel):
     active_legend_prefix: str = ""
     # The `?` overlay widget while it is open (None otherwise).
     help_overlay: Any = None
+    # --- Footer prompt (None => no prompt open) ---
+    # The open one-line input and the handler that answers it.
+    open_prompt: _OpenPrompt | None = None
+    # Single-worker executor for prompted commands, kept off the shared `executor` so a
+    # write against an unresponsive host cannot stall a board refresh for the whole timeout.
+    prompt_executor: ThreadPoolExecutor | None = None
+    # A command's outcome, held until the refresh it asked for has repainted the board, so
+    # the message and the rows it describes appear together instead of a second apart.
+    pending_completion_message: str | None = None
     # --- Search prompt (None input => closed) ---
     # The Frame's footer: a blank row above the belt. Focused while the prompt is open,
     # since Frame routes keys only to the part it has focus on.
@@ -549,6 +586,12 @@ class _KanpanInputHandler(MutableModel):
         # already been consumed by its reply Edit before reaching here.
         if self.state.peek_agent_name is not None:
             return _handle_peek_key(self.state, key)
+        # While a command prompt is open it owns the keyboard; printable keys have already
+        # been consumed by its input Edit before reaching here. This gate must stay above
+        # the branches below that claim the keys the Edit does refuse: `ctrl c` would quit
+        # kanpan, `enter` would attach to the agent, and `up` would clear board focus.
+        if self.state.open_prompt is not None:
+            return _handle_prompt_key(self.state, key)
         # Likewise for the search prompt, so `q` and the command keys type into
         # the query instead of quitting or acting on the focused agent.
         if self.state.search_input is not None:
@@ -606,17 +649,37 @@ class _BoardFrame(Frame):
         return super().mouse_event(size, event, button, col, row, focus)
 
 
+def _is_modal_surface_open(state: _KanpanState) -> bool:
+    """Whether the prompt, the peek panel, or the `?` overlay currently owns the keyboard.
+
+    The search prompt is deliberately absent: it answers a board click by ending the
+    search on the row clicked (see ``_BoardFrame``), which withholding the event would
+    silently undo.
+    """
+    return state.open_prompt is not None or state.peek_agent_name is not None or state.help_overlay is not None
+
+
 class _KanpanInputFilter(MutableModel):
-    """Input the board sees before the widget tree does: a resize refits the footer."""
+    """Input the board sees before the widget tree does.
+
+    A resize refits the footer legend. And while a modal surface owns the keyboard the
+    board is shown no mouse events at all: urwid routes those by position rather than
+    focus, so a click would otherwise reach the board's ListBox and move the selection
+    out from under an open panel -- ListBox.mouse_event changes focus even while
+    reporting the event unhandled. This is the only place that can stop it;
+    ``unhandled_input`` runs after the widget tree has already acted.
+    """
 
     state: _KanpanState
 
-    def __call__(
-        self, keys: list[str | tuple[str, int, int, int]], raw: list[int]
-    ) -> list[str | tuple[str, int, int, int]]:
+    # Elements are Any because urwid types this list as list[str] while a mouse event
+    # arrives in it as a ("mouse press", button, col, row) tuple -- the thing being dropped.
+    def __call__(self, keys: list[Any], raw: list[int]) -> list[Any]:
         if "window resize" in keys:
             _render_footer(self.state)
-        return keys
+        if not _is_modal_surface_open(self.state):
+            return list(keys)
+        return [key for key in keys if not isinstance(key, tuple)]
 
 
 def _is_focus_on_first_selectable(state: _KanpanState) -> bool:
@@ -758,11 +821,59 @@ def _update_mark_count_footer(state: _KanpanState) -> None:
     _render_footer(state)
 
 
-def _execute_marks(state: _KanpanState) -> None:
-    """Execute all pending marks immediately."""
-    if not state.marks or state.executing:
+class _CollectBatchInput(FrozenModel):
+    """Prompt handler that banks one marked command's answer and moves the batch along."""
+
+    state: _KanpanState
+    key: str
+    remaining_keys: tuple[str, ...]
+    collected: dict[str, str]
+
+    def __call__(self, input_text: str) -> None:
+        _collect_batch_input(self.state, self.remaining_keys, {**self.collected, self.key: input_text})
+
+
+def _prompted_mark_keys(state: _KanpanState) -> tuple[str, ...]:
+    """Keys of the marked commands that ask for a value, in the order they were marked."""
+    keys: list[str] = []
+    for mark_key in state.marks.values():
+        cmd = state.commands.get(mark_key)
+        if isinstance(cmd, CustomCommand) and cmd.prompt and mark_key not in keys:
+            keys.append(mark_key)
+    return tuple(keys)
+
+
+def _collect_batch_input(state: _KanpanState, remaining_keys: tuple[str, ...], collected: Mapping[str, str]) -> None:
+    """Ask for the next prompted command's value, or start the batch once every answer is in.
+
+    One prompt per marked command rather than per agent: the answer applies to all of
+    that command's marks. Cancelling a prompt runs nothing at all and leaves the marks,
+    so a batch is never half-applied on a change of mind.
+    """
+    if not remaining_keys:
+        _start_batch_execution(state, collected)
         return
-    _start_batch_execution(state)
+    key, rest = remaining_keys[0], remaining_keys[1:]
+    cmd = state.commands.get(key)
+    if not isinstance(cmd, CustomCommand):
+        _collect_batch_input(state, rest, collected)
+        return
+    marked_count = sum(1 for marked_key in state.marks.values() if marked_key == key)
+    _open_prompt(
+        state,
+        title=f" {cmd.name} · {marked_count} marked ",
+        caption=cmd.prompt,
+        on_submit=_CollectBatchInput(state=state, key=key, remaining_keys=rest, collected=dict(collected)),
+    )
+
+
+def _execute_marks(state: _KanpanState) -> None:
+    """Execute all pending marks, asking first for any prompted command's value."""
+    # An open prompt means a collection round is already under way; a second `x` would
+    # stack a prompt over it and strand the first.
+    if not state.marks or state.executing or state.open_prompt is not None:
+        return
+    _collect_batch_input(state, _prompted_mark_keys(state), {})
 
 
 class _BatchWorkItem(FrozenModel):
@@ -771,6 +882,8 @@ class _BatchWorkItem(FrozenModel):
     cmd: KanpanCommand
     entry: AgentBoardEntry | None
     batch_names: tuple[AgentName, ...] = ()
+    # Answer collected once for this item's command, shared by every agent marked with it.
+    input_text: str = ""
 
 
 class _BatchItemResult(FrozenModel):
@@ -790,9 +903,13 @@ def _batch_item_label(item: _BatchWorkItem) -> str:
     return f"{item.cmd.name} {item.name}"
 
 
-def _run_shell_command_sync(command: str, agent_name: str) -> subprocess.CompletedProcess[str]:
-    """Run a shell command with MNGR_AGENT_NAME set. Called from a background thread."""
-    env = {**os.environ, "MNGR_AGENT_NAME": agent_name}
+def _run_shell_command_sync(command: str, agent_name: str, input_text: str) -> subprocess.CompletedProcess[str]:
+    """Run a custom command's shell string for one agent. Called from a background thread.
+
+    A prompted command's typed text arrives as ``MNGR_INPUT`` rather than interpolated
+    into the command string, keeping it out of the shell's parse phase.
+    """
+    env = {**os.environ, "MNGR_AGENT_NAME": agent_name, "MNGR_INPUT": input_text}
     return subprocess.run(
         command,
         shell=True,
@@ -803,8 +920,8 @@ def _run_shell_command_sync(command: str, agent_name: str) -> subprocess.Complet
     )
 
 
-def _start_batch_execution(state: _KanpanState) -> None:
-    """Begin executing all marked operations sequentially."""
+def _start_batch_execution(state: _KanpanState, input_text_by_key: Mapping[str, str]) -> None:
+    """Begin executing all marked operations sequentially, with any prompted answers in hand."""
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
@@ -828,7 +945,15 @@ def _start_batch_execution(state: _KanpanState) -> None:
         if isinstance(cmd, MarkableBuiltinCommand) and cmd.role == MarkableBuiltinRole.DELETE:
             delete_names.append(name)
         else:
-            individual_work.append(_BatchWorkItem(name=name, key=mark_key, cmd=cmd, entry=entries_by_name.get(name)))
+            individual_work.append(
+                _BatchWorkItem(
+                    name=name,
+                    key=mark_key,
+                    cmd=cmd,
+                    entry=entries_by_name.get(name),
+                    input_text=input_text_by_key.get(mark_key, ""),
+                )
+            )
 
     work: list[_BatchWorkItem] = []
     if delete_names:
@@ -870,7 +995,7 @@ def _submit_batch_item(
             return None
         case CustomCommand():
             if item.cmd.command:
-                return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
+                return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name), item.input_text)
             return None
         case _:
             assert_never(item.cmd)
@@ -966,15 +1091,18 @@ def _finish_batch_execution(state: _KanpanState, results: list[_BatchItemResult]
     state.execute_errors = tuple(f"{r.label}: {r.detail}" if r.detail else r.label for r in failures)
 
     if not failures:
-        _show_transient_message(state, f"  Executed {ok_count} operation(s) successfully")
+        summary = f"  Executed {ok_count} operation(s) successfully"
     else:
-        _show_transient_message(state, f"  Executed: {ok_count} ok, {len(failures)} failed (see errors below)")
+        summary = f"  Executed: {ok_count} ok, {len(failures)} failed"
 
     _refresh_display(state)
 
-    # Local-only refresh to immediately show updated state
+    # Local-only refresh to immediately show updated state, with the summary held back
+    # until it lands so the count and the rows it counts arrive together.
     if state.loop is not None:
-        _start_local_refresh(state.loop, state)
+        _report_after_refresh(state, summary, state.loop)
+    else:
+        _show_transient_message(state, summary)
 
 
 def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEntry:
@@ -1108,14 +1236,15 @@ def _find_entry_by_name(state: _KanpanState, name: AgentName | None) -> AgentBoa
     return None
 
 
-def _focus_row_by_name(state: _KanpanState, name: AgentName) -> None:
-    """Move the board's list focus to the row for the named agent, if present."""
+def _focus_row_by_name(state: _KanpanState, name: AgentName) -> int | None:
+    """Move the board's list focus to the row for the named agent; report where it landed."""
     if state.list_walker is None:
-        return
+        return None
     for idx, entry in state.index_to_entry.items():
         if entry.name == name:
             state.list_walker.set_focus(idx)
-            return
+            return idx
+    return None
 
 
 def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
@@ -1302,6 +1431,25 @@ def _legend_markup(
     return markup
 
 
+def _panel_hint(bindings: Sequence[tuple[str, str]], hint_attr: str) -> Text:
+    """Right-aligned key hint for a panel in the footer slot, inset from its border."""
+    return Text(
+        [
+            *_legend_markup(bindings, "help_key", hint_attr, _PANEL_HINT_SEPARATOR),
+            (hint_attr, " "),
+        ],
+        align="right",
+    )
+
+
+@pure
+def _binding_description(cmd: KanpanCommand) -> str:
+    """Legend text for a command; a prompted one trails an ellipsis, as a menu item would."""
+    if isinstance(cmd, CustomCommand) and cmd.prompt:
+        return f"{cmd.name}…"
+    return cmd.name
+
+
 @pure
 def _legend_width(bindings: Sequence[tuple[str, str]]) -> int:
     """Rendered width of ``bindings`` laid out the way the belt lays them out, on ``_LEGEND_SEPARATOR``.
@@ -1341,11 +1489,15 @@ def _build_legend_bindings(
     """
     mark_keys = {_BUILTIN_COMMAND_KEY_UNMARK}
     mark_bindings = [
-        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is not None or key in mark_keys
+        (key, _binding_description(cmd))
+        for key, cmd in commands.items()
+        if _mark_color(cmd) is not None or key in mark_keys
     ]
     mark_bindings.append(("U", "unmark all"))
     action_bindings = [
-        (key, cmd.name) for key, cmd in commands.items() if _mark_color(cmd) is None and key not in mark_keys
+        (key, _binding_description(cmd))
+        for key, cmd in commands.items()
+        if _mark_color(cmd) is None and key not in mark_keys
     ]
     overlay_bindings = [
         ("space", "peek"),
@@ -1362,9 +1514,41 @@ def _build_legend_bindings(
         _BUILTIN_COMMAND_KEY_DELETE,
         _BUILTIN_COMMAND_KEY_EXECUTE,
     )
-    footer_legend = [(key, commands[key].name) for key in footer_command_keys if key in commands]
+    footer_legend = [(key, _binding_description(commands[key])) for key in footer_command_keys if key in commands]
     footer_legend += [("q", "quit"), ("?", "more keys")]
     return overlay_bindings, footer_legend
+
+
+def _rounded_line_box(body: Any, title: str) -> LineBox:
+    """A thin-bordered panel with rounded corners and a left-aligned title."""
+    return LineBox(
+        body,
+        title=title,
+        title_align="left",
+        tlcorner="╭",
+        trcorner="╮",
+        blcorner="╰",
+        brcorner="╯",
+    )
+
+
+def _install_footer_panel(state: _KanpanState, panel: Any) -> None:
+    """Show a panel in the footer slot and give it the keyboard, saving the belt it hides."""
+    state.saved_footer = state.frame.footer
+    state.frame.footer = panel
+    state.frame.focus_position = "footer"
+
+
+def _restore_footer_belt(state: _KanpanState) -> None:
+    """Put the saved keybinding belt back in the footer slot and return focus to the board.
+
+    Restoring focus is not optional: leaving it on the footer makes the board unable
+    to receive keys, which reads as a frozen TUI.
+    """
+    if state.saved_footer is not None:
+        state.frame.footer = state.saved_footer
+        state.saved_footer = None
+    state.frame.focus_position = "body"
 
 
 def _build_help_overlay(state: _KanpanState) -> Any:
@@ -1381,15 +1565,7 @@ def _build_help_overlay(state: _KanpanState) -> Any:
     )
     rows.append(Divider())
     listbox: ListBox = ListBox(SimpleFocusListWalker(rows))
-    box = LineBox(
-        Padding(listbox, left=2, right=2),
-        title="Keys",
-        title_align="left",
-        tlcorner="╭",
-        trcorner="╮",
-        blcorner="╰",
-        brcorner="╯",
-    )
+    box = _rounded_line_box(Padding(listbox, left=2, right=2), "Keys")
     description_width = max((len(description) for _, description in state.legend_bindings), default=1)
     width = 2 + 2 + key_width + 3 + description_width + 2 + 2
     height = len(rows) + 2
@@ -1433,13 +1609,7 @@ def _build_peek_panel(state: _KanpanState) -> LineBox:
     """Build the peek panel (a bordered box shown in place of the footer) and stash its parts."""
     state.peek_body_text = Text("", wrap="space")
     state.peek_input = _make_readline_edit(("peek_user", PEEK_REPLY_PROMPT))
-    hint = Text(
-        [
-            *_legend_markup([("enter", "send"), ("esc", "close")], "help_key", "peek_hint", " \u00b7 "),
-            ("peek_hint", " "),
-        ],
-        align="right",
-    )
+    hint = _panel_hint([("enter", "send"), ("esc", "close")], "peek_hint")
     inner = Pile(
         [
             state.peek_body_text,
@@ -1450,15 +1620,7 @@ def _build_peek_panel(state: _KanpanState) -> LineBox:
     )
     # Focus the reply input so typed keys land in it.
     inner.focus_position = 2
-    box = LineBox(
-        inner,
-        title="Peek",
-        title_align="left",
-        tlcorner="╭",
-        trcorner="╮",
-        blcorner="╰",
-        brcorner="╯",
-    )
+    box = _rounded_line_box(inner, "Peek")
     state.peek_box = box
     return box
 
@@ -1549,10 +1711,7 @@ def _open_peek(state: _KanpanState) -> None:
     state.peek_transcript = ""
     state.peek_pending_replies = []
     state.peek_reply_error = ""
-    panel = _build_peek_panel(state)
-    state.saved_footer = state.frame.footer
-    state.frame.footer = panel
-    state.frame.focus_position = "footer"
+    _install_footer_panel(state, _build_peek_panel(state))
     _update_peek_header(state)
     if state.peek_body_text is not None:
         state.peek_body_text.set_text(("peek_hint", "(loading...)"))
@@ -1567,10 +1726,7 @@ def _close_peek(state: _KanpanState) -> None:
     _cancel_peek_alarm(state)
     state.peek_capture_future = None
     state.peek_agent_name = None
-    if state.saved_footer is not None:
-        state.frame.footer = state.saved_footer
-        state.saved_footer = None
-    state.frame.focus_position = "body"
+    _restore_footer_belt(state)
     state.focused_agent_name = closed_name
     _focus_row_by_name(state, closed_name)
     state.peek_box = None
@@ -1989,7 +2145,10 @@ def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None
             _toggle_mark(state, key)
             return
         if cmd.command:
-            _run_shell_command(state, cmd)
+            if cmd.prompt:
+                _open_prompt_for_command(state, cmd)
+            else:
+                _run_shell_command(state, cmd)
         return
     # cmd is ActionBuiltinCommand; match on role for exhaustive dispatch.
     match cmd.role:
@@ -2008,33 +2167,137 @@ def _dispatch_command(state: _KanpanState, key: str, cmd: KanpanCommand) -> None
             assert_never(cmd.role)
 
 
+def _launch_custom_command(
+    state: _KanpanState,
+    executor: ThreadPoolExecutor,
+    cmd: CustomCommand,
+    agent_name: AgentName,
+    input_text: str,
+) -> None:
+    """Start a custom command in the background, showing the spinner and polling for it."""
+    state.action_label = f"  Running {cmd.name} on {agent_name}"
+    _render_footer(state)
+    _ensure_animation_running(state)
+    future = executor.submit(_run_shell_command_sync, cmd.command, str(agent_name), input_text)
+    if state.loop is not None:
+        state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, (state, future, cmd, agent_name))
+
+
 def _run_shell_command(state: _KanpanState, cmd: CustomCommand) -> None:
-    """Run a user-defined custom command on the focused agent."""
+    """Run a non-prompted custom command on the focused agent."""
     entry = _get_focused_entry(state)
     if entry is None:
         return
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
+    _launch_custom_command(state, state.executor, cmd, entry.name, "")
 
-    agent_name = entry.name
-    state.action_label = f"  Running {cmd.name} on {agent_name}"
-    _render_footer(state)
-    _ensure_animation_running(state)
 
-    def _do_run() -> subprocess.CompletedProcess[str]:
-        env = {**os.environ, "MNGR_AGENT_NAME": str(agent_name)}
-        return subprocess.run(
-            cmd.command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
-        )
+def _ensure_prompt_executor(state: _KanpanState) -> ThreadPoolExecutor:
+    """Return the single-worker prompted-command executor, creating it on first use."""
+    if state.prompt_executor is None:
+        state.prompt_executor = ThreadPoolExecutor(max_workers=1)
+    return state.prompt_executor
 
-    future = state.executor.submit(_do_run)
+
+class _RunPromptedCommand(FrozenModel):
+    """Prompt handler that runs a custom command with the submitted text as MNGR_INPUT."""
+
+    state: _KanpanState
+    cmd: CustomCommand
+    agent_name: AgentName
+
+    def __call__(self, input_text: str) -> None:
+        _launch_custom_command(self.state, _ensure_prompt_executor(self.state), self.cmd, self.agent_name, input_text)
+
+
+def _open_prompt_for_command(state: _KanpanState, cmd: CustomCommand) -> None:
+    """Ask for a prompted command's input, bound to the agent focused right now."""
+    entry = _get_focused_entry(state)
+    if entry is None:
+        return
+    state.focused_agent_name = entry.name
+    # Title names only the agent: the caption is the command's own `prompt` text, which
+    # already says what is being asked, so repeating the command name reads as a stutter.
+    _open_prompt(
+        state,
+        title=f" {entry.name} ",
+        caption=cmd.prompt,
+        on_submit=_RunPromptedCommand(state=state, cmd=cmd, agent_name=entry.name),
+    )
+
+
+def _build_prompt_overlay(state: _KanpanState, title: str, edit: ReadlineEdit) -> Overlay:
+    """A compact bordered input floating in the middle of the board.
+
+    Centred rather than parked in the footer slot because the prompt is modal -- board
+    keys and clicks are both withheld while it is open -- and sized to the input rather
+    than to the terminal, so a wide screen does not stretch one short line across it.
+    """
+    hint = _panel_hint([("enter", "apply"), ("esc", "cancel")], "prompt_hint")
+    inner = Pile([edit, hint])
+    # Focus the input so typed keys land in it.
+    inner.focus_position = 0
+    return Overlay(
+        _rounded_line_box(Padding(inner, left=1, right=1), title),
+        state.frame,
+        align="center",
+        width=_PROMPT_WIDTH,
+        valign="middle",
+        height="pack",
+    )
+
+
+def _open_prompt(state: _KanpanState, title: str, caption: str, on_submit: Callable[[str], None]) -> None:
+    """Ask for one line of text in a centred box, to be answered by ``on_submit``.
+
+    Nothing here knows what the answer drives -- callers bind their target when they
+    build the handler. ``title`` names that target; the board's own selection highlight
+    is not drawn while the overlay holds focus, so the title is the only cue for it.
+    """
+    # A second prompt would replace the first as the loop's widget, stranding it open in
+    # state with no way to reach or dismiss it.
+    if state.open_prompt is not None:
+        return
+    edit = _make_readline_edit(("prompt_caption", caption))
+    state.open_prompt = _OpenPrompt(edit=edit, on_submit=on_submit)
     if state.loop is not None:
-        state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, (state, future, cmd, agent_name))
+        state.loop.widget = _build_prompt_overlay(state, title, edit)
+
+
+def _close_prompt(state: _KanpanState) -> None:
+    """Close the prompt, handing the screen back to the board."""
+    if state.open_prompt is None:
+        return
+    state.open_prompt = None
+    if state.loop is not None:
+        state.loop.widget = state.frame
+
+
+def _submit_prompt(state: _KanpanState) -> None:
+    """Hand the typed text to the open prompt's handler, closing the prompt first.
+
+    An empty line is a valid submission -- ``mngr label X -l "tag="`` is the only way to
+    clear a label -- so Esc rather than an empty Enter carries the cancel meaning.
+    Closing first means the handler's own footer messages are visible as it runs.
+    """
+    open_prompt = state.open_prompt
+    if open_prompt is None:
+        return
+    input_text = open_prompt.edit.get_edit_text()
+    _close_prompt(state)
+    open_prompt.on_submit(input_text)
+
+
+def _handle_prompt_key(state: _KanpanState, key: str) -> bool | None:
+    """Route keys while a prompt is open. Printable keys reach the input Edit."""
+    if key in ("esc", "ctrl c"):
+        _close_prompt(state)
+        return True
+    if key == "enter":
+        _submit_prompt(state)
+        return True
+    return None
 
 
 def _on_custom_command_poll(
@@ -2042,21 +2305,22 @@ def _on_custom_command_poll(
 ) -> None:
     """Poll for custom command completion."""
     state, future, cmd, agent_name = data
-    if future.done():
-        state.action_label = None
-        try:
-            result = future.result()
-            if result.returncode == 0:
-                _show_transient_message(state, f"  {cmd.name} completed for {agent_name}")
-            else:
-                stderr = result.stderr.strip()
-                _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {stderr}")
-        except Exception as e:
-            _show_transient_message(state, f"  {cmd.name} failed for {agent_name}: {e}")
-        if cmd.refresh_afterwards:
-            _start_local_refresh(loop, state)
-    else:
+    if not future.done():
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, data)
+        return
+    try:
+        result = future.result()
+        if result.returncode == 0:
+            message = f"  {cmd.name} completed for {agent_name}"
+        else:
+            message = f"  {cmd.name} failed for {agent_name}: {result.stderr.strip()}"
+    except Exception as e:
+        message = f"  {cmd.name} failed for {agent_name}: {e}"
+    if cmd.refresh_afterwards:
+        _report_after_refresh(state, message, loop)
+    else:
+        state.action_label = None
+        _show_transient_message(state, message)
 
 
 def _refresh_stamp(seconds_ago: float, fetch_seconds: float | None) -> str:
@@ -2183,6 +2447,30 @@ def _show_transient_message(state: _KanpanState, message: str) -> None:
             state.loop.remove_alarm(state.transient_alarm)
         state.transient_alarm = state.loop.set_alarm_in(TRANSIENT_MESSAGE_SECONDS, _on_transient_expire, state)
     _render_footer(state)
+
+
+def _report_after_refresh(state: _KanpanState, message: str, loop: MainLoop) -> None:
+    """Hold `message` until a refresh has repainted the board, then show it.
+
+    A command that repaints produced two beats otherwise: the outcome, then a second
+    later the rows it was describing. Holding it keeps the in-progress label up across
+    both, so the board changes and says why in one step.
+    """
+    state.pending_completion_message = message
+    _start_local_refresh(loop, state)
+    if state.refresh_future is None:
+        # Nothing to wait on -- a refresh was already in flight and this one was dropped.
+        _flush_pending_completion(state)
+
+
+def _flush_pending_completion(state: _KanpanState) -> None:
+    """Show the outcome a command left waiting for its repaint, if there is one."""
+    message = state.pending_completion_message
+    if message is None:
+        return
+    state.pending_completion_message = None
+    state.action_label = None
+    _show_transient_message(state, message)
 
 
 def _on_transient_expire(loop: MainLoop, state: _KanpanState) -> None:
@@ -2322,6 +2610,7 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
     _refresh_display(state)
     _prune_orphaned_marks(state)
+    _flush_pending_completion(state)
 
     if state.snapshot is not None and not was_local_only:
         state.last_fetch_seconds = state.snapshot.fetch_time_seconds
@@ -2340,8 +2629,9 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 def _carry_forward_fields(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapshot:
     """Carry forward field data from a previous full snapshot for local-only refreshes.
 
-    Local-only refreshes only run git_info and repo_paths. Other fields (PR, CI, etc.)
-    are carried forward from the previous snapshot.
+    A local-only refresh runs every non-remote data source, so the fields those produce
+    arrive fresh; the fields only remote sources produce (PR, CI, shell columns) are
+    carried forward from the previous snapshot.
     """
     old_by_name = {entry.name: entry for entry in old.entries}
     updated_entries: list[AgentBoardEntry] = []
@@ -2875,12 +3165,40 @@ def _build_board_widgets(
     return walker, index_to_entry
 
 
+def _board_body_size(state: _KanpanState) -> tuple[int, int] | None:
+    """Size of the board's own rows, or None when there is no screen to measure against."""
+    if state.loop is None:
+        return None
+    cols, rows = state.loop.screen.get_cols_rows()
+    (header_rows, footer_rows), _originals = state.frame.frame_top_bottom((cols, rows), True)
+    body_rows = rows - header_rows - footer_rows
+    return (cols, body_rows) if cols > 0 and body_rows > 0 else None
+
+
+def _focused_row_offset(state: _KanpanState, size: tuple[int, int] | None) -> int | None:
+    """How far down the screen the focused row currently sits, if anything is focused."""
+    body = state.frame.body
+    if size is None or not isinstance(body, ListBox) or state.list_walker is None:
+        return None
+    _widget, position = state.list_walker.get_focus()
+    if position is None:
+        return None
+    offset, _inset = body.get_focus_offset_inset(size)
+    return offset
+
+
 def _refresh_display(state: _KanpanState) -> None:
     """Rebuild the body display from the current snapshot."""
     # Save the currently focused agent name before rebuilding
     focused_entry = _get_focused_entry(state)
     if focused_entry is not None:
         state.focused_agent_name = focused_entry.name
+
+    # Where the focused row sits on screen, so the rebuild can put it back there. A fresh
+    # ListBox starts scrolled to the top, and moving the walker's focus does not tell the
+    # ListBox where to draw it -- so without this the view jumps on every refresh.
+    body_size = _board_body_size(state)
+    previous_offset = _focused_row_offset(state, body_size)
 
     # Update field color palette from snapshot and register new entries with the screen
     field_palette, field_attr_names = _build_field_color_palette(state.snapshot)
@@ -2899,11 +3217,14 @@ def _refresh_display(state: _KanpanState) -> None:
         execute_errors=state.execute_errors,
     )
     state.list_walker = walker
-    state.frame.body = ListBox(walker)
+    listbox: ListBox = ListBox(walker)
+    state.frame.body = listbox
 
-    # Restore focus to the previously focused agent
+    # Restore focus to the previously focused agent, at the height it was already at.
     if state.focused_agent_name is not None:
-        _focus_row_by_name(state, state.focused_agent_name)
+        restored_index = _focus_row_by_name(state, state.focused_agent_name)
+        if restored_index is not None and previous_offset is not None and body_size is not None:
+            listbox.change_focus(body_size, restored_index, offset_inset=previous_offset)
 
     # An open peek panel's title shows live state; re-render it from the new entries.
     _update_peek_header(state)
@@ -3074,3 +3395,5 @@ def run_kanpan(
                 state.peek_executor.shutdown(wait=False)
             if state.peek_reply_executor is not None:
                 state.peek_reply_executor.shutdown(wait=False)
+            if state.prompt_executor is not None:
+                state.prompt_executor.shutdown(wait=False)

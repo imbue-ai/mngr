@@ -237,7 +237,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(7))
+    rc.check_direct_subprocess(_DIR, snapshot(6))
 
 
 def test_prevent_bare_tmux_targets() -> None:
@@ -252,7 +252,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(2))
+    rc.check_inline_functions(_DIR, snapshot(1))
 
 
 def test_prevent_underscore_imports() -> None:

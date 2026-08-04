@@ -70,11 +70,11 @@ class LabelsDataSource(FrozenModel):
         label_key = self.config.label_key
         now = now_utc()
         fields: dict[AgentName, dict[str, FieldValue]] = {}
+        # Every agent gets a field, empty value included: a local refresh merges over the
+        # previous snapshot, so an omitted field leaves a cleared label's old cell on the board.
         for agent in agents:
             value = agent.labels.get(label_key, "")
-            if value:
-                color = self.config.colors.get(value)
-                fields[agent.name] = {
-                    self.field_key: _ColoredStringField(value=value, color=color, created=now),
-                }
+            fields[agent.name] = {
+                self.field_key: _ColoredStringField(value=value, color=self.config.colors.get(value), created=now),
+            }
         return fields, []

@@ -36,7 +36,10 @@ def test_labels_compute_agent_with_label() -> None:
     assert field.color is None
 
 
-def test_labels_compute_agent_without_label() -> None:
+def test_labels_compute_agent_without_label_emits_empty_value() -> None:
+    # An absent label emits a field with an empty value, not no field at all: a local
+    # refresh merges the previous snapshot underneath, so an omitted field would leave
+    # a cleared label's stale cell on the board until the next full refresh.
     ds = LabelsDataSource(
         field_key="priority",
         config=LabelColumnConfig(header="PRIORITY", label_key="priority"),
@@ -48,7 +51,11 @@ def test_labels_compute_agent_without_label() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    assert agent.name not in fields
+    field = fields[agent.name]["priority"]
+    assert isinstance(field, _ColoredStringField)
+    assert field.value == ""
+    assert field.color is None
+    assert field.display().text == ""
 
 
 def test_labels_compute_with_color_map() -> None:
@@ -142,8 +149,6 @@ def test_labels_compute_multiple_agents() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    assert agent_a.name in fields
-    assert agent_b.name not in fields
-    assert agent_c.name in fields
     assert fields[agent_a.name]["status"].display().text == "active"
+    assert fields[agent_b.name]["status"].display().text == ""
     assert fields[agent_c.name]["status"].display().text == "idle"
