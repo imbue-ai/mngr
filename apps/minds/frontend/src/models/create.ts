@@ -64,9 +64,22 @@ export interface LandingExtras {
   has_restorable_workspaces: boolean;
 }
 
+export interface OnboardingCloudApp {
+  icon: string;
+  name: string;
+}
+
+export interface LiveCreateAttemptDetail {
+  workspace_name: string;
+  provider_label: string;
+  is_remote: boolean;
+  expected_duration_seconds: number;
+  onboarding_services: OnboardingCloudApp[];
+}
+
 export interface CreateAttemptDetail {
   kind: "live" | "record" | "gone";
-  live: { workspace_name: string; provider_label: string } | null;
+  live: LiveCreateAttemptDetail | null;
   record: {
     state: "interrupted" | "failed";
     workspace_name: string;

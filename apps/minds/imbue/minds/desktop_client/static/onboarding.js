@@ -2,25 +2,25 @@
 // progress/status/failure and signals readiness by setting data-ready +
 // data-redirect-url on #creating and dispatching 'minds:create-ready'.
 //
-// The walkthrough plays by itself: seven steps, each held for 6.5s. The
-// dots sit still, the current one stretched into a pill that fills as the
-// step runs out; clicking any dot jumps to its step. Each step swaps the graphic; the
-// browser demo's tabs (chat -> app -> browser) accumulate as it advances --
-// each new tab is opened by a pointer that flies to the "+" and clicks it.
-// The moment the workspace is ready the page enters it, wherever the
-// walkthrough has got to.
+// The walkthrough plays by itself: nine steps, held for 7s each bar the
+// three that play a longer sequence (see STEP_MS_BY_STEP). The dots sit
+// still, the current one stretched into a pill that fills as the step runs
+// out; clicking any dot jumps to its step. Each step swaps the graphic. On
+// the tabs step the demo pulls the app up beside the chat (is-split in
+// app.css). The moment the workspace is ready the page enters it, wherever
+// the walkthrough has got to.
 (function () {
   var root = document.getElementById('creating');
   var onboarding = document.getElementById('onboarding');
   if (!root || !onboarding) return;
 
-  var TOTAL_STEPS = 8;
+  var TOTAL_STEPS = 9;
   var LAST_STEP = TOTAL_STEPS;
   // How long each step is held before the walkthrough moves on. The
   // connections step runs a sequence (approve, then the link forms), so it
   // gets longer than the rest.
   var STEP_MS = 7000;
-  var STEP_MS_BY_STEP = { 2: 10000, 5: 16000, 7: 9000 };
+  var STEP_MS_BY_STEP = { 3: 10000, 6: 16000, 8: 9000 };
 
   function dwellFor(stepNumber) {
     return STEP_MS_BY_STEP[stepNumber] || STEP_MS;
@@ -30,21 +30,8 @@
 
   var dots = Array.prototype.slice.call(document.querySelectorAll('.onboarding-dot'));
   var demo = document.getElementById('theme-demo');
-  var demoCursor = document.getElementById('demo-cursor');
-  var demoPlus = demo ? demo.querySelector('.demo-plus') : null;
-  var demoSplash = document.getElementById('demo-click-splash');
-  var newTabTimers = [];
-  // Pointer beats. The tab that is already open gets a beat to be read before
-  // anything happens; then the pointer teleports (no transition) to the middle
-  // of the window, shows there, glides once in a straight line to the "+",
-  // clicks it (which opens the tab), and disappears. The glide is 520ms (see
-  // .demo-cursor).
-  var NEW_TAB_SHOW_MS = 1500;
-  var NEW_TAB_PRESS_MS = 2200;
-  var NEW_TAB_OPEN_MS = 2360;
-  var NEW_TAB_DONE_MS = 2900;
-  // The step rendered last, so render() can tell a forward Next (which opens
-  // a tab with the pointer) from a jump or a Previous (which just applies).
+  // The step rendered last: arriving at the tabs step from the chat step is
+  // what makes the window form around the conversation (is-forming).
   var lastRenderedStep = null;
 
   // Which graphic block a step shows, and the browser tabs revealed/active
@@ -52,120 +39,20 @@
   // stands in the graphic's place so the reserved height is not left blank.
   function graphicForStep(s) {
     if (s === 1) return 'gfx-minds';
-    if (s === 2) return 'gfx-chat';
-    if (s === 3) return 'gfx-browser';
-    if (s === 4) return 'gfx-apps';
-    if (s === 5) return 'gfx-connect';
-    if (s === 6) return 'gfx-devices';
-    if (s === 7) return 'gfx-publish';
+    if (s === 2) return 'gfx-machine';
+    if (s === 3) return 'gfx-chat';
+    if (s === 4) return 'gfx-browser';
+    if (s === 5) return 'gfx-apps';
+    if (s === 6) return 'gfx-connect';
+    if (s === 7) return 'gfx-devices';
+    if (s === 8) return 'gfx-publish';
     return 'gfx-tips';
   }
-  // The demo opens a second tab on its one step: it starts on Chat, and the
-  // pointer clicks "+" to open the app tab.
-  var TAB_ORDER = ['chat', 'app'];
-  var ACTIVE_TAB_BY_STEP = { 3: 'app' };
-
-  function isReady() {
-    return root.getAttribute('data-ready') === 'true';
-  }
-
   function showGraphic(id) {
-    ['gfx-minds', 'gfx-chat', 'gfx-browser', 'gfx-apps', 'gfx-connect',
-     'gfx-devices', 'gfx-publish', 'gfx-tips'].forEach(function (gid) {
+    ['gfx-minds', 'gfx-machine', 'gfx-chat', 'gfx-browser', 'gfx-apps',
+     'gfx-connect', 'gfx-devices', 'gfx-publish', 'gfx-tips'].forEach(function (gid) {
       var el = document.getElementById(gid);
       if (el) el.classList.toggle('hidden', gid !== id);
-    });
-  }
-
-  // Reveal the first ``revealCount`` tabs and select ``activeTab``.
-  function applyBrowserTabs(revealCount, activeTab) {
-    demo.querySelectorAll('.demo-tab').forEach(function (tab) {
-      var idx = TAB_ORDER.indexOf(tab.getAttribute('data-tab'));
-      tab.classList.toggle('demo-tab-pending', idx >= revealCount);
-      tab.classList.toggle('demo-tab-active', tab.getAttribute('data-tab') === activeTab);
-    });
-    demo.querySelectorAll('.demo-pane').forEach(function (pane) {
-      pane.classList.toggle('hidden', pane.getAttribute('data-pane') !== activeTab);
-    });
-  }
-
-  function clearNewTabAnimation() {
-    newTabTimers.forEach(clearTimeout);
-    newTabTimers = [];
-    if (demoPlus) demoPlus.classList.remove('is-pressed');
-    if (demoCursor) {
-      demoCursor.style.opacity = '0';
-      demoCursor.classList.remove('is-pressing');
-    }
-    if (demoSplash) demoSplash.classList.remove('is-splashing');
-  }
-
-  // Fly the pointer to the "+" button, press it, and call ``openTab`` on the
-  // click so the new tab appears as a result of the click.
-  function playNewTabClick(openTab) {
-    var demoRect = demo.getBoundingClientRect();
-    var plusRect = demoPlus.getBoundingClientRect();
-    if (!plusRect.width) {
-      openTab();
-      return;
-    }
-    // The pointer always makes the same trip: from the middle of the window
-    // to the "+", where it stays put while the new tab opens.
-    var x = plusRect.left - demoRect.left + plusRect.width / 2 - 3;
-    var y = plusRect.top - demoRect.top + plusRect.height / 2;
-    var at = function () {
-      return 'translate(' + x + 'px, ' + y + 'px)';
-    };
-    // Teleport to the middle of the window and show there, both with no
-    // transition, so the only animated move is the straight glide below.
-    demoCursor.style.transition = 'none';
-    demoCursor.style.opacity = '0';
-    demoCursor.style.transform =
-      'translate(' + demoRect.width / 2 + 'px, ' + demoRect.height / 2 + 'px)';
-    void demoCursor.offsetWidth;
-    demoCursor.style.opacity = '1';
-    void demoCursor.offsetWidth;
-    demoCursor.style.transition = '';
-    newTabTimers.push(setTimeout(function () {
-      demoCursor.style.transform = at();
-    }, NEW_TAB_SHOW_MS));
-    newTabTimers.push(setTimeout(function () {
-      demoPlus.classList.add('is-pressed');
-      demoCursor.classList.add('is-pressing');
-      // Splash ring blooming out of the pointer tip.
-      if (demoSplash) {
-        demoSplash.style.left = x + 'px';
-        demoSplash.style.top = y + 'px';
-        demoSplash.classList.remove('is-splashing');
-        void demoSplash.offsetWidth;
-        demoSplash.classList.add('is-splashing');
-      }
-    }, NEW_TAB_PRESS_MS));
-    newTabTimers.push(setTimeout(function () {
-      // Release the press and open the tab; the pointer holds its spot.
-      demoPlus.classList.remove('is-pressed');
-      demoCursor.classList.remove('is-pressing');
-      openTab();
-    }, NEW_TAB_OPEN_MS));
-    newTabTimers.push(setTimeout(function () {
-      demoCursor.style.opacity = '0';
-    }, NEW_TAB_DONE_MS));
-  }
-
-  function updateBrowserTabs(animateNewTab) {
-    if (!demo) return;
-    var activeTab = ACTIVE_TAB_BY_STEP[step];
-    if (!activeTab) return;
-    var revealCount = TAB_ORDER.indexOf(activeTab) + 1;
-    clearNewTabAnimation();
-    if (!animateNewTab || !demoCursor || !demoPlus || revealCount < 2) {
-      applyBrowserTabs(revealCount, activeTab);
-      return;
-    }
-    // Hold the previous tab set until the pointer actually clicks "+".
-    applyBrowserTabs(revealCount - 1, TAB_ORDER[revealCount - 2]);
-    playNewTabClick(function () {
-      applyBrowserTabs(revealCount, activeTab);
     });
   }
 
@@ -199,17 +86,22 @@
 
     var g = graphicForStep(step);
     showGraphic(g);
-    if (g === 'gfx-browser') {
-      updateBrowserTabs(lastRenderedStep !== null && step === lastRenderedStep + 1);
-    } else {
-      clearNewTabAnimation();
+    // The agent pulls the app up beside the chat: is-split narrows the chat
+    // column and reveals the dashboard (and its tab). Removing and re-adding
+    // the class replays the entrance on every visit.
+    if (demo) {
+      demo.classList.remove('is-split');
+      if (g === 'gfx-browser') {
+        void demo.offsetWidth;
+        demo.classList.add('is-split');
+      }
     }
     // Arriving from the chat step, the window forms around the conversation
     // that is already on screen rather than anything having to travel.
     var browser = document.getElementById('gfx-browser');
     if (browser) {
       browser.classList.remove('is-forming');
-      if (g === 'gfx-browser' && lastRenderedStep === 2) {
+      if (g === 'gfx-browser' && lastRenderedStep === 3) {
         void browser.offsetWidth;
         browser.classList.add('is-forming');
       }
@@ -240,10 +132,7 @@
 
     renderDots();
 
-    var ready = isReady();
     lastRenderedStep = step;
-
-    onboarding.classList.toggle('is-ready', ready);
   }
 
   // ---- Auto-advance ----
@@ -268,8 +157,8 @@
 
   var entering = false;
 
-  // Enter straight away, with no zoom: used from the intro screen, where the
-  // walkthrough's workspace tile is not on screen to dive into.
+  // Enter straight away, with no zoom: used when the step on screen has no
+  // picture to dive into.
   function enterNow() {
     var url = root.getAttribute('data-redirect-url');
     if (!url || entering) return;
@@ -307,16 +196,15 @@
   root.setAttribute('data-walkthrough-active', 'true');
 
   // The workspace being ready wins over whatever step is showing: go in.
-  // The dive-into-the-workspace zoom only reads when the final picture is
-  // the graphic on screen, which is where the walkthrough normally is by
-  // then; from an earlier step, enter straight away.
+  // The zoom dives into the picture on screen, so it needs one: the last
+  // step is a line of text with no illustration, and that is where the
+  // walkthrough usually is by the time a machine is ready.
   root.addEventListener('minds:create-ready', function () {
     render();
-    var pictureGraphic = document.getElementById('gfx-connect');
-    if (pictureGraphic && !pictureGraphic.classList.contains('hidden')) {
-      begin();
-    } else {
+    if (graphicForStep(step) === 'gfx-tips') {
       enterNow();
+    } else {
+      begin();
     }
   });
 
@@ -422,13 +310,14 @@
   // ---- Chat step: the request types itself, then tries other things ----
   // A CSS typewriter clips a line to a fixed width, which cannot backspace
   // through phrases of differing length, so the text is driven from here.
-  var CHAT_PREFIX = 'Hey! I want to make ';
-  // Three requests, ending on the tracker: that is the app the next step
-  // opens, so the tab picks up exactly where the typing left off.
+  var CHAT_PREFIX = 'I want ';
+  // The last option is the one the walkthrough stays on: the next step's
+  // window opens exactly this dashboard. Keep .chat-reserve in the template
+  // holding the longest option so the bubble never resizes.
   var CHAT_OPTIONS = [
-    'a dashboard for my plants.',
-    'an inbox for my email.',
-    'a tracker for my workouts.'
+    'a custom "to do" app.',
+    'you to filter my emails.',
+    'to build a dashboard.'
   ];
   var CHAT_TYPE_MS = 45;
   var CHAT_ERASE_MS = 22;

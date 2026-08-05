@@ -637,11 +637,13 @@ def test_render_create_form_shows_error_message_when_supplied() -> None:
 
 
 def test_render_creating_page_renders_onboarding_walkthrough() -> None:
-    """The creating page carries the five-step onboarding walkthrough.
+    """The creating page carries the nine-step onboarding walkthrough.
 
-    The title, the step markers (1..5), the intro panel + advance button,
-    and the graphics (minds logo, browser demo, app cloud, and the final
-    latchkey/tunnel illustration) must all be present on first paint.
+    The title, the step markers (1..9), the dot strip that navigates them,
+    and the graphics (minds mark, machine, chat, browser demo, app cloud,
+    the permissions scene, devices, publishing) must all be present on first
+    paint. There is no intro panel and no button to start it: it plays
+    itself.
     """
     create_attempt_id = CreateAttemptId()
     info = AgentCreateAttemptInfo(
@@ -660,11 +662,12 @@ def test_render_creating_page_renders_onboarding_walkthrough() -> None:
     ]
     html = render_creating_page(create_attempt_id=create_attempt_id, info=info, onboarding_services=services)
     assert "Setting up your machine" in html
-    # Eight walkthrough steps: the intro, the chat, the tabs demo, the apps
-    # cloud, the connections scene, the devices, publishing, and the tips.
-    for step_number in range(1, 9):
+    # Nine walkthrough steps: the intro, the machine, the chat, the tabs
+    # demo, the apps cloud, the connections scene, the devices, publishing,
+    # and the tips.
+    for step_number in range(1, 10):
         assert f'data-step="{step_number}"' in html
-    assert 'data-step="9"' not in html
+    assert 'data-step="10"' not in html
     assert 'id="intro-panel"' not in html
     # The progress strip is always visible.
     strip_index = html.index('id="top-strip"')
@@ -679,7 +682,7 @@ def test_render_creating_page_renders_onboarding_walkthrough() -> None:
     # circle carrying the sweep arc.
     assert 'id="onboarding-advance"' not in html
     assert 'id="onboarding-prev"' not in html
-    assert html.count('class="onboarding-dot"') == 8
+    assert html.count('class="onboarding-dot"') == 9
     # The current step's dot stretches into a pill whose fill times the dwell.
     assert "onboarding-dot-fill" in html
     # The strip is dots alone: no play/pause/replay control.
@@ -687,6 +690,7 @@ def test_render_creating_page_renders_onboarding_walkthrough() -> None:
     # Graphics for the phases.
     for gfx in (
         'id="gfx-minds"',
+        'id="gfx-machine"',
         'id="gfx-chat"',
         'id="gfx-browser"',
         'id="gfx-apps"',
@@ -732,23 +736,23 @@ def test_render_creating_page_opens_on_the_minds_intro() -> None:
     )
     html = render_creating_page(create_attempt_id=create_attempt_id, info=info)
     assert 'data-surface-errors="true"' in html
-    assert "This is Minds: your machine for building personalized apps." in html
+    assert "Minds is your personal AI operating system." in html
     # Every step is two lines: what the thing is, then what you do with it.
-    assert "Learn more while you wait." in html
+    assert "Learn your way around while your machine sets up." in html
     # The minds mark is defined once and referenced wherever it is shown.
     assert 'id="minds-mark"' in html
     assert html.count('href="#minds-mark"') == 1
     # Both devices show the same miniature of the app pane.
     assert html.count('href="#app-ui"') == 2
     # Nothing invites a click to start it any more.
-    assert "Learn more while you wait?" not in html
+    assert "Learn more while you wait" not in html
     # The tips sit on their own final step rather than crowding the picture.
-    tips_index = html.index('data-step="8"')
+    tips_index = html.index('data-step="9"')
     assert 'id="tip"' in html[tips_index : html.index("</div>", html.index('id="tip"'))]
 
 
 def test_render_creating_page_final_copy_matches_launch_mode() -> None:
-    """The final step explains where the workspace runs, per launch mode."""
+    """The machine and sharing steps explain where the machine runs, per launch mode."""
     create_attempt_id = CreateAttemptId()
     local_info = AgentCreateAttemptInfo(
         create_attempt_id=create_attempt_id,
@@ -757,7 +761,9 @@ def test_render_creating_page_final_copy_matches_launch_mode() -> None:
     )
     local_html = render_creating_page(create_attempt_id=create_attempt_id, info=local_info)
     assert "runs locally, so your computer has to be on" in local_html
-    assert 'data-is-remote="false"' in local_html
+    assert "This one runs right on your own computer." in local_html
+    # The machine drawing matches: the local variant is the laptop with a star.
+    assert 'id="gfx-machine"' in local_html
 
     remote_info = AgentCreateAttemptInfo(
         create_attempt_id=create_attempt_id,
@@ -766,7 +772,7 @@ def test_render_creating_page_final_copy_matches_launch_mode() -> None:
     )
     remote_html = render_creating_page(create_attempt_id=create_attempt_id, info=remote_info)
     assert "even when your laptop is closed" in remote_html
-    assert 'data-is-remote="true"' in remote_html
+    assert "secure cloud, but is dedicated to you" in remote_html
 
 
 def test_render_creating_page_carries_hidden_github_auth_guidance() -> None:

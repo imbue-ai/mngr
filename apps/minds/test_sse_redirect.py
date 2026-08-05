@@ -156,16 +156,9 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 logger.info("CreateAttempt done, waiting for the ready state...")
                 page.wait_for_selector("#creating[data-ready='true']", state="attached", timeout=10000)
 
-                # Click through the onboarding walkthrough to the last step,
-                # where the Begin button appears once the workspace is ready;
-                # clicking it performs the actual navigation.
-                for _ in range(20):
-                    if page.locator("#onboarding-begin").is_visible():
-                        break
-                    page.click("#onboarding-next")
-                page.click("#onboarding-begin")
-
-                logger.info("Begin clicked, waiting for browser redirect...")
+                # Nothing to click: the walkthrough enters the workspace itself
+                # as soon as it sees the ready state, wherever it has got to.
+                logger.info("Ready state reached, waiting for browser redirect...")
                 page.wait_for_url(re.compile(r"/goto/"), timeout=10000)
                 logger.info("Redirect happened! URL: {}", page.url)
                 assert f"/goto/{agent_id}" in page.url

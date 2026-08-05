@@ -1003,7 +1003,7 @@ def _create_workspace_and_first_message(
         chrome.click("#create-submit")
     with contextlib.suppress(Exception):
         chrome.wait_for_function(
-            "document.body.innerText.includes('Setting up your workspace')",
+            "document.body.innerText.includes('Setting up your machine')",
             timeout=15_000,
         )
     snap_page(chrome, snaps.submitted)

@@ -622,8 +622,8 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
  * ---------------------------------------------------------------------------
  * Creating-page onboarding walkthrough (Creating.jinja + onboarding.js).
  *
- * The walkthrough is eight steps and plays by itself. #onboarding carries
- * data-step (1..8); onboarding.js swaps which #graphic block is visible per
+ * The walkthrough is nine steps and plays by itself. #onboarding carries
+ * data-step (1..9); onboarding.js swaps which #graphic block is visible per
  * step and toggles the step text panels. The CSS here styles the browser
  * demo, the app cloud, the step dots and the ready/entering states.
  * ---------------------------------------------------------------------------
@@ -682,9 +682,9 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 /* Step text panels all reserve the height of the tallest, so moving between
  * steps never shifts the dot strip underneath them. */
 .onboarding-step {
-  /* The tallest panel, so the shorter ones reserve the same space and the
-   * strip below stays put. */
-  min-height: 84px;
+  /* The tallest panel (a wrapped headline plus its line of copy), so the
+   * shorter ones reserve the same space and the strip below stays put. */
+  min-height: 112px;
 }
 
 /*
@@ -792,6 +792,18 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 @keyframes onboarding-dot-fill {
   from { width: 0; }
   to { width: 100%; }
+}
+
+/*
+ * Machine step (#gfx-machine): where the machine itself runs. Local shows
+ * this laptop with a star on its screen; remote shows this laptop linked to
+ * a rack in Imbue's cloud. Inked the way the other scenes are -- the
+ * walkthrough gray, set once here and inherited via currentColor -- rather
+ * than the theme's translucent text tokens (the arrow overrides itself to
+ * the arrow ink through .gfx-arrow, and the labels to text-tertiary).
+ */
+#gfx-machine {
+  color: var(--gfx-ink);
 }
 
 /*
@@ -1503,8 +1515,90 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 .demo-tab.demo-tab-pending {
   display: none;
 }
-/* The "+ new tab" affordance next to the tabs (decorative). It flashes
- * pressed when the demo pointer "clicks" it to open the next tab. */
+/*
+ * Split view (the tabs step): the agent pulls the app up beside the chat.
+ * onboarding.js puts is-split on #theme-demo when the step shows; the chat
+ * column narrows, the app column appears (which is also what starts the
+ * charts' entrance animations, declared below), and the app's tab joins the
+ * strip already selected -- no pointer, nothing to click.
+ */
+.demo-chat-col {
+  width: 100%;
+  flex: none;
+  transition: width 320ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+#theme-demo.is-split .demo-chat-col {
+  width: 190px;
+}
+.demo-app-col {
+  display: none;
+  min-width: 0;
+}
+#theme-demo.is-split .demo-app-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+/*
+ * The divider between the halves. It sits in the columns' flow (so the gaps
+ * either side are the same 12px the columns use) and stretches past the
+ * body's padding, meeting the titlebar above and the window edge below, so
+ * the split reads as two panes rather than two boxes floating apart.
+ */
+.demo-split-divider {
+  display: none;
+}
+#theme-demo.is-split .demo-split-divider {
+  display: block;
+  width: 1px;
+  flex: none;
+  align-self: stretch;
+  margin: -16px 0;
+  background: var(--demo-border);
+}
+/*
+ * One tab per half: Chat stays on the left, and the app's tab appears over
+ * the right half, aligned with its pane below (16px body padding + 190px
+ * chat column + 12px gap + 1px divider + 12px gap = 231px). Both carry the
+ * active look, since both panes are on screen.
+ */
+#theme-demo.is-split .demo-tab.demo-tab-pending {
+  display: inline-flex;
+  align-items: center;
+  position: absolute;
+  left: 231px;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--demo-border);
+  background: var(--demo-bg);
+  color: var(--demo-text);
+}
+/*
+ * "Pulling it up in a new tab." is new on this screen -- the chat step ends
+ * on "You've got it" -- so it lands with a small entrance as the app opens.
+ * The animation restarts whenever the browser graphic is shown, because the
+ * whole block's display flips (showGraphic toggles .hidden).
+ */
+.demo-bubble-in {
+  animation: demo-bubble-in 360ms 200ms ease-out both;
+}
+@keyframes demo-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .demo-bubble-in {
+    animation: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .demo-chat-col {
+    transition: none;
+  }
+}
+/* The "+ new tab" affordance next to the tabs (decorative chrome). */
 .demo-plus {
   display: inline-flex;
   align-items: center;
@@ -1523,71 +1617,95 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
     color 100ms ease,
     transform 140ms ease;
 }
-.demo-plus.is-pressed {
-  background: var(--demo-hover);
-  color: var(--demo-text);
-  transform: scale(0.9);
-}
 
 /*
- * Demo pointer: flies to the "+" and clicks it when a new tab opens.
- * onboarding.js owns the transform (translate + a press scale), so the
- * transition here covers both the glide and the press.
+ * Dashboard pane (the demo's "My app" tab): two charts pop up when the tab
+ * opens. The pane is revealed by removing "hidden" -- display flips from
+ * none, which (re)starts every animation declared on its descendants -- so
+ * the entrance replays on each visit to the step without any JS help.
  */
-.demo-cursor {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 30px;
-  height: 30px;
-  opacity: 0;
-  pointer-events: none;
-  z-index: 3;
-  /* Only the travel (translate) animates here; the click scale lives on the
-   * arrow inside, so pressing can never bend the straight glide path. */
-  transition:
-    transform 520ms cubic-bezier(0.4, 0, 0.2, 1),
-    opacity 140ms ease;
+.demo-pane[data-pane="app"] .demo-chart {
+  animation: demo-chart-pop 420ms cubic-bezier(0.32, 0.72, 0, 1) both;
 }
-.demo-cursor-arrow {
-  display: block;
-  width: 100%;
-  height: 100%;
-  transform-origin: top left;
-  transition: transform 110ms ease-out;
-  filter: drop-shadow(0 2px 3px rgb(0 0 0 / 0.35));
+/* The second chart trails the first by a beat. */
+.demo-pane[data-pane="app"] .demo-chart + .demo-chart {
+  animation-delay: 140ms;
 }
-.demo-cursor.is-pressing .demo-cursor-arrow {
-  transform: scale(0.8);
+@keyframes demo-chart-pop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.94);
+  }
 }
 
-/* Click splash: a ring that blooms out of the pointer tip on the press.
- * onboarding.js parks it on the "+" and restarts the animation. */
-.demo-click-splash {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 30px;
-  height: 30px;
-  margin: -15px 0 0 -15px;
-  border-radius: 9999px;
-  border: 2px solid var(--demo-text-dim);
-  opacity: 0;
-  pointer-events: none;
-  transform: scale(0.3);
-  z-index: 2;
+/* The bars grow out of the baseline once their card has landed, left to
+ * right. */
+.demo-pane[data-pane="app"] .demo-chart-bar {
+  transform-origin: bottom;
+  animation: demo-chart-bar-grow 420ms cubic-bezier(0.32, 0.72, 0, 1) both;
 }
-.demo-click-splash.is-splashing {
-  animation: demo-click-splash 520ms ease-out;
+.demo-pane[data-pane="app"] .demo-chart-bar:nth-child(1) { animation-delay: 160ms; }
+.demo-pane[data-pane="app"] .demo-chart-bar:nth-child(2) { animation-delay: 205ms; }
+.demo-pane[data-pane="app"] .demo-chart-bar:nth-child(3) { animation-delay: 250ms; }
+.demo-pane[data-pane="app"] .demo-chart-bar:nth-child(4) { animation-delay: 295ms; }
+.demo-pane[data-pane="app"] .demo-chart-bar:nth-child(5) { animation-delay: 340ms; }
+.demo-pane[data-pane="app"] .demo-chart-bar:nth-child(6) { animation-delay: 385ms; }
+.demo-pane[data-pane="app"] .demo-chart-bar:nth-child(7) { animation-delay: 430ms; }
+@keyframes demo-chart-bar-grow {
+  from { transform: scaleY(0); }
 }
-@keyframes demo-click-splash {
+
+/* The line draws itself on. pathLength="1" normalizes the dash length, so
+ * one dash of length 1 is the whole path and the dashoffset animation is
+ * independent of the path's true length. The stroke width is declared here
+ * rather than as an attribute so the #graphic non-scaling-stroke rule does
+ * not catch it (non-scaling-stroke breaks the pathLength normalization). */
+.demo-chart-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+.demo-pane[data-pane="app"] .demo-chart-line {
+  animation: demo-chart-line-draw 650ms 420ms ease-out forwards;
+}
+@keyframes demo-chart-line-draw {
+  to { stroke-dashoffset: 0; }
+}
+.demo-pane[data-pane="app"] .demo-chart-area {
+  animation: demo-chart-fade-in 450ms 650ms ease-out both;
+}
+@keyframes demo-chart-fade-in {
+  from { opacity: 0; }
+}
+.demo-chart-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.demo-pane[data-pane="app"] .demo-chart-dot {
+  animation: demo-chart-dot-pop 240ms 1000ms ease-out both;
+}
+@keyframes demo-chart-dot-pop {
   from {
-    opacity: 0.55;
+    opacity: 0;
     transform: scale(0.3);
   }
-  to {
-    opacity: 0;
-    transform: scale(1.6);
+}
+
+/* Without animation the charts simply sit there, finished. The line's
+ * resting dashoffset hides it, so it is shown fully drawn instead. */
+@media (prefers-reduced-motion: reduce) {
+  .demo-pane[data-pane="app"] .demo-chart,
+  .demo-pane[data-pane="app"] .demo-chart-bar,
+  .demo-pane[data-pane="app"] .demo-chart-line,
+  .demo-pane[data-pane="app"] .demo-chart-area,
+  .demo-pane[data-pane="app"] .demo-chart-dot {
+    animation: none;
+  }
+  .demo-chart-line {
+    stroke-dashoffset: 0;
   }
 }
 /*

@@ -168,7 +168,7 @@ def _make_client_with_store(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
-) -> tuple[FlaskClient, PendingCreateAttemptStore]:
+) -> tuple[FlaskClient, PendingCreateAttemptStore, AgentCreator]:
     """A desktop-client test app whose agent creator carries a pending-create-attempt store."""
     store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
     creator = AgentCreator(
@@ -185,7 +185,7 @@ def _make_client_with_store(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
     )
-    return client, store
+    return client, store, creator
 
 
 def test_form_defaults_prefill_the_form_from_a_known_retry_record(
@@ -199,7 +199,7 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     has none configured), so the prefill drops it while still threading the
     stored machine size through.
     """
-    client, store = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
     create_attempt_id = str(CreateAttemptId.generate())
     store.write_record(
         _record(
@@ -230,7 +230,7 @@ def test_create_attempt_detail_carries_error_and_log_tail_for_a_failed_record(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    client, store = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
     create_attempt_id = str(CreateAttemptId.generate())
     store.write_record(
         _record(
@@ -258,7 +258,7 @@ def test_create_attempt_detail_reports_an_in_flight_record_without_a_live_thread
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    client, store = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
     create_attempt_id = str(CreateAttemptId.generate())
     store.write_record(_record(create_attempt_id, PendingCreateAttemptState.IN_FLIGHT))
 
@@ -269,3 +269,44 @@ def test_create_attempt_detail_reports_an_in_flight_record_without_a_live_thread
     assert payload["kind"] == "record"
     assert payload["record"]["state"] == "interrupted"
     assert payload["record"]["error"] is None
+
+
+# -- Live-attempt detail: the onboarding walkthrough's context (is_remote,
+# -- expected_duration_seconds, onboarding_services) --
+
+
+def test_create_attempt_detail_carries_the_onboarding_walkthrough_context_for_a_live_attempt(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """A live (in-flight) attempt's detail carries what the walkthrough needs.
+
+    Pointing at a nonexistent local path (the same pattern agent_creator_test.py
+    uses) fails fast in the background thread, but the attempt is genuinely
+    live -- tracked by get_create_attempt_info -- for the brief window this
+    test reads it in, same as the create form's own in-flight polling would.
+    """
+    client, _store, creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    create_attempt_id = creator.start_create_attempt(
+        "file:///nonexistent-repo-for-onboarding-context-test",
+        host_name="onboarding-context-test",
+        launch_mode=LaunchMode.DOCKER,
+    )
+
+    response = client.get(f"/ui/api/create/attempts/{create_attempt_id}")
+
+    assert response.status_code == 200
+    payload = json.loads(response.get_data(as_text=True))
+    assert payload["kind"] == "live"
+    live = payload["live"]
+    # DOCKER is a local launch mode, so the machine step's copy and graphic
+    # should be the local (not cloud) variant.
+    assert live["is_remote"] is False
+    assert live["expected_duration_seconds"] > 0
+    # The bundled latchkey services catalog backs the app-cloud icon wheel;
+    # every entry carries an inlined (data: URI) icon and a display name.
+    assert len(live["onboarding_services"]) > 0
+    for service in live["onboarding_services"]:
+        assert service["icon"].startswith("data:image/")
+        assert service["name"]

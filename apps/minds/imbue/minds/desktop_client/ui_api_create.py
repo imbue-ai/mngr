@@ -40,6 +40,7 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
+from imbue.minds.desktop_client.onboarding_services import list_onboarding_services
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
@@ -49,6 +50,7 @@ from imbue.minds.desktop_client.region_preference import known_regions_for_provi
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.templates import default_workspace_git_url
 from imbue.minds.desktop_client.templates import default_workspace_template_ref
+from imbue.minds.desktop_client.templates import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
@@ -71,6 +73,7 @@ from imbue.minds.primitives import DEFAULT_GCP_ZONE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 # The cloud modes are bring-your-own-key-account only; they never appear as
 # plain compute options in the form (each configured account is its own row).
@@ -147,11 +150,23 @@ class LandingExtrasResponse(FrozenModel):
     has_restorable_workspaces: bool = Field(description="Whether the last-good topology knows any workspace")
 
 
+class OnboardingCloudApp(FrozenModel):
+    """One app in the onboarding walkthrough's app-cloud icon wheel."""
+
+    icon: str = Field(description="The app's brand icon, inlined as a data: URI")
+    name: str = Field(description="Display name")
+
+
 class LiveCreateAttemptDetail(FrozenModel):
     """The Creating page's live-attempt facts (status itself is polled from /api/v1)."""
 
     workspace_name: str = Field(description="Display name for the header")
     provider_label: str = Field(description="Friendly compute-provider label")
+    is_remote: bool = Field(description="Whether the machine runs in the cloud (drives walkthrough copy + graphics)")
+    expected_duration_seconds: float = Field(description="Expected create duration for the progress bar's easing")
+    onboarding_services: tuple[OnboardingCloudApp, ...] = Field(
+        description="Apps for the walkthrough's app-cloud icon wheel, icons pre-inlined"
+    )
 
 
 class RecordCreateAttemptDetail(FrozenModel):
@@ -382,6 +397,13 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
         live = LiveCreateAttemptDetail(
             workspace_name=display_name or info.host_name or create_attempt_id,
             provider_label=friendly_provider_label(record.provider_instance_name if record else None),
+            is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
+            expected_duration_seconds=expected_create_attempt_duration_seconds(info.launch_mode),
+            onboarding_services=tuple(
+                OnboardingCloudApp(icon=service.icon_data_uri, name=service.display_name)
+                for service in list_onboarding_services(ServicesCatalog())
+                if service.icon_data_uri is not None
+            ),
         )
         return _json_response(CreateAttemptDetailResponse(kind="live", live=live))
     if record is None or record.state is PendingCreateAttemptState.DONE:

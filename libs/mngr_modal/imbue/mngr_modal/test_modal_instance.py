@@ -321,6 +321,12 @@ def test_start_host_on_running_host(real_modal_provider: ModalProviderInstance) 
         assert started_host.id == host_id
 
 
+# Flaky: start_host's SSH wait (SSH_CONNECT_TIMEOUT, 60s) can time out when a
+# resumed sandbox is slow to accept connections under CI's parallel
+# acceptance fan-out (~50 sandboxes created at once) -- the same
+# resource-contention family as the VolumeListFiles flakiness marked flaky
+# elsewhere in this file, just a different Modal-side resource.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_start_host_on_stopped_host_uses_latest_resumable_snapshot(
