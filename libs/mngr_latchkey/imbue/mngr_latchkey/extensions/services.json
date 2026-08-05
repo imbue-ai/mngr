@@ -1622,6 +1622,31 @@
       ]
     }
   ],
+  "ngrok": [
+    {
+      "scope": "ngrok-api",
+      "display_name": "ngrok",
+      "description": "All requests to the ngrok API.",
+      "permissions": [
+        {
+          "name": "ngrok-read-all",
+          "description": "Read anything from the ngrok API."
+        },
+        {
+          "name": "ngrok-write-all",
+          "description": "Create, update, delete, or run actions (e.g. restart/stop a tunnel session) through the ngrok API."
+        },
+        {
+          "name": "ngrok-read-credentials",
+          "description": "List and inspect tunnel credentials (the ngrok agent authtokens used to bring up tunnels)."
+        },
+        {
+          "name": "ngrok-write-credentials",
+          "description": "Mint, update, or delete tunnel credentials (create the ngrok agent authtokens used to bring up tunnels)."
+        }
+      ]
+    }
+  ],
   "ramp": [
     {
       "scope": "ramp-api",

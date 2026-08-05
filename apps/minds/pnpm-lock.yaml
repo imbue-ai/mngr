@@ -15,8 +15,8 @@ importers:
         specifier: ^1.6.0
         version: 1.6.4
       latchkey:
-        specifier: ^3.3.0
-        version: 3.3.0
+        specifier: ^3.4.1
+        version: 3.4.1
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
@@ -292,8 +292,8 @@ packages:
     resolution: {integrity: sha512-RE815I4arJFtt+FVeU1Tgp9/Xvecacji8w/V6XtXsWWH/wz/eNkNbhb+ny/+PlVZjV0rxQpRSQKNKE3lcktHEA==}
     engines: {node: '>=10.10.0'}
 
-  '@imbue-ai/detent@1.11.2':
-    resolution: {integrity: sha512-BVij1lgq0u9eBiTLnkdAitOfKP7lTxHCdS4iuKwEm0UC9i/Bplu4f+/p8ib2eWjzz16NHmFLg2edPi4ZKMEwJw==}
+  '@imbue-ai/detent@1.12.0':
+    resolution: {integrity: sha512-aWiZMxZkmXPTi/WpVTmmFSNEyC6j0yoIjsihYYBBRjR3Pdbg2+dTg0ETonjB20oH5SYHMrO6VQMLrXtVdddWvA==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -1970,8 +1970,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@3.3.0:
-    resolution: {integrity: sha512-N0mU27XV+3ngbpkpyB6Obm8UB2RD1NhiGgnqFsGwUhka/F1uAWR3g77kfYo5+pNoWF3IFywMSyK3LosyRv1vmw==}
+  latchkey@3.4.1:
+    resolution: {integrity: sha512-Pex49IFrcRWDigFAcmmPZaw4B6g5vS86mSDJI2j+zrqxLTkM324zx8iVj6pyJaUVoh7+6eXggCk+KVUVZbH1zw==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -3266,7 +3266,7 @@ snapshots:
 
   '@humanwhocodes/momoa@2.0.4': {}
 
-  '@imbue-ai/detent@1.11.2':
+  '@imbue-ai/detent@1.12.0':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       commander: 14.0.3
@@ -5137,9 +5137,9 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@3.3.0:
+  latchkey@3.4.1:
     dependencies:
-      '@imbue-ai/detent': 1.11.2
+      '@imbue-ai/detent': 1.12.0
       '@napi-rs/keyring': 1.2.0
       commander: 12.1.0
       playwright: 1.60.0
