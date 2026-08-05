@@ -6,7 +6,11 @@ import {
   isPermissionCheckboxDisabled,
   isSharePathWithinRoots,
 } from "./inbox";
-import type { FileSharingPermissionDetail, PredefinedPermissionDetail } from "./inbox";
+import type {
+  FileSharingPermissionDetail,
+  ManualCredentialsPrompt,
+  PredefinedPermissionDetail,
+} from "./inbox";
 
 const CARD_A = { id: "evt-a", kind_label: "permission", ws_name: "alpha", display_name: "Slack", accent: "#123456" };
 const CARD_B = { id: "evt-b", kind_label: "permission", ws_name: "beta", display_name: "Gmail", accent: "#654321" };
@@ -22,12 +26,55 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   permission_schemas: ["any", "slack-read-all"],
   description_by_permission_name: { "slack-read-all": "Read everything" },
   checked_permissions: ["slack-read-all"],
-  account_choices: [{ value: "", label: "Default account", hint: "" }],
+  account_choices: [
+    { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
+  ],
   selected_account_value: "",
   new_account_value: ":new-account",
   wildcard_permission: "any",
   wildcard_label: "all",
   will_open_browser: false,
+  manual_credentials: null,
+};
+
+const AWS_PROMPT: ManualCredentialsPrompt = {
+  parameters: [
+    { name: "access-key-id", label: "Access key id" },
+    { name: "secret-access-key", label: "Secret access key" },
+  ],
+  message: "AWS does not support browser sign-in",
+};
+
+// A service with no browser sign-in: the connected account is fine, the
+// not-yet-connected one and the new-account choice need credentials typed in.
+const MANUAL_DETAIL: PredefinedPermissionDetail = {
+  ...PREDEFINED_DETAIL,
+  display_name: "AWS",
+  account_choices: [
+    {
+      value: "alice@x",
+      label: "alice@x",
+      hint: "",
+      is_credential_setup_needed: false,
+      is_account_name_needed: false,
+    },
+    {
+      value: "bob@x",
+      label: "bob@x",
+      hint: "not connected yet -- asks you for credentials",
+      is_credential_setup_needed: true,
+      is_account_name_needed: false,
+    },
+    {
+      value: ":new-account",
+      label: "Use a new account",
+      hint: "asks you for credentials",
+      is_credential_setup_needed: true,
+      is_account_name_needed: true,
+    },
+  ],
+  selected_account_value: "bob@x",
+  manual_credentials: AWS_PROMPT,
 };
 
 const FILE_DETAIL: FileSharingPermissionDetail = {
@@ -192,23 +239,208 @@ describe("InboxModel", () => {
     expect(closed).toBe(false);
   });
 
-  it("shows manual credentials without resolving when the grant needs them", async () => {
+  it("shows the credential form as soon as an account that needs credentials is selected", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+    });
+
+    await model.select("evt-a");
+
+    // No Approve click needed: the form is part of the detail.
+    expect(model.manualCredentialsPrompt()).toEqual(AWS_PROMPT);
+    expect(model.isManualAccountNameNeeded()).toBe(false);
+    // ...and Approve stays disabled while it is empty.
+    expect(model.isApproveAllowed()).toBe(false);
+    expect(calls.filter((call) => call.url.includes("/grant"))).toEqual([]);
+  });
+
+  it("hides the credential form when a connected account is selected instead", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+    });
+    await model.select("evt-a");
+
+    model.selectedAccount = "alice@x";
+
+    expect(model.manualCredentialsPrompt()).toBeNull();
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("never shows a credential form for a service that signs in through a browser", async () => {
     const model = makeModel({
       "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+    });
+
+    await model.select("evt-a");
+
+    expect(model.manualCredentialsPrompt()).toBeNull();
+  });
+
+  it("enables Approve once every credential input is filled in", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+    });
+    await model.select("evt-a");
+
+    model.manualCredentialValues["access-key-id"] = "AKIA-4471";
+    expect(model.isApproveAllowed()).toBe(false);
+    model.manualCredentialValues["secret-access-key"] = "   ";
+    expect(model.isApproveAllowed()).toBe(false);
+    model.manualCredentialValues["secret-access-key"] = "shh-9013";
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("submits the typed credential values with the approve", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }),
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [], auto_open: true }),
+    });
+    await model.select("evt-a");
+    model.manualCredentialValues["access-key-id"] = "AKIA-4471";
+    model.manualCredentialValues["secret-access-key"] = "shh-9013";
+
+    await model.approve();
+
+    const grantCall = calls.find((call) => call.url.includes("/grant"));
+    const form = grantCall?.init?.body as FormData;
+    expect(form.get("manual_credentials")).toBe(
+      JSON.stringify({ "access-key-id": "AKIA-4471", "secret-access-key": "shh-9013" }),
+    );
+    expect(form.get("account")).toBe("bob@x");
+    expect(form.get("account_name")).toBe("");
+    expect(form.getAll("permissions")).toEqual(["slack-read-all"]);
+  });
+
+  it("requires a name for the new account when the selected choice needs one", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+    });
+    await model.select("evt-a");
+    model.selectedAccount = ":new-account";
+    model.manualCredentialValues["access-key-id"] = "AKIA-4471";
+    model.manualCredentialValues["secret-access-key"] = "shh-9013";
+
+    expect(model.isManualAccountNameNeeded()).toBe(true);
+    expect(model.isApproveAllowed()).toBe(false);
+    model.manualAccountName = "work";
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("replaces the form's instruction with the reason a rejected attempt gives", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
       "POST /requests/evt-a/grant": () =>
         jsonResponse({
           outcome: "NEEDS_MANUAL_CREDENTIALS",
-          message: "manual required",
-          set_credentials_example: "latchkey auth set slack",
+          message: "AWS did not accept those credentials.",
+          manual_credentials: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
         }),
+    });
+    await model.select("evt-a");
+    model.manualCredentialValues["access-key-id"] = "AKIA-4471";
+    model.manualCredentialValues["secret-access-key"] = "shh-9013";
+
+    await model.approve();
+
+    expect(model.manualCredentialsPrompt()?.message).toBe("AWS did not accept those credentials.");
+    // The typed values survive so one field can be corrected and retried.
+    expect(model.manualCredentialValues["access-key-id"]).toBe("AKIA-4471");
+    expect(model.isApproveBusy).toBe(false);
+    expect(model.errorMessage).toBeNull();
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("blocks approval when Minds cannot work out which credentials to ask for", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({
+          detail: {
+            ...MANUAL_DETAIL,
+            manual_credentials: { parameters: [], message: "Minds cannot work out which credentials to ask for" },
+          },
+        }),
+    });
+
+    await model.select("evt-a");
+
+    expect(model.manualCredentialsPrompt()?.parameters).toEqual([]);
+    expect(model.isApproveAllowed()).toBe(false);
+  });
+
+  it("drops typed credentials when a request is re-selected", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+    });
+    await model.select("evt-a");
+    model.manualCredentialValues["access-key-id"] = "AKIA-4471";
+    model.manualAccountName = "work";
+
+    await model.select("evt-a");
+
+    expect(model.manualCredentialValues).toEqual({});
+    expect(model.manualAccountName).toBe("");
+    expect(model.manualCredentialsFeedback).toBeNull();
+  });
+
+  it("asks the view to scroll the reason into view once per failed approval", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+      "POST /requests/evt-a/grant": () =>
+        jsonResponse({
+          outcome: "NEEDS_MANUAL_CREDENTIALS",
+          message: "AWS did not accept those credentials.",
+          manual_credentials: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
+        }),
+    });
+    await model.select("evt-a");
+    // Nothing to scroll to before an attempt has failed.
+    expect(model.takePendingFailureScroll()).toBe(false);
+    model.manualCredentialValues["access-key-id"] = "AKIA-4471";
+    model.manualCredentialValues["secret-access-key"] = "shh-9013";
+
+    await model.approve();
+
+    expect(model.takePendingFailureScroll()).toBe(true);
+    // Handed out once, so later redraws do not fight the user's own scrolling.
+    expect(model.takePendingFailureScroll()).toBe(false);
+  });
+
+  it("marks the form as showing a failure only after an attempt comes back", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
+      "POST /requests/evt-a/grant": () =>
+        jsonResponse({
+          outcome: "NEEDS_MANUAL_CREDENTIALS",
+          message: "AWS did not accept those credentials.",
+          manual_credentials: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
+        }),
+    });
+    await model.select("evt-a");
+    expect(model.isManualCredentialsFailureShown()).toBe(false);
+    model.manualCredentialValues["access-key-id"] = "AKIA-4471";
+    model.manualCredentialValues["secret-access-key"] = "shh-9013";
+
+    await model.approve();
+
+    expect(model.isManualCredentialsFailureShown()).toBe(true);
+    // Re-selecting the request drops the failure state with the typed values.
+    await model.select("evt-a");
+    expect(model.isManualCredentialsFailureShown()).toBe(false);
+    expect(model.takePendingFailureScroll()).toBe(false);
+  });
+
+  it("also asks for a scroll when the approval fails outright", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "FAILED", message: "sign-in failed" }),
     });
     await model.select("evt-a");
 
     await model.approve();
 
-    expect(model.manualCredentials).toEqual({ message: "manual required", command: "latchkey auth set slack" });
-    expect(model.isApproveBusy).toBe(false);
-    expect(model.errorMessage).toBeNull();
+    expect(model.errorMessage).toBe("sign-in failed");
+    expect(model.takePendingFailureScroll()).toBe(true);
   });
 
   it("keeps the request pending and shows the reason on FAILED", async () => {

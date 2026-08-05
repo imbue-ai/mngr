@@ -22,6 +22,10 @@ export interface PermissionAccountChoice {
   value: string;
   label: string;
   hint: string;
+  /** Picking this account has to establish credentials before the grant applies. */
+  is_credential_setup_needed: boolean;
+  /** Picking this account also requires the user to name it. */
+  is_account_name_needed: boolean;
 }
 
 export interface WorkspaceVerbChoice {
@@ -29,6 +33,20 @@ export interface WorkspaceVerbChoice {
   display_name: string;
   description: string;
   is_targeted: boolean;
+}
+
+/** One value of a service's credential command that the user must fill in. */
+export interface ManualCredentialParameter {
+  name: string;
+  label: string;
+}
+
+/** The credential form shown while an account that needs credentials is selected.
+ * An empty `parameters` means Minds cannot work out what to ask for: the dialog
+ * shows `message` as an error and offers no Approve. */
+export interface ManualCredentialsPrompt {
+  parameters: ManualCredentialParameter[];
+  message: string;
 }
 
 export interface PredefinedPermissionDetail {
@@ -48,6 +66,7 @@ export interface PredefinedPermissionDetail {
   wildcard_permission: string;
   wildcard_label: string;
   will_open_browser: boolean;
+  manual_credentials: ManualCredentialsPrompt | null;
 }
 
 export interface FileSharingPermissionDetail {
@@ -112,7 +131,7 @@ export type InboxDetail =
 export interface GrantResponse {
   outcome: "GRANTED" | "DENIED" | "NEEDS_MANUAL_CREDENTIALS" | "FAILED" | string;
   message?: string;
-  set_credentials_example?: string;
+  manual_credentials?: ManualCredentialsPrompt;
 }
 
 /** Expand a leading `~` / `~/` to the home dir (port of the legacy dialog JS;
@@ -182,7 +201,17 @@ export class InboxModel {
   isApproveBusy = false;
   isProgressShown = false;
   errorMessage: string | null = null;
-  manualCredentials: { message: string; command: string } | null = null;
+  /** Prompt returned by the last Approve; it replaces the detail's own copy so
+   * the form explains what went wrong with the attempt. */
+  manualCredentialsFeedback: ManualCredentialsPrompt | null = null;
+  /** Set when an approval comes back unresolved, so the view scrolls the notice
+   * the user has to read into view -- it can be a scroll away from the buttons
+   * they just clicked. Consumed once, by whichever notice rendered. */
+  private isFailureScrollPending = false;
+  /** What the user typed into the credential form, keyed by parameter name. */
+  manualCredentialValues: Record<string, string> = {};
+  /** Name for the new account the manually-entered credentials belong to. */
+  manualAccountName = "";
   /** Ids whose deny POST is in flight (cards fade + become unclickable). */
   denyingIds = new Set<string>();
   /** Whether resolving a request advances to the next one (true) or dismisses (false). */
@@ -250,7 +279,10 @@ export class InboxModel {
     this.selectedId = id;
     this.isDetailLoading = true;
     this.errorMessage = null;
-    this.manualCredentials = null;
+    this.manualCredentialsFeedback = null;
+    this.isFailureScrollPending = false;
+    this.manualCredentialValues = {};
+    this.manualAccountName = "";
     this.isProgressShown = false;
     this.redraw();
     const response = await this.fetcher()(`/ui/api/inbox/${encodeURIComponent(id)}/detail`);
@@ -287,10 +319,59 @@ export class InboxModel {
     }
   }
 
+  /** The account radio currently selected, when the detail offers one. */
+  selectedAccountChoice(): PermissionAccountChoice | null {
+    const detail = this.detail;
+    if (detail === null || detail.kind !== "predefined") return null;
+    return detail.account_choices.find((choice) => choice.value === this.selectedAccount) ?? null;
+  }
+
+  /** The credential form to render, if the selected account needs one. It is
+   * part of the detail, so it shows up front rather than after a first Approve. */
+  manualCredentialsPrompt(): ManualCredentialsPrompt | null {
+    const detail = this.detail;
+    if (detail === null || detail.kind !== "predefined" || detail.manual_credentials === null) return null;
+    const choice = this.selectedAccountChoice();
+    if (choice === null || !choice.is_credential_setup_needed) return null;
+    return this.manualCredentialsFeedback ?? detail.manual_credentials;
+  }
+
+  /** Whether the visible credential form is reporting a failed attempt rather
+   * than giving its opening instruction (a form with no inputs is always one). */
+  isManualCredentialsFailureShown(): boolean {
+    const prompt = this.manualCredentialsPrompt();
+    if (prompt === null) return false;
+    return this.manualCredentialsFeedback !== null || prompt.parameters.length === 0;
+  }
+
+  /** Whether the view should scroll its failure notice into view now. True at
+   * most once per failed approval. */
+  takePendingFailureScroll(): boolean {
+    if (!this.isFailureScrollPending) return false;
+    this.isFailureScrollPending = false;
+    return true;
+  }
+
+  /** Whether the visible credential form also asks the user to name the account. */
+  isManualAccountNameNeeded(): boolean {
+    return this.manualCredentialsPrompt() !== null && (this.selectedAccountChoice()?.is_account_name_needed ?? false);
+  }
+
+  /** Whether a credential form is open whose inputs are not all filled in yet.
+   * A form with no parameters is an error state, not something Approve can fix. */
+  private isManualCredentialFormIncomplete(): boolean {
+    const prompt = this.manualCredentialsPrompt();
+    if (prompt === null) return false;
+    if (prompt.parameters.length === 0) return true;
+    if (this.isManualAccountNameNeeded() && this.manualAccountName.trim() === "") return true;
+    return prompt.parameters.some((parameter) => (this.manualCredentialValues[parameter.name] ?? "").trim() === "");
+  }
+
   /** Whether the Approve button is enabled for the current detail + edits. */
   isApproveAllowed(): boolean {
     const detail = this.detail;
     if (detail === null || this.isApproveBusy) return false;
+    if (this.isManualCredentialFormIncomplete()) return false;
     if (detail.kind === "predefined" || detail.kind === "workspace") {
       return this.checkedPermissions.size > 0;
     }
@@ -317,6 +398,7 @@ export class InboxModel {
     if (detail.kind === "predefined") {
       for (const permission of this.checkedPermissions) form.append("permissions", permission);
       form.append("account", this.selectedAccount);
+      this.appendManualCredentialFields(form);
     } else if (detail.kind === "workspace") {
       for (const permission of this.checkedPermissions) form.append("permissions", permission);
       form.append("target_scope", this.targetScope);
@@ -329,18 +411,33 @@ export class InboxModel {
     return form;
   }
 
+  /** Carry the open credential form's values back so the server can run the command. */
+  private appendManualCredentialFields(form: FormData): void {
+    const prompt = this.manualCredentialsPrompt();
+    if (prompt === null || prompt.parameters.length === 0) return;
+    const values: Record<string, string> = {};
+    for (const parameter of prompt.parameters) {
+      values[parameter.name] = this.manualCredentialValues[parameter.name] ?? "";
+    }
+    form.append("manual_credentials", JSON.stringify(values));
+    form.append("account_name", this.manualAccountName);
+  }
+
   async approve(): Promise<void> {
     const resolvedId = this.selectedId;
     if (resolvedId === null || !this.isApproveAllowed()) return;
+    const body = this.buildGrantForm();
     this.isApproveBusy = true;
     this.isProgressShown = true;
     this.errorMessage = null;
-    this.manualCredentials = null;
+    // Drop the previous attempt's feedback; the form itself stays visible
+    // (it belongs to the detail) with everything the user typed.
+    this.manualCredentialsFeedback = null;
     this.redraw();
     try {
       const response = await this.fetcher()(`/requests/${encodeURIComponent(resolvedId)}/grant`, {
         method: "POST",
-        body: this.buildGrantForm(),
+        body,
       });
       if (!response.ok) {
         const text = await response.text();
@@ -352,8 +449,15 @@ export class InboxModel {
         return;
       }
       this.isProgressShown = false;
+      // The request stays pending either way, so the reason has to be read.
+      this.isFailureScrollPending = true;
       if (data.outcome === "NEEDS_MANUAL_CREDENTIALS") {
-        this.manualCredentials = { message: data.message ?? "", command: data.set_credentials_example ?? "" };
+        // Keep whatever the user already typed: a rejected credential is
+        // usually one field away from being right.
+        this.manualCredentialsFeedback = data.manual_credentials ?? {
+          parameters: [],
+          message: data.message ?? "",
+        };
       } else {
         // FAILED (and anything unrecognized): request stays pending; show
         // the reason and let the user retry.
@@ -361,6 +465,7 @@ export class InboxModel {
       }
     } catch (error) {
       this.isProgressShown = false;
+      this.isFailureScrollPending = true;
       this.errorMessage = error instanceof Error ? error.message : String(error);
     } finally {
       this.isApproveBusy = false;

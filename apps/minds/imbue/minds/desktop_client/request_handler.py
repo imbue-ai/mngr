@@ -25,6 +25,20 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.request_events import RequestEvent
+from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
+
+
+class UiManualCredentialsPrompt(FrozenModel):
+    """The credential form shown for a service that cannot be signed in to through a browser."""
+
+    parameters: tuple[CredentialCommandParameter, ...] = Field(
+        description=(
+            "One labeled input per value the service's credential command needs. Empty when Minds cannot "
+            "work out what to ask for, in which case the dialog shows the message as an error and offers "
+            "no Approve."
+        ),
+    )
+    message: str = Field(description="Instruction (or, after a failed attempt, the reason) shown above the inputs")
 
 
 class UiPermissionAccountChoice(FrozenModel):
@@ -33,6 +47,14 @@ class UiPermissionAccountChoice(FrozenModel):
     value: str = Field(description="Form value: latchkey account key ('' = unnamed default) or the new-account value")
     label: str = Field(description="User-facing account label")
     hint: str = Field(default="", description="Short qualifier shown next to the label (e.g. 'needs sign-in')")
+    is_credential_setup_needed: bool = Field(
+        default=False,
+        description="Whether picking this account has to establish credentials before the grant can apply",
+    )
+    is_account_name_needed: bool = Field(
+        default=False,
+        description="Whether picking this account also requires the user to name it (manual-credentials services)",
+    )
 
 
 class UiWorkspaceVerbChoice(FrozenModel):
@@ -63,6 +85,12 @@ class UiPredefinedPermissionDetail(FrozenModel):
     wildcard_permission: str = Field(description="The catch-all permission's submitted value (e.g. 'any')")
     wildcard_label: str = Field(description="User-facing label for the catch-all permission (e.g. 'all')")
     will_open_browser: bool = Field(description="Whether approving is expected to pop a browser sign-in")
+    manual_credentials: UiManualCredentialsPrompt | None = Field(
+        description=(
+            "The credential form to show while an account that needs credential setup is selected. None when "
+            "the service signs in through a browser, so no form is ever needed."
+        ),
+    )
 
 
 class UiFileSharingPermissionDetail(FrozenModel):

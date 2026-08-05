@@ -2013,6 +2013,7 @@ def test_services_info_returns_valid_when_status_is_valid(tmp_path: Path) -> Non
     info = latchkey.services_info("slack")
     assert info.credential_status == CredentialStatus.VALID
     assert info.auth_options == frozenset({"browser", "set"})
+    assert info.is_browser_auth_supported is True
     assert info.set_credentials_example == "..."
 
 
@@ -2097,6 +2098,8 @@ def test_services_info_returns_empty_auth_options_when_field_is_missing(tmp_path
     assert info.credential_status == CredentialStatus.MISSING
     assert info.auth_options == frozenset()
     assert info.set_credentials_example is None
+    # No auth options at all means "we don't know": keep offering the browser flow.
+    assert info.is_browser_auth_supported is True
 
 
 def test_services_info_returns_set_only_auth_options_for_set_only_service(tmp_path: Path) -> None:
@@ -2115,6 +2118,7 @@ def test_services_info_returns_set_only_auth_options_for_set_only_service(tmp_pa
     info = latchkey.services_info("coolify")
     assert info.credential_status == CredentialStatus.MISSING
     assert info.auth_options == frozenset({"set"})
+    assert info.is_browser_auth_supported is False
     assert info.set_credentials_example is not None
     assert "latchkey auth set coolify" in info.set_credentials_example
 
@@ -2458,6 +2462,37 @@ def test_auth_clear_account_passes_account_flag(tmp_path: Path) -> None:
 
     argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
     assert argv_calls == [["auth", "clear", "-y", "slack", "--account", "hynek@imbue-ai"]]
+
+
+# -- auth_set_credentials --
+
+
+def test_auth_set_credentials_passes_the_argv_through_verbatim(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_set_credentials(
+        "aws",
+        ("--account", "alice@x", "auth", "set-nocurl", "aws", "AKIA-6612", "shh-4093"),
+    )
+
+    assert is_success is True
+    assert detail == ""
+    assert [record["argv"] for record in _read_recording_report(tmp_path)] == [
+        ["--account", "alice@x", "auth", "set-nocurl", "aws", "AKIA-6612", "shh-4093"]
+    ]
+    # The credential command must run against the pinned credential store.
+    assert _read_recording_report(tmp_path)[0]["env_LATCHKEY_DIRECTORY"] == str(tmp_path)
+
+
+def test_auth_set_credentials_reports_the_failure_detail(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=1, stderr="Error: Unknown service: aws")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_set_credentials("aws", ("auth", "set-nocurl", "aws", "x", "y"))
+
+    assert is_success is False
+    assert detail == "Error: Unknown service: aws"
 
 
 # -- add_account --

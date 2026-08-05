@@ -497,7 +497,7 @@
         if (data.outcome === "NEEDS_MANUAL_CREDENTIALS") {
           var cmdEl = document.getElementById("permissions-manual-credentials-command");
           var msgEl = document.getElementById("permissions-manual-credentials-message");
-          if (cmdEl) cmdEl.textContent = data.set_credentials_example || "";
+          if (cmdEl) cmdEl.textContent = (data.manual_credentials && data.manual_credentials.command) || "";
           if (msgEl) msgEl.textContent = data.message || "";
           if (manualBox) {
             manualBox.classList.remove("hidden");

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { jsonResponse, withReceiverGuardedGlobalFetch } from "../testing";
-import { SettingsModel, type SettingsOverview } from "./settings";
+import { SettingsModel, addAccountBlockedReason, type ServicePermissionOverview, type SettingsOverview } from "./settings";
 
 const BASE_OVERVIEW: SettingsOverview = {
   services_overview: [],
@@ -208,5 +208,22 @@ describe("SettingsModel", () => {
 
     expect(model.masterPasswordError).toContain("do not match");
     expect(postCount).toBe(0);
+  });
+});
+
+describe("addAccountBlockedReason", () => {
+  const SERVICE: ServicePermissionOverview = {
+    service_name: "aws",
+    display_name: "AWS",
+    accounts: [],
+    is_browser_sign_in_supported: false,
+  };
+
+  it("blocks the action, with a reason, for a service that has no browser sign-in", () => {
+    expect(addAccountBlockedReason(SERVICE)).toBe("AWS does not support signing in through a browser.");
+  });
+
+  it("allows the action for a service that signs in through a browser", () => {
+    expect(addAccountBlockedReason({ ...SERVICE, is_browser_sign_in_supported: true })).toBeNull();
   });
 });

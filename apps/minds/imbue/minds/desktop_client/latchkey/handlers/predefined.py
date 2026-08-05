@@ -19,10 +19,16 @@ requests (single path, yes/no decision). Both siblings share the
 :class:`~.messaging.MngrMessageSender` helper.
 
 Services that latchkey reports as not supporting browser sign-in fall
-back to a manual flow: the grant is refused (the request stays pending),
-the user is shown the suggested ``latchkey auth set`` invocation, and a
-fresh Approve click re-runs ``latchkey services info`` to check whether
-credentials have since become valid.
+back to a manual flow: the grant is refused (the request stays pending)
+and the dialog is handed the service's suggested ``latchkey auth set``
+invocation split into one labeled input per ``<placeholder>`` (see
+:mod:`imbue.mngr_latchkey.credential_commands`). The next Approve click
+carries the typed values, which minds substitutes into the command and
+runs itself -- pinned to the account the dialog selected -- before
+re-checking the credential status and continuing the grant. An example
+that has no placeholders (or is not a latchkey command at all) yields a
+prompt with no parameters, which the dialog renders as an error with no
+Approve button.
 
 The route layer in ``app.py`` is intentionally thin: it authenticates,
 looks up the request event by id, and dispatches by request type. All
@@ -31,7 +37,6 @@ the latchkey-specific work lives here.
 
 import html as html_module
 import json
-import shlex
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
@@ -40,9 +45,11 @@ from flask import Request
 from flask import Response
 from loguru import logger
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -63,6 +70,7 @@ from imbue.minds.desktop_client.request_events import append_response_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import UiManualCredentialsPrompt
 from imbue.minds.desktop_client.request_handler import UiPermissionAccountChoice
 from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
 from imbue.minds.desktop_client.request_handler import UiUnknownScopeDetail
@@ -74,10 +82,14 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
-from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.credential_commands import CredentialCommandError
+from imbue.mngr_latchkey.credential_commands import ParsedCredentialCommand
+from imbue.mngr_latchkey.credential_commands import build_credential_command_argv
+from imbue.mngr_latchkey.credential_commands import describe_credential_command_failure
+from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -91,6 +103,25 @@ class GrantOutcome(UpperCaseStrEnum):
     DENIED = auto()
     NEEDS_MANUAL_CREDENTIALS = auto()
     FAILED = auto()
+
+
+class ManualCredentialSubmission(FrozenModel):
+    """The credential-form values an Approve click carries back for a manual-credentials service."""
+
+    value_by_parameter_name: dict[str, str] = Field(
+        description="Value the user typed for each ``<placeholder>``; empty on the Approve click that opens the form.",
+    )
+    account_name: str = Field(
+        description="Name for the new account the credentials belong to; empty unless the dialog asked for one.",
+    )
+
+
+# What ``grant`` is given when the dialog submitted no credential form at all
+# (every request except a second Approve click on a manual-credentials service).
+EMPTY_MANUAL_CREDENTIAL_SUBMISSION: ManualCredentialSubmission = ManualCredentialSubmission(
+    value_by_parameter_name={},
+    account_name="",
+)
 
 
 class GrantResult(FrozenModel):
@@ -111,10 +142,10 @@ class GrantResult(FrozenModel):
             "``None`` for ``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
         ),
     )
-    set_credentials_example: str | None = Field(
+    manual_credentials: UiManualCredentialsPrompt | None = Field(
         description=(
-            "Suggested ``latchkey auth set`` invocation to show the user. Only set "
-            "when ``outcome == NEEDS_MANUAL_CREDENTIALS``."
+            "The credential form the dialog must render (with its message) before the next Approve "
+            "click. Only set when ``outcome == NEEDS_MANUAL_CREDENTIALS``."
         ),
     )
 
@@ -144,41 +175,99 @@ def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
     )
 
 
-def _format_manual_credentials_message(service_display_name: str) -> str:
-    return f"{service_display_name} does not support browser sign-in; manual credentials are required."
-
-
 def _fallback_set_credentials_example(service_name: str) -> str:
     """Return a generic ``latchkey auth set`` invocation when latchkey didn't supply one."""
     return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
 
 
-def _prepend_latchkey_directory(command: str, latchkey_directory: Path) -> str:
-    """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
-    the user writes from their terminal lands in the same store the
-    desktop client uses.
+class ManualCredentialsForm(FrozenModel):
+    """A service's credential command as the dialog needs it: what to ask for, and what to run."""
 
-    Without the prefix the user's terminal-run ``latchkey`` would write
-    credentials to its own default (``~/.latchkey``) and the desktop
-    client (which runs latchkey with ``LATCHKEY_DIRECTORY`` set) would
-    never see them.
+    prompt: UiManualCredentialsPrompt = Field(description="What the dialog renders: the inputs and their heading.")
+    parsed_command: ParsedCredentialCommand | None = Field(
+        description="Command the typed values are substituted into; ``None`` when the example is unusable.",
+    )
+
+
+def _build_manual_credentials_form(
+    service_name: str,
+    service_display_name: str,
+    set_credentials_example: str | None,
+) -> ManualCredentialsForm:
+    """Turn a service's suggested credential command into the dialog's input form.
+
+    The command itself is an implementation detail the user never sees: only
+    its ``<placeholder>`` parameters become inputs. A command that cannot be
+    turned into inputs yields a parameter-less prompt, which the dialog renders
+    as an error with no Approve.
     """
-    return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
+    command_example = set_credentials_example or _fallback_set_credentials_example(service_name)
+    try:
+        parsed_command = parse_credential_command_example(command_example)
+    except CredentialCommandError as e:
+        logger.warning("Could not build a credential form for {} from its suggested command: {}", service_name, e)
+        return ManualCredentialsForm(
+            prompt=UiManualCredentialsPrompt(
+                parameters=(),
+                message=(
+                    f"{service_display_name} does not support browser sign-in, and Minds cannot work out "
+                    "which credentials to ask for. It has to be connected some other way."
+                ),
+            ),
+            parsed_command=None,
+        )
+    return ManualCredentialsForm(
+        prompt=UiManualCredentialsPrompt(
+            parameters=parsed_command.parameters,
+            message=(
+                f"{service_display_name} does not support browser sign-in, so Minds needs its credentials. "
+                "Get them from the provider and fill them in -- Approve stores them and grants the permission."
+            ),
+        ),
+        parsed_command=parsed_command,
+    )
 
 
-def _supports_browser_auth(latchkey_service_info: LatchkeyServiceInfo) -> bool:
-    """True when ``latchkey auth browser`` is the right way to fix credentials.
+def _manual_credentials_result(message: str, prompt: UiManualCredentialsPrompt) -> GrantResult:
+    """Build the result that leaves the request pending and re-shows the credential form.
 
-    Either latchkey explicitly advertises a browser flow, or it returned
-    no ``authOptions`` at all and we don't actually know (legacy
-    fallback: keep the old always-run-browser behaviour).
+    ``message`` replaces the prompt's own instruction, so the dialog explains
+    what went wrong with the attempt instead of repeating the instruction.
     """
-    return LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options or not latchkey_service_info.auth_options
+    return GrantResult(
+        outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
+        message=message,
+        response_event=None,
+        manual_credentials=prompt.model_copy_update(to_update(prompt.field_ref().message, message)),
+    )
+
+
+def _manual_credentials_account(
+    account_choice: str,
+    submitted_account_name: str,
+    is_account_name_required: bool,
+) -> str:
+    """Resolve which latchkey account manually-entered credentials belong to.
+
+    The new-account choice resolves to latchkey's unnamed default account,
+    which is what the first account of a service is; once a service has one,
+    the dialog collects a name for the next (see ``is_account_name_required``).
+    """
+    if is_account_name_required:
+        return submitted_account_name.strip()
+    if account_choice == NEW_ACCOUNT_FORM_VALUE:
+        return DEFAULT_ACCOUNT
+    return account_choice
 
 
 def _account_label(account: str) -> str:
     """Render a latchkey account key as a user-facing label (the default one is unnamed)."""
     return DEFAULT_ACCOUNT_LABEL if account == DEFAULT_ACCOUNT else account
+
+
+def _first_connection_label(is_browser_auth_supported: bool) -> str:
+    """Label for the only choice a never-connected service offers."""
+    return "Sign in" if is_browser_auth_supported else "Connect"
 
 
 def _sorted_accounts(accounts: Sequence[ServiceAccountCredential]) -> tuple[ServiceAccountCredential, ...]:
@@ -212,11 +301,18 @@ def _needs_account_credential_setup(credential_status: CredentialStatus) -> bool
 def _build_account_choices(
     accounts: Sequence[ServiceAccountCredential],
     requested_account: str | None,
+    is_browser_auth_supported: bool,
 ) -> tuple[tuple[PermissionAccountChoice, ...], str]:
     """Build the dialog's account radio list and the value to preselect.
 
     Every account currently signed in to the service is offered, plus the
     always-available "new account" choice.
+
+    ``is_browser_auth_supported`` shapes every hint and
+    ``is_account_name_needed``: picking an account with no usable credentials
+    either opens a browser sign-in or fills in the dialog's credential form
+    (see :meth:`LatchkeyPermissionGrantHandler._establish_manual_credentials`),
+    and no hint may promise the wrong one.
 
     An agent may name an account that is *not* signed in -- a typo, an account
     the user has on the service but never connected here, or one whose
@@ -231,12 +327,19 @@ def _build_account_choices(
     The preselection is otherwise the first signed-in account, or the
     new-account choice when nothing is signed in.
     """
+    # What picking an unusable account leads to. A service with no browser flow
+    # asks for credentials in the dialog, so nothing may say "sign in" -- not
+    # for a new account, and not for a stored one whose credentials went bad.
+    connect_hint = "opens a browser sign-in" if is_browser_auth_supported else "asks you for credentials"
+    needs_setup_hint = "needs sign-in" if is_browser_auth_supported else "needs credentials"
     ordered = _sorted_accounts(accounts)
     choices = [
         PermissionAccountChoice(
             value=entry.account,
             label=_account_label(entry.account),
-            hint="needs sign-in" if _needs_account_credential_setup(entry.credential_status) else "",
+            hint=needs_setup_hint if _needs_account_credential_setup(entry.credential_status) else "",
+            is_credential_setup_needed=_needs_account_credential_setup(entry.credential_status),
+            is_account_name_needed=False,
         )
         for entry in ordered
     ]
@@ -246,15 +349,23 @@ def _build_account_choices(
             PermissionAccountChoice(
                 value=requested_account,
                 label=_account_label(requested_account),
-                hint="not connected yet -- opens a browser sign-in",
+                hint=f"not connected yet -- {connect_hint}",
+                is_credential_setup_needed=True,
+                is_account_name_needed=False,
             )
         )
     choices.append(
         PermissionAccountChoice(
             value=NEW_ACCOUNT_FORM_VALUE,
-            # "Sign in" only reads right when it is the single option.
-            label="Sign in" if len(choices) == 0 else "Use a new account",
-            hint="opens a browser sign-in",
+            # "Sign in" only reads right when it is the single option, and only
+            # when signing in is what actually happens.
+            label=_first_connection_label(is_browser_auth_supported) if len(choices) == 0 else "Use a new account",
+            hint=connect_hint,
+            is_credential_setup_needed=True,
+            # Latchkey names an account from the sign-in; a manual connection
+            # cannot, so the user names it -- except for a service's first
+            # account, which is latchkey's unnamed default.
+            is_account_name_needed=not is_browser_auth_supported and bool(ordered),
         )
     )
     if requested_account is not None:
@@ -264,6 +375,30 @@ def _build_account_choices(
     else:
         selected = NEW_ACCOUNT_FORM_VALUE
     return tuple(choices), selected
+
+
+def _parse_manual_credentials_form(raw_values: str | None, account_name: str) -> ManualCredentialSubmission:
+    """Parse the credential-form fields of a grant submission.
+
+    ``raw_values`` is the dialog's JSON object of ``<placeholder>`` name to the
+    value the user typed; it is absent on every submission that did not come
+    from a credential form. Raises :class:`LatchkeyPermissionFlowError` when it
+    is present but not such an object.
+    """
+    if raw_values is None:
+        return EMPTY_MANUAL_CREDENTIAL_SUBMISSION
+    try:
+        payload = json.loads(raw_values)
+    except json.JSONDecodeError as e:
+        raise LatchkeyPermissionFlowError(f"The submitted credential values are not valid JSON: {e}") from e
+    if not isinstance(payload, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in payload.items()
+    ):
+        raise LatchkeyPermissionFlowError("The submitted credential values must be a JSON object of strings.")
+    return ManualCredentialSubmission(
+        value_by_parameter_name={str(key): str(value) for key, value in payload.items()},
+        account_name=account_name,
+    )
 
 
 def _json_error(message: str, status_code: int) -> Response:
@@ -387,8 +522,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
     * ``latchkey_permissions.json`` is unchanged.
     * No response event has been written; the request stays pending so the
-      user can run the suggested ``latchkey auth set`` command and click
-      Approve again.
+      user can fill in the returned credential form and click Approve
+      again (the Approve that carries the values runs the command and,
+      if the credentials check out, grants).
     * No ``mngr message`` has been sent.
 
     ``deny`` writes a ``DENIED`` response and notifies; nothing else.
@@ -420,6 +556,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
         account_choice: str,
+        manual_credentials: ManualCredentialSubmission,
     ) -> GrantResult:
         """Apply a grant for one account, signing in / falling back as needed.
 
@@ -441,6 +578,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         fresh one in. Whatever it resolves to is the *only* account the
         resulting rule grants (see :mod:`imbue.mngr_latchkey.account_scopes`).
 
+        ``manual_credentials`` carries what the user typed into the credential
+        form a previous ``NEEDS_MANUAL_CREDENTIALS`` result asked for; it is
+        :data:`EMPTY_MANUAL_CREDENTIAL_SUBMISSION` on every other call.
+
         The HTTP layer mirrors any non-None ``response_event`` into the
         in-memory inbox so it doesn't have to reload from disk, and
         surfaces ``message`` to both the agent (via ``mngr message``) and
@@ -460,7 +601,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 f"Granted permissions not in catalog for service '{service_info.name}': {invalid}",
             )
 
-        resolved = self._resolve_account_for_grant(service_info, account_choice)
+        resolved = self._resolve_account_for_grant(service_info, account_choice, manual_credentials)
         if isinstance(resolved, GrantResult):
             # Credentials could not be established (sign-in cancelled, manual
             # credentials required, ...): the request stays pending.
@@ -488,13 +629,14 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             outcome=GrantOutcome.GRANTED,
             message=granted_message,
             response_event=response_event,
-            set_credentials_example=None,
+            manual_credentials=None,
         )
 
     def _resolve_account_for_grant(
         self,
         service_info: ServicePermissionInfo,
         account_choice: str,
+        manual_credentials: ManualCredentialSubmission,
     ) -> str | GrantResult:
         """Turn the dialog's account choice into the concrete account to grant.
 
@@ -508,7 +650,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
           nothing to do;
         * the chosen account is signed in but its credentials are
           missing/invalid -> re-run the browser sign-in for that account (or
-          ask for manual credentials when the service has no browser flow);
+          go through the manual credential form when the service has no
+          browser flow);
         * the user picked "new account" (or an account latchkey no longer
           knows about, e.g. a stale dialog) -> run the sign-in and read back
           which account it stored.
@@ -529,25 +672,21 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         if chosen is not None and not _needs_account_credential_setup(chosen.credential_status):
             return chosen.account
 
-        if not _supports_browser_auth(latchkey_service_info):
-            # No browser flow: refuse the grant and ask the user to set
-            # credentials manually. The request stays pending so a follow-up
-            # Approve click re-checks the status.
+        if not latchkey_service_info.is_browser_auth_supported:
+            # No browser flow: collect the credentials in the dialog instead
+            # and store them ourselves. Until they check out the request stays
+            # pending.
             logger.info(
-                "Credentials for {} account {!r} reported as unusable; latchkey does not advertise a "
-                "browser flow, asking user to run 'latchkey auth set'",
+                "Credentials for {} account {!r} reported as unusable and latchkey advertises no "
+                "browser flow; collecting them from the permission dialog",
                 service_info.name,
                 account_choice,
             )
-            return GrantResult(
-                outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
-                message=_format_manual_credentials_message(service_info.display_name),
-                response_event=None,
-                set_credentials_example=_prepend_latchkey_directory(
-                    latchkey_service_info.set_credentials_example
-                    or _fallback_set_credentials_example(service_info.name),
-                    self.latchkey.latchkey_directory,
-                ),
+            return self._establish_manual_credentials(
+                service_info=service_info,
+                latchkey_service_info=latchkey_service_info,
+                account_choice=account_choice,
+                manual_credentials=manual_credentials,
             )
 
         accounts_before = frozenset(accounts_by_name)
@@ -577,9 +716,127 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 outcome=GrantOutcome.FAILED,
                 message=_format_auth_failed_message(service_info.display_name, detail),
                 response_event=None,
-                set_credentials_example=None,
+                manual_credentials=None,
             )
         return self._account_after_sign_in(service_info, accounts_before, chosen)
+
+    def _establish_manual_credentials(
+        self,
+        service_info: ServicePermissionInfo,
+        latchkey_service_info: LatchkeyServiceInfo,
+        account_choice: str,
+        manual_credentials: ManualCredentialSubmission,
+    ) -> str | GrantResult:
+        """Collect and store credentials for a service latchkey cannot sign in to.
+
+        Returns the account the credentials were stored under once latchkey
+        reports them as usable, or the :class:`GrantResult` that re-shows the
+        credential form (with whatever went wrong as its message) and leaves
+        the request pending.
+
+        The command comes from the service itself (``setCredentialsExample``)
+        and is never shown to the user: only its ``<placeholder>`` parameters
+        are, as inputs. A service whose example carries none of those -- or is
+        not a latchkey invocation at all -- yields a prompt with no parameters,
+        which the dialog renders as a plain error.
+        """
+        form = _build_manual_credentials_form(
+            service_name=service_info.name,
+            service_display_name=service_info.display_name,
+            set_credentials_example=latchkey_service_info.set_credentials_example,
+        )
+        prompt = form.prompt
+        if form.parsed_command is None:
+            # Nothing to ask for: the dialog shows the reason and offers no Approve.
+            return _manual_credentials_result(message=prompt.message, prompt=prompt)
+
+        # The dialog renders the form as soon as such an account is selected,
+        # so an Approve with nothing typed can only be a stale submission.
+        if not manual_credentials.value_by_parameter_name:
+            return _manual_credentials_result(message=prompt.message, prompt=prompt)
+
+        # A new account can only be named by the user when the service already
+        # has one; the first account of a service is latchkey's unnamed default.
+        is_account_name_required = account_choice == NEW_ACCOUNT_FORM_VALUE and bool(latchkey_service_info.accounts)
+        account = _manual_credentials_account(
+            account_choice,
+            manual_credentials.account_name,
+            is_account_name_required,
+        )
+        if is_account_name_required and not account:
+            return _manual_credentials_result(
+                message=f"Enter a name for the new {service_info.display_name} account.",
+                prompt=prompt,
+            )
+
+        try:
+            argv = build_credential_command_argv(
+                form.parsed_command,
+                manual_credentials.value_by_parameter_name,
+                account,
+            )
+        except CredentialCommandError as e:
+            return _manual_credentials_result(
+                message=f"The {service_info.display_name} credentials are incomplete: {e}.",
+                prompt=prompt,
+            )
+
+        is_success, detail = self.latchkey.auth_set_credentials(service_info.name, argv)
+        if not is_success:
+            # The service itself usually says which value it did not like; its
+            # usage lines (and any crash noise) are not worth showing.
+            described_failure = describe_credential_command_failure(detail)
+            return _manual_credentials_result(
+                message=(
+                    f"{service_info.display_name} rejected those credentials: {described_failure}"
+                    if described_failure
+                    else f"Storing the {service_info.display_name} credentials failed."
+                ),
+                prompt=prompt,
+            )
+        return self._account_after_manual_credentials(
+            service_info=service_info,
+            prompt=prompt,
+            account=account,
+        )
+
+    def _account_after_manual_credentials(
+        self,
+        service_info: ServicePermissionInfo,
+        prompt: UiManualCredentialsPrompt,
+        account: str,
+    ) -> str | GrantResult:
+        """Check that the credentials we just stored are usable before granting.
+
+        ``latchkey auth set`` only validates the *shape* of what it is handed,
+        so credentials that are well-formed but wrong -- mistyped, revoked,
+        rotated, expired -- are stored happily and only fail when latchkey
+        actually calls the service. This re-read does exactly that call (the
+        online ``services info``), so an unusable status re-shows the form
+        rather than granting a permission the agent could never exercise.
+
+        That call is also how an unreachable service reads, so the message says
+        so: latchkey reports a failed check as ``invalid`` either way. The
+        credentials stay stored regardless, so a later Approve re-checks them.
+        """
+        stored_by_account = {entry.account: entry for entry in self.latchkey.services_info(service_info.name).accounts}
+        stored = stored_by_account.get(account)
+        if stored is None or _needs_account_credential_setup(stored.credential_status):
+            logger.info(
+                "Stored {} credentials for account {!r} are still unusable ({}); re-showing the form",
+                service_info.name,
+                account,
+                stored.credential_status if stored is not None else "not stored",
+            )
+            return _manual_credentials_result(
+                message=(
+                    f"{service_info.display_name} did not accept those credentials. They may be mistyped or "
+                    f"no longer valid (revoked, rotated or expired), or Minds could not reach "
+                    f"{service_info.display_name} to check them."
+                ),
+                prompt=prompt,
+            )
+        return account
 
     def _account_after_sign_in(
         self,
@@ -618,7 +875,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 "permission was not granted. Try approving again and picking the account explicitly."
             ),
             response_event=None,
-            set_credentials_example=None,
+            manual_credentials=None,
         )
 
     def deny(
@@ -693,7 +950,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # One ``services info`` call feeds both the account picker and the
         # progress notice below.
         latchkey_service_info = self.latchkey.services_info(service_info.name)
-        account_choices, selected_account = _build_account_choices(latchkey_service_info.accounts, req_event.account)
+        account_choices, selected_account = _build_account_choices(
+            latchkey_service_info.accounts,
+            req_event.account,
+            is_browser_auth_supported=latchkey_service_info.is_browser_auth_supported,
+        )
         # Existing grants are per account, so the pre-check reflects the
         # preselected one; switching accounts in the dialog does not re-fetch
         # (the user can still adjust the checkboxes by hand).
@@ -713,7 +974,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         selected_status = selected_status_by_account.get(selected_account)
         will_open_browser = (
             selected_status is None or _needs_account_credential_setup(selected_status)
-        ) and _supports_browser_auth(latchkey_service_info)
+        ) and latchkey_service_info.is_browser_auth_supported
 
         return render_predefined_permission_dialog(
             agent_id=req_event.agent_id,
@@ -745,7 +1006,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         host_id = _resolve_host_id(backend_resolver, parsed_id)
 
         latchkey_service_info = self.latchkey.services_info(service_info.name)
-        account_choices, selected_account = _build_account_choices(latchkey_service_info.accounts, req_event.account)
+        account_choices, selected_account = _build_account_choices(
+            latchkey_service_info.accounts,
+            req_event.account,
+            is_browser_auth_supported=latchkey_service_info.is_browser_auth_supported,
+        )
         pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions, selected_account)
         selected_status_by_account = {
             entry.account: entry.credential_status for entry in latchkey_service_info.accounts
@@ -753,7 +1018,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         selected_status = selected_status_by_account.get(selected_account)
         will_open_browser = (
             selected_status is None or _needs_account_credential_setup(selected_status)
-        ) and _supports_browser_auth(latchkey_service_info)
+        ) and latchkey_service_info.is_browser_auth_supported
 
         return UiPredefinedPermissionDetail(
             request_id=str(req_event.event_id),
@@ -766,7 +1031,13 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             description_by_permission_name=dict(service_info.description_by_permission_name),
             checked_permissions=tuple(pre_checked),
             account_choices=tuple(
-                UiPermissionAccountChoice(value=choice.value, label=choice.label, hint=choice.hint)
+                UiPermissionAccountChoice(
+                    value=choice.value,
+                    label=choice.label,
+                    hint=choice.hint,
+                    is_credential_setup_needed=choice.is_credential_setup_needed,
+                    is_account_name_needed=choice.is_account_name_needed,
+                )
                 for choice in account_choices
             ),
             selected_account_value=selected_account,
@@ -774,6 +1045,17 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             wildcard_permission=WILDCARD_PERMISSION_NAME,
             wildcard_label=WILDCARD_PERMISSION_UI_LABEL,
             will_open_browser=will_open_browser,
+            # The dialog renders the form up front, as soon as an account that
+            # needs credentials is selected, so approving is a single click.
+            manual_credentials=(
+                None
+                if latchkey_service_info.is_browser_auth_supported
+                else _build_manual_credentials_form(
+                    service_name=service_info.name,
+                    service_display_name=service_info.display_name,
+                    set_credentials_example=latchkey_service_info.set_credentials_example,
+                ).prompt
+            ),
         )
 
     def apply_grant_request(
@@ -806,6 +1088,13 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 "An account must be selected to approve the request.",
                 status_code=400,
             )
+        try:
+            manual_credentials = _parse_manual_credentials_form(
+                raw_values=form.get("manual_credentials"),
+                account_name=str(form.get("account_name", "")),
+            )
+        except LatchkeyPermissionFlowError as e:
+            return _json_error(str(e), status_code=400)
 
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
@@ -824,6 +1113,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 service_info=service_info,
                 granted_permissions=granted_permissions,
                 account_choice=str(account_choice),
+                manual_credentials=manual_credentials,
             )
         except LatchkeyPermissionFlowError as e:
             return _json_error(str(e), status_code=400)
@@ -845,12 +1135,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         if grant_result.response_event is not None:
             self._mirror_response_into_inbox(grant_result.response_event)
 
-        response_payload: dict[str, str] = {
+        response_payload: dict[str, JsonValue] = {
             "outcome": str(grant_result.outcome),
             "message": grant_result.message,
         }
-        if grant_result.set_credentials_example is not None:
-            response_payload["set_credentials_example"] = grant_result.set_credentials_example
+        if grant_result.manual_credentials is not None:
+            response_payload["manual_credentials"] = grant_result.manual_credentials.model_dump(mode="json")
         return make_response(
             content=json.dumps(response_payload),
             media_type="application/json",

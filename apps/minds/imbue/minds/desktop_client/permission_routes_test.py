@@ -5,6 +5,7 @@ fake ``LatchkeyPermissionGrantHandler`` so the routes are exercised
 end-to-end without spawning any subprocesses.
 """
 
+import json
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -33,6 +34,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -44,6 +46,7 @@ from imbue.minds.desktop_client.request_events import create_latchkey_predefined
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import UiManualCredentialsPrompt
 from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
@@ -54,6 +57,7 @@ from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.testing import FakeLatchkey
@@ -82,7 +86,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
 
     grant_outcome: GrantOutcome = Field(default=GrantOutcome.GRANTED)
     grant_message: str = Field(default="granted")
-    grant_set_credentials_example: str | None = Field(default=None)
+    grant_manual_credentials: UiManualCredentialsPrompt | None = Field(default=None)
     deny_message: str = Field(default="denied")
     grant_calls: list[dict[str, object]] = Field(default_factory=list)
     deny_calls: list[dict[str, object]] = Field(default_factory=list)
@@ -95,6 +99,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         service_info: ServicePermissionInfo,
         granted_permissions: Sequence[str],
         account_choice: str,
+        manual_credentials: ManualCredentialSubmission,
     ) -> GrantResult:
         self.grant_calls.append(
             {
@@ -104,6 +109,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 "scope": service_info.scope,
                 "granted_permissions": tuple(granted_permissions),
                 "account_choice": account_choice,
+                "manual_credentials": manual_credentials,
             }
         )
         # NEEDS_MANUAL_CREDENTIALS and FAILED keep the request pending and
@@ -113,7 +119,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 outcome=self.grant_outcome,
                 message=self.grant_message,
                 response_event=None,
-                set_credentials_example=self.grant_set_credentials_example,
+                manual_credentials=self.grant_manual_credentials,
             )
         status = RequestStatus.GRANTED if self.grant_outcome == GrantOutcome.GRANTED else RequestStatus.DENIED
         response_event = create_request_response_event(
@@ -127,7 +133,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
             outcome=self.grant_outcome,
             message=self.grant_message,
             response_event=response_event,
-            set_credentials_example=None,
+            manual_credentials=None,
         )
 
     def deny(
@@ -208,7 +214,7 @@ def _make_recording_handler(
     tmp_path: Path,
     grant_outcome: GrantOutcome = GrantOutcome.GRANTED,
     grant_message: str = "granted",
-    grant_set_credentials_example: str | None = None,
+    grant_manual_credentials: UiManualCredentialsPrompt | None = None,
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     gateway_client = build_fake_gateway_client()
@@ -225,7 +231,7 @@ def _make_recording_handler(
         gateway_client=gateway_client,
         grant_outcome=grant_outcome,
         grant_message=grant_message,
-        grant_set_credentials_example=grant_set_credentials_example,
+        grant_manual_credentials=grant_manual_credentials,
     )
 
 
@@ -416,7 +422,7 @@ def test_post_permission_grant_with_failed_signin_keeps_request_pending(tmp_path
 
 
 def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp_path: Path) -> None:
-    """NEEDS_MANUAL_CREDENTIALS must echo the example command and not resolve the inbox."""
+    """NEEDS_MANUAL_CREDENTIALS must return the credential form and not resolve the inbox."""
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -424,12 +430,15 @@ def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp
         rationale="reason",
     )
     inbox = RequestInbox().add_request(request)
-    expected_example = 'latchkey auth set slack -H "Authorization: Bearer xoxb-..."'
+    expected_prompt = UiManualCredentialsPrompt(
+        parameters=(CredentialCommandParameter(name="token", label="Token"),),
+        message="Slack does not support browser sign-in",
+    )
     handler = _make_recording_handler(
         tmp_path,
         grant_outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
         grant_message="Slack does not support browser sign-in.",
-        grant_set_credentials_example=expected_example,
+        grant_manual_credentials=expected_prompt,
     )
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
@@ -441,11 +450,68 @@ def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
-    assert payload["set_credentials_example"] == expected_example
-    # The request must remain pending so the user can click Approve again
-    # after running the suggested command.
+    assert payload["manual_credentials"] == {
+        "parameters": [{"name": "token", "label": "Token"}],
+        "message": "Slack does not support browser sign-in",
+    }
+    # The request must remain pending so the user can fill the form in and
+    # click Approve again.
     final_inbox = _get_app_request_inbox(client)
     assert final_inbox.get_pending_count() == 1
+
+
+def test_post_permission_grant_forwards_the_submitted_credential_form(tmp_path: Path) -> None:
+    """The values typed into the credential form must reach the grant flow."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
+
+    response = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={
+            "permissions": ["slack-read-all"],
+            "account": _TEST_ACCOUNT,
+            "manual_credentials": json.dumps({"token": "xoxb-9137"}),
+            "account_name": "work",
+        },
+    )
+
+    assert response.status_code == 200
+    assert handler.grant_calls[0]["manual_credentials"] == ManualCredentialSubmission(
+        value_by_parameter_name={"token": "xoxb-9137"},
+        account_name="work",
+    )
+
+
+def test_post_permission_grant_rejects_a_malformed_credential_form(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
+
+    response = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={
+            "permissions": ["slack-read-all"],
+            "account": _TEST_ACCOUNT,
+            "manual_credentials": json.dumps(["xoxb-9137"]),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "JSON object of strings" in response.get_json()["error"]
+    assert handler.grant_calls == []
 
 
 def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -> None:

@@ -30,10 +30,12 @@ permission-request flow, not here.
 from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -182,6 +184,12 @@ class ServicePermissionOverview(FrozenModel):
 
     service_name: str = Field(description="Raw service name (e.g. ``slack``); used as the revoke action key.")
     display_name: str = Field(description="Human-readable service label shown above the account sections.")
+    is_browser_sign_in_supported: bool = Field(
+        description=(
+            "Whether latchkey can sign in to this service through a browser. When false the settings "
+            "page's '+ Add account' action is disabled, since it is exactly that sign-in."
+        ),
+    )
     accounts: tuple[ServiceAccountOverview, ...] = Field(
         description=(
             "One entry per account of this service: those latchkey has credentials for (read via "
@@ -263,6 +271,45 @@ def _granted_permissions(
     return tuple(permissions)
 
 
+# Ceiling on how long the parallel browser-support probes may take to join.
+# Must stay above latchkey's own ``services info`` timeout so a stalled probe
+# resolves the way it does on its own (degrading to "unknown") instead of
+# failing the whole settings page on the join.
+_BROWSER_SUPPORT_PROBE_EXIT_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+def _is_browser_sign_in_supported_by_service(
+    latchkey: Latchkey,
+    service_names: Sequence[str],
+) -> dict[str, bool]:
+    """Probe, for each service, whether latchkey can sign in to it through a browser.
+
+    Only ``services info`` knows this, and it is one subprocess per service, so
+    the probes run on a thread each (they are independent, and each writes its
+    own key) rather than adding up in series on the settings page's critical
+    path. ``--offline`` keeps every probe a local lookup.
+    """
+    is_supported_by_service: dict[str, bool] = {}
+
+    def _probe_one_service(service_name: str) -> None:
+        is_supported_by_service[service_name] = latchkey.services_info(
+            service_name, is_offline=True
+        ).is_browser_auth_supported
+
+    concurrency_group = ConcurrencyGroup(
+        name="connectors-browser-support",
+        exit_timeout_seconds=_BROWSER_SUPPORT_PROBE_EXIT_TIMEOUT_SECONDS,
+    )
+    with concurrency_group:
+        for service_name in service_names:
+            concurrency_group.start_new_thread(
+                target=_probe_one_service,
+                args=(service_name,),
+                name=f"browser-support-{service_name}",
+            )
+    return is_supported_by_service
+
+
 def build_permission_overview(
     backend_resolver: BackendResolverInterface,
     gateway_client: LatchkeyGatewayClient,
@@ -279,7 +326,8 @@ def build_permission_overview(
     grouped by service and account. A service is returned when it has at least
     one account -- either one latchkey stores credentials for or one that only
     appears in a host's grants -- and the result is sorted by display name for a
-    stable UI.
+    stable UI. Each listed service is then probed for browser-sign-in support,
+    all of them at once (see :func:`_is_browser_sign_in_supported_by_service`).
 
     Raises :class:`LatchkeyGatewayClientError` if a host file cannot be read.
     Because every host shares one gateway, a read error almost always means the
@@ -302,7 +350,9 @@ def build_permission_overview(
     # accounts, so we don't shell out per service while rendering the page.
     accounts_by_service = latchkey.auth_list(is_offline=True)
 
-    overviews: list[ServicePermissionOverview] = []
+    # Which services the page will list, with their account sections, before
+    # anything that needs a per-service round trip.
+    account_overviews_by_service: dict[str, tuple[ServiceAccountOverview, ...]] = {}
     for service_name, service_infos in services_catalog.as_mapping().items():
         if not service_infos:
             continue
@@ -325,13 +375,23 @@ def build_permission_overview(
             for account in tuple(entry.account for entry in stored_accounts) + not_connected_accounts
         )
         if account_overviews:
-            overviews.append(
-                ServicePermissionOverview(
-                    service_name=service_name,
-                    display_name=service_infos[0].display_name,
-                    accounts=account_overviews,
-                )
-            )
+            account_overviews_by_service[service_name] = account_overviews
+
+    is_browser_sign_in_supported_by_service = _is_browser_sign_in_supported_by_service(
+        latchkey,
+        tuple(account_overviews_by_service),
+    )
+    overviews = [
+        ServicePermissionOverview(
+            service_name=service_name,
+            display_name=services_catalog.as_mapping()[service_name][0].display_name,
+            accounts=account_overviews,
+            # A probe that somehow did not report leaves the sign-in offered
+            # rather than disabling an action that may well work.
+            is_browser_sign_in_supported=is_browser_sign_in_supported_by_service.get(service_name, True),
+        )
+        for service_name, account_overviews in account_overviews_by_service.items()
+    ]
     return tuple(sorted(overviews, key=lambda overview: overview.display_name.lower()))
 
 

@@ -64,6 +64,12 @@ class PermissionAccountChoice(FrozenModel):
     )
     label: str = Field(description="User-facing account label.")
     hint: str = Field(default="", description="Short qualifier shown next to the label (e.g. 'needs sign-in').")
+    is_credential_setup_needed: bool = Field(
+        description="Whether picking this account has to establish credentials before the grant can apply.",
+    )
+    is_account_name_needed: bool = Field(
+        description="Whether picking this account also requires the user to name it (manual-credentials services).",
+    )
 
 
 @pure

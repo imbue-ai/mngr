@@ -33,6 +33,19 @@ export interface ServicePermissionOverview {
   service_name: string;
   display_name: string;
   accounts: ServiceAccountOverview[];
+  /** Whether latchkey can sign in to this service through a browser, which is
+   * what "+ Add account" does. */
+  is_browser_sign_in_supported: boolean;
+}
+
+/** Why "+ Add account" is unavailable for a service, or null when it works.
+ *
+ * The action is latchkey's browser sign-in, so a service without one (AWS,
+ * Coolify, ...) has nothing for it to do; the dialog says so on hover instead
+ * of failing after the click. */
+export function addAccountBlockedReason(service: ServicePermissionOverview): string | null {
+  if (service.is_browser_sign_in_supported) return null;
+  return `${service.display_name} does not support signing in through a browser.`;
 }
 
 export interface SharedPath {

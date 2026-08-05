@@ -89,7 +89,9 @@ second gateway URL or a different agent skill.
      there before approving.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
-      `authOptions`, and `setCredentialsExample`.
+      `authOptions`, and `setCredentialsExample` (the same call that
+      rendered the dialog's account picker and, for a service with no
+      browser sign-in, its credential form).
    2. If credentials are not `valid` and the service advertises a
       `browser` auth option (or latchkey reports no `authOptions` at all,
       treated as the legacy fallback), runs `latchkey auth browser <service>`
@@ -101,12 +103,11 @@ second gateway URL or a different agent skill.
       user can click Approve again to retry. A failed approval is never
       recorded as a denial.
    3. If credentials are not `valid` and the service does not advertise a
-      `browser` auth option (e.g. Coolify, where `authOptions = ["set"]`),
-      the grant is **refused** and the request stays pending. The dialog
-      shows the `setCredentialsExample` returned by latchkey (or a
-      generic fallback) and asks the user to run it in a terminal. A
-      subsequent Approve click re-runs `latchkey services info` and
-      proceeds normally once credentials are valid.
+      `browser` auth option (e.g. AWS or Coolify, where `authOptions =
+      ["set"]`), the grant is **refused for now** and the request stays
+      pending while the dialog collects the credentials (see
+      [Manual credential entry](#manual-credential-entry) below). Minds
+      never asks the user to open a terminal.
    4. Atomically rewrites the agent's `latchkey_permissions.json` so the gateway
       enforces the chosen schemas on the next request.
    5. On success, appends a `GRANTED` response event to
@@ -119,6 +120,75 @@ second gateway URL or a different agent skill.
 7. **User denies.** The desktop client appends a `DENIED` response event
    and sends the agent a plain-English denial message. `latchkey_permissions.json`
    is not touched.
+
+## Manual credential entry
+
+A service latchkey cannot sign in to through a browser advertises an
+example of the command that stores its credentials, with each value the
+user has to supply written as an angle-bracketed placeholder -- e.g.
+`latchkey auth set-nocurl aws <access-key-id> <secret-access-key>`. Minds
+parses that example (`imbue.mngr_latchkey.credential_commands`) and turns
+it into **one labeled input per placeholder**, which the detail payload
+carries (`manual_credentials`) so the dialog renders the form at the top
+immediately -- no first Approve needed to discover that credentials are
+required. Approve then substitutes the typed values, runs the command
+itself with `--account <selected account>` (a global latchkey option, so
+it precedes the subcommand) and Minds' own `LATCHKEY_DIRECTORY`, re-reads
+`latchkey services info`, and continues the grant. One click, no terminal,
+and the credentials land in the store the desktop client actually reads.
+
+Details worth knowing:
+
+* The command itself is **never shown**: it is an implementation detail,
+  and the user only ever sees the values it needs. It is built as an argv
+  list (no shell), so a pasted value is never re-interpreted, and the
+  filled-in argv is never logged.
+
+* The form belongs to the *selected account*: each account choice carries
+  `is_credential_setup_needed`, so switching from a not-yet-connected
+  account to a working one hides the form (and re-enables Approve) without
+  a round trip. Approve stays disabled while any input is empty.
+
+* The account the credentials are stored under is the one the dialog's
+  account radio selects. "Connect" (a service with no accounts yet)
+  resolves to latchkey's unnamed default account; "Use a new account" on a
+  service that already has one also asks for an **account name**
+  (`is_account_name_needed`), since a manual connection cannot discover it
+  the way a browser sign-in does.
+
+* Two different things can go wrong, and they read differently:
+
+  * The value is **malformed** -- the service's own shape check rejects it
+    (`latchkey auth set-nocurl` exits non-zero, e.g. "doesn't look like an
+    AWS access key ID"). Its explanation is surfaced verbatim, minus the
+    usage lines latchkey appends: those either restate a terminal command
+    Minds never shows or, for AWS, print the bare `<access-key-id>`
+    placeholder as the "example", which is worse than nothing next to an
+    input already labelled that way. `describe_credential_command_failure`
+    does that trimming (and caps a crash dump).
+
+  * The value is **well-formed but wrong** -- mistyped within the accepted
+    shape, or revoked, rotated or expired. `auth set` only validates the
+    shape, so these store fine and only fail when latchkey actually calls
+    the service. Minds therefore re-reads the *online* `services info`
+    after storing and refuses to grant unless the account's credentials
+    come back usable. Note that a service Minds cannot reach reads the same
+    way (latchkey reports any failed check as `invalid`), so the message
+    names that possibility too. The credentials stay stored either way, so
+    a later Approve re-checks them.
+
+  In both cases the form comes back with the typed values intact and the
+  reason in place of its instruction -- as the design system's `error`
+  `Notice` (red, `role="alert"`), and scrolled into view with the smallest
+  movement that shows it, since the form sits above a permission list that
+  can leave it off-screen from where the Approve button is. The scroll is
+  handed out once per failed approval, so later redraws never fight the
+  user's own scrolling. An outright `FAILED` approval (a browser sign-in
+  that did not complete) gets the same treatment on its own notice.
+
+* If the example has no `<placeholder>` at all (or is not a latchkey
+  invocation), there is nothing to ask for: the dialog shows that as an
+  error and offers **no Approve button**, leaving Deny as the only action.
 
 ## Per-agent isolation
 
@@ -366,6 +436,15 @@ Two per-service actions manage accounts:
   Google OAuth service, if signing in with the official Minds client does
   not succeed, it always falls back to a fresh `auth browser-prepare`
   self-setup step and retries.
+
+  Because the action *is* that sign-in, it is **disabled** for a service
+  that has no browser flow (`is_browser_sign_in_supported`, resolved per
+  listed service with one `latchkey services info <service> --offline`
+  call -- all of them probed on a thread each, so the page's wall time
+  does not grow with the number of connectors), with the reason on hover,
+  instead of failing with an error after the click. Such a service is connected from a permission dialog, which
+  asks for its credentials directly (see
+  [Manual credential entry](#manual-credential-entry)).
 * **Disconnect** clears one account's stored credentials
   (`latchkey auth clear <service> --account <account>`). Disconnecting the
   *last* account for a service also runs the per-service "revoke all"

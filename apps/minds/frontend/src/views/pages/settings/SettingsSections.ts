@@ -12,7 +12,7 @@ import type {
   WorkspaceDelegationGrant,
   WorkspaceFileSharingGrant,
 } from "../../../models/settings";
-import { SETTINGS_SECTIONS } from "../../../models/settings";
+import { SETTINGS_SECTIONS, addAccountBlockedReason } from "../../../models/settings";
 import { Button } from "../../components/Button";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
@@ -181,6 +181,35 @@ function accountSubsection(
   ]);
 }
 
+/** The service-level "+ Add account" action.
+ *
+ * It runs latchkey's browser sign-in, so for a service that has none there is
+ * nothing to click: the button is disabled and says why on hover. The title
+ * sits on a wrapper because a disabled button gets no mouse events, and so no
+ * tooltip, in Chromium. */
+function addAccountButton(model: SettingsModel, service: ServicePermissionOverview): m.Children {
+  const isBusy = model.addAccountBusyService === service.service_name;
+  const blockedReason = addAccountBlockedReason(service);
+  return m(
+    "span",
+    { class: "shrink-0", ...(blockedReason === null ? {} : { title: blockedReason }) },
+    m(
+      Button,
+      {
+        variant: "ghost",
+        size: "md",
+        id: `add-account-${service.service_name}`,
+        disabled: isBusy || blockedReason !== null,
+        onclick: async () => {
+          const errorMessage = await model.addConnectorAccount(service.service_name);
+          if (errorMessage !== null) window.alert(errorMessage);
+        },
+      },
+      isBusy ? "Signing in..." : "+ Add account",
+    ),
+  );
+}
+
 function connectorsPanel(model: SettingsModel): m.Children {
   const overview = model.overview;
   if (overview === null) return null;
@@ -213,25 +242,7 @@ function connectorsPanel(model: SettingsModel): m.Children {
                       { class: "type-heading text-primary" },
                       service.display_name,
                     ),
-                    m(
-                      Button,
-                      {
-                        variant: "ghost",
-                        size: "md",
-                        extra: "shrink-0",
-                        disabled:
-                          model.addAccountBusyService === service.service_name,
-                        onclick: async () => {
-                          const errorMessage = await model.addConnectorAccount(
-                            service.service_name,
-                          );
-                          if (errorMessage !== null) window.alert(errorMessage);
-                        },
-                      },
-                      model.addAccountBusyService === service.service_name
-                        ? "Signing in..."
-                        : "+ Add account",
-                    ),
+                    addAccountButton(model, service),
                   ],
                 ),
                 m(

@@ -598,3 +598,39 @@ The `latchkey_directory` is used both as the upstream `LATCHKEY_DIRECTORY`
 for spawned `latchkey` subprocesses and as the root of this package's own
 metadata subdirectory (`<latchkey_directory>/mngr_latchkey/`, accessible
 via `Latchkey.plugin_data_dir`).
+
+### Storing user-supplied credentials
+
+Services with no browser sign-in report an example of the command that
+stores their credentials, each value the caller must supply written as an
+angle-bracketed placeholder (`LatchkeyServiceInfo.set_credentials_example`,
+e.g. `latchkey auth set-nocurl aws <access-key-id> <secret-access-key>`).
+`imbue.mngr_latchkey.credential_commands` turns such an example into a
+fillable form and back into a runnable command, so an embedder can collect
+the values in its own UI instead of sending the user to a terminal:
+
+```python
+from imbue.mngr_latchkey.credential_commands import (
+    build_credential_command_argv,
+    parse_credential_command_example,
+)
+
+# Raises CredentialCommandError when the example is not a latchkey command,
+# or has no placeholders (nothing to ask the user for).
+parsed = parse_credential_command_example(service_info.set_credentials_example)
+# parsed.parameters: one (name, label) pair per placeholder, to render as inputs
+
+argv = build_credential_command_argv(
+    parsed,
+    {"access-key-id": "...", "secret-access-key": "..."},
+    account,  # "" for latchkey's unnamed default account
+)
+is_success, detail = latchkey.auth_set_credentials("aws", argv)
+```
+
+The argv carries the user's secrets, so it is passed to the subprocess as a
+list (never a shell string) and is never logged. `--account` is a *global*
+latchkey option and is therefore placed before the subcommand rather than
+after the example's own arguments. `auth set` stores whatever it is handed,
+so callers should re-read `services_info` afterwards to find out whether
+the credentials are actually usable.

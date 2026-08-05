@@ -1,6 +1,8 @@
 """Unit tests for the cross-workspace permission overview / revoke helpers."""
 
+import threading
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import Field
@@ -9,6 +11,7 @@ from pydantic import JsonValue
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
+from imbue.minds.desktop_client.latchkey.permission_overview import _is_browser_sign_in_supported_by_service
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
@@ -78,6 +81,10 @@ class _MultiHostResolver(StaticBackendResolver):
 
     def get_workspace_color(self, agent_id: AgentId) -> str | None:
         return self.color_by_agent.get(str(agent_id))
+
+
+# Generous: it only bounds a hang, and a correct implementation trips it at once.
+_BARRIER_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 def _catalog() -> ServicesCatalog:
@@ -222,6 +229,23 @@ def test_build_overview_omits_services_with_neither_accounts_nor_grants(tmp_path
     overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
 
     assert [o.service_name for o in overview] == ["slack"]
+
+
+def test_build_overview_reports_whether_a_service_supports_browser_sign_in(tmp_path: Path) -> None:
+    """The settings page disables "+ Add account" on this flag, so it must be per service."""
+    latchkey = _AccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": ["alice@x"], "github": [""]},
+        services_without_browser_auth=("github",),
+    )
+    agent, host = str(AgentId()), HostId()
+    _seed_host(latchkey, host, ())
+    resolver = _resolver({agent: host}, {agent: "Alpha"})
+
+    overview = build_permission_overview(resolver, build_fake_gateway_client(), _catalog(), latchkey)
+
+    assert {o.service_name: o.is_browser_sign_in_supported for o in overview} == {"slack": True, "github": False}
 
 
 def test_build_overview_ignores_non_catalog_scopes(tmp_path: Path) -> None:
@@ -582,6 +606,7 @@ class _AccountsLatchkey(Latchkey):
 
     accounts_by_service: dict[str, list[str]] = Field(default_factory=dict)
     cleared_calls: list[tuple[str, str | None]] = Field(default_factory=list)
+    services_without_browser_auth: tuple[str, ...] = Field(default=())
 
     def _accounts_for(self, service_name: str) -> tuple[ServiceAccountCredential, ...]:
         return tuple(
@@ -592,10 +617,13 @@ class _AccountsLatchkey(Latchkey):
     def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
         del is_offline
         accounts = self._accounts_for(service_name)
+        auth_options = (
+            frozenset({"set"}) if service_name in self.services_without_browser_auth else frozenset({"browser", "set"})
+        )
         return LatchkeyServiceInfo(
             credential_status=CredentialStatus.VALID if accounts else CredentialStatus.MISSING,
             accounts=accounts,
-            auth_options=frozenset({"browser", "set"}),
+            auth_options=auth_options,
             set_credentials_example=None,
         )
 
@@ -672,3 +700,30 @@ def test_disconnect_account_raises_when_clear_fails(tmp_path: Path) -> None:
 
     with pytest.raises(PermissionOverviewError, match="keychain locked"):
         disconnect_account(latchkey, "slack", "a@x")
+
+
+def test_browser_sign_in_probes_run_concurrently(tmp_path: Path) -> None:
+    """Each probe is its own subprocess, so they must not add up in series.
+
+    The double's ``services_info`` waits on a barrier that only trips once every
+    probe has entered it, which no sequential implementation can satisfy.
+    """
+    service_names = ("slack", "github", "aws")
+    barrier = threading.Barrier(len(service_names))
+
+    class _BarrierLatchkey(_AccountsLatchkey):
+        def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
+            barrier.wait(timeout=_BARRIER_TIMEOUT_SECONDS)
+            return super().services_info(service_name, is_offline=is_offline)
+
+    latchkey = _BarrierLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service=dict.fromkeys(service_names, ["a@x"]),
+        services_without_browser_auth=("aws",),
+    )
+
+    is_supported_by_service = _is_browser_sign_in_supported_by_service(latchkey, service_names)
+
+    assert is_supported_by_service == {"slack": True, "github": True, "aws": False}
+    assert not barrier.broken, "the probes did not all run at the same time"

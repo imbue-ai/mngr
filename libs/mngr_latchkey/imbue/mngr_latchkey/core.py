@@ -28,6 +28,7 @@ from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
+from functools import cached_property
 from importlib import resources
 from pathlib import Path
 from typing import Final
@@ -38,6 +39,7 @@ from packaging.version import Version
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
+from pydantic import computed_field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -98,6 +100,11 @@ _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # Empirically, reencryption takes around 0.1s.
 _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# Storing user-supplied credentials writes the credential store and, for some
+# services, validates the credentials over the network first. Unlike the browser
+# flows it never waits on a human, so it must not run unbounded.
+_AUTH_SET_TIMEOUT_SECONDS: Final[float] = 60.0
 
 # Listing services and registering an additional (custom) service are quick
 # config-store operations, but can stall on slow keychains like the others.
@@ -320,6 +327,18 @@ class LatchkeyServiceInfo(FrozenModel):
             "manual credential setup, or ``None`` if latchkey did not provide one."
         ),
     )
+
+    @computed_field
+    @cached_property
+    def is_browser_auth_supported(self) -> bool:
+        """True when ``latchkey auth browser`` is the way to establish credentials.
+
+        Either latchkey explicitly advertises a browser flow, or it returned no
+        ``auth_options`` at all and we don't actually know (legacy fallback:
+        keep the old always-run-browser behaviour). A service without one --
+        AWS, Coolify, ... -- can only be connected by supplying credentials.
+        """
+        return LATCHKEY_AUTH_OPTION_BROWSER in self.auth_options or not self.auth_options
 
 
 _UNKNOWN_LATCHKEY_SERVICE_INFO: Final[LatchkeyServiceInfo] = LatchkeyServiceInfo(
@@ -1441,18 +1460,41 @@ class Latchkey(MutableModel):
             service_name=service_name,
         )
 
+    def auth_set_credentials(self, service_name: str, argv: Sequence[str]) -> tuple[bool, str]:
+        """Run a ``latchkey auth set``-family command that stores credentials the user typed in.
+
+        ``argv`` (everything after the binary) is built by
+        :func:`imbue.mngr_latchkey.credential_commands.build_credential_command_argv`
+        from the service's own ``setCredentialsExample``, so it already carries
+        the ``--account`` option and the filled-in values. It is passed through
+        verbatim and never logged, since it contains the user's secrets.
+        Returns ``(is_success, detail)``.
+        """
+        return self._run_latchkey_auth_command(
+            log_label="auth set",
+            argv=list(argv),
+            service_name=service_name,
+            timeout_seconds=_AUTH_SET_TIMEOUT_SECONDS,
+        )
+
     def _run_latchkey_auth_command(
         self,
         log_label: str,
         argv: list[str],
         service_name: str,
         is_ephemeral: bool = False,
+        timeout_seconds: float | None = None,
     ) -> tuple[bool, str]:
         """Run a single ``latchkey auth ...`` subcommand and translate its exit into ``(is_success, detail)``.
 
         ``log_label`` is the human-readable name of the subcommand
         (e.g. ``"auth browser"``, ``"auth browser-prepare"``) used in
-        log lines and the generic failure-message fallback.
+        log lines, as the log-safe process name (the argv may carry
+        credentials, so it must never be logged), and as the generic
+        failure-message fallback.
+
+        ``timeout_seconds`` bounds the child; leave it ``None`` for the
+        interactive flows that wait on a human.
 
         When ``is_ephemeral`` is set, :data:`LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR`
         is exported to the child so any browser flow starts from a clean session
@@ -1466,16 +1508,17 @@ class Latchkey(MutableModel):
             env[LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR] = "1"
         cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
         with cg:
-            # No timeout: ``auth browser`` waits on a real human
-            # completing the browser sign-in flow, which can take
-            # arbitrarily long. ``auth browser-prepare`` is typically
-            # non-interactive but may still hit the network, so we keep
-            # the same untimed treatment.
+            # Without an explicit timeout the child is unbounded, which is what
+            # ``auth browser`` needs: it waits on a real human completing the
+            # browser sign-in flow, which can take arbitrarily long. ``auth
+            # browser-prepare`` is typically non-interactive but may still hit
+            # the network, so it keeps the same untimed treatment.
             result = cg.run_process_to_completion(
                 command=[self.latchkey_binary, *argv],
-                timeout=None,
+                timeout=timeout_seconds,
                 is_checked_after=False,
                 env=env,
+                name=f"latchkey {log_label} {service_name}",
             )
         if result.returncode == 0:
             logger.info("latchkey {} {} succeeded", log_label, service_name)
