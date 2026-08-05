@@ -131,6 +131,24 @@ from imbue.modal_proxy.interface import VolumeInterface
 
 # Constants
 CONTAINER_SSH_PORT: Final[int] = 22
+
+# Fallback base image when the caller specifies neither an image nor a Dockerfile.
+#
+# This must name a Debian release explicitly, and must match the release that the
+# workspace template's apt sources are pinned to (default-workspace-template's
+# system/scripts/write_apt_sources.sh currently pins the trixie suites).
+#
+# `modal.Image.debian_slim()` cannot be used here: Modal hardcodes it to bookworm
+# (Debian 12) for every image builder version, in its own base-images.json, so it
+# does not track the template. A Debian 12 host whose apt points at Debian 13 turns
+# the workspace's first `apt-get install` into a full cross-release upgrade, which
+# replaces libc6, ld.so and openssh-server (9.2p1 -> 10.0p1) underneath the sshd
+# started by _start_sshd_in_sandbox. sshd re-execs the on-disk binary once per
+# incoming connection, so the surviving 9.2 listener hands every later connection to
+# the 10.0 binary, which rejects 9.2's `-R` re-exec flag; the child dies before
+# logging is initialised and the socket closes with no banner and no log entry. That
+# surfaces as "Error reading SSH protocol banner" on a host that is otherwise healthy.
+DEFAULT_BASE_IMAGE: Final[str] = "python:3.12-slim-trixie"
 # 2 minutes default sandbox lifetime (so that we don't just leave tons of them running--we're not doing a good job of cleaning them up yet)
 DEFAULT_SANDBOX_TIMEOUT: Final[int] = 2 * 60
 # Seconds to wait for sshd to be ready
@@ -911,7 +929,15 @@ class ModalProviderInstance(BaseProviderInstance):
         elif base_image:
             image = modal_interface.image_from_registry(base_image)
         else:
-            image = modal_interface.image_debian_slim().apt_install(*(pkg.package for pkg in REQUIRED_HOST_PACKAGES))
+            # `debian_slim` ships pip/wheel/uv in its base (Modal's "package_tools"); a plain
+            # registry image does not, and the workspace template's provision commands shell
+            # out to `uv` (e.g. `uv sync --all-packages`). Install them so swapping the base
+            # away from debian_slim stays behaviour-preserving.
+            image = (
+                modal_interface.image_from_registry(DEFAULT_BASE_IMAGE)
+                .apt_install(*(pkg.package for pkg in REQUIRED_HOST_PACKAGES))
+                .dockerfile_commands(["RUN pip install --no-cache-dir uv wheel"])
+            )
 
         return image
 
@@ -1759,9 +1785,10 @@ log "=== Shutdown script completed ==="
 
         if not base_image and not dockerfile_path and snapshot is None:
             logger.warning(
-                "No image or Dockerfile specified -- building from mngr default Dockerfile. "
-                "Consider using your own Dockerfile (-b --file=<path>) to include "
-                "your project's dependencies for faster startup.",
+                "No image or Dockerfile specified -- building from the default base image {} plus "
+                "mngr's required host packages. Consider using your own Dockerfile "
+                "(-b --file=<path>) to include your project's dependencies for faster startup.",
+                DEFAULT_BASE_IMAGE,
             )
 
         try:
