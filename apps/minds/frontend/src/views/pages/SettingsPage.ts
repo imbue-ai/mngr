@@ -5,10 +5,7 @@
 
 import m from "mithril";
 import { SettingsModel } from "../../models/settings";
-import { PageContainer } from "../components/Layout";
-import { Link } from "../components/Link";
 import { Notice } from "../components/Notice";
-import { routeLinkAttrs } from "../components/route-link";
 import { Spinner } from "../components/Spinner";
 import { SettingsSections } from "./settings/SettingsSections";
 
@@ -19,7 +16,9 @@ export function SettingsPage(): m.Component {
       void model.load();
     },
     view(): m.Children {
-      return m(PageContainer, [
+      // Rendered inside the AppOverlay card (Shell), which supplies the width,
+      // padding, scroll, and close X -- so no PageContainer or back link.
+      return [
         m("h1", { class: "type-heading-lg text-primary mb-8" }, "Settings"),
         model.isLoadFailed
           ? m(
@@ -34,12 +33,7 @@ export function SettingsPage(): m.Component {
                 [m(Spinner, { size: "sm" }), "Loading settings…"],
               )
             : m(SettingsSections, { model }),
-        m(
-          "div",
-          { class: "mt-8" },
-          m(Link, { extra: "type-helper", ...routeLinkAttrs("/") }, "← Back to machines"),
-        ),
-      ]);
+      ];
     },
   };
 }

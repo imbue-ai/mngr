@@ -1,8 +1,10 @@
 // The workspace options overlay (/workspace/<id>/options?tab=&group=&target=):
-// Share machine + Machine settings tabs over one options-data load, rendered
-// by the Shell as a panel floating over the still-mounted workspace surface.
-// The titlebar's ws-tab buttons land here; ?tab preselects the pane, ?group
-// the settings group, ?target the share target.
+// Share machine + Machine settings tabs over one options-data load. This owns
+// the URL-backed tab/group state and the options-data model; the docked panel
+// chrome (backdrop, tab strip, card) lives in WorkspaceOptionsOverlay, which
+// the Shell floats over the still-mounted workspace surface. The titlebar's
+// ws-tab buttons land here; ?tab preselects the pane, ?group the settings
+// group, ?target the share target.
 //
 // The URL is the single source of truth for tab/group: they are re-read from
 // the route on every render, so titlebar-driven navigation (which changes
@@ -11,7 +13,7 @@
 import m from "mithril";
 import type { OptionsTab, SettingsGroup } from "../../models/workspaceOptions";
 import { WorkspaceOptionsModel } from "../../models/workspaceOptions";
-import { OptionsPanel } from "./workspace/OptionsPanel";
+import { WorkspaceOptionsOverlay } from "./workspace/WorkspaceOptionsOverlay";
 
 function requestedTab(): OptionsTab {
   return m.route.param("tab") === "settings" ? "settings" : "share";
@@ -61,7 +63,7 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
     },
     view() {
       const currentModel = ensureModelForRouteAgent();
-      return m(OptionsPanel, {
+      return m(WorkspaceOptionsOverlay, {
         model: currentModel,
         tab: requestedTab(),
         group: requestedGroup(),

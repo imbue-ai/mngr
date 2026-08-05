@@ -6,7 +6,6 @@
 import m from "mithril";
 import { AccountsDetailModel } from "../../models/accountsDetail";
 import { ButtonLink } from "../components/Button";
-import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
 import { AccountCard } from "./settings/AccountCard";
@@ -21,7 +20,9 @@ export function AccountsPage(): m.Component {
       model.dispose();
     },
     view(): m.Children {
-      return m(PageContainer, [
+      // Rendered inside the AppOverlay card (Shell), which supplies the width,
+      // padding, scroll, and close X -- so no PageContainer wrapper.
+      return [
         m("h1", { class: "type-heading text-primary mb-4" }, "Manage Accounts"),
         model.actionError !== ""
           ? m(
@@ -60,7 +61,7 @@ export function AccountsPage(): m.Component {
             "Add account",
           ),
         ),
-      ]);
+      ];
     },
   };
 }

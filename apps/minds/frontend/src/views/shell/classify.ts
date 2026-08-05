@@ -50,6 +50,39 @@ export function isWorkspaceOverlayPath(path: string): boolean {
   return new RegExp(`^/workspace/${ID_SEGMENT}/options$`, "i").test(path);
 }
 
+/** App-level modal routes the Shell floats as a centered overlay over the
+ * surface they were opened from (Minds settings, Accounts, Get help, the
+ * Requests inbox, and the AI-keys mint dialog) instead of a full breadcrumbed
+ * page. The AI-keys mint dialog is workspace-triggered ("Sign in with Imbue"
+ * inside a machine) and floats over that machine, mirroring Get help. */
+const APP_OVERLAY_PATHS = new Set(["/settings", "/accounts", "/help", "/inbox", "/settings/ai-keys"]);
+
+export function isAppOverlayPath(path: string): boolean {
+  return APP_OVERLAY_PATHS.has(path);
+}
+
+/** The workspace kept mounted behind an app-overlay modal: the ?workspace= that
+ * Get help, the Requests inbox, the New machine inspiration flow, and the
+ * AI-keys mint dialog forward, so those overlays float over the live workspace
+ * they were opened from (kept mounted, no reload). The AI-keys dialog forwards
+ * the machine's HOST id (the mint endpoint keys on it); the others forward the
+ * agent id. Settings / Accounts are launched from Home and carry none, the
+ * inbox opened from Home carries none, and an inspiration link with no machine
+ * open redirects to the full create form -- so their overlay floats over Home /
+ * never renders (returns null). */
+const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set([
+  "/help",
+  "/inbox",
+  "/create/inspiration",
+  "/settings/ai-keys",
+]);
+
+export function overlayBehindWorkspaceId(path: string, search = ""): string | null {
+  if (!OVERLAY_BEHIND_WORKSPACE_PATHS.has(path)) return null;
+  const workspace = new URLSearchParams(search).get("workspace");
+  return workspace !== null && new RegExp(`^${ID_SEGMENT}$`, "i").test(workspace) ? workspace : null;
+}
+
 export function classifyRoute(path: string, search = ""): TitlebarContext {
   const displayId = workspaceDisplayIdFromPath(path);
   if (displayId !== null) {
@@ -70,14 +103,25 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (match) return workspaceContext(match[1], null);
   match = path.match(new RegExp(`^/agents/${ID_SEGMENT}/recovery$`, "i"));
   if (match) return workspaceContext(match[1], null);
-  if (path === "/create" || path === "/create/inspiration" || path.startsWith("/creating/")) {
+  if (path === "/create/inspiration") {
+    // Over a machine the inspiration stepper is a modal floating on that
+    // machine's surface (its context + accent); with no machine it redirects to
+    // the /create form, so it stays a plain New machine page until that lands.
+    const behind = overlayBehindWorkspaceId(path, search);
+    return behind !== null ? workspaceContext(behind, null) : pageContext("New machine", false);
+  }
+  if (path === "/create" || path.startsWith("/creating/")) {
     return pageContext("New machine", path === "/create");
   }
-  if (path === "/settings" || path === "/settings/ai-keys") return pageContext("Settings", true);
-  if (path === "/accounts") return pageContext("Accounts", true);
+  if (isAppOverlayPath(path)) {
+    // Minds settings / Accounts / Get help / the AI-keys mint dialog float as a
+    // centered modal over the surface they were opened from; the titlebar keeps
+    // that surface's context (the workspace behind Get help / AI-keys, else
+    // Home) rather than a back-button page.
+    const behind = overlayBehindWorkspaceId(path, search);
+    return behind !== null ? workspaceContext(behind, null) : HOME_CONTEXT;
+  }
   if (path === "/workspaces/destroyed") return pageContext("Recently destroyed", true);
-  if (path === "/inbox") return pageContext("Requests", true);
-  if (path === "/help") return pageContext("Get help", true);
   if (path === "/consent") return pageContext("Consent", false);
   if (path === "/welcome") {
     return { kind: "welcome", workspaceAnyId: null, activeTab: null, pageLabel: "", isBackShown: false };
@@ -87,7 +131,7 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
 
 /** Which workspace's accent (if any) a route belongs to (accent survives on
  * workspace-scoped pages like destroying/recovery, exactly as before). */
-export function accentSourceForRoute(path: string): string | null {
-  const context = classifyRoute(path);
+export function accentSourceForRoute(path: string, search = ""): string | null {
+  const context = classifyRoute(path, search);
   return context.kind === "workspace" ? context.workspaceAnyId : null;
 }

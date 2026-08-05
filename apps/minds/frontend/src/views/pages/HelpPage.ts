@@ -10,8 +10,14 @@ import { Button } from "../components/Button";
 import { Spinner } from "../components/Spinner";
 
 function closeHelpSurface(): void {
-  if (window.history.length > 1) window.history.back();
-  else m.route.set("/");
+  // Mirror ShellState.closeAppOverlay: return to the opener via history, else
+  // fall back to the workspace this help was opened over (else Home).
+  if (window.history.length > 1) {
+    window.history.back();
+    return;
+  }
+  const workspace = m.route.param("workspace");
+  m.route.set(workspace ? `/workspace/${workspace}` : "/");
 }
 
 function modeChoice(model: HelpModel): m.Children {
@@ -213,21 +219,12 @@ function HelpPageComponent(): m.Component {
       else if (activeModel.phase === "agent_error") body = agentErrorPhase(activeModel);
       else if (activeModel.phase === "sent") body = sentPhase(activeModel);
       else body = formPhase(activeModel);
-      return m("div", { class: "flex justify-center p-6" }, [
-        m(
-          "div",
-          {
-            class:
-              "w-full max-w-md bg-surface-primary rounded-lg border border-default shadow-raised overflow-hidden",
-          },
-          [
-            m("div", { class: "flex items-center justify-between px-4 h-[44px] border-b border-default" }, [
-              m("h1", { class: "type-section text-primary" }, "Ran into a bug?"),
-            ]),
-            m("div", { class: "p-4" }, body),
-          ],
-        ),
-      ]);
+      // Rendered inside the AppOverlay card (Shell), which supplies the card
+      // chrome, padding, scroll, and close X.
+      return [
+        m("h1", { class: "type-section text-primary mb-4" }, "Ran into a bug?"),
+        body,
+      ];
     },
   };
 }

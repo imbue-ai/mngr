@@ -93,10 +93,28 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         if (isRemoved) return;
         contract = loaded;
         const handlers: Record<string, (message: Record<string, unknown>) => void> = {};
-        handlers[loaded.OPEN_REQUEST_MODAL] = () => m.route.set("/inbox");
-        handlers[loaded.OPEN_HELP] = () => m.route.set("/help");
-        handlers[loaded.OPEN_AI_KEYS_PAGE] = () => {
-          m.route.set("/settings/ai-keys");
+        handlers[loaded.OPEN_REQUEST_MODAL] = () => {
+          // Float the inbox drawer over this machine (kept mounted), matching
+          // OPEN_HELP below, rather than tearing the frame down to Home.
+          const current = armedWorkspaceAnyId ?? workspaceAnyId;
+          m.route.set("/inbox", { workspace: shell.stores.workspaces.toAgentScopedId(current) });
+        };
+        handlers[loaded.OPEN_HELP] = () => {
+          // Float Get help over this machine (kept mounted), matching the
+          // titlebar bug button, rather than tearing the frame down to a page.
+          const current = armedWorkspaceAnyId ?? workspaceAnyId;
+          m.route.set("/help", { workspace: shell.stores.workspaces.toAgentScopedId(current) });
+        };
+        handlers[loaded.OPEN_AI_KEYS_PAGE] = (message) => {
+          // Float the AI-keys mint dialog over this machine (kept mounted),
+          // matching OPEN_HELP above, rather than tearing the frame down to a
+          // page. The mint page keys on the HOST id (ai_keys.py resolves the
+          // owning account from the workspace record's host_id): prefer the host
+          // id the workspace sent, else derive it from the mounted surface.
+          const current = armedWorkspaceAnyId ?? workspaceAnyId;
+          const messageHostId = typeof message.hostId === "string" ? message.hostId : null;
+          const hostId = messageHostId ?? shell.stores.workspaces.toHostScopedId(current);
+          m.route.set("/settings/ai-keys", { workspace: hostId });
           endpoint?.send(loaded.OPEN_AI_KEYS_ACK);
         };
         handlers[loaded.BRING_APP_TO_FRONT] = () => electronBridge.bringAppToFront();

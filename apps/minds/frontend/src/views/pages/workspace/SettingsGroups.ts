@@ -15,6 +15,7 @@ import { TextInput } from "../../components/FormControls";
 import type { SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import { normalizeWorkspaceColorHex } from "../../../models/workspaceOptions";
 import { BackupGroupSlot } from "./BackupGroupSlot";
+import { PANE_CONTENT_SCROLL, PANE_NAV_SCROLL } from "./paneScroll";
 
 const GROUPS: { id: SettingsGroup; icon: string; label: string }[] = [
   { id: "general", icon: "info", label: "General" },
@@ -52,7 +53,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
       return m("div", { class: "mt-8 flex gap-8 flex-1 min-h-0" }, [
         m(
           "nav",
-          { class: "shrink-0 w-52", "aria-label": "Settings groups" },
+          { class: "shrink-0 w-52 " + PANE_NAV_SCROLL, "aria-label": "Settings groups" },
           m(
             "div",
             { class: "flex flex-col gap-0.5" },
@@ -74,7 +75,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
             ),
           ),
         ),
-        m("div", { class: "flex-1 min-w-0" }, [
+        m("div", { class: "flex-1 min-w-0 " + PANE_CONTENT_SCROLL }, [
           selectedGroup === "general" ? renderGeneralGroup(model, local) : null,
           selectedGroup === "account" ? renderAccountGroup(model, local) : null,
           selectedGroup === "backup" ? m(BackupGroupSlot, { agentId: data.agent_id }) : null,

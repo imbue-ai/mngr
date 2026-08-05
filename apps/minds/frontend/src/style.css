@@ -16,6 +16,10 @@
 @import "tailwindcss" source(none);
 
 @source "./**/*.ts";
+/* rounded-2xl (16px) is a defined scale step with no literal consumer yet, and
+   the styleguide applies it via an interpolated rounded-${step} the scan cannot
+   see, so safelist it here to keep the token usable. */
+@source inline("rounded-2xl");
 
 /*
  * ---------------------------------------------------------------------------
@@ -135,18 +139,21 @@
  */
 
 /*
- * Corner-radius scale -- four steps (px: sm 4 / md 6 / lg 8 / xl 16), held by a
- * ratchet alongside the built-in rounded-full / rounded-none. md is the
- * default control radius (buttons, inputs, badges, swatches) and matches
- * Figma's 6px. The one exception is the chrome content frame, which keeps a
- * structural rounded-[12px] to match Electron's CONTENT_CORNER_RADIUS and the
- * OS window's outer rounding.
+ * Corner-radius scale -- five steps (px: sm 4 / md 6 / lg 8 / xl 12 / 2xl 16),
+ * alongside the built-in rounded-full / rounded-none. md is the default control
+ * radius (buttons, inputs, badges, swatches) and matches Figma's 6px; xl (12px)
+ * is the floating-modal-card radius (the app modals + the docked options panel).
+ * The chrome content frame uses an explicit rounded-[12px] pinned to Electron's
+ * CONTENT_CORNER_RADIUS and the OS window's outer rounding -- numerically the
+ * same as xl now, but kept decoupled from the token so it stays correct if the
+ * scale ever shifts.
  */
 @theme {
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
-  --radius-xl: 16px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
 }
 
 /*
@@ -346,6 +353,18 @@ body {
   overflow: hidden;
 }
 /*
+ * The whole app background takes the per-workspace accent (--titlebar-bg, set
+ * on the document root while a workspace is displayed; falls back to the
+ * neutral surface on hub pages). This mirrors ChromeShell.jinja's _body_style
+ * in the legacy renderer, which the SPA port had dropped -- so the accent
+ * fills the page and bleeds around the inset content card / workspace frame
+ * rather than being confined to the titlebar strip. The titlebar paints the
+ * same variable on top, so the field reads as continuous.
+ */
+body {
+  background: var(--titlebar-bg, var(--c-surface-primary));
+}
+/*
  * Scrollbars are left NATIVE (no ``::-webkit-scrollbar`` styling): the OS draws
  * its own overlay/auto-hiding bar, which matches the platform, auto-aligns to
  * each scroll container's edge, and adapts to ``color-scheme``. Every
@@ -432,6 +451,62 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 }
 
 /*
+ * Create-from-Inspiration numbered stepper (CreateInspirationPage). The active
+ * step's circle is a solid inverse bubble with a contrasting number; a completed
+ * step is a faint fill with a muted number -- both opaque so the connector line
+ * stays hidden behind them. Completed steps link down to the next with a solid
+ * 1px line; the current (last visible) step gets a short dotted "more to come"
+ * stub instead, unless it is the final step. Ported from InspirationCreate.jinja.
+ */
+.inspiration-step-circle[data-state="active"] {
+  background-color: var(--c-surface-inverse);
+  color: var(--c-text-inverse-primary);
+}
+.inspiration-step-circle[data-state="done"] {
+  background-color: color-mix(in srgb, var(--c-text-primary) 10%, var(--c-surface-primary));
+  color: var(--c-text-secondary);
+}
+.step-connector-line {
+  width: 1px;
+  background-color: color-mix(in srgb, var(--c-text-primary) 10%, var(--c-surface-primary));
+}
+.step-connector-dots {
+  top: 2.25rem;
+  height: 20px;
+  width: 3px;
+  background-image: radial-gradient(circle, var(--c-border-strong) 1.1px, transparent 1.6px);
+  background-size: 3px 7px;
+  background-repeat: repeat-y;
+  background-position: center top;
+}
+
+/*
+ * The copyable "/use-inspiration <repo>" box on the add branch: a slight lift
+ * with a stronger border + soft shadow on hover. The border/background
+ * transitions also carry the green "Copied" confirmation (set via inline style,
+ * which overrides the hover border while the green is showing). The whole box
+ * copies on click, so its read-only value shows the pointer cursor.
+ */
+.copy-box {
+  transition:
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 300ms ease,
+    background-color 300ms ease,
+    box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.copy-box:hover {
+  transform: translateY(-2px);
+  border-color: var(--c-border-strong);
+  box-shadow: 0 6px 18px -8px rgb(0 0 0 / 0.35);
+}
+.copy-box:active {
+  transform: translateY(0);
+}
+.copy-box input {
+  cursor: pointer;
+}
+
+/*
  * Custom tooltip bubble -- shared appearance for the two render backends in
  * static/tooltip_triggers.js: the overlay surface (static/overlay.js, used by
  * the chrome titlebar + the modal pages) and the in-page fallback that
@@ -447,9 +522,23 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
  * label. The max-width is generous enough that short button labels (e.g.
  * "Open in new window") stay on one line; ``text-center`` centers the lines
  * when a longer label does wrap.
+ *
+ * The opacity/transform transition is the enter/leave motion the SPA
+ * controller (views/shell/tooltips.ts) drives by toggling the from/to states;
+ * the 80ms here must match its TOOLTIP_MOTION_MS. Only opacity + transform
+ * animate, so the legacy backends (which never touch either) are unaffected.
+ * prefers-reduced-motion collapses it to none, making those toggles instant.
  */
 .minds-tooltip {
   @apply bg-surface-inverse text-inverse-primary type-helper shadow-overlay pointer-events-none inline-flex max-w-[400px] items-center gap-1.5 rounded-md px-2 py-1 text-center whitespace-normal;
+  transition:
+    opacity 80ms ease,
+    transform 80ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .minds-tooltip {
+    transition: none;
+  }
 }
 
 /*
@@ -1845,9 +1934,16 @@ body {
 #minds-titlebar button {
   -webkit-app-region: no-drag;
 }
-/* The workspace-switcher backdrop paints above the titlebar (z-200 vs
- * z-100), so it must subtract the titlebar strip's drag region or clicks
- * there would drag the window instead of dismissing the popover. */
-#sidebar-backdrop {
+/* Overlays that paint ABOVE the titlebar -- the workspace-switcher popover
+ * (z-200) and the full-window modal / docked-options backdrops (z-110) -- must
+ * subtract the titlebar strip's drag region, or a click in that top strip (the
+ * empty backdrop above an app modal, or the docked options panel's own tab
+ * strip standing in for the titlebar tabs) would drag the window instead of
+ * dismissing / switching tabs. macOS unions drag regions across the whole
+ * window, so being on top in z-order is not enough; the overlapping element
+ * must itself declare no-drag. */
+#sidebar-backdrop,
+#app-overlay-backdrop,
+#ws-options-backdrop {
   -webkit-app-region: no-drag;
 }

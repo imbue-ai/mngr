@@ -32,6 +32,11 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       const requestCount = shell.stores.requests.count;
       const isDesktop = electronBridge.isDesktop;
       const isHomeSelected = context.kind === "home";
+      // While the docked options panel is up it draws its own tab strip at this
+      // strip's measured rect, so hide ours (by visibility, keeping the crumb's
+      // box and the rect true) or the two would ghost through each other --
+      // matching the legacy body.ws-options-open rule.
+      const isOptionsOverlayOpen = isWorkspaceOverlayPath(routePath);
 
       return m(
         "div#minds-titlebar",
@@ -108,7 +113,11 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                         "aria-label": "Share machine",
                         "data-tooltip": "Share machine",
                         tone: context.activeTab === "share" ? "default" : "muted",
-                        extra: context.activeTab === "share" ? "bg-fill-active" : "",
+                        extra: isOptionsOverlayOpen
+                          ? "invisible"
+                          : context.activeTab === "share"
+                            ? "bg-fill-active"
+                            : "",
                         onclick: () => toggleWorkspaceOptions(shell, routePath, context, "share"),
                       },
                       m(Icon16, { name: "share" }),
@@ -120,7 +129,11 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                         "aria-label": "Machine settings",
                         "data-tooltip": "Machine settings",
                         tone: context.activeTab === "settings" ? "default" : "muted",
-                        extra: context.activeTab === "settings" ? "bg-fill-active" : "",
+                        extra: isOptionsOverlayOpen
+                          ? "invisible"
+                          : context.activeTab === "settings"
+                            ? "bg-fill-active"
+                            : "",
                         onclick: () => toggleWorkspaceOptions(shell, routePath, context, "settings"),
                       },
                       m(Icon16, { name: "settings" }),
@@ -152,7 +165,9 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               "aria-label": "Requests",
               "data-tooltip": "Requests",
               extra: "gap-[3px]",
-              onclick: () => m.route.set("/inbox"),
+              // Float the inbox over the current workspace (kept mounted), like
+              // the bug button does for Get help, rather than dropping to Home.
+              onclick: () => shell.openInbox(),
             },
             [m(Icon16, { name: "inbox" }), m(Badge, { id: "requests-badge", count: requestCount, hidden: requestCount === 0 })],
           ),

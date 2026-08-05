@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   accentSourceForRoute,
   classifyRoute,
+  isAppOverlayPath,
   isWorkspaceOverlayPath,
+  overlayBehindWorkspaceId,
   workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
@@ -36,18 +38,83 @@ describe("classifyRoute", () => {
   it("labels hub pages and back visibility like the legacy chrome", () => {
     expect(classifyRoute("/create")).toMatchObject({ kind: "page", pageLabel: "New machine", isBackShown: true });
     expect(classifyRoute("/creating/agent-ff00")).toMatchObject({ kind: "page", isBackShown: false });
-    expect(classifyRoute("/settings").pageLabel).toBe("Settings");
-    expect(classifyRoute("/accounts").pageLabel).toBe("Accounts");
+    // Inspiration over a machine is that machine's modal; standalone it is a
+    // plain New machine page (until it redirects to the create form).
+    expect(classifyRoute("/create/inspiration")).toMatchObject({ kind: "page", pageLabel: "New machine", isBackShown: false });
+    expect(classifyRoute("/create/inspiration", "workspace=agent-ab12")).toMatchObject({
+      kind: "workspace",
+      workspaceAnyId: "agent-ab12",
+    });
     expect(classifyRoute("/workspaces/destroyed").pageLabel).toBe("Recently destroyed");
     expect(classifyRoute("/welcome").kind).toBe("welcome");
     expect(classifyRoute("/").kind).toBe("home");
     expect(classifyRoute("/definitely/unknown").kind).toBe("home");
   });
 
+  it("treats app modals as their opener's context, not a back-button page", () => {
+    // Minds settings / Accounts / Get help / inbox opened from Home -> home context.
+    expect(classifyRoute("/settings")).toMatchObject({ kind: "home", isBackShown: false });
+    expect(classifyRoute("/accounts")).toMatchObject({ kind: "home", isBackShown: false });
+    expect(classifyRoute("/help")).toMatchObject({ kind: "home", isBackShown: false });
+    expect(classifyRoute("/inbox")).toMatchObject({ kind: "home", isBackShown: false });
+    // Get help / the inbox opened over a workspace keep that workspace's context + accent.
+    expect(classifyRoute("/help", "workspace=agent-ab12")).toMatchObject({
+      kind: "workspace",
+      workspaceAnyId: "agent-ab12",
+    });
+    expect(classifyRoute("/inbox", "workspace=agent-ab12")).toMatchObject({
+      kind: "workspace",
+      workspaceAnyId: "agent-ab12",
+    });
+    expect(accentSourceForRoute("/help", "workspace=agent-ab12")).toBe("agent-ab12");
+    expect(accentSourceForRoute("/inbox", "workspace=agent-ab12")).toBe("agent-ab12");
+    // The AI-keys mint dialog floats over the machine that opened it (a
+    // host-scoped ?workspace), keeping that machine's context + accent; opened
+    // without one it floats over Home.
+    expect(classifyRoute("/settings/ai-keys", "workspace=host-99aa")).toMatchObject({
+      kind: "workspace",
+      workspaceAnyId: "host-99aa",
+    });
+    expect(accentSourceForRoute("/settings/ai-keys", "workspace=host-99aa")).toBe("host-99aa");
+    expect(classifyRoute("/settings/ai-keys")).toMatchObject({ kind: "home", isBackShown: false });
+  });
+
   it("keeps the workspace accent on destroying and recovery routes", () => {
     expect(accentSourceForRoute("/destroying/agent-ab12")).toBe("agent-ab12");
     expect(accentSourceForRoute("/agents/host-cd34/recovery")).toBe("host-cd34");
     expect(accentSourceForRoute("/settings")).toBeNull();
+  });
+});
+
+describe("app overlay routing", () => {
+  it("flags the app modal routes", () => {
+    expect(isAppOverlayPath("/settings")).toBe(true);
+    expect(isAppOverlayPath("/accounts")).toBe(true);
+    expect(isAppOverlayPath("/help")).toBe(true);
+    expect(isAppOverlayPath("/inbox")).toBe(true);
+    expect(isAppOverlayPath("/settings/ai-keys")).toBe(true);
+    expect(isAppOverlayPath("/settings")).toBe(true);
+    expect(isAppOverlayPath("/workspace/agent-ab12")).toBe(false);
+  });
+
+  it("reads the workspace behind /help, /inbox, the inspiration modal, and AI-keys from ?workspace only", () => {
+    expect(overlayBehindWorkspaceId("/help", "workspace=agent-ab12")).toBe("agent-ab12");
+    expect(overlayBehindWorkspaceId("/help", "workspace=host-99aa")).toBe("host-99aa");
+    expect(overlayBehindWorkspaceId("/help", "")).toBeNull();
+    expect(overlayBehindWorkspaceId("/help", "workspace=not-an-id")).toBeNull();
+    // The inbox drawer floats over the workspace it was opened from, or Home.
+    expect(overlayBehindWorkspaceId("/inbox", "workspace=agent-ab12")).toBe("agent-ab12");
+    expect(overlayBehindWorkspaceId("/inbox", "")).toBeNull();
+    // The New machine inspiration stepper floats over the machine it was opened
+    // from; with none it redirects to the create form (no behind-workspace).
+    expect(overlayBehindWorkspaceId("/create/inspiration", "workspace=agent-ab12")).toBe("agent-ab12");
+    expect(overlayBehindWorkspaceId("/create/inspiration", "")).toBeNull();
+    // The AI-keys mint dialog floats over the machine that opened it, keyed by
+    // that machine's HOST id (the mint endpoint resolves the account from it).
+    expect(overlayBehindWorkspaceId("/settings/ai-keys", "workspace=host-99aa")).toBe("host-99aa");
+    expect(overlayBehindWorkspaceId("/settings/ai-keys", "")).toBeNull();
+    // Settings / Accounts never carry a behind-workspace -> float over Home.
+    expect(overlayBehindWorkspaceId("/settings", "workspace=agent-ab12")).toBeNull();
   });
 });
 

@@ -67,16 +67,20 @@ export function mountRouter(root: Element, shell: ShellState): void {
     onmatch: () => component,
     render(vnode) {
       const path = shell.currentRoutePath();
+      const search = shell.currentRouteSearch();
       // The surface id (bare workspace OR its options overlay) keeps the
       // WorkspaceFrame mounted across overlay open/close, so opening Share /
       // Settings never tears down and reloads the workspace iframe.
       const workspaceParam = workspaceSurfaceIdFromPath(path);
-      shell.handleRouteChanged(path);
+      shell.handleRouteChanged(path, search);
       return m(Shell, {
         shell,
         routePath: path,
         workspaceParam,
         content: vnode,
+        // The Home surface an app-level modal (settings/accounts/help) floats
+        // over when no workspace is behind it; the router owns page identity.
+        homeContent: m(LandingPage),
       });
     },
   });
@@ -102,6 +106,24 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
   }
   try {
     const parsed = new URL(url, window.location.origin);
+    // An inspiration deeplink (minds://create?git_url= -> /create/inspiration?
+    // git_url=) that lands while a machine is displayed floats the stepper as a
+    // modal over that machine (create new OR add to it), the SPA heir of the
+    // legacy /create/inspiration/modal; with no machine it passes through to the
+    // full-page stepper. (Electron decided this via mru.currentWorkspaceId; here
+    // the displayed machine is the same signal, captured before we navigate.)
+    const gitUrl = parsed.searchParams.get("git_url");
+    const displayed = shell.displayedWorkspaceAnyId;
+    if (parsed.pathname === "/create/inspiration" && gitUrl && displayed !== null) {
+      const query: Record<string, string> = {
+        workspace: shell.stores.workspaces.toAgentScopedId(displayed),
+        git_url: gitUrl,
+      };
+      const branch = parsed.searchParams.get("branch");
+      if (branch) query.branch = branch;
+      m.route.set("/create/inspiration", query);
+      return;
+    }
     m.route.set(parsed.pathname + parsed.search);
   } catch {
     m.route.set("/");

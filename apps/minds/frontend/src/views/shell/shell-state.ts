@@ -6,7 +6,13 @@
 import m from "mithril";
 import type { AppStores } from "../../models/boot";
 import type { UiChannelClient } from "../../channel/client";
-import { accentSourceForRoute, isWorkspaceOverlayPath, workspaceSurfaceIdFromPath } from "./classify";
+import {
+  accentSourceForRoute,
+  isAppOverlayPath,
+  isWorkspaceOverlayPath,
+  overlayBehindWorkspaceId,
+  workspaceSurfaceIdFromPath,
+} from "./classify";
 
 export class ShellState {
   readonly stores: AppStores;
@@ -17,6 +23,10 @@ export class ShellState {
   sidebarAnchor: { x: number; y: number; width: number; height: number } | null = null;
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
+  /** Re-entrancy guard for closeAppOverlay: a single Escape can reach it from
+   * both the in-document listener and the Electron before-input-event forward,
+   * and its history.back() is not idempotent. Cleared on the next route change. */
+  private isAppOverlayClosing = false;
 
   constructor(stores: AppStores) {
     this.stores = stores;
@@ -27,10 +37,30 @@ export class ShellState {
     return route.split("?")[0];
   }
 
+  currentRouteSearch(): string {
+    const route = m.route.get() ?? "";
+    return route.split("?")[1] ?? "";
+  }
+
   /** Enter a workspace: route to the content surface for its identity. */
   enterWorkspace(anyId: string): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     m.route.set(`/workspace/${agentScoped}`);
+  }
+
+  /** Open the Requests inbox over the current surface: forward the displayed
+   * workspace as ?workspace so the drawer floats over that live workspace (kept
+   * mounted) instead of navigating the base layer to Home, mirroring how Get
+   * help forwards ?workspace. Opened from Home (no workspace displayed), it
+   * carries none and floats over Home. Extra query params (e.g. a pre-selected
+   * request on auto-open) are merged in. */
+  openInbox(params: Record<string, string> = {}): void {
+    const displayed = this.displayedWorkspaceAnyId;
+    const query =
+      displayed === null
+        ? params
+        : { ...params, workspace: this.stores.workspaces.toAgentScopedId(displayed) };
+    m.route.set("/inbox", query);
   }
 
   /** Close the options overlay if one is open, returning whether it was. */
@@ -43,9 +73,41 @@ export class ShellState {
     return true;
   }
 
+  /** Dismiss an open app-level modal (Minds settings / Accounts / Get help),
+   * returning to the surface it was opened over. Prefers history so the opener
+   * (Home, Create, or the workspace) is restored exactly; falls back to routing
+   * to the base when there is no history (a cold-start deep link). */
+  closeAppOverlay(): void {
+    const path = this.currentRoutePath();
+    const search = this.currentRouteSearch();
+    // The fixed app modals are always closeable; the New machine inspiration
+    // stepper is a closeable modal only while it floats over a machine
+    // (?workspace=) -- with none it is a redirect, not an overlay.
+    const isCloseable =
+      isAppOverlayPath(path) ||
+      (path === "/create/inspiration" && overlayBehindWorkspaceId(path, search) !== null);
+    if (!isCloseable) return;
+    // A single Escape reaches here twice under Electron (in-document listener +
+    // main-process before-input-event forward). history.back() does not update
+    // the route synchronously, so guard against a second dismissal firing
+    // another back() and over-navigating past the opener.
+    if (this.isAppOverlayClosing) return;
+    this.isAppOverlayClosing = true;
+    if (window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    const behind = overlayBehindWorkspaceId(path, search);
+    m.route.set(behind !== null ? `/workspace/${behind}` : "/");
+  }
+
   /** Route-change hook: track displayed workspace, repaint accent, register. */
-  handleRouteChanged(path: string): void {
-    const accentSource = accentSourceForRoute(path);
+  handleRouteChanged(path: string, search = ""): void {
+    // The dismissal navigation has landed; clear the closeAppOverlay guard.
+    this.isAppOverlayClosing = false;
+    // Pass the query so an app modal opened over a workspace (/help?workspace=)
+    // keeps that workspace's accent painting behind it.
+    const accentSource = accentSourceForRoute(path, search);
     // The options overlay keeps the workspace surface mounted, so it still
     // counts as displaying that workspace.
     this.displayedWorkspaceAnyId = workspaceSurfaceIdFromPath(path);
@@ -74,8 +136,7 @@ export class ShellState {
 
   /** Re-derive the accent for the current route (list updates, previews). */
   repaintAccentForCurrentRoute(): void {
-    const path = this.currentRoutePath();
-    this.paintAccent(accentSourceForRoute(path));
+    this.paintAccent(accentSourceForRoute(this.currentRoutePath(), this.currentRouteSearch()));
   }
 
   private setTitlebarSurface(isOn: boolean): void {

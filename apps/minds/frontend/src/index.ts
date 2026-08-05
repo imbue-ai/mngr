@@ -11,6 +11,7 @@ import { setPendingHelpLaunch } from "./models/help";
 import { attachInboxRequestsStore } from "./models/inbox";
 import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
+import { installTooltips } from "./views/shell/tooltips";
 
 // Stage the pre-filled agent-report launch, then route to the help page
 // (which consumes it). Shared by the plain-browser open_help path and the
@@ -85,12 +86,9 @@ function main(): void {
   bootContext.stores.requests.onAutoOpen((newIds) => {
     electronBridge.sendShellEvent({ type: "focus_window" });
     // Pre-select the newest request so a single arriving request opens
-    // straight onto its detail (the legacy auto-open behavior).
-    if (newIds.length > 0) {
-      m.route.set("/inbox", { selected: newIds[0] });
-    } else {
-      m.route.set("/inbox");
-    }
+    // straight onto its detail (the legacy auto-open behavior). Float over the
+    // current workspace surface if one is displayed rather than dropping to Home.
+    shell.openInbox(newIds.length > 0 ? { selected: newIds[0] } : {});
   });
 
   // Repaint the accent when the workspace list (and its accent cache)
@@ -116,13 +114,15 @@ function main(): void {
     m.redraw();
   });
   // Esc forwarded by Electron main (needed when focus sits inside the
-  // cross-origin workspace iframe, whose key events never reach this
-  // document): dismiss the switcher popover first, else the options overlay.
+  // cross-origin workspace iframe, whose key events never reach this document,
+  // so the overlays' in-document Escape listener never fires): dismiss the
+  // switcher popover first, else the workspace options overlay, else an
+  // app-level modal (Get help / Settings / Accounts) floating over the frame.
   electronBridge.onEscapePressed(() => {
     if (shell.isSidebarOpen) {
       shell.closeSidebar();
-    } else {
-      shell.closeWorkspaceOverlay();
+    } else if (!shell.closeWorkspaceOverlay()) {
+      shell.closeAppOverlay();
     }
     m.redraw();
   });
@@ -130,6 +130,9 @@ function main(): void {
   const root = document.getElementById("app") ?? document.body.appendChild(document.createElement("div"));
   root.id = "app";
   mountRouter(root, shell);
+  // Delegated hover/focus tooltips for the [data-tooltip] chrome (titlebar
+  // buttons, etc.); one document-level install survives mithril's re-renders.
+  installTooltips();
   channel.start();
 }
 
