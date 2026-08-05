@@ -748,7 +748,7 @@ def test_top_level_coverage_omit_covers_subproject_omits() -> None:
 
 @pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="offload configs are absent on the public mirror")
 def test_offload_configs_suppress_per_batch_coverage_reports() -> None:
-    """Guard the offload CI coverage-report invariant established in MIND-142.
+    """Guard the offload CI coverage invariants established in MIND-142.
 
     Per-run coverage reports walk every measured file and are never consumed
     from sandboxes (CI combines the raw .coverage data files on the runner and
@@ -761,10 +761,15 @@ def test_offload_configs_suppress_per_batch_coverage_reports() -> None:
     - offload-modal.toml must pass ``--cov-report=`` so its batches generate
       no reports but still write the .coverage data file the gates combine.
 
-    Discovery-side speedups (--no-cov during collect-only) and invoking
-    .venv/bin/pytest directly instead of `uv run pytest` were prototyped in
-    this PR but moved upstream to offload (see the OFFLOAD tickets linked
-    from MIND-142's follow-up); do not re-add them as config here.
+    Two discovery-side speedups were prototyped in MIND-142; they diverge now:
+
+    - Invoking ``.venv/bin/pytest`` directly instead of ``uv run pytest`` landed
+      upstream -- offload activates the project virtualenv itself as of 0.9.11 --
+      so it must NOT be re-added as config here.
+    - Skipping coverage tracing during ``pytest --collect-only`` (``--no-cov``)
+      lives in each config's framework ``discovery_args``. offload exposes the
+      knob but does not auto-inject discovery args -- by design they stay
+      explicit -- so every offload config sets it.
     """
     errors: list[str] = []
 
@@ -781,4 +786,47 @@ def test_offload_configs_suppress_per_batch_coverage_reports() -> None:
             "offload-modal.toml: framework.run_args must contain `--cov-report=` to suppress per-batch reports"
         )
 
-    assert len(errors) == 0, "offload CI coverage-report invariant violated:\n" + "\n".join(f"  - {e}" for e in errors)
+    for config_name in (
+        "offload-modal.toml",
+        "offload-modal-acceptance.toml",
+        "offload-modal-release.toml",
+        "offload-modal-minds-snapshot.toml",
+    ):
+        discovery_args = str(
+            tomlkit.parse((_REPO_ROOT / config_name).read_text()).get("framework", {}).get("discovery_args", "")
+        )
+        if "--no-cov" not in discovery_args.split():
+            errors.append(
+                f"{config_name}: framework.discovery_args must contain `--no-cov` to skip coverage tracing "
+                "during discovery (offload does not auto-inject discovery args -- by design they stay explicit)"
+            )
+
+    assert len(errors) == 0, "offload CI coverage invariants violated:\n" + "\n".join(f"  - {e}" for e in errors)
+
+
+@pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="offload CI action is absent on the public mirror")
+def test_offload_version_pinned_consistently() -> None:
+    """The offload version is pinned in exactly two places; they must match.
+
+    - ``.github/actions/setup-offload/action.yml`` -- the composite action every
+      offload CI job uses to install the orchestrator binary.
+    - ``libs/mngr/imbue/mngr/resources/Dockerfile`` -- ``OFFLOAD_VERSION``, the
+      in-image ``offload apply-diff`` binary.
+
+    The orchestrator and the in-sandbox binary must be the same version, so a
+    bump has to touch both. This test fails if they drift apart.
+    """
+    version_pattern = r"([0-9]+(?:\.[0-9]+)+)"
+
+    action_text = (_REPO_ROOT / ".github/actions/setup-offload/action.yml").read_text()
+    action_match = re.search(rf'default:\s*"{version_pattern}"', action_text)
+    assert action_match is not None, "could not find the offload version default in setup-offload/action.yml"
+
+    dockerfile_text = (_REPO_ROOT / "libs/mngr/imbue/mngr/resources/Dockerfile").read_text()
+    dockerfile_match = re.search(rf"OFFLOAD_VERSION={version_pattern}", dockerfile_text)
+    assert dockerfile_match is not None, "could not find OFFLOAD_VERSION in the mngr Dockerfile"
+
+    assert action_match.group(1) == dockerfile_match.group(1), (
+        f"offload version mismatch: the setup-offload composite action pins {action_match.group(1)} "
+        f"but the mngr Dockerfile pins {dockerfile_match.group(1)}. Bump both together."
+    )
