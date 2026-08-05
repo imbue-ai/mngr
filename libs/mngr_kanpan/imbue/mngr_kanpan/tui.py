@@ -46,6 +46,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.logging import CLEAR_SCREEN
@@ -62,6 +63,7 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import DEFAULT_LOCAL_REFRESH_INTERVAL_SECONDS
 from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
@@ -443,6 +445,12 @@ class _KanpanState(MutableModel):
     # In-memory cache of fields from previous refresh cycle
     cached_fields: dict[AgentName, dict[str, FieldValue]] = {}
     executor: ThreadPoolExecutor | None = None
+    # The in-flight periodic local refresh, and the worker that serves it. An in-flight
+    # fetch cannot be cancelled, so a tick that runs most of the time would hold
+    # `refresh_future` almost always and the periodic full refresh, which skips whenever
+    # that field is taken, would stop happening. Hence a worker and a field of its own.
+    local_refresh_future: Future[FetchResult] | None = None
+    local_refresh_executor: ThreadPoolExecutor | None = None
     # Dired-style marks: agents flagged for batch operations, keyed by command key
     marks: dict[AgentName, str] = {}
     # Active batch execution state
@@ -479,12 +487,17 @@ class _KanpanState(MutableModel):
     last_fetch_seconds: float | None = None
     # Whether the current in-flight refresh is local-only (no GitHub API)
     refresh_is_local_only: bool = False
+    # Whether a local refresh was asked for while one was already in flight, and so runs
+    # once that one finishes. Only one is held: the board has a single state to catch up to.
+    is_local_refresh_pending: bool = False
     # Handle for the pending deferred refresh alarm (None if no alarm is pending)
     deferred_refresh_alarm: Any = None
     # Monotonic time the deferred refresh is scheduled to fire
     deferred_refresh_fire_at: float = 0.0
     # Cooldown durations (loaded from plugin config)
     refresh_interval_seconds: float = DEFAULT_REFRESH_INTERVAL_SECONDS
+    # Seconds between periodic local refreshes; 0 runs them only on an action.
+    local_refresh_interval_seconds: float = DEFAULT_LOCAL_REFRESH_INTERVAL_SECONDS
     retry_cooldown_seconds: float = 60.0
     staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS
     # When true, Left on an empty reply closes the peek panel (Agent-View back gesture).
@@ -1156,6 +1169,8 @@ def _mute_focused_agent(state: _KanpanState) -> None:
     agent_name = entry.name
     new_muted = not entry.is_muted
 
+    # A periodic read in flight predates this keypress, so it would put the row back where it was.
+    _abandon_periodic_local_refresh(state)
     # Optimistic UI update
     _update_snapshot_mute(state, agent_name, new_muted)
     _refresh_display(state)
@@ -1233,7 +1248,7 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
         _show_transient_message(
             state, f"  Connect to {entry.name} failed (mngr connect exited with code {result.returncode})"
         )
-    _start_local_refresh(loop, state)
+    _request_local_refresh(loop, state)
 
 
 def _find_entry_by_name(state: _KanpanState, name: AgentName | None) -> AgentBoardEntry | None:
@@ -1787,11 +1802,12 @@ def _on_peek_reply_poll(
     loop: MainLoop,
     data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentName, str],
 ) -> None:
-    """Poll a sent reply; on failure drop its optimistic echo and surface the error.
+    """Poll a sent reply; refresh the board on success, drop its optimistic echo on failure.
 
-    A successful send needs no action here -- the echo is pruned once the reply shows up
-    in the transcript. A failed send would otherwise leave the echo up forever, showing
-    the message as delivered when it was not.
+    A delivered reply keeps its echo until the transcript refresh prunes it, and triggers a
+    local refresh because accepting the message puts a WAITING agent back to work, leaving the
+    row's STATE stale from that moment. A failed send would otherwise leave the echo up forever,
+    showing the message as delivered when it was not.
     """
     state, future, agent_name, reply_text = data
     if not future.done():
@@ -1803,6 +1819,7 @@ def _on_peek_reply_poll(
         detail = str(e)
     else:
         if result.returncode == 0:
+            _request_local_refresh(loop, state)
             return
         detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
     if state.peek_agent_name == agent_name:
@@ -2474,10 +2491,7 @@ def _report_after_refresh(state: _KanpanState, message: str, loop: MainLoop) -> 
     both, so the board changes and says why in one step.
     """
     state.pending_completion_message = message
-    _start_local_refresh(loop, state)
-    if state.refresh_future is None:
-        # Nothing to wait on -- a refresh was already in flight and this one was dropped.
-        _flush_pending_completion(state)
+    _request_local_refresh(loop, state)
 
 
 def _flush_pending_completion(state: _KanpanState) -> None:
@@ -2530,10 +2544,117 @@ def _on_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
         _start_refresh(loop, state)
 
 
+def _request_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Run a local-only refresh, deferring it until any in-flight refresh finishes.
+
+    The single entry point for every action that changes what the board should show. An
+    in-flight refresh was started before the action happened, so its result cannot contain
+    the change; holding the request and re-running it afterwards is what makes the caller's
+    repaint certain rather than dependent on refresh timing.
+    """
+    if state.refresh_future is not None:
+        state.is_local_refresh_pending = True
+        return
+    _start_local_refresh(loop, state)
+
+
+def _on_local_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback for the periodic local refresh.
+
+    A tick that lands while the previous one is still running is skipped rather than
+    queued, so the interval is a floor on how often the board re-reads rather than a
+    promise, and an interval shorter than a refresh takes degrades to back-to-back
+    refreshes instead of a growing backlog. The alarm re-arms either way.
+
+    A full refresh in flight counts as this tick: it fetches everything this one would and
+    more, so running alongside it would only sweep the agent list twice for one answer. The
+    deference is one-way -- the full refresh reads `refresh_future` alone, so however often
+    this one runs it can neither take that field nor keep a full refresh from starting.
+    """
+    if state.local_refresh_future is None and state.refresh_future is None:
+        _start_periodic_local_refresh(loop, state)
+    _schedule_next_local_refresh(loop, state)
+
+
+def _schedule_next_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Arm the next periodic local refresh, unless the interval asks for none."""
+    if state.local_refresh_interval_seconds <= 0:
+        return
+    loop.set_alarm_in(state.local_refresh_interval_seconds, _on_local_refresh_alarm, state)
+
+
+def _start_periodic_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Start the periodic local refresh in the background.
+
+    Runs on its own worker and tracks its own future, so at an interval short enough to keep
+    it running most of the time it neither waits behind the full refresh nor keeps that
+    refresh out of `refresh_future`.
+    """
+    if state.local_refresh_executor is None:
+        state.local_refresh_executor = ThreadPoolExecutor(max_workers=1)
+    state.local_refresh_future = state.local_refresh_executor.submit(
+        fetch_local_snapshot,
+        state.mngr_ctx,
+        state.data_sources,
+        state.cached_fields,
+        state.include_filters,
+        state.exclude_filters,
+    )
+    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _poll_periodic_local_refresh, state)
+
+
+def _poll_periodic_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback: watch the periodic local refresh and apply it when it lands."""
+    future = state.local_refresh_future
+    if future is None:
+        return
+    if not future.done():
+        loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _poll_periodic_local_refresh, state)
+        return
+    state.local_refresh_future = None
+    try:
+        fresh = future.result().snapshot
+    except MngrError as e:
+        # The board is left exactly as it was: this runs unprompted and often, so an error row
+        # per tick would be noise, and the full refresh surfaces trouble that persists within
+        # `refresh_interval_seconds`. Only a fetch failure is swallowed; anything else reaches
+        # the loop as the bug it is. `run_kanpan` disables logging for as long as it holds the
+        # terminal, so this line reaches a sink only for a caller that is not the board.
+        logger.debug("Periodic local refresh failed: {}", e)
+        return
+    if fresh.errors:
+        # Shown nowhere, for the same reason and with the same reach as the failure above.
+        logger.debug("Periodic local refresh reported errors: {}", fresh.errors)
+    previous = state.snapshot
+    if previous is None:
+        state.snapshot = fresh
+    else:
+        # Only remote sources sat this one out, so their columns come from the last full
+        # refresh and keep its cadence while everything local tracks the interval. The error
+        # list stays the full refresh's too: this read did run sources that fill one, but
+        # taking its list would drop what a remote source reported, and only that refresh
+        # runs those sources and can put it back.
+        merged = _carry_forward_fields(previous, fresh)
+        state.snapshot = merged.model_copy_update(to_update(merged.field_ref().errors, previous.errors))
+    _refresh_display(state)
+    _prune_orphaned_marks(state)
+
+
+def _abandon_periodic_local_refresh(state: _KanpanState) -> None:
+    """Drop a periodic local read in flight, so it cannot land on top of a newer refresh.
+
+    A read still running when another refresh starts was started before it, and so holds the
+    older answer. It cannot be cancelled, but its result can be left unread: the poll returns
+    early once this field is clear, and the next tick starts a read that sees the change.
+    """
+    state.local_refresh_future = None
+
+
 def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Start a local-only background refresh (no GitHub API calls)."""
     if state.refresh_future is not None:
         return
+    _abandon_periodic_local_refresh(state)
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
     state.refresh_is_local_only = True
@@ -2552,6 +2673,7 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Start a full background refresh and begin the spinner animation."""
+    _abandon_periodic_local_refresh(state)
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
     state.refresh_is_local_only = False
@@ -2627,7 +2749,10 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
     _refresh_display(state)
     _prune_orphaned_marks(state)
-    _flush_pending_completion(state)
+    # A held message waits for the repaint that shows what it is describing. This refresh
+    # predates the change when another is pending, so the message rides that one instead.
+    if not state.is_local_refresh_pending:
+        _flush_pending_completion(state)
 
     if state.snapshot is not None and not was_local_only:
         state.last_fetch_seconds = state.snapshot.fetch_time_seconds
@@ -2636,10 +2761,12 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
     if failed:
         _request_refresh(loop, state, state.retry_cooldown_seconds)
-    elif was_local_only:
-        pass
-    else:
-        _schedule_next_refresh(loop, state)
+
+    if state.is_local_refresh_pending:
+        # A full refresh started by the failure retry above fetches everything a local one
+        # would, so it satisfies the held request and this call stands down for it.
+        state.is_local_refresh_pending = False
+        _start_local_refresh(loop, state)
 
 
 @pure
@@ -3296,9 +3423,16 @@ def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
-    """Alarm callback for periodic auto-refresh."""
+    """Alarm callback for the periodic full refresh.
+
+    A firing that lands while a refresh is already running is skipped: the interval says
+    how often to start one, not how many to have going. Re-arming here rather than on
+    completion is what makes the interval a period and keeps the chain alive down every
+    path a refresh can take, including the ones that never reach completion.
+    """
     if state.refresh_future is None:
         _start_refresh(loop, state)
+    _schedule_next_refresh(loop, state)
 
 
 def _load_user_commands(mngr_ctx: MngrContext) -> dict[str, CustomCommand]:
@@ -3328,6 +3462,8 @@ def _shutdown_executors(state: _KanpanState) -> None:
     """
     if state.executor is not None:
         state.executor.shutdown(wait=False)
+    if state.local_refresh_executor is not None:
+        state.local_refresh_executor.shutdown(wait=False)
     if state.peek_executor is not None:
         state.peek_executor.shutdown(wait=False)
     if state.peek_reply_executor is not None:
@@ -3375,6 +3511,7 @@ def run_kanpan(
     # Compiled before the screen is taken, so a misconfigured template reports
     # itself on the terminal rather than under the board.
     header_status = compile_header_status(plugin_config.header_status)
+    plugin_config.check_refresh_intervals()
 
     # Collect data sources and load cached fields from disk
     data_sources = collect_data_sources(mngr_ctx)
@@ -3413,6 +3550,7 @@ def run_kanpan(
         footer_right=footer_right,
         commands=commands,
         refresh_interval_seconds=plugin_config.refresh_interval_seconds,
+        local_refresh_interval_seconds=plugin_config.local_refresh_interval_seconds,
         retry_cooldown_seconds=plugin_config.retry_cooldown_seconds,
         batch_concurrency=plugin_config.batch_concurrency,
         staleness_threshold_seconds=plugin_config.effective_staleness_threshold_seconds(),
@@ -3451,6 +3589,9 @@ def run_kanpan(
         # Initial data load with spinner
         _start_refresh(loop, state)
         loop.set_alarm_in(_STAMP_TICK_SECONDS, _on_stamp_tick, state)
+        # Each periodic refresh runs off a chain its own alarm keeps going, so both start here.
+        _schedule_next_refresh(loop, state)
+        _schedule_next_local_refresh(loop, state)
 
         screen.write(_TITLE_STACK_PUSH)
         _write_terminal_title(screen, TERMINAL_TITLE)

@@ -19,6 +19,7 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import KanpanConfigError
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import section_label
 
@@ -208,6 +209,24 @@ def test_effective_staleness_threshold_tracks_custom_refresh_interval() -> None:
 def test_effective_staleness_threshold_uses_explicit_value_when_set() -> None:
     config = KanpanPluginConfig(refresh_interval_seconds=600.0, staleness_threshold_seconds=42.0)
     assert config.effective_staleness_threshold_seconds() == 42.0
+
+
+def test_check_refresh_intervals_rejects_what_the_config_loader_lets_through() -> None:
+    # `_parse_plugins` builds plugin config with `model_construct`, so the `gt=0` declared on the
+    # field never runs on the path a `mngr.toml` takes -- which is why this check exists at all.
+    # An interval that is not positive leaves the board's alarm permanently due, and urwid
+    # repaints only on the idle iteration that then never comes.
+    KanpanPluginConfig().check_refresh_intervals()
+    KanpanPluginConfig.model_construct(local_refresh_interval_seconds=5.0).check_refresh_intervals()
+    # Zero asks the local refresh for no timer, so it arms no alarm and is not the spin case.
+    KanpanPluginConfig.model_construct(local_refresh_interval_seconds=0.0).check_refresh_intervals()
+    for setting, config in (
+        ("local_refresh_interval_seconds", KanpanPluginConfig.model_construct(local_refresh_interval_seconds=-3.0)),
+        ("refresh_interval_seconds", KanpanPluginConfig.model_construct(refresh_interval_seconds=0.0)),
+        ("refresh_interval_seconds", KanpanPluginConfig.model_construct(refresh_interval_seconds=-3.0)),
+    ):
+        with pytest.raises(KanpanConfigError, match=setting):
+            config.check_refresh_intervals()
 
 
 # The kanpan plugin no longer carries a custom ``merge_with`` that unions its dict fields

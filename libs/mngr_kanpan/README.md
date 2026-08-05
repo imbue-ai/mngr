@@ -16,6 +16,7 @@ Interact with an agent without leaving the board:
 - **Peek** (`Space`): open a live bordered panel below the board showing the focused agent's recent user/assistant conversation (via `mngr transcript --role user --role assistant`), refreshed every couple of seconds, with the board still visible above. Tool calls and framework-injected turns do not appear, so the peek reads like the human conversation. Each message's `[timestamp] role:` header is trimmed to a dim role cue. It shows the newest lines, so a long final message renders its end (the agent's conclusion, or the question it is waiting on) under a `⋯` marker, rather than mirroring the agent's scrolled-up screen. The panel says `(no messages yet)` when there is no readable message.
   - `Esc` closes the panel. To peek a different agent, close it, move the board selection, and press `Space` again.
 - **Reply**: type into the panel's `›` input and press `Enter` to send the message to that agent (equivalent to `mngr message`); an empty reply does nothing. Your reply is echoed into the panel immediately as a `›` line, so you see it without waiting: `mngr message` blocks up to ~90s on the agent's submission signal (which a busy agent cannot give until its current turn ends), so the send runs in the background and is not awaited. Once the agent accepts the reply and it appears in the transcript, the echo is replaced by the real message. Several replies typed in a row are delivered in the order you sent them.
+  - A reply only reaches a live agent: the send does not start agents, so replying to a `STOPPED` or `DONE` one fails with its state instead of reviving it. A delivered reply puts a `WAITING` agent back to work, so the board re-probes local state once the send returns and the row's `STATE` catches up on its own.
   - The input supports readline-style editing: word movement (`Option`/`Ctrl`+`←`/`→`), word delete (`Option`+`Delete`, `Ctrl-W`), start/end (`Ctrl-A`/`Ctrl-E`), and kill to start/end (`Ctrl-U`/`Ctrl-K`).
 - **Selections**: a text reply cannot move a selection cursor, and selection menus (e.g. `/login`) are not part of the transcript, so they do not appear in the peek; attach (`Enter`) to make the choice in the real session.
 
@@ -377,7 +378,9 @@ The PR column displays clickable hyperlinks (OSC 8) in terminals that support th
 Kanpan uses two refresh strategies:
 
 - **Full refresh** (manual 'r' key, periodic 10-minute timer): runs all data sources. Only one can be in flight at a time -- pressing 'r' while a refresh is running is ignored.
-- **Agent-only refresh** (after push, delete, custom commands): runs every local data source -- `repo_paths`, `git_info`, and any label-backed column -- and carries the rest (PR, CI, shell columns) forward from the previous snapshot. Label-backed columns being local is why `refresh_afterwards` on a command that writes a label repaints that label's column.
+- **Local refresh** (after push, delete, custom commands, attach, and a delivered peek reply, plus on a timer if you set one): runs every local data source -- `repo_paths`, `git_info`, and any label-backed column -- and carries the rest (PR, CI, shell columns) forward from the previous snapshot. Label-backed columns being local is why `refresh_afterwards` on a command that writes a label repaints that label's column.
+
+An action's refresh is held, not dropped, when one is already running: the fetch in flight was started before the action, so it cannot show what the action changed, and a second one runs as soon as it lands. So the board always catches up with an action you took, whatever the refresh timing happened to be. A held outcome message waits for that second refresh too, keeping the message and the rows it describes together. A periodic full refresh that lands mid-fetch is skipped for that interval and resumes on the next one.
 
 Both are configurable:
 
@@ -387,7 +390,30 @@ Both are configurable:
 refresh_interval_seconds = 600.0
 # Seconds before retrying after a failed full refresh
 retry_cooldown_seconds = 60.0
+# Seconds between periodic local refreshes (default 30 seconds); 0 runs them
+# only in response to an action.
+local_refresh_interval_seconds = 30.0
 ```
+
+### Keeping the board live
+
+A local refresh runs every `local_refresh_interval_seconds`, so `STATE`, `commits_ahead` and any header count over them describe the fleet as it is rather than as the last full refresh found it. Shorten the interval to watch a count move in something close to real time:
+
+```toml
+[plugins.kanpan]
+local_refresh_interval_seconds = 5.0
+header_status = 'Running: {state == "RUNNING"}'
+```
+
+Set it to `0` to go back to refreshing only when you act. That is the way to turn the timer off -- TOML has no null, so a setting that is on by default needs a value that means off, and zero arms no alarm rather than one that is always due. A negative interval is rejected.
+
+What to weigh in choosing one: a refresh costs roughly a second per few dozen agents and is spent whether or not anything changed. The default trades a small share of an idle board's time for columns that are seconds rather than minutes old; a few seconds an interval keeps a count live at the cost of the board reading the agent list almost continuously.
+
+The interval is a floor, not a promise. A tick that lands while the previous refresh is still running is skipped rather than queued, so an interval shorter than a refresh takes settles into back-to-back refreshes instead of a growing backlog. A refresh that finishes inside its interval leaves the columns under two intervals behind; a slower one stretches that in step with itself, so a slow data source costs you freshness rather than piling work up. These refreshes run on their own worker, so a slow one delays neither the periodic full refresh nor an action's repaint.
+
+A header count is only ever as fresh as the columns it reads. `{state == "RUNNING"}` and `{fields.commits_ahead.count > 0}` ride this timer, but `{cells.ci.text == "failure"}` still moves at the GitHub source's cadence, since remote sources sit these refreshes out.
+
+The `Errors:` block at the bottom of the board belongs to the full refresh for the same reason: a tick has trouble of its own to report -- a provider that will not answer counts against it as much as against a full refresh -- but taking its list would drop what a remote source reported, which only the full refresh can put back. So a tick that goes wrong leaves the board exactly as it was -- no error row, no spinner, nothing at all. At a few seconds an interval, anything else would be noise. Trouble that persists still reaches the board within `refresh_interval_seconds`, since the full refresh does report the fetch errors it runs into, and what it reported stays up across these ticks.
 
 ## Staleness
 

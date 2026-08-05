@@ -4,6 +4,7 @@ import io
 import re
 import subprocess
 import threading
+from collections.abc import Callable
 from collections.abc import Sequence
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +37,7 @@ from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import KanpanDataSourceError
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
@@ -49,10 +51,12 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import CustomCommand
+from imbue.mngr_kanpan.data_types import DEFAULT_LOCAL_REFRESH_INTERVAL_SECONDS
 from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.header_status import compile_header_status
 from imbue.mngr_kanpan.testing import make_additional_pr
 from imbue.mngr_kanpan.testing import make_agent_details
@@ -143,8 +147,11 @@ from imbue.mngr_kanpan.tui import _legend_width
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_readline_edit
 from imbue.mngr_kanpan.tui import _mark_color
+from imbue.mngr_kanpan.tui import _mute_focused_agent
 from imbue.mngr_kanpan.tui import _nearest_surviving_name
+from imbue.mngr_kanpan.tui import _on_auto_refresh_alarm
 from imbue.mngr_kanpan.tui import _on_batch_poll
+from imbue.mngr_kanpan.tui import _on_local_refresh_alarm
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
 from imbue.mngr_kanpan.tui import _on_stamp_tick
@@ -155,6 +162,7 @@ from imbue.mngr_kanpan.tui import _open_search
 from imbue.mngr_kanpan.tui import _packed_width
 from imbue.mngr_kanpan.tui import _peek_body_lines
 from imbue.mngr_kanpan.tui import _peek_body_markup
+from imbue.mngr_kanpan.tui import _poll_periodic_local_refresh
 from imbue.mngr_kanpan.tui import _prompted_mark_keys
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _rank_matches
@@ -167,12 +175,15 @@ from imbue.mngr_kanpan.tui import _report_after_refresh
 from imbue.mngr_kanpan.tui import _resolve_section_order
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _run_shell_command_sync
+from imbue.mngr_kanpan.tui import _schedule_next_local_refresh
 from imbue.mngr_kanpan.tui import _search_counter_text
 from imbue.mngr_kanpan.tui import _search_rows
 from imbue.mngr_kanpan.tui import _set_footer_legend
 from imbue.mngr_kanpan.tui import _short_header
 from imbue.mngr_kanpan.tui import _show_transient_message
 from imbue.mngr_kanpan.tui import _shutdown_executors
+from imbue.mngr_kanpan.tui import _start_local_refresh
+from imbue.mngr_kanpan.tui import _start_refresh
 from imbue.mngr_kanpan.tui import _submit_batch_item
 from imbue.mngr_kanpan.tui import _submit_peek_reply
 from imbue.mngr_kanpan.tui import _submit_prompt
@@ -194,13 +205,15 @@ from imbue.mngr_kanpan.tui import resolve_board_layout
 
 
 class _CallTracker:
-    """Lightweight call tracker."""
+    """Lightweight call tracker, recording how often it was called and with what."""
 
     def __init__(self) -> None:
         self.call_count: int = 0
+        self.calls: list[tuple[object, ...]] = []
 
     def __call__(self, *args: object, **kwargs: object) -> None:
         self.call_count += 1
+        self.calls.append(args)
 
 
 _TEST_SCREEN_COLS: int = 120
@@ -1055,7 +1068,7 @@ def test_carry_forward_fields_merges() -> None:
 
 
 def test_carry_forward_fields_blanks_a_cleared_label_cell() -> None:
-    # What a user sees after clearing a label: the agent-only refresh that `refresh_afterwards`
+    # What a user sees after clearing a label: the local refresh that `refresh_afterwards`
     # triggers blanks the cell. Both halves are driven -- the label source produces the fields,
     # the merge lays them over the previous snapshot -- since either alone would still show
     # the stale value.
@@ -2416,9 +2429,11 @@ def test_on_peek_reply_poll_failure_drops_echo_and_shows_error() -> None:
     assert state.peek_pending_replies == []
     assert "reply failed" in str(state.peek_body_text.text)
     assert "agent not running" in str(state.peek_body_text.text)
+    # Nothing was delivered, so the agent's state is unchanged and there is nothing to re-probe.
+    assert state.refresh_future is None
 
 
-def test_on_peek_reply_poll_success_keeps_echo() -> None:
+def test_on_peek_reply_poll_success_keeps_echo_and_refreshes_board() -> None:
     state = _make_state()
     state.loop = _make_mock_loop()
     _build_peek_panel(state)
@@ -2429,6 +2444,27 @@ def test_on_peek_reply_poll_success_keeps_echo() -> None:
     # A delivered reply keeps its echo until the transcript refresh prunes it.
     assert state.peek_pending_replies == ["my reply"]
     assert state.peek_reply_error == ""
+    # Accepting the message puts a WAITING agent back to work, so the row's lifecycle
+    # state is re-probed rather than left showing the pre-reply value.
+    assert state.refresh_future is not None
+    assert state.refresh_is_local_only is True
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_on_peek_reply_poll_success_does_not_stack_refreshes() -> None:
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    _build_peek_panel(state)
+    state.peek_agent_name = AgentName("agent-a")
+    in_flight: Future[FetchResult] = Future()
+    state.refresh_future = in_flight
+    _on_peek_reply_poll(state.loop, (state, _make_reply_result(returncode=0), AgentName("agent-a"), "my reply"))
+    # A refresh already in flight is left alone rather than being replaced mid-fetch, and
+    # the reply's own refresh is held rather than dropped: that fetch was started before the
+    # reply landed, so it cannot show the agent going back to work.
+    assert state.refresh_future is in_flight
+    assert state.is_local_refresh_pending is True
 
 
 def test_on_peek_reply_poll_failure_after_close_shows_transient() -> None:
@@ -4383,13 +4419,292 @@ def test_a_repainting_command_reports_only_once_the_board_has_repainted() -> Non
 
 
 def test_a_held_outcome_waits_rather_than_reporting_twice_when_a_refresh_is_running() -> None:
-    # `_start_local_refresh` early-returns while one is in flight. The outcome must ride
-    # that refresh out rather than being shown now and again when it lands.
+    # The outcome must ride out the refresh it asked for rather than being shown now and
+    # again when it lands.
     state = _tall_board_state()
     state.refresh_future = cast(Any, object())
     _report_after_refresh(state, "  note completed for agent-00", state.loop)
     assert state.transient_message is None
     assert state.pending_completion_message == "  note completed for agent-00"
+    assert state.is_local_refresh_pending is True
+
+
+def test_an_in_flight_refresh_that_predates_the_change_does_not_release_the_outcome() -> None:
+    # That fetch was started before the command ran, so its repaint cannot show what the
+    # message describes. The held message waits for the refresh queued behind it.
+    state = _tall_board_state()
+    done: Future[Any] = Future()
+    done.set_exception(RuntimeError("discovery is down"))
+    state.refresh_future = done
+    state.refresh_is_local_only = True
+    state.pending_completion_message = "  note completed for agent-00"
+    state.is_local_refresh_pending = True
+    _finish_refresh(state.loop, state)
+    assert state.transient_message is None
+    assert state.pending_completion_message == "  note completed for agent-00"
+    # The failure retry started a fetch, so the pool it opened is this test's to close.
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_deferred_local_refresh_runs_once_the_in_flight_one_finishes() -> None:
+    # Without the drain the request is lost outright and the board keeps showing state
+    # from before the change until the next manual `r` or the periodic timer.
+    state = _tall_board_state()
+    done: Future[FetchResult] = Future()
+    done.set_result(FetchResult(snapshot=make_board_snapshot(entries=()), cached_fields={}))
+    state.refresh_future = done
+    state.refresh_is_local_only = True
+    state.is_local_refresh_pending = True
+    _finish_refresh(state.loop, state)
+    assert state.is_local_refresh_pending is False
+    assert state.refresh_future is not None
+    assert state.refresh_is_local_only is True
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_failed_refresh_lets_its_full_retry_stand_in_for_the_deferred_local_one() -> None:
+    # The retry fetches everything a local refresh would, so the held request is satisfied
+    # by it rather than queued behind it as a second fetch.
+    state = _tall_board_state()
+    failed: Future[Any] = Future()
+    failed.set_exception(RuntimeError("discovery is down"))
+    state.refresh_future = failed
+    state.refresh_is_local_only = True
+    state.is_local_refresh_pending = True
+    _finish_refresh(state.loop, state)
+    assert state.is_local_refresh_pending is False
+    assert state.refresh_future is not None
+    assert state.refresh_is_local_only is False
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_the_periodic_refresh_alarm_rearms_itself_when_one_is_already_running() -> None:
+    # A firing that skips its interval still has to keep the chain going, or the board is
+    # left with no periodic refresh at all.
+    state = _tall_board_state()
+    state.refresh_future = cast(Any, object())
+    before = state.loop.set_alarm_in.call_count
+    _on_auto_refresh_alarm(state.loop, state)
+    assert state.loop.set_alarm_in.call_count == before + 1
+
+
+def test_the_periodic_refresh_alarm_rearms_itself_when_it_starts_a_refresh() -> None:
+    # The alarm is the only thing that arms the next one, so the chain has to survive the
+    # path that starts a refresh just as much as the path that skips one.
+    state = _tall_board_state()
+    state.refresh_future = None
+    _on_auto_refresh_alarm(state.loop, state)
+    assert state.refresh_future is not None
+    # By callback rather than by count: starting a refresh arms the spinner and the completion
+    # poll too, so a count alone rises whether or not the chain was kept going.
+    assert any(call[1] is _on_auto_refresh_alarm for call in state.loop.set_alarm_in.calls)
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_periodic_local_refresh_stands_down_for_a_full_refresh_in_flight() -> None:
+    # The full refresh fetches everything this one would, so running alongside it would
+    # sweep the agent list twice for one answer.
+    state = _tall_board_state()
+    state.local_refresh_interval_seconds = 5.0
+    state.refresh_future = cast(Any, object())
+    _on_local_refresh_alarm(state.loop, state)
+    assert state.local_refresh_future is None
+    assert state.local_refresh_executor is None
+
+
+def test_no_periodic_local_refresh_runs_when_the_interval_is_zero() -> None:
+    # Zero is how a board that refreshes on a timer by default is asked not to.
+    state = _tall_board_state()
+    state.local_refresh_interval_seconds = 0.0
+    before = state.loop.set_alarm_in.call_count
+    _schedule_next_local_refresh(state.loop, state)
+    assert state.loop.set_alarm_in.call_count == before
+    assert state.local_refresh_future is None
+
+
+def test_a_periodic_local_refresh_tick_is_skipped_while_the_previous_one_is_still_running() -> None:
+    # launchd-style: the interval is a floor on how often the board refreshes, not a promise.
+    # Queueing instead would build a backlog whenever a refresh outlasts the interval.
+    state = _tall_board_state()
+    state.local_refresh_interval_seconds = 5.0
+    in_flight: Future[FetchResult] = Future()
+    state.local_refresh_future = in_flight
+    _on_local_refresh_alarm(state.loop, state)
+    assert state.local_refresh_future is in_flight
+    assert state.local_refresh_executor is None
+
+
+def test_the_periodic_local_refresh_alarm_rearms_itself_when_a_read_is_already_running() -> None:
+    # The alarm is the only thing that arms the next one, so a skipped tick still has to keep the
+    # chain going, or the timer fires once and the board never re-reads on its own again.
+    state = _tall_board_state()
+    state.local_refresh_interval_seconds = 5.0
+    in_flight: Future[FetchResult] = Future()
+    state.local_refresh_future = in_flight
+    before = state.loop.set_alarm_in.call_count
+    _on_local_refresh_alarm(state.loop, state)
+    assert state.loop.set_alarm_in.call_count == before + 1
+
+
+def test_a_periodic_local_refresh_still_in_flight_is_watched_again() -> None:
+    # The poll is what applies the read and clears the field the next tick checks, so it has to
+    # re-arm while the read is unfinished; dropping that leaves the field set for the rest of the
+    # session and every later tick skips.
+    state = _make_state()
+    state.loop = _make_mock_loop()
+    in_flight: Future[FetchResult] = Future()
+    state.local_refresh_future = in_flight
+    _poll_periodic_local_refresh(state.loop, state)
+    assert state.local_refresh_future is in_flight
+    assert state.loop.set_alarm_in.call_count == 1
+
+
+def test_a_periodic_local_refresh_tick_leaves_refresh_future_alone() -> None:
+    # Tracking its own future is what stops a tick that runs most of the time from starving
+    # the periodic full refresh, which skips whenever `refresh_future` is taken.
+    state = _tall_board_state()
+    state.local_refresh_interval_seconds = 5.0
+    _on_local_refresh_alarm(state.loop, state)
+    assert state.local_refresh_future is not None
+    assert state.refresh_future is None
+    assert state.local_refresh_executor is not None
+    state.local_refresh_executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_periodic_local_refresh_keeps_the_columns_it_did_not_run() -> None:
+    # Remote sources sit it out, so their fields arrive empty; carrying them forward is what
+    # keeps PR and CI on the full refresh's cadence instead of blanking between them.
+    carried_pr = make_pr_field(created=datetime(2027, 1, 1, tzinfo=timezone.utc))
+    before = make_board_snapshot(
+        entries=(
+            make_board_entry(
+                name="agent-a",
+                state=AgentLifecycleState.WAITING,
+                fields={FIELD_PR: carried_pr},
+                cells={FIELD_PR: carried_pr.display()},
+            ),
+        )
+    )
+    state = _make_state(snapshot=before)
+    state.loop = _make_mock_loop()
+    _refresh_display(state)
+    read_locally = CommitsAheadField(
+        count=3, has_work_dir=True, created=datetime(2027, 1, 1, 0, 5, tzinfo=timezone.utc)
+    )
+    fresh: Future[FetchResult] = Future()
+    fresh.set_result(
+        FetchResult(
+            snapshot=make_board_snapshot(
+                entries=(
+                    make_board_entry(
+                        name="agent-a",
+                        state=AgentLifecycleState.RUNNING,
+                        fields={"commits_ahead": read_locally},
+                    ),
+                )
+            ),
+            cached_fields={},
+        )
+    )
+    state.local_refresh_future = fresh
+    _poll_periodic_local_refresh(state.loop, state)
+    after = state.snapshot
+    assert after is not None
+    assert after.entries[0].state is AgentLifecycleState.RUNNING
+    # What the read produced lands, and the PR column it never ran survives instead of blanking.
+    assert after.entries[0].fields["commits_ahead"] is read_locally
+    assert after.entries[0].fields[FIELD_PR] is carried_pr
+    assert state.local_refresh_future is None
+
+
+def test_a_periodic_local_refresh_leaves_the_error_list_to_the_full_refresh() -> None:
+    # This read ran none of the remote sources that fill that list, so adopting its own errors
+    # would drop what a remote source reported and leave its stale column unexplained until the
+    # next full refresh -- and would put a local blip on the board once per tick besides.
+    before = make_board_snapshot(
+        entries=(make_board_entry(name="agent-a", state=AgentLifecycleState.WAITING),),
+        errors=("Data source 'github' failed: rate limited",),
+    )
+    state = _make_state(snapshot=before)
+    state.loop = _make_mock_loop()
+    _refresh_display(state)
+    fresh: Future[FetchResult] = Future()
+    fresh.set_result(
+        FetchResult(
+            snapshot=make_board_snapshot(
+                entries=(make_board_entry(name="agent-a", state=AgentLifecycleState.RUNNING),),
+                errors=("local provider blipped",),
+            ),
+            cached_fields={},
+        )
+    )
+    state.local_refresh_future = fresh
+    _poll_periodic_local_refresh(state.loop, state)
+    after = state.snapshot
+    assert after is not None
+    assert after.errors == ("Data source 'github' failed: rate limited",)
+    # The columns it did run still land, so preserving the errors costs no freshness.
+    assert after.entries[0].state is AgentLifecycleState.RUNNING
+
+
+def test_a_failed_periodic_local_refresh_leaves_the_board_exactly_as_it_was() -> None:
+    # This tier runs unprompted and often, so the board's error list is left to the full refresh
+    # rather than rewritten between them. The failure shows up nowhere: no error row, and the
+    # columns keep the values the last refresh gave them.
+    before = make_board_snapshot(
+        entries=(make_board_entry(name="agent-a", state=AgentLifecycleState.WAITING),), errors=("earlier trouble",)
+    )
+    state = _make_state(snapshot=before)
+    state.loop = _make_mock_loop()
+    failed: Future[FetchResult] = Future()
+    failed.set_exception(KanpanDataSourceError("discovery is down"))
+    state.local_refresh_future = failed
+    _poll_periodic_local_refresh(state.loop, state)
+    assert state.snapshot is before
+    # Cleared even so, or the next tick would find one in flight forever and never run again.
+    assert state.local_refresh_future is None
+
+
+def test_muting_abandons_a_periodic_local_read_that_predates_it() -> None:
+    # The read holds the value from before the keypress, so landing it would take the row straight
+    # back out of MUTED and leave the board contradicting the thing the user just did.
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    state = _make_state_with_walker((entry,))
+    state.loop = _make_mock_loop()
+    state.list_walker.set_focus(next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a")))
+    stale: Future[FetchResult] = Future()
+    state.local_refresh_future = stale
+    _mute_focused_agent(state)
+    assert state.snapshot is not None
+    assert state.snapshot.entries[0].is_muted is True
+    assert state.local_refresh_future is None
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.parametrize("start_newer_refresh", (_start_local_refresh, _start_refresh), ids=("local", "full"))
+def test_a_periodic_local_read_is_abandoned_by_the_refresh_that_supersedes_it(
+    start_newer_refresh: Callable[[Any, _KanpanState], None],
+) -> None:
+    # The periodic read started first, so it holds the older answer. Landing it afterwards
+    # would put the rows the newer refresh replaced back on the board -- an agent the action
+    # deleted, or the STATE it changed -- until the next tick.
+    before = make_board_snapshot(entries=(make_board_entry(name="agent-a", state=AgentLifecycleState.WAITING),))
+    state = _make_state(snapshot=before)
+    state.loop = _make_mock_loop()
+    stale: Future[FetchResult] = Future()
+    stale.set_result(FetchResult(snapshot=make_board_snapshot(entries=()), cached_fields={}))
+    state.local_refresh_future = stale
+    start_newer_refresh(state.loop, state)
+    assert state.local_refresh_future is None
+    _poll_periodic_local_refresh(state.loop, state)
+    assert state.snapshot is before
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_a_failed_refresh_still_releases_the_outcome_it_was_carrying() -> None:
@@ -4401,7 +4716,7 @@ def test_a_failed_refresh_still_releases_the_outcome_it_was_carrying() -> None:
     state.refresh_future = failed
     state.refresh_is_local_only = True
     state.pending_completion_message = "  note completed for agent-00"
-    _finish_refresh(cast(Any, state.loop), state)
+    _finish_refresh(state.loop, state)
     assert state.transient_message == "  note completed for agent-00"
     assert state.pending_completion_message is None
 
@@ -4477,6 +4792,19 @@ def test_the_batch_pool_runs_as_many_at_once_as_configured() -> None:
     futures = [executor.submit(_blocks_until_partners_arrive) for _ in range(3)]
     assert sorted(f.result(timeout=5) for f in futures) == [0, 1, 2]
     executor.shutdown(wait=True)
+
+
+def test_the_local_refresh_interval_defaults_to_a_period_and_takes_zero_as_off() -> None:
+    # TOML has no null, so a field that is on by default needs a value that means off; zero is
+    # it, and arms no alarm rather than one that is always due.
+    assert KanpanPluginConfig().local_refresh_interval_seconds == DEFAULT_LOCAL_REFRESH_INTERVAL_SECONDS
+    assert KanpanPluginConfig(local_refresh_interval_seconds=5.0).local_refresh_interval_seconds == 5.0
+    assert KanpanPluginConfig(local_refresh_interval_seconds=0.0).local_refresh_interval_seconds == 0.0
+    with pytest.raises(ValidationError):
+        KanpanPluginConfig(local_refresh_interval_seconds=-1.0)
+    # The full refresh has no off switch, so zero there is the always-due alarm, not a request.
+    with pytest.raises(ValidationError):
+        KanpanPluginConfig(refresh_interval_seconds=0.0)
 
 
 def test_batch_concurrency_is_configurable_and_defaults_to_overlapping() -> None:

@@ -17,6 +17,13 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.errors import KanpanError
+
+
+class KanpanConfigError(KanpanError, ValueError):
+    """Raised when kanpan's plugin config holds a value the board cannot run with."""
+
+    ...
 
 
 class BoardSection(UpperCaseStrEnum):
@@ -242,6 +249,11 @@ KanpanCommand = Annotated[CustomCommand | ActionBuiltinCommand | MarkableBuiltin
 # briefly grey out near the cycle boundary.
 STALENESS_FRACTION_OF_REFRESH_INTERVAL = 0.9
 
+# Short enough that a board left open describes the fleet as it is rather than as the last
+# full refresh found it, long enough that the read it costs stays a small share of the time
+# the board spends idle.
+DEFAULT_LOCAL_REFRESH_INTERVAL_SECONDS = 30.0
+
 
 class KanpanPluginConfig(PluginConfig):
     """Configuration for the kanpan plugin."""
@@ -281,9 +293,20 @@ class KanpanPluginConfig(PluginConfig):
         "an agent to accept) otherwise makes a batch take the sum of its parts. Raise it for more "
         "overlap, or set 1 to run them strictly one at a time.",
     )
-    refresh_interval_seconds: float = Field(
+    refresh_interval_seconds: Annotated[float, Field(gt=0)] = Field(
         default=600.0,
         description="Seconds between periodic full refreshes (default 10 minutes)",
+    )
+    local_refresh_interval_seconds: Annotated[float, Field(ge=0)] = Field(
+        default=DEFAULT_LOCAL_REFRESH_INTERVAL_SECONDS,
+        description="Seconds between periodic local refreshes, which run every local data "
+        "source, so `STATE`, `commits_ahead`, label columns and any header count over them stay "
+        "current between full refreshes. Remote columns (PR, CI, shell) are carried forward and "
+        "keep the full refresh's cadence. A tick that lands while the previous one is still "
+        "running is skipped rather than queued, so the interval can be shorter than a refresh "
+        "takes. Set 0 to run these only in response to an action. A refresh costs roughly a "
+        "second per few dozen agents and is spent whether or not anything changed, so shortening "
+        "the interval trades that against how soon the board shows what it did not cause.",
     )
     retry_cooldown_seconds: float = Field(
         default=60.0,
@@ -320,6 +343,27 @@ class KanpanPluginConfig(PluginConfig):
         default_factory=dict,
         description="[deprecated] After-refresh hooks - use data sources instead",
     )
+
+    def check_refresh_intervals(self) -> None:
+        """Reject a periodic interval the board's alarm chains could never advance past.
+
+        Plugin config is built with `model_construct`, which skips the bound declared on the
+        field, so an out-of-range interval arrives here intact. Both chains re-arm on firing, so
+        an alarm that is always due leaves urwid's loop no iteration in which it is idle -- and
+        idle is when the screen repaints, so the board pegs a core and freezes. Zero arms no
+        alarm at all, which is why the local refresh takes it as the way to ask for none and the
+        full refresh, having no such off switch, does not.
+        """
+        if self.refresh_interval_seconds <= 0:
+            raise KanpanConfigError(
+                "plugins.kanpan.refresh_interval_seconds must be greater than zero, "
+                f"but is {self.refresh_interval_seconds}"
+            )
+        if self.local_refresh_interval_seconds < 0:
+            raise KanpanConfigError(
+                "plugins.kanpan.local_refresh_interval_seconds cannot be negative, "
+                f"but is {self.local_refresh_interval_seconds}; use 0 to run no periodic local refreshes"
+            )
 
     def effective_staleness_threshold_seconds(self) -> float:
         """Resolved staleness threshold: explicit value, or
