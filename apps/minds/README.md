@@ -51,6 +51,7 @@ app prints on startup.
 - [Glossary of key concepts](./docs/workspace/glossary.md)
 - [Desktop app](./docs/desktop-app.md)
 - [Latchkey permissions](./docs/latchkey-permissions.md)
+- [Behaviors](./docs/behaviors.md)
 
 ## Testing live deployments
 

@@ -47,6 +47,7 @@ license-files = [
     "LICENSE",
 ]
 
+
 [project.scripts]
 minds = "imbue.minds.main:main"
 
