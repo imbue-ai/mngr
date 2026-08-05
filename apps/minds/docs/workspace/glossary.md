@@ -30,6 +30,12 @@ Key concepts in the minds system:
 
 - **desktop client**: a local process (`minds run`) that handles authentication, agent creation, and reverse proxying. Multiplexes access to multiple workspaces through a single local endpoint.
 
+- **browser authorization component** (fully, the *desktop-app backend-server* browser authorization component): the browser-facing part of the *desktop client* -- the bare-origin web UI served by `minds run` (`apps/minds/imbue/minds/desktop_client/`) on a single local endpoint. It serves every page the browser reaches, carries the browser's session, and authenticates it. The desktop client's other duties (agent and workspace creation, reverse proxying to workspaces) sit outside the browser authorization component.
+
+- **session**: the authenticated state of a browser connected to the *browser authorization component*, carried by the **session cookie** -- an HTTP cookie whose value is a token signed with the *installation*'s session-signing key, so a tampered cookie, one minted under another installation, or one older than 30 days is rejected. A browser authenticates a session by opening the one-time authentication URL that `minds run` prints to its terminal; the authenticated session is then the sole credential gating every page the component serves, and it covers all of the user's workspaces. It is scoped to a single *installation*, and is distinct from the optional imbue-cloud account sign-in (a separate credential for cloud-backed features).
+
+- **installation**: one copy of the desktop client's local state -- a single data directory (e.g. `~/.minds`), so one installation = one data directory. Its one-time code, session-signing key, sessions, and error-reporting consent all live in that data directory and do not carry across to another one on the same machine; `minds run` pointed at a different data directory is a different installation.
+
 - **bootstrap**: `uv run bootstrap`, the process that runs first-boot setup inside each agent container and then execs `supervisord -n` to launch the apps and background services.
 
 - **supervisord**: the process-control system running inside each agent container that supervises the apps and background services, each declared as a `[program:*]` section in `supervisord.conf` (logs under `/var/log/supervisor`). Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.
