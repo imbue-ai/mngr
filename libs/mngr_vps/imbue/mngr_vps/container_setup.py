@@ -1259,7 +1259,18 @@ def build_image_on_outer_from_build_args(
     # _clone_build_context_for_self_contained_git for why.
     local_clone_dir: Path | None = None
     if context_args:
-        local_context = Path(context_args[-1]).resolve()
+        # Path.resolve() calls os.getcwd() even for an already-absolute path (via
+        # os.path.abspath), so it raises FileNotFoundError when THIS process's working
+        # directory has been deleted -- which happens in the create flow when a
+        # temporary build/clone dir is cleaned up while it is still the CWD (the deleted
+        # dir is unrelated to the build context). The context path was already verified
+        # to exist above, so normalize an absolute one WITHOUT touching the (possibly
+        # gone) CWD; only a relative path still needs a CWD to resolve against.
+        raw_context = context_args[-1]
+        if os.path.isabs(raw_context):
+            local_context = Path(os.path.normpath(raw_context))
+        else:
+            local_context = Path(raw_context).resolve()
         clone_target = _clone_build_context_for_self_contained_git(local_context, git_depth)
         if clone_target is not None:
             # clone_target is <tempdir>/repo; remove the whole tempdir on exit.
