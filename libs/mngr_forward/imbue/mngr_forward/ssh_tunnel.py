@@ -688,6 +688,13 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     transport = client.get_transport()
     if transport is not None:
         transport.set_keepalive(_SSH_KEEPALIVE_INTERVAL_SECONDS)
+        # Disable Nagle on the one TCP socket that crosses the network. The
+        # tunnel multiplexes bulk data (down) and tiny interactive frames (up);
+        # with Nagle on, a lone small packet on an otherwise-quiet connection can
+        # sit behind delayed-ACK for up to ~40ms before it ships. paramiko sets no
+        # socket options itself, so we set it here on the live transport socket.
+        if transport.sock is not None:
+            transport.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     return client
 
