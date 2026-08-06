@@ -728,6 +728,71 @@ _DEFAULT_SNAPSHOT_EXCLUDES = (
 )
 
 
+# Service-health model for the post-restore verification. A service is
+# "healthy" when RUNNING, or when it ran to completion (supervisord reports
+# one-shots like env-converge as EXITED). The verdict gates on the
+# restore-critical set and on nothing else (the contract is
+# behaviors/backup-restore/restore-verdict.feature): a restored workspace
+# must come back able to serve its user, and every other service's recovery
+# is reported, never fatal -- the environment converges stragglers in the
+# background, and a service that stays down needs attention independent of
+# this restore. The backup service is deliberately OUTSIDE the set: its
+# health has its own verification and repair flows, and the pre-restore
+# safety snapshot exists regardless.
+_HEALTHY_SERVICE_STATES = ("RUNNING", "EXITED")
+_RESTORE_CRITICAL_SERVICES = ("system_interface",)
+_SERVICE_SETTLE_POLL_SECONDS = 2.0
+
+
+def _all_service_states():
+    # name -> supervisord state for every configured program. supervisorctl's
+    # exit code is non-zero whenever any program is not RUNNING, so only the
+    # output matters here. {} when supervisorctl is unusable, which reads as
+    # every restore-critical service absent -- a failure, since a machine
+    # that cannot answer for its core cannot be verified alive.
+    status = _run(["supervisorctl", "status"], timeout=60)
+    states = {}
+    for line in (status.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            states[parts[0]] = parts[1]
+    return states
+
+
+def _unhealthy_services(states):
+    # (critical_down, other_down): sorted names not healthy in `states`. A
+    # restore-critical service missing from the roster entirely counts as
+    # down: the verdict is absolute, not relative to what this machine
+    # happens to define.
+    critical_down = sorted(
+        name for name in _RESTORE_CRITICAL_SERVICES if states.get(name) not in _HEALTHY_SERVICE_STATES
+    )
+    other_down = sorted(
+        name
+        for name, state in states.items()
+        if state not in _HEALTHY_SERVICE_STATES and name not in _RESTORE_CRITICAL_SERVICES
+    )
+    return critical_down, other_down
+
+
+def _wait_for_service_recovery(timeout_seconds):
+    # Poll until one status sample shows every service healthy, or the
+    # deadline passes; returns the final (states, critical_down, other_down).
+    # Waiting on ALL services -- not just the restore-critical set -- gives
+    # stragglers their settle time before the success warning names them,
+    # while the all-healthy common case exits on the first sample. Requiring
+    # a single all-healthy sample (rather than first-sight-of-RUNNING per
+    # service) also catches a service that spawns and promptly crash-loops.
+    deadline = _time.time() + timeout_seconds
+    states = _all_service_states()
+    critical_down, other_down = _unhealthy_services(states)
+    while (critical_down or other_down) and _time.time() <= deadline:
+        _time.sleep(_SERVICE_SETTLE_POLL_SECONDS)
+        states = _all_service_states()
+        critical_down, other_down = _unhealthy_services(states)
+    return states, critical_down, other_down
+
+
 # Cleanup obligations of the current run. Every side effect the restore takes
 # registers its cleanup here, and _finish pays the debts (best-effort) before
 # reporting -- so no individual failure path can forget to bring the services
@@ -997,6 +1062,14 @@ def _main():
     is_stop_chats = _has_flag("--stop-chats")
     is_chat_gate_skipped = _has_flag("--skip-chat-gate")
     is_safety_snapshot_skipped = _has_flag("--skip-safety-snapshot")
+    # Test hook: production dispatch never passes this; unit tests shrink the
+    # post-restart settle wait so failure paths stay fast.
+    try:
+        service_verify_timeout = float(
+            _arg_value("--service-verify-timeout-seconds", str(SERVICE_VERIFY_TIMEOUT_SECONDS))
+        )
+    except ValueError:
+        service_verify_timeout = SERVICE_VERIFY_TIMEOUT_SECONDS
     result = {
         "schema": 2,
         "safety_snapshot_taken": False,
@@ -1153,20 +1226,27 @@ def _main():
     # all onto the restored tree (`restart all` starts stopped programs too).
     # This pays the resume debt directly (and clears it first, so a failed
     # restart is not blindly retried by _finish) because the success path
-    # must also verify the service actually came back.
+    # must also verify the services actually came back.
     _progress("Restarting the machine services...")
     _DEBTS["is_resume_owed"] = False
     # `restart all` also re-runs the env-converge one-shot, which converges the
     # (untouched) rootfs back to the restored environment record -- that is
     # what makes a restore reproduce the restored package set, not just files.
+    # Its exit code is recorded but deliberately NOT the success gate: it goes
+    # non-zero when ANY program fails to start immediately, and only the
+    # restore-critical set below decides the verdict.
     restarted = _run(["supervisorctl", "restart", "all"], timeout=300)
     result["services_restarted"] = restarted.returncode == 0
-    if restarted.returncode != 0:
-        detail = "restored, but restarting services failed: %s" % (restarted.stderr or restarted.stdout).strip()[-500:]
+    post_states, critical_down, other_down = _wait_for_service_recovery(service_verify_timeout)
+    if critical_down:
+        restart_tail = (restarted.stderr or restarted.stdout).strip()[-300:]
+        detail = "restored, but the restore-critical service(s) did not come back: %s%s" % (
+            ", ".join("%s (%s)" % (name, post_states.get(name) or "absent") for name in critical_down),
+            ("; restart all said: %s" % restart_tail) if restarted.returncode != 0 else "",
+        )
         _finish(result, "failed", detail)
-    verify_detail = _wait_for_backup_service_running()
-    if verify_detail:
-        _finish(result, "failed", "restored, but %s" % verify_detail)
+    if other_down:
+        result["services_down"] = other_down
     _finish(result, "ok")
 
 

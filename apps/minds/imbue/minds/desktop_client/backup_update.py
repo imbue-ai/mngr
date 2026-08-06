@@ -463,6 +463,36 @@ def _resolve_restore_subpath(
     )
 
 
+def _services_down_warning(names: list[str]) -> str:
+    """Word the restore script's ``services_down`` list as a completion warning.
+
+    These services are outside the restore-critical set (the contract is
+    ``behaviors/backup-restore/restore-verdict.feature``), so their state
+    never fails the operation -- the workspace came back able to serve its
+    user, and this caveat tells them what has not come back up.
+    """
+    return (
+        f"The restore succeeded, but these services have not come back up: {', '.join(names)}. "
+        "The workspace is usable; the machine converges its environment in the background, so "
+        "this usually resolves itself, and a service that stays down needs attention "
+        "independent of this restore."
+    )
+
+
+def _restore_completion_warnings(payload: dict[str, object]) -> list[str]:
+    services_down = payload.get("services_down")
+    if not isinstance(services_down, list) or not services_down:
+        return []
+    return [_services_down_warning([str(name) for name in services_down])]
+
+
+def _complete_restore(registry: WorkspaceOperationRegistryInterface, agent_id: AgentId, warnings: list[str]) -> None:
+    if warnings:
+        registry.complete_with_warning(agent_id, " ".join(warnings))
+    else:
+        registry.complete(agent_id)
+
+
 def _chained_update_warning(update_error: str) -> str:
     """Word a chained-update failure as a completion warning (the restore itself succeeded)."""
     if update_error.startswith(BLOCKED_BY_RUNNING_CHATS_PREFIX):
@@ -601,6 +631,9 @@ def _run_restore_phases(
         registry.fail(agent_id, f"{detail}{safety_note}")
         return
     registry.append_log(agent_id, "Restored the backup, reinstalled dependencies, and restarted the machine services.")
+    # Services that were already unhealthy before the restore surface as a
+    # completion warning, never a failure -- see _services_converging_warning.
+    warnings = _restore_completion_warnings(payload)
 
     # Phase 3: the script wrote back the pre-restore restic.env, but re-inject
     # the canonical copy anyway so the workspace ends converged even if the
@@ -615,7 +648,7 @@ def _run_restore_phases(
     # must not fail the operation -- the user's data is restored, which is
     # what they asked for -- so it downgrades to a completion warning.
     if not is_update_after:
-        registry.complete(agent_id)
+        _complete_restore(registry, agent_id, warnings)
         return
     registry.append_log(agent_id, "Updating the backup service to the current version...")
     update_error = _apply_update_and_verify(
@@ -626,11 +659,10 @@ def _run_restore_phases(
         parent_cg=parent_cg,
         is_stop_chats=is_stop_chats,
     )
-    if update_error is None:
-        registry.complete(agent_id)
-        return
-    logger.warning("Chained backup-service update after restore for {} failed: {}", agent_id, update_error)
-    registry.complete_with_warning(agent_id, _chained_update_warning(update_error))
+    if update_error is not None:
+        logger.warning("Chained backup-service update after restore for {} failed: {}", agent_id, update_error)
+        warnings.append(_chained_update_warning(update_error))
+    _complete_restore(registry, agent_id, warnings)
 
 
 def run_backup_configure_sequence(

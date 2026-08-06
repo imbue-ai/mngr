@@ -1,4 +1,5 @@
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -140,28 +141,65 @@ def write_stub_supervisorctl(
     *,
     is_restart_ok: bool = True,
     call_log_path: Path | None = None,
+    status_lines: Sequence[str] | None = None,
+    status_lines_after_restart: Sequence[str] | None = None,
 ) -> Path:
     """Write a stub ``supervisorctl`` into ``stub_bin`` and return its path.
 
-    The healthy variant always reports ``host-backup`` RUNNING; the
-    ``is_restart_ok=False`` variant fails ``restart`` and reports the program
-    STOPPED, for exercising the update script's rollback path.
+    ``status`` prints the roster in ``status_lines`` (defaulting to a healthy
+    ``host-backup`` + ``system_interface``, with ``host-backup`` STOPPED when
+    ``is_restart_ok=False``); ``status <name>`` filters it like the real tool.
+    Once a ``restart`` has been attempted, ``status`` switches to
+    ``status_lines_after_restart`` when given -- so tests can model a machine
+    whose service states differ before and after the restore's restart.
+
+    The ``is_restart_ok=False`` variant additionally fails ``restart``, for
+    exercising the update script's rollback path and the restore's
+    restart-exit-code independence.
 
     ``call_log_path`` appends each invocation's arguments as one line, so tests
     can assert on service-lifecycle ordering (e.g. ``stop all`` before
     ``restart all``).
     """
+    if status_lines is None:
+        status_lines = (
+            ("host-backup RUNNING pid 123, uptime 0:00:01" if is_restart_ok else "host-backup STOPPED"),
+            "system_interface RUNNING pid 124, uptime 0:00:01",
+        )
+    if status_lines_after_restart is None:
+        status_lines_after_restart = status_lines
+    restart_marker = stub_bin / ".supervisorctl-restarted"
+
+    def _printf(lines: Sequence[str]) -> str:
+        return "printf '%s\\n' " + " ".join(f"'{line}'" for line in lines)
+
     stub = stub_bin / "supervisorctl"
     lines = ["#!/bin/bash"]
     if call_log_path is not None:
         lines.append(f'echo "$@" >> "{call_log_path}"')
+    lines.append(f'if [ "$1" = "restart" ]; then touch "{restart_marker}"; fi')
+    if not is_restart_ok:
+        lines.append('if [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi')
+    lines += [
+        'if [ "$1" = "status" ]; then',
+        f'    if [ -e "{restart_marker}" ]; then',
+        f"        roster=$({_printf(status_lines_after_restart)})",
+        "    else",
+        f"        roster=$({_printf(status_lines)})",
+        "    fi",
+        '    if [ -n "$2" ]; then',
+        '        printf \'%s\\n\' "$roster" | grep -E "^$2 " || true',
+        "    else",
+        "        printf '%s\\n' \"$roster\"",
+        "    fi",
+        "    exit 0",
+        "fi",
+    ]
     if is_restart_ok:
         lines.append('echo "host-backup RUNNING pid 123, uptime 0:00:01"')
-        lines.append("exit 0")
     else:
-        lines.append('if [ "$1" = "restart" ]; then echo "failed" >&2; exit 1; fi')
         lines.append('echo "host-backup STOPPED"')
-        lines.append("exit 0")
+    lines.append("exit 0")
     stub.write_text("\n".join(lines) + "\n")
     stub.chmod(0o755)
     return stub
