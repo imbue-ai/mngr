@@ -9,7 +9,7 @@ meaningful.
 
 Run from the repo root:
 
-    uv run python apps/minds/scripts/generate_ui_schema.py [--out PATH]
+    uv run --package minds python apps/minds/scripts/generate_ui_schema.py [--out PATH]
 """
 
 import json

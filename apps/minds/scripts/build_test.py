@@ -18,6 +18,10 @@ wheel, they are marked ``@pytest.mark.acceptance``.
 ``test_workspace_package_lists_are_consistent`` is a fast, pure file-parsing
 drift guard (no toolchain, no network) and stays an unmarked integration
 test so it runs on every branch.
+
+``test_ui_schema_generator_is_scoped_to_the_minds_package`` is a second such
+guard, over the other half of the minds wheel build: the frontend hook shells
+out to a schema generator that must resolve its own Python environment.
 """
 
 import json
@@ -67,6 +71,9 @@ MONOREPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_PATTERN = re.compile(r"(^|/)(test_[^/]*\.py|[^/]+_test\.py|conftest\.py)$")
 _DOWNLOAD_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "download-binaries.js"
 _ENSURE_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "ensure-binaries.js"
+_GENERATE_TYPES_PATH: Final[Path] = APP_ROOT / "frontend" / "scripts" / "generate-types.mjs"
+_GENERATE_UI_SCHEMA_PATH: Final[Path] = APP_ROOT / "scripts" / "generate_ui_schema.py"
+_UV_SCHEMA_ARGV_PATTERN: Final[re.Pattern[str]] = re.compile(r'execFileSync\("uv",\s*\[(?P<args>[^\]]*)\]')
 
 
 @pytest.fixture(scope="module")
@@ -128,6 +135,51 @@ def test_workspace_wheel_excludes_test_files(built_wheels: dict[str, Path], pack
         f"{built_wheels[package_name].name} contains test files that should be excluded: {leaks}. "
         'Add `exclude = ["*_test.py", "test_*.py", "**/conftest.py"]` to '
         "[tool.hatch.build.targets.wheel] in the package's pyproject.toml."
+    )
+
+
+def _uv_schema_argv() -> list[str]:
+    """The uv command generate-types.mjs runs to dump the wire schema.
+
+    Read out of the .mjs rather than restated here, so the test exercises the
+    invocation the frontend build actually performs.
+    """
+    match = _UV_SCHEMA_ARGV_PATTERN.search(_GENERATE_TYPES_PATH.read_text())
+    assert match is not None, f'no `execFileSync("uv", [...])` call found in {_GENERATE_TYPES_PATH}'
+    argv = ["uv"]
+    for token in (t.strip() for t in match.group("args").split(",")):
+        if token == "schemaScript":
+            argv.append(str(_GENERATE_UI_SCHEMA_PATH))
+        else:
+            assert token.startswith('"') and token.endswith('"'), (
+                f"{_GENERATE_TYPES_PATH} passes a non-literal uv argument {token!r}; "
+                "this test can only reconstruct string literals and `schemaScript`."
+            )
+            argv.append(token[1:-1])
+    return argv
+
+
+def test_ui_schema_generator_is_scoped_to_the_minds_package() -> None:
+    """The schema dump must name the workspace package whose models it imports.
+
+    The minds wheel's frontend hook runs this command from inside hatchling's
+    isolated build environment, on checkouts nobody synced first (the
+    launch-to-msg mac runner git-cleans before every build). The workspace root
+    project does not depend on minds, so an unscoped `uv run` creates an
+    environment without ``imbue.minds`` and the wheel build dies partway
+    through on a ModuleNotFoundError.
+    """
+    argv = _uv_schema_argv()
+    assert argv[:2] == ["uv", "run"], f"expected {_GENERATE_TYPES_PATH} to shell out to `uv run`, got {argv}"
+    assert "python" in argv, f"expected {_GENERATE_TYPES_PATH} to run the generator under `python`, got {argv}"
+    # `uv run` is trailing_var_arg: everything from the command word on is handed
+    # to the command, so a --package sitting after `python` reaches the generator
+    # script's own argv and leaves the run unscoped.
+    uv_flags = argv[2 : argv.index("python")]
+    assert any(uv_flags[i : i + 2] == ["--package", "minds"] for i in range(len(uv_flags))), (
+        f"{_GENERATE_TYPES_PATH} must run the schema generator as `uv run --package minds`, got {argv}. "
+        "Without the scope, uv resolves the workspace root project, which does not depend on minds, "
+        "so imbue.minds is not importable in an unsynced checkout."
     )
 
 

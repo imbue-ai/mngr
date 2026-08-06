@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Regenerate src/generated/ from the server's pydantic JSON Schema.
 //
-// Pipeline: `uv run python apps/minds/scripts/generate_ui_schema.py` (run from
-// the repo root) writes the consolidated JSON Schema to stdout; we feed it to
-// json-schema-to-typescript and write src/generated/ui.ts. Degrades with a
+// Pipeline: `uv run --package minds python apps/minds/scripts/generate_ui_schema.py`
+// (run from the repo root) writes the consolidated JSON Schema to stdout; we feed
+// it to json-schema-to-typescript and write src/generated/ui.ts. Degrades with a
 // clear message while the schema script does not exist yet (it lands with the
 // server foundation).
 
@@ -23,7 +23,9 @@ if (!existsSync(schemaScript)) {
   process.exit(0);
 }
 
-const schemaJson = execFileSync("uv", ["run", "python", schemaScript], {
+// --package scopes the run to minds: the workspace root project does not depend
+// on it, so a bare `uv run` resolves an environment without imbue.minds.
+const schemaJson = execFileSync("uv", ["run", "--package", "minds", "python", schemaScript], {
   cwd: repoRoot,
   encoding: "utf-8",
   maxBuffer: 64 * 1024 * 1024,
