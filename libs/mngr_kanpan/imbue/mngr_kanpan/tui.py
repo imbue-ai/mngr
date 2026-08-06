@@ -1773,9 +1773,8 @@ def _toggle_peek(state: _KanpanState) -> None:
 def _submit_peek_reply(state: _KanpanState) -> None:
     """Send the reply-input text to the peeked agent and echo it immediately; no-op when empty.
 
-    ``mngr message`` blocks up to ~90s on the agent's submission signal, which a busy
-    agent cannot give until its current turn ends -- so the send runs on the reply
-    executor and is not awaited. The typed text is echoed into the body right away (as a
+    ``mngr message`` blocks until durable evidence shows the agent accepted the reply,
+    up to ~90s -- so the send runs on the reply executor and is not awaited. The typed text is echoed into the body right away (as a
     ``›`` line) and, once the agent accepts it and it shows up in the transcript, the
     echo is dropped in favour of the real message.
     """
