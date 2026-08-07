@@ -15,5 +15,7 @@ def test_no_external_agent_types_registered(plugin_manager: pluggy.PluginManager
 
 def test_all_cataloged_plugins_are_blocked(plugin_manager: pluggy.PluginManager) -> None:
     """Every cataloged plugin should be blocked."""
+    # Guard against vacuous success if the catalog is ever emptied.
+    assert PLUGIN_CATALOG, "Expected a non-empty plugin catalog"
     for entry in PLUGIN_CATALOG:
         assert plugin_manager.is_blocked(entry.entry_point_name), f"Plugin {entry.entry_point_name} should be blocked"
