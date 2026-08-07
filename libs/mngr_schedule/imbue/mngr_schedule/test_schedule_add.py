@@ -64,8 +64,24 @@ def test_schedule_add_deploys_to_modal(monorepo_root: Path) -> None:
         assert result.returncode == 0, (
             f"schedule add failed with exit code {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert app_name in result.stdout or app_name in result.stderr, (
+        combined_output = result.stdout + result.stderr
+        assert app_name in combined_output, (
             f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # `--verify none` must skip the post-deploy verification entirely. The
+        # deploy wraps verification in a `log_span("Verifying deployment of
+        # schedule '{}'")` (deploy.py) that is only entered when verify_mode !=
+        # NONE, and `verify_schedule_deployment` logs "Invoking deployed
+        # function to verify deployment" (verification.py) only when it runs.
+        # Both must be ABSENT here -- if a bug made `none` behave like quick or
+        # full, one of these would appear.
+        assert "Verifying deployment of schedule" not in combined_output, (
+            f"Expected NO verification for --verify none, but found the verification log span\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "Invoking deployed function to verify deployment" not in combined_output, (
+            f"Expected NO verification for --verify none, but the verifier was invoked\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
     finally:
         cleanup_modal_app(
@@ -125,8 +141,29 @@ def test_schedule_add_with_verification(monorepo_root: Path) -> None:
         assert result.returncode == 0, (
             f"schedule add with verify failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert app_name in result.stdout or app_name in result.stderr, (
+        combined_output = result.stdout + result.stderr
+        assert app_name in combined_output, (
             f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # Quick verify specifically: the verifier invokes the deployed function
+        # with `--verify-mode quick` (logged by verification.py's "Invoking
+        # deployed function to verify deployment" line, which echoes the joined
+        # `modal run ... --verify-mode quick` command). Inside the container the
+        # quick path destroys the agent and emits a result sentinel whose verify
+        # block has status "destroyed" (cron_runner.py); that sentinel line is
+        # streamed back verbatim to this subprocess's stdout.
+        assert "--verify-mode quick" in combined_output, (
+            f"Expected the verifier to run with --verify-mode quick\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert '"status": "destroyed"' in combined_output, (
+            f"Expected quick verify to destroy the agent (sentinel status 'destroyed')\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # And it must NOT have taken the full-verify (poll-until-done) path,
+        # which would emit a "finished" status instead.
+        assert '"status": "finished"' not in combined_output, (
+            f"Quick verify unexpectedly took the full-verify (poll) path\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
     finally:
         cleanup_modal_app(
@@ -187,8 +224,34 @@ def test_schedule_add_with_full_verification(monorepo_root: Path) -> None:
         assert result.returncode == 0, (
             f"schedule add with full verify failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
-        assert app_name in result.stdout or app_name in result.stderr, (
+        combined_output = result.stdout + result.stderr
+        assert app_name in combined_output, (
             f"Expected app name '{app_name}' in output\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # Full verify specifically: the verifier invokes the deployed function
+        # with `--verify-mode full` (logged by verification.py's "Invoking
+        # deployed function to verify deployment" line). Inside the container the
+        # full path drives `_poll_until_done` (which shells `mngr list`) until the
+        # agent reaches a terminal state, then emits a result sentinel whose
+        # verify block has status "finished" with the terminal final_state
+        # (cron_runner.py); that sentinel line is streamed back verbatim here.
+        assert "--verify-mode full" in combined_output, (
+            f"Expected the verifier to run with --verify-mode full\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert '"status": "finished"' in combined_output, (
+            f"Expected full verify to poll the agent to a terminal state (sentinel status 'finished')\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        # The echo agent finishes immediately, so the poll loop should record a
+        # terminal-success state (DONE or STOPPED) rather than destroying the
+        # agent like the quick path does.
+        assert '"final_state": "DONE"' in combined_output or '"final_state": "STOPPED"' in combined_output, (
+            f"Expected full verify to record a terminal-success final_state (DONE/STOPPED)\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert '"status": "destroyed"' not in combined_output, (
+            f"Full verify unexpectedly took the quick (immediate-destroy) path\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
     finally:
         cleanup_modal_app(
