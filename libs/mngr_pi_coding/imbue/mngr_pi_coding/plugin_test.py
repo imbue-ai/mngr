@@ -44,6 +44,7 @@ from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
 from imbue.mngr_pi_coding.plugin import _PI_NPM_PACKAGE
 from imbue.mngr_pi_coding.plugin import _SESSION_FILE_NAME
 from imbue.mngr_pi_coding.plugin import _SESSION_STARTED_SENTINEL_NAME
+from imbue.mngr_pi_coding.plugin import _has_api_credentials_available
 from imbue.mngr_pi_coding.plugin import _inbox_append_command
 from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import _read_pi_trust
@@ -258,6 +259,33 @@ def test_on_before_provisioning_does_not_warn_when_auth_file_present(
     pi_agent.on_before_provisioning(host, options, mngr_ctx)
 
     assert not any("No API credentials detected" in message for message in log_warnings)
+
+
+def test_has_api_credentials_available_with_corrupt_auth_returns_false(tmp_path: Path) -> None:
+    """A corrupt auth.json must not raise -- it is treated as no credentials available."""
+    home = _setup_home_pi(tmp_path)
+    (home / ".pi" / "agent" / "auth.json").write_text("{not valid json")
+    host = _stub_host(tmp_path, is_local=False)
+
+    assert _has_api_credentials_available(host, _make_options(), home) is False
+
+
+def test_has_api_credentials_available_with_valid_auth_returns_true(tmp_path: Path) -> None:
+    """A non-empty auth.json indicates credentials are available."""
+    home = _setup_home_pi(tmp_path)
+    (home / ".pi" / "agent" / "auth.json").write_text('{"anthropic": {"type": "api_key"}}')
+    host = _stub_host(tmp_path, is_local=False)
+
+    assert _has_api_credentials_available(host, _make_options(), home) is True
+
+
+def test_has_api_credentials_available_with_empty_auth_returns_false(tmp_path: Path) -> None:
+    """A present-but-empty auth.json ({}) means no credentials are configured."""
+    home = _setup_home_pi(tmp_path)
+    (home / ".pi" / "agent" / "auth.json").write_text("{}")
+    host = _stub_host(tmp_path, is_local=False)
+
+    assert _has_api_credentials_available(host, _make_options(), home) is False
 
 
 # =============================================================================
