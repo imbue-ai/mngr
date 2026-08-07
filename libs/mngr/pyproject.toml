@@ -147,6 +147,7 @@ omit = [
   # prevents their lower coverage from dragging the combined mean down.
   "*/mngr_vps/*",
   "*/mngr_vultr/*",
+  "*/mngr_foreman/*",
 ]
 
 [tool.inline-snapshot]
