@@ -221,7 +221,7 @@ def test_create_docker_cpus_start_arg(e2e: E2eSession) -> None:
     2 CPUs (cpu.max / cpu.cfs_quota_us contains 200000).
     """
     # The tutorial block omits an agent type because it assumes the user has
-    # configured a default (via `mngr extras config`). The e2e environment has
+    # configured a default (via `mngr config wizard`). The e2e environment has
     # no default, so we pass `--type command -- sleep ...` as a stand-in, the
     # same convention used by the other create tutorial tests.
     expect(
