@@ -56,12 +56,12 @@ def test_line_number_must_be_positive() -> None:
 
 
 def test_line_number_rejects_zero() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be > 0"):
         LineNumber(0)
 
 
 def test_line_number_rejects_negative() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be > 0"):
         LineNumber(-1)
 
 
@@ -266,8 +266,7 @@ def test_get_ratchet_failures_finds_matches_in_git_repo(git_repo: Path) -> None:
     chunks = get_ratchet_failures(git_repo, FileExtension(".py"), pattern)
 
     assert len(chunks) == 2
-    assert chunks[0].matched_content in ["# TODO: Fix this", "# TODO: And this"]
-    assert chunks[1].matched_content in ["# TODO: Fix this", "# TODO: And this"]
+    assert {chunk.matched_content for chunk in chunks} == {"# TODO: Fix this", "# TODO: And this"}
     assert all(chunk.file_path.name == "test.py" for chunk in chunks)
 
 
@@ -342,7 +341,7 @@ def test_get_ratchet_failures_raises_on_non_git_directory(tmp_path: Path) -> Non
         get_ratchet_failures(test_dir, FileExtension(".py"), pattern)
 
 
-def test_formatting(git_repo: Path):
+def test_format_ratchet_failure_message_includes_rule_name_and_matched_content(git_repo: Path) -> None:
     test_file = git_repo / "test.py"
     test_file.write_text("    suspicious_code_here()\n    another_bad_line()\n")
     subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
