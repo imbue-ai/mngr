@@ -1,3 +1,5 @@
+from typing import assert_never
+
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.data_types import OutputSource
 
@@ -30,10 +32,13 @@ class Transcript:
             lines.append(f"$ {result.command}")
 
             for output_line in result.output_lines:
-                if output_line.source == OutputSource.STDOUT:
-                    lines.append(f"  {output_line.text}")
-                else:
-                    lines.append(f"! {output_line.text}")
+                match output_line.source:
+                    case OutputSource.STDOUT:
+                        lines.append(f"  {output_line.text}")
+                    case OutputSource.STDERR:
+                        lines.append(f"! {output_line.text}")
+                    case _ as unreachable:
+                        assert_never(unreachable)
 
             lines.append(f"? {result.exit_code}")
         return "\n".join(lines) + "\n" if lines else ""

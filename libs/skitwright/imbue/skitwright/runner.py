@@ -91,6 +91,8 @@ def run_command(
 def _reconstruct(lines: tuple[OutputLine, ...], source: OutputSource) -> str:
     """Reconstruct a combined string from interleaved output lines for a given source."""
     matching = [line.text for line in lines if line.source == source]
+    # No output on this stream must yield "" -- joining an empty list and appending "\n" would
+    # produce a spurious "\n", making "no output" indistinguishable from "one blank line of output".
     if not matching:
         return ""
     return "\n".join(matching) + "\n"
