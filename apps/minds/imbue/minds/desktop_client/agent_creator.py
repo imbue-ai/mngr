@@ -2571,6 +2571,15 @@ class AgentCreator(MutableModel):
                 # workspace (see the resolver sweep in ``cli/run.py``).
                 self._mark_pending_create_attempt_done(cid_str, str(canonical_id), str(canonical_host_id))
 
+                # Publish the canonical agent id now, not at DONE: discovery can
+                # see the workspace during the (for build-in-VM Lima, very long)
+                # ready wait below, and the create-attempt row is only suppressed
+                # once ``info.agent_id`` matches a discovered id -- without this,
+                # the workspace row and the "Creating..." row show side by side.
+                with self._lock:
+                    self._canonical_agent_ids[cid_str] = canonical_id
+                self._notify_create_attempts_changed()
+
                 # Now that we know the canonical host id, point the
                 # opaque permissions handle (which the JWT references)
                 # at the canonical host-keyed permissions file. After
@@ -2656,13 +2665,13 @@ class AgentCreator(MutableModel):
                 # subdomain. The plugin owns ``/goto/<agent>/``.
                 redirect_url = self._build_redirect_url(canonical_host_id)
 
-                # Publish the canonical id + DONE atomically so the UI sees
-                # both at once. ``on_created`` runs after publication so any
-                # downstream consumer (e.g. ``OnCreatedCallback``, which records
-                # the workspace<->account association) can rely on the
-                # canonical id.
+                # Publish DONE + redirect_url atomically so the UI sees both
+                # at once (the canonical agent id was already published when
+                # ``mngr create`` returned, above). ``on_created`` runs after
+                # publication so any downstream consumer (e.g.
+                # ``OnCreatedCallback``, which records the workspace<->account
+                # association) can rely on the canonical id.
                 with self._lock:
-                    self._canonical_agent_ids[cid_str] = canonical_id
                     self._statuses[cid_str] = AgentCreateAttemptStatus.DONE
                     self._redirect_urls[cid_str] = redirect_url
                 self._notify_create_attempts_changed()
