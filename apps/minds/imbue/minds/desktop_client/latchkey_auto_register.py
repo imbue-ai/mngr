@@ -108,7 +108,7 @@ class LatchkeyAutoRegister(MutableModel):
 
         try:
             register_agent_for_host(self.latchkey.plugin_data_dir, host_id, agent_id)
-        except LatchkeyStoreError as e:
+        except (LatchkeyStoreError, OSError) as e:
             logger.warning(
                 "Failed to auto-register agent {} on host {} in latchkey permissions: {}",
                 agent_id,

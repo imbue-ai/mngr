@@ -520,7 +520,6 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     from the output (detent accepts both shapes); ``rules`` is always
     emitted, even when empty.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Pydantic's ``exclude=`` drops the field entirely; we drop
     # ``schemas``/``include`` when empty so existing on-disk files (and the
     # gateway's own writers) keep emitting the same ``{"rules": ...}``
@@ -530,10 +529,10 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
         exclude.add("schemas")
     if not config.include:
         exclude.add("include")
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(config.model_dump_json(indent=2, exclude=exclude))
-    tmp_path.chmod(0o600)
-    os.replace(tmp_path, path)
+    # ``atomic_write`` uses a uniquely-named temp file, so concurrent writers
+    # (e.g. the minds auto-register callback firing from two threads) cannot
+    # steal each other's temp file the way a fixed ``.tmp`` name allowed.
+    atomic_write(path, config.model_dump_json(indent=2, exclude=exclude))
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
 
 
