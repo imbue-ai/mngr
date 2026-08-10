@@ -6,7 +6,9 @@ from typing import Any
 import pytest
 from urwid.event_loop.abstract_loop import ExitMainLoop
 from urwid.widget.attr_map import AttrMap
+from urwid.widget.filler import Filler
 from urwid.widget.listbox import SimpleFocusListWalker
+from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 from urwid.widget.wimp import SelectableIcon
 
@@ -16,6 +18,7 @@ from imbue.mngr_tutor.data_types import AgentExistsCheck
 from imbue.mngr_tutor.data_types import AgentNotExistsCheck
 from imbue.mngr_tutor.data_types import Lesson
 from imbue.mngr_tutor.data_types import LessonStep
+from imbue.mngr_tutor.tui import CHECK_INTERVAL_SECONDS
 from imbue.mngr_tutor.tui import _LessonRunnerInputHandler
 from imbue.mngr_tutor.tui import _LessonRunnerState
 from imbue.mngr_tutor.tui import _LessonSelectorInputHandler
@@ -31,20 +34,40 @@ from imbue.mngr_tutor.tui import _schedule_next_check
 # =============================================================================
 
 
-class _CallTracker:
-    """Lightweight call tracker to replace MagicMock.assert_called patterns."""
+class _AlarmRecorder:
+    """Records every call to a loop's set_alarm_in so tests can assert the exact
+    delay, callback, and arguments an alarm was scheduled with (not just the count)."""
 
     def __init__(self) -> None:
-        self.call_count: int = 0
+        self.calls: list[tuple[object, ...]] = []
 
-    def __call__(self, *args: object, **kwargs: object) -> None:
-        self.call_count += 1
+    def __call__(self, *args: object) -> None:
+        self.calls.append(args)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
 
 
 def _make_mock_loop() -> Any:
-    """Create a lightweight loop substitute with a trackable set_alarm_in."""
-    tracker = _CallTracker()
-    return SimpleNamespace(set_alarm_in=tracker, _alarm_tracker=tracker)
+    """Create a lightweight loop substitute with a recording set_alarm_in.
+
+    A real urwid MainLoop opens a screen and an event loop, neither of which is
+    needed to test scheduling, so this records the set_alarm_in calls instead.
+    """
+    recorder = _AlarmRecorder()
+    return SimpleNamespace(set_alarm_in=recorder, _alarm_recorder=recorder)
+
+
+def _collect_text(widget: object) -> str:
+    """Recursively join the rendered text of a Text/Pile/Filler widget tree."""
+    if isinstance(widget, Text):
+        return str(widget.get_text()[0])
+    if isinstance(widget, Filler):
+        return _collect_text(widget.original_widget)
+    if isinstance(widget, Pile):
+        return " ".join(_collect_text(child) for child, _ in widget.contents)
+    return ""
 
 
 def _make_step(heading: str = "Step", details: str = "Do something") -> LessonStep:
@@ -75,6 +98,9 @@ def _make_runner_state(
         step_completed = [False] * len(lesson.steps)
     frame = SimpleNamespace(body=None)
     status_text = Text("")
+    # These widget/scheduling tests never read mngr_ctx (the check is only run via
+    # _on_check_alarm, which has its own real-context helper below), so we bypass
+    # validation with model_construct rather than spin up a real MngrContext.
     mngr_ctx = SimpleNamespace()
     return _LessonRunnerState.model_construct(
         lesson=lesson,
@@ -168,10 +194,13 @@ def test_build_step_widgets_all_complete_has_no_details() -> None:
 # =============================================================================
 
 
-def test_refresh_display_sets_frame_body() -> None:
+def test_refresh_display_populates_frame_body_with_current_step_content() -> None:
     state = _make_runner_state()
     _refresh_display(state)
-    assert state.frame.body is not None
+    assert isinstance(state.frame.body, Filler)
+    text_content = _collect_text(state.frame.body)
+    assert "Step 1" in text_content
+    assert "First step" in text_content
 
 
 # =============================================================================
@@ -259,10 +288,11 @@ def test_runner_input_handler_swallows_other_keys() -> None:
 # =============================================================================
 
 
-def test_schedule_next_check_sets_alarm() -> None:
+def test_schedule_next_check_schedules_on_check_alarm_at_the_check_interval() -> None:
     loop = _make_mock_loop()
-    _schedule_next_check(loop, _make_runner_state())
-    assert loop._alarm_tracker.call_count == 1
+    state = _make_runner_state()
+    _schedule_next_check(loop, state)
+    assert loop._alarm_recorder.calls == [(CHECK_INTERVAL_SECONDS, _on_check_alarm, state)]
 
 
 def test_on_check_alarm_all_complete_sets_status() -> None:
@@ -291,7 +321,8 @@ def _make_runner_state_with_ctx(
         step_completed = [False] * len(lesson.steps)
     frame = SimpleNamespace(body=None)
     status_text = Text("")
-    return _LessonRunnerState.model_construct(
+    # A real MngrContext is available here, so use the validating constructor.
+    return _LessonRunnerState(
         lesson=lesson,
         mngr_ctx=mngr_ctx,
         step_completed=step_completed,
@@ -304,7 +335,7 @@ def test_on_check_alarm_step_not_passed_schedules_next(temp_mngr_ctx: MngrContex
     state = _make_runner_state_with_ctx(temp_mngr_ctx, step_completed=[False, False], passing_check=False)
     loop = _make_mock_loop()
     _on_check_alarm(loop, state)
-    assert loop._alarm_tracker.call_count == 1
+    assert loop._alarm_recorder.call_count == 1
     assert state.step_completed[0] is False
 
 
@@ -313,7 +344,7 @@ def test_on_check_alarm_step_passed_advances(temp_mngr_ctx: MngrContext) -> None
     loop = _make_mock_loop()
     _on_check_alarm(loop, state)
     assert state.step_completed[0] is True
-    assert loop._alarm_tracker.call_count == 1
+    assert loop._alarm_recorder.call_count == 1
 
 
 def test_on_check_alarm_last_step_passed_shows_complete(temp_mngr_ctx: MngrContext) -> None:
