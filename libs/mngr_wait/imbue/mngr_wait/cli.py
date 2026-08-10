@@ -208,7 +208,6 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
     # Parse interval
     interval_seconds = parse_duration_to_seconds(opts.interval)
 
-    # Poll the initial state
     initial_state = poll_target_state(resolved)
     current_state_description = describe_combined_state(initial_state, resolved.target.target_type)
 
@@ -247,7 +246,6 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
         logger.info("Timeout: {:.0f}s", timeout_seconds)
     logger.info("Poll interval: {:.0f}s", interval_seconds)
 
-    # Run the wait loop
     captured_output_format = output_opts.output_format
     try:
         result = wait_for_state(
@@ -263,7 +261,6 @@ def wait(ctx: click.Context, **kwargs: object) -> None:
         ctx.exit(EXIT_CODE_ERROR)
         return
 
-    # Output the result
     _output_result(result, output_opts)
 
     # Set exit code
