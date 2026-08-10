@@ -6,90 +6,102 @@ from click.testing import CliRunner
 from imbue.mngr_pair.cli import pair
 
 
-def test_pair_source_and_source_agent_conflict(
+def test_pair_source_and_source_agent_conflict_is_rejected(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that providing both --source and --source-agent shows error."""
+    """Specifying --source and --source-agent with different agents is rejected.
+
+    The conflict is only detected when --source actually carries an agent that
+    differs from --source-agent, so this passes two distinct agent names.
+    """
     result = cli_runner.invoke(
         pair,
-        ["agent-name", "--source", "/some/path", "--source-agent", "other-agent"],
+        ["--source", "agent-a", "--source-agent", "agent-b"],
         obj=plugin_manager,
     )
-    # Should fail because you can't provide both
     assert result.exit_code != 0
-    assert "cannot" in result.output.lower() or "error" in result.output.lower()
+    assert "Cannot specify both --source and --source-agent" in result.output
 
 
-def test_pair_source_as_path_raises_error(
+def test_pair_source_and_source_agent_agreeing_does_not_conflict(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that using --source with a path correctly requires the path to exist."""
+    """--source and --source-agent naming the same agent must NOT raise the conflict.
+
+    This pins the other branch of the equality check: when the two agree, the
+    command proceeds to agent resolution (and fails there, not on the conflict).
+    """
     result = cli_runner.invoke(
         pair,
-        ["agent-name", "--source", "/nonexistent/path/12345"],
+        ["--source", "agent-same", "--source-agent", "agent-same"],
         obj=plugin_manager,
     )
-    # Should fail because path doesn't exist
     assert result.exit_code != 0
+    assert "Cannot specify both --source and --source-agent" not in result.output
+    assert "Could not find agent with ID or name: agent-same" in result.output
+
+
+def test_pair_source_without_agent_requires_an_agent_to_be_specified(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """A path-only --source carries no agent, so the command reports a missing agent.
+
+    (Non-interactive invocation cannot prompt, so it errors rather than asking.)
+    """
+    result = cli_runner.invoke(
+        pair,
+        ["--source", "/nonexistent/path/12345"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "No agent specified" in result.output
 
 
 def test_pair_nonexistent_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that pairing with nonexistent agent shows appropriate error."""
+    """Pairing with a nonexistent agent reports that the agent could not be found."""
     result = cli_runner.invoke(
         pair,
         ["nonexistent-agent-12345"],
         obj=plugin_manager,
     )
-    # Should fail because agent doesn't exist
     assert result.exit_code != 0
+    assert "Could not find agent with ID or name: nonexistent-agent-12345" in result.output
 
 
 def test_pair_source_host_nonexistent_host(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --source-host with nonexistent host shows appropriate error."""
+    """--source-host with a nonexistent host reports that no host matched."""
     result = cli_runner.invoke(
         pair,
         ["some-agent", "--source-host", "nonexistent-host-12345"],
         obj=plugin_manager,
     )
-    # Should fail because host doesn't exist
     assert result.exit_code != 0
-    assert "no host found" in result.output.lower() or "error" in result.output.lower()
+    assert "No hosts found matching nonexistent-host-12345" in result.output
 
 
-def test_pair_source_host_with_local_host(
+def test_pair_source_host_localhost_resolves_then_fails_on_missing_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --source-host with 'localhost' (local host) works for filtering."""
+    """--source-host localhost resolves the host; the failure is about the agent.
+
+    This demonstrates that the local host filter works: the error is the
+    agent-not-found message, not a host-resolution error.
+    """
     result = cli_runner.invoke(
         pair,
         ["nonexistent-agent", "--source-host", "localhost"],
         obj=plugin_manager,
     )
-    # Should fail because the agent doesn't exist on the local host
-    # But NOT because the host doesn't exist
     assert result.exit_code != 0
-    # The error should be about the agent, not the host
-    assert "no agent found" in result.output.lower() or "error" in result.output.lower()
-
-
-def test_pair_source_host_agent_not_on_specified_host(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --source-host shows error when agent doesn't exist on that host."""
-    result = cli_runner.invoke(
-        pair,
-        ["some-agent", "--source-host", "localhost"],
-        obj=plugin_manager,
-    )
-    # Should fail because agent doesn't exist on the specified host
-    assert result.exit_code != 0
+    assert "Could not find agent with ID or name: nonexistent-agent" in result.output
+    assert "No hosts found" not in result.output
