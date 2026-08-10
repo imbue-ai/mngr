@@ -13,11 +13,11 @@ def test_modal_schedule_creation_record_round_trips_through_json() -> None:
     """Test that ModalScheduleCreationRecord serializes and deserializes correctly."""
     trigger = ScheduleTriggerDefinition(
         name="nightly-create",
-        command=ScheduledMngrCommand.CREATE,
+        command=ScheduledMngrCommand.EXEC,
         args="--type claude --message 'fix bugs'",
         schedule_cron="0 2 * * *",
         provider="modal",
-        is_enabled=True,
+        is_enabled=False,
     )
     record = ModalScheduleCreationRecord(
         trigger=trigger,
@@ -33,12 +33,11 @@ def test_modal_schedule_creation_record_round_trips_through_json() -> None:
     json_data = record.model_dump_json()
     restored = ModalScheduleCreationRecord.model_validate_json(json_data)
 
-    assert restored.trigger.name == "nightly-create"
-    assert restored.trigger.command == ScheduledMngrCommand.CREATE
-    assert restored.trigger.args == "--type claude --message 'fix bugs'"
-    assert restored.hostname == "dev-machine"
-    assert restored.working_directory == "/home/user/project"
-    assert restored.mngr_git_hash == "fedcba654321"
+    # The nested enum and bool exercise serialization of non-string field types.
+    assert restored.trigger.command == ScheduledMngrCommand.EXEC
+    assert restored.trigger.is_enabled is False
+    # A tz-aware datetime must survive the JSON round-trip without losing its tzinfo.
+    assert restored.created_at == datetime(2025, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
     assert restored.app_name == "mngr-schedule-nightly-create"
     assert restored.environment == "mngr-user1"
 
@@ -65,9 +64,9 @@ def test_base_schedule_creation_record_round_trips_through_json() -> None:
     json_data = record.model_dump_json()
     restored = ScheduleCreationRecord.model_validate_json(json_data)
 
-    assert restored.trigger.name == "local-trigger"
-    assert restored.trigger.provider == "local"
-    assert restored.hostname == "dev-machine"
+    assert restored.trigger.command == ScheduledMngrCommand.CREATE
+    assert restored.trigger.is_enabled is True
+    assert restored.created_at == datetime(2025, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
 
 
 def test_modal_record_deserializes_old_field_names() -> None:
@@ -82,29 +81,3 @@ def test_modal_record_deserializes_old_field_names() -> None:
     record = ModalScheduleCreationRecord.model_validate_json(old_json)
     assert record.app_name == "mngr-schedule-old"
     assert record.environment == "mngr-user1"
-
-
-def test_schedule_creation_record_includes_all_trigger_fields() -> None:
-    """Test that the nested trigger definition is fully preserved."""
-    trigger = ScheduleTriggerDefinition(
-        name="test-trigger",
-        command=ScheduledMngrCommand.EXEC,
-        args="--exec 'echo hello'",
-        schedule_cron="*/5 * * * *",
-        provider="modal",
-        is_enabled=False,
-    )
-    record = ModalScheduleCreationRecord(
-        trigger=trigger,
-        full_commandline="mngr schedule add --name test-trigger",
-        hostname="laptop",
-        working_directory="/tmp",
-        mngr_git_hash="1234abcd",
-        created_at=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
-        app_name="mngr-schedule-test-trigger",
-        environment="mngr-testuser",
-    )
-
-    assert record.trigger.is_enabled is False
-    assert record.trigger.command == ScheduledMngrCommand.EXEC
-    assert record.trigger.schedule_cron == "*/5 * * * *"

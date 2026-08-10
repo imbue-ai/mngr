@@ -1,6 +1,7 @@
-"""Integration tests for the schedule run command (local provider)."""
+"""Unit tests for the schedule run command (local provider)."""
 
 import json
+from collections.abc import Callable
 
 import click
 import pytest
@@ -10,26 +11,17 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_schedule.cli.run import _emit_output
 from imbue.mngr_schedule.cli.run import run_local_trigger
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
-from imbue.mngr_schedule.data_types import ScheduledMngrCommand
 from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
 from imbue.mngr_schedule.implementations.local.deploy import get_local_trigger_run_script
 
 
-def _deploy_echo_trigger(
-    mngr_ctx: MngrContext,
-    name: str = "test-trigger",
-    *,
-    is_enabled: bool = True,
-) -> None:
-    """Deploy a local trigger whose run.sh runs 'echo hello'."""
-    trigger = ScheduleTriggerDefinition(
-        name=name,
-        command=ScheduledMngrCommand.CREATE,
-        args="--message hello",
-        schedule_cron="0 2 * * *",
-        provider="local",
-        is_enabled=is_enabled,
-    )
+def _deploy_local_trigger(trigger: ScheduleTriggerDefinition, mngr_ctx: MngrContext) -> None:
+    """Deploy a local trigger so its run.sh exists.
+
+    Every test overwrites the generated run.sh with its own script, so the
+    trigger's command/args are irrelevant here -- this just installs the
+    on-disk trigger directory, record, and wrapper script.
+    """
     deploy_local_schedule(
         trigger,
         mngr_ctx,
@@ -41,9 +33,10 @@ def _deploy_echo_trigger(
 
 def test_run_local_trigger_executes_run_script(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
 ) -> None:
     """Running a local trigger should execute its run.sh and return its exit code."""
-    _deploy_echo_trigger(temp_mngr_ctx)
+    _deploy_local_trigger(make_test_trigger(), temp_mngr_ctx)
 
     # Replace the generated run.sh with a deterministic script that exits
     # with a distinctive code, so we can prove the script was actually run
@@ -65,9 +58,10 @@ def test_run_local_trigger_not_found_raises(
 
 def test_run_local_trigger_missing_script_raises(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
 ) -> None:
     """If the record exists but run.sh is missing, should raise ClickException."""
-    _deploy_echo_trigger(temp_mngr_ctx)
+    _deploy_local_trigger(make_test_trigger(), temp_mngr_ctx)
 
     # Delete the run.sh file (resolve the path via the public helper so a
     # layout change in deploy.py doesn't silently break this test).
@@ -80,9 +74,10 @@ def test_run_local_trigger_missing_script_raises(
 
 def test_run_local_trigger_disabled_still_runs(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
 ) -> None:
     """A disabled trigger should still be run (with a warning)."""
-    _deploy_echo_trigger(temp_mngr_ctx, "disabled-trigger", is_enabled=False)
+    _deploy_local_trigger(make_test_trigger("disabled-trigger", is_enabled=False), temp_mngr_ctx)
 
     # Overwrite run.sh with a script that exits with a distinctive code,
     # so we can prove the script ran despite the trigger being disabled.
@@ -93,39 +88,61 @@ def test_run_local_trigger_disabled_still_runs(
     assert exit_code == 37
 
 
-def test_run_local_trigger_json_emits_parseable_object(
+def test_run_local_trigger_json_merges_stdout_and_stderr(
     temp_mngr_ctx: MngrContext,
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """JSON format must emit exactly one parseable JSON object with captured output.
+    """JSON format must emit one parseable object merging stdout and stderr.
 
-    For the local provider, HUMAN format streams the script's stdout live.
-    JSON / JSONL must instead capture the script output and emit it via
-    the same structured envelope as the modal branch, so downstream
-    consumers see a consistent shape regardless of provider.
+    For the local provider, HUMAN format streams the script's output live.
+    JSON / JSONL must instead capture the script output and emit it via the
+    same structured envelope as the modal branch. The script writes distinct
+    markers to stdout and stderr; both must appear in the envelope's output
+    field, proving stderr is not dropped from the merged payload.
     """
-    _deploy_echo_trigger(temp_mngr_ctx)
+    _deploy_local_trigger(make_test_trigger(), temp_mngr_ctx)
 
-    # Replace the generated run.sh with a deterministic script that writes
-    # a known marker to stdout (and nothing to stderr), so we can assert
-    # on exact captured output without depending on ``uv run mngr create``.
+    # Write distinct markers to stdout and stderr so a bug that dropped stderr
+    # (or stdout) from the merged payload would fail this assertion.
     run_script = get_local_trigger_run_script(temp_mngr_ctx, "test-trigger")
-    run_script.write_text("#!/bin/sh\necho local-trigger-marker\n")
+    run_script.write_text("#!/bin/sh\necho stdout-marker\necho stderr-marker >&2\n")
 
     exit_code = run_local_trigger(temp_mngr_ctx, "test-trigger", OutputFormat.JSON)
 
     assert exit_code == 0
     captured = capsys.readouterr()
-    # In JSON mode, the *only* thing on stdout should be the structured
-    # envelope. The script's raw output must be captured into the envelope
-    # rather than leaking through.
+    # In JSON mode the only thing on stdout should be the structured envelope;
+    # the script's raw output must be captured into it rather than leaking.
     payload = json.loads(captured.out)
-    assert payload == {"output": "local-trigger-marker\n"}
+    assert set(payload.keys()) == {"output"}
+    assert "stdout-marker" in payload["output"]
+    assert "stderr-marker" in payload["output"]
 
 
-# =============================================================================
-# _emit_output tests
-# =============================================================================
+def test_run_local_trigger_jsonl_emits_event_envelope(
+    temp_mngr_ctx: MngrContext,
+    make_test_trigger: Callable[..., ScheduleTriggerDefinition],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """JSONL format must emit one event-tagged object through the run path.
+
+    This exercises the JSONL branch of run_local_trigger end-to-end (not just
+    _emit_output in isolation): the emitted line must parse to the
+    ``{"event": "output", "output": ...}`` envelope containing the script's
+    captured output.
+    """
+    _deploy_local_trigger(make_test_trigger(), temp_mngr_ctx)
+
+    run_script = get_local_trigger_run_script(temp_mngr_ctx, "test-trigger")
+    run_script.write_text("#!/bin/sh\necho jsonl-trigger-marker\n")
+
+    exit_code = run_local_trigger(temp_mngr_ctx, "test-trigger", OutputFormat.JSONL)
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload == {"event": "output", "output": "jsonl-trigger-marker\n"}
 
 
 @pytest.mark.parametrize(

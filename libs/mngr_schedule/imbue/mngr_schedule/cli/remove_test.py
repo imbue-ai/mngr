@@ -54,13 +54,30 @@ def test_remove_local_schedule_cleans_all_artifacts(
 def test_remove_local_schedule_idempotent(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Removing a nonexistent trigger should not raise."""
+    """Removing a nonexistent trigger must be a no-op, not a destructive rewrite.
+
+    With nothing deployed, removal should neither rewrite the (unrelated)
+    crontab nor create any trigger directory or record. A bug that rewrote or
+    corrupted the crontab, or partially materialized state for the missing
+    trigger, would otherwise pass silently.
+    """
+    unrelated_crontab = "0 0 * * * /some/other/job.sh\n"
+    written: list[str] = []
     remove_local_schedule(
         "nonexistent",
         temp_mngr_ctx,
-        crontab_reader=lambda: "",
-        crontab_writer=lambda _: None,
+        crontab_reader=lambda: unrelated_crontab,
+        crontab_writer=written.append,
     )
+
+    # No crontab entry matched, so the writer must not be invoked at all (no
+    # spurious rewrite of the unrelated crontab).
+    assert written == []
+
+    # No trigger directory or creation record should have been created for the
+    # nonexistent trigger.
+    assert not get_local_trigger_run_script(temp_mngr_ctx, "nonexistent").parent.exists()
+    assert get_local_schedule_creation_record(temp_mngr_ctx, "nonexistent") is None
 
 
 def test_remove_local_schedule_leaves_other_triggers(

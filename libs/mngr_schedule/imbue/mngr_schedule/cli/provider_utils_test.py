@@ -18,3 +18,16 @@ def test_load_schedule_provider_unknown_raises(temp_mngr_ctx: MngrContext) -> No
     """Loading an unknown provider should raise ClickException."""
     with pytest.raises(click.ClickException, match="Failed to load provider"):
         load_schedule_provider("nonexistent-provider-xyz", temp_mngr_ctx)
+
+
+def test_load_schedule_provider_unsupported_type_raises(temp_mngr_ctx: MngrContext) -> None:
+    """A provider that loads successfully but is neither local nor modal should raise.
+
+    The 'lima' backend is registered and defers all installation/version checks
+    to first use, so it instantiates cleanly here but is not a supported
+    schedule provider. This exercises the third outcome of
+    load_schedule_provider (load succeeds, type is unsupported), distinct from
+    the load-failure path above.
+    """
+    with pytest.raises(click.ClickException, match="not supported for schedules"):
+        load_schedule_provider("lima", temp_mngr_ctx)

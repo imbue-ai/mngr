@@ -1,11 +1,11 @@
 """Integration tests for the schedule CLI command."""
 
+import json
+
 import click
 import pluggy
-import pytest
 from click.testing import CliRunner
 
-import imbue.mngr_schedule.cli.remove as remove_module
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_schedule.cli.commands import schedule
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
@@ -119,27 +119,6 @@ def test_schedule_add_rejects_timezone_for_local_provider(
     assert "only supported for the modal provider" in result.output
 
 
-def test_schedule_update_raises_not_implemented(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that schedule update raises NotImplementedError with shared options."""
-    result = cli_runner.invoke(
-        schedule,
-        [
-            "update",
-            "--name",
-            "my-trigger",
-            "--disabled",
-        ],
-        obj=plugin_manager,
-    )
-    assert result.exit_code != 0
-    assert result.exception is not None
-    assert isinstance(result.exception, NotImplementedError)
-    assert "schedule update is not implemented yet" in str(result.exception)
-
-
 def test_schedule_add_accepts_positional_name(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -200,30 +179,34 @@ def test_schedule_add_and_update_share_options(
         "none",
     ]
 
-    # add will fail trying to load the modal provider in the test env
-    # but it should not be a UsageError or click error
+    # add accepts the shared options (no parse error) and proceeds past
+    # option parsing all the way to provider loading, which is where it
+    # fails in the test env because modal is not a registered backend.
+    # If a shared option were rejected, we'd get a click.UsageError before
+    # reaching the provider-load failure below.
     add_result = cli_runner.invoke(
         schedule,
         ["add", *shared_args],
         obj=plugin_manager,
     )
-    # Should fail with ScheduleDeployError (wrapped as ClickException), not a UsageError
     assert add_result.exit_code != 0
     assert not isinstance(add_result.exception, click.UsageError)
+    assert "Failed to load provider 'modal'" in add_result.output
 
+    # update must accept the same shared options without a parse error.
     update_result = cli_runner.invoke(
         schedule,
         ["update", *shared_args],
         obj=plugin_manager,
     )
-    assert isinstance(update_result.exception, NotImplementedError)
+    assert not isinstance(update_result.exception, click.UsageError)
 
 
 def test_schedule_add_accepts_verify_none(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --verify none is accepted."""
+    """Test that --verify none is accepted and consumed before provider load."""
     result = cli_runner.invoke(
         schedule,
         [
@@ -239,16 +222,20 @@ def test_schedule_add_accepts_verify_none(
         ],
         obj=plugin_manager,
     )
-    # Should fail at deploy (no git repo), NOT at verify option parsing
+    # A rejected --verify value would surface as a click.UsageError ("Invalid
+    # value") during parsing, before provider load. Asserting we instead reach
+    # the provider-load failure proves --verify none was accepted, and pins the
+    # point where execution stops so the test breaks if that moves earlier.
     assert result.exit_code != 0
     assert not isinstance(result.exception, click.UsageError)
+    assert "Failed to load provider 'modal'" in result.output
 
 
 def test_schedule_add_accepts_verify_full(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --verify full is accepted."""
+    """Test that --verify full is accepted and consumed before provider load."""
     result = cli_runner.invoke(
         schedule,
         [
@@ -264,9 +251,13 @@ def test_schedule_add_accepts_verify_full(
         ],
         obj=plugin_manager,
     )
-    # Should fail at deploy (no git repo), NOT at verify option parsing
+    # A rejected --verify value would surface as a click.UsageError ("Invalid
+    # value") during parsing, before provider load. Asserting we instead reach
+    # the provider-load failure proves --verify full was accepted, and pins the
+    # point where execution stops so the test breaks if that moves earlier.
     assert result.exit_code != 0
     assert not isinstance(result.exception, click.UsageError)
+    assert "Failed to load provider 'modal'" in result.output
 
 
 def test_schedule_add_rejects_invalid_verify_value(
@@ -293,36 +284,11 @@ def test_schedule_add_rejects_invalid_verify_value(
     assert "Invalid value" in result.output
 
 
-def test_schedule_add_snapshot_raises_not_implemented(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --snapshot raises NotImplementedError."""
-    result = cli_runner.invoke(
-        schedule,
-        [
-            "add",
-            "--command",
-            "create",
-            "--schedule",
-            "0 2 * * *",
-            "--provider",
-            "modal",
-            "--snapshot",
-            "snap-123",
-        ],
-        obj=plugin_manager,
-    )
-    assert result.exit_code != 0
-    assert isinstance(result.exception, NotImplementedError)
-    assert "--snapshot is not yet implemented" in str(result.exception)
-
-
 def test_schedule_add_full_copy_accepted(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that --full-copy is accepted and does not raise NotImplementedError."""
+    """Test that --full-copy is accepted and consumed before provider load."""
     result = cli_runner.invoke(
         schedule,
         [
@@ -338,9 +304,13 @@ def test_schedule_add_full_copy_accepted(
         ],
         obj=plugin_manager,
     )
-    # Should fail at deploy (provider loading), not NotImplementedError
+    # If --full-copy / --no-auto-merge were unknown flags, click would raise a
+    # UsageError during parsing, before provider load. Asserting we instead
+    # reach the provider-load failure proves both flags were accepted, and pins
+    # the point where execution stops so the test breaks if that moves earlier.
     assert result.exit_code != 0
-    assert not isinstance(result.exception, NotImplementedError)
+    assert not isinstance(result.exception, click.UsageError)
+    assert "Failed to load provider 'modal'" in result.output
 
 
 # =============================================================================
@@ -394,7 +364,7 @@ def test_schedule_remove_requires_provider(
         obj=plugin_manager,
     )
     assert result.exit_code != 0
-    assert "Missing option" in result.output or "required" in result.output.lower()
+    assert "Missing option '--provider'" in result.output
 
 
 def test_schedule_remove_local_missing_trigger_with_force(
@@ -458,40 +428,6 @@ def test_schedule_remove_local_force_skips_prompt_and_dispatches(
     assert "Removed schedule" in result.output
 
 
-def test_schedule_remove_local_force_dispatches_to_provider_remove(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    temp_mngr_ctx: MngrContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Remove with --force dispatches to the provider's remove function
-    with the resolved trigger name.
-
-    Complements `test_schedule_remove_local_force_skips_prompt_and_dispatches`
-    by asserting directly on the dispatch call rather than on its
-    downstream side effects. The real `remove_local_schedule` is
-    monkey-patched with a recorder so the claim is about the CLI wiring
-    only: the real implementation is exercised by `cli/remove_test.py`
-    unit tests and the `test_schedule_local_lifecycle.py` release test.
-    """
-    _deploy_local_trigger(temp_mngr_ctx, "dispatch-target")
-
-    dispatched: list[str] = []
-
-    def fake_remove(name: str, _mngr_ctx: MngrContext) -> None:
-        dispatched.append(name)
-
-    monkeypatch.setattr(remove_module, "remove_local_schedule", fake_remove)
-
-    result = cli_runner.invoke(
-        schedule,
-        ["remove", "dispatch-target", "--provider", "local", "--force"],
-        obj=plugin_manager,
-    )
-    assert result.exit_code == 0, f"remove failed: {result.output}"
-    assert dispatched == ["dispatch-target"]
-
-
 # =============================================================================
 # schedule run CLI tests
 # =============================================================================
@@ -522,7 +458,7 @@ def test_schedule_run_requires_provider(
         obj=plugin_manager,
     )
     assert result.exit_code != 0
-    assert "Missing option" in result.output or "required" in result.output.lower()
+    assert "Missing option '--provider'" in result.output
 
 
 def test_schedule_run_local_nonexistent_trigger(
@@ -557,11 +493,12 @@ def test_schedule_run_local_deployed_trigger(
         ["run", "test-run-trigger", "--provider", "local"],
         obj=plugin_manager,
     )
-    # run.sh will fail (mngr create isn't available in test env) but the
-    # command should not error at the CLI level -- it should propagate the
-    # script's exit code. The exit code may be non-zero because the run.sh
-    # itself fails, which is expected.
-    assert isinstance(result.exit_code, int)
+    # run.sh may fail (mngr create isn't available in test env) and the command
+    # propagates the script's exit code, so we don't assert on exit_code. What
+    # distinguishes the deployed path from the nonexistent path is that we get
+    # past the record lookup: the "No local schedule record found" error
+    # (raised only when the trigger does not exist) must not appear.
+    assert "No local schedule record found" not in result.output
 
 
 # =============================================================================
@@ -614,7 +551,12 @@ def test_schedule_list_local_json(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    assert "test-json-trigger" in result.output
+    # The whole output must parse as a single JSON document (this would fail
+    # against the jsonl format, which emits one object per line), and it must
+    # carry the deployed trigger under "schedules".
+    parsed = json.loads(result.output)
+    schedule_names = [entry["trigger"]["name"] for entry in parsed["schedules"]]
+    assert schedule_names == ["test-json-trigger"]
 
 
 def test_schedule_list_local_jsonl(
@@ -631,4 +573,10 @@ def test_schedule_list_local_jsonl(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    assert "test-jsonl-trigger" in result.output
+    # Every non-empty line must independently parse as JSON (this distinguishes
+    # jsonl from the json format, whose single multi-record document is not
+    # line-parseable once there is more than one record). One trigger was
+    # deployed, so there is exactly one record line carrying its name.
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    records = [json.loads(line) for line in lines]
+    assert [record["trigger"]["name"] for record in records] == ["test-jsonl-trigger"]
