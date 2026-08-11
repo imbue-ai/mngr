@@ -1,31 +1,55 @@
+import re
 from collections.abc import Callable
+from collections.abc import Sequence
+from contextlib import AbstractContextManager
+from contextlib import nullcontext
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from threading import Lock
+from typing import Final
 
 import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.create import CreateAgentOptions
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import MessageResult
+from imbue.mngr.api.message import _process_host_for_messaging
 from imbue.mngr.api.message import _send_message_to_agent
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import CorruptedAgentDataError
+from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -341,6 +365,267 @@ def test_send_message_records_failure_when_revive_fails(
     assert result.failed_agents == [
         (str(agent.name), f"Failed to start agent {agent.name}: agent did not become ready")
     ]
+    assert errors == result.failed_agents
+
+
+_PROBE_PARSE_ERROR: Final[str] = "Expecting value: line 1 column 1 (char 0)"
+
+
+def _make_probe_failure(agent: BaseAgent[AgentTypeConfig]) -> CorruptedAgentDataError:
+    """Build the error ``probe_lifecycle`` raises when the agent's data.json will not parse."""
+    return CorruptedAgentDataError(agent.id, agent._get_data_path(), ValueError(_PROBE_PARSE_ERROR))
+
+
+class _ProbeFailingAgent(BaseAgent[AgentTypeConfig]):
+    """Test agent whose lifecycle probe raises instead of reporting a state.
+
+    ``probe_lifecycle`` resolves the expected process name by reading the agent's data.json,
+    so ``CorruptedAgentDataError`` is a real way for it to raise past its
+    HostConnectionError guard.
+    """
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        raise _make_probe_failure(self)
+
+
+@pytest.mark.parametrize("error_behavior", [ErrorBehavior.CONTINUE, ErrorBehavior.ABORT], ids=["continue", "abort"])
+def test_send_message_records_failure_when_the_lifecycle_probe_raises(
+    temp_work_dir: Path,
+    local_provider: LocalProviderInstance,
+    error_behavior: ErrorBehavior,
+) -> None:
+    """A failed lifecycle probe must be recorded, like every other per-agent failure.
+
+    The probe decides whether the agent needs starting, so it runs before any path that
+    records an outcome. `BaseAgent.probe_lifecycle` absorbs only HostConnectionError, so
+    any other MngrError would escape `_send_message_to_agent` entirely and leave its agent
+    in neither result list -- reporting delivery for a message that was never sent.
+    """
+    agent = create_test_agent(
+        local_provider,
+        temp_work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=_ProbeFailingAgent,
+    )
+    is_abort = error_behavior == ErrorBehavior.ABORT
+    expected_error = str(_make_probe_failure(agent))
+
+    result = MessageResult()
+    errors: list[tuple[str, str]] = []
+    expectation: AbstractContextManager = (
+        pytest.raises(MngrError, match=re.escape(expected_error)) if is_abort else nullcontext()
+    )
+    with expectation:
+        _send_message_to_agent(
+            agent=agent,
+            host=agent.host,
+            message_content="hello",
+            result=result,
+            result_lock=Lock(),
+            error_behavior=error_behavior,
+            is_start_desired=True,
+            on_success=None,
+            on_error=lambda name, error: errors.append((name, error)),
+        )
+
+    assert result.successful_agents == []
+    assert result.failed_agents == [(str(agent.name), expected_error)]
+    assert errors == result.failed_agents
+
+
+def _make_matches_on_host(
+    provider: BaseProviderInstance,
+    host_id: HostId,
+    host_name: str,
+    agent_names: Sequence[str],
+) -> list[AgentMatch]:
+    """Build one AgentMatch per name, all resolving to the same host."""
+    return [
+        AgentMatch(
+            agent_id=AgentId.generate(),
+            agent_name=AgentName(name),
+            host_id=host_id,
+            host_name=HostName(host_name),
+            provider_name=provider.name,
+        )
+        for name in agent_names
+    ]
+
+
+class _HostStartFailingProvider(MockProviderInstance):
+    """Test provider whose offline hosts cannot be started."""
+
+    def start_host(self, host: HostInterface | HostId, snapshot_id: SnapshotId | None = None) -> Host:
+        raise HostConnectionError("could not reach the host")
+
+
+@pytest.mark.allow_warnings(match=r"^Error accessing host")
+@pytest.mark.parametrize("error_behavior", [ErrorBehavior.CONTINUE, ErrorBehavior.ABORT], ids=["continue", "abort"])
+@pytest.mark.parametrize("is_start_desired", [True, False], ids=["start-fails", "offline-without-start"])
+def test_unreachable_host_fails_its_agents_or_aborts(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    is_start_desired: bool,
+    error_behavior: ErrorBehavior,
+) -> None:
+    """An unreachable host must fail every agent on it, not vanish into a log.
+
+    `mngr message` exits non-zero only when an agent lands in failed_agents or
+    blocked_agents, so a host-level error recorded nowhere reports success for a message
+    that was never delivered. Both error behaviours record; ABORT additionally re-raises,
+    which is what fails the command rather than only reporting the failure in its result.
+    """
+    host_id = HostId.generate()
+    agent_names = ("sleepy", "dozy")
+    provider = _HostStartFailingProvider(
+        name=ProviderInstanceName("test-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    provider.mock_hosts.append(
+        make_offline_host(
+            CertifiedHostData(
+                host_id=str(host_id),
+                host_name="stopped-host",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            ),
+            provider,
+            temp_mngr_ctx,
+        )
+    )
+    expected_error = (
+        "could not reach the host" if is_start_desired else f"Host '{host_id}' is offline. Cannot send messages."
+    )
+    is_abort = error_behavior == ErrorBehavior.ABORT
+
+    result = MessageResult()
+    errors: list[tuple[str, str]] = []
+    expectation: AbstractContextManager = (
+        pytest.raises(HostConnectionError, match=re.escape(expected_error)) if is_abort else nullcontext()
+    )
+    with expectation:
+        _process_host_for_messaging(
+            matches=_make_matches_on_host(provider, host_id, "stopped-host", agent_names),
+            provider=provider,
+            message_content="hello",
+            error_behavior=error_behavior,
+            is_start_desired=is_start_desired,
+            result=result,
+            result_lock=Lock(),
+            parent_cg=temp_mngr_ctx.concurrency_group,
+            on_success=None,
+            on_error=lambda name, error: errors.append((name, error)),
+        )
+
+    assert result.successful_agents == []
+    assert result.failed_agents == [(name, expected_error) for name in agent_names]
+    assert errors == result.failed_agents
+
+
+class _AgentListFailingHost(Host):
+    """Host subclass whose get_agents always raises HostConnectionError."""
+
+    def get_agents(self) -> list[AgentInterface]:
+        raise HostConnectionError("could not list agents")
+
+
+class _AgentListFailingProvider(LocalProviderInstance):
+    """Provider that returns an online _AgentListFailingHost from get_host()."""
+
+    def get_host(self, host: HostId | HostName) -> _AgentListFailingHost:
+        return _AgentListFailingHost(
+            id=self.host_id,
+            host_name=HostName("test"),
+            connector=PyinfraConnector(self._create_local_pyinfra_host()),
+            provider_instance=self,
+            mngr_ctx=self.mngr_ctx,
+        )
+
+
+@pytest.mark.allow_warnings(match=r"^Error accessing host")
+def test_host_that_cannot_list_its_agents_fails_them(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A reachable host whose agent listing raises must fail its agents too.
+
+    ``get_agents`` is the one host-phase step reached past ``_resolve_online_host``, so
+    it is the statement a refactor could move into the send phase -- where the handler
+    only logs and `mngr message` goes back to exiting 0 on an undelivered message.
+    """
+    agent_names = ("sleepy", "dozy")
+    provider = _AgentListFailingProvider(
+        name=ProviderInstanceName("test-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    result = MessageResult()
+    errors: list[tuple[str, str]] = []
+    _process_host_for_messaging(
+        matches=_make_matches_on_host(provider, provider.host_id, "test", agent_names),
+        provider=provider,
+        message_content="hello",
+        error_behavior=ErrorBehavior.CONTINUE,
+        is_start_desired=False,
+        result=result,
+        result_lock=Lock(),
+        parent_cg=temp_mngr_ctx.concurrency_group,
+        on_success=None,
+        on_error=lambda name, error: errors.append((name, error)),
+    )
+
+    assert result.successful_agents == []
+    assert result.failed_agents == [(name, "could not list agents") for name in agent_names]
+    assert errors == result.failed_agents
+
+
+@pytest.mark.parametrize("error_behavior", [ErrorBehavior.CONTINUE, ErrorBehavior.ABORT], ids=["continue", "abort"])
+def test_agent_missing_from_its_host_is_recorded_before_the_abort(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+    error_behavior: ErrorBehavior,
+) -> None:
+    """An agent missing from its host must be recorded, including under ABORT.
+
+    ABORT raises on the first missing agent, so only that one is recorded, whereas
+    CONTINUE goes on to the rest; either way the agent that missed the message reaches
+    failed_agents, which is what `mngr message` exits non-zero on.
+    """
+    agent_names = ("sleepy", "dozy")
+    matches = _make_matches_on_host(local_provider, local_provider.host_id, LOCAL_HOST_NAME, agent_names)
+    is_abort = error_behavior == ErrorBehavior.ABORT
+    expected_failures = [
+        (str(match.agent_name), f"Agent {match.agent_id} not found on host {local_provider.host_id}")
+        for match in (matches[:1] if is_abort else matches)
+    ]
+
+    result = MessageResult()
+    errors: list[tuple[str, str]] = []
+    expectation: AbstractContextManager = (
+        pytest.raises(AgentNotFoundOnHostError, match=re.escape(expected_failures[0][1]))
+        if is_abort
+        else nullcontext()
+    )
+    with expectation:
+        _process_host_for_messaging(
+            matches=matches,
+            provider=local_provider,
+            message_content="hello",
+            error_behavior=error_behavior,
+            is_start_desired=False,
+            result=result,
+            result_lock=Lock(),
+            parent_cg=temp_mngr_ctx.concurrency_group,
+            on_success=None,
+            on_error=lambda name, error: errors.append((name, error)),
+        )
+
+    assert result.successful_agents == []
+    assert result.failed_agents == expected_failures
     assert errors == result.failed_agents
 
 

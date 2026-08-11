@@ -27,6 +27,7 @@ from imbue.mngr.interfaces.agent import require_interactive_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
@@ -98,6 +99,37 @@ def send_message_to_agents(
     return result
 
 
+def _record_agent_failure(
+    result: MessageResult,
+    result_lock: Lock,
+    agent_name: str,
+    error_msg: str,
+    on_error: Callable[[str, str], None] | None,
+) -> None:
+    """Record one agent as not having received the message.
+
+    ``failed_agents`` is what carries a failure into ``mngr message``'s exit code, and
+    ``on_error`` is what carries it into the streamed ``--format jsonl`` output.
+    """
+    with result_lock:
+        result.failed_agents.append((agent_name, error_msg))
+    if on_error:
+        on_error(agent_name, error_msg)
+
+
+def _resolve_online_host(
+    host_id: HostId, provider: BaseProviderInstance, is_start_desired: bool
+) -> OnlineHostInterface:
+    """Return the online host to message on, starting it when it is offline and that is desired."""
+    host_interface = provider.get_host(host_id)
+    if isinstance(host_interface, OnlineHostInterface):
+        return host_interface
+    if not is_start_desired:
+        raise HostOfflineError(f"Host '{host_id}' is offline. Cannot send messages.")
+    host, _was_started = ensure_host_started(host_interface, is_start_desired=True, provider=provider)
+    return host
+
+
 def _process_host_for_messaging(
     matches: Sequence[AgentMatch],
     provider: BaseProviderInstance,
@@ -113,45 +145,37 @@ def _process_host_for_messaging(
     """Resolve a single host, look up its agents, and send messages concurrently.
 
     This function is run in a thread per host. Within it, per-agent sends are
-    parallelized with a nested ConcurrencyGroupExecutor.
+    parallelized with a nested ConcurrencyGroupExecutor. A host that cannot be reached
+    fails every agent on it, so the result -- and the command's exit code -- report the
+    message as undelivered rather than as nothing at all. ABORT additionally re-raises,
+    so the failure leaves this call as an exception instead of only as a recorded result.
     """
     host_id = matches[0].host_id
     try:
-        host_interface = provider.get_host(host_id)
-
-        # If host is offline, optionally start it or report an error
-        if not isinstance(host_interface, OnlineHostInterface):
-            if is_start_desired:
-                host, _was_started = ensure_host_started(host_interface, is_start_desired=True, provider=provider)
-            else:
-                exception = HostOfflineError(f"Host '{host_id}' is offline. Cannot send messages.")
-                if error_behavior == ErrorBehavior.ABORT:
-                    raise exception
-                logger.warning("Host is offline: {}", host_id)
-                for match in matches:
-                    with result_lock:
-                        result.failed_agents.append((str(match.agent_name), str(exception)))
-                    if on_error:
-                        on_error(str(match.agent_name), str(exception))
-                return
-        else:
-            host = host_interface
-
+        host = _resolve_online_host(host_id, provider, is_start_desired=is_start_desired)
         # Look up live agents on the host that correspond to our matches
         live_agents = host.get_agents()
+    except MngrError as e:
+        # No agent on this host was reached, so each of them is a delivery failure.
+        # Recorded before the abort check, so an aborted run still reports which agents
+        # missed the message -- the raise ends the command either way.
+        for match in matches:
+            _record_agent_failure(result, result_lock, str(match.agent_name), str(e), on_error)
+        if error_behavior == ErrorBehavior.ABORT:
+            raise
+        logger.warning("Error accessing host {}: {}", host_id, e)
+        return
+
+    try:
         agents_to_send: list[AgentInterface] = []
 
         for match in matches:
             agent = next((a for a in live_agents if a.id == match.agent_id), None)
             if agent is None:
                 exception = AgentNotFoundOnHostError(match.agent_id, host_id)
+                _record_agent_failure(result, result_lock, str(match.agent_name), str(exception), on_error)
                 if error_behavior == ErrorBehavior.ABORT:
                     raise exception
-                error_msg = str(exception)
-                with result_lock:
-                    result.failed_agents.append((str(match.agent_name), error_msg))
-                if on_error:
-                    on_error(str(match.agent_name), error_msg)
                 continue
             agents_to_send.append(agent)
 
@@ -181,7 +205,10 @@ def _process_host_for_messaging(
     except MngrError as e:
         if error_behavior == ErrorBehavior.ABORT:
             raise
-        logger.warning("Error accessing host {}: {}", host_id, e)
+        # Every agent reached here has recorded its own outcome, and re-recording would
+        # append a second entry rather than replace the first. What is left is the
+        # executor itself failing, which belongs to no single agent.
+        logger.warning("Error sending messages on host {}: {}", host_id, e)
 
 
 def _send_message_to_agent(
@@ -210,12 +237,17 @@ def _send_message_to_agent(
     # a raw send would just type the message into a dead shell and silently lose
     # it. A DONE husk must be torn down before the relaunch actually happens
     # (revive_done_agent), whereas a STOPPED agent just needs a plain start.
-    lifecycle_state = agent.get_lifecycle_state()
+    try:
+        lifecycle_state = agent.get_lifecycle_state()
+    except MngrError as e:
+        error_msg = str(e)
+        _record_agent_failure(result, result_lock, agent_name, error_msg, on_error)
+        if error_behavior == ErrorBehavior.ABORT:
+            raise MngrError(error_msg) from e
+        return
+
     if lifecycle_state in (AgentLifecycleState.STOPPED, AgentLifecycleState.DONE):
         if is_start_desired:
-            # Record a failed (re)start against this agent just like a failed send,
-            # so it shows up in the result (and the exit code) instead of only in a
-            # host-level warning log.
             try:
                 if lifecycle_state == AgentLifecycleState.DONE:
                     revive_done_agent(agent, host)
@@ -223,19 +255,13 @@ def _send_message_to_agent(
                     ensure_agent_started(agent, host, is_start_desired=True)
             except MngrError as e:
                 error_msg = str(e)
-                with result_lock:
-                    result.failed_agents.append((agent_name, error_msg))
-                if on_error:
-                    on_error(agent_name, error_msg)
+                _record_agent_failure(result, result_lock, agent_name, error_msg, on_error)
                 if error_behavior == ErrorBehavior.ABORT:
                     raise MngrError(error_msg) from e
                 return
         else:
             error_msg = f"Agent is not running (state: {lifecycle_state.value})"
-            with result_lock:
-                result.failed_agents.append((agent_name, error_msg))
-            if on_error:
-                on_error(agent_name, error_msg)
+            _record_agent_failure(result, result_lock, agent_name, error_msg, on_error)
             if error_behavior == ErrorBehavior.ABORT:
                 raise MngrError(f"Cannot send message to {agent_name}: {error_msg}")
             return
@@ -260,10 +286,7 @@ def _send_message_to_agent(
             raise
     except MngrError as e:
         error_msg = str(e)
-        with result_lock:
-            result.failed_agents.append((agent_name, error_msg))
-        if on_error:
-            on_error(agent_name, error_msg)
+        _record_agent_failure(result, result_lock, agent_name, error_msg, on_error)
         if error_behavior == ErrorBehavior.ABORT:
             raise MngrError(error_msg) from e
 
