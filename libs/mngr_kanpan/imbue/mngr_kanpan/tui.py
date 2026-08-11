@@ -1305,13 +1305,29 @@ def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pra
     )
 
 
+@pure
+def _message_command(agent_name: str, message: str) -> list[str]:
+    """Build the ``mngr message`` argv for a peek reply.
+
+    ``--start`` brings up an offline host and (re)launches a ``STOPPED`` or ``DONE``
+    agent, so a reply lands on an agent that is not currently live instead of
+    failing with its state. Reviving a ``DONE`` agent tears down its lingering tmux
+    session, discarding that pane's content.
+    """
+    return ["mngr", "message", agent_name, "--start", "-m", message]
+
+
 def _run_message(agent_name: str, message: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Send a message to the agent. Called from a background thread.
 
-    The timeout sits above ``mngr message``'s own ~90s submission-confirmation
-    wait so a delivered message is not cut off and misreported as a failure.
+    The timeout is a ceiling on how long one send may hold the single-worker reply
+    executor, not a bound on the path: it clears the ~135s a live agent's own waits
+    (TUI-ready, paste-visible, submission-confirmation) can take, but a cold start
+    can outrun it -- ``--start`` waits on the host coming up, and reviving a DONE
+    agent takes a host lock that has no timeout at all. A send cut off here is
+    reported as a failure whether or not the message landed.
     """
-    return subprocess.run(["mngr", "message", agent_name, "-m", message], capture_output=True, text=True, timeout=100)
+    return subprocess.run(_message_command(agent_name, message), capture_output=True, text=True, timeout=180)
 
 
 def _ensure_peek_executor(state: _KanpanState) -> ThreadPoolExecutor:
@@ -1793,9 +1809,10 @@ def _submit_peek_reply(state: _KanpanState) -> None:
     """Send the reply-input text to the peeked agent and echo it immediately; no-op when empty.
 
     ``mngr message`` blocks until durable evidence shows the agent accepted the reply,
-    up to ~90s -- so the send runs on the reply executor and is not awaited. The typed text is echoed into the body right away (as a
-    ``›`` line) and, once the agent accepts it and it shows up in the transcript, the
-    echo is dropped in favour of the real message.
+    up to ~90s, and longer still when the agent has to be started first -- so the send
+    runs on the reply executor and is not awaited. The typed text is echoed into the body
+    right away (as a ``›`` line) and, once the agent accepts it and it shows up in the
+    transcript, the echo is dropped in favour of the real message.
     """
     if state.peek_agent_name is None or state.peek_input is None:
         return
@@ -1820,12 +1837,13 @@ def _on_peek_reply_poll(
     loop: MainLoop,
     data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentName, str],
 ) -> None:
-    """Poll a sent reply; refresh the board on success, drop its optimistic echo on failure.
+    """Poll a sent reply; refresh the board either way, drop its optimistic echo on failure.
 
-    A delivered reply keeps its echo until the transcript refresh prunes it, and triggers a
-    local refresh because accepting the message puts a WAITING agent back to work, leaving the
-    row's STATE stale from that moment. A failed send would otherwise leave the echo up forever,
-    showing the message as delivered when it was not.
+    A delivered reply keeps its echo until the transcript refresh prunes it, and re-probes because
+    accepting the message puts a WAITING agent back to work. A failed one re-probes because it may
+    have moved the row too: a STOPPED or DONE agent is (re)launched before delivery is even
+    attempted, and the exit code does not say whether it got that far. A failed send would
+    otherwise leave the echo up forever, showing the message as delivered when it was not.
     """
     state, future, agent_name, reply_text = data
     if not future.done():
@@ -1856,6 +1874,7 @@ def _on_peek_reply_poll(
         # The panel has closed, so the restored footer is visible again and is the
         # right place for the failure notice.
         _show_transient_message(state, f"  Reply to {agent_name} failed: {detail}")
+    _request_local_refresh(loop, state)
 
 
 def _handle_peek_key(state: _KanpanState, key: str) -> bool | None:

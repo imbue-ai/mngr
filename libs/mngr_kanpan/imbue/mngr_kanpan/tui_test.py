@@ -151,6 +151,7 @@ from imbue.mngr_kanpan.tui import _legend_width
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _make_readline_edit
 from imbue.mngr_kanpan.tui import _mark_color
+from imbue.mngr_kanpan.tui import _message_command
 from imbue.mngr_kanpan.tui import _mute_focused_agent
 from imbue.mngr_kanpan.tui import _nearest_surviving_name
 from imbue.mngr_kanpan.tui import _on_auto_refresh_alarm
@@ -2415,6 +2416,14 @@ def test_submit_peek_reply_empty_input_is_noop() -> None:
     assert state.peek_reply_future is None
 
 
+def test_message_command_passes_start_for_a_non_live_agent() -> None:
+    # Without --start, mngr message refuses a STOPPED or DONE agent ("Agent is not
+    # running") instead of delivering, so a reply to an idle agent would never land.
+    assert _message_command("agent-a", "my reply") == ["mngr", "message", "agent-a", "--start", "-m", "my reply"]
+    # A reply that looks like a flag is still the message, because -m takes it as a value.
+    assert _message_command("agent-a", "--start") == ["mngr", "message", "agent-a", "--start", "-m", "--start"]
+
+
 def _make_reply_result(returncode: int, stderr: str = "") -> Future[subprocess.CompletedProcess[str]]:
     future: Future[subprocess.CompletedProcess[str]] = Future()
     future.set_result(subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr))
@@ -2434,8 +2443,12 @@ def test_on_peek_reply_poll_failure_drops_echo_and_shows_error() -> None:
     assert state.peek_pending_replies == []
     assert "reply failed" in str(state.peek_body_text.text)
     assert "agent not running" in str(state.peek_body_text.text)
-    # Nothing was delivered, so the agent's state is unchanged and there is nothing to re-probe.
-    assert state.refresh_future is None
+    # --start (re)launches a STOPPED or DONE agent before delivery is attempted, so a send that
+    # then fails can still have left it running: the row's lifecycle state is re-probed anyway.
+    assert state.refresh_future is not None
+    assert state.refresh_is_local_only is True
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_on_peek_reply_poll_success_keeps_echo_and_refreshes_board() -> None:
@@ -2477,9 +2490,12 @@ def test_on_peek_reply_poll_failure_after_close_shows_transient() -> None:
     state.loop = _make_mock_loop()
     future = _make_reply_result(returncode=1, stderr="delivery timed out\n")
     _on_peek_reply_poll(state.loop, (state, future, AgentName("agent-a"), "my reply"))
-    # Panel closed: the failure goes to the (now visible) footer as a transient message.
+    # Panel closed: the failure goes to the (now visible) footer as a transient message, which
+    # outranks the "Refreshing" spinner the re-probe puts there.
     assert state.transient_message is not None
     assert "delivery timed out" in state.transient_message
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_on_peek_reply_poll_failure_with_other_agent_peeked_renders_in_panel() -> None:
@@ -2499,6 +2515,8 @@ def test_on_peek_reply_poll_failure_with_other_agent_peeked_renders_in_panel() -
     assert state.transient_message is None
     # agent-b's own pending echoes are untouched.
     assert state.peek_pending_replies == ["draft to b"]
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_submit_then_transcript_refresh_keeps_reply_error_visible() -> None:
