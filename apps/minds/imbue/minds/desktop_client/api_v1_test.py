@@ -1115,6 +1115,51 @@ def test_start_workspace_does_not_broadcast_workspace_stopped(
     assert event_queue.empty()
 
 
+def test_workspace_refresh_broadcasts_to_every_chrome_connection(tmp_path: Path) -> None:
+    """The refresh route reaches every open window, keyed to the path agent id.
+
+    This is the whole mechanism: the agent has no other way to reach the shell,
+    so a payload that does not land on each subscribed chrome-events connection
+    means a window keeps rendering the pre-change interface.
+    """
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    first_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    second_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
+    wake_event = threading.Event()
+    broadcaster = get_state(client.application).chrome_event_broadcaster
+    broadcaster.subscribe(first_queue, wake_event)
+    broadcaster.subscribe(second_queue, threading.Event())
+
+    # Exactly what default-workspace-template's ``system/scripts/refresh_workspace_view.py``
+    # puts on the wire: an empty JSON object with a JSON content type. The route
+    # declares no request model, so this pins that an empty body is accepted
+    # rather than rejected as invalid.
+    response = client.post(f"/api/v1/agents/{agent_id}/refresh", json={}, headers=_auth_header())
+
+    assert response.status_code == 200
+    assert wake_event.is_set()
+    expected = {"type": "workspace_refresh", "agent_id": str(agent_id)}
+    assert first_queue.get_nowait() == expected
+    assert second_queue.get_nowait() == expected
+
+
+def test_workspace_refresh_succeeds_with_no_window_open(tmp_path: Path) -> None:
+    """A closed workspace still answers ``ok``: the refresh is fire-and-forget.
+
+    The caller is an agent mid-``update-self`` / ``update-app``; failing it
+    because the user happens to have the window shut would turn a cosmetic
+    no-op into a failed reveal.
+    """
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+
+    response = client.post(f"/api/v1/agents/{agent_id}/refresh", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+
+
 def test_operation_status_unknown_create_id_returns_404(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
     create_attempt_id = CreateAttemptId()

@@ -172,6 +172,13 @@ class UiOpenHelpMessage(FrozenModel):
     workspace_agent_id: str = Field(description="Reporting workspace's agent id")
 
 
+class UiWorkspaceRefreshMessage(FrozenModel):
+    """An in-workspace agent changed the workspace's own interface; rebuild the displayed view."""
+
+    type: Literal["workspace_refresh"] = "workspace_refresh"
+    agent_id: str = Field(description="Workspace agent id whose view is stale")
+
+
 class UiReloadMessage(FrozenModel):
     """Ask every client to hard-reload (e.g. new hashed assets after an update)."""
 
@@ -199,6 +206,7 @@ UiServerMessage = Annotated[
     | UiDiscoveryHealthMessage
     | UiWorkspaceStoppedMessage
     | UiOpenHelpMessage
+    | UiWorkspaceRefreshMessage
     | UiReloadMessage,
     Field(discriminator="type"),
 ]
@@ -253,6 +261,7 @@ class UiWireSchema(FrozenModel):
     discovery_health: UiDiscoveryHealthMessage = Field(description="discovery_health frame")
     workspace_stopped: UiWorkspaceStoppedMessage = Field(description="workspace_stopped frame")
     open_help: UiOpenHelpMessage = Field(description="open_help frame")
+    workspace_refresh: UiWorkspaceRefreshMessage = Field(description="workspace_refresh frame")
     reload_ui: UiReloadMessage = Field(description="reload_ui frame")
     client_state: UiClientStateMessage = Field(description="client_state frame (client to server)")
     bootstrap: UiBootstrap = Field(description="bootstrap document")

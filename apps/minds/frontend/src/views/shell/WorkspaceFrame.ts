@@ -11,7 +11,7 @@ import m from "mithril";
 import { ButtonLink } from "../components/Button";
 import { Notice } from "../components/Notice";
 import { electronBridge } from "../../electron-bridge";
-import type { ShellState } from "./shell-state";
+import type { ShellState, WorkspaceFrameHandle } from "./shell-state";
 
 // The embed contract module is served verbatim at /_static/embed_contract.js
 // (single shared source with the workspace side; see docs/embed-contract.md).
@@ -62,6 +62,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let armedWorkspaceAnyId: string | null = null;
   let unsubscribeWorkspaces: (() => void) | null = null;
   let closeActiveTabForwarder: (() => void) | null = null;
+  let frameHandle: WorkspaceFrameHandle | null = null;
   let isRemoved = false;
 
   function armFrame(shell: ShellState, workspaceAnyId: string): void {
@@ -73,11 +74,29 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     }
   }
 
+  // Re-navigate the frame even though the URL is unchanged: assigning src
+  // always processes the iframe attributes and navigates, and it is the only
+  // reload the embedder has -- the frame is cross-origin, so its
+  // contentWindow.location is unreachable. Consequence: the frame comes back
+  // at the workspace root rather than wherever its own app had routed itself.
+  function reloadFrame(shell: ShellState): void {
+    if (frameElement === null || armedWorkspaceAnyId === null) return;
+    frameElement.src = shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId);
+  }
+
   return {
     oncreate(vnode) {
       const { shell, workspaceAnyId } = vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
       armFrame(shell, workspaceAnyId);
+      // The armed id, not the attr, is what the shell asks about: this frame is
+      // re-armed by onupdate, and it is mounted for the workspace an app modal
+      // floats over as well as for the routed workspace surface.
+      frameHandle = {
+        armedWorkspaceAnyId: () => armedWorkspaceAnyId,
+        reload: () => reloadFrame(shell),
+      };
+      shell.workspaceFrame = frameHandle;
 
       // A frame armed before the workspace list arrives may be keyed by an
       // agent id with no host mapping yet (/goto/ only routes host ids);
@@ -146,11 +165,17 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     onupdate(vnode) {
       armFrame(vnode.attrs.shell, vnode.attrs.workspaceAnyId);
     },
-    onremove() {
+    onremove(vnode) {
       isRemoved = true;
       if (activeCloseActiveTabForwarder === closeActiveTabForwarder) {
         activeCloseActiveTabForwarder = null;
       }
+      // Clear the shell's handle only if it is still ours, so this teardown can
+      // never unhook a frame that is actually mounted.
+      if (vnode.attrs.shell.workspaceFrame === frameHandle) {
+        vnode.attrs.shell.workspaceFrame = null;
+      }
+      frameHandle = null;
       endpoint?.dispose();
       endpoint = null;
       unsubscribeWorkspaces?.();

@@ -464,10 +464,11 @@ def maybe_recover_host_permissions_for_agent(
        it, via :func:`finalize_host_permissions`).
     2. ``agent_id`` is (idempotently) registered for the host via
        :func:`register_agent_for_host`. This always runs -- even when the
-       file already existed -- to close the gap where the discovery-time
-       auto-register saw this agent while the host file was missing: it
-       skips (and de-dups) such agents, so they would otherwise never get
-       added to the host's ``minds-api-proxy`` allowlist.
+       file already existed -- because the discovery-time auto-register
+       only ever *waits* for a host file to appear, never creates one: an
+       agent on a host whose file was never materialized is left out of
+       the ``minds-api-proxy`` allowlist until something repairs the file,
+       and repair 1 above is that something.
 
     ``opaque_permissions_path`` is the path the agent's
     permissions-override JWT resolves to; minds reads it from the
@@ -517,7 +518,7 @@ def maybe_recover_host_permissions_for_agent(
         did_repair = True
 
     # Always ensure the requesting agent is in the host's allowlist. This is a
-    # no-op when it already is, and repairs the auto-register de-dup gap when
-    # it is not.
+    # no-op when it already is, and covers the agents the discovery-time
+    # auto-register left waiting on a host file that was never materialized.
     register_agent_for_host(plugin_data_dir, host_id, agent_id)
     return did_repair

@@ -90,6 +90,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiRequestsMessage",
             "UiSnapshot",
             "UiWorkspaceEntry",
+            "UiWorkspaceRefreshMessage",
             "UiWorkspaceStoppedMessage",
             "UiWorkspacesMessage",
         ]

@@ -18,11 +18,13 @@ agents (deny-all baseline) while still cookie-reachable by the UI.
 Agent identity, when a route needs it, comes from the URL path's
 ``<agent_id>`` parameter -- *not* from the bearer token. The gateway's
 per-host permissions file is what gates which agent ids a given caller
-can talk about: at agent-create time the desktop client narrows the
-host's permission rule to ``/minds-api-proxy/api/v1/agents/<agent_id>/...``,
-so a request that reaches a route with a given ``<agent_id>`` has
-already been authorized by the gateway as "this is an agent that lives
-on the caller's host".
+can talk about: the desktop client registers every agent discovery
+reports into its host's allowlist, which is what lifts
+``/minds-api-proxy/api/v1/agents/<agent_id>/...`` out of the baseline's
+reject shortcut for unregistered ids (see ``docs/latchkey-permissions.md``
+for the rule ordering that implements it). So a request that reaches a
+route with a given ``<agent_id>`` has already been authorized by the
+gateway as "this is an agent that lives on the caller's host".
 """
 
 import itertools
@@ -126,6 +128,7 @@ from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.chrome_event_broadcast import build_open_help_payload
+from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_refresh_payload
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
@@ -2350,6 +2353,34 @@ def _handle_bug_report(agent_id: str) -> OkResponse | Response:
     return OkResponse(ok=True)
 
 
+# -- Workspace view refresh route --
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(OkResponse))
+def _handle_workspace_refresh(agent_id: str) -> OkResponse:
+    """Rebuild the displayed view of a workspace, on behalf of an in-workspace agent.
+
+    An agent that changes the workspace's own interface -- typically followed by a
+    ``mngr start --restart system-services`` -- leaves any open view running the
+    pre-change frontend against the restarted backend. A restart that completes
+    quickly never trips the system-interface health tracker's STUCK threshold, so
+    no recovery-page redirect reloads the view on the agent's behalf. This route
+    is the agent's explicit request for that reload.
+
+    Takes no body: the path ``agent_id`` (which the gateway has already authorized)
+    is the whole request. It names the *workspace*, so a sub-agent asking for a
+    refresh addresses its workspace's primary agent id rather than its own.
+
+    Fire-and-forget by design, mirroring the broadcaster's own contract: a
+    workspace with no window open has nothing to refresh, and the agent's caller
+    must not fail because the user happens to have the workspace closed. The
+    response is ``ok`` either way.
+    """
+    get_state().chrome_event_broadcaster.broadcast(build_workspace_refresh_payload(workspace_agent_id=agent_id))
+    return OkResponse(ok=True)
+
+
 # -- Workspace metadata update route (color + account association) --
 
 
@@ -3263,5 +3294,9 @@ def create_api_v1_blueprint() -> Blueprint:
     # Bug reports (per-agent for the same gateway-permission reason; the agent_id
     # also scopes the report's workspace context).
     blueprint.add_url_rule("/agents/<agent_id>/report", view_func=_handle_bug_report, methods=["POST"])
+
+    # Workspace view refresh (per-agent for the same gateway-permission reason; the
+    # agent_id identifies which workspace's view to rebuild).
+    blueprint.add_url_rule("/agents/<agent_id>/refresh", view_func=_handle_workspace_refresh, methods=["POST"])
 
     return blueprint

@@ -9,6 +9,8 @@ connected window exactly when they happen:
   interface and auto-restart it.
 - ``open_help``: an in-workspace agent escalated a bug report, so every window
   gets the chance to surface the report modal pre-filled with its diagnosis.
+- ``workspace_refresh``: an in-workspace agent changed the workspace's own
+  interface and needs the displayed view rebuilt from the new code.
 
 This broker is the fan-out point between the producer (a Flask request thread)
 and the chrome-events SSE generators (one per connected window): each generator
@@ -95,6 +97,22 @@ def build_workspace_stopped_payload(workspace_agent_id: str) -> dict[str, str]:
     the stop) and by the browser-mode chrome (navigate the content frame home).
     """
     return {"type": "workspace_stopped", "agent_id": workspace_agent_id}
+
+
+def build_workspace_refresh_payload(workspace_agent_id: str) -> dict[str, str]:
+    """The ``workspace_refresh`` SSE payload: rebuild this workspace's displayed view.
+
+    Emitted when an in-workspace agent POSTs to ``/api/v1/agents/<id>/refresh``
+    after changing the workspace's own interface (see that route for why nothing
+    else reloads the view).
+
+    Bridged onto the SPA's ``/ui/ws`` channel as a ``workspace_refresh`` frame.
+    Every window receives it; each one whose content iframe is mounted on this
+    workspace re-navigates that iframe -- including the windows floating an app
+    modal over it, which keep the frame mounted behind the card. The iframe is
+    cross-origin, so the SPA can only reload it by re-arming ``src``.
+    """
+    return {"type": "workspace_refresh", "agent_id": workspace_agent_id}
 
 
 def build_open_help_payload(description: str, workspace_agent_id: str) -> dict[str, str]:

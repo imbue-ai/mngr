@@ -1,6 +1,34 @@
 // Shared non-fixture test utilities, explicitly imported by *.test.ts files.
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
+import type { UiWorkspacesMessage } from "./channel/messages";
+
+/** A one-workspace list message: agent `agent-aa11` on host `host-bb22`. */
+export function workspacesMessage(overrides: Partial<UiWorkspacesMessage> = {}): UiWorkspacesMessage {
+  return {
+    type: "workspaces",
+    workspaces: [
+      {
+        id: "agent-aa11",
+        name: "alpha",
+        accent: "#aabbcc",
+        host_id: "host-bb22",
+        is_stale: false,
+        supports_shutdown: true,
+        liveness: "RUNNING",
+        account: "",
+        create_attempt_state: "",
+        is_remote: false,
+        location: "",
+      },
+    ],
+    destroying_agent_ids: [],
+    restorable_workspace_ids: ["agent-aa11", "host-bb22"],
+    remote_workspace_states: {},
+    ...overrides,
+  };
+}
+
 /** A JSON Response carrying the given payload with the given status. */
 export function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {

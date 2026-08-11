@@ -71,6 +71,12 @@ function main(): void {
       if (electronBridge.isDesktop) return;
       openHelpFromShellAsk(shell, message.workspace_agent_id, message.description);
     },
+    onWorkspaceRefresh: (message) => {
+      // An in-workspace agent says the interface this view is running is stale.
+      // Every window acts on its own frame -- no main process involvement,
+      // unlike the pre-SPA content-view reload.
+      shell.reloadWorkspaceFrame(message.agent_id);
+    },
   });
   shell.channel = channel;
 

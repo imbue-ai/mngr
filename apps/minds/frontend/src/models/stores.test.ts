@@ -1,34 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { UiRequestsMessage, UiWorkspacesMessage } from "../channel/messages";
+import type { UiRequestsMessage } from "../channel/messages";
+import { workspacesMessage } from "../testing";
 import { applySnapshotToStores, bootFromBootstrap, createEmptyStores } from "./boot";
 import { HealthStore } from "./health";
 import { RequestsStore } from "./requests";
 import { WorkspacesStore } from "./workspaces";
-
-function workspacesMessage(overrides: Partial<UiWorkspacesMessage> = {}): UiWorkspacesMessage {
-  return {
-    type: "workspaces",
-    workspaces: [
-      {
-        id: "agent-aa11",
-        name: "alpha",
-        accent: "#aabbcc",
-        host_id: "host-bb22",
-        is_stale: false,
-        supports_shutdown: true,
-        liveness: "RUNNING",
-        account: "",
-        create_attempt_state: "",
-        is_remote: false,
-        location: "",
-      },
-    ],
-    destroying_agent_ids: [],
-    restorable_workspace_ids: ["agent-aa11", "host-bb22"],
-    remote_workspace_states: {},
-    ...overrides,
-  };
-}
 
 function requestsMessage(ids: string[], autoOpen: boolean): UiRequestsMessage {
   return { type: "requests", count: ids.length, request_ids: ids, auto_open: autoOpen };

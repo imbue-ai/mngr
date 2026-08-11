@@ -227,8 +227,8 @@ latchkey 2.8.0 features:
 ## Minds API access through the gateway
 
 Minds itself exposes a small REST API on the desktop-client bare
-origin (`/api/v1/...`: agent notifications and the WebDAV
-file-sharing mount). Agents reach it through the same latchkey
+origin (`/api/v1/...`: agent notifications, workspace view refresh,
+and the WebDAV file-sharing mount). Agents reach it through the same latchkey
 gateway they use for every other outbound HTTP call, via the bundled
 `minds-api-proxy` extension at `/minds-api-proxy/api/v1/...`. There is
 no per-agent reverse SSH tunnel for the Minds API anymore.
@@ -266,24 +266,46 @@ whatever app state a later route hangs off that prefix.
 Existing hosts pick a newly-added baseline grant up through
 `reconcile_baseline_permissions`, which `register_agent_for_host` applies
 whenever it registers a discovered agent -- a baseline addition alone
-would otherwise only reach newly-created workspaces. Auto-registration
-de-dupes per `(host, agent)` pair for the life of the process, so a
-baseline addition lands on the first discovery after the app restarts,
-not mid-run.
+would otherwise only reach newly-created workspaces. Reconciliation only
+*adds permissions to the `latchkey-self` rule*; it never introduces a
+rule, so a baseline addition shaped as a new rule reaches newly-created
+host files only. Auto-registration de-dupes an agent it has already
+registered for the life of the process, so a permission addition lands on
+the first discovery after the app restarts, not mid-run. An agent still
+waiting on its host file is the exception: it is retried on every
+resolver change, so its registration (and the reconciliation that rides
+along) does land mid-run.
 
 Per-agent isolation comes from the latchkey gateway's permissions
-file. The agent baseline grants every agent one shared call --
-`POST /minds-api-proxy/api/v1/agents/<...>/notifications` -- so any
-workspace the desktop client created can always notify the user. For
-the other routes (future `/api/v1/agents/<id>/*` endpoints,
-the WebDAV mount), agent creation installs a *per-agent* rule + inline
-schemas in the host's permissions file: the scope schema
-`minds-api-self-<agent_id>` mirrors `latchkey-self.invalid` and the
-permission schema `minds-api-proxy-call-<agent_id>` pins the URL
-path to `/minds-api-proxy/api/v1/agents/<agent_id>/...`. Because the
-file is keyed per host, an agent on host A cannot reach the API on
-behalf of an agent on host B: host A's permissions file does not list
-B's agent id at all.
+file. The agent baseline grants the whole per-agent path prefix --
+any method on `/minds-api-proxy/api/v1/agents/<agent_id>/...` -- but
+only when `<agent_id>` is one the host has registered. Two baseline
+rules produce that, and rule order matters because detent stops at the
+first matching scope: `minds-api-proxy-per-agent-unauthorized` matches
+the prefix for any *unregistered* agent id and resolves to an empty
+permission list (an immediate reject), and the `latchkey-self` rule
+behind it carries `minds-api-proxy-per-agent`, which allows the path.
+Registration adds an agent id to the unauthorized *scope schema's*
+`not.anyOf` list, lifting it out of the reject shortcut. It is driven off the
+*discovery* stream, not agent creation, so it covers agents the
+workspace creates for itself (chat, worktree, worker) as well as the
+primary one minds creates. Because discovery can see a brand-new agent
+before creation has linked the host's permissions file into place, a
+registration with no file to write to is retried on later resolver
+changes rather than dropped. A new `/api/v1/agents/<id>/*` route
+therefore needs no permissions work.
+
+The bug-report route (`POST .../agents/<...>/report`) is the one
+exception: it sits in a rule *ahead* of the unauthorized gate, so it
+works for a caller with no per-agent registration at all -- on host files
+new enough to carry that rule. Reconciliation adds no rule to older ones,
+where an unregistered caller's report still hits the gate.
+
+Because the file is keyed per host, an agent on host A cannot reach the
+API on behalf of an agent on host B: host A's permissions file does not
+list B's agent id at all. Within a host the allowlist is shared, which
+is what lets a sub-agent address its workspace's primary agent id (as
+the refresh call does).
 
 The gateway's *default* permissions config
 (`~/.minds/latchkey_default_permissions.json`) is materialized with

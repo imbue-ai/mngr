@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiReloadMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiSnapshot
+from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.errors import MindError
@@ -49,7 +50,7 @@ from imbue.mngr.errors import MngrError
 
 # The one-shot message types a producer pushes directly (no diffing): health
 # edges ride through publish_health so connect-time snapshots stay coherent.
-UiOneShotMessage = UiWorkspaceStoppedMessage | UiOpenHelpMessage | UiReloadMessage
+UiOneShotMessage = UiWorkspaceStoppedMessage | UiOpenHelpMessage | UiWorkspaceRefreshMessage | UiReloadMessage
 
 
 class UiStatePublisher(MutableModel):
@@ -76,7 +77,8 @@ class UiStatePublisher(MutableModel):
     _last_frame_by_type: dict[str, str] = PrivateAttr(default_factory=dict)
     _is_started: bool = PrivateAttr(default=False)
     # One-shot payload dicts bridged from the legacy ChromeEventBroadcaster
-    # (workspace_stopped / open_help producers keep their existing call sites).
+    # (workspace_stopped / open_help / workspace_refresh producers keep their
+    # existing call sites).
     _legacy_event_queue: "queue.Queue[dict[str, str]]" = PrivateAttr(default_factory=queue.Queue)
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
@@ -131,6 +133,8 @@ class UiStatePublisher(MutableModel):
                         workspace_agent_id=payload.get("workspace_agent_id", ""),
                     )
                 )
+            elif payload_type == "workspace_refresh":
+                self.publish_one_shot(UiWorkspaceRefreshMessage(agent_id=payload.get("agent_id", "")))
             else:
                 logger.warning("Dropped an unrecognized bridged chrome event of type {}", payload_type)
 
@@ -139,7 +143,7 @@ class UiStatePublisher(MutableModel):
         self.broadcaster.broadcast(message.model_dump_json())
 
     def publish_one_shot(self, message: UiOneShotMessage) -> None:
-        """Broadcast a fire-and-forget event frame (workspace_stopped / open_help / reload_ui)."""
+        """Broadcast a fire-and-forget event frame (workspace_stopped / open_help / workspace_refresh / reload_ui)."""
         self.broadcaster.broadcast(message.model_dump_json())
 
     def build_snapshot(self) -> UiSnapshot:

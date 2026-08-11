@@ -368,10 +368,10 @@ def test_recover_links_standalone_opaque_when_host_file_missing(tmp_path: Path) 
 def test_recover_is_noop_for_file_but_still_registers_agent(tmp_path: Path) -> None:
     """A host that was already finalized needs no file repair, but the agent is still registered.
 
-    Closes the auto-register de-dup gap: an agent first seen while the host
-    file was missing is skipped (and de-duped) by discovery-time registration,
-    so registering it here on its permission request is the only thing that
-    adds it to the allowlist.
+    Discovery-time registration waits for a host file to appear and never
+    creates one, so an agent whose host file was materialized by something
+    other than that path (here, repair 1 -- or an operator) is only added to
+    the allowlist by this registration.
     """
     fake = _full_fake(tmp_path)
     setup = prepare_agent_latchkey(fake, is_tunneled=True)

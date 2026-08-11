@@ -55,6 +55,10 @@ describe("parseServerMessage", () => {
       schema_version: 1,
     });
     expect(parseServerMessage("not json")).toBeNull();
+    expect(parseServerMessage(JSON.stringify({ type: "workspace_refresh", agent_id: "agent-1" }))).toEqual({
+      type: "workspace_refresh",
+      agent_id: "agent-1",
+    });
     expect(parseServerMessage(JSON.stringify({ type: "later_addition" }))).toBeNull();
     expect(parseServerMessage(JSON.stringify({ no_type: true }))).toBeNull();
   });
@@ -65,6 +69,8 @@ describe("UiChannelClient", () => {
     const stores = createEmptyStores();
     const sockets: FakeSocket[] = [];
     const reloads: number[] = [];
+    const refreshedAgentIds: string[] = [];
+    const relayedTypes: string[] = [];
     const storageMap = new Map<string, string>();
     if (overrides.seededLatch === true) storageMap.set(SCHEMA_RELOAD_GUARD_KEY_FOR_TESTS, "1");
     const storage = {
@@ -81,11 +87,13 @@ describe("UiChannelClient", () => {
         return socket;
       },
       reloadPage: () => reloads.push(1),
+      onWorkspaceRefresh: (message) => refreshedAgentIds.push(message.agent_id),
+      relayShellEvent: (message) => relayedTypes.push(message.type),
       jitter01: () => 0.5,
       redraw: () => undefined,
       storage,
     });
-    return { client, stores, sockets, reloads, storageMap };
+    return { client, stores, sockets, reloads, refreshedAgentIds, relayedTypes, storageMap };
   }
 
   it("sends client_state on open and on route changes", () => {
@@ -126,6 +134,19 @@ describe("UiChannelClient", () => {
       remote_workspace_states: {},
     });
     expect(stores.workspaces.destroyingAgentIds).toEqual(["agent-1"]);
+  });
+
+  it("hands workspace_refresh to the shell without relaying it to main", () => {
+    const { client, sockets, refreshedAgentIds, relayedTypes } = makeClient();
+    client.start();
+    sockets[0].open();
+    sockets[0].receive({ type: "workspace_refresh", agent_id: "agent-1" });
+
+    expect(refreshedAgentIds).toEqual(["agent-1"]);
+    // Main keeps no bookkeeping for this one: each window reloads its own
+    // frame, so relaying it would be a no-op ask. This frame is the only one
+    // the socket delivered, so nothing at all should have reached the relay.
+    expect(relayedTypes).toEqual([]);
   });
 
   it("clears per-workspace health on the reconnect hello (reconnect is resync)", () => {

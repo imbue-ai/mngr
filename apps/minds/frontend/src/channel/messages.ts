@@ -18,6 +18,7 @@ import type {
   UiRequestsMessage,
   UiSnapshot,
   UiWorkspaceEntry,
+  UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
   UiWorkspacesMessage,
 } from "../generated/ui";
@@ -34,6 +35,7 @@ export type {
   UiRequestsMessage,
   UiSnapshot,
   UiWorkspaceEntry,
+  UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
   UiWorkspacesMessage,
 };
@@ -53,6 +55,7 @@ export type UiServerMessage =
   | Framed<UiDiscoveryHealthMessage, "discovery_health">
   | Framed<UiWorkspaceStoppedMessage, "workspace_stopped">
   | Framed<UiOpenHelpMessage, "open_help">
+  | Framed<UiWorkspaceRefreshMessage, "workspace_refresh">
   | Framed<UiReloadMessage, "reload_ui">;
 
 export interface UiClientState {
@@ -83,6 +86,7 @@ export function parseServerMessage(raw: string): UiServerMessage | null {
     case "discovery_health":
     case "workspace_stopped":
     case "open_help":
+    case "workspace_refresh":
     case "reload_ui":
       return data as UiServerMessage;
     default:

@@ -14,6 +14,14 @@ import {
   workspaceSurfaceIdFromPath,
 } from "./classify";
 
+/** The mounted workspace content iframe, as the shell addresses it. */
+export interface WorkspaceFrameHandle {
+  /** The workspace the frame is navigated to, or null before it is first armed. */
+  armedWorkspaceAnyId(): string | null;
+  /** Re-navigate the frame to that workspace's root URL. */
+  reload(): void;
+}
+
 export class ShellState {
   readonly stores: AppStores;
   channel: UiChannelClient | null = null;
@@ -23,6 +31,12 @@ export class ShellState {
   sidebarAnchor: { x: number; y: number; width: number; height: number } | null = null;
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
+  /** The mounted content iframe, installed by WorkspaceFrame (null when none is
+   * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
+   * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
+   * is why the workspace it is showing is asked of it rather than read off
+   * `displayedWorkspaceAnyId`. */
+  workspaceFrame: WorkspaceFrameHandle | null = null;
   /** Re-entrancy guard for closeAppOverlay: a single Escape can reach it from
    * both the in-document listener and the Electron before-input-event forward,
    * and its history.back() is not idempotent. Cleared on the next route change. */
@@ -30,6 +44,16 @@ export class ShellState {
 
   constructor(stores: AppStores) {
     this.stores = stores;
+  }
+
+  /** Rebuild this window's workspace view, if its frame is showing the one named. */
+  reloadWorkspaceFrame(agentScopedId: string): void {
+    const frame = this.workspaceFrame;
+    if (frame === null) return;
+    const armed = frame.armedWorkspaceAnyId();
+    if (armed === null) return;
+    if (this.stores.workspaces.toAgentScopedId(armed) !== agentScopedId) return;
+    frame.reload();
   }
 
   currentRoutePath(): string {

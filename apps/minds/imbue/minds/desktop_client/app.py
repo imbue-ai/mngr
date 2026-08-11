@@ -2839,7 +2839,8 @@ def create_desktop_client(
 
     # Wire the channel publisher into every producer the legacy SSE listens to:
     # resolver changes, health edges, discovery-health changes, and (via the
-    # bridged legacy broker) the one-shot workspace_stopped / open_help events.
+    # bridged legacy broker) the one-shot workspace_stopped / open_help /
+    # workspace_refresh events.
     ui_publisher.bridge_legacy_broker(state.chrome_event_broadcaster)
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.add_on_change_callback(ui_publisher.notify_change)

@@ -95,11 +95,11 @@ def test_registers_newly_discovered_agents_on_change(
     assert any(str(later_agent) in p for p in registered)
 
 
-def test_skips_hosts_without_permissions_file(
+def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
 ) -> None:
-    """Hosts that have no existing permissions file are intentionally skipped.
+    """Hosts that have no existing permissions file do not get one created.
 
     The file is materialized at host-creation time by
     :func:`finalize_host_permissions`; its absence means the host is not
@@ -113,6 +113,39 @@ def test_skips_hosts_without_permissions_file(
     LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey).start()
 
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+
+
+def test_registers_an_agent_whose_host_file_lands_after_discovery(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+) -> None:
+    """A permissions file that appears *after* the agent was discovered still registers it.
+
+    This is the ordering a brand-new workspace actually creates: the agent hits
+    the discovery stream before agent creation's ``finalize_host_permissions``
+    links the host file into place. Treating that absence as final leaves the
+    workspace's own agent out of the host's ``minds-api-proxy`` allowlist for
+    the rest of the app's lifetime, so every ``/api/v1/agents/<id>/...`` call
+    from inside it is rejected with a 403.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+
+    LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey).start()
+    # Nothing to register against yet -- the deferral must not have written a file.
+    assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+
+    # The host file appears, as a regular file -- the shape production lands too:
+    # ``link_opaque_permissions_to_host`` promotes the opaque file *to* this path
+    # and leaves the symlink on the opaque handle pointing back at it. Either way
+    # the retry turns on nothing but ``is_file()`` starting to answer.
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+
+    patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_id)}
+    assert any(str(agent_id) in p for p in patterns)
 
 
 def test_idempotent_across_repeated_discovery_ticks(

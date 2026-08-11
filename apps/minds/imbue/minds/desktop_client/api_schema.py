@@ -121,6 +121,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("POST", "/api/v1/agents/{agent_id}/report"): _RouteModels(
         request_model=BugReportRequest, response_model=OkResponse
     ),
+    ("POST", "/api/v1/agents/{agent_id}/refresh"): _RouteModels(response_model=OkResponse),
     ("GET", "/api/v1/app/version"): _RouteModels(response_model=AppVersionResponse),
     ("GET", "/api/v1/workspaces"): _RouteModels(response_model=WorkspaceListResponse),
     ("GET", "/api/v1/accounts"): _RouteModels(response_model=AccountsResponse),

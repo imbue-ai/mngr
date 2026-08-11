@@ -6,6 +6,7 @@ import time
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.chrome_event_broadcast import ChromeEventBroadcaster
 from imbue.minds.desktop_client.chrome_event_broadcast import build_open_help_payload
+from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_refresh_payload
 from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_stopped_payload
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -129,6 +130,20 @@ def test_bridged_legacy_open_help_event_reaches_the_channel() -> None:
     frames = _drain_frames(client_queue)
     help_frames = [frame for frame in frames if frame["type"] == "open_help"]
     assert help_frames == [{"type": "open_help", "description": "the diagnosis", "workspace_agent_id": "agent-7"}]
+
+
+def test_bridged_legacy_workspace_refresh_event_reaches_the_channel() -> None:
+    source = _MutableWorkspaceSource()
+    publisher, client_queue = _build_publisher(source)
+    broker = ChromeEventBroadcaster()
+    publisher.bridge_legacy_broker(broker)
+
+    broker.broadcast(build_workspace_refresh_payload("agent-13"))
+    publisher.publish_now()
+
+    frames = _drain_frames(client_queue)
+    refreshes = [frame for frame in frames if frame["type"] == "workspace_refresh"]
+    assert refreshes == [{"type": "workspace_refresh", "agent_id": "agent-13"}]
 
 
 def test_publish_health_broadcasts_immediately_without_diffing() -> None:
