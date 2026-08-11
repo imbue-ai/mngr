@@ -11,8 +11,10 @@ import type { UiDiscoveryHealthMessage, UiHealthMessage } from "../channel/messa
 
 export type WorkspaceHealth = "healthy" | "stuck" | "restarting" | "restart_failed";
 
+export type DiscoveryHealth = "healthy" | "reconnecting" | "blocked";
+
 export class HealthStore {
-  discoveryHealth: "healthy" | "reconnecting" | "blocked" = "healthy";
+  discoveryHealth: DiscoveryHealth = "healthy";
 
   private statusByAgentId = new Map<string, WorkspaceHealth>();
   private errorByAgentId = new Map<string, string>();

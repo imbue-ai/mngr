@@ -31,6 +31,20 @@ class FakeEventSource implements EventSourceLike {
 
 class FakeDeps implements LifecycleDeps {
   getResponses: Array<unknown | null> = [];
+  /**
+   * Answers for the recovery-info route, kept out of the positional queue.
+   *
+   * The recovery card runs two pollers at once (its own state and a restart
+   * operation), so a single in-order queue cannot say which of them a given
+   * response was meant for -- whichever fires first would take it. Recovery-info
+   * reads are served only from here, and answer null when it is empty, which is
+   * exactly the transient-failure case the model already handles.
+   */
+  recoveryInfoResponses: Array<unknown | null> = [];
+  /** While true, recovery-info reads hang until `resolveRecoveryInfo` answers
+   * them -- the only way to hold one in flight while something else moves. */
+  isRecoveryInfoHeld = false;
+  private heldRecoveryInfo: ((payload: unknown | null) => void) | null = null;
   getUrls: string[] = [];
   postResponses: Array<{ status: number; json: unknown | null }> = [];
   postCalls: Array<{ url: string; body: unknown }> = [];
@@ -42,6 +56,14 @@ class FakeDeps implements LifecycleDeps {
 
   async getJson(url: string): Promise<unknown | null> {
     this.getUrls.push(url);
+    if (url.includes("/recovery-info")) {
+      if (this.isRecoveryInfoHeld) {
+        return new Promise((resolve) => {
+          this.heldRecoveryInfo = resolve;
+        });
+      }
+      return this.recoveryInfoResponses.length > 0 ? this.recoveryInfoResponses.shift()! : null;
+    }
     return this.getResponses.length > 0 ? this.getResponses.shift()! : null;
   }
 
@@ -72,6 +94,14 @@ class FakeDeps implements LifecycleDeps {
   runScheduled(): void {
     const pending = this.scheduled.splice(0);
     for (const callback of pending) callback();
+  }
+
+  /** Answer the recovery-info read left hanging by `isRecoveryInfoHeld`. */
+  resolveRecoveryInfo(payload: unknown | null): void {
+    const resolve = this.heldRecoveryInfo;
+    if (resolve === null) throw new Error("no recovery-info read is in flight");
+    this.heldRecoveryInfo = null;
+    resolve(payload);
   }
 }
 
@@ -389,7 +419,6 @@ describe("RecoveryModel", () => {
     workspace_name: "my-machine",
     health: "stuck",
     health_error: "",
-    is_restart_start_only: null,
     ssh_command: "ssh -p 22 user@host",
     is_host_offline: false,
   };
@@ -397,7 +426,7 @@ describe("RecoveryModel", () => {
   it("loads recovery info and dispatches a manual host restart to success", async () => {
     const deps = new FakeDeps();
     const model = new RecoveryModel("host-abc", deps);
-    deps.getResponses.push(info);
+    deps.recoveryInfoResponses.push(info);
     await model.load();
     expect(model.info?.workspace_name).toBe("my-machine");
     expect(model.agentId).toBe("agent-33");
@@ -406,7 +435,7 @@ describe("RecoveryModel", () => {
     await model.dispatchRestart();
     expect(model.isRestartRunning).toBe(true);
     expect(deps.postCalls[0].url).toContain("/api/v1/workspaces/agent-33/restart");
-    expect(deps.postCalls[0].body).toEqual({ scope: "host" });
+    expect(deps.postCalls[0].body).toEqual({ scope: "host", start_only: false });
 
     deps.getResponses.push({ status: "DONE", is_done: true });
     deps.runScheduled();
@@ -418,7 +447,7 @@ describe("RecoveryModel", () => {
   it("surfaces a rejected restart dispatch and a failed restart operation", async () => {
     const deps = new FakeDeps();
     const model = new RecoveryModel("agent-33", deps);
-    deps.getResponses.push(info);
+    deps.recoveryInfoResponses.push(info);
     await model.load();
 
     deps.postResponses.push({ status: 409, json: { error: "another operation is running" } });
@@ -437,7 +466,7 @@ describe("RecoveryModel", () => {
   it("bounds consecutive failed restart-status polls like the sibling pollers", async () => {
     const deps = new FakeDeps();
     const model = new RecoveryModel("agent-33", deps);
-    deps.getResponses.push(info);
+    deps.recoveryInfoResponses.push(info);
     await model.load();
     deps.postResponses.push({ status: 202, json: null });
     await model.dispatchRestart();
@@ -453,15 +482,232 @@ describe("RecoveryModel", () => {
 
     expect(model.isRestartRunning).toBe(false);
     expect(model.restartError).toContain("Lost contact with the restart");
-    expect(deps.scheduled).toHaveLength(0);
+
+    // The restart poll is what has to stop -- a lost restart must not keep
+    // asking about itself forever. The card's own state poll is a separate
+    // loop and outlives it, so counting pending callbacks would not tell the
+    // two apart.
+    const restartPolls = () => deps.getUrls.filter((url) => url.includes("/operations/restart/")).length;
+    const pollsBefore = restartPolls();
+    deps.runScheduled();
+    await settle();
+    expect(restartPolls()).toBe(pollsBefore);
+  });
+
+  it("does not re-attach to the restart it just gave up following", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+    deps.postResponses.push({ status: 202, json: null });
+    await model.dispatchRestart();
+    for (let attempt = 0; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
+      deps.runScheduled();
+      await settle();
+    }
+    expect(model.restartError).toContain("Lost contact with the restart");
+    const streamCount = deps.sources.length;
+
+    // The tracker goes on calling that same restart running -- it is the state
+    // whose status could not be read. Attaching to it would clear the report
+    // the bound exists to make and start the whole run over, every poll.
+    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.runScheduled();
+    await settle();
+    expect(model.restartError).toContain("Lost contact with the restart");
+    expect(model.isRestartRunning).toBe(false);
+    expect(deps.sources).toHaveLength(streamCount);
+
+    // A restart that starts after the tracker has left this one is a different
+    // run, and is followed like any other.
+    deps.recoveryInfoResponses.push(info);
+    deps.runScheduled();
+    await settle();
+    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.runScheduled();
+    await settle();
+    expect(model.isRestartRunning).toBe(true);
+    expect(model.restartError).toBeNull();
+    expect(deps.sources).toHaveLength(streamCount + 1);
   });
 
   it("reattaches to an in-flight restart when the page loads mid-restart", async () => {
     const deps = new FakeDeps();
     const model = new RecoveryModel("agent-33", deps);
-    deps.getResponses.push({ ...info, health: "restarting" });
+    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
     await model.load();
     expect(model.isRestartRunning).toBe(true);
     expect(deps.sources).toHaveLength(1);
+  });
+
+  it("keeps the last good state when a poll cannot be read, and keeps polling", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+
+    // No queued answer: the read failed. A fetch error is not news about the
+    // machine, so what is on screen stays and the loop lives on.
+    deps.runScheduled();
+    await settle();
+
+    expect(model.info?.workspace_name).toBe("my-machine");
+    expect(model.loadError).toBeNull();
+    expect(deps.scheduled).toHaveLength(1);
+  });
+
+  it("keeps reading after a first read that could not be made", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+
+    // No queued answer: the first read failed. That is not more final than any
+    // later one, and the surface must not hold the error until a reload.
+    await model.load();
+    expect(model.loadError).not.toBeNull();
+
+    deps.recoveryInfoResponses.push(info);
+    deps.runScheduled();
+    await settle();
+
+    expect(model.loadError).toBeNull();
+    expect(model.info?.workspace_name).toBe("my-machine");
+  });
+
+  it("attaches to a restart that something else started while the card was open", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+    expect(model.isRestartRunning).toBe(false);
+
+    // Something else -- the same machine's card in another window -- restarts
+    // it. The card shows that restart rather than an idle machine.
+    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.runScheduled();
+    await settle();
+    expect(model.isRestartRunning).toBe(true);
+    expect(deps.sources).toHaveLength(1);
+
+    // The next poll must not open a second stream for the same restart.
+    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.runScheduled();
+    await settle();
+    expect(deps.sources).toHaveLength(1);
+  });
+
+  it("drops a reading taken before the restart it was watching finished", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+    deps.postResponses.push({ status: 202, json: null });
+    await model.dispatchRestart();
+
+    // The server moves the tracker out of "restarting" before the operation
+    // reports done, so a read whose answer was decided just before that
+    // transition still says "restarting" -- and can land after the status poll
+    // has already reported success. Adopting it would re-report a restart that
+    // is over: the success would vanish, the log would clear, and a second log
+    // stream would open for a finished operation.
+    deps.isRecoveryInfoHeld = true;
+    deps.getResponses.push({ status: "DONE", is_done: true });
+    deps.runScheduled();
+    await settle();
+    expect(model.isRestartSucceeded).toBe(true);
+    const streamCount = deps.sources.length;
+
+    deps.resolveRecoveryInfo({ ...info, health: "restarting" });
+    await settle();
+
+    expect(model.isRestartSucceeded).toBe(true);
+    expect(model.isRestartRunning).toBe(false);
+    expect(model.info?.health).toBe("stuck");
+    expect(deps.sources).toHaveLength(streamCount);
+    // Dropping a reading is not a reason to stop reading.
+    expect(deps.scheduled).toHaveLength(1);
+  });
+
+  it("stops polling once the card is gone", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+
+    model.stop();
+    deps.runScheduled();
+    await settle();
+
+    expect(deps.scheduled).toHaveLength(0);
+  });
+
+  it("follows nothing from a restart dispatched off a card that closed mid-flight", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+    const pendingBefore = deps.scheduled.length;
+
+    // The dispatch POST is still in flight when the card goes away (the fake's
+    // postJson resolves on a microtask, so stop() lands first). The POST is
+    // already out -- the server may restart the machine -- but a stopped model
+    // must not open a log stream nothing will ever close, or arm a poller.
+    deps.postResponses.push({ status: 202, json: null });
+    const dispatching = model.dispatchRestart();
+    model.stop();
+    await dispatching;
+
+    expect(deps.sources).toHaveLength(0);
+    expect(deps.scheduled).toHaveLength(pendingBefore);
+  });
+
+  it("adopts nothing from a first read that lands after the card is gone", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.isRecoveryInfoHeld = true;
+    const loading = model.load();
+
+    // Navigating away mid-read. The surfaces dispatch their post-load work off
+    // this promise -- the recovery page's ?intent=restart runs whenever the read
+    // succeeded -- so a reading adopted here would act on a machine the user left.
+    model.stop();
+    deps.resolveRecoveryInfo(info);
+    await loading;
+
+    expect(model.info).toBeNull();
+    expect(deps.scheduled).toHaveLength(0);
+  });
+
+  it("never asks for the health verdict on the card's behalf", async () => {
+    // The verdict has a reader inside the app now -- the restart sequence runs
+    // it alongside the restart it is deciding about. Nothing the card renders
+    // depends on it, and it execs into the container behind a ~30s cap.
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+
+    deps.postResponses.push({ status: 202, json: null });
+    await model.dispatchRestart();
+
+    expect(deps.getUrls.some((url) => url.includes("/health"))).toBe(false);
+  });
+
+  it("separates opening a stopped machine from bouncing a wedged one", async () => {
+    // Stopping a host that is already stopped buys nothing and is what let a
+    // plain open tear down a container; the card's own Restart button still
+    // asks for the full bounce, since that is what a wedged container needs.
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+
+    deps.postResponses.push({ status: 202, json: null });
+    await model.dispatchRestart(true);
+    expect(deps.postCalls.at(-1)?.body).toEqual({ scope: "host", start_only: true });
+
+    model.isRestartRunning = false;
+    deps.postResponses.push({ status: 202, json: null });
+    await model.dispatchRestart();
+    expect(deps.postCalls.at(-1)?.body).toEqual({ scope: "host", start_only: false });
   });
 });

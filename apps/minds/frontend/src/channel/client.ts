@@ -41,7 +41,7 @@ export interface ChannelOptions {
   onOpenHelp?: (message: UiOpenHelpMessage) => void;
   onWorkspaceRefresh?: (message: UiWorkspaceRefreshMessage) => void;
   /** Relays state messages to the Electron main process (window bookkeeping);
-   * called for workspaces/health/workspace_stopped/open_help/discovery_health. */
+   * called for workspaces/health/workspace_stopped/open_help. */
   relayShellEvent?: (message: UiServerMessage) => void;
   /** Deterministic jitter for tests; defaults to Math.random. */
   jitter01?: () => number;
@@ -159,7 +159,6 @@ export class UiChannelClient {
       case "health":
       case "workspace_stopped":
       case "open_help":
-      case "discovery_health":
         this.options.relayShellEvent?.(message);
         break;
       default:

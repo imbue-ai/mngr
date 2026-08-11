@@ -31,15 +31,23 @@ export class ShellState {
   sidebarAnchor: { x: number; y: number; width: number; height: number } | null = null;
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
+  /**
+   * The one piece of recovery-card state: which machine's card is up.
+   *
+   * Not derived from health. The card is raised by asking for it -- the band's
+   * "Open recovery" -- so there is nothing to re-derive from a state that is
+   * already on screen in the band.
+   */
+  private openRecoveryAgentId: string | null = null;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
    * is why the workspace it is showing is asked of it rather than read off
    * `displayedWorkspaceAnyId`. */
   workspaceFrame: WorkspaceFrameHandle | null = null;
-  /** Re-entrancy guard for closeAppOverlay: a single Escape can reach it from
-   * both the in-document listener and the Electron before-input-event forward,
-   * and its history.back() is not idempotent. Cleared on the next route change. */
+  /** Re-entrancy guard for closeAppOverlay: its history.back() is not
+   * idempotent, and a repeated Escape can reach it again before the first
+   * back() has landed. Cleared on the next route change. */
   private isAppOverlayClosing = false;
 
   constructor(stores: AppStores) {
@@ -111,10 +119,9 @@ export class ShellState {
       isAppOverlayPath(path) ||
       (path === "/create/inspiration" && overlayBehindWorkspaceId(path, search) !== null);
     if (!isCloseable) return;
-    // A single Escape reaches here twice under Electron (in-document listener +
-    // main-process before-input-event forward). history.back() does not update
-    // the route synchronously, so guard against a second dismissal firing
-    // another back() and over-navigating past the opener.
+    // history.back() does not update the route synchronously, so a second
+    // dismissal arriving before it lands (a repeated Escape) would fire
+    // another back() and over-navigate past the opener.
     if (this.isAppOverlayClosing) return;
     this.isAppOverlayClosing = true;
     if (window.history.length > 1) {
@@ -140,6 +147,22 @@ export class ShellState {
       this.displayedWorkspaceAnyId === null
         ? null
         : this.stores.workspaces.toAgentScopedId(this.displayedWorkspaceAnyId);
+    // A card belongs to one machine; arriving anywhere else does not carry it
+    // along. Keyed on the card's own machine rather than on "the route
+    // changed", so a card opened for a machine the window is still navigating
+    // to survives its arrival.
+    //
+    // "Anywhere else" means the machine is off screen entirely, not merely
+    // covered: an app-level modal opened over it (Get help, the Requests inbox)
+    // keeps its surface mounted behind the backdrop, and the Shell renders no
+    // card while one is up but expects it back on the way out. The card's own
+    // "Report a problem" opens exactly such a modal.
+    const heldWorkspaceAnyId = this.displayedWorkspaceAnyId ?? overlayBehindWorkspaceId(path, search);
+    const heldAgentScoped =
+      heldWorkspaceAnyId === null ? null : this.stores.workspaces.toAgentScopedId(heldWorkspaceAnyId);
+    if (this.openRecoveryAgentId !== null && this.openRecoveryAgentId !== heldAgentScoped) {
+      this.openRecoveryAgentId = null;
+    }
     this.channel?.setClientState(path, agentScoped);
   }
 
@@ -165,6 +188,48 @@ export class ShellState {
 
   private setTitlebarSurface(isOn: boolean): void {
     document.getElementById("minds-titlebar")?.classList.toggle("titlebar-surface", isOn);
+  }
+
+  /** Publish the failure band's measured height so the workspace surface can
+   * shrink by it (see .workspace-surface). A CSS variable rather than view
+   * state: nothing needs to re-render for the surface to follow. */
+  setNoticeBandHeight(height: number): void {
+    document.documentElement.style.setProperty("--notice-band-height", `${height}px`);
+  }
+
+  /** Whether the recovery card is up over `agentId`. */
+  isRecoveryModalOpenFor(agentId: string): boolean {
+    return this.openRecoveryAgentId === agentId;
+  }
+
+  /** The user asked for the card, from the band's "Open recovery". */
+  openRecoveryModal(agentId: string): void {
+    this.openRecoveryAgentId = agentId;
+  }
+
+  /**
+   * The user closed the card, and the frame behind it is reloaded.
+   *
+   * The frame is still holding whatever the machine served while it was down
+   * -- an error page, or a half-loaded one -- and nothing about the recovery
+   * changes its URL, so it would sit there until the user navigated away and
+   * back. A card is only ever up mid-episode, so uncovering that dead page
+   * would report a recovery the window does not show.
+   */
+  closeRecoveryModal(): void {
+    this.workspaceFrame?.reload();
+    this.openRecoveryAgentId = null;
+  }
+
+  /** Close the recovery card if one is up over the displayed machine,
+   * reporting whether there was one. For the Escape that Electron forwards
+   * out of the workspace iframe, whose keydowns never reach this document. */
+  closeOpenRecoveryModal(): boolean {
+    const displayed = this.displayedWorkspaceAnyId;
+    if (displayed === null) return false;
+    if (!this.isRecoveryModalOpenFor(this.stores.workspaces.toAgentScopedId(displayed))) return false;
+    this.closeRecoveryModal();
+    return true;
   }
 
   openSidebar(anchor: { x: number; y: number; width: number; height: number }): void {

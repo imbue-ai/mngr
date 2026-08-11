@@ -311,41 +311,28 @@
 }
 
 /*
- * Always reserve space for the scrollbar gutter so that toggling page
- * height (e.g. expanding the permission dialog's "Adjust" editor) does
- * not make a classic scrollbar appear/disappear and shift the centered
- * layout sideways. No-op for macOS-style overlay scrollbars.
- */
-html {
-  scrollbar-gutter: stable;
-}
-/*
- * Opt-out for the edge-to-edge chrome / overlay surfaces (the chrome
- * titlebar page, the overlay host, and the modal pages hosted in it).
- * These paint fixed full-viewport layers and never scroll at the
- * document level, but with classic (always-visible) scrollbars the
- * reserved gutter shrinks the initial containing block by 15px, so
- * nothing paints the window's right edge: tooltips get clipped
- * mid-label, modal dim backdrops stop short of the edge (twice over for
- * a modal iframe inside the overlay host -- a 30px un-dimmed strip),
- * and the titlebar's right-aligned buttons shift inward. The class must
- * sit on the html element because the gutter belongs to the viewport
- * scroller: overlay-view pages get it from the OverlaySurface wrapper,
- * and the chrome page passes it via Base's ``html_class``.
- */
-html.no-scrollbar-gutter {
-  scrollbar-gutter: auto;
-}
-/*
  * Both shell modes lock the document to the viewport: the agent surface fills
  * it with the fixed workspace iframe, and local pages scroll inside
- * #local-page-scroll -- a container pinned below the fixed 38px titlebar (see
- * ChromeShell.jinja). So the DOCUMENT never scrolls on any minds page, the
- * titlebar never shares an edge with a scrollbar, and its buttons never shift
- * with gutter differences between pages. A universal default (a page that
- * genuinely needs document scroll can override on its own html/body); kept
- * here with the rest of the app's CSS rather than in a template <style> so all
- * scoping and order live in one place.
+ * #local-page-scroll -- a container pinned below the fixed 38px titlebar. So
+ * the DOCUMENT never scrolls on any minds page, the titlebar never shares an
+ * edge with a scrollbar, and its buttons never shift with gutter differences
+ * between pages. A universal default (a page that genuinely needs document
+ * scroll can override on its own html/body); kept here with the rest of the
+ * app's CSS rather than in a template <style> so all scoping and order live in
+ * one place.
+ *
+ * Which is also why the html element reserves NO scrollbar gutter. The gutter
+ * belongs to the viewport scroller, and with classic (always-visible)
+ * scrollbars a reserved one shrinks the initial containing block by 15px, so
+ * nothing can paint the window's right edge: everything anchored to it -- the
+ * inset workspace card and its notice band, #local-page-scroll's right inset,
+ * the titlebar's right-aligned buttons, tooltips, modal backdrops -- lands
+ * 15px short, which reads as a right margin four times the left one. The
+ * pre-SPA renderer reserved it globally for the scrolling document pages and
+ * had the chrome page opt back out (``html_class="no-scrollbar-gutter"``,
+ * still live in app.css for the pages served into the workspace iframe); the
+ * SPA is only ever the chrome page, so here there is nothing to opt out of.
+ * Its scroll containers set ``scrollbar-gutter: stable`` on themselves.
  */
 html,
 body {
@@ -388,6 +375,37 @@ body {
 body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
   inset: 38px 4px 4px 4px;
   border-radius: 12px;
+}
+
+/*
+ * The workspace content surface -- the sandboxed iframe and the white mirror
+ * behind it -- kept here beside #local-page-scroll so the shell's geometry
+ * lives in one place.
+ *
+ * --notice-band-height is 0 until the shell's failure band is up, at which
+ * point the surface shrinks by exactly the band's measured height. The band
+ * layers over the app, never over the machine: whatever the user was looking
+ * at stays on screen and stays readable.
+ */
+:root {
+  --notice-band-height: 0px;
+}
+.workspace-surface {
+  position: fixed;
+  left: 4px;
+  width: calc(100% - 8px);
+  top: calc(38px + var(--notice-band-height));
+  height: calc(100% - 42px - var(--notice-band-height));
+  border-radius: 12px;
+}
+/*
+ * With the band up, it carries this card's top corners (it is inset and
+ * rounded to the same 4px / 12px), so the surface meets it square: one card,
+ * one accent border around it, no seam where the two edges disagree.
+ */
+body:has(#notice-band) .workspace-surface {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
 }
 
 .accent-spine::before {

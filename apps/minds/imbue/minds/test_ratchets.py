@@ -96,7 +96,7 @@ def test_prevent_silent_decode_error_catches() -> None:
     # The added catch is ``build_info.py`` parsing the desktop app's package.json
     # for the Sentry release id: a malformed file degrades to a fallback version
     # (logged at debug) rather than crashing startup.
-    rc.check_silent_decode_error_catches(_DIR, snapshot(4))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(3))
 
 
 # --- Import style ---
@@ -381,10 +381,10 @@ def test_prevent_if_elif_without_else() -> None:
 
 def test_prevent_inline_functions() -> None:
     # The remaining inline functions are closures that capture the local state they were
-    # defined next to: the SSE generator and its watch callbacks plus the unhandled-exception
-    # hook in app.py, a thread target in api_v1.py, the signal handler in server.py, the WSGI
-    # app in webdav.py, and the ``record_loss`` helper in the ported Sentry HTTP transport.
-    rc.check_inline_functions(_DIR, snapshot(7))
+    # defined next to: the unhandled-exception hook and the health-edge publisher in app.py,
+    # a thread target in api_v1.py, the signal handler in server.py, the WSGI app in
+    # webdav.py, and the per-service probe body in permission_overview.py.
+    rc.check_inline_functions(_DIR, snapshot(6))
 
 
 def test_prevent_underscore_imports() -> None:

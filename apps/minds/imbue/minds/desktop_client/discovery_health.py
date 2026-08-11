@@ -40,18 +40,21 @@ The watchdog never touches the consumer subprocess: it is also the HTTP traffic
 proxy, and its bound port is baked into app state / ``AgentCreator`` / the
 Electron shell, so respawning it is heavyweight and risks a port rebind.
 
-Health is a three-state machine surfaced to the chrome:
+Health is a three-state machine surfaced to the SPA:
 
 - ``HEALTHY`` -- pipeline fresh; nothing surfaced.
 - ``RECONNECTING`` -- producer stall detected; remediation is healing in the
   background and keeps retrying indefinitely. The currently-loaded workspace
   still works, so nothing is surfaced (the providers panel's "time since last
-  discovery" counter is the only passive signal); this state never escalates to
-  the error-takeover screen.
-- ``BLOCKED`` -- the consumer died: forwarding is down / the app is unusable, so
-  the chrome redirects the whole app to an error-takeover screen. ``BLOCKED`` is
-  terminal -- it stays until the user restarts the app -- and is reached *only*
-  via consumer death, never from a producer stall.
+  discovery" counter is the only passive signal).
+- ``BLOCKED`` -- the consumer died: forwarding is down and every machine reads
+  unreachable. The SPA surfaces this as a notice band over a displayed machine
+  (and an in-page notice on hub pages) offering the app restart, and withholds
+  the machine list's per-row state and controls, whose data can no longer be
+  refreshed. It deliberately does NOT take the windows over: the machines keep
+  running and the user's windows are left alone. ``BLOCKED`` is terminal -- it
+  stays until the user restarts the app -- and is reached *only* via consumer
+  death, never from a producer stall.
 
 State changes fire registered on-change callbacks, invoked outside the internal
 lock so they may take the FastAPI app's own locks without deadlocking.
@@ -171,8 +174,8 @@ class DiscoveryHealthWatchdog(MutableModel):
     - the consumer's lifecycle watcher, which calls :meth:`record_consumer_death`
       when the ``mngr forward`` subprocess exits unexpectedly.
 
-    The chrome SSE generator subscribes via :meth:`add_on_change_callback` and
-    surfaces the ``BLOCKED`` transition.
+    The UI publisher subscribes via :meth:`add_on_change_callback` and pushes
+    the state onto the ``/ui/ws`` channel, where the SPA renders it.
     """
 
     remediator: ProducerRemediator = Field(description="Producer-side bounce/restart remediations.")

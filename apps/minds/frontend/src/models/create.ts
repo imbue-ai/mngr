@@ -124,11 +124,18 @@ export function hostNameFormatError(value: string): string {
   return "";
 }
 
-/** The Recovery deep-link for a workspace. ?intent=restart makes RecoveryPage
- * dispatch the restart on arrival (the stopped-machine click-through). */
-export function recoveryRoute(agentId: string, returnTo: string, isRestartIntent: boolean): string {
-  const intent = isRestartIntent ? "&intent=restart" : "";
-  return `/agents/${encodeURIComponent(agentId)}/recovery?return_to=${encodeURIComponent(returnTo)}${intent}`;
+/** What the Recovery deep-link should dispatch on arrival, if anything.
+ *
+ * "start" opens a stopped machine: an idempotent ``mngr start``, which has
+ * nothing to bounce. "restart" is the user asking for the full stop+start.
+ * Only the first is safe to probe alongside, since a bounce would tear the
+ * container down under the probe. */
+export type RecoveryIntent = "start" | "restart" | null;
+
+/** The Recovery deep-link for a workspace. */
+export function recoveryRoute(agentId: string, returnTo: string, intent: RecoveryIntent): string {
+  const intentParam = intent === null ? "" : `&intent=${intent}`;
+  return `/agents/${encodeURIComponent(agentId)}/recovery?return_to=${encodeURIComponent(returnTo)}${intentParam}`;
 }
 
 // ---- Creating-page progress (port of creating.js's time-eased bar).

@@ -18,7 +18,7 @@ import { Icon16 } from "../components/Icon";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
 import { routeLinkAttrs } from "../components/route-link";
-import { mindControlsFor } from "./landing-controls";
+import { isMachineStateKnown, mindControlsFor } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
 
@@ -170,11 +170,12 @@ export const LandingPage: m.ClosureComponent = () => {
     const returnTo = `/goto/${stores.workspaces.toHostScopedId(entry.id)}/`;
     const liveness = state.tracker.displayedLiveness(entry.id, entry.liveness ?? "");
     if (health !== "healthy") {
-      m.route.set(recoveryRoute(entry.id, returnTo, false));
+      m.route.set(recoveryRoute(entry.id, returnTo, null));
     } else if ((entry.supports_shutdown ?? false) && liveness === "STOPPED") {
       // The container is stopped: entering directly would strand the user on
-      // the loader, so go straight to Recovery which dispatches the start.
-      m.route.set(recoveryRoute(entry.id, returnTo, true));
+      // the loader, so go straight to Recovery, which dispatches the start.
+      // A start, not a bounce -- there is nothing running to stop first.
+      m.route.set(recoveryRoute(entry.id, returnTo, "start"));
     } else {
       shell.enterWorkspace(entry.id);
     }
@@ -212,6 +213,10 @@ export const LandingPage: m.ClosureComponent = () => {
     // A stopped/transitioning container is expectedly unreachable; the state
     // badge already explains it, so suppress the health badge there.
     if (liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING") return null;
+    // While the consumer is dead every machine reads unhealthy, and the cause
+    // is the app's, not theirs. The page's notice names it once instead of
+    // every row repeating a symptom.
+    if (!isMachineStateKnown(getAppContext().stores.health.discoveryHealth)) return null;
     const health = getAppContext().stores.health.statusFor(entry.id);
     if (health === "healthy") return null;
     const label =
@@ -241,10 +246,14 @@ export const LandingPage: m.ClosureComponent = () => {
         ],
       );
     }
-    const liveness = (entry.supports_shutdown ?? false)
-      ? state.tracker.displayedLiveness(entry.id, entry.liveness ?? "")
-      : ("UNKNOWN" as MindLiveness);
-    const controls = mindControlsFor(entry, liveness);
+    const discoveryHealth = stores.health.discoveryHealth;
+    // Nothing is arriving to correct a frozen reading, so the row reports
+    // "Status unknown" rather than showing the last one as if it were current.
+    const liveness =
+      (entry.supports_shutdown ?? false) && isMachineStateKnown(discoveryHealth)
+        ? state.tracker.displayedLiveness(entry.id, entry.liveness ?? "")
+        : ("UNKNOWN" as MindLiveness);
+    const controls = mindControlsFor(entry, liveness, discoveryHealth);
     const providerLabel = extras?.provider_label_by_agent_id[entry.id] ?? "";
     return m(
       Card,
@@ -310,7 +319,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
                   const returnTo = `/goto/${stores.workspaces.toHostScopedId(entry.id)}/`;
-                  m.route.set(recoveryRoute(entry.id, returnTo, true));
+                  m.route.set(recoveryRoute(entry.id, returnTo, "restart"));
                 },
               },
               m(Icon16, { name: "restart" }),

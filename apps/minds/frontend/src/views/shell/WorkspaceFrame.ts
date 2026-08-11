@@ -1,15 +1,14 @@
 // The workspace content surface (route /workspace/<id>): the sandboxed
-// cross-origin iframe + the white anti-flash mirror behind it, the embed
-// contract endpoint, and the health overlay.
+// cross-origin iframe + the white anti-flash mirror behind it, and the embed
+// contract endpoint.
 //
-// Faithful port of pages/Chrome.jinja + the frame parts of chrome.js, with
-// two deliberate behavior changes from the plan: a STUCK workspace shows an
-// overlay banner linking to Recovery (never auto-navigates), and a stopped
-// workspace is never auto-restarted by observation.
+// Faithful port of pages/Chrome.jinja + the frame parts of chrome.js. A
+// machine's health is NOT drawn here: the shell owns that, so one band can
+// speak for whichever condition is actually relevant (a dead discovery
+// consumer outranks the stuck machine it produces) and so the surface
+// shrinks under it instead of being obscured by it.
 
 import m from "mithril";
-import { ButtonLink } from "../components/Button";
-import { Notice } from "../components/Notice";
 import { electronBridge } from "../../electron-bridge";
 import type { ShellState, WorkspaceFrameHandle } from "./shell-state";
 
@@ -182,64 +181,23 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       unsubscribeWorkspaces = null;
       frameElement = null;
     },
-    view(vnode) {
-      const { shell, workspaceAnyId } = vnode.attrs;
-      const agentScoped = shell.stores.workspaces.toAgentScopedId(workspaceAnyId);
-      const health = shell.stores.health.statusFor(agentScoped);
-      const surfaceGeometry =
-        "fixed left-[4px] top-[38px] rounded-[12px] " +
-        "w-[calc(100%-8px)] h-[calc(100%-42px)]";
-
+    view() {
+      // Health is reported by the shell's band, which shrinks this surface
+      // rather than covering it: an unresponsive machine's last frame is
+      // often the thing the user needs to read, and the band sits clear of it.
       return m("div", { style: "display: contents" }, [
         // White mirror behind the iframe: shows through whenever the frame's
         // compositor surface goes transparent on cross-origin navigation.
         m("div#content-bg-mirror", {
-          class: `${surfaceGeometry} bg-surface-primary pointer-events-none`,
+          class: "workspace-surface bg-surface-primary pointer-events-none",
         }),
         m("iframe#content-frame", {
           sandbox:
             "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals",
           allow: "clipboard-read *; clipboard-write *; fullscreen *",
-          class: `${surfaceGeometry} border-0 bg-surface-primary`,
+          class: "workspace-surface border-0 bg-surface-primary",
           style: "box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;",
         }),
-        health !== "healthy"
-          ? m(
-              "div",
-              { class: `${surfaceGeometry} flex items-start justify-center pointer-events-none pt-10` },
-              m(
-                "div",
-                { class: "pointer-events-auto max-w-[440px] w-full px-4" },
-                m(
-                  Notice,
-                  { variant: health === "restarting" ? "info" : "warn" },
-                  m("div", { class: "flex flex-col gap-2" }, [
-                    m(
-                      "span",
-                      health === "restarting"
-                        ? "This machine's interface is restarting…"
-                        : "This machine's interface is not responding.",
-                    ),
-                    health !== "restarting"
-                      ? m(
-                          ButtonLink,
-                          {
-                            href: `#!/agents/${agentScoped}/recovery`,
-                            variant: "secondary",
-                            size: "md",
-                            onclick: (event: MouseEvent) => {
-                              event.preventDefault();
-                              m.route.set(`/agents/${agentScoped}/recovery`);
-                            },
-                          },
-                          "Open recovery",
-                        )
-                      : null,
-                  ]),
-                ),
-              ),
-            )
-          : null,
       ]);
     },
   };

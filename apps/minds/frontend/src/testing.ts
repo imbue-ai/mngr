@@ -1,7 +1,37 @@
 // Shared non-fixture test utilities, explicitly imported by *.test.ts files.
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
+import m from "mithril";
 import type { UiWorkspacesMessage } from "./channel/messages";
+
+/** Render a component to its root vnode by instantiating the closure and
+ * calling view() directly -- the inner-app idiom of testing render logic
+ * without a DOM. m() normalizes attrs/children exactly as mithril would at
+ * runtime. */
+export function renderRoot<A>(
+  component: () => m.Component<A>,
+  attrs: A,
+  ...children: m.Children[]
+): m.Vnode {
+  const instance = component() as unknown as m.Component;
+  const vnode = m(instance, attrs as m.Attributes, ...children) as m.Vnode;
+  return (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
+    instance,
+    vnode,
+  );
+}
+
+/** Every string a rendered tree would put on screen, for the assertions that
+ * are about what the reader sees rather than about markup. */
+export function renderedText(vnode: m.Vnode | null): string {
+  if (vnode === null || vnode === undefined) return "";
+  if (typeof vnode === "string" || typeof vnode === "number") return String(vnode);
+  if (Array.isArray(vnode)) return vnode.map(renderedText).join(" ");
+  const text = (vnode as unknown as { text?: unknown }).text;
+  if (text !== undefined && text !== null) return String(text);
+  const children = (vnode as unknown as { children?: unknown }).children;
+  return renderedText(children as m.Vnode | null);
+}
 
 /** A one-workspace list message: agent `agent-aa11` on host `host-bb22`. */
 export function workspacesMessage(overrides: Partial<UiWorkspacesMessage> = {}): UiWorkspacesMessage {

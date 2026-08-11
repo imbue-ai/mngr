@@ -20,6 +20,9 @@ interface MindsNativeSurface {
   minimize(): void;
   maximize(): void;
   close(): void;
+  /** Bounce the backend and re-prepare every window. Named `retry` on the
+   * preload, where it started as the error takeover's button. */
+  retry(): void;
   showFilePicker(options: FilePickerOptions): Promise<string | null>;
   bringAppToFront(): void;
   openWorkspaceInNewWindow(agentId: string): void;
@@ -57,6 +60,11 @@ export const electronBridge = {
   },
   close(): void {
     native()?.close();
+  },
+  /** Restart the app's backend -- the one action that fixes a dead discovery
+   * consumer. The machines themselves keep running. */
+  restartApp(): void {
+    native()?.retry();
   },
   async showFilePicker(options: FilePickerOptions): Promise<string | null> {
     const surface = native();

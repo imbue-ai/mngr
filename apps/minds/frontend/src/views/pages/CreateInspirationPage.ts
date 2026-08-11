@@ -277,7 +277,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
         onclick: () => {
           if (isStopped) {
             const returnTo = `/goto/${stores.workspaces.toHostScopedId(entry.id)}/`;
-            m.route.set(recoveryRoute(entry.id, returnTo, true));
+            m.route.set(recoveryRoute(entry.id, returnTo, "start"));
           } else {
             shell.enterWorkspace(entry.id);
           }

@@ -9,22 +9,7 @@ import { Notice, noticeClass } from "./Notice";
 import { spinnerClass } from "./Spinner";
 import { statusBadgeClass } from "./StatusBadge";
 import { titlebarButtonClass } from "./TitlebarButton";
-
-// Render a component to its root vnode by instantiating the closure and
-// calling view() directly -- the inner-app idiom of testing logic without a
-// DOM. m() normalizes attrs/children exactly as mithril would at runtime.
-function renderRoot<A>(
-  component: () => m.Component<A>,
-  attrs: A,
-  ...children: m.Children[]
-): m.Vnode {
-  const instance = component() as unknown as m.Component;
-  const vnode = m(instance, attrs as m.Attributes, ...children) as m.Vnode;
-  return (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
-    instance,
-    vnode,
-  );
-}
+import { renderRoot } from "../../testing";
 
 interface ElementVnode {
   tag: string;

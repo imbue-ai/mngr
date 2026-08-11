@@ -960,8 +960,6 @@ function restoreWindowBounds(bundle, entry) {
 // still acts on. Every window relays the same broadcasts, so handlers must be
 // idempotent; genuinely once-only reactions dedupe via recentShellEventKeys.
 
-let discoveryBlockedShown = false;
-
 function isDuplicateShellEvent(key) {
   const now = Date.now();
   for (const [k, ts] of recentShellEventKeys) {
@@ -1034,25 +1032,17 @@ function handleShellEvent(evt, senderBundle) {
       if (isMac) app.focus({ steal: true });
       focusBundle(target);
     }
-  } else if (evt.type === 'discovery_health') {
-    if (String(evt.state).toLowerCase() === 'blocked' && !discoveryBlockedShown) {
-      discoveryBlockedShown = true;
-      showErrorInAllWindows(
-        "Minds has disconnected from your workspaces and can't automatically reconnect. Restart the app to recover. Your data has not been lost.",
-        readLastLogLines(50),
-        'Restart Minds',
-      );
-    }
   }
 }
 
 // The frame types main acts on; anything else is dropped before dispatch.
+// discovery_health is deliberately absent: a dead consumer is surfaced by the
+// SPA's own band now, so main has nothing to do with it.
 const KNOWN_SHELL_EVENT_TYPES = new Set([
   'workspaces',
   'health',
   'workspace_stopped',
   'open_help',
-  'discovery_health',
   'focus_window',
 ]);
 
@@ -1890,7 +1880,6 @@ ipcMain.on('reload-chrome', (event) => {
 ipcMain.on('retry', async (event) => {
   const senderBundle = getBundleFromEvent(event);
   if (senderBundle) focusBundle(senderBundle);
-  discoveryBlockedShown = false;
   await shutdown();
   prepareAllWindowsForRetry();
   await startBackendWithRetry();

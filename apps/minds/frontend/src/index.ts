@@ -52,7 +52,7 @@ function main(): void {
     stores: bootContext.stores,
     expectedSchemaVersion: bootContext.schemaVersion,
     // Main keeps minimal window bookkeeping fed by this verbatim relay
-    // (workspaces/health/workspace_stopped/open_help/discovery_health).
+    // (workspaces/health/workspace_stopped/open_help).
     relayShellEvent: (message) => electronBridge.sendShellEvent(message),
     onWorkspaceStopped: (message) => {
       // Main closes other windows showing this workspace (via the relay
@@ -119,16 +119,35 @@ function main(): void {
     );
     m.redraw();
   });
-  // Esc forwarded by Electron main (needed when focus sits inside the
-  // cross-origin workspace iframe, whose key events never reach this document,
-  // so the overlays' in-document Escape listener never fires): dismiss the
-  // switcher popover first, else the workspace options overlay, else an
-  // app-level modal (Get help / Settings / Accounts) floating over the frame.
+  // Esc forwarded by Electron main. Main forwards EVERY Escape, so a single
+  // keypress arrives here and (when focus is in this document) as the normal
+  // in-document keydown as well.
+  //
+  // The switcher popover is closed first, unconditionally: it has no
+  // in-document Escape listener, so this forward is its only closer.
+  //
+  // The overlay chain runs only when focus sits inside a cross-origin iframe
+  // (the workspace frame, or a service iframe in a panel), whose key events
+  // never reach this document -- the case the forward exists for. Everywhere
+  // else the keypress already reached the in-document listeners, which take
+  // the topmost surface themselves: the recovery card's capture-phase listener
+  // beats the overlays' bubble ones and stops in-document propagation.
+  // Running the chain here too would spend one Escape on two surfaces -- the
+  // card's listener closes the card, and this delivery (which no
+  // stopPropagation can reach) would then find no card and close the options
+  // overlay beneath it.
+  //
+  // The card comes before the two route-based overlays because it is not one
+  // -- it can be raised over the workspace options overlay, which it sits
+  // above. It is never raised over an app-level modal, so the chain never has
+  // to choose between the two.
   electronBridge.onEscapePressed(() => {
     if (shell.isSidebarOpen) {
       shell.closeSidebar();
-    } else if (!shell.closeWorkspaceOverlay()) {
-      shell.closeAppOverlay();
+    } else if (document.activeElement instanceof HTMLIFrameElement) {
+      if (!shell.closeOpenRecoveryModal() && !shell.closeWorkspaceOverlay()) {
+        shell.closeAppOverlay();
+      }
     }
     m.redraw();
   });
