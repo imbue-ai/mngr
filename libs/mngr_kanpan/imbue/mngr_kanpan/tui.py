@@ -56,6 +56,7 @@ from imbue.mngr_kanpan.data_source import CellRun
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSource
+from imbue.mngr_kanpan.data_source import KanpanFieldTypeError
 from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_types import ActionBuiltinCommand
 from imbue.mngr_kanpan.data_types import ActionBuiltinRole
@@ -79,7 +80,7 @@ from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
 from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
 from imbue.mngr_kanpan.fetcher import load_field_cache
 from imbue.mngr_kanpan.fetcher import save_field_cache
-from imbue.mngr_kanpan.fetcher import toggle_agent_mute
+from imbue.mngr_kanpan.fetcher import set_agent_mute
 from imbue.mngr_kanpan.header_status import HeaderStatus
 from imbue.mngr_kanpan.header_status import compile_header_status
 from imbue.mngr_kanpan.header_status import render_header_status
@@ -1128,25 +1129,44 @@ def _finish_batch_execution(state: _KanpanState, results: list[_BatchItemResult]
         _show_transient_message(state, summary)
 
 
-def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEntry:
-    """Return an updated AgentBoardEntry with the mute state applied.
+_LOCALLY_WRITTEN_FIELDS: Final[tuple[str, ...]] = (FIELD_MUTED,)
 
-    Updates fields, cells, section, and is_muted so the board renders correctly.
+
+@pure
+def _read_muted(fields: Mapping[str, FieldValue]) -> bool:
+    """Whether `fields` marks the agent as muted."""
+    field = fields.get(FIELD_MUTED)
+    if field is None:
+        return False
+    if not isinstance(field, BoolField):
+        raise KanpanFieldTypeError(f"Expected BoolField for '{FIELD_MUTED}', got {type(field).__name__}")
+    return field.value
+
+
+@pure
+def _with_fields(entry: AgentBoardEntry, fields: dict[str, FieldValue]) -> AgentBoardEntry:
+    """Return an updated AgentBoardEntry carrying `fields`.
+
+    Rebuilds cells, section and is_muted from them, so everything the row derives from its
+    fields stays in step with them.
     """
-    updated_fields = {**entry.fields, FIELD_MUTED: BoolField(value=is_muted, created=now_utc())}
-    updated_cells = {key: field.display() for key, field in updated_fields.items()}
-    updated_section = compute_section(updated_fields)
     ref = entry.field_ref()
     return entry.model_copy_update(
-        to_update(ref.is_muted, is_muted),
-        to_update(ref.fields, updated_fields),
-        to_update(ref.cells, updated_cells),
-        to_update(ref.section, updated_section),
+        to_update(ref.is_muted, _read_muted(fields)),
+        to_update(ref.fields, fields),
+        to_update(ref.cells, {key: field.display() for key, field in fields.items()}),
+        to_update(ref.section, compute_section(fields)),
     )
 
 
+def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEntry:
+    """Return an updated AgentBoardEntry with the mute state applied, as of now."""
+    muted = BoolField(value=is_muted, created=now_utc())
+    return _with_fields(entry, {**entry.fields, FIELD_MUTED: muted})
+
+
 def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: bool) -> None:
-    """Update the snapshot in-place by toggling mute state on the named agent."""
+    """Update the snapshot in-place by setting the mute state on the named agent."""
     if state.snapshot is None:
         return
     new_entries = tuple(
@@ -1169,17 +1189,16 @@ def _mute_focused_agent(state: _KanpanState) -> None:
     agent_name = entry.name
     new_muted = not entry.is_muted
 
-    # A periodic read in flight predates this keypress, so it would put the row back where it was.
-    _abandon_periodic_local_refresh(state)
-    # Optimistic UI update
+    # Optimistic UI update. Stamped now, so a fetch that read this agent before the keypress
+    # loses to it in `_prefer_later_read` however long it takes to land.
     _update_snapshot_mute(state, agent_name, new_muted)
     _refresh_display(state)
     action = "Muted" if new_muted else "Unmuted"
     _show_transient_message(state, f"  {action} {agent_name}")
 
     # Persist in background
-    def _do_mute() -> bool:
-        return toggle_agent_mute(state.mngr_ctx, agent_name)
+    def _do_mute() -> None:
+        set_agent_mute(state.mngr_ctx, agent_name, new_muted)
 
     future = state.executor.submit(_do_mute)
     if state.loop is not None:
@@ -1188,7 +1207,7 @@ def _mute_focused_agent(state: _KanpanState) -> None:
         )
 
 
-def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[bool], AgentName, bool]) -> None:
+def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[None], AgentName, bool]) -> None:
     """Poll for mute persist completion. Revert UI on failure."""
     state, future, agent_name, expected_muted = data
     if future.done():
@@ -2633,7 +2652,7 @@ def _poll_periodic_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
         # list stays the full refresh's too: this read did run sources that fill one, but
         # taking its list would drop what a remote source reported, and only that refresh
         # runs those sources and can put it back.
-        merged = _carry_forward_fields(previous, fresh)
+        merged = _prefer_later_read(previous, _carry_forward_fields(previous, fresh), _LOCALLY_WRITTEN_FIELDS)
         state.snapshot = merged.model_copy_update(to_update(merged.field_ref().errors, previous.errors))
     _refresh_display(state)
     _prune_orphaned_marks(state)
@@ -2729,6 +2748,8 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
         # For local-only refreshes, carry forward fields from previous snapshot
         if was_local_only and state.snapshot is not None:
             new_snapshot = _carry_forward_fields(state.snapshot, new_snapshot)
+        if state.snapshot is not None:
+            new_snapshot = _prefer_later_read(state.snapshot, new_snapshot, _LOCALLY_WRITTEN_FIELDS)
         state.snapshot = new_snapshot
     except Exception as e:
         failed = True
@@ -2784,15 +2805,7 @@ def _carry_forward_fields(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapsh
             # Merge: new fields override old, but keep old fields not produced by local sources
             merged_fields = dict(old_entry.fields)
             merged_fields.update(entry.fields)
-            merged_cells = {key: field.display() for key, field in merged_fields.items()}
-            section = compute_section(merged_fields)
-            ref = entry.field_ref()
-            updated = entry.model_copy_update(
-                to_update(ref.fields, merged_fields),
-                to_update(ref.cells, merged_cells),
-                to_update(ref.section, section),
-            )
-            updated_entries.append(updated)
+            updated_entries.append(_with_fields(entry, merged_fields))
         else:
             updated_entries.append(entry)
     return BoardSnapshot(
@@ -2800,6 +2813,32 @@ def _carry_forward_fields(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapsh
         errors=new.errors,
         fetch_time_seconds=new.fetch_time_seconds,
     )
+
+
+@pure
+def _prefer_later_read(old: BoardSnapshot, new: BoardSnapshot, field_keys: Sequence[str]) -> BoardSnapshot:
+    """Return `new` with `field_keys` taken from whichever snapshot read them later.
+
+    A fetch reads its values as of its start, so one still running when the board writes one
+    of these holds an answer from before that write and would otherwise undo it.
+    """
+    old_by_name = {entry.name: entry for entry in old.entries}
+    updated_entries: list[AgentBoardEntry] = []
+    for entry in new.entries:
+        old_entry = old_by_name.get(entry.name)
+        if old_entry is None:
+            updated_entries.append(entry)
+            continue
+        fields = dict(entry.fields)
+        is_changed = False
+        for key in field_keys:
+            old_field = old_entry.fields.get(key)
+            new_field = fields.get(key)
+            if old_field is not None and new_field is not None and old_field.created > new_field.created:
+                fields[key] = old_field
+                is_changed = True
+        updated_entries.append(_with_fields(entry, fields) if is_changed else entry)
+    return new.model_copy_update(to_update(new.field_ref().entries, tuple(updated_entries)))
 
 
 def _get_state_attr(entry: AgentBoardEntry) -> str:

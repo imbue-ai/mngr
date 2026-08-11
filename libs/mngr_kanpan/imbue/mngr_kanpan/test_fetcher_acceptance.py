@@ -32,6 +32,7 @@ from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
@@ -42,7 +43,7 @@ from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import fetch_board_snapshot
 from imbue.mngr_kanpan.fetcher import fetch_local_snapshot
-from imbue.mngr_kanpan.fetcher import toggle_agent_mute
+from imbue.mngr_kanpan.fetcher import set_agent_mute
 
 
 class _FakeRemoteDataSource:
@@ -83,6 +84,38 @@ class _FakeRemoteDataSource:
         )
 
 
+class _ClockRecordingDataSource:
+    """A data source that records when it ran, to order the fetch's own stamps against it."""
+
+    def __init__(self) -> None:
+        self.ran_at: datetime | None = None
+
+    @property
+    def name(self) -> str:
+        return "clock_recording"
+
+    @property
+    def is_remote(self) -> bool:
+        return False
+
+    @property
+    def columns(self) -> dict[str, str]:
+        return {}
+
+    @property
+    def field_types(self) -> dict[str, TypeAdapter[FieldValue]]:
+        return {}
+
+    def compute(
+        self,
+        agents: tuple[AgentDetails, ...],
+        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        mngr_ctx: MngrContext,
+    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
+        self.ran_at = now_utc()
+        return ({}, [])
+
+
 @pytest.fixture
 def local_host(local_provider: LocalProviderInstance) -> Host:
     """Create a local Host via the local provider."""
@@ -95,6 +128,13 @@ def work_dir(tmp_path: Path) -> Path:
     d = tmp_path / "work_dir"
     d.mkdir()
     return d
+
+
+def _read_persisted_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
+    """Read the mute flag back out of the agent's certified plugin data."""
+    result = fetch_board_snapshot(mngr_ctx, [], {})
+    entry = {e.name: e for e in result.snapshot.entries}[agent_name]
+    return entry.is_muted
 
 
 def _ctx_with_failing_provider(mngr_ctx: MngrContext) -> MngrContext:
@@ -264,27 +304,56 @@ def test_fetch_local_snapshot_skips_remote_sources(
 
 
 # =============================================================================
-# toggle_agent_mute
+# set_agent_mute
 # =============================================================================
 
 
 @pytest.mark.acceptance
-def test_toggle_agent_mute_twice_returns_to_unmuted(
+@pytest.mark.tmux
+def test_set_agent_mute_writes_the_state_it_is_given(
     local_host: Host,
     work_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Toggling mute twice returns the agent to its unmuted state.
+    """Each call persists its argument, so repeating one is a no-op rather than a flip.
 
-    ``toggle_agent_mute`` reads and writes the persisted certified data, so its
-    return values reflect the round trip: first -> True (now muted), second ->
-    False (back to unmuted).
+    The board decides which way a keypress goes from what it is showing; were the write
+    to flip what is stored instead, the two would disagree whenever the board had not yet
+    caught up, and a second keypress would undo the first.
     """
-    create_test_agent_state(local_host, work_dir, "double-toggle-agent")
-    first = toggle_agent_mute(temp_mngr_ctx, AgentName("double-toggle-agent"))
-    assert first is True
-    second = toggle_agent_mute(temp_mngr_ctx, AgentName("double-toggle-agent"))
-    assert second is False
+    create_test_agent_state(local_host, work_dir, "set-mute-agent")
+    name = AgentName("set-mute-agent")
+
+    set_agent_mute(temp_mngr_ctx, name, True)
+    assert _read_persisted_mute(temp_mngr_ctx, name) is True
+    set_agent_mute(temp_mngr_ctx, name, True)
+    assert _read_persisted_mute(temp_mngr_ctx, name) is True
+    set_agent_mute(temp_mngr_ctx, name, False)
+    assert _read_persisted_mute(temp_mngr_ctx, name) is False
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_fetch_board_snapshot_stamps_mute_as_of_the_read_it_started(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """``FIELD_MUTED.created`` marks when the fetch began, not when it built its rows.
+
+    A mute pressed while a fetch is still running has to out-date that fetch's answer, and
+    the stamp is the only thing ordering the two. Data sources run after the agent list is
+    read and before the rows are built, so one of them running later than the stamp is what
+    places the stamp at the start.
+    """
+    create_test_agent_state(local_host, work_dir, "mute-stamp-agent")
+    clock = _ClockRecordingDataSource()
+    result = fetch_board_snapshot(temp_mngr_ctx, [clock], {})
+    entries = {e.name: e for e in result.snapshot.entries}
+    muted_field = entries[AgentName("mute-stamp-agent")].fields[FIELD_MUTED]
+    assert isinstance(muted_field, BoolField)
+    assert clock.ran_at is not None
+    assert muted_field.created <= clock.ran_at
 
 
 @pytest.mark.acceptance
@@ -296,7 +365,7 @@ def test_fetch_board_snapshot_muted_agent_in_muted_section(
 ) -> None:
     """A muted agent appears in the MUTED section of the board snapshot."""
     create_test_agent_state(local_host, work_dir, "muted-section-agent")
-    toggle_agent_mute(temp_mngr_ctx, AgentName("muted-section-agent"))
+    set_agent_mute(temp_mngr_ctx, AgentName("muted-section-agent"), True)
     result = fetch_board_snapshot(temp_mngr_ctx, [], {})
     entries = {e.name: e for e in result.snapshot.entries}
     entry = entries[AgentName("muted-section-agent")]
@@ -325,7 +394,7 @@ def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
     failing provider, so the muted agent must remain in MUTED.
     """
     create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
-    toggle_agent_mute(temp_mngr_ctx, AgentName("muted-despite-failure-agent"))
+    set_agent_mute(temp_mngr_ctx, AgentName("muted-despite-failure-agent"), True)
 
     failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
     result = fetch_board_snapshot(failing_ctx, [], {})

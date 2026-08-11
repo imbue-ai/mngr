@@ -63,6 +63,9 @@ def fetch_board_snapshot(
     Returns a FetchResult with the snapshot and updated cached fields for the next cycle.
     """
     start_time = time.monotonic()
+    # Stamped before the read so `created` marks when the values below were true, which is
+    # what orders a fetch against a mute pressed while it was still running.
+    read_at = now_utc()
     errors: list[str] = []
 
     result = list_agents(
@@ -91,14 +94,12 @@ def fetch_board_snapshot(
 
     # Build board entries. The muted bit rides on each AgentDetails (populated by
     # kanpan's agent_field_generators / offline_agent_field_generators during the
-    # list_agents call above), so it is sourced as resiliently as the agent list
-    # itself and its `created` is now.
-    now = now_utc()
+    # list_agents call above), so it is sourced as resiliently as the agent list itself.
     entries: list[AgentBoardEntry] = []
     for agent in agents:
         agent_fields = dict(all_fields.get(agent.name, {}))
         is_agent_muted = is_muted(agent.plugin.get(PLUGIN_NAME, {}))
-        agent_fields[FIELD_MUTED] = BoolField(value=is_agent_muted, created=now)
+        agent_fields[FIELD_MUTED] = BoolField(value=is_agent_muted, created=read_at)
 
         cells = {key: field.display() for key, field in agent_fields.items()}
         section = compute_section(agent_fields)
@@ -220,8 +221,13 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
     raise AssertionError(f"Unhandled PR state: {pr.state}")
 
 
-def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
-    """Toggle the mute state of an agent. Returns the new mute state."""
+def set_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName, is_agent_muted: bool) -> None:
+    """Set the mute state of an agent.
+
+    Takes the state to write rather than flipping what is stored, so a caller that has
+    already decided from what it shows cannot disagree with the stored value about which
+    way the flip goes.
+    """
     host_ref, agent_ref = find_one_agent(AgentAddress(agent=agent_name), mngr_ctx)
     agent, _host = resolve_to_started_host_and_agent(
         host_ref=host_ref,
@@ -230,10 +236,8 @@ def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
         mngr_ctx=mngr_ctx,
     )
     plugin_data = agent.get_plugin_data(PLUGIN_NAME)
-    is_agent_muted = not plugin_data.get(FIELD_MUTED, False)
     plugin_data[FIELD_MUTED] = is_agent_muted
     agent.set_plugin_data(PLUGIN_NAME, plugin_data)
-    return is_agent_muted
 
 
 def _cache_file_path(mngr_ctx: MngrContext) -> Path:

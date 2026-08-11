@@ -33,8 +33,10 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_CI
+from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import KanpanDataSourceError
@@ -64,6 +66,7 @@ from imbue.mngr_kanpan.testing import make_board_entry
 from imbue.mngr_kanpan.testing import make_board_snapshot
 from imbue.mngr_kanpan.testing import make_mngr_ctx
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_config
+from imbue.mngr_kanpan.testing import make_mngr_ctx_with_profile_dir
 from imbue.mngr_kanpan.testing import make_pr_field
 from imbue.mngr_kanpan.tui import BOARD_SECTION_ORDER
 from imbue.mngr_kanpan.tui import HEADER_TITLE
@@ -88,6 +91,7 @@ from imbue.mngr_kanpan.tui import _KanpanInputFilter
 from imbue.mngr_kanpan.tui import _KanpanInputHandler
 from imbue.mngr_kanpan.tui import _KanpanState
 from imbue.mngr_kanpan.tui import _LEGEND_SEPARATOR
+from imbue.mngr_kanpan.tui import _LOCALLY_WRITTEN_FIELDS
 from imbue.mngr_kanpan.tui import _SEARCH_QUERY_MIN_COLS
 from imbue.mngr_kanpan.tui import _SelectableRow
 from imbue.mngr_kanpan.tui import _assemble_column_defs
@@ -163,6 +167,7 @@ from imbue.mngr_kanpan.tui import _packed_width
 from imbue.mngr_kanpan.tui import _peek_body_lines
 from imbue.mngr_kanpan.tui import _peek_body_markup
 from imbue.mngr_kanpan.tui import _poll_periodic_local_refresh
+from imbue.mngr_kanpan.tui import _prefer_later_read
 from imbue.mngr_kanpan.tui import _prompted_mark_keys
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _rank_matches
@@ -4669,19 +4674,102 @@ def test_a_failed_periodic_local_refresh_leaves_the_board_exactly_as_it_was() ->
     assert state.local_refresh_future is None
 
 
-def test_muting_abandons_a_periodic_local_read_that_predates_it() -> None:
-    # The read holds the value from before the keypress, so landing it would take the row straight
-    # back out of MUTED and leave the board contradicting the thing the user just did.
+def _muted_snapshot_at(created: datetime, *, is_muted: bool) -> BoardSnapshot:
+    """A one-row board whose mute was read at `created`."""
+    fields = {FIELD_MUTED: BoolField(value=is_muted, created=created)}
+    return make_board_snapshot(
+        entries=(
+            make_board_entry(
+                name="agent-a",
+                is_muted=is_muted,
+                section=BoardSection.MUTED if is_muted else BoardSection.STILL_COOKING,
+                fields=fields,
+            ),
+        )
+    )
+
+
+def test_prefer_later_read_holds_the_row_against_a_fetch_that_read_it_earlier() -> None:
+    # The fetch read this agent before the keypress did, so its answer is the older one and
+    # landing it would take the row straight back out of MUTED.
+    on_screen = _muted_snapshot_at(datetime(2027, 1, 1, 0, 5, tzinfo=timezone.utc), is_muted=True)
+    stale_fetch = _muted_snapshot_at(datetime(2027, 1, 1, 0, 0, tzinfo=timezone.utc), is_muted=False)
+    merged = _prefer_later_read(on_screen, stale_fetch, _LOCALLY_WRITTEN_FIELDS)
+    assert merged.entries[0].is_muted is True
+    assert merged.entries[0].section is BoardSection.MUTED
+
+
+def test_prefer_later_read_yields_to_a_fetch_that_read_the_agent_afterwards() -> None:
+    # This read began after the keypress was persisted, so it is the authority on what is
+    # stored -- including when someone else changed it -- and the row on screen stands down.
+    on_screen = _muted_snapshot_at(datetime(2027, 1, 1, 0, 0, tzinfo=timezone.utc), is_muted=True)
+    later_fetch = _muted_snapshot_at(datetime(2027, 1, 1, 0, 5, tzinfo=timezone.utc), is_muted=False)
+    merged = _prefer_later_read(on_screen, later_fetch, _LOCALLY_WRITTEN_FIELDS)
+    assert merged.entries[0].is_muted is False
+    assert merged.entries[0].section is BoardSection.STILL_COOKING
+
+
+def test_prefer_later_read_leaves_an_agent_the_board_has_not_seen_before() -> None:
+    on_screen = make_board_snapshot(entries=())
+    fetch = _muted_snapshot_at(datetime(2027, 1, 1, 0, 0, tzinfo=timezone.utc), is_muted=True)
+    assert _prefer_later_read(on_screen, fetch, _LOCALLY_WRITTEN_FIELDS).entries[0].is_muted is True
+
+
+@pytest.mark.parametrize("is_local_only", (True, False), ids=("local", "full"))
+def test_a_refresh_that_predates_a_mute_no_longer_puts_the_row_back(is_local_only: bool, tmp_path: Path) -> None:
+    # The whole flicker: `m` moves the row to MUTED, then a refresh already in flight lands
+    # holding the value it read before the keypress and moves it back until the next read.
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
     state.loop = _make_mock_loop()
     state.list_walker.set_focus(next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a")))
-    stale: Future[FetchResult] = Future()
-    state.local_refresh_future = stale
+    # A full refresh writes the field cache on its way out, so it needs somewhere to write it
+    # or the snapshot it fetched never reaches the board and this passes without testing it.
+    state.mngr_ctx = make_mngr_ctx_with_profile_dir(tmp_path)
+
+    in_flight: Future[FetchResult] = Future()
+    state.refresh_future = in_flight
+    state.refresh_is_local_only = is_local_only
+
     _mute_focused_agent(state)
     assert state.snapshot is not None
     assert state.snapshot.entries[0].is_muted is True
-    assert state.local_refresh_future is None
+
+    in_flight.set_result(
+        FetchResult(
+            snapshot=_muted_snapshot_at(datetime(2020, 1, 1, tzinfo=timezone.utc), is_muted=False),
+            cached_fields={},
+        )
+    )
+    _finish_refresh(state.loop, state)
+
+    assert state.snapshot.entries[0].is_muted is True
+    assert state.snapshot.entries[0].section is BoardSection.MUTED
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_periodic_read_that_predates_a_mute_no_longer_puts_the_row_back() -> None:
+    # Same race on the periodic tier, which runs often enough to be the likelier one to hit.
+    entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
+    state = _make_state_with_walker((entry,))
+    state.loop = _make_mock_loop()
+    state.list_walker.set_focus(next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a")))
+
+    _mute_focused_agent(state)
+    stale: Future[FetchResult] = Future()
+    stale.set_result(
+        FetchResult(
+            snapshot=_muted_snapshot_at(datetime(2020, 1, 1, tzinfo=timezone.utc), is_muted=False),
+            cached_fields={},
+        )
+    )
+    state.local_refresh_future = stale
+    _poll_periodic_local_refresh(state.loop, state)
+
+    assert state.snapshot is not None
+    assert state.snapshot.entries[0].is_muted is True
+    assert state.snapshot.entries[0].section is BoardSection.MUTED
     assert state.executor is not None
     state.executor.shutdown(wait=False, cancel_futures=True)
 
