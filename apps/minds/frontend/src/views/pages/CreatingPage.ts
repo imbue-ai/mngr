@@ -172,7 +172,9 @@ export const CreatingPage: m.ClosureComponent = () => {
     const expectedDurationSeconds = live?.expected_duration_seconds ?? DEFAULT_EXPECTED_DURATION_SECONDS;
     const percent = state.isDone ? 100 : Math.min(99.5, progressForElapsed(elapsedSeconds, expectedDurationSeconds));
     return [
-      m("div", { id: "progress-view", class: "flex flex-col gap-4 max-w-[640px] mx-auto pt-24" }, [
+      // The progress block keeps its natural height; the walkthrough below it
+      // takes whatever is left (see the root's column comment).
+      m("div", { id: "progress-view", class: "shrink-0 flex flex-col gap-4 max-w-[640px] mx-auto" }, [
         m("h1", { class: "type-heading text-primary text-center" }, `Setting up ${workspaceName || "your machine"}`),
         m(
           "div",
@@ -204,7 +206,11 @@ export const CreatingPage: m.ClosureComponent = () => {
               "pre",
               {
                 id: "logs",
-                class: "type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-72 overflow-y-auto",
+                // A share of the window rather than a fixed height: this panel
+                // is the biggest claim on a budget the whole column has to fit
+                // inside, and how much there is to claim depends on how tall
+                // the window is. The walkthrough gives up the difference.
+                class: "type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto",
                 onupdate: (vnode) => {
                   const element = vnode.dom as HTMLElement;
                   element.scrollTop = element.scrollHeight;
@@ -278,23 +284,32 @@ export const CreatingPage: m.ClosureComponent = () => {
     },
     view() {
       const detail = state.detail;
-      return m(
-        PageContainer,
-        // The logs panel wants a fifth of the window, which the walkthrough
-        // at full size has no room to give; is-details-open (app.css) has
-        // the walkthrough compact itself to make that room while it's open,
-        // rather than the page growing a scrollbar.
-        { id: "creating", "data-agent-id": state.createAttemptId, extra: state.isLogOpen ? "is-details-open" : "" },
-        [
-          detail === null
-            ? m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" }))
-            : detail.kind === "record"
-              ? recordView(detail)
-              : state.isFailed
-                ? failureView(detail.live?.workspace_name ?? "", null, state.errorText, state.errorKind)
-                : progressView(detail.live?.workspace_name ?? "", detail.live),
-        ],
-      );
+      if (detail !== null && detail.kind !== "record" && !state.isFailed) {
+        // The walkthrough is laid out to fit the window rather than to scroll:
+        // this column is exactly as tall as the scroll card it sits in, the
+        // progress block above takes its natural height, and #onboarding takes
+        // what is left -- scaling the illustration into whatever that comes to
+        // (see OnboardingWalkthrough). Opening the logs is just another claim
+        // on the same budget: the picture gets smaller, the page does not grow.
+        return m(
+          "div",
+          {
+            id: "creating",
+            "data-agent-id": state.createAttemptId,
+            class: "h-full flex flex-col gap-4 px-6 py-6",
+          },
+          progressView(detail.live?.workspace_name ?? "", detail.live),
+        );
+      }
+      // The failure and interrupted-record views are ordinary pages: they hold
+      // as much text as the create produced, so they scroll if they are tall.
+      return m(PageContainer, { id: "creating", "data-agent-id": state.createAttemptId }, [
+        detail === null
+          ? m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" }))
+          : detail.kind === "record"
+            ? recordView(detail)
+            : failureView(detail.live?.workspace_name ?? "", null, state.errorText, state.errorKind),
+      ]);
     },
   };
 };

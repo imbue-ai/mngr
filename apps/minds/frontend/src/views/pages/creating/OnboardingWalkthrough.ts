@@ -39,6 +39,14 @@ import {
 } from "./graphics";
 import { Symbols } from "./symbols";
 
+/**
+ * The height every scene is drawn at, and so the height a full-size box is:
+ * the scale is the box's real height as a fraction of this. Must match the
+ * `max-h-[340px]` on #graphic below, which is spelled out because Tailwind
+ * only generates utilities it can find as literal text in the source.
+ */
+const GRAPHIC_DESIGN_HEIGHT_PX = 340;
+
 export interface OnboardingWalkthroughAttrs {
   isRemote: boolean;
   onboardingServices: OnboardingCloudApp[];
@@ -157,6 +165,7 @@ export const OnboardingWalkthrough: m.ClosureComponent<OnboardingWalkthroughAttr
 
   let isEntering = false;
   let hasTriggeredEntry = false;
+  let graphicResizeObserver: ResizeObserver | null = null;
   // 0 never matches a real step number, so the first sync always runs.
   let lastSyncedStep = 0;
 
@@ -176,6 +185,25 @@ export const OnboardingWalkthrough: m.ClosureComponent<OnboardingWalkthroughAttr
     else appsWheel.stop();
     if (graphic === "gfx-connect") connectWheel.start();
     else connectWheel.stop();
+  }
+
+  /**
+   * Keep the picture at whatever fraction of its design height the box came
+   * out at. Each scene is laid out at fixed pixel sizes and scales as a whole
+   * rather than reflowing into a shape it was not drawn for, so the one thing
+   * the layout can give the page is this scale: the column above claims the
+   * height it needs (the logs panel most of all), the box gets what is left,
+   * and the illustration is drawn to fit it. Setting the scale changes no
+   * layout -- a transform does not -- so this cannot feed back into a resize.
+   */
+  function trackGraphicScale(box: HTMLElement): void {
+    const applyScale = (): void => {
+      const scale = Math.min(1, box.clientHeight / GRAPHIC_DESIGN_HEIGHT_PX);
+      box.style.setProperty("--gfx-scale", String(scale));
+    };
+    applyScale();
+    graphicResizeObserver = new ResizeObserver(applyScale);
+    graphicResizeObserver.observe(box);
   }
 
   // The workspace being ready wins over whatever step is showing: go in.
@@ -210,6 +238,7 @@ export const OnboardingWalkthrough: m.ClosureComponent<OnboardingWalkthroughAttr
       tips.stop();
       appsWheel.stop();
       connectWheel.stop();
+      graphicResizeObserver?.disconnect();
     },
     view(vnode) {
       const { isRemote } = vnode.attrs;
@@ -250,16 +279,30 @@ export const OnboardingWalkthrough: m.ClosureComponent<OnboardingWalkthroughAttr
         "div",
         {
           id: "onboarding",
+          // min-h-0 so this column can be shorter than the picture it holds:
+          // it takes the height the progress block above leaves it, and the
+          // graphic box below gives up the difference.
           class:
-            "onboarding flex-1 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-6 gap-6" +
+            "onboarding flex-1 min-h-0 flex flex-col items-center justify-center w-full max-w-3xl mx-auto px-6 py-6 gap-6" +
             (isEntering ? " is-entering" : ""),
           "data-step": String(step),
         },
         [
           m(Symbols),
-          // Fixed height, not a minimum: the graphics differ in height and
-          // the step text does too, and the dot strip below must not move.
-          m("div", { id: "graphic", class: "flex items-center justify-center w-full h-[340px]" }, scene),
+          // The step text and dot strip below keep their own height, so the
+          // box is the one thing that flexes -- capped at the height the
+          // scenes are drawn at, since a picture never grows past full size.
+          // It also clips: the scale is applied a frame after the box resizes,
+          // and that frame must not reach the page as a flash of scrollbar.
+          m(
+            "div",
+            {
+              id: "graphic",
+              class: "flex items-center justify-center w-full flex-1 min-h-0 max-h-[340px] overflow-hidden",
+              oncreate: (graphicVnode) => trackGraphicScale(graphicVnode.dom as HTMLElement),
+            },
+            scene,
+          ),
           copyPanel(step, isRemote, tips.text, tips.opacity),
           dotsNav(stepper),
         ],

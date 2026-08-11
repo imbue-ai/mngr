@@ -706,12 +706,12 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 
 /*
  * ---------------------------------------------------------------------------
- * Creating-page onboarding walkthrough (Creating.jinja + onboarding.js).
+ * Creating-page onboarding walkthrough (views/pages/creating/).
  *
  * The walkthrough is nine steps and plays by itself. #onboarding carries
- * data-step (1..9); onboarding.js swaps which #graphic block is visible per
- * step and toggles the step text panels. The CSS here styles the browser
- * demo, the app cloud, the step dots and the ready/entering states.
+ * data-step (1..9) and renders one scene per step, keyed so each replays from
+ * the start on revisit. The CSS here styles the browser demo, the app cloud,
+ * the step dots and the ready/entering states.
  * ---------------------------------------------------------------------------
  */
 
@@ -784,45 +784,20 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 }
 
 /*
- * Details open. The logs panel wants most of a fifth of the window, which
- * the walkthrough at full size has no room to give: opening it pushed the
- * page into a scroll. Whoever opens the logs came to read them, so the
- * walkthrough gives up its breathing room and the illustration shrinks to
- * make that space, rather than the page growing a scrollbar. creating.js
- * puts is-details-open on #creating alongside revealing the logs.
+ * The page fits the window rather than scrolling it. #creating is a column
+ * exactly as tall as the scroll card, the progress strip at the top takes its
+ * natural height (the logs panel, when open, being most of it), and the
+ * walkthrough takes what is left -- so the one thing that has to give is the
+ * illustration. Each scene is laid out at fixed pixel sizes, so it scales as a
+ * whole rather than reflowing into a shape it was not drawn for:
+ * OnboardingWalkthrough measures the box and publishes the fraction of the
+ * 340px design height it came out at as --gfx-scale. Whoever opens the logs
+ * came to read them, and this is how they get that room.
  */
-/* py-2 and gap-3, off the same scale the utilities compute from. */
-#creating.is-details-open .onboarding {
-  padding-top: calc(var(--spacing) * 2);
-  padding-bottom: calc(var(--spacing) * 2);
-  gap: calc(var(--spacing) * 3);
-}
-/* Each scene is laid out at fixed pixel sizes, so it scales as a whole
- * rather than reflowing into a shape it was not drawn for. The box height
- * is what a 340px scene comes to at this scale. */
-#creating.is-details-open #graphic {
-  height: 210px;
-}
-#creating.is-details-open .gfx {
-  transform: scale(0.62);
-}
-#graphic {
-  transition: height 200ms ease;
-}
+/* Applied with no transition, so the picture is never momentarily bigger than
+ * the box it has to fit in (which is what a scrollbar is made of). */
 .gfx {
-  transition: transform 200ms ease;
-}
-.onboarding {
-  transition:
-    gap 200ms ease,
-    padding 200ms ease;
-}
-@media (prefers-reduced-motion: reduce) {
-  #graphic,
-  .gfx,
-  .onboarding {
-    transition: none;
-  }
+  transform: scale(var(--gfx-scale, 1));
 }
 
 /*
