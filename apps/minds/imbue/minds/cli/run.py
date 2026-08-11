@@ -21,6 +21,7 @@ the gateway itself into each agent's container.
 
 import os
 import secrets
+import tempfile
 import threading
 import webbrowser
 from collections.abc import Callable
@@ -45,6 +46,7 @@ from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
@@ -610,6 +612,17 @@ def run(
     root_concurrency_group.start_new_thread(
         target=startup_host_reconciler.run_once_after_discovery,
         name="startup-host-reconcile",
+        is_checked=False,
+    )
+
+    # Each create attempt clones its source into a private temp dir and removes
+    # it in a ``finally`` -- which a force-quit or crash skips, since the create
+    # worker is a daemon thread. Reclaim the day-old leftovers. Backgrounded
+    # because rmtree of a ~240MB clone is not instant, and is_checked=False so a
+    # failed sweep never tears down the app over disk hygiene.
+    root_concurrency_group.start_new_thread(
+        target=lambda: sweep_orphaned_scratch_clones(Path(tempfile.gettempdir())),
+        name="startup-scratch-clone-sweep",
         is_checked=False,
     )
 

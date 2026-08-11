@@ -1215,6 +1215,37 @@ def _clone_build_context_for_self_contained_git(local_context: Path, git_depth: 
     return clone_target
 
 
+def _raise_if_cwd_deleted_for_relative_context(docker_build_args: tuple[str, ...]) -> None:
+    """Fail legibly when a relative build context has no working directory to resolve against.
+
+    A relative context -- every ``[create_templates.*]`` block passes ``"."`` --
+    resolves against THIS process's cwd, so a deleted cwd makes the build
+    unsalvageable, and unrecognisably so. ``Path(".").exists()`` still returns
+    True (the process holds an open fd on the unlinked directory), so ``"."``
+    survives the is-it-a-path filter in the caller and then dies inside
+    ``Path.resolve()``'s ``os.getcwd()`` with a bare ``FileNotFoundError`` raised
+    from posixpath, naming nothing the operator can act on.
+
+    Resolving cwd-independently instead of raising would be strictly worse: the
+    context would filter out as nonexistent, ``context_args`` would come back
+    empty, and we would upload an *empty* build context and fail minutes later on
+    a missing Dockerfile, with nothing pointing at the real cause.
+
+    Scoped to relative contexts on purpose: an absolute context needs no cwd and
+    builds fine without one, so it must not be blocked here.
+    """
+    if not any(not arg.startswith("-") and not os.path.isabs(arg) for arg in docker_build_args):
+        return
+    try:
+        os.getcwd()
+    except FileNotFoundError as e:
+        raise MngrError(
+            "Cannot resolve a relative Docker build context: this process's working directory no longer "
+            "exists (it was deleted while create was running). The build context is resolved relative to "
+            "it, so the build cannot proceed."
+        ) from e
+
+
 def build_image_on_outer_from_build_args(
     outer: OuterHostInterface,
     cg: ConcurrencyGroup,
@@ -1242,6 +1273,8 @@ def build_image_on_outer_from_build_args(
     build_tag = f"mngr-build-{host_id}"
     remote_build_dir = f"/tmp/mngr-build-{host_id.get_uuid().hex}"
 
+    _raise_if_cwd_deleted_for_relative_context(docker_build_args)
+
     # Separate the build context path from other docker build args.
     # Docker build expects the last positional arg to be the context path.
     # We scan for args that look like local paths (not starting with --)
@@ -1259,18 +1292,11 @@ def build_image_on_outer_from_build_args(
     # _clone_build_context_for_self_contained_git for why.
     local_clone_dir: Path | None = None
     if context_args:
-        # Path.resolve() calls os.getcwd() even for an already-absolute path (via
-        # os.path.abspath), so it raises FileNotFoundError when THIS process's working
-        # directory has been deleted -- which happens in the create flow when a
-        # temporary build/clone dir is cleaned up while it is still the CWD (the deleted
-        # dir is unrelated to the build context). The context path was already verified
-        # to exist above, so normalize an absolute one WITHOUT touching the (possibly
-        # gone) CWD; only a relative path still needs a CWD to resolve against.
-        raw_context = context_args[-1]
-        if os.path.isabs(raw_context):
-            local_context = Path(os.path.normpath(raw_context))
-        else:
-            local_context = Path(raw_context).resolve()
+        # A live cwd is guaranteed by the check at the top of this function, so
+        # resolve() is safe here. Note it must stay resolve() rather than
+        # normpath(): normpath collapses ".." lexically, which walks through a
+        # symlink to the wrong directory.
+        local_context = Path(context_args[-1]).resolve()
         clone_target = _clone_build_context_for_self_contained_git(local_context, git_depth)
         if clone_target is not None:
             # clone_target is <tempdir>/repo; remove the whole tempdir on exit.

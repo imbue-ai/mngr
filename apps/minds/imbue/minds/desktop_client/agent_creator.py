@@ -428,6 +428,59 @@ def extract_repo_name(git_url: str) -> str:
     return cleaned if cleaned else "workspace"
 
 
+SCRATCH_CLONE_DIR_PREFIX: Final = "minds-clone-"
+ORPHANED_SCRATCH_CLONE_AGE_SECONDS: Final = 24 * 60 * 60
+
+
+def make_scratch_clone_root(repo_name: str, temp_dir: Path | None = None) -> Path:
+    """Create a private temp directory to clone one create attempt's source into.
+
+    Returns the *root*; the caller clones into ``<root>/<repo_name>`` (a fresh
+    subdirectory, because :func:`clone_git_repo` requires its target not to
+    exist) and removes the whole root when the attempt ends.
+
+    One directory per attempt is load-bearing. This used to be a single
+    ``<tmp>/minds-clone-<repo_name>`` shared by every attempt for a repo and
+    rmtree'd on the way in, so a second create deleted the directory an
+    in-flight create was using as its ``mngr create`` cwd. That cwd is what the
+    relative build context (``"."`` in every ``[create_templates.*]`` block)
+    resolves against, so the older attempt died minutes later inside
+    ``Path.resolve()`` with a bare ``FileNotFoundError`` from posixpath. Any two
+    overlapping creates from one repo collided, whatever their launch modes --
+    the path was keyed on the repo name alone.
+
+    The repo name stays in the prefix purely so ``ls`` on the temp dir is
+    readable; uniqueness comes from ``mkdtemp``. ``temp_dir`` defaults to the
+    system temp dir and is only passed explicitly by tests.
+    """
+    parent = None if temp_dir is None else str(temp_dir)
+    return Path(tempfile.mkdtemp(prefix="{}{}-".format(SCRATCH_CLONE_DIR_PREFIX, repo_name), dir=parent))
+
+
+def sweep_orphaned_scratch_clones(temp_dir: Path) -> None:
+    """Delete scratch clone roots left behind by a previous session.
+
+    Per-attempt roots are removed in the create attempt's ``finally``, which
+    does not run when the app is force-quit or killed (the create worker is a
+    daemon thread). A full default-workspace-template clone is ~240MB, so
+    without this sweep the shared-path fix above would trade a crash for a slow
+    disk leak -- the old shared path was accidentally self-reclaiming, since the
+    next create for that repo deleted it.
+
+    Only roots untouched for a day are removed, so a clone belonging to a
+    *concurrently running* second Minds instance is never deleted out from under
+    it, which is the exact failure this whole change is about.
+    """
+    cutoff = time.time() - ORPHANED_SCRATCH_CLONE_AGE_SECONDS
+    for path in temp_dir.glob(SCRATCH_CLONE_DIR_PREFIX + "*"):
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                logger.info("Removing orphaned scratch clone {}", path)
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError as e:
+            logger.debug("Skipping orphaned scratch clone {}: {}", path, e)
+
+
 def _is_local_path(repo_source: str) -> bool:
     """Check if a repo source is a local path rather than a URL.
 
@@ -2322,6 +2375,12 @@ class AgentCreator(MutableModel):
         cid_str = str(create_attempt_id)
         emit_log = make_log_callback(log_sink)
         workspace_dir: Path | None = None
+        # Bound the moment the scratch root is created, NOT alongside
+        # workspace_dir: in the worktree branch the clone and the rsync over it
+        # both happen before workspace_dir is assigned, so a failure in between
+        # would leak a full clone that nothing else will ever reclaim (the old
+        # shared path was reclaimed by the next create for that repo).
+        scratch_clone_root: Path | None = None
         try:
             with log_span(
                 "Creating agent for create attempt {} from {} (mode: {})",
@@ -2365,12 +2424,10 @@ class AgentCreator(MutableModel):
                         # container's bare receiver also rejects shallow source
                         # packs with "shallow update not allowed". Cloning
                         # deeply avoids both. Local file:// clones are cheap.
-                        # Use a stable path based on repo name so Docker layer caching works.
                         log_sink.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
-                        clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
-                        if clone_target.exists():
-                            shutil.rmtree(clone_target)
+                        scratch_clone_root = make_scratch_clone_root(repo_name)
+                        clone_target = scratch_clone_root / repo_name
                         file_url = GitUrl("file://{}".format(resolved_path))
                         # Pass the branch through (like the remote-URL case
                         # below) so that when one is requested the clone takes
@@ -2402,9 +2459,8 @@ class AgentCreator(MutableModel):
                         log_sink.put("[minds] Using local directory: {}".format(workspace_dir))
                 else:
                     repo_name = extract_repo_name(repo_source)
-                    clone_target = Path(tempfile.gettempdir()) / "minds-clone-{}".format(repo_name)
-                    if clone_target.exists():
-                        shutil.rmtree(clone_target)
+                    scratch_clone_root = make_scratch_clone_root(repo_name)
+                    clone_target = scratch_clone_root / repo_name
                     log_sink.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
                     # Clone only the requested branch (non-shallow) when one is
                     # given: cheaper than a full clone, yet keeps the complete
@@ -2721,6 +2777,8 @@ class AgentCreator(MutableModel):
                     self._error_kinds[cid_str] = error_kind
             self._notify_create_attempts_changed()
         finally:
+            if scratch_clone_root is not None:
+                shutil.rmtree(scratch_clone_root, ignore_errors=True)
             log_sink.put(LOG_SENTINEL)
 
     def _discard_dead_create_attempts_holding_name(

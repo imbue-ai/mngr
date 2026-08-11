@@ -9,6 +9,7 @@ file covers minds' command-building and helpers.
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -32,6 +33,8 @@ from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_M
 from imbue.minds.desktop_client.agent_creator import CreateAttemptErrorKind
 from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import ORPHANED_SCRATCH_CLONE_AGE_SECONDS
+from imbue.minds.desktop_client.agent_creator import SCRATCH_CLONE_DIR_PREFIX
 from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
@@ -46,9 +49,11 @@ from imbue.minds.desktop_client.agent_creator import classify_create_attempt_err
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
+from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
+from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
@@ -2109,3 +2114,46 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
         creator.wait_for_all()
     finally:
         server.shutdown()
+
+
+def test_scratch_clone_roots_are_unique_per_create_attempt() -> None:
+    """Two overlapping creates from one repo must not share a directory.
+
+    The old path was ``<tmp>/minds-clone-<repo_name>``, keyed on the repo name
+    alone and rmtree'd on the way in, so the second create deleted the directory
+    the first was using as its ``mngr create`` cwd -- whatever launch modes the
+    two had picked.
+    """
+    first = make_scratch_clone_root("default-workspace-template")
+    second = make_scratch_clone_root("default-workspace-template")
+    try:
+        assert first != second
+        assert first.is_dir()
+        assert second.is_dir()
+        assert first.name.startswith(SCRATCH_CLONE_DIR_PREFIX)
+    finally:
+        shutil.rmtree(first, ignore_errors=True)
+        shutil.rmtree(second, ignore_errors=True)
+
+
+def test_sweep_reclaims_stale_scratch_clones_but_spares_live_ones(tmp_path: Path) -> None:
+    """Startup sweep collects what a force-quit leaked, and nothing else.
+
+    Per-attempt directories are removed in the attempt's ``finally``, which a
+    force-quit skips (the create worker is a daemon thread), and a full clone is
+    ~240MB. The age guard is what keeps the sweep from deleting a clone belonging
+    to a concurrently running second Minds instance -- i.e. from reintroducing the
+    very race this change removes.
+    """
+    stale = make_scratch_clone_root("default-workspace-template", temp_dir=tmp_path)
+    live = make_scratch_clone_root("default-workspace-template", temp_dir=tmp_path)
+    unrelated = tmp_path / "some-other-tempdir"
+    unrelated.mkdir()
+    aged_out = time.time() - ORPHANED_SCRATCH_CLONE_AGE_SECONDS - 60
+    os.utime(stale, (aged_out, aged_out))
+
+    sweep_orphaned_scratch_clones(tmp_path)
+
+    assert not stale.exists()
+    assert live.is_dir()
+    assert unrelated.is_dir()
