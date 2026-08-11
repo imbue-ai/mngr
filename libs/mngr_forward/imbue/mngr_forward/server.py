@@ -442,22 +442,25 @@ async def _forward_workspace_http(
         backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
         try:
             backend_response = await http_client.send(backend_request, stream=True)
-        except (httpx.ConnectError, httpx.RemoteProtocolError):
+        except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
             # ``RemoteProtocolError`` here means the backend disconnected
             # before sending headers -- typical when the system interface
             # died between the SSH tunnel accepting the unix-socket
             # connection and the channel-open completing. Same recovery
             # signal as a connect-time failure.
+            logger.debug("Failed to reach the backend for {} at {}: {}", agent_id, backend_url, e)
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
             return _service_unavailable_response(request)
-        except httpx.ReadError:
+        except httpx.ReadError as e:
+            logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
             return Response(status_code=502, content="Backend connection lost")
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as e:
             # A wedged-but-listening backend produces a TimeoutException
             # rather than ConnectError. Surface this as CONNECT_ERROR so a
             # consumer still treats the agent as failing, matching the
             # behaviour for a backend that returns a 504.
+            logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
             return Response(status_code=504, content="Backend stream timed out")
 
@@ -485,25 +488,33 @@ async def _forward_workspace_http(
 
     try:
         backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
-    except (httpx.ConnectError, httpx.RemoteProtocolError):
+    except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
         # System interface may not yet be listening, or it may have closed the
         # connection before sending headers (typical during startup). Surface
         # a 503 (and the failure envelope below) so a consumer can react (e.g.
         # navigate the user to its recovery UI); non-HTML callers can interpret
-        # the 503 programmatically.
+        # the 503 programmatically. Logged at debug, since a workspace that has
+        # not finished starting is the expected source of it.
+        logger.debug("Failed to reach the backend for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
-    except httpx.ReadError:
+    except httpx.ReadError as e:
         # ReadError fires after the connection was established, so this is a
         # mid-response failure (same shape as SSE_EOF on the streaming path),
-        # not a connect-time failure.
+        # not a connect-time failure -- hence warning: unlike a connect failure,
+        # a workspace that is merely still starting does not produce this.
+        logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as e:
         # A wedged-but-listening backend produces a TimeoutException rather
         # than ConnectError. Surface this as CONNECT_ERROR so a consumer still
         # treats the agent as failing, matching the behaviour for a backend
-        # that returns a 504.
+        # that returns a 504. Logged at warning while the connect failure above
+        # is not: a workspace still starting refuses the connection or closes
+        # it, so one that accepted it and then stayed silent is a different
+        # condition.
+        logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
 
@@ -894,6 +905,14 @@ async def _handle_workspace_forward_websocket(
         TimeoutError,
         SSHTunnelError,
         paramiko.SSHException,
+        # A backend that dies part-way through the opening handshake surfaces as
+        # ``InvalidHandshake``, which descends from ``WebSocketException`` rather
+        # than ``OSError``. Caught at ``InvalidHandshake`` so a backend serving
+        # the loader page instead of a 101 (``InvalidStatus``) lands here too,
+        # but deliberately NOT at the wider ``WebSocketException``:
+        # ``ConnectionClosed`` names a failure during relaying, which the block
+        # above must keep propagating.
+        websockets.exceptions.InvalidHandshake,
     ) as connection_error:
         logger.debug("Backend WS connection failed for {}: {}", agent_id, connection_error)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)

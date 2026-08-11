@@ -8,12 +8,15 @@ surfaces using ``starlette.testclient.TestClient``.
 
 import io
 import json
+import socket as socket_module
+import tempfile
 import threading
 from pathlib import Path
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import PrivateAttr
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from websockets.sync.server import ServerConnection
@@ -36,6 +39,8 @@ from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
+from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
 
 # The workspace host every test agent runs on: requests route by the
 # ``host-<hex>.localhost`` Host header, and the resolver maps it back to the
@@ -1341,6 +1346,113 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp
     assert len(lines) == 1
     envelope = json.loads(lines[0])
     assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
+
+
+class _AcceptThenCloseTunnelManager(SSHTunnelManager):
+    """Tunnel manager whose socket accepts a connection and immediately closes it.
+
+    This is what a forward tunnel does to an in-flight connection once it
+    retires itself over a transport-level failure: ``_open_and_relay`` closes
+    the accepted socket without ever speaking HTTP. The ``websockets`` client
+    reports that as ``InvalidMessage``, not as an ``OSError``.
+    """
+
+    _socket_tmpdir: tempfile.TemporaryDirectory[str] = PrivateAttr()
+    _socket_path: Path = PrivateAttr()
+    _server: socket_module.socket = PrivateAttr()
+    _stop: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _thread: threading.Thread = PrivateAttr()
+
+    def model_post_init(self, __context: object) -> None:
+        # Not pytest's tmp_path: on macOS that lives under /var/folders/... and
+        # overflows AF_UNIX's sun_path on its own, so the socket is placed by
+        # the same rule the manager under test uses for its own.
+        self._socket_tmpdir = _create_short_path_tmpdir("mngr-fwd-ws-test-")
+        self._socket_path = Path(self._socket_tmpdir.name) / "accept-then-close.sock"
+        self._server = _create_tunnel_listener(self._socket_path)
+        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._thread.start()
+
+    def _accept_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._server.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            conn.close()
+
+    def get_tunnel_socket_path(self, ssh_info: RemoteSSHInfo, remote_host: str, remote_port: int) -> Path:
+        return self._socket_path
+
+    def cleanup(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+        self._server.close()
+        self._socket_tmpdir.cleanup()
+        super().cleanup()
+
+
+def test_websocket_emits_failure_when_backend_closes_during_handshake(tmp_path: Path) -> None:
+    """A backend that closes mid-handshake must emit ``CONNECT_ERROR``, not escape as an ASGI error.
+
+    Regression test for the same class of bug as
+    ``test_websocket_forward_emits_failure_on_ssh_tunnel_setup_error``, reached
+    by a different exception. There the tunnel fails to open; here it opens and
+    then dies under the handshake, which is what happens when the tunnel retires
+    itself after its SSH transport stops answering (a laptop resumed from sleep).
+
+    ``websockets`` reports that as ``InvalidMessage`` (with an ``EOFError``
+    as its ``__cause__``), which descends from ``WebSocketException`` rather
+    than ``OSError``, so it used to slip past the handler's ``except`` and
+    escape into the ASGI framework. The cost was the same one that test
+    describes -- no envelope, so minds never enrolled the agent as a probe
+    suspect -- plus the client never received the 1011 close that tells it to
+    reconnect promptly.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.set_agent_host(agent_id, _TEST_HOST_ID)
+    # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_ssh_info(
+        agent_id,
+        RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
+    )
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-ws-handshake-eof"
+    tunnel_manager = _AcceptThenCloseTunnelManager()
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=EnvelopeWriter(output=envelope_output),
+        listen_host="127.0.0.1",
+        listen_port=18422,
+        preauth_cookie_value=preauth,
+    )
+
+    try:
+        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18422") as client:
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect(
+                    f"ws://{_TEST_HOST_ID}.localhost:18422/api/ws",
+                    headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+                ):
+                    pass
+    finally:
+        tunnel_manager.cleanup()
+
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
     assert envelope["agent_id"] == str(agent_id)
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"

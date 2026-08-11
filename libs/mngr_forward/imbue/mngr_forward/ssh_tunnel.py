@@ -22,7 +22,10 @@ from imbue.mngr_forward.relay import relay_data
 
 _SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
 
-_SOCKET_POLL_SECONDS: Final[float] = 0.01
+# Pending-connection backlog on each tunnel's Unix socket. Connections beyond
+# this are refused, which a caller reads as an unreachable backend, so it needs
+# headroom over the parallel requests a single page load makes.
+_TUNNEL_LISTEN_BACKLOG: Final[int] = 8
 
 _REVERSE_TUNNEL_HEALTH_CHECK_SECONDS: Final[float] = 30.0
 
@@ -46,10 +49,41 @@ _MAX_AF_UNIX_PATH_LENGTH: Final[int] = 103
 # keeps the transport marked "active" and the remote sshd keeps the forwarded
 # listener bound, so the remote port is orphaned across restarts (the next
 # run's ``request_port_forward`` is then denied). Periodic keepalives keep the
-# connection from idling out and let paramiko mark a dead peer promptly so the
-# health check can repair it. Kept below the 30s health-check interval so a
-# dead connection is detectable before the next repair tick.
+# connection from idling out. Kept below the 30s health-check interval.
+#
+# They do NOT detect a dead peer, despite the name: ``set_keepalive`` never
+# waits for a reply, so a peer that vanished mid-connection leaves the transport
+# reporting ``is_active() == True`` for minutes. Detecting that is the job of
+# the bounded channel open in ``_open_and_relay``.
 _SSH_KEEPALIVE_INTERVAL_SECONDS: Final[int] = 15
+
+# How long to wait for sshd's reply to a ``direct-tcpip`` channel open before
+# calling the peer gone. paramiko defaults this to 3600s, so an open against a
+# peer that silently went away waits an hour -- long enough that the tunnel is
+# effectively dead for the rest of the session.
+#
+# Set to the proxy's own request timeout (``server._PROXY_TIMEOUT_SECONDS``):
+# beyond that the request this open serves has already been abandoned, so
+# waiting longer buys nothing and holds that request's pooled connection while
+# it does. Deliberately no tighter, because hitting it closes the whole SSH
+# connection out from under every other channel on it -- a merely loaded sshd
+# must not pay that price.
+#
+# It bounds the wait, NOT the whole open: ``Transport.open_channel`` sends its
+# request before starting the clock, and that send can block independently. A
+# link that black-holes without ever erroring can therefore still stall an open
+# past this.
+_CHANNEL_OPEN_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Threshold for reporting a channel open that did succeed. One open is a single
+# round trip to sshd, so anything beyond this means the link or the remote sshd
+# is degrading. This is the only trace of a link slow enough to ruin the page
+# but never slow enough to trip the bound above.
+#
+# Reported at debug, not warning: the loading page re-polls once a second and
+# each poll opens its own channel, so a degraded link would otherwise warn every
+# second for as long as the page is open, all of it restating one fact.
+_CHANNEL_OPEN_SLOW_THRESHOLD_SECONDS: Final[float] = 5.0
 
 
 class RemoteSSHInfo(FrozenModel):
@@ -197,15 +231,11 @@ class SSHTunnelManager(MutableModel):
     def _get_tmpdir(self) -> Path:
         """Get or create the secure temporary directory for Unix sockets.
 
-        On macOS, $TMPDIR is a long per-user path under /var/folders/... that
-        can push AF_UNIX socket paths over the 104-byte sun_path limit. We use
-        /tmp directly on Darwin to keep socket paths short. The directory is
-        chmodded to 0o700 and contains only 0o600 sockets, so sharing /tmp with
-        other users on the machine is safe.
+        The directory is chmodded to 0o700 and contains only 0o600 sockets, so
+        sharing /tmp with other users on the machine is safe.
         """
         if self._tmpdir is None:
-            base_dir = "/tmp" if sys.platform == "darwin" else None
-            self._tmpdir = tempfile.TemporaryDirectory(prefix="mngr-forward-ssh-", dir=base_dir)
+            self._tmpdir = _create_short_path_tmpdir("mngr-forward-ssh-")
             os.chmod(self._tmpdir.name, 0o700)
         return Path(self._tmpdir.name)
 
@@ -231,6 +261,25 @@ class SSHTunnelManager(MutableModel):
         self._connections[conn_key] = client
         return client
 
+    def _invalidate_connection(self, conn_key: str, client: paramiko.SSHClient) -> None:
+        """Drop ``client`` from the connection cache so the next request reconnects.
+
+        The identity check makes concurrent invalidations idempotent: several
+        connections can be in flight against the same dead transport and all
+        time out, but only the first should close it. The rest must not tear
+        down whatever replacement a later request has already established.
+        """
+        with self._lock:
+            if self._connections.get(conn_key) is not client:
+                return
+            del self._connections[conn_key]
+        # Closed outside the lock: closing a wedged transport can itself block,
+        # and every other tunnel operation takes this lock.
+        try:
+            client.close()
+        except (OSError, paramiko.SSHException) as e:
+            logger.trace("Error closing invalidated SSH connection: {}", e)
+
     def get_tunnel_socket_path(
         self,
         ssh_info: RemoteSSHInfo,
@@ -243,7 +292,8 @@ class SSHTunnelManager(MutableModel):
         will forward traffic through an SSH tunnel to (remote_host, remote_port)
         on the remote host identified by ssh_info.
         """
-        tunnel_key = f"{ssh_info.host}:{ssh_info.port}->{remote_host}:{remote_port}"
+        conn_key = f"{ssh_info.host}:{ssh_info.port}"
+        tunnel_key = f"{conn_key}->{remote_host}:{remote_port}"
 
         with self._lock:
             existing_path = self._tunnel_socket_paths.get(tunnel_key)
@@ -253,6 +303,14 @@ class SSHTunnelManager(MutableModel):
 
             client = self._get_or_create_connection(ssh_info)
             transport = _ssh_connection_transport(client)
+            stop_event = threading.Event()
+            on_transport_failure = _TransportFailureHandler(
+                manager=self,
+                conn_key=conn_key,
+                client=client,
+                stop_event=stop_event,
+            )
+
             # Use a short hash of tunnel_key for the filename. Encoding the full
             # tunnel_key produces paths that can exceed AF_UNIX's 104-byte
             # sun_path limit on macOS, especially with long hostnames or IPv6
@@ -264,15 +322,27 @@ class SSHTunnelManager(MutableModel):
             if socket_path.exists():
                 socket_path.unlink()
 
+            # Bound and listening before the path is handed back, so a caller
+            # that connects immediately cannot land in the window between the
+            # socket file appearing (at bind) and the listen that makes it
+            # connectable -- which shows up as a spurious unreachable backend.
+            server = _create_tunnel_listener(socket_path)
             thread = threading.Thread(
                 target=_tunnel_accept_loop,
-                args=(socket_path, transport, remote_host, remote_port, self._shutdown_event),
+                args=(
+                    server,
+                    socket_path,
+                    transport,
+                    remote_host,
+                    remote_port,
+                    self._shutdown_event,
+                    stop_event,
+                    on_transport_failure,
+                ),
                 daemon=True,
                 name=f"ssh-tunnel-{tunnel_key}",
             )
             thread.start()
-
-            _wait_for_socket(socket_path)
 
             self._tunnel_socket_paths[tunnel_key] = socket_path
             self._tunnel_threads[tunnel_key] = thread
@@ -635,13 +705,19 @@ class SSHTunnelManager(MutableModel):
         self._reverse_tunnels.clear()
         self._failure_state.clear()
 
-        for client in self._connections.values():
+        # Emptied under the lock, because a relay thread whose channel open is
+        # still in flight outlives the accept loops joined above and invalidates
+        # against this dict. Closing happens outside the lock: closing a wedged
+        # transport can itself block.
+        with self._lock:
+            clients = tuple(self._connections.values())
+            self._connections.clear()
+        for client in clients:
             try:
                 client.close()
             except (OSError, paramiko.SSHException) as e:
                 logger.trace("Error closing SSH connection during cleanup: {}", e)
 
-        self._connections.clear()
         self._tunnel_socket_paths.clear()
         self._tunnel_threads.clear()
 
@@ -678,13 +754,10 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
         timeout=10.0,
     )
 
-    # Send periodic keepalives so an idle reverse tunnel does not silently
-    # half-die: without this a dropped connection goes unnoticed on both ends
-    # (paramiko keeps the transport "active" and the remote sshd keeps the
-    # forwarded listener bound), orphaning the remote port across restarts.
-    # Keepalives also let paramiko mark the transport dead promptly when the
-    # peer stops responding, so the reverse-tunnel health check repairs it
-    # instead of spinning against a zombie connection.
+    # Send periodic keepalives so an idle reverse tunnel is not reaped for
+    # inactivity, which would leave the remote sshd's forwarded listener bound
+    # and orphan the remote port across restarts. See
+    # ``_SSH_KEEPALIVE_INTERVAL_SECONDS`` for why they do not detect a dead peer.
     transport = client.get_transport()
     if transport is not None:
         transport.set_keepalive(_SSH_KEEPALIVE_INTERVAL_SECONDS)
@@ -692,47 +765,172 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     return client
 
 
-def _wait_for_socket(socket_path: Path, timeout: float = 2.0) -> None:
-    """Wait for a Unix domain socket file to appear.
+def _create_short_path_tmpdir(prefix: str) -> tempfile.TemporaryDirectory[str]:
+    """Create a temporary directory short enough to hold AF_UNIX socket paths.
 
-    Raises SSHTunnelError if the socket does not appear within the timeout.
-    Uses threading.Event.wait for polling instead of time.sleep.
+    On macOS, $TMPDIR is a long per-user path under /var/folders/... that can
+    push a socket path over ``_MAX_AF_UNIX_PATH_LENGTH`` on its own, so /tmp is
+    used directly on Darwin.
     """
-    poll_event = threading.Event()
-    deadline = threading.Event()
-    timer = threading.Timer(timeout, deadline.set)
-    timer.start()
+    base_dir = "/tmp" if sys.platform == "darwin" else None
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=base_dir)
+
+
+def _create_tunnel_listener(socket_path: Path) -> socket.socket:
+    """Create, bind, and listen on the tunnel's Unix domain socket.
+
+    Done on the caller's thread rather than inside the accept loop so that the
+    socket is connectable the moment the path is handed out, and so a bind
+    failure raises here instead of surfacing on a background thread.
+    """
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        while not deadline.is_set():
-            if socket_path.exists():
-                return
-            poll_event.wait(timeout=_SOCKET_POLL_SECONDS)
-    finally:
-        timer.cancel()
-    raise SSHTunnelError(f"SSH tunnel socket did not appear within {timeout}s at {socket_path}")
+        server.bind(str(socket_path))
+    except OSError as e:
+        server.close()
+        raise SSHTunnelError(f"Could not bind tunnel socket {socket_path}: {e}") from e
+    try:
+        os.chmod(str(socket_path), 0o600)
+        server.listen(_TUNNEL_LISTEN_BACKLOG)
+        server.settimeout(_SHUTDOWN_POLL_SECONDS)
+    except OSError as e:
+        server.close()
+        # The bind above created the socket file, and closing the socket does
+        # not remove it. Only this arm may unlink: a path that failed to bind
+        # is one we do not own.
+        socket_path.unlink(missing_ok=True)
+        raise SSHTunnelError(f"Could not listen on tunnel socket {socket_path}: {e}") from e
+    return server
+
+
+class _TransportFailureHandler(FrozenModel):
+    """Retires one tunnel and the SSH connection under it, when that connection stops answering.
+
+    Retiring the loop is the half that triggers the rebuild: the next
+    :meth:`SSHTunnelManager.get_tunnel_socket_path` finds a dead thread, and by
+    then :meth:`SSHTunnelManager._get_or_create_connection` finds no cached
+    client either, so both are established fresh.
+    """
+
+    # ``threading.Event`` is not pydantic-native, and ``FrozenModel`` disallows
+    # arbitrary types by default.
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    manager: "SSHTunnelManager" = Field(description="Manager whose connection cache the dead client is dropped from")
+    conn_key: str = Field(description="``host:port`` key of the connection being retired")
+    client: paramiko.SSHClient = Field(description="The specific client to drop; a replacement is left alone")
+    stop_event: threading.Event = Field(description="Per-tunnel flag that retires this tunnel's accept loop")
+
+    def __call__(self) -> None:
+        self.manager._invalidate_connection(self.conn_key, self.client)
+        self.stop_event.set()
+
+
+def _is_transport_unusable(transport: paramiko.Transport, open_seconds: float) -> bool:
+    """Whether a channel open that just failed means the SSH connection itself is unusable.
+
+    The exception paramiko raises cannot answer this:
+    ``Transport.saved_exception`` is a single slot shared by every in-flight
+    open and reading it clears it, so out of a burst of refusals only the first
+    waiter to wake sees the ``ChannelException``. The rest get a bare
+    ``SSHException``, the same type a genuine transport failure raises.
+
+    The transport answers it. sshd answering, refusal included, leaves the
+    transport active and comes back within a single round trip. A peer that
+    vanished either takes the transport down with it, or leaves it reporting
+    active while the open runs out ``_CHANNEL_OPEN_TIMEOUT_SECONDS``.
+
+    ``open_seconds`` must be the larger of the monotonic and wall-clock elapsed,
+    because paramiko times the open on the wall clock. A machine that suspends
+    with an open in flight resumes with the wall clock advanced by the whole
+    sleep, so paramiko times out at once while the monotonic elapsed is still
+    near zero.
+    """
+    return not transport.is_active() or open_seconds >= _CHANNEL_OPEN_TIMEOUT_SECONDS
+
+
+def _open_and_relay(
+    client_sock: socket.socket,
+    transport: paramiko.Transport,
+    remote_host: str,
+    remote_port: int,
+    on_transport_failure: Callable[[], None],
+) -> None:
+    """Open a direct-tcpip channel for one accepted connection, then relay it.
+
+    Runs per connection rather than on the accept loop, because opening the
+    channel is the step that blocks when the transport has silently died: doing
+    it inline would queue every later connection behind the stuck one.
+
+    A failed open is either the target port not listening -- a workspace still
+    booting refuses every open until its service comes up -- or the SSH
+    connection underneath having stopped answering. The two call for opposite
+    responses, and :func:`_is_transport_unusable` is what tells them apart: only
+    the second retires the connection via ``on_transport_failure``.
+
+    ``EOFError`` is caught alongside paramiko's own exceptions because paramiko
+    re-raises a bare one from an open that was in flight when the peer closed;
+    it is neither an ``SSHException`` nor an ``OSError``.
+    """
+    started_at = time.monotonic()
+    started_at_wall = time.time()
+    try:
+        channel = transport.open_channel(
+            "direct-tcpip",
+            (remote_host, remote_port),
+            ("127.0.0.1", 0),
+            timeout=_CHANNEL_OPEN_TIMEOUT_SECONDS,
+        )
+    except (paramiko.SSHException, EOFError, OSError) as e:
+        client_sock.close()
+        open_seconds = max(time.monotonic() - started_at, time.time() - started_at_wall)
+        if not _is_transport_unusable(transport, open_seconds):
+            logger.debug("Failed to open an SSH channel to {}:{}: {}", remote_host, remote_port, e)
+            return
+        logger.warning(
+            "Failed to open an SSH channel to {}:{} at the transport level; dropped the connection so "
+            "the next request reconnects: {}",
+            remote_host,
+            remote_port,
+            e,
+        )
+        on_transport_failure()
+        return
+
+    # Leave a trace of a degrading link before it starts tripping the hard bound.
+    elapsed_seconds = time.monotonic() - started_at
+    if elapsed_seconds > _CHANNEL_OPEN_SLOW_THRESHOLD_SECONDS:
+        logger.debug(
+            "Opened an SSH channel to {}:{} in {:.1f}s, far longer than a single round trip should take",
+            remote_host,
+            remote_port,
+            elapsed_seconds,
+        )
+
+    relay_data(client_sock, channel)
 
 
 def _tunnel_accept_loop(
+    server: socket.socket,
     sock_path: Path,
     transport: paramiko.Transport,
     remote_host: str,
     remote_port: int,
     shutdown_event: threading.Event,
+    stop_event: threading.Event,
+    on_transport_failure: Callable[[], None],
 ) -> None:
-    """Accept connections on a Unix domain socket and forward them via SSH.
+    """Accept connections on an already-listening Unix socket and forward them via SSH.
 
-    For each accepted connection, opens a paramiko direct-tcpip channel to
-    (remote_host, remote_port) on the remote SSH host, then relays data
-    bidirectionally between the local socket and the SSH channel.
+    Takes ownership of ``server`` (built by :func:`_create_tunnel_listener`) and
+    closes and unlinks it on exit. Each accepted connection is handed to its own
+    thread, which opens the direct-tcpip channel and relays it.
+    ``shutdown_event`` retires every tunnel (manager cleanup); ``stop_event``
+    retires just this one, which is how a transport failure gets the tunnel
+    rebuilt on the next request.
     """
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        server.bind(str(sock_path))
-        os.chmod(str(sock_path), 0o600)
-        server.listen(8)
-        server.settimeout(_SHUTDOWN_POLL_SECONDS)
-
-        while not shutdown_event.is_set():
+        while not shutdown_event.is_set() and not stop_event.is_set():
             try:
                 client_sock, _ = server.accept()
             except socket.timeout:
@@ -741,23 +939,9 @@ def _tunnel_accept_loop(
                 logger.warning("Accept loop socket error, stopping tunnel: {}", e)
                 break
 
-            try:
-                channel = transport.open_channel(
-                    "direct-tcpip",
-                    (remote_host, remote_port),
-                    ("127.0.0.1", 0),
-                )
-            except (paramiko.SSHException, OSError) as e:
-                logger.warning("Failed to open SSH channel to {}:{}: {}", remote_host, remote_port, e)
-                client_sock.close()
-                if not transport.is_active():
-                    logger.warning("SSH transport is dead, stopping tunnel accept loop")
-                    break
-                continue
-
             threading.Thread(
-                target=relay_data,
-                args=(client_sock, channel),
+                target=_open_and_relay,
+                args=(client_sock, transport, remote_host, remote_port, on_transport_failure),
                 daemon=True,
                 name=f"ssh-relay-{remote_host}:{remote_port}",
             ).start()
