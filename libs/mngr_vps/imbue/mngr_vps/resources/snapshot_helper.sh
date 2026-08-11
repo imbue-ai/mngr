@@ -32,12 +32,15 @@
 #     MNGR_BTRFS_MOUNT_PATH -- e.g. /mngr-btrfs
 #     MNGR_HOST_SUBVOLUME   -- e.g. /mngr-btrfs/<host_id_hex>
 #     MNGR_TRIGGER_DIR      -- e.g. /var/lib/mngr-snapshot
+#     MNGR_MOUNT_POLL_SECONDS -- seconds between mount probes while deferring
+#                                a request (default 5; tests override)
 set -euo pipefail
 
 # --- config defaults (overridable via env) ----------------------------------
 : "${MNGR_BTRFS_MOUNT_PATH:=/mngr-btrfs}"
 : "${MNGR_HOST_SUBVOLUME:?MNGR_HOST_SUBVOLUME must be set}"
 : "${MNGR_TRIGGER_DIR:=/var/lib/mngr-snapshot}"
+: "${MNGR_MOUNT_POLL_SECONDS:=5}"
 
 SNAPSHOTS_DIR="${MNGR_BTRFS_MOUNT_PATH}/snapshots"
 REQUEST_PATH="${MNGR_TRIGGER_DIR}/request.json"
@@ -60,6 +63,30 @@ emit_result() {
         '{request_id: $request_id, operation: $operation, exit_code: $exit_code, stdout: $stdout, stderr: $stderr, snapshot_path: $snapshot_path}' \
         > "$RESULT_TMP"
     mv "$RESULT_TMP" "$RESULT_PATH"
+}
+
+# Block until the data volume is actually mounted. On slice VMs the btrfs
+# disk is mounted by the guest's lima provisioning at a highly variable point
+# late in boot (well after local-fs.target, which this unit orders on), and
+# the trigger dir lives on the root fs, so a request can be waiting before
+# the volume exists -- e.g. this script's own startup replay of a request
+# left over from before a reboot. Servicing it early is doubly wrong: the
+# mkdir/btrfs calls write shadow debris onto the root fs beneath the
+# unmounted mountpoint (which once defeated the workspace autostart trigger;
+# see default-workspace-template#381), and the request fails when it only
+# needed to wait a few seconds -- and then never retries, because the
+# result-id guard retires it. Deferring is always correct: the inner
+# requester enforces its own result timeout, and a deferred request serviced
+# post-mount produces the result it would have produced on a healthy boot.
+wait_until_data_volume_mounted() {
+    local waited=0
+    until mountpoint -q "$(readlink -f "$MNGR_BTRFS_MOUNT_PATH")"; do
+        if [ "$((waited % 60))" -eq 0 ]; then
+            echo "snapshot_helper: waiting for the data volume at ${MNGR_BTRFS_MOUNT_PATH} to be mounted (waited ${waited}s)" >&2
+        fi
+        sleep "$MNGR_MOUNT_POLL_SECONDS"
+        waited=$((waited + MNGR_MOUNT_POLL_SECONDS))
+    done
 }
 
 # Return 0 iff `name` is a safe single path component (a child of the
@@ -139,6 +166,11 @@ do_cleanup() {
 
 handle_request() {
     local payload request_id operation target last_result_request_id
+    # Defer (never fail) requests that arrive before the data volume is up.
+    # Waiting BEFORE reading the payload matters: the deferral can last
+    # minutes, and a request superseded during it should never be serviced --
+    # once the volume appears we read (and answer) the newest request on disk.
+    wait_until_data_volume_mounted
     payload=$(cat "$REQUEST_PATH" 2>/dev/null || echo "{}")
     request_id=$(echo "$payload" | jq -r '.request_id // ""')
     operation=$(echo "$payload" | jq -r '.operation // ""')

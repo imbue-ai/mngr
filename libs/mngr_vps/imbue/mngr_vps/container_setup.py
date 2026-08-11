@@ -310,6 +310,15 @@ def is_path_mounted_on_outer(outer: OuterHostInterface, path: Path) -> bool:
     return result.success
 
 
+def is_path_symlink_on_outer(outer: OuterHostInterface, path: Path) -> bool:
+    """Return True iff ``path`` is a symlink on the outer."""
+    result = outer.execute_idempotent_command(
+        f"test -L {shlex.quote(str(path))}",
+        timeout_seconds=10.0,
+    )
+    return result.success
+
+
 def is_fstab_entry_present_on_outer(outer: OuterHostInterface, loop_file_path: Path) -> bool:
     """Return True iff ``/etc/fstab`` already references ``loop_file_path`` at column 1."""
     pattern = f"^{re.escape(str(loop_file_path))}[[:space:]]"
@@ -634,9 +643,27 @@ def prepare_btrfs_on_outer(
     suitable for use as the ``device=`` value of a bind-options docker volume.
 
     Raises ``VpsProvisioningError`` if free space on ``/`` (after subtracting
-    ``outer_disk_reserved_gb``) is not positive, or if any setup step fails.
+    ``outer_disk_reserved_gb``) is not positive, if the mount path is a symlink
+    with nothing mounted at its target yet (the pre-mounted slice layout before
+    the VM's data-disk provisioning finishes), or if any setup step fails.
     """
     subvolume_path = btrfs_mount_path / host_id.get_uuid().hex
+
+    # Guard the slice case: a symlink at the mount path is the signature of a
+    # pre-mounted data disk (the VM's lima ``additionalDisk``, mounted elsewhere
+    # and symlinked here by guest provisioning). If nothing is mounted at its
+    # target yet, the pre-mounted branch below would not match and we would
+    # silently fall through to building a loop file on the VM's root disk -- a
+    # wrong-but-working state that masks the real volume (and its content) from
+    # then on. Refuse loudly instead; the caller retries once the VM's data-disk
+    # provisioning finishes.
+    is_mounted = is_path_mounted_on_outer(outer, btrfs_mount_path)
+    if not is_mounted and is_path_symlink_on_outer(outer, btrfs_mount_path):
+        raise VpsProvisioningError(
+            f"The btrfs mount path {btrfs_mount_path} is a symlink (pre-mounted data-disk layout) but "
+            f"nothing is mounted at its target yet; refusing to fall back to a loop file on the root "
+            f"disk. Wait for the VM's data-disk provisioning to finish and retry."
+        )
 
     # Pre-mounted-btrfs case (slices): the btrfs filesystem is already mounted at
     # ``btrfs_mount_path`` -- it's the VM's lima ``additionalDisk``, not a loop
@@ -644,7 +671,7 @@ def prepare_btrfs_on_outer(
     # "mount present AND our loop file absent" so a normal loop-backed VPS re-run
     # (loop file present) still takes the full path below. Just ensure btrfs-progs
     # and the per-host subvolume, then return.
-    if is_path_mounted_on_outer(outer, btrfs_mount_path) and not check_file_exists_on_outer(outer, loop_file_path):
+    if is_mounted and not check_file_exists_on_outer(outer, loop_file_path):
         with log_span("Using pre-mounted btrfs at {} (no loop image)", btrfs_mount_path):
             if not is_btrfs_progs_installed_on_outer(outer):
                 install_btrfs_progs_on_outer(outer)

@@ -726,6 +726,7 @@ def _fresh_vps_script() -> list[tuple[str, CommandResult]]:
         ("test -f /var/lib/mngr-btrfs.img", _fail()),
         ("df --output=avail", _ok(f"{100 * (1024**3)}\n")),
         ("mountpoint -q", _fail()),
+        ("test -L /mngr-btrfs", _fail()),
         ("grep -qE", _fail()),
         (f"test -d /mngr-btrfs/{_TEST_HOST_HEX}", _fail()),
     ]
@@ -808,6 +809,7 @@ def test_prepare_btrfs_on_outer_raises_when_free_space_below_reserve() -> None:
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
             ("mountpoint -q", _fail()),
+            ("test -L /mngr-btrfs", _fail()),
             ("df --output=avail", _ok(f"{15 * (1024**3)}\n")),
         ]
     )
@@ -830,6 +832,7 @@ def test_prepare_btrfs_on_outer_raises_when_free_space_equal_to_reserve() -> Non
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
             ("mountpoint -q", _fail()),
+            ("test -L /mngr-btrfs", _fail()),
             ("df --output=avail", _ok(f"{20 * (1024**3)}\n")),
         ]
     )
@@ -898,6 +901,34 @@ def test_prepare_btrfs_on_outer_skips_loop_when_btrfs_already_mounted() -> None:
     assert "/etc/fstab" not in joined
     # ...but the per-host subvolume was created.
     assert f"btrfs subvolume create /mngr-btrfs/{_TEST_HOST_HEX}" in joined
+
+
+def test_prepare_btrfs_on_outer_raises_when_mount_path_is_unmounted_symlink() -> None:
+    """Slice VM whose data disk has not mounted yet: refuse, never build a loop file.
+
+    A symlink at the mount path is the pre-mounted (slice) layout; if nothing is
+    mounted at its target yet (e.g. the guest's lima provisioning has not
+    finished), falling through to the loop-file path would silently build a
+    loop image on the VM's root disk and mask the real volume from then on.
+    """
+    outer = _scripted(
+        [
+            ("mountpoint -q", _fail()),
+            ("test -L /mngr-btrfs", _ok()),
+        ]
+    )
+    with pytest.raises(VpsProvisioningError, match="symlink"):
+        prepare_btrfs_on_outer(
+            outer,
+            host_id=_TEST_HOST_ID,
+            btrfs_mount_path=_TEST_MOUNT_PATH,
+            loop_file_path=_TEST_LOOP_FILE,
+            outer_disk_reserved_gb=_TEST_RESERVED_GB,
+        )
+    # Nothing was mutated: only the two probes ran.
+    recorded = cast(_ScriptedOuter, outer).recorded
+    for cmd in recorded:
+        assert cmd.startswith(("mountpoint -q", "test -L")), f"unexpected command issued: {cmd!r}"
 
 
 # =========================================================================
