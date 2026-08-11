@@ -19,6 +19,7 @@ from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvid
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_imbue_cloud.providers.slice_provider import _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR
 from imbue.mngr_imbue_cloud.providers.slice_provider import _ENV_D_BROWSER_UNIT
+from imbue.mngr_imbue_cloud.providers.slice_provider import _IMAGE_CACHE_WAIT_ROUNDS
 from imbue.mngr_imbue_cloud.providers.slice_provider import _PLAYWRIGHT_CTX_DIR
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
 from imbue.mngr_imbue_cloud.slices.mock_box_image_cache_test import MockBoxImageCache
@@ -99,7 +100,18 @@ def test_waits_then_loads_when_another_slice_is_seeding() -> None:
     # No tar yet and the lock is held by an in-flight builder, so we must take the
     # try_acquire (fails) -> wait_for_tar (tar appears) -> load path rather than the
     # has_tar() fast path.
-    cache = MockBoxImageCache(locks_held={_TAG}, is_tar_published_on_wait=True)
+    cache = MockBoxImageCache(locks_held={_TAG}, tar_published_after_wait_count=1)
+    provider = _provider(cache)
+    _ensure(provider)
+    assert provider.loaded_tags == [_TAG]
+    assert provider.seeded_tags == []
+
+
+def test_loads_when_the_tar_publishes_during_the_final_wait_round() -> None:
+    # A tar published during an earlier round's wait is caught by the next round's
+    # has_tar re-check, but one landing during the LAST round's wait has no
+    # following round: the post-loop check must load it rather than raising.
+    cache = MockBoxImageCache(locks_held={_TAG}, tar_published_after_wait_count=_IMAGE_CACHE_WAIT_ROUNDS)
     provider = _provider(cache)
     _ensure(provider)
     assert provider.loaded_tags == [_TAG]
@@ -113,6 +125,17 @@ def test_raises_when_lock_held_and_tar_never_appears() -> None:
     with pytest.raises(BoxImageCacheError):
         _ensure(provider)
     assert provider.seeded_tags == []
+    assert provider.loaded_tags == []
+
+
+def test_reacquires_and_seeds_when_the_seeder_dies_without_a_tar() -> None:
+    # A seeder holds the lock but dies without publishing (its build failed): the
+    # wait returns early with the lock released, and the next round must take over
+    # as the new seeder instead of stranding until the wait window expires.
+    cache = MockBoxImageCache(locks_held={_TAG}, is_lock_released_on_wait=True)
+    provider = _provider(cache)
+    _ensure(provider)
+    assert provider.seeded_tags == [_TAG]
     assert provider.loaded_tags == []
 
 

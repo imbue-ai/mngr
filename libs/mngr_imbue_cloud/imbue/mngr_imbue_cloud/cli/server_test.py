@@ -10,11 +10,13 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.cli.server import _bake_one_slice_with_retry
 from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
 from imbue.mngr_imbue_cloud.cli.server import _destroy_one_pool_host
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
 from imbue.mngr_imbue_cloud.cli.server import _resolve_vendored_mngr_source
+from imbue.mngr_imbue_cloud.cli.server import _run_bake_attempts
 from imbue.mngr_imbue_cloud.cli.server import assert_box_is_exclusive_to_tier
 from imbue.mngr_imbue_cloud.cli.server import build_box_tier_audit_report
 from imbue.mngr_imbue_cloud.cli.server import build_pool_host_destroy_report
@@ -27,12 +29,14 @@ from imbue.mngr_imbue_cloud.cli.server import slice_advertised_attributes
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BoxTierAudit
 from imbue.mngr_imbue_cloud.data_types import PoolHostDestroyOutcome
+from imbue.mngr_imbue_cloud.data_types import SliceBakeOutcome
 from imbue.mngr_imbue_cloud.data_types import UnauditedBox
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
@@ -291,6 +295,84 @@ def test_bounded_fan_out_caps_concurrency_and_collects_all_outcomes() -> None:
     )
     assert sorted(outcome["item"] for outcome in outcomes) == [0, 1, 2, 3]
     assert concurrency_state["max"] == 2
+
+
+def _bake_outcome(status: SliceBakeOutcomeStatus, host_name: str) -> SliceBakeOutcome:
+    # error is documented "failed only" on SliceBakeOutcome, so stamp it only there.
+    error = "boom" if status == SliceBakeOutcomeStatus.FAILED else None
+    return SliceBakeOutcome(host_name=host_name, server_id="server-1", status=status, error=error)
+
+
+def test_run_bake_attempts_returns_the_first_success_without_retrying() -> None:
+    call_count = {"count": 0}
+
+    def bake_once() -> SliceBakeOutcome:
+        call_count["count"] += 1
+        return _bake_outcome(SliceBakeOutcomeStatus.SUCCEEDED, f"slice-{call_count['count']}")
+
+    outcome = _run_bake_attempts(bake_once, attempt_count=3, termination_event=threading.Event())
+    assert outcome.status == SliceBakeOutcomeStatus.SUCCEEDED
+    assert call_count["count"] == 1
+
+
+def test_run_bake_attempts_retries_a_transient_failure_with_a_fresh_slice() -> None:
+    # A failed bake destroys its VM and writes no row, so the retry is a clean fresh
+    # slice: two transient failures followed by a success must yield the success.
+    call_count = {"count": 0}
+
+    def bake_once() -> SliceBakeOutcome:
+        call_count["count"] += 1
+        status = SliceBakeOutcomeStatus.SUCCEEDED if call_count["count"] == 3 else SliceBakeOutcomeStatus.FAILED
+        return _bake_outcome(status, f"slice-{call_count['count']}")
+
+    outcome = _run_bake_attempts(bake_once, attempt_count=3, termination_event=threading.Event())
+    assert outcome.status == SliceBakeOutcomeStatus.SUCCEEDED
+    assert outcome.host_name == "slice-3"
+    assert call_count["count"] == 3
+
+
+def test_run_bake_attempts_returns_the_last_failure_after_exhausting_attempts() -> None:
+    call_count = {"count": 0}
+
+    def bake_once() -> SliceBakeOutcome:
+        call_count["count"] += 1
+        return _bake_outcome(SliceBakeOutcomeStatus.FAILED, f"slice-{call_count['count']}")
+
+    outcome = _run_bake_attempts(bake_once, attempt_count=2, termination_event=threading.Event())
+    assert outcome.status == SliceBakeOutcomeStatus.FAILED
+    assert outcome.host_name == "slice-2"
+    assert call_count["count"] == 2
+
+
+def test_run_bake_attempts_does_not_retry_after_the_bake_is_terminated() -> None:
+    # A termination signal's kill sweep makes every in-flight attempt fail; retrying
+    # those would spawn replacement bakes (new VMs) after the operator killed the
+    # bake, so a set termination event must return the failure without retrying.
+    termination_event = threading.Event()
+    termination_event.set()
+    call_count = {"count": 0}
+
+    def bake_once() -> SliceBakeOutcome:
+        call_count["count"] += 1
+        return _bake_outcome(SliceBakeOutcomeStatus.FAILED, f"slice-{call_count['count']}")
+
+    outcome = _run_bake_attempts(bake_once, attempt_count=3, termination_event=termination_event)
+    assert outcome.status == SliceBakeOutcomeStatus.FAILED
+    assert call_count["count"] == 1
+
+
+def test_bake_worker_does_not_start_a_first_attempt_after_termination() -> None:
+    # A worker still queued on the concurrency semaphore when the bake is terminated
+    # must not start its first `mngr create` (a brand-new VM carve after the kill
+    # sweep); it reports the slice as failed instead. The worker kwargs deliberately
+    # omit everything _bake_one_slice requires, so any accidental bake attempt
+    # fails loudly.
+    termination_event = threading.Event()
+    termination_event.set()
+    outcome = _bake_one_slice_with_retry(termination_event=termination_event, server=_server(4, 16))
+    assert outcome.status == SliceBakeOutcomeStatus.FAILED
+    assert outcome.host_name == "slice-never-started"
+    assert outcome.error is not None and "terminated before" in outcome.error
 
 
 def test_assert_box_is_exclusive_to_tier_accepts_a_single_key_and_same_tier_slices() -> None:

@@ -95,7 +95,16 @@ class LimaBoxImageCache(BoxImageCacheInterface):
 
     def wait_for_tar(self, image_tag: str, *, timeout_seconds: int) -> bool:
         tar = shlex.quote(self._tar_path(image_tag))
-        poll = f"timeout {int(timeout_seconds)} bash -c {shlex.quote(f'until test -f {tar}; do sleep 5; done')}"
+        lock = shlex.quote(self._lock_path(image_tag))
+        # Also exit early (non-zero) when the build lock disappears without the tar:
+        # the seeder died or its build failed, so the caller should re-contend the
+        # lock right away instead of blocking out the full window. The seeder
+        # publishes the tar (atomic mv) BEFORE releasing the lock, so a vanished
+        # lock without a tar can only mean a dead/failed seed -- and the caller
+        # re-checks has_tar before acting on a False return, closing the race where
+        # the tar lands between our two probes.
+        poll_script = f"until test -f {tar}; do test -d {lock} || exit 1; sleep 5; done"
+        poll = f"timeout {int(timeout_seconds)} bash -c {shlex.quote(poll_script)}"
         rc, _out, _err = self._run(poll, timeout=float(timeout_seconds + 60), label="cache-wait-tar")
         return rc == 0
 

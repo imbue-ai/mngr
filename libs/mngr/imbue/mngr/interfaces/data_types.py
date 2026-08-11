@@ -191,6 +191,10 @@ class CommandResult(FrozenModel):
     stdout: str = Field(description="Standard output from the command")
     stderr: str = Field(description="Standard error from the command")
     success: bool = Field(description="True if the command succeeded (had an expected exit code)")
+    exit_code: int | None = Field(
+        default=None,
+        description="The command's exit code when the executor observed one (None when not surfaced)",
+    )
 
 
 class CleanupFailureCategory(UpperCaseStrEnum):

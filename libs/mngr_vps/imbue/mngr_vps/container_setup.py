@@ -134,6 +134,10 @@ def ensure_depot_token_available(builder: DockerBuilder) -> None:
 # attempts can resume rather than re-uploading completed bytes.
 _RSYNC_PARTIAL_DIR_REMOTE: Final[str] = "/tmp/mngr-rsync-partial"
 
+# How many trailing lines of EACH stream a failed docker build reports (the two
+# streams are tailed separately so one stream's noise cannot hide the other's error).
+_BUILD_FAILURE_TAIL_LINE_COUNT: Final[int] = 50
+
 # Backoff between attempts (entry N is the wait *before* attempt N+1). There is
 # one entry per retry gap; the total attempt count is derived from its length so
 # the two can never drift (the loop indexes this tuple on every non-last attempt).
@@ -1168,8 +1172,19 @@ def build_image_on_outer(
         timeout_seconds=timeout_seconds,
     )
     if not result.success:
-        tail = "\n".join((result.stdout + "\n" + result.stderr).splitlines()[-50:])
-        raise MngrError(f"Remote docker build failed: {tail}")
+        # Tail each stream separately: concatenating stdout+stderr and tailing the
+        # combination lets one stream's noise (e.g. buildkit progress on stderr)
+        # push the other stream's error text out of the window entirely. The exit
+        # code distinguishes "the build script really failed" from output that just
+        # stopped arriving.
+        stderr_tail = "\n".join(result.stderr.splitlines()[-_BUILD_FAILURE_TAIL_LINE_COUNT:])
+        stdout_tail = "\n".join(result.stdout.splitlines()[-_BUILD_FAILURE_TAIL_LINE_COUNT:])
+        exit_code_note = f"exit code {result.exit_code}" if result.exit_code is not None else "exit code unknown"
+        raise MngrError(
+            f"Remote docker build failed ({exit_code_note}).\n"
+            f"--- stderr tail ---\n{stderr_tail}\n"
+            f"--- stdout tail ---\n{stdout_tail}"
+        )
     return tag
 
 

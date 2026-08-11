@@ -46,7 +46,7 @@ class BoxImageCacheInterface(MutableModel, ABC):
 
     @abstractmethod
     def wait_for_tar(self, image_tag: str, *, timeout_seconds: int) -> bool:
-        """Block until the tar for image_tag exists; True if it appeared, False on timeout."""
+        """Block until the tar for image_tag exists (True); False when the build lock vanished without it or on timeout."""
 
     @abstractmethod
     def check_free_disk(self, required_bytes: int) -> None:

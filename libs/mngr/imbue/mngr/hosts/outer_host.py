@@ -1063,6 +1063,7 @@ class OuterHost(OuterHostInterface):
             stdout=accumulator.stdout,
             stderr=accumulator.stderr,
             success=(finished.returncode == 0),
+            exit_code=finished.returncode,
         )
 
     @retry_on_transient_ssh_error
@@ -1135,6 +1136,7 @@ class OuterHost(OuterHostInterface):
             stdout="\n".join(stdout_lines) + ("\n" if stdout_lines else ""),
             stderr="\n".join(stderr_state.lines) + ("\n" if stderr_state.lines else ""),
             success=(exit_code == 0),
+            exit_code=exit_code,
         )
 
     def read_file(self, path: Path) -> bytes:

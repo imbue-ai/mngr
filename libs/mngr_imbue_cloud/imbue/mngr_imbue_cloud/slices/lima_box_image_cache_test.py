@@ -83,6 +83,17 @@ def test_try_acquire_build_lock_reclaims_a_stale_lock() -> None:
     assert state["mkdir_calls"] == 2
 
 
+def test_wait_for_tar_poll_exits_early_when_the_lock_vanishes() -> None:
+    # The poll must abort (non-zero) as soon as the build lock disappears without
+    # the tar -- a dead/failed seeder -- so the caller re-contends the lock in
+    # seconds instead of blocking out the full wait window.
+    client, cache = _build(lambda cmd: (1, "", ""))
+    assert cache.wait_for_tar(_TAG, timeout_seconds=60) is False
+    poll_cmd = next(c for c in client.recorded if "until test -f" in c)
+    assert ".lock-" in poll_cmd
+    assert "|| exit 1" in poll_cmd
+
+
 def test_save_image_renders_atomic_save_and_prune() -> None:
     client, cache = _build(lambda cmd: (0, "", ""))
     cache.save_image_from_slice(_TAG, vm_ssh_port=2200, transfer_key=_KEY)

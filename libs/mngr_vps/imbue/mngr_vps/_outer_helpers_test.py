@@ -371,6 +371,42 @@ def test_build_image_on_outer_raises_on_build_failure() -> None:
         )
 
 
+def test_build_image_on_outer_failure_reports_both_stream_tails_and_exit_code() -> None:
+    # Each stream is tailed separately: a long buildkit progress tail on stderr must
+    # not push the stdout error text out of the reported window, and the exit code
+    # tells a real build failure apart from output that just stopped arriving.
+    noisy_stderr = "\n".join(f"#36 exporting layers {idx}" for idx in range(80))
+    outer = _outer(CommandResult(stdout="the real error is here", stderr=noisy_stderr, success=False, exit_code=17))
+    with pytest.raises(MngrError) as exc_info:
+        build_image_on_outer(
+            outer,
+            tag="bad-image",
+            build_context_path="/tmp/build",
+            docker_build_args=[],
+            timeout_seconds=60.0,
+            on_output=None,
+            builder=DockerBuilder.DOCKER,
+        )
+    message = str(exc_info.value)
+    assert "exit code 17" in message
+    assert "the real error is here" in message
+    assert "--- stderr tail ---" in message and "--- stdout tail ---" in message
+
+
+def test_build_image_on_outer_failure_reports_unknown_exit_code_when_absent() -> None:
+    outer = _outer(CommandResult(stdout="", stderr="boom", success=False))
+    with pytest.raises(MngrError, match="exit code unknown"):
+        build_image_on_outer(
+            outer,
+            tag="bad-image",
+            build_context_path="/tmp/build",
+            docker_build_args=[],
+            timeout_seconds=60.0,
+            on_output=None,
+            builder=DockerBuilder.DOCKER,
+        )
+
+
 def test_ensure_depot_token_available_raises_for_depot_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEPOT_TOKEN", raising=False)
     with pytest.raises(MngrError, match="DEPOT_TOKEN"):
