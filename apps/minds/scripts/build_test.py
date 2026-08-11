@@ -341,35 +341,25 @@ def test_build_js_stages_every_runtime_binary() -> None:
 
     ``build.js`` is the only stage whose output reaches the app: ToDesktop maps the
     uploaded ``resources/`` into ``Contents/Resources`` via ``extraResources``, which
-    is what ``paths.getResourcesDir()`` reads. The ``todesktop:beforeInstall`` hook
-    also downloads binaries, but it runs against ``app-wrapper/app/``, so its output
-    is folded into ``app.asar`` and never read at runtime.
+    is what ``paths.getResourcesDir()`` reads.
 
-    A binary fetched only by the hook therefore ships dead. That already happened:
-    ``desync`` was staged by the hook alone, so no packaged release ever carried a
-    usable copy and the pre-baked-image download was broken in every build, silently
-    -- dev is unaffected, because ``ensure-binaries.js`` populates ``resources/``
-    there. This guard fails if a downloader is dropped from ``main()``.
+    A binary that build.js does not stage therefore ships dead, and that happened
+    twice while the staging list was written out by hand here: ``desync``, then the
+    latchkey ``curl``. Both were fetched only by the ToDesktop ``beforeInstall``
+    hook, whose output lands in ``app.asar`` where nothing reads it. Staging is now
+    driven by the BINARIES table instead, and this guard keeps it that way.
     """
     text = (APP_ROOT / "scripts" / "build.js").read_text()
     match = re.search(r"async function main\(\) \{(.*?)\n\}\n", text, re.DOTALL)
     assert match is not None, "Could not locate main() in build.js"
     body = match.group(1)
 
-    for downloader in (
-        "downloadUv",
-        "downloadLima",
-        "downloadGit",
-        "downloadRestic",
-        "downloadDesync",
-        "downloadLatchkeyCurl",
-    ):
-        assert f"{downloader}(" in body, (
-            f"build.js main() must call {downloader}(). build.js is the only stage "
-            "whose resources/ reaches the packaged app -- a binary fetched solely by "
-            "the todesktop:beforeInstall hook lands in app.asar and is unreachable at "
-            "runtime."
-        )
+    assert "downloadBinaries(RESOURCES_DIR)" in body, (
+        "build.js main() must stage binaries via downloadBinaries(RESOURCES_DIR), which "
+        "iterates download-binaries.js's BINARIES table. Naming individual downloaders "
+        "here is what let desync -- and later the latchkey curl -- ship staged by "
+        "nothing that reaches the app, landing in app.asar where nothing reads them."
+    )
 
 
 def test_bundle_latchkey_uses_pnpm_deploy_against_lockfile() -> None:
@@ -631,53 +621,187 @@ def test_download_binaries_git_map_agrees_with_manifest() -> None:
     )
 
 
-def test_ensure_binaries_guards_stale_git_payload() -> None:
-    """Guard: ensure-binaries.js must keep its dugite-native staleness check.
+def test_ensure_binaries_derives_its_required_set_from_the_binaries_table() -> None:
+    """Guard: the dev required-set must be derived, never restated.
 
-    A dev machine carrying an old (pre-manifest or wrong-tag) git payload passes
-    the plain existence check, so ensure-binaries.js reads the pinned tag from
-    git-manifest.json and treats a missing/mismatched ``.dugite-tag`` marker as a
-    missing binary, forcing a re-download. This cheap textual check trips if
-    someone deletes that staleness logic. See specs/minds-managed-git/concise.md.
+    ensure-binaries.js used to hand-maintain a list of paths parallel to what
+    download-binaries.js actually produces, and it drifted twice. The second time
+    was lima, which download-binaries.js never provisioned at all: the path could
+    never be satisfied, so every ``pnpm start`` re-ran the full downloader and
+    re-fetched every binary. Deriving the set from BINARIES makes that unrepresentable.
+    """
+    text = (APP_ROOT / "scripts" / "ensure-binaries.js").read_text()
+    assert "getProvisionedBinaries(" in text, (
+        "ensure-binaries.js must derive its required set from "
+        "getProvisionedBinaries() in download-binaries.js, so it can never require "
+        "a path the downloader does not produce."
+    )
+    assert "usedInDev" in text, (
+        "ensure-binaries.js must filter the provisioned set by BINARIES[].usedInDev, "
+        "so dev does not download binaries it never resolves (e.g. uv, which dev "
+        "deliberately takes from the developer's PATH)."
+    )
+
+
+def test_dev_mode_puts_bundled_lima_on_path() -> None:
+    """Guard: dev must resolve the pinned limactl, not the developer's own.
+
+    ``mngr_lima`` resolves ``limactl`` via ``shutil.which``, and lima is pinned
+    (see download-binaries.js) because 2.1.x's usernet forwarder wedges fresh ssh
+    connections and hangs agent creation forever. ``check_lima_version`` only
+    enforces a *minimum*, so a newer system lima passes and then hangs. Dev
+    therefore has to prepend the bundled lima bin dir like packaged mode does.
+    """
+    text = (APP_ROOT / "electron" / "backend.js").read_text()
+    match = re.search(r"if \(paths\.isDev\(\)\) \{(.*?)\n      \} else \{", text, re.DOTALL)
+    assert match is not None, "Could not locate the dev-mode branch in backend.js"
+    assert "getLimaBinDir()" in match.group(1), (
+        "backend.js's dev branch must prepend paths.getLimaBinDir() to PATH so agent "
+        "creation uses the pinned limactl; mngr_lima resolves it from PATH and only "
+        "checks a minimum version, so a newer system lima silently hangs creation."
+    )
+
+
+def _run_cache_harness(tmp_path: Path, concurrency: int) -> dict:
+    """Exercise ensureCachedBinary under contention, with a stubbed download."""
+    assert _NODE_BINARY is not None
+    result = subprocess.run(
+        [
+            _NODE_BINARY,
+            str(APP_ROOT / "test" / "binary_cache_harness.js"),
+            str(tmp_path / "cache"),
+            str(concurrency),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return json.loads(result.stdout)
+
+
+def test_binary_cache_survives_concurrent_provisioners(tmp_path: Path) -> None:
+    """Parallel provisioners must converge on one complete entry.
+
+    Many worktrees and many agents share one machine and one cache, so several
+    processes routinely provision the same binary at the same moment. Each
+    stages its download and renames it into place, so the losers of the race
+    find a complete entry rather than clobbering a directory another process is
+    already reading from -- and no caller ever observes a half-extracted one.
+    """
+    outcome = _run_cache_harness(tmp_path, concurrency=8)
+    assert outcome["distinctEntriesFromRace"] == 1, (
+        "concurrent provisioners must all resolve to the same cache entry; got "
+        f"{outcome['distinctEntriesFromRace']} distinct paths"
+    )
+    assert outcome["racedContent"] == "v1", "the surviving entry must hold complete content"
+    assert outcome["stagingLeftBehind"] == 0, (
+        "staging directories must be cleaned up even when a provisioner loses the race, "
+        "or the cache accumulates partial downloads forever"
+    )
+
+
+def test_binary_cache_provisions_a_bumped_version_without_disturbing_the_old(tmp_path: Path) -> None:
+    """Bumping a pinned version must fetch the new one and leave the old alone.
+
+    Cache entries are keyed by version, so a bump is a cache miss that fetches
+    fresh rather than silently reusing the previous bytes. The old entry stays
+    intact because checkouts still pinned to it -- other branches, other agents
+    mid-run -- are reading from it through their symlinks.
+    """
+    outcome = _run_cache_harness(tmp_path, concurrency=8)
+    assert outcome["bumpDownloadCount"] == 1, (
+        "a version bump must be a cache miss that downloads exactly once; got "
+        f"{outcome['bumpDownloadCount']} downloads"
+    )
+    assert outcome["bumpedContent"] == "v2", "the bumped entry must hold the new version's content"
+    assert outcome["oldVersionStillIntact"], (
+        "the previous version's entry must survive a bump -- other checkouts still "
+        "symlink at it and would break mid-run"
+    )
+
+
+def test_binary_cache_repairs_an_entry_whose_files_were_pruned(tmp_path: Path) -> None:
+    """A partially-pruned cache entry must be repaired, not wedge the cache.
+
+    Cache cleaners delete files but leave directories, so an entry can survive
+    with its completion marker gone. Such an entry can satisfy nothing, and
+    renaming a fresh download onto it fails with ENOTEMPTY -- so without an
+    explicit repair the failure is permanent and every later launch dies on it,
+    with nothing pointing at the cache as the cause.
+    """
+    outcome = _run_cache_harness(tmp_path, concurrency=8)
+    assert outcome["repairDownloadCount"] == 1, (
+        f"a pruned entry must be re-provisioned exactly once; got {outcome['repairDownloadCount']} downloads"
+    )
+    assert outcome["repairedContent"] == "v2", "the repaired entry must hold complete content"
+
+
+def _parse_binaries_table() -> dict[str, dict]:
+    """Return download-binaries.js's BINARIES table, evaluated by node.
+
+    Read from the module itself rather than regex-parsed, so the guards below
+    assert against the table the scripts actually use.
+    """
+    assert _NODE_BINARY is not None
+    result = subprocess.run(
+        [
+            _NODE_BINARY,
+            "-e",
+            "const {BINARIES} = require(process.argv[1]);"
+            "console.log(JSON.stringify(Object.fromEntries(Object.entries(BINARIES).map("
+            "([k, v]) => [k, {requiredPath: v.requiredPath, usedInDev: v.usedInDev,"
+            "}]))))",
+            str(_DOWNLOAD_BINARIES_PATH),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _parse_binaries_table_names() -> set[str]:
+    """Names of the binaries download-binaries.js provisions."""
+    return set(_parse_binaries_table())
+
+
+def test_binaries_required_paths_match_what_the_runtime_resolves() -> None:
+    """Guard: each BINARIES entry's completion path must be the path the app runs.
+
+    ``requiredPath`` is what decides an install is complete -- in the shared cache
+    and in ``resources/``. If it names a file the app never resolves, a broken
+    install passes the check; if it names the wrong one, a good install is
+    re-fetched forever. Both are silent, so tie the table to electron/paths.js.
+    """
+    paths_text = (APP_ROOT / "electron" / "paths.js").read_text()
+    resolved = {
+        tuple(re.findall(r"'([^']+)'", components))
+        for components in re.findall(r"path\.join\(getResourcesDir\(\),\s*([^)]+)\)", paths_text)
+    }
+    for name, entry in _parse_binaries_table().items():
+        expected = (name, *entry["requiredPath"].split(os.sep))
+        assert expected in resolved, (
+            f"BINARIES.{name}.requiredPath is {entry['requiredPath']!r}, so the install is "
+            f"considered complete at resources/{'/'.join(expected)} -- but electron/paths.js "
+            f"resolves no such path. Bring the table and the runtime back in agreement."
+        )
+
+
+def test_ensure_binaries_replaces_anything_but_the_current_cache_entry() -> None:
+    """Guard: resources/<name> is re-provisioned unless it resolves to the current entry.
+
+    The pinned version is a path segment of the cache entry, so "resolves to the
+    current entry" IS the version check. That one comparison covers a link to a
+    superseded entry, a real directory staged by ``pnpm build``, and a checkout
+    provisioned before the cache existed -- cases that otherwise need a
+    per-payload version marker each. Losing it silently serves old bytes.
     """
     text = _ENSURE_BINARIES_PATH.read_text()
-    assert ".dugite-tag" in text, (
-        "ensure-binaries.js must reference the '.dugite-tag' marker so a stale "
-        "bundled git payload is re-downloaded (spec: minds-managed-git)."
-    )
-    assert "git-manifest.json" in text, (
-        "ensure-binaries.js must read 'git-manifest.json' to compare the on-disk "
-        ".dugite-tag against the pinned dugiteNativeTag (spec: minds-managed-git)."
-    )
-
-
-def test_ensure_binaries_guards_stale_curl_bundle() -> None:
-    """Guard: ensure-binaries.js must keep its datalib curl staleness check.
-
-    The bundled dispatch curl and impersonator have version-less filenames, so a
-    dev machine holding an older datalib release passes the plain existence
-    check. ensure-binaries.js therefore compares the marker written into
-    ``resources/curl/`` against the downloader's pinned release, and
-    ``downloadLatchkeyCurl`` writes that marker only once both binaries are
-    verified -- otherwise a curl bump would never reach the dev machine.
-    """
-    ensure_text = _ENSURE_BINARIES_PATH.read_text()
-    assert "DATALIB_CURL_VERSION_MARKER" in ensure_text, (
-        "ensure-binaries.js must read the bundled curl's DATALIB_CURL_VERSION_MARKER "
-        "file so a stale bundle can be spotted."
-    )
-    assert "!== DATALIB_CURL_VERSION" in ensure_text, (
-        "ensure-binaries.js must compare that marker's contents against the pinned "
-        "DATALIB_CURL_VERSION so a stale bundle is re-downloaded."
-    )
-    download_text = _DOWNLOAD_BINARIES_PATH.read_text()
-    verify_loop_index = download_text.find("'latchkey-curl-dispatch', 'latchkey-curl-impersonate'")
-    marker_write_index = download_text.find("path.join(curlDir, DATALIB_CURL_VERSION_MARKER)")
-    assert verify_loop_index != -1, "downloadLatchkeyCurl must verify both extracted binaries"
-    assert marker_write_index != -1, "downloadLatchkeyCurl must write the curl version marker"
-    assert verify_loop_index < marker_write_index, (
-        "downloadLatchkeyCurl must verify both binaries BEFORE writing the version "
-        "marker, so an incomplete bundle is never marked as the current release"
+    assert "getCacheEntryPath" in text and "realpathSync(cacheEntry)" in text, (
+        "ensure-binaries.js must compare resources/<name> against the CURRENT cache "
+        "entry (which carries the pinned version in its path); without it a bumped "
+        "version keeps serving the old payload."
     )
 
 
@@ -867,20 +991,13 @@ def test_assert_tree_fits_upload_budget_fails_on_symlink_inflation(tmp_path: Pat
 def test_build_pipeline_keeps_payload_shim_and_budget_guards() -> None:
     """Drift guard: the shim conversion and upload-budget guard must stay wired in.
 
-    ``downloadGit`` must convert payload symlinks BEFORE writing the
-    ``.dugite-tag`` marker (a payload that failed conversion must never be
-    tagged complete, or ensure-binaries.js would skip re-downloading it), and
-    ``build.js`` must run the upload-budget assertion so a symlink regression
-    fails the local build instead of the ToDesktop upload.
+    ``downloadGit`` must convert payload symlinks to shims, and ``build.js``
+        must run the upload-budget assertion so a symlink regression fails the local
+        build instead of the ToDesktop upload.
     """
     download_binaries_text = _DOWNLOAD_BINARIES_PATH.read_text()
-    conversion_call_index = download_binaries_text.find("convertGitPayloadSymlinksToShims(gitDir)")
-    tag_write_index = download_binaries_text.find("'.dugite-tag'")
-    assert conversion_call_index != -1, "downloadGit must call convertGitPayloadSymlinksToShims on the payload"
-    assert tag_write_index != -1, "downloadGit must write the .dugite-tag marker"
-    assert conversion_call_index < tag_write_index, (
-        "downloadGit must convert payload symlinks BEFORE writing .dugite-tag, so a "
-        "failed conversion is never tagged as a complete payload"
+    assert "convertGitPayloadSymlinksToShims(gitDir)" in download_binaries_text, (
+        "downloadGit must call convertGitPayloadSymlinksToShims on the payload"
     )
     build_text = (APP_ROOT / "scripts" / "build.js").read_text()
     assert "assertUploadFitsToDesktopLimit(ROOT" in build_text, (

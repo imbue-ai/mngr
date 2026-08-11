@@ -292,7 +292,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       };
 
       if (paths.isDev()) {
-        // Dev mode: use system uv with the monorepo workspace venv
+        // Dev shares the developer's .venv and uv.lock, so it uses their uv.
         uvBin = 'uv';
         args = [
           'run', '--package', 'minds',
@@ -310,7 +310,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...gitEnv,
           // Pair the bundled git binary with gitEnv in dev too: a system git
           // running against the payload's exec-path would be version-skewed.
-          PATH: `${paths.getGitBinDir()}:${process.env.PATH || ''}`,
+          // limactl too -- mngr_lima resolves it from PATH.
+          PATH: `${paths.getGitBinDir()}:${paths.getLimaBinDir()}:${process.env.PATH || ''}`,
           MINDS_ELECTRON: '1',
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,

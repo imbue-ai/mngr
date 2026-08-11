@@ -183,9 +183,9 @@ def _run_git(
 def _convert_payload_symlinks_to_shims(git_root: Path) -> int:
     """Run the production shim conversion from scripts/download-binaries.js on an extracted payload.
 
-    Invokes the same exported function the build and the ToDesktop
-    ``beforeInstall`` hook run, so this test exercises the exact payload shape
-    the app ships. Node is a hard requirement of the minds toolchain (the
+    Invokes the same exported function the build runs, so this test exercises
+    the exact payload shape the app ships. Node is a hard requirement of the
+    minds toolchain (the
     offload image provisions it for exactly this kind of ``node -e`` use).
     """
     node_binary = shutil.which("node")

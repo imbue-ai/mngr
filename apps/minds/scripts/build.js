@@ -10,24 +10,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, downloadRestic, downloadDesync, downloadLatchkeyCurl, download, assertTreeFitsUploadBudget, assertUploadFitsToDesktopLimit } = require('./download-binaries.js');
+const { downloadBinaries, assertTreeFitsUploadBudget, assertUploadFitsToDesktopLimit } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
-
-// Pinned at 2.0.3 to avoid the gvisor-tap-vsock TCP forwarder regression
-// introduced in lima 2.1.0. Lima 2.1.x's usernet forwarder (the path used
-// when the guest's systemd < 256, which includes Debian 12 / systemd 252,
-// the mngr_lima default image) wedges fresh ssh connections post-VM-READY:
-// TCP-accepted on the host then CLOSE_WAIT, no data flow to the in-VM
-// sshd, no git-receive-pack ever spawns -- mngr create hangs forever at
-// "Transferring git repository...". Root cause is the inetaf/tcpproxy
-// "half-close dance" leaking goroutines in io.Copy; lima a2b52885
-// (gvisor-tap-vsock 0.8.7 -> 0.8.8) is the regression boundary.
-// Tracked upstream as lima-vm/lima#4558 + #5042, no fix in flight yet.
-// Unaffected by mngr_lima's PINNED_DOCKER_APT_VERSION: the bug sits in
-// lima's host-side TCP forwarder, below the guest docker daemon.
-const LIMA_VERSION = '2.0.3';
 
 const MONOREPO_ROOT = path.resolve(ROOT, '../..');
 
@@ -119,44 +105,6 @@ function buildWorkspaceWheels() {
   return wheelByPackage;
 }
 
-
-function getPlatformArch() {
-  const platform = process.platform;
-  const arch = process.arch;
-
-  if (platform === 'darwin' && arch === 'arm64') return { platform: 'darwin', arch: 'aarch64' };
-  if (platform === 'darwin' && arch === 'x64') return { platform: 'darwin', arch: 'x86_64' };
-  if (platform === 'linux' && arch === 'x64') return { platform: 'linux', arch: 'x86_64' };
-  throw new Error(`Unsupported platform/arch: ${platform}/${arch}`);
-}
-
-/**
- * Download a gzipped tarball to ``destDir`` and extract it in place with
- * ``--strip-components=1``, then verify and chmod the named binary.
- *
- * Used for binaries that ship as a single self-contained tarball rooted one
- * level deep (e.g. Lima). ``label`` is used only for log lines and error
- * messages; ``archiveName`` is the on-disk filename for the downloaded
- * tarball (deleted after extraction); ``binaryPath`` is the absolute path
- * the caller expects the extracted binary to live at.
- */
-async function downloadAndExtractTarball({ destDir, url, archiveName, binaryPath, label }) {
-  fs.mkdirSync(destDir, { recursive: true });
-  console.log(`Downloading ${label} from ${url}...`);
-
-  const tarball = await download(url);
-  const tarPath = path.join(destDir, archiveName);
-  fs.writeFileSync(tarPath, tarball);
-
-  execSync(`tar xzf "${tarPath}" -C "${destDir}" --strip-components=1`, { stdio: 'inherit' });
-  fs.unlinkSync(tarPath);
-
-  if (!fs.existsSync(binaryPath)) {
-    throw new Error(`${label} binary not found at ${binaryPath} after extraction`);
-  }
-  fs.chmodSync(binaryPath, 0o755);
-  console.log(`${label} binary installed at ${binaryPath}`);
-}
 
 /**
  * Read and parse a JSON file.
@@ -358,52 +306,6 @@ function bundleLatchkey() {
   );
 }
 
-function getLimaDownloadUrl({ platform, arch }) {
-  // Lima release tarballs are named lima-<version>-<OsLabel>-<archLabel>.tar.gz.
-  // The OS label is title-cased (Darwin/Linux). The arch label differs by OS:
-  // Darwin uses arm64, Linux uses aarch64; both use x86_64 for Intel.
-  const osLabel = platform === 'darwin' ? 'Darwin' : 'Linux';
-  let archLabel;
-  if (arch === 'x86_64') {
-    archLabel = 'x86_64';
-  } else if (arch === 'aarch64') {
-    archLabel = platform === 'darwin' ? 'arm64' : 'aarch64';
-  } else {
-    throw new Error(`Unsupported Lima arch: ${arch}`);
-  }
-  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${archLabel}.tar.gz`;
-}
-
-async function downloadLima({ platform, arch }) {
-  // We keep the full extracted layout (bin/ + share/ + libexec/) because
-  // limactl resolves its templates and guest-agent payloads via paths
-  // relative to its own executable.
-  const limaDir = path.join(RESOURCES_DIR, 'lima');
-  await downloadAndExtractTarball({
-    destDir: limaDir,
-    url: getLimaDownloadUrl({ platform, arch }),
-    archiveName: 'lima.tar.gz',
-    binaryPath: path.join(limaDir, 'bin', 'limactl'),
-    label: 'Lima',
-  });
-
-  // Strip Darwin guest-agents. Each one is a gzipped arm64/x86_64 Mach-O,
-  // and Apple's notarytool unzips it and rejects the inner binary because
-  // we never code-signed it (no Developer ID, no hardened runtime, no
-  // secure timestamp). We run Linux VMs only via Lima, so Darwin guest-
-  // agents are unreachable code and safe to delete.
-  const limaShareDir = path.join(limaDir, 'share', 'lima');
-  if (fs.existsSync(limaShareDir)) {
-    for (const entry of fs.readdirSync(limaShareDir)) {
-      if (entry.startsWith('lima-guestagent.Darwin-') && entry.endsWith('.gz')) {
-        const full = path.join(limaShareDir, entry);
-        fs.rmSync(full);
-        console.log(`Stripped Darwin guest-agent (unsignable inside .gz): ${full}`);
-      }
-    }
-  }
-}
-
 /**
  * Write the current git SHA into electron/build-info.json so the runtime
  * can surface it in the About panel. Falls back to "unknown" if the
@@ -596,18 +498,8 @@ async function main() {
   }
   fs.mkdirSync(RESOURCES_DIR, { recursive: true });
 
-  const { platform, arch } = getPlatformArch();
-  console.log(`Platform: ${platform}, Architecture: ${arch}\n`);
-
-  // Download binaries and copy pyproject in parallel
-  await Promise.all([
-    downloadUv(RESOURCES_DIR, { platform, arch }),
-    downloadLima({ platform, arch }),
-    downloadGit(RESOURCES_DIR, { platform, arch }),
-    downloadRestic(RESOURCES_DIR, { platform, arch }),
-    downloadDesync(RESOURCES_DIR, { platform, arch }),
-    downloadLatchkeyCurl(RESOURCES_DIR, { platform, arch }),
-  ]);
+  // The only staging whose output reaches the packaged app.
+  await downloadBinaries(RESOURCES_DIR);
 
   buildCss();
   bundleLatchkey();

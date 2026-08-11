@@ -1,8 +1,10 @@
 /**
- * Bundle the platform-specific uv and git binaries into
- * `<resourcesDir>/{uv,git}/`, for the platform of the machine that runs it.
- * Called by `pnpm build` (scripts/build.js) and, as a CLI, by
- * `pnpm start`'s prestart hook via scripts/ensure-binaries.js.
+ * Provision the pinned, platform-specific binaries the app bundles, into
+ * `<resourcesDir>/<name>/`. BINARIES below is the single table of what those
+ * are: build.js stages it for packaging, ensure-binaries.js for dev.
+ *
+ * Every download is SHA256-verified against a pinned hash before anything is
+ * extracted or executed.
  *
  * uv:  SHA256-verified download from astral-sh/uv releases.
  * git:
@@ -16,6 +18,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const https = require('https');
 const http = require('http');
@@ -32,6 +35,19 @@ const GIT_MANIFEST_PATH = path.join(__dirname, 'git-manifest.json');
 // desync: content-defined-chunking client used to fetch the pre-baked Lima image.
 // Only bundled on macOS/Linux (the Lima launch mode's platforms).
 const DESYNC_VERSION = '1.0.3';
+// Pinned at 2.0.3 to avoid the gvisor-tap-vsock TCP forwarder regression
+// introduced in lima 2.1.0. Lima 2.1.x's usernet forwarder (the path used
+// when the guest's systemd < 256, which includes Debian 12 / systemd 252,
+// the mngr_lima default image) wedges fresh ssh connections post-VM-READY:
+// TCP-accepted on the host then CLOSE_WAIT, no data flow to the in-VM
+// sshd, no git-receive-pack ever spawns -- mngr create hangs forever at
+// "Transferring git repository...". Root cause is the inetaf/tcpproxy
+// "half-close dance" leaking goroutines in io.Copy; lima a2b52885
+// (gvisor-tap-vsock 0.8.7 -> 0.8.8) is the regression boundary.
+// Tracked upstream as lima-vm/lima#4558 + #5042, no fix in flight yet.
+// Unaffected by mngr_lima's PINNED_DOCKER_APT_VERSION: the bug sits in
+// lima's host-side TCP forwarder, below the guest docker daemon.
+const LIMA_VERSION = '2.0.3';
 
 // datalib "curl" distribution: the dispatch curl + the Chrome-impersonating
 // curl it fronts (see the `curl-<triple>.tar.gz` release asset).
@@ -46,10 +62,6 @@ const DESYNC_VERSION = '1.0.3';
 // old hash would otherwise be checked against the new bytes and fail).
 const DATALIB_REPO = 'imbue-ai/datalib';
 const DATALIB_CURL_VERSION = 'v0.26.0';
-// Marker file (inside the bundled `curl/` dir) naming the release its binaries
-// came from, so ensure-binaries.js can spot a dev machine still carrying an
-// older bundle. Same role `.dugite-tag` plays for the git payload.
-const DATALIB_CURL_VERSION_MARKER = '.datalib-curl-version';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -59,11 +71,12 @@ const DATALIB_CURL_VERSION_MARKER = '.datalib-curl-version';
  * - MinGit: https://github.com/git-for-windows/git/releases/tag/<tag> release notes
  * - restic: https://github.com/restic/restic/releases/download/v<version>/SHA256SUMS
  * - desync: https://github.com/folbricht/desync/releases/tag/v<version>
+ * - lima: https://github.com/lima-vm/lima/releases/download/v<version>/SHA256SUMS
  *
  * Update this map whenever UV_VERSION, GIT_FOR_WINDOWS_VERSION,
- * RESTIC_VERSION, or DESYNC_VERSION changes. If a download hash doesn't
- * match an entry here, the script aborts before extracting or executing any
- * downloaded bytes.
+ * RESTIC_VERSION, DESYNC_VERSION, or LIMA_VERSION changes. If a download
+ * hash doesn't match an entry here, the script aborts before extracting or
+ * executing any downloaded bytes.
  */
 const EXPECTED_SHA256 = {
   'uv-aarch64-apple-darwin.tar.gz':     '7e5b336108f8576eda1939920ca0a805b4a9a3c3d3eb2f6140e38b7092fbe4f3',
@@ -79,6 +92,10 @@ const EXPECTED_SHA256 = {
   'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
   'desync_1.0.3_linux_amd64.tar.gz':    'ad4dd9e91b57eef8627d2038df09281d7f38dca02eeca0e66592b54087619953',
   'desync_1.0.3_linux_arm64.tar.gz':    '9008e297f527634efe94688f67c7a49a534c561bf43d223e50f64bec899c15ca',
+  'lima-2.0.3-Darwin-arm64.tar.gz':     '22aee997df59e4fd448041b2d1214e48bd8eaf705d2d48a4307d65c1b179dc97',
+  'lima-2.0.3-Darwin-x86_64.tar.gz':    '0806bcb83a08411e9d878b43b2c4203f1556fe14f9f8ba1e5f0d5d9a3c2c0bd8',
+  'lima-2.0.3-Linux-x86_64.tar.gz':     '6838a926d85ed2ddcfd636befb476256a96196516a3b7f36d2af66cde9188d66',
+  'lima-2.0.3-Linux-aarch64.tar.gz':    'd0f9c30b82fdbd06b5c951b76bf3378b68cc658aebfe243f777949e131b6ea28',
   // From the datalib release named by DATALIB_CURL_VERSION
   // (`curl-<triple>.tar.gz.sha256`).
   'curl-aarch64-apple-darwin.tar.gz':      '38db8dca3aa4106c653808fce5e2f0d2cf79345f18980ffb89c14b91b642c037',
@@ -87,6 +104,11 @@ const EXPECTED_SHA256 = {
 
 const MAX_REDIRECTS = 5;
 const DOWNLOAD_RETRIES = 5;
+
+/** Parsed git-manifest.json: the pinned dugite-native tag, version, and per-target assets. */
+function readGitManifest() {
+  return JSON.parse(fs.readFileSync(GIT_MANIFEST_PATH, 'utf-8'));
+}
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -129,6 +151,22 @@ function getDesyncDownloadUrl({ platform, arch }) {
     throw new Error(`Unsupported desync arch: ${arch}`);
   }
   return `https://github.com/folbricht/desync/releases/download/v${DESYNC_VERSION}/desync_${DESYNC_VERSION}_${platform}_${goArch}.tar.gz`;
+}
+
+function getLimaDownloadUrl({ platform, arch }) {
+  // Lima release tarballs are named lima-<version>-<OsLabel>-<archLabel>.tar.gz.
+  // The OS label is title-cased (Darwin/Linux). The arch label differs by OS:
+  // Darwin uses arm64, Linux uses aarch64; both use x86_64 for Intel.
+  const osLabel = platform === 'darwin' ? 'Darwin' : 'Linux';
+  let archLabel;
+  if (arch === 'x86_64') {
+    archLabel = 'x86_64';
+  } else if (arch === 'aarch64') {
+    archLabel = platform === 'darwin' ? 'arm64' : 'aarch64';
+  } else {
+    throw new Error(`Unsupported Lima arch: ${arch}`);
+  }
+  return `https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-${osLabel}-${archLabel}.tar.gz`;
 }
 
 /**
@@ -364,6 +402,56 @@ async function downloadDesync(resourcesDir, { platform, arch }) {
   console.log(`[download-binaries] desync installed at ${desyncBinary}`);
 }
 
+/**
+ * Bundle Lima into ``<resourcesDir>/lima/``.
+ *
+ * The full extracted layout (bin/ + share/ + libexec/) is kept because
+ * limactl resolves its templates and guest-agent payloads via paths relative
+ * to its own executable.
+ */
+async function downloadLima(resourcesDir, { platform, arch }) {
+  const limaDir = path.join(resourcesDir, 'lima');
+  if (fs.existsSync(limaDir)) fs.rmSync(limaDir, { recursive: true });
+  fs.mkdirSync(limaDir, { recursive: true });
+
+  const url = getLimaDownloadUrl({ platform, arch });
+  const filename = path.basename(new URL(url).pathname);
+  console.log(`[download-binaries] Downloading Lima from ${url}...`);
+
+  const archive = await download(url);
+  verifyChecksum(archive, filename);
+
+  // The tarball is rooted at "./", hence --strip-components=1.
+  const tarPath = path.join(limaDir, 'lima.tar.gz');
+  fs.writeFileSync(tarPath, archive);
+  execSync(`tar xzf "${tarPath}" -C "${limaDir}" --strip-components=1`, { stdio: 'inherit' });
+  fs.unlinkSync(tarPath);
+
+  const limaBinary = path.join(limaDir, 'bin', 'limactl');
+  if (!fs.existsSync(limaBinary)) {
+    throw new Error(`Lima binary not found at ${limaBinary} after extraction`);
+  }
+  fs.chmodSync(limaBinary, 0o755);
+
+  // Strip Darwin guest-agents. Each one is a gzipped arm64/x86_64 Mach-O,
+  // and Apple's notarytool unzips it and rejects the inner binary because
+  // we never code-signed it (no Developer ID, no hardened runtime, no
+  // secure timestamp). We run Linux VMs only via Lima, so Darwin guest-
+  // agents are unreachable code and safe to delete.
+  const limaShareDir = path.join(limaDir, 'share', 'lima');
+  if (fs.existsSync(limaShareDir)) {
+    for (const entry of fs.readdirSync(limaShareDir)) {
+      if (entry.startsWith('lima-guestagent.Darwin-') && entry.endsWith('.gz')) {
+        const full = path.join(limaShareDir, entry);
+        fs.rmSync(full);
+        console.log(`[download-binaries] Stripped Darwin guest-agent (unsignable inside .gz): ${full}`);
+      }
+    }
+  }
+
+  console.log(`[download-binaries] Lima installed at ${limaBinary}`);
+}
+
 // Maps (platform, arch) as produced by getPlatformArch() to the manifest
 // target key. win32 stays on the MinGit path below and is intentionally absent.
 const GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH = {
@@ -416,7 +504,6 @@ async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
   // so this marker is the only way ensure-binaries.js can tell a stale dev
   // bundle from a current one. Written last: a failed download or SHA
   // mismatch must never leave a marker claiming this version.
-  fs.writeFileSync(path.join(curlDir, DATALIB_CURL_VERSION_MARKER), DATALIB_CURL_VERSION + '\n');
   console.log(`[download-binaries] latchkey curl (dispatch + impersonator) installed in ${curlDir}`);
 }
 
@@ -557,7 +644,7 @@ async function downloadGit(resourcesDir, { platform, arch }) {
   }
 
   // macOS/Linux: SHA256-verified dugite-native tarball, pinned by the manifest.
-  const manifest = JSON.parse(fs.readFileSync(GIT_MANIFEST_PATH, 'utf-8'));
+  const manifest = readGitManifest();
   const targetKey = GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH[`${platform}/${arch}`];
   const target = targetKey && manifest.targets[targetKey];
   if (!target) {
@@ -586,14 +673,9 @@ async function downloadGit(resourcesDir, { platform, arch }) {
   }
   fs.chmodSync(destGit, 0o755);
 
-  // Replace payload symlinks with shims BEFORE writing the .dugite-tag
-  // marker, so a payload that failed conversion is never tagged as complete
-  // (ensure-binaries.js would then re-run the downloader).
   const shimCount = convertGitPayloadSymlinksToShims(gitDir);
   console.log(`[download-binaries] replaced ${shimCount} git payload symlinks with shims`);
 
-  // Marker so ensure-binaries.js can replace a stale payload on dev machines.
-  fs.writeFileSync(path.join(gitDir, '.dugite-tag'), manifest.dugiteNativeTag + '\n');
   writeGitNotice(gitDir, manifest);
   fs.copyFileSync(path.join(__dirname, 'assets', 'git-COPYING'), path.join(gitDir, 'COPYING'));
 
@@ -791,38 +873,155 @@ function assertUploadFitsToDesktopLimit(appRoot, todesktopConfig) {
 }
 
 /**
- * Download platform-specific binaries into the given resources directory.
- * Can be called directly or from a ToDesktop hook.
+ * Every binary this script provisions, keyed by its `resources/` subdirectory.
  *
- * pnpm and Node are NOT provisioned here -- ToDesktop's `pnpmVersion`
- * and `nodeVersion` fields in `todesktop.js` cover that. This hook only
- * handles binaries ToDesktop has no first-class knob for: `uv`, `git`,
- * `restic` (per-workspace backups), and, for the Lima launch mode on
- * macOS/Linux, `desync` (fetches the pre-baked Lima image).
+ * - `version`      pinned version for the platform; also the shared-cache key.
+ * - `requiredPath` path inside the subdirectory that must exist for an install
+ *                  to count as complete.
+ * - `isSupported`  whether the binary is provisioned for a platform/arch at all.
+ * - `usedInDev`    whether `pnpm start` reaches the bundled copy.
+ * - `download`     provisioning function, `(resourcesDir, {platform, arch})`.
+ *
+ * ensure-binaries.js derives its dev set from this table and build.js stages
+ * it whole, so neither can require a path the other cannot produce.
+ *
+ * pnpm and Node are not provisioned here -- `todesktop.js` covers those.
+ */
+const BINARIES = {
+  uv: {
+    version: () => UV_VERSION,
+    requiredPath: 'uv',
+    isSupported: () => true,
+    // Dev uses the developer's own uv against the monorepo's shared .venv and
+    // uv.lock; a second pinned uv there risks lockfile-format skew.
+    usedInDev: false,
+    download: downloadUv,
+  },
+  git: {
+    version: ({ platform }) =>
+      platform === 'win32' ? GIT_FOR_WINDOWS_VERSION : readGitManifest().dugiteNativeTag,
+    requiredPath: path.join('bin', 'git'),
+    isSupported: () => true,
+    usedInDev: true,
+    download: downloadGit,
+  },
+  restic: {
+    version: () => RESTIC_VERSION,
+    requiredPath: 'restic',
+    isSupported: () => true,
+    usedInDev: true,
+    download: downloadRestic,
+  },
+  desync: {
+    version: () => DESYNC_VERSION,
+    requiredPath: 'desync',
+    isSupported: ({ platform }) => platform !== 'win32',
+    usedInDev: true,
+    download: downloadDesync,
+  },
+  lima: {
+    version: () => LIMA_VERSION,
+    requiredPath: path.join('bin', 'limactl'),
+    isSupported: ({ platform }) => platform !== 'win32',
+    usedInDev: true,
+    download: downloadLima,
+  },
+  curl: {
+    version: () => DATALIB_CURL_VERSION,
+    requiredPath: 'latchkey-curl-dispatch',
+    isSupported: (platformArch) => getLatchkeyCurlDownloadInfo(platformArch) !== null,
+    usedInDev: true,
+    download: downloadLatchkeyCurl,
+  },
+};
+
+/** Names from BINARIES that are provisioned for the given platform/arch. */
+function getProvisionedBinaries({ platform, arch }) {
+  return Object.keys(BINARIES).filter((name) => BINARIES[name].isSupported({ platform, arch }));
+}
+
+/** Root of the shared binary cache. */
+function getBinaryCacheDir() {
+  const override = process.env.MINDS_BINARY_CACHE_DIR;
+  return override ? path.resolve(override) : path.join(os.homedir(), '.cache', 'minds', 'binaries');
+}
+
+/** Cache directory holding one provisioned binary. */
+function getCacheEntryPath(name, { platform, arch }) {
+  const version = BINARIES[name].version({ platform, arch });
+  return path.join(getBinaryCacheDir(), name, version, `${platform}-${arch}`);
+}
+
+/**
+ * Return the cache entry for `name`, provisioning it first if absent.
+ *
+ * The download is staged in a sibling directory and renamed in, so concurrent
+ * provisioners observe a complete entry or none.
+ */
+async function ensureCachedBinary(name, { platform, arch }) {
+  const binary = BINARIES[name];
+  const entry = getCacheEntryPath(name, { platform, arch });
+  const completionMarker = path.join(entry, binary.requiredPath);
+  if (fs.existsSync(completionMarker)) {
+    return entry;
+  }
+
+  // A markerless entry resolves nothing and would fail the rename below with
+  // ENOTEMPTY, wedging every future provision.
+  fs.rmSync(entry, { recursive: true, force: true });
+
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  const stagingDir = fs.mkdtempSync(path.join(path.dirname(entry), '.staging-'));
+  try {
+    await binary.download(stagingDir, { platform, arch });
+    const staged = path.join(stagingDir, name);
+    if (!fs.existsSync(path.join(staged, binary.requiredPath))) {
+      throw new Error(
+        `${name} download produced no ${binary.requiredPath} under ${staged}; ` +
+        `BINARIES.${name}.requiredPath and its download function disagree.`,
+      );
+    }
+    try {
+      fs.renameSync(staged, entry);
+    } catch (err) {
+      // Another provisioner won: same pinned version, same verified hash.
+      if (!fs.existsSync(completionMarker)) throw err;
+    }
+  } finally {
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+  }
+  return entry;
+}
+
+/**
+ * Stage every binary this platform provisions, as real directories. This is the
+ * packaging path -- build.js calls it and ToDesktop ships the result.
  */
 async function downloadBinaries(resourcesDir) {
   const { platform, arch } = getPlatformArch();
   console.log(`[download-binaries] Platform: ${platform}, Architecture: ${arch}`);
 
-  await Promise.all([
-    downloadUv(resourcesDir, { platform, arch }),
-    downloadGit(resourcesDir, { platform, arch }),
-    downloadRestic(resourcesDir, { platform, arch }),
-    downloadDesync(resourcesDir, { platform, arch }),
-    downloadLatchkeyCurl(resourcesDir, { platform, arch }),
-  ]);
+  await Promise.all(
+    getProvisionedBinaries({ platform, arch }).map((name) =>
+      BINARIES[name].download(resourcesDir, { platform, arch }),
+    ),
+  );
 
   console.log('[download-binaries] Done.');
 }
 
+// Individual downloaders are reachable as BINARIES[name].download; only the
+// two with their own tests are named here.
 module.exports = {
+  BINARIES,
+  getProvisionedBinaries,
+  getPlatformArch,
+  getCacheEntryPath,
+  ensureCachedBinary,
+  downloadBinaries,
   downloadGit,
-  downloadUv,
-  downloadRestic,
-  downloadDesync,
   downloadLatchkeyCurl,
   DATALIB_CURL_VERSION,
-  DATALIB_CURL_VERSION_MARKER,
   download,
   convertGitPayloadSymlinksToShims,
   measureTreeAsArchived,
