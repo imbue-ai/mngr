@@ -88,9 +88,11 @@ from loguru import logger
 # `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
 # then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
 from playwright.sync_api import BrowserContext
+from playwright.sync_api import ConsoleMessage
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
+from playwright.sync_api import WebError
 from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -781,6 +783,40 @@ def live_url(target: Page | Frame) -> str:
     return ""
 
 
+def _log_console_message(message: ConsoleMessage) -> None:
+    """Mirror a page's console errors and warnings into the run log, tagged with the emitting script and line.
+
+    Electron forwards only its main process's console to electron.log, so a
+    workspace page's own `console.error` -- the app's own account of a failure
+    -- lands nowhere the CI artifacts can show.
+    """
+    if message.type not in ("error", "warning"):
+        return
+    source = message.location
+    # Playwright reports the line 0-based.
+    origin = f"{source['url']}:{source['lineNumber'] + 1}" if source["url"] else "?"
+    logger.warning("[renderer:{}] {}: {}", message.type, origin, message.text)
+
+
+def _log_web_error(web_error: WebError) -> None:
+    """Mirror a page's uncaught exceptions into the run log."""
+    error = web_error.error
+    logger.warning("[renderer:pageerror] {}", error.stack or error.message)
+
+
+def capture_renderer_diagnostics(ctx: BrowserContext) -> None:
+    """Log console errors, warnings and uncaught exceptions from every page in ``ctx``, including later ones.
+
+    A page's out-of-process frames report here too, so a workspace document --
+    which lives under ``page.frames``, not ``ctx.pages`` -- is covered.
+
+    Playwright delivers a console message only to listeners registered when it
+    arrives, so whatever a page logged before this call is gone.
+    """
+    ctx.on("console", _log_console_message)
+    ctx.on("weberror", _log_web_error)
+
+
 def find_chat_window(ctx: BrowserContext, host: str | None = None) -> Frame | None:
     """Find the frame showing an agent chat (``host-<hex>.localhost``).
 
@@ -1347,6 +1383,7 @@ def run_e2e() -> int:
         browser = pw.chromium.connect_over_cdp(cdp_url, timeout=60_000)
         # Single Electron context wraps all WebContentsViews as pages.
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        capture_renderer_diagnostics(ctx)
         # Wait for first page (chrome shell or splash) to materialise.
         for _ in range(60):
             if ctx.pages:
@@ -2071,6 +2108,7 @@ def run_e2e() -> int:
             cdp_url2 = _wait_cdp(cdp_port2)
             browser = pw.chromium.connect_over_cdp(cdp_url2, timeout=60_000)
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            capture_renderer_diagnostics(ctx)
             for _ in range(60):
                 if ctx.pages:
                     break
