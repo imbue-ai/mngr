@@ -7,9 +7,9 @@
 // these helpers and acts on the result.
 //
 // URL shape: the host names the action.
-//   minds://create?git_url=<repo>&branch=<ref>  -> an Inspiration link:
-//     main.js navigates to the SPA's Create from Inspiration PAGE, which
-//     offers both ways forward (create a new machine, or add the Inspiration
+//   minds://create?git_url=<repo>&branch=<ref>  -> a Template link:
+//     main.js navigates to the SPA's Create from Template PAGE, which
+//     offers both ways forward (create a new machine, or add the Template
 //     to an existing one). `branch` accepts anything the create form's
 //     Branch input accepts and stays blank when absent (create then resolves
 //     the repo's latest version). Without a git_url the plain create page is
@@ -58,10 +58,10 @@ function parseDeeplink(rawUrl) {
  * Map a raw deeplink URL to the backend path the CONTENT VIEW should navigate
  * to, or null for focus-only. This is the allowlist boundary: the only possible
  * outputs are null or a string built from the fixed '/create' /
- * '/create/inspiration' literals plus URLSearchParams re-encoding -- raw
- * deeplink text never reaches loadURL. A repo-carrying link is an Inspiration
- * link and targets the Create from Inspiration page; without a repo the plain
- * create page is the target (a branch alone is not an Inspiration).
+ * '/create/template' literals plus URLSearchParams re-encoding -- raw
+ * deeplink text never reaches loadURL. A repo-carrying link is a Template
+ * link and targets the Create from Template page; without a repo the plain
+ * create page is the target (a branch alone is not a Template).
  */
 function deeplinkTargetPath(rawUrl) {
   const parsed = parseDeeplink(rawUrl);
@@ -70,7 +70,7 @@ function deeplinkTargetPath(rawUrl) {
   if (parsed.gitUrl) params.set('git_url', parsed.gitUrl);
   if (parsed.branch) params.set('branch', parsed.branch);
   const query = params.toString();
-  if (parsed.gitUrl) return `/create/inspiration?${query}`;
+  if (parsed.gitUrl) return `/create/template?${query}`;
   return query ? `/create?${query}` : '/create';
 }
 

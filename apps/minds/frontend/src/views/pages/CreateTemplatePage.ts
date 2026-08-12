@@ -1,13 +1,13 @@
-// Create from Inspiration (GET /create/inspiration?git_url=...): the landing
-// stepper for an inspiration deeplink, a numbered vertical stepper that shows
+// Create from Template (GET /create/template?git_url=...): the landing
+// stepper for a template deeplink, a numbered vertical stepper that shows
 // ONE step at a time (completed steps collapse to their number + a one-line
-// summary, click to reopen). Port of InspirationCreate.jinja.
+// summary, click to reopen). Port of TemplateCreate.jinja.
 //
 //   Step 1: create a NEW machine from the repo, or add it to an EXISTING one.
 //   Create branch: (2) local vs remote presets, (3) confirm -- account, a
-//     required "I trust this Inspiration" acknowledgment, optional advanced
+//     required "I trust this Template" acknowledgment, optional advanced
 //     provider/region settings, and Create.
-//   Add branch: (2) copy the "/use-inspiration <repo>" message (copying
+//   Add branch: (2) copy the adopt-command message (copying
 //     advances), (3) pick the machine to open (full page) -- or, in the modal,
 //     just paste it into the machine you are already in.
 //
@@ -30,10 +30,23 @@ import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
 
+// The chat command the add flow tells the user to paste.
+//
+// The LEADING SPACE is deliberate. Pasting a string that starts with "/" into
+// a chat input can be taken as a slash command by the client rather than as
+// message text; a space in front makes it unambiguous while still reading and
+// running the same once sent.
+//
+// Requires the target machine to have the `use-template` skill, i.e. to have
+// been created from (or updated to) a post-rename workspace template. A machine
+// on an older template will not recognise it.
+const ADOPT_COMMAND = " /use-template";
+
+
 const ID_SEGMENT = /^(?:agent|host)-[a-f0-9]+$/i;
 
 // A soft ease-out shared by every reveal so the motion feels consistent
-// (ported from InspirationCreate.jinja's animations).
+// (ported from TemplateCreate.jinja's animations).
 const EASE_OUT = "cubic-bezier(0.16, 1, 0.3, 1)";
 
 /** Slide + fade an element into place, easing in gently -- played once when a
@@ -82,7 +95,7 @@ interface StepSpec {
   body: () => m.Children;
 }
 
-export const CreateInspirationPage: m.ClosureComponent = () => {
+export const CreateTemplatePage: m.ClosureComponent = () => {
   const model = new CreateFormModel();
   // Route-derived (re-synced each render so the modal -> full page create hand-
   // off, which keeps this component instance, is picked up).
@@ -154,10 +167,10 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
   // current top BEFORE the panel grows -- switch the centering container off
   // center-alignment and compensate with a margin -- so growth pushes downward
   // instead of jumping up. Released when the panel is removed. (Ported from
-  // InspirationCreate.jinja; the modal card scrolls itself, so it is exempt.)
+  // TemplateCreate.jinja; the modal card scrolls itself, so it is exempt.)
   let isColumnPinned = false;
   function pageColumn(): HTMLElement | null {
-    return document.getElementById("inspiration-content-top")?.parentElement ?? null;
+    return document.getElementById("template-content-top")?.parentElement ?? null;
   }
   function pinPageColumn(): void {
     if (isModal() || isColumnPinned) return;
@@ -196,7 +209,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
     if (isModal()) {
       const params: Record<string, string> = { git_url: gitUrl, start: "create" };
       if (branchName) params.branch = branchName;
-      m.route.set("/create/inspiration", params);
+      m.route.set("/create/template", params);
       return;
     }
     chooseBranch("create");
@@ -204,7 +217,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
 
   function doCopy(): void {
     if (isMessageCopied) return;
-    navigator.clipboard?.writeText(`/use-inspiration ${gitUrl}`).catch(() => undefined);
+    navigator.clipboard?.writeText(`${ADOPT_COMMAND} ${gitUrl}`).catch(() => undefined);
     isMessageCopied = true;
     // Copying is what advances to the last step, so the message is always in
     // hand first; hold long enough that the green confirmation registers.
@@ -444,12 +457,12 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
             m(
               "span",
               { class: "type-body font-semibold " + (isTrusted ? "text-primary" : "text-important") },
-              "I trust this Inspiration",
+              "I trust this Template",
             ),
             m(
               "span",
               { class: "block type-helper text-primary" },
-              "Inspirations are community content. This one has not been approved or verified by Imbue.",
+              "Templates are community content. This one has not been approved or verified by Imbue.",
             ),
           ]),
         ],
@@ -516,7 +529,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
         m(
           ButtonSubmit,
           { variant: "primary", block: true, disabled: !isTrusted || model.isSubmitting },
-          model.isSubmitting ? "Creating..." : "Create from Inspiration",
+          model.isSubmitting ? "Creating..." : "Create from Template",
         ),
       ),
     ]);
@@ -527,7 +540,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
       m(
         "p",
         { class: "type-body text-secondary mb-4" },
-        "You'll paste this into the chat of the machine you want to add this Inspiration to.",
+        "You'll paste this into the chat of the machine you want to add this Template to.",
       ),
       m(
         "div",
@@ -544,7 +557,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
           m("input", {
             type: "text",
             readonly: true,
-            value: `/use-inspiration ${gitUrl}`,
+            value: `${ADOPT_COMMAND} ${gitUrl}`,
             onclick: (event: Event) => (event.target as HTMLInputElement).select(),
             class: "flex-1 bg-transparent border-0 type-body text-primary font-mono outline-none",
           }),
@@ -565,7 +578,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
         ? m(
             "p",
             { class: "type-helper text-tertiary mt-2" },
-            `The link's branch (${branchName}) applies only when creating a new machine; the message above always uses the Inspiration's published version.`,
+            `The link's branch (${branchName}) applies only when creating a new machine; the message above always uses the Template's published version.`,
           )
         : null,
     ]);
@@ -613,7 +626,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
                   chooseBranch("create");
                 },
               },
-              "Create a new one from this Inspiration",
+              "Create a new one from this Template",
             ),
             " instead.",
           ]),
@@ -705,7 +718,7 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
           {
             "data-state": state,
             class:
-              "inspiration-step-circle relative z-10 flex items-center justify-center w-8 h-8 rounded-full " +
+              "template-step-circle relative z-10 flex items-center justify-center w-8 h-8 rounded-full " +
               "type-body font-semibold shrink-0 transition-colors duration-300" +
               (spec.done ? " cursor-pointer" : ""),
             onclick: spec.done ? () => goBack(spec.target) : undefined,
@@ -776,8 +789,8 @@ export const CreateInspirationPage: m.ClosureComponent = () => {
       }
       const steps = buildSteps();
       const body = [
-        m("div", { id: "inspiration-content-top", class: "text-center mb-8" }, [
-          m("h1", { class: "type-heading-lg text-primary" }, "You've opened an Inspiration"),
+        m("div", { id: "template-content-top", class: "text-center mb-8" }, [
+          m("h1", { class: "type-heading-lg text-primary" }, "You've opened a Template"),
           m("p", { class: "type-body text-secondary font-mono mt-2 break-all" }, gitUrl),
         ]),
         m(

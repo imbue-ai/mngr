@@ -1685,9 +1685,9 @@ function handleDeeplink(rawUrl) {
   }
   if (!mru) return;
   focusBundle(mru);
-  // An Inspiration link always navigates to the SPA's Create from
-  // Inspiration page: it carries both legacy branches (create a new machine,
-  // or add the Inspiration to an existing one), so the old in-machine modal
+  // A Template link always navigates to the SPA's Create from
+  // Template page: it carries both legacy branches (create a new machine,
+  // or add the Template to an existing one), so the old in-machine modal
   // variant is gone.
   const targetPath = deeplinkTargetPath(rawUrl);
   if (!targetPath) return;

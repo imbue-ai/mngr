@@ -53,7 +53,7 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "energy": "#cecd0c",
     "strength": "#cfc7b3",
     "comfort": "#f5d6a0",
-    "inspiration": "#e9ecd9",
+    "template": "#e9ecd9",
     "clarity": "#fcefd4",
 }
 

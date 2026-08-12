@@ -160,17 +160,17 @@ export function Shell(): m.Component<ShellAttrs> {
 
       const routeSearch = shell.currentRouteSearch();
       const isAppOverlay = isAppOverlayPath(routePath);
-      // The New machine inspiration stepper floats as a modal only when it is
+      // The New machine template stepper floats as a modal only when it is
       // over a machine (?workspace=); opened with none it redirects to the full
       // create form, so it is not an overlay then.
-      const isInspirationRoute = routePath === "/create/inspiration";
+      const isTemplateRoute = routePath === "/create/template";
       // The workspace surface kept mounted underneath: the agent surface itself,
-      // or the workspace a Get help / inbox / inspiration modal was opened over.
+      // or the workspace a Get help / inbox / template modal was opened over.
       // Rendering it at a stable vtree position keeps its iframe from reloading
       // across open/close.
       const behindWorkspaceId =
-        isAppOverlay || isInspirationRoute ? overlayBehindWorkspaceId(routePath, routeSearch) : null;
-      const isInspirationModal = isInspirationRoute && behindWorkspaceId !== null;
+        isAppOverlay || isTemplateRoute ? overlayBehindWorkspaceId(routePath, routeSearch) : null;
+      const isTemplateModal = isTemplateRoute && behindWorkspaceId !== null;
       const surfaceWorkspaceId = workspaceParam ?? behindWorkspaceId;
       const localScrollClass =
         "bg-surface-primary overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]";
@@ -199,8 +199,8 @@ export function Shell(): m.Component<ShellAttrs> {
         overlay = m(InboxOverlay, { shell }, content);
       } else if (isAppOverlay) {
         overlay = m(AppOverlay, { shell, cardClass: appOverlayCardClass(routePath) }, content);
-      } else if (isInspirationModal) {
-        // The New machine inspiration stepper over a live machine: a centered
+      } else if (isTemplateModal) {
+        // The New machine template stepper over a live machine: a centered
         // card, dismissed back to that machine (closeAppOverlay handles it).
         overlay = m(AppOverlay, { shell, cardClass: "w-[600px] min-h-0" }, content);
       }

@@ -14,9 +14,9 @@ Key concepts in the minds system:
 
 - **customization**: a user's change to any existing part of the workspace -- a modified app, an edited skill, a tweaked chat behavior. Not a standalone kind of creation; everything in minds can be modified.
 
-- **inspiration**: a publishable, reusable, *bootable* snapshot of the creations a mind has built, pushed to a GitHub repo so another mind can be created from it or adopt it (one repo can accumulate several inspirations). An inspiration can include zero or more creations plus customizations to existing things. See the workspace's publish-inspiration / use-inspiration skills.
+- **template**: a publishable, reusable, *bootable* snapshot of the creations a mind has built, pushed to a GitHub repo so another mind can be created from it or adopt it (one repo can accumulate several templates). A template can include zero or more creations plus customizations to existing things. See the workspace's publish-template / use-template skills.
 
-- **template base**: the template state a workspace started from (or last updated itself to) -- the newest `update-self:` / `Initial workspace commit` marker on its first-parent history. Publishing an inspiration diffs against it; formerly called the "creation snapshot".
+- **template base**: the template state a workspace started from (or last updated itself to) -- the newest `update-self:` / `Initial workspace commit` marker on its first-parent history. Publishing a template diffs against it; formerly called the "creation snapshot".
 
 - **primary agent**: the single `system-services` agent on each workspace host, labeled `is_primary=true`. It runs bootstrap and the background services rather than a user-facing chat -- it is a plain `command`-type agent whose window-0 command is `sleep infinity`, so no claude is ever involved. Its `workspace_display_name` label holds the workspace's human-readable name (the normalized slug is the host's name). Hidden from the UI agent list and protected against direct destroy.
 

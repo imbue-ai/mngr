@@ -62,18 +62,18 @@ export function isAppOverlayPath(path: string): boolean {
 }
 
 /** The workspace kept mounted behind an app-overlay modal: the ?workspace= that
- * Get help, the Requests inbox, the New machine inspiration flow, and the
+ * Get help, the Requests inbox, the New machine template flow, and the
  * AI-keys mint dialog forward, so those overlays float over the live workspace
  * they were opened from (kept mounted, no reload). The AI-keys dialog forwards
  * the machine's HOST id (the mint endpoint keys on it); the others forward the
  * agent id. Settings / Accounts are launched from Home and carry none, the
- * inbox opened from Home carries none, and an inspiration link with no machine
+ * inbox opened from Home carries none, and a template link with no machine
  * open redirects to the full create form -- so their overlay floats over Home /
  * never renders (returns null). */
 const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set([
   "/help",
   "/inbox",
-  "/create/inspiration",
+  "/create/template",
   "/settings/ai-keys",
 ]);
 
@@ -103,8 +103,8 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (match) return workspaceContext(match[1], null);
   match = path.match(new RegExp(`^/agents/${ID_SEGMENT}/recovery$`, "i"));
   if (match) return workspaceContext(match[1], null);
-  if (path === "/create/inspiration") {
-    // Over a machine the inspiration stepper is a modal floating on that
+  if (path === "/create/template") {
+    // Over a machine the template stepper is a modal floating on that
     // machine's surface (its context + accent); with no machine it redirects to
     // the /create form, so it stays a plain New machine page until that lands.
     const behind = overlayBehindWorkspaceId(path, search);

@@ -42,10 +42,10 @@ test('git_url only', () => {
     gitUrl: 'https://github.com/imbue-ai/example',
     branch: '',
   });
-  // A repo-carrying link is an Inspiration link: the target is the Create
-  // from Inspiration page, which offers both creating a new machine and
-  // adding the Inspiration to an existing one.
-  assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample');
+  // A repo-carrying link is a Template link: the target is the Create
+  // from Template page, which offers both creating a new machine and
+  // adding the Template to an existing one.
+  assert.equal(deeplinkTargetPath(url), '/create/template?git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample');
 });
 
 test('branch only', () => {
@@ -59,7 +59,7 @@ test('both params', () => {
     gitUrl: 'https://github.com/a/b',
     branch: 'v1.2.3',
   });
-  assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fgithub.com%2Fa%2Fb&branch=v1.2.3');
+  assert.equal(deeplinkTargetPath(url), '/create/template?git_url=https%3A%2F%2Fgithub.com%2Fa%2Fb&branch=v1.2.3');
 });
 
 test('empty-string params behave like absent ones', () => {
@@ -71,7 +71,7 @@ test('git_url containing its own query survives the decode/re-encode round trip'
   // ?token=abc inside the value, percent-encoded by the sender.
   const url = 'minds://create?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc';
   assert.equal(parseDeeplink(url).gitUrl, 'https://host/repo.git?token=abc');
-  assert.equal(deeplinkTargetPath(url), '/create/inspiration?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc');
+  assert.equal(deeplinkTargetPath(url), '/create/template?git_url=https%3A%2F%2Fhost%2Frepo.git%3Ftoken%3Dabc');
 });
 
 test('target allowlist property: output is null or a fixed create path', () => {
@@ -86,7 +86,7 @@ test('target allowlist property: output is null or a fixed create path', () => {
   for (const input of inputs) {
     const out = deeplinkTargetPath(input);
     assert.ok(
-      out === null || out === '/create' || out.startsWith('/create?') || out.startsWith('/create/inspiration?'),
+      out === null || out === '/create' || out.startsWith('/create?') || out.startsWith('/create/template?'),
       `unexpected: ${out}`
     );
   }
@@ -152,7 +152,7 @@ test('allowlist property: output is null or starts with /create', () => {
   for (const input of inputs) {
     const out = deeplinkTargetPath(input);
     assert.ok(
-      out === null || out === '/create' || out.startsWith('/create?') || out.startsWith('/create/inspiration?'),
+      out === null || out === '/create' || out.startsWith('/create?') || out.startsWith('/create/template?'),
       `unexpected: ${out}`
     );
   }

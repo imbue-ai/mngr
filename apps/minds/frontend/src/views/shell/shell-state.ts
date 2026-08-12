@@ -112,12 +112,12 @@ export class ShellState {
   closeAppOverlay(): void {
     const path = this.currentRoutePath();
     const search = this.currentRouteSearch();
-    // The fixed app modals are always closeable; the New machine inspiration
+    // The fixed app modals are always closeable; the New machine template
     // stepper is a closeable modal only while it floats over a machine
     // (?workspace=) -- with none it is a redirect, not an overlay.
     const isCloseable =
       isAppOverlayPath(path) ||
-      (path === "/create/inspiration" && overlayBehindWorkspaceId(path, search) !== null);
+      (path === "/create/template" && overlayBehindWorkspaceId(path, search) !== null);
     if (!isCloseable) return;
     // history.back() does not update the route synchronously, so a second
     // dismissal arriving before it lands (a repeated Escape) would fire

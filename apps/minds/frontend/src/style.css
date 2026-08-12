@@ -469,18 +469,18 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * Create-from-Inspiration numbered stepper (CreateInspirationPage). The active
+ * Create-from-Template numbered stepper (CreateTemplatePage). The active
  * step's circle is a solid inverse bubble with a contrasting number; a completed
  * step is a faint fill with a muted number -- both opaque so the connector line
  * stays hidden behind them. Completed steps link down to the next with a solid
  * 1px line; the current (last visible) step gets a short dotted "more to come"
- * stub instead, unless it is the final step. Ported from InspirationCreate.jinja.
+ * stub instead, unless it is the final step. Ported from TemplateCreate.jinja.
  */
-.inspiration-step-circle[data-state="active"] {
+.template-step-circle[data-state="active"] {
   background-color: var(--c-surface-inverse);
   color: var(--c-text-inverse-primary);
 }
-.inspiration-step-circle[data-state="done"] {
+.template-step-circle[data-state="done"] {
   background-color: color-mix(in srgb, var(--c-text-primary) 10%, var(--c-surface-primary));
   color: var(--c-text-secondary);
 }
@@ -499,7 +499,7 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * The copyable "/use-inspiration <repo>" box on the add branch: a slight lift
+ * The copyable "/use-template <repo>" box on the add branch: a slight lift
  * with a stronger border + soft shadow on hover. The border/background
  * transitions also carry the green "Copied" confirmation (set via inline style,
  * which overrides the hover border while the green is showing). The whole box

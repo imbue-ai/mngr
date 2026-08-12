@@ -2889,7 +2889,7 @@ def create_desktop_client(
     for spa_route in (
         "/",
         "/create",
-        "/create/inspiration",
+        "/create/template",
         "/creating/<agent_id>",
         "/settings",
         "/settings/ai-keys",

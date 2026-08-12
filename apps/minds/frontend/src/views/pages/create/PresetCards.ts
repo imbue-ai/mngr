@@ -1,5 +1,5 @@
 // The remote/local compute-preset card pair shared by the create form and
-// the Create from Inspiration page (port of CreatePresetCards.jinja).
+// the Create from Template page (port of CreatePresetCards.jinja).
 
 import m from "mithril";
 import type { PresetName } from "./form-model";

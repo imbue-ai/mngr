@@ -955,7 +955,7 @@
   // this pane lives in an overlay view, so that is a real case). Say so rather
   // than leaving the user to paste whatever was on the clipboard before.
   // Confirm a copy by flashing the link pill green, the same way the
-  // inspiration flow confirms its copy: the clipboard gives no feedback of its
+  // template flow confirms its copy: the clipboard gives no feedback of its
   // own, and a link that looks unchanged after a click reads as a dead button.
   // Set through the theme's success variables inline so it stays theme-aware
   // and beats the pill's own hover colors.

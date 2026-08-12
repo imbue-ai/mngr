@@ -968,7 +968,7 @@
           {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "#0b292b") ~ ";" %}
           {# The plugin's /goto/ route is host-keyed; fall back to the agent id
              only when no host coordinate is known (same degrade as the
-             inspiration page's rows). #}
+             template page's rows). #}
           {% set goto_href = mngr_forward_origin ~ "/goto/" ~ (agent_host_ids.get(agent_id | string) or agent_id) ~ "/" %}
           {% set destroying_href = "/destroying/" ~ agent_id %}
           {% set supports_shutdown = (agent_id | string) in shutdown_capable_agent_ids %}

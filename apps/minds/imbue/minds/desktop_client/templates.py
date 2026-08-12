@@ -289,8 +289,8 @@ def _build_catalog() -> Catalog:
 CATALOG: Final[Catalog] = _build_catalog()
 
 
-class InspirationMachineRow(FrozenModel):
-    """One pickable machine on the Create from Inspiration page's add flow."""
+class TemplateMachineRow(FrozenModel):
+    """One pickable machine on the Create from Template page's add flow."""
 
     agent_id: str = Field(description="The machine agent id (drives the recovery-restart detour)")
     host_id: str = Field(default="", description="The machine host id (drives the /goto/ href); '' when unknown")
@@ -353,7 +353,7 @@ def render_landing_page(
     agent_host_ids maps agent ID strings to the workspace's ``host-<hex>``
     coordinate. The plugin's ``/goto/`` route is host-keyed, so rows with an
     entry link via it; rows without one fall back to the agent id (nothing
-    better is known -- same degrade as the inspiration page's rows).
+    better is known -- same degrade as the template page's rows).
 
     agent_accents maps agent ID strings to ``#rrggbb`` workspace accent
     hexes (the stored color label, resolved by the caller). Agents without
@@ -636,7 +636,7 @@ def render_create_form(
     effective_url = git_url if git_url else default_workspace_git_url()
     # The env/operator branch default pairs with the default template repo, so
     # it only applies when the repository was NOT explicitly supplied. With an
-    # explicit repository (e.g. an inspiration deeplink's git_url) the branch
+    # explicit repository (e.g. a template deeplink's git_url) the branch
     # is kept exactly as given: blank means "the repo's latest version", which
     # is what submit resolves it to (``resolve_template_version``).
     if git_url:
@@ -722,31 +722,36 @@ def render_create_form(
 
 
 @pure
-def render_inspiration_create_page(
+def render_template_create_page(
     git_url: str,
     branch: str = "",
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
     color: str = DEFAULT_WORKSPACE_COLOR,
     mngr_forward_origin: str = "",
-    machine_rows: Sequence[InspirationMachineRow] = (),
+    machine_rows: Sequence[TemplateMachineRow] = (),
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
     start: str = "",
 ) -> str:
-    """Render the Create from Inspiration page (GET /create/inspiration).
+    """Render the Create from Template page (GET /create/template).
 
-    The landing page for an Inspiration deeplink: a chooser between creating
-    a new machine from ``git_url`` and adding the Inspiration to an
-    existing machine. The add flow shows a copyable ``/use-inspiration
+    The landing page for a Template deeplink: a chooser between creating
+    a new machine from ``git_url`` and adding the Template to an
+    existing machine. The add flow shows a copyable `` /use-template
     <git-url>`` message (the skill accepts only a URL, so ``branch`` is
-    deliberately absent from it) plus ``machine_rows`` to open. The new
+    deliberately absent from it). The leading space is deliberate: a pasted
+    string starting with ``/`` can be read as a slash command by the chat input
+    rather than as text. It requires the target machine to be on a
+    post-rename workspace template; one still on an older template does not
+    recognise the command and has to be updated first. ``machine_rows`` is the
+    set of existing machines the add flow offers to paste it into. The new
     flow's settings step lets the user keep the preset defaults or reveal the
     compute / backup provider and region selects inline (the repo and branch
     stay fixed); the provider enums and region options come from the same
     source the create form uses.
     """
-    return _render_inspiration_stepper(
+    return _render_template_stepper(
         git_url=git_url,
         branch=branch,
         accounts=accounts,
@@ -762,14 +767,14 @@ def render_inspiration_create_page(
 
 
 @pure
-def _render_inspiration_stepper(
+def _render_template_stepper(
     git_url: str,
     branch: str,
     accounts: Sequence[object] | None,
     default_account_id: str,
     color: str,
     mngr_forward_origin: str,
-    machine_rows: Sequence[InspirationMachineRow],
+    machine_rows: Sequence[TemplateMachineRow],
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None,
     region_selected_by_launch_mode: Mapping[str, str] | None,
     is_modal: bool,
@@ -777,14 +782,14 @@ def _render_inspiration_stepper(
     current_machine_name: str = "",
     start: str = "",
 ) -> str:
-    """Render the Create from Inspiration stepper into one of its two shells.
+    """Render the Create from Template stepper into one of its two shells.
 
     ``is_modal`` picks the shell: the full page, or the shared overlay's card
     (the deeplink modal). The stepper itself is identical; only the add branch's
     last step differs, and only when a ``current_machine_id`` is supplied.
     """
     return CATALOG.render(
-        "pages.InspirationCreate",
+        "pages.TemplateCreate",
         git_url=git_url,
         branch=branch,
         accounts=accounts or [],
@@ -1673,7 +1678,7 @@ def render_account_plan_modal_page(acct_user_id: str, account_email: str) -> str
 
 
 @pure
-def render_inspiration_modal_page(
+def render_template_modal_page(
     git_url: str,
     branch: str = "",
     current_machine_id: str = "",
@@ -1682,20 +1687,20 @@ def render_inspiration_modal_page(
     default_account_id: str = "",
     color: str = DEFAULT_WORKSPACE_COLOR,
     mngr_forward_origin: str = "",
-    machine_rows: Sequence[InspirationMachineRow] = (),
+    machine_rows: Sequence[TemplateMachineRow] = (),
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
 ) -> str:
-    """Render the Create from Inspiration stepper as a modal (``GET /create/inspiration/modal``).
+    """Render the Create from Template stepper as a modal (``GET /create/template/modal``).
 
     The deeplink entry point when the app is already inside a workspace. It is
-    the SAME stepper the full page renders (``render_inspiration_create_page``),
+    the SAME stepper the full page renders (``render_template_create_page``),
     hosted in the shared overlay's card instead of the page shell, so the create
     flow behaves identically. The one difference: the add branch targets the
     workspace the user is already in, so its last step drops the picker and just
     says to paste the copied message into that chat, then dismisses itself.
     """
-    return _render_inspiration_stepper(
+    return _render_template_stepper(
         git_url=git_url,
         branch=branch,
         accounts=accounts,

@@ -122,9 +122,9 @@ describe("CreateFormModel", () => {
 
   it("keeps a deep-linked repository and its blank latest-version branch over the defaults", () => {
     const model = new CreateFormModel();
-    model.gitUrl = "https://example.com/inspiration.git";
+    model.gitUrl = "https://example.com/template.git";
     model.applyDefaults(buildDefaults());
-    expect(model.gitUrl).toBe("https://example.com/inspiration.git");
+    expect(model.gitUrl).toBe("https://example.com/template.git");
     // Blank means "the repo's latest version" for an explicit repository, so
     // the default branch must not be paired with it.
     expect(model.branch).toBe("");

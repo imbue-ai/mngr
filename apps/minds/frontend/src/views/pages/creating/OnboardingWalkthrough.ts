@@ -99,7 +99,7 @@ const STEP_COPY: Record<number, StepCopy> = {
   },
   8: {
     headline: "You can publish your apps, or adapt what others have made.",
-    body: "Find others’ apps in the Inspirations catalog here.",
+    body: "Find others’ apps in the Templates catalog here.",
   },
 };
 

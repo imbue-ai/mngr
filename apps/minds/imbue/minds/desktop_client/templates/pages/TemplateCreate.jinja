@@ -1,24 +1,24 @@
 {#def git_url, branch="", accounts=[], default_account_id="", color="#0b292b", mngr_forward_origin="", machine_rows=[], launch_modes=[], backup_providers=[], region_options_by_launch_mode={}, region_selected_by_launch_mode={}, is_modal=False, current_machine_id="", current_machine_name="", start="" #}
 {#
-  Create from Inspiration page (GET /create/inspiration?git_url=...).
+  Create from Template page (GET /create/template?git_url=...).
 
-  Landing page for an Inspiration deeplink (minds://create?git_url=...), laid
+  Landing page for a Template deeplink (minds://create?git_url=...), laid
   out as a numbered vertical stepper that shows ONE step's content at a time.
   The active step's body is expanded; completed steps collapse to their number
   plus a one-line summary of the choice (click to reopen and change it); steps
   not yet reached stay hidden. The user is walked (1) -> (2) -> (3) in order.
 
-  - Step 1: create a new machine from the Inspiration, or add it to an
+  - Step 1: create a new machine from the Template, or add it to an
     existing one.
   - Create branch: (2) local vs. remote via the shared preset cards -- no
     default selection, an explicit click advances; then (3) confirm --
-    account, the Inspiration shown as plain read-only text, a required "I
-    trust this Inspiration" acknowledgment, and the "Create from Inspiration"
+    account, the Template shown as plain read-only text, a required "I
+    trust this Template" acknowledgment, and the "Create from Template"
     submit. Advanced settings are NOT their own step: a low-key "Advanced
     settings" dashed divider above Create expands the compute / AI / backup
     provider and region selects in place. The POST carries the (possibly edited) select
     values; host name and runtime are omitted so the server defaults apply.
-  - Add branch: (2) copy the "/use-inspiration <git-url>" message (the whole
+  - Add branch: (2) copy the "/use-template <git-url>" message (the whole
     box is clickable; the skill accepts only a URL -- a deeplink branch is
     deliberately dropped); the copy advances, forcing it before (3) the
     machine picker. Rows mirror the landing page's gating: STOPPED minds
@@ -50,7 +50,7 @@
     function closeModalIfAny() {
       if (IS_MODAL && window.minds && window.minds.closeModal) window.minds.closeModal();
     }
-    window.dismissInspirationModal = closeModalIfAny;
+    window.dismissTemplateModal = closeModalIfAny;
 
     // Navigate the shell underneath and dismiss the modal. Never plain
     // ``window.location`` in modal mode: that would load the destination inside
@@ -103,28 +103,28 @@
     }
 
     var el = {
-      s1: byId('inspiration-step-1'),
-      c2: byId('inspiration-step-create-2'),  // where to run
-      c3: byId('inspiration-step-create-3'),  // confirm + create (advanced optional)
-      a2: byId('inspiration-step-add-2'),
-      a3: byId('inspiration-step-add-3')
+      s1: byId('template-step-1'),
+      c2: byId('template-step-create-2'),  // where to run
+      c3: byId('template-step-create-3'),  // confirm + create (advanced optional)
+      a2: byId('template-step-add-2'),
+      a3: byId('template-step-add-3')
     };
     var accountSelect = byId('account_id');
-    var accountError = byId('inspiration-account-error');
-    var trustCheckbox = byId('inspiration-trust');
-    var trustTitle = byId('inspiration-trust-title');
-    var createError = byId('inspiration-create-error');
-    var submitBtn = byId('inspiration-submit');
+    var accountError = byId('template-account-error');
+    var trustCheckbox = byId('template-trust');
+    var trustTitle = byId('template-trust-title');
+    var createError = byId('template-create-error');
+    var submitBtn = byId('template-submit');
     var presetCards = document.querySelectorAll('[data-preset]');
 
     // Advanced settings selects (revealed by "Enter advanced settings" on the
     // confirm step). Their values are the source of truth for the POST, and are
     // pre-filled to the chosen preset's providers so creating without opening
     // the panel submits the same config the preset implies.
-    var launchSelect = byId('inspiration-launch-mode');
-    var backupSelect = byId('inspiration-backup-provider');
-    var regionSelect = byId('inspiration-region');
-    var regionRow = byId('inspiration-region-row');
+    var launchSelect = byId('template-launch-mode');
+    var backupSelect = byId('template-backup-provider');
+    var regionSelect = byId('template-region');
+    var regionRow = byId('template-region-row');
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
@@ -184,7 +184,7 @@
       // (always the last visible one) instead gets a short 3-dot "more to come"
       // stub below its number -- unless it's the final step (activeStep === 3),
       // in which case it gets nothing, so the last number reads as the end.
-      var allSteps = document.querySelectorAll('.inspiration-step');
+      var allSteps = document.querySelectorAll('.template-step');
       var visible = [];
       for (var i = 0; i < allSteps.length; i++) {
         if (!allSteps[i].classList.contains('hidden')) visible.push(allSteps[i]);
@@ -271,7 +271,7 @@
     // Collapsed: the label sits on the left. Open: the flanking dashed rules
     // appear, pushing the label to the center so the toggle reads as a divider.
     function setAdvancedRule(open) {
-      var rules = byId('inspiration-toggle-advanced').querySelectorAll('[data-adv-rule]');
+      var rules = byId('template-toggle-advanced').querySelectorAll('[data-adv-rule]');
       for (var i = 0; i < rules.length; i++) rules[i].classList.toggle('hidden', !open);
     }
 
@@ -280,7 +280,7 @@
     // FLIPs from its old left position to center while the rules grow outward
     // from it. Only transforms animate, so nothing reflows mid-motion.
     function animateAdvancedDivider() {
-      var btn = byId('inspiration-toggle-advanced');
+      var btn = byId('template-toggle-advanced');
       var label = btn.querySelector('span:not([data-adv-rule])');
       var rules = btn.querySelectorAll('[data-adv-rule]');
       var startLeft = label.getBoundingClientRect().left;
@@ -305,7 +305,7 @@
     // The reverse: the label slides back from center to left as the rules shrink
     // inward + fade, then the rules are hidden so it rests as a plain left label.
     function reverseAdvancedDivider() {
-      var btn = byId('inspiration-toggle-advanced');
+      var btn = byId('template-toggle-advanced');
       var label = btn.querySelector('span:not([data-adv-rule])');
       var rules = btn.querySelectorAll('[data-adv-rule]');
       if (!label.animate) { setAdvancedRule(false); return; }
@@ -344,7 +344,7 @@
     // pushes downward instead of jumping up. revealAdvanced() then scrolls the
     // newly opened options into view. Both are reverted when the panel closes.
     function pageColumn() {
-      var anchor = byId('inspiration-content-top');
+      var anchor = byId('template-content-top');
       return anchor ? anchor.parentElement : null;
     }
     function pinPageColumn() {
@@ -395,7 +395,7 @@
       // Let the open begin, then slowly scroll the options + Create into view.
       window.setTimeout(function () {
         if (!isAdvanced) return;   // closed again before the scroll started
-        var submit = byId('inspiration-submit');
+        var submit = byId('template-submit');
         if (!submit) return;
         if (IS_MODAL) {
           // The modal card is its own scroll container, so let the browser
@@ -417,7 +417,7 @@
     // fades: the Create button below slides straight up as the options vanish,
     // instead of waiting on a scroll. Hides it and runs onDone once settled.
     function collapseAdvancedPanel(onDone) {
-      var adv = byId('inspiration-advanced');
+      var adv = byId('template-advanced');
       if (!adv.animate) { adv.classList.add('hidden'); if (onDone) onDone(); return; }
       adv.getAnimations().forEach(function (a) { a.cancel(); });
       var h = adv.getBoundingClientRect().height;
@@ -437,8 +437,8 @@
     }
 
     function openAdvanced() {
-      var adv = byId('inspiration-advanced');
-      byId('inspiration-advanced-chevron').style.transform = 'rotate(180deg)';
+      var adv = byId('template-advanced');
+      byId('template-advanced-chevron').style.transform = 'rotate(180deg)';
       pinPageColumn();               // freeze the column BEFORE the content grows
       adv.classList.remove('hidden');
       animateAdvancedDivider();      // reveal + morph the divider open
@@ -451,7 +451,7 @@
       // opacity) so the Create button rises immediately as the options vanish.
       // The shrinking content scrolls the view back up on its own; release the
       // pinned column once the collapse settles.
-      byId('inspiration-advanced-chevron').style.transform = '';
+      byId('template-advanced-chevron').style.transform = '';
       reverseAdvancedDivider();
       collapseAdvancedPanel(function () {
         if (isAdvanced) return;    // re-opened during the collapse; leave it open
@@ -464,8 +464,8 @@
       // persist, so reopening shows the prior picks); reset the chevron and the
       // divider back to a plain left-aligned label, and release the pinned column.
       isAdvanced = false;
-      byId('inspiration-advanced').classList.add('hidden');
-      byId('inspiration-advanced-chevron').style.transform = '';
+      byId('template-advanced').classList.add('hidden');
+      byId('template-advanced-chevron').style.transform = '';
       setAdvancedRule(false);
       unpinPageColumn();
     }
@@ -491,34 +491,34 @@
     // page it just advances to the next step.
     function openCreateOnFullPage() {
       var params = new URLSearchParams();
-      params.set('git_url', byId('inspiration-git-url').value);
-      var b = byId('inspiration-branch').value;
+      params.set('git_url', byId('template-git-url').value);
+      var b = byId('template-branch').value;
       if (b) params.set('branch', b);
       params.set('start', 'create');
-      leaveTo('/create/inspiration?' + params.toString());
+      leaveTo('/create/template?' + params.toString());
     }
     byId('choose-new-machine').addEventListener('click', function () {
       if (IS_MODAL) openCreateOnFullPage();
       else chooseBranch('create');
     });
     byId('choose-add-existing').addEventListener('click', function () { chooseBranch('add'); });
-    var emptyToNew = byId('inspiration-empty-to-new');
+    var emptyToNew = byId('template-empty-to-new');
     if (emptyToNew) emptyToNew.addEventListener('click', function (e) { e.preventDefault(); chooseBranch('create'); });
 
     // Confirm step: the "Advanced settings" dashed divider (above Create)
     // expands the provider/region selects in place, rotating its chevron.
-    byId('inspiration-toggle-advanced').addEventListener('click', function () {
+    byId('template-toggle-advanced').addEventListener('click', function () {
       isAdvanced = !isAdvanced;
       if (isAdvanced) openAdvanced();
       else closeAdvanced();
     });
 
     var isMessageCopied = false;
-    var copyBtn = byId('inspiration-copy-btn');
-    var copyBox = byId('inspiration-skill-message').parentElement;
+    var copyBtn = byId('template-copy-btn');
+    var copyBox = byId('template-skill-message').parentElement;
     function doCopy() {
       if (isMessageCopied) return; // already copying/advancing
-      var message = byId('inspiration-skill-message').value;
+      var message = byId('template-skill-message').value;
       try {
         if (navigator.clipboard) navigator.clipboard.writeText(message);
       } catch (e) {
@@ -557,7 +557,7 @@
     // The whole box is clickable, not just the button.
     copyBox.addEventListener('click', doCopy);
 
-    window.inspirationRowClick = function (row) {
+    window.templateRowClick = function (row) {
       var agentId = row.dataset.agentId;
       var ret = row.dataset.defaultHref || '';
       var target;
@@ -615,7 +615,7 @@
     accountSelect.addEventListener('change', hideAccountError);
 
     function syncTrustGate() {
-      // Gray out + disable Create until the Inspiration is acknowledged, and
+      // Gray out + disable Create until the Template is acknowledged, and
       // keep the acknowledgment red until it is (it is not verified by Imbue).
       var ok = trustCheckbox.checked;
       submitBtn.disabled = !ok;
@@ -636,10 +636,10 @@
       createError.textContent = message || 'Something went wrong. Please try again.';
       createError.classList.remove('hidden');
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Create from Inspiration';
+      submitBtn.textContent = 'Create from Template';
     }
 
-    byId('inspiration-form').addEventListener('submit', function (e) {
+    byId('template-form').addEventListener('submit', function (e) {
       e.preventDefault();
       createError.classList.add('hidden');
       // The Create button is disabled until the box is checked; this guards
@@ -657,9 +657,9 @@
       submitBtn.disabled = true;
       submitBtn.textContent = 'Creating...';
       var body = {
-        git_url: byId('inspiration-git-url').value,
-        branch: byId('inspiration-branch').value,
-        color: byId('inspiration-color').value,
+        git_url: byId('template-git-url').value,
+        branch: byId('template-branch').value,
+        color: byId('template-color').value,
         launch_mode: launchSelect.value,
         backup_provider: backupSelect.value,
         region: regionSelect.disabled ? '' : regionSelect.value,
@@ -692,7 +692,7 @@
     render();
 
     // Modal only: clicking the dimmed area outside the card dismisses it.
-    var modalBackdrop = byId('inspiration-modal-backdrop');
+    var modalBackdrop = byId('template-modal-backdrop');
     if (modalBackdrop) {
       modalBackdrop.addEventListener('click', function (e) {
         if (e.target === modalBackdrop) closeModalIfAny();
@@ -771,8 +771,8 @@
     }
   </style>
 
-  <div id="inspiration-content-top" class="text-center mb-8">
-    <h1 class="type-heading-lg text-primary">You've opened an Inspiration</h1>
+  <div id="template-content-top" class="text-center mb-8">
+    <h1 class="type-heading-lg text-primary">You've opened a Template</h1>
     {# Plain read-only text, deliberately not styled like an input. #}
     <p class="type-body text-secondary font-mono mt-2 break-all">{{ git_url }}</p>
   </div>
@@ -783,7 +783,7 @@
   <div>
 
     {# ---- Step 1: choose the pathway (always present) ---- #}
-    <div id="inspiration-step-1" class="inspiration-step">
+    <div id="template-step-1" class="template-step">
       <div class="flex gap-3">
         <div class="relative flex flex-col items-center self-stretch">
           <span data-step-circle class="relative z-10 flex items-center justify-center w-8 h-8 rounded-full type-body font-semibold shrink-0 transition-colors duration-300">1</span>
@@ -811,7 +811,7 @@
     </div>
 
     {# ---- Create branch, step 2: local vs. remote ---- #}
-    <div id="inspiration-step-create-2" class="inspiration-step hidden">
+    <div id="template-step-create-2" class="template-step hidden">
       <div class="flex gap-3">
         <div class="relative flex flex-col items-center self-stretch">
           <span data-step-circle class="relative z-10 flex items-center justify-center w-8 h-8 rounded-full type-body font-semibold shrink-0 transition-colors duration-300">2</span>
@@ -837,7 +837,7 @@
     </div>
 
     {# ---- Create branch, step 3: confirm + create (advanced optional) ---- #}
-    <div id="inspiration-step-create-3" class="inspiration-step hidden">
+    <div id="template-step-create-3" class="template-step hidden">
       <div class="flex gap-3">
         <div class="relative flex flex-col items-center self-stretch">
           <span data-step-connector class="absolute hidden"></span>
@@ -852,12 +852,12 @@
             </span>
           </div>
           <div data-step-body class="mt-4">
-            <form id="inspiration-form">
-              <input type="hidden" id="inspiration-git-url" value="{{ git_url }}">
-              <input type="hidden" id="inspiration-branch" value="{{ branch }}">
-              <input type="hidden" id="inspiration-color" value="{{ color }}">
+            <form id="template-form">
+              <input type="hidden" id="template-git-url" value="{{ git_url }}">
+              <input type="hidden" id="template-branch" value="{{ branch }}">
+              <input type="hidden" id="template-color" value="{{ color }}">
 
-              <p id="inspiration-create-error" role="alert" class="hidden mb-4 type-helper text-important"></p>
+              <p id="template-create-error" role="alert" class="hidden mb-4 type-helper text-important"></p>
 
               <div class="mb-4">
                 <p class="type-label uppercase tracking-wide text-secondary">Creating from</p>
@@ -882,7 +882,7 @@
                   </Select>
                 </div>
               </div>
-              <p id="inspiration-account-error" class="hidden mb-4 type-helper text-important">
+              <p id="template-account-error" class="hidden mb-4 type-helper text-important">
                 Pick an account to use Imbue Cloud, or choose the local preset.
               </p>
 
@@ -890,10 +890,10 @@
                 {# Required acknowledgment: shown red until checked, and the
                    Create button below stays disabled/grayed until it is. #}
                 <label class="flex items-center gap-3 cursor-pointer">
-                  <input type="checkbox" id="inspiration-trust" class="shrink-0">
+                  <input type="checkbox" id="template-trust" class="shrink-0">
                   <span>
-                    <span id="inspiration-trust-title" class="type-body font-semibold text-important transition-colors duration-200">I trust this Inspiration</span>
-                    <span class="block type-helper text-tertiary">Inspirations are community content. This one has not been approved or verified by Imbue.</span>
+                    <span id="template-trust-title" class="type-body font-semibold text-important transition-colors duration-200">I trust this Template</span>
+                    <span class="block type-helper text-tertiary">Templates are community content. This one has not been approved or verified by Imbue.</span>
                   </span>
                 </label>
               </div>
@@ -907,37 +907,37 @@
                  revealed selects sit inline with no box, pre-filled to the chosen
                  preset, so creating without opening it submits the same config. #}
               <div class="mt-8">
-                <button type="button" id="inspiration-toggle-advanced"
+                <button type="button" id="template-toggle-advanced"
                         class="group w-full flex items-center gap-3 cursor-pointer bg-transparent">
                   <span data-adv-rule class="flex-1 border-t border-dashed border-default hidden"></span>
                   <span class="flex items-center gap-1 type-helper text-tertiary transition-colors duration-200 group-hover:text-primary">
                     Advanced settings
-                    <span id="inspiration-advanced-chevron" class="transition-transform duration-200"><Icon16 name="chevron-down" /></span>
+                    <span id="template-advanced-chevron" class="transition-transform duration-200"><Icon16 name="chevron-down" /></span>
                   </span>
                   <span data-adv-rule class="flex-1 border-t border-dashed border-default hidden"></span>
                 </button>
-                <div id="inspiration-advanced" class="hidden mt-4">
+                <div id="template-advanced" class="hidden mt-4">
                   <div class="flex flex-col gap-6">
                     <div class="flex items-center justify-between gap-4">
-                      <FormLabel target="inspiration-launch-mode" inline>Compute provider</FormLabel>
-                      <Select id="inspiration-launch-mode" name="inspiration_launch_mode" width="w-48">
+                      <FormLabel target="template-launch-mode" inline>Compute provider</FormLabel>
+                      <Select id="template-launch-mode" name="template_launch_mode" width="w-48">
                         {% for mode in launch_modes %}
                           <option value="{{ mode.value }}">{{ mode.value | lower }}</option>
                         {% endfor %}
                       </Select>
                     </div>
                     <div class="flex items-center justify-between gap-4">
-                      <FormLabel target="inspiration-backup-provider" inline>Backup provider</FormLabel>
-                      <Select id="inspiration-backup-provider" name="inspiration_backup_provider" width="w-48">
+                      <FormLabel target="template-backup-provider" inline>Backup provider</FormLabel>
+                      <Select id="template-backup-provider" name="template_backup_provider" width="w-48">
                         {% for provider in backup_providers %}
                           <option value="{{ provider.value }}">{% if provider.value == 'API_KEY' %}manual{% else %}{{ provider.value | lower }}{% endif %}</option>
                         {% endfor %}
                       </Select>
                     </div>
-                    <div id="inspiration-region-row" class="hidden">
+                    <div id="template-region-row" class="hidden">
                       <div class="flex items-center justify-between gap-4">
-                        <FormLabel target="inspiration-region" inline>Region</FormLabel>
-                        <Select id="inspiration-region" name="inspiration_region" width="w-48"></Select>
+                        <FormLabel target="template-region" inline>Region</FormLabel>
+                        <Select id="template-region" name="template_region" width="w-48"></Select>
                       </div>
                     </div>
                   </div>
@@ -945,7 +945,7 @@
               </div>
 
               <div class="mt-6">
-                <ButtonSubmit id="inspiration-submit" variant="primary" block disabled extra="transition-all duration-200">Create from Inspiration</ButtonSubmit>
+                <ButtonSubmit id="template-submit" variant="primary" block disabled extra="transition-all duration-200">Create from Template</ButtonSubmit>
               </div>
             </form>
           </div>
@@ -954,7 +954,7 @@
     </div>
 
     {# ---- Add branch, step 2: copy the skill message ---- #}
-    <div id="inspiration-step-add-2" class="inspiration-step hidden">
+    <div id="template-step-add-2" class="template-step hidden">
       <div class="flex gap-3">
         <div class="relative flex flex-col items-center self-stretch">
           <span data-step-circle class="relative z-10 flex items-center justify-center w-8 h-8 rounded-full type-body font-semibold shrink-0 transition-colors duration-300">2</span>
@@ -975,15 +975,15 @@
           <div data-step-body class="mt-4">
             <p class="type-body text-secondary mb-4">
               You'll paste this into the chat of the machine you want to add
-              this Inspiration to.
+              this Template to.
             </p>
-            <CopyField :value="'/use-inspiration ' ~ git_url" id="inspiration-skill-message" aria-label="Inspiration chat message" extra="copy-box cursor-pointer">
-              <Button variant="ghost" id="inspiration-copy-btn" extra="transition-colors duration-300 shrink-0">Copy</Button>
+            <CopyField :value="' /use-template ' ~ git_url" id="template-skill-message" aria-label="Template chat message" extra="copy-box cursor-pointer">
+              <Button variant="ghost" id="template-copy-btn" extra="transition-colors duration-300 shrink-0">Copy</Button>
             </CopyField>
             {% if branch %}
               <p class="type-helper text-tertiary mt-2">
                 The link's branch ({{ branch }}) applies only when creating a new machine;
-                the message above always uses the Inspiration's published version.
+                the message above always uses the Template's published version.
               </p>
             {% endif %}
           </div>
@@ -992,7 +992,7 @@
     </div>
 
     {# ---- Add branch, step 3: pick the machine ---- #}
-    <div id="inspiration-step-add-3" class="inspiration-step hidden">
+    <div id="template-step-add-3" class="template-step hidden">
       <div class="flex gap-3">
         <div class="relative flex flex-col items-center self-stretch">
           <span data-step-circle class="relative z-10 flex items-center justify-center w-8 h-8 rounded-full type-body font-semibold shrink-0 transition-colors duration-300">3</span>
@@ -1019,7 +1019,7 @@
                 The message is on your clipboard &mdash; paste it into {{ current_machine_name or "this machine" }}'s chat to get started.
               </p>
               <div class="mt-4">
-                <Button variant="secondary" block onclick="dismissInspirationModal()">Done</Button>
+                <Button variant="secondary" block onclick="dismissTemplateModal()">Done</Button>
               </div>
             {% else %}
             <p class="type-body text-secondary mb-4">
@@ -1036,7 +1036,7 @@
                         :data-agent-id="row.agent_id"
                         :data-liveness="row.liveness"
                         :data-default-href="goto_href"
-                        onclick="window.inspirationRowClick(this)">
+                        onclick="window.templateRowClick(this)">
                     <span class="flex-1 font-semibold text-primary pl-1">{{ row.name }}</span>
                     {% if row.liveness == "STOPPED" %}
                       <StatusBadge>Stopped</StatusBadge>
@@ -1049,7 +1049,7 @@
             {% else %}
               <p class="type-body text-secondary">
                 You don't have any machines yet.
-                <a href="#" id="inspiration-empty-to-new" class="text-accent hover:underline">Create a new one from this Inspiration</a> instead.
+                <a href="#" id="template-empty-to-new" class="text-accent hover:underline">Create a new one from this Template</a> instead.
               </p>
             {% endif %}
             {% endif %}
@@ -1062,18 +1062,18 @@
 {% if is_modal %}
   {# Deeplink modal: the same stepper inside the shared overlay's centered card
      (its own scroll container, so a tall step scrolls in place). #}
-  <OverlaySurface title="Create from Inspiration"
+  <OverlaySurface title="Create from Template"
                   body_style="-webkit-app-region: no-drag;"
                   scripts={{ _scripts }}>
-    <div id="inspiration-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
+    <div id="template-modal-backdrop" class="fixed inset-0 flex items-center justify-center bg-surface-overlay p-4">
       <div class="relative bg-surface-primary rounded-lg shadow-overlay max-w-lg w-full p-6 max-h-[85vh] overflow-y-auto text-left">
-        <DialogCloseButton onclick="dismissInspirationModal()" />
+        <DialogCloseButton onclick="dismissTemplateModal()" />
         {{ _body }}
       </div>
     </div>
   </OverlaySurface>
 {% else %}
-  <PageNarrowContainer title="Create from Inspiration" page_label="New machine" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
+  <PageNarrowContainer title="Create from Template" page_label="New machine" padding="form" max_width="max-w-[720px]" scripts={{ _scripts }}>
     {{ _body }}
   </PageNarrowContainer>
 {% endif %}

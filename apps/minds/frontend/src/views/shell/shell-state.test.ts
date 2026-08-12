@@ -43,7 +43,7 @@ function displaying(shell: ShellState, agentId: string): void {
 
 // The ask follows the MOUNTED FRAME, not the routed content surface. Those
 // diverge on the routes that float an app modal over a workspace (/help,
-// /inbox, /settings/ai-keys, /create/inspiration): the frame stays mounted and
+// /inbox, /settings/ai-keys, /create/template): the frame stays mounted and
 // visible behind the card while `displayedWorkspaceAnyId` is null, and the
 // Shell keeps it at a stable vtree position so dismissing the modal does not
 // remount it either. Keying off the frame is what covers those windows.

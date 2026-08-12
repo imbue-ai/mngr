@@ -12,7 +12,7 @@ import { DevStyleguide } from "./views/pages/DevStyleguide";
 import { AccountsPage } from "./views/pages/AccountsPage";
 import { AiKeysPage } from "./views/pages/AiKeysPage";
 import { ConsentPage } from "./views/pages/ConsentPage";
-import { CreateInspirationPage } from "./views/pages/CreateInspirationPage";
+import { CreateTemplatePage } from "./views/pages/CreateTemplatePage";
 import { CreatePage } from "./views/pages/CreatePage";
 import { CreatingPage } from "./views/pages/CreatingPage";
 import { DestroyedWorkspacesPage } from "./views/pages/DestroyedWorkspacesPage";
@@ -36,7 +36,7 @@ interface RouteEntry {
 const ROUTE_ENTRIES: RouteEntry[] = [
   { path: "/", component: LandingPage },
   { path: "/create", component: CreatePage },
-  { path: "/create/inspiration", component: CreateInspirationPage },
+  { path: "/create/template", component: CreateTemplatePage },
   { path: "/creating/:agentId", component: CreatingPage },
   { path: "/settings", component: SettingsPage },
   { path: "/settings/ai-keys", component: AiKeysPage },
@@ -106,22 +106,22 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
   }
   try {
     const parsed = new URL(url, window.location.origin);
-    // An inspiration deeplink (minds://create?git_url= -> /create/inspiration?
+    // A template deeplink (minds://create?git_url= -> /create/template?
     // git_url=) that lands while a machine is displayed floats the stepper as a
     // modal over that machine (create new OR add to it), the SPA heir of the
-    // legacy /create/inspiration/modal; with no machine it passes through to the
+    // legacy /create/template/modal; with no machine it passes through to the
     // full-page stepper. (Electron decided this via mru.currentWorkspaceId; here
     // the displayed machine is the same signal, captured before we navigate.)
     const gitUrl = parsed.searchParams.get("git_url");
     const displayed = shell.displayedWorkspaceAnyId;
-    if (parsed.pathname === "/create/inspiration" && gitUrl && displayed !== null) {
+    if (parsed.pathname === "/create/template" && gitUrl && displayed !== null) {
       const query: Record<string, string> = {
         workspace: shell.stores.workspaces.toAgentScopedId(displayed),
         git_url: gitUrl,
       };
       const branch = parsed.searchParams.get("branch");
       if (branch) query.branch = branch;
-      m.route.set("/create/inspiration", query);
+      m.route.set("/create/template", query);
       return;
     }
     m.route.set(parsed.pathname + parsed.search);
