@@ -35,7 +35,6 @@ looks up the request event by id, and dispatches by request type. All
 the latchkey-specific work lives here.
 """
 
-import html as html_module
 import json
 from collections.abc import Sequence
 from enum import auto
@@ -54,12 +53,11 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.account_choices import DEFAULT_ACCOUNT_LABEL
+from imbue.minds.desktop_client.latchkey.handlers.account_choices import NEW_ACCOUNT_FORM_VALUE
+from imbue.minds.desktop_client.latchkey.handlers.account_choices import PermissionAccountChoice
+from imbue.minds.desktop_client.latchkey.handlers.account_choices import WILDCARD_PERMISSION_UI_LABEL
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.templates import DEFAULT_ACCOUNT_LABEL
-from imbue.minds.desktop_client.latchkey.handlers.templates import NEW_ACCOUNT_FORM_VALUE
-from imbue.minds.desktop_client.latchkey.handlers.templates import PermissionAccountChoice
-from imbue.minds.desktop_client.latchkey.handlers.templates import WILDCARD_PERMISSION_UI_LABEL
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -455,40 +453,6 @@ def _resolve_host_id(
             agent_id,
         )
         return None
-
-
-def _render_unknown_scope_fragment(request_id: str, scope: str) -> str:
-    """Render a deny-only detail fragment when the requested scope isn't in the catalog.
-
-    No catalog entry means we have no permissions to offer the user; the
-    only action that makes sense from here is Deny. Shaped to share the
-    inbox shell's deny submission JS: the fragment emits a
-    ``#permissions-form`` whose ``action`` targets ``/requests/<id>/grant``
-    so the shell's ``submitPermissionDeny`` helper (which rewrites
-    ``/grant`` to ``/deny``) auto-advances the inbox after the user clicks
-    Deny. There is no Approve button and no ``name="permissions"`` input
-    because no permissions are on offer; the form's action URL is only
-    used as the deny URL template.
-    """
-    escaped_scope = html_module.escape(scope)
-    escaped_request_id = html_module.escape(request_id, quote=True)
-    return (
-        '<div class="permissions-detail">'
-        '<h1 class="text-xl font-semibold text-zinc-900 leading-tight">Unknown scope</h1>'
-        '<p class="mt-2 text-zinc-600">'
-        f"The agent requested permissions under scope <code>{escaped_scope}</code>, "
-        "but this scope is not in the latchkey service catalog. "
-        "The request can only be denied from here."
-        "</p>"
-        '<form id="permissions-form" method="POST" '
-        f'action="/requests/{escaped_request_id}/grant" class="mt-6">'
-        '<div class="flex gap-2 mt-5 justify-end">'
-        '<button type="button" onclick="submitPermissionDeny()" '
-        'class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm '
-        'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 cursor-pointer">Deny</button>'
-        "</div></form>"
-        "</div>"
-    )
 
 
 class LatchkeyPermissionGrantHandler(RequestEventHandler):
@@ -923,78 +887,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         info = self.services_catalog.get_by_scope(req_event.scope)
         return info.display_name if info is not None else req_event.scope
 
-    def render_request_detail_fragment(
-        self,
-        req_event: RequestEvent,
-        backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        """Render the inbox right-pane fragment for a latchkey permission request.
-
-        Falls back to a deny-only fragment when the requested service is
-        not in the catalog, since there are no permissions to offer.
-        """
-        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
-            return "<p>Unsupported request type</p>"
-        service_info = self.services_catalog.get_by_scope(req_event.scope)
-        if service_info is None:
-            return _render_unknown_scope_fragment(
-                request_id=str(req_event.event_id),
-                scope=req_event.scope,
-            )
-
-        parsed_id = AgentId(req_event.agent_id)
-        ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
-        host_id = _resolve_host_id(backend_resolver, parsed_id)
-
-        # One ``services info`` call feeds both the account picker and the
-        # progress notice below.
-        latchkey_service_info = self.latchkey.services_info(service_info.name)
-        account_choices, selected_account = _build_account_choices(
-            latchkey_service_info.accounts,
-            req_event.account,
-            is_browser_auth_supported=latchkey_service_info.is_browser_auth_supported,
-        )
-        # Existing grants are per account, so the pre-check reflects the
-        # preselected one; switching accounts in the dialog does not re-fetch
-        # (the user can still adjust the checkboxes by hand).
-        pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions, selected_account)
-
-        # Match ``grant()``: ``latchkey auth browser`` runs when the selected
-        # account has no usable credentials (or a brand-new account is being
-        # signed in) AND the service either advertises a browser flow or
-        # returns no auth options at all (legacy fallback). Computed up front
-        # so the dialog's progress notice tells the truth about whether to
-        # expect a browser pop-up. If the selection or the status changes
-        # between render and submit, the user may see a slightly inaccurate
-        # notice for one cycle; the actual outcome is unaffected.
-        selected_status_by_account = {
-            entry.account: entry.credential_status for entry in latchkey_service_info.accounts
-        }
-        selected_status = selected_status_by_account.get(selected_account)
-        will_open_browser = (
-            selected_status is None or _needs_account_credential_setup(selected_status)
-        ) and latchkey_service_info.is_browser_auth_supported
-
-        return render_predefined_permission_dialog(
-            agent_id=req_event.agent_id,
-            request_id=str(req_event.event_id),
-            ws_name=ws_name,
-            rationale=req_event.rationale,
-            service=service_info,
-            checked_permissions=pre_checked,
-            account_choices=account_choices,
-            selected_account_value=selected_account,
-            will_open_browser=will_open_browser,
-            mngr_forward_origin=mngr_forward_origin,
-        )
-
     def build_request_detail_payload(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
     ) -> RequestDetailPayload:
-        """Typed twin of :meth:`render_request_detail_fragment` (same derivation, no HTML)."""
         if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
             return UiUnsupportedDetail(message="Unsupported request type")
         service_info = self.services_catalog.get_by_scope(req_event.scope)

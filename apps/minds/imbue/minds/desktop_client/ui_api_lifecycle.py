@@ -7,22 +7,21 @@ Three surfaces:
   the backup retention window (newest destroyed first) plus orphan backup
   envs this device holds, with the retention window for the page header.
 - ``POST /ui/api/destroyed-workspaces/<agent_id>/delete-backup`` -- frees a
-  destroyed workspace's backup quota now instead of waiting out retention
-  (the /ui twin of the legacy form POST, which Phase 4 deletes).
+  destroyed workspace's backup quota now instead of waiting out retention.
 - ``GET /ui/api/workspaces/<workspace_id>/recovery-info`` -- everything the
   Recovery page needs beyond the live channel health state: the resolved
   agent id (either workspace coordinate is accepted, since restored windows
   navigate host-keyed), the display name, the copy-pasteable SSH command,
   and whether the host currently reads as offline.
 
-The destroyed-row collection is the SURVIVING copy of ``app.py``'s legacy
-``_collect_destroyed_machine_rows`` (which now serves only the legacy POST
-route and dies with it in Phase 4); importing it from ``app.py`` would be a
-circular import, since ``app.py`` imports this module via ``ui_api.py``.
+This module is the single home of the destroyed-row derivation (moved here
+from ``app.py``'s deleted legacy page handlers).
 """
 
 import json
 import os
+from collections.abc import Iterable
+from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 
@@ -43,9 +42,11 @@ from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
 from imbue.minds.desktop_client.backup_reaper import parse_destroyed_at
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
+from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -93,8 +94,8 @@ def _is_lifecycle_request_authenticated() -> bool:
     """The /ui session check, local to this module to avoid a circular import via ui_api.
 
     Mirrors ``ui_api.is_ui_request_authenticated`` (including the SKIP_AUTH
-    test escape hatch); Phase 4 should hoist one shared helper when the
-    legacy surface is deleted.
+    test escape hatch); a shared helper hoisted onto the /ui blueprint
+    would remove the duplication.
     """
     if os.getenv("SKIP_AUTH", "0") == "1":
         return True
@@ -207,15 +208,31 @@ def _collect_destroyed_rows() -> list[DestroyedWorkspaceRow]:
     return [row for _, row in dated_record_rows] + orphan_rows
 
 
-def _resolve_workspace_coordinate(workspace_id: str) -> AgentId | None:
+def _iter_workspace_records(session_store: MultiAccountSessionStore | None) -> Iterator[ReplicaRecord]:
+    """Lazily yield every signed-in account's workspace records.
+
+    A generator so the coordinate resolver only lists records on a discovery
+    miss (listing can be slow).
+    """
+    record_store = session_store.record_store if session_store is not None else None
+    if session_store is None or record_store is None:
+        return
+    for account in session_store.list_accounts():
+        yield from record_store.list_records(str(account.user_id))
+
+
+def _resolve_workspace_coordinate_to_agent_id(
+    workspace_id: str,
+    backend_resolver: BackendResolverInterface,
+    workspace_records: Iterable[ReplicaRecord],
+) -> AgentId | None:
     """Map an agent- or host-keyed coordinate to the stable agent id.
 
     Content URLs and restored windows are host-keyed; minds records are
-    agent-keyed. Falls back to workspace records so a stopped host that
-    discovery no longer reports still resolves.
+    agent-keyed. Falls back to ``workspace_records`` (pass a lazy iterable so
+    records are only listed on a miss) so a stopped host that discovery no
+    longer reports still resolves.
     """
-    state = get_state()
-    backend_resolver: BackendResolverInterface = state.backend_resolver
     if workspace_id.startswith("agent-"):
         try:
             return AgentId(workspace_id)
@@ -227,14 +244,18 @@ def _resolve_workspace_coordinate(workspace_id: str) -> AgentId | None:
         display_info = backend_resolver.get_agent_display_info(agent_id)
         if display_info is not None and str(display_info.host_id) == workspace_id:
             return agent_id
-    session_store = state.session_store
-    record_store = session_store.record_store if session_store is not None else None
-    if session_store is not None and record_store is not None:
-        for account in session_store.list_accounts():
-            for record in record_store.list_records(str(account.user_id)):
-                if record.host_id == workspace_id and record.agent_id:
-                    return AgentId(record.agent_id)
+    for record in workspace_records:
+        if record.host_id == workspace_id and record.agent_id:
+            return AgentId(record.agent_id)
     return None
+
+
+def _resolve_workspace_coordinate(workspace_id: str) -> AgentId | None:
+    """The request-scoped wrapper: resolve against the app state's resolver and records."""
+    state = get_state()
+    return _resolve_workspace_coordinate_to_agent_id(
+        workspace_id, state.backend_resolver, _iter_workspace_records(state.session_store)
+    )
 
 
 def _build_ssh_command(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:

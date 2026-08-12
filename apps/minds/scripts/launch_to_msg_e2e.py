@@ -676,8 +676,9 @@ def _wait_cdp(port: int, timeout: float = 60.0) -> str:
 def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
     """Answer the "Help improve Minds" consent screen if it is up. True if dismissed.
 
-    Consent.jinja takes over the page while ``error_reporting_consent_given`` is
-    False, which it always is on a wiped ~/.minds. It is not once-per-run: it can
+    The SPA consent screen (ConsentPage) takes over the page while
+    ``error_reporting_consent_given`` is False, which it always is on a wiped
+    ~/.minds. It is not once-per-run: it can
     be back on a later ``goto("/")``, and a caller that assumed otherwise spent
     the rest of the run driving a dialog it thought was the home page.
     """
@@ -1414,7 +1415,7 @@ def run_e2e() -> int:
         snap_page(win, "02-home-after-auth")
 
         # The post-login "Help improve Minds" error-reporting consent screen
-        # (Consent.jinja, shown while error_reporting_consent_given is False --
+        # (the SPA ConsentPage, shown while error_reporting_consent_given is False --
         # always here, since the runner's ~/.minds is wiped each run) sits on
         # the home page until answered. Dismiss it once via Continue; the
         # POST /consent + reload then proceeds home, so the create flow and the

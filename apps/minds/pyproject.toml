@@ -17,8 +17,6 @@ dependencies = [
     "httpx>=0.27.0",
     "imbue-common",
     "itsdangerous>=2.2.0",
-    "jinja2>=3.1.0",
-    "jinjax>=0.45",
     "loguru",
     "imbue-mngr",
     "imbue-mngr-aws",
@@ -65,14 +63,12 @@ imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
 
-# Force-include the compiled Tailwind stylesheet + built SPA bundle for the
-# desktop client. Both are gitignored build artifacts, so hatchling would
-# otherwise omit them from the wheel. app.min.css is built from static/app.css
-# by `just minds-css` (pnpm run build:css); static/ui/ is built from frontend/
-# by the custom wheel build hook below (hatch_build.py).
+# Force-include the built SPA bundle for the desktop client. It is a
+# gitignored build artifact, so hatchling would otherwise omit it from the
+# wheel. static/ui/ is built from frontend/ by the custom wheel build hook
+# below (hatch_build.py).
 [tool.hatch.build]
 artifacts = [
-    "imbue/minds/desktop_client/static/app.min.css",
     "imbue/minds/desktop_client/static/ui/**",
 ]
 

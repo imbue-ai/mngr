@@ -1,10 +1,12 @@
-#!/usr/bin/env python3
-"""Visual diff harness for desktop_client templates.
+"""Visual diff harness for the minds SPA.
 
-Captures rendered HTML + Playwright screenshots for every page under
-``imbue.minds.desktop_client.templates`` (and friends), then compares
-two captures side by side. Intended as a local sanity tool for
-template-layer changes -- not wired into CI.
+``capture-spa`` builds the frontend bundle, renders the SPA index page per
+route with a deterministic fixture ``UiBootstrap`` (built from the real wire
+models in ``ui_models.py`` so fixtures can never drift from the schema),
+serves each route at its REAL path (the SPA router reads
+``location.pathname``), and screenshots every route. ``compare`` then diffs
+two captures side by side. Intended as a local sanity tool for UI changes --
+not wired into CI.
 
 Outputs land at ``apps/minds/.visual-diff/<label>/`` (gitignored).
 
@@ -12,40 +14,23 @@ Typical use:
 
     # On main:
     git checkout main
-    uv run apps/minds/scripts/visual_diff.py capture --label main
+    uv run apps/minds/scripts/visual_diff.py capture-spa --label spa-main
 
     # On the feature branch:
-    git checkout gleb/jinjax
-    uv run apps/minds/scripts/visual_diff.py capture --label jinjax
+    git checkout your-branch
+    uv run apps/minds/scripts/visual_diff.py capture-spa --label spa-branch
 
     # Compare:
-    uv run apps/minds/scripts/visual_diff.py compare main jinjax
-    open apps/minds/.visual-diff/report-main-vs-jinjax.html
+    uv run apps/minds/scripts/visual_diff.py compare spa-main spa-branch
+    open apps/minds/.visual-diff/report-spa-main-vs-spa-branch.html
 
-``capture`` writes:
-    apps/minds/.visual-diff/<label>/html/<scenario>.html
-    apps/minds/.visual-diff/<label>/png/<scenario>.png
+``capture-spa`` writes:
+    apps/minds/.visual-diff/<label>/html/spa_<route-slug>.html
+    apps/minds/.visual-diff/<label>/png/spa_<route-slug>.png
 
 ``compare`` writes a single ``report-<a>-vs-<b>.html`` with a side-by-side
 table of screenshots + a per-scenario verdict (HTML structural diff +
 pixel diff threshold).
-
-``capture-spa`` captures the Mithril SPA instead of the JinjaX templates:
-it builds the frontend bundle, renders the SPA index page per route with a
-deterministic fixture ``UiBootstrap`` (built from the real wire models in
-``ui_models.py`` so fixtures can never drift from the schema), serves each
-route at its REAL path (the SPA router reads ``location.pathname``), and
-screenshots every route:
-
-    uv run apps/minds/scripts/visual_diff.py capture-spa --label spa-main
-    uv run apps/minds/scripts/visual_diff.py capture-spa --label spa-branch
-    uv run apps/minds/scripts/visual_diff.py compare spa-main spa-branch
-
-SPA scenarios are namespaced ``spa_<route-slug>`` so a legacy capture and an
-SPA capture never collide on names: comparing across the two modes lists
-every scenario as ``missing_in_a``/``missing_in_b`` (by design -- pixel
-comparison across different DOMs is meaningless); compare two SPA captures
-(or two legacy captures) for real verdicts.
 """
 
 import argparse
@@ -63,46 +48,18 @@ import subprocess
 import sys
 import threading
 import zlib
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from typing import Final
 
-import jinja2.exceptions
 from loguru import logger
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
-from pydantic import ConfigDict
-from pydantic import Field
 
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
-from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
-from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
-from imbue.minds.desktop_client.templates import render_accounts_modal_page
-from imbue.minds.desktop_client.templates import render_accounts_page
-from imbue.minds.desktop_client.templates import render_auth_error_page
-from imbue.minds.desktop_client.templates import render_chrome_page
-from imbue.minds.desktop_client.templates import render_create_form
-from imbue.minds.desktop_client.templates import render_creating_page
-from imbue.minds.desktop_client.templates import render_destroying_page
-from imbue.minds.desktop_client.templates import render_dev_styleguide_page
-from imbue.minds.desktop_client.templates import render_inbox_page
-from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
-from imbue.minds.desktop_client.templates import render_landing_page
-from imbue.minds.desktop_client.templates import render_login_page
-from imbue.minds.desktop_client.templates import render_login_redirect_page
-from imbue.minds.desktop_client.templates import render_settings_modal_page
-from imbue.minds.desktop_client.templates import render_settings_page as render_app_settings_page
-from imbue.minds.desktop_client.templates import render_sidebar_page
-from imbue.minds.desktop_client.templates import render_welcome_page
-from imbue.minds.desktop_client.templates import render_workspace_options_modal_page
-from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.ui_api import read_vite_entry_tags
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
@@ -118,12 +75,6 @@ from imbue.minds.desktop_client.ui_models import UiSnapshot
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.errors import MindError
-from imbue.minds.primitives import BackupProvider
-from imbue.minds.primitives import CreateAttemptId
-from imbue.minds.primitives import LaunchMode
-from imbue.minds.primitives import OneTimeCode
-from imbue.mngr.primitives import AgentId
-from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 
 
 def _repo_root() -> Path:
@@ -147,23 +98,6 @@ OUTPUT_ROOT: Final[Path] = REPO_ROOT / "apps" / "minds" / ".visual-diff"
 VIEWPORT_W: Final[int] = 1440
 VIEWPORT_H: Final[int] = 900
 
-# Exceptions that a template builder can plausibly raise during scenario
-# rendering. The harness catches these so a single broken page doesn't
-# abort the whole capture run; anything outside this set (e.g.
-# KeyboardInterrupt, SystemExit, or a real programming defect like an
-# AssertionError that wasn't anticipated) should still crash.
-_BUILDER_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
-    TypeError,
-    AttributeError,
-    KeyError,
-    ValueError,
-    LookupError,
-    RuntimeError,
-    OSError,
-    ImportError,
-    jinja2.exceptions.TemplateError,
-)
-
 # Exceptions that Playwright can raise during navigation/screenshotting.
 _PLAYWRIGHT_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
     PlaywrightError,
@@ -172,332 +106,7 @@ _PLAYWRIGHT_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
 )
 
 
-# -- Scenario catalog -----------------------------------------------------
-
-
-class Scenario(FrozenModel):
-    """One renderable state to capture.
-
-    ``builder`` returns the HTML string. We pass it as a thunk (rather than
-    pre-rendering) so import side-effects from a single branch never bleed
-    into both sides of a comparison run.
-
-    ``interactions`` is a list of Playwright actions to run BEFORE
-    screenshotting, e.g. clicking a button to open a modal. Each action
-    receives the active ``page`` object. Keep them small; complex driving
-    belongs in dedicated tests.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
-
-    name: str
-    builder: Callable[[], str]
-    interactions: tuple[Callable[[Any], None], ...] = Field(default=())
-
-
-class _Account(FrozenModel):
-    """Minimal account stub matching the attrs the templates read.
-
-    The real Account model lives in the imbue_cloud client and pulling it
-    in here would couple this tool to that whole subsystem.
-    """
-
-    user_id: str
-    email: str
-    workspace_ids: tuple[str, ...]
-
-
-def _stub_account(user_id: str, email: str, n_workspaces: int = 0) -> _Account:
-    return _Account(
-        user_id=user_id,
-        email=email,
-        workspace_ids=tuple(f"agent-{i:032d}" for i in range(n_workspaces)),
-    )
-
-
-def _build_scenarios() -> list[Scenario]:
-    agent_a = AgentId("agent-00000000000000000000000000000001")
-    agent_b = AgentId("agent-00000000000000000000000000000002")
-    agent_c = AgentId("agent-00000000000000000000000000000003")
-    account_a = _stub_account("user-aaaaaa", "alice@example.com", n_workspaces=2)
-    account_b = _stub_account("user-bbbbbb", "bob@example.com", n_workspaces=0)
-
-    slack_service = ServicePermissionInfo(
-        name="slack",
-        scope="slack-api",
-        display_name="Slack",
-        description="Send and read messages in Slack channels.",
-        permission_schemas=("any", "slack-read", "slack-write"),
-        description_by_permission_name={
-            "slack-read": "Read messages and channel listings.",
-            "slack-write": "Send messages as the agent's bot user.",
-        },
-    )
-
-    create_attempt_info_running = AgentCreateAttemptInfo(
-        create_attempt_id=CreateAttemptId("create-attempt-00000000000000000000000000000001"),
-        status=AgentCreateAttemptStatus.CREATING_WORKSPACE,
-        launch_mode=LaunchMode.DOCKER,
-    )
-
-    return [
-        # -- Landing page ------------------------------------------------
-        Scenario(name="landing_empty", builder=lambda: render_landing_page(accessible_agent_ids=())),
-        Scenario(
-            name="landing_discovering",
-            builder=lambda: render_landing_page(accessible_agent_ids=(), is_discovering=True),
-        ),
-        Scenario(
-            name="landing_with_workspaces",
-            builder=lambda: render_landing_page(
-                accessible_agent_ids=(agent_a, agent_b),
-                mngr_forward_origin="http://localhost:8421",
-                agent_names={str(agent_a): "alpha", str(agent_b): "beta"},
-            ),
-        ),
-        Scenario(
-            name="landing_with_destroying_workspace",
-            builder=lambda: render_landing_page(
-                accessible_agent_ids=(agent_a, agent_b, agent_c),
-                mngr_forward_origin="http://localhost:8421",
-                agent_names={str(agent_a): "alpha", str(agent_b): "beta-destroying", str(agent_c): "gamma-failed"},
-                destroying_status_by_agent_id={str(agent_b): "running", str(agent_c): "failed"},
-            ),
-        ),
-        # -- Welcome page ------------------------------------------------
-        Scenario(name="welcome", builder=render_welcome_page),
-        # -- Create form -------------------------------------------------
-        Scenario(name="create_no_account", builder=lambda: render_create_form()),
-        Scenario(
-            name="create_with_account",
-            builder=lambda: render_create_form(accounts=(account_a,), default_account_id="user-aaaaaa"),
-        ),
-        Scenario(
-            name="create_with_error",
-            builder=lambda: render_create_form(error_message="imbue_cloud requires an account."),
-        ),
-        Scenario(
-            name="create_lima",
-            builder=lambda: render_create_form(launch_mode=LaunchMode.LIMA),
-        ),
-        Scenario(
-            name="create_with_imbue_cloud_backups",
-            builder=lambda: render_create_form(
-                backup_provider=BackupProvider.IMBUE_CLOUD,
-                accounts=(account_a,),
-                default_account_id="user-aaaaaa",
-            ),
-        ),
-        # -- Creating page (question flow + loading) ---------------------
-        Scenario(
-            name="creating",
-            builder=lambda: render_creating_page(
-                create_attempt_id=CreateAttemptId("create-attempt-00000000000000000000000000000001"),
-                info=create_attempt_info_running,
-            ),
-        ),
-        # -- Destroying detail page --------------------------------------
-        Scenario(
-            name="destroying_running",
-            builder=lambda: render_destroying_page(agent_id=agent_a, agent_name="alpha", pid=12345, status="running"),
-        ),
-        Scenario(
-            name="destroying_failed",
-            builder=lambda: render_destroying_page(agent_id=agent_a, agent_name="alpha", pid=12345, status="failed"),
-        ),
-        Scenario(
-            name="destroying_done",
-            builder=lambda: render_destroying_page(agent_id=agent_a, agent_name="alpha", pid=12345, status="done"),
-        ),
-        # -- Accounts page -----------------------------------------------
-        Scenario(
-            name="accounts_empty",
-            builder=lambda: render_accounts_page(accounts=()),
-        ),
-        Scenario(
-            name="accounts_with_default",
-            builder=lambda: render_accounts_page(
-                accounts=(account_a, account_b),
-                default_account_id="user-aaaaaa",
-                enabled_by_user_id={"user-aaaaaa": True, "user-bbbbbb": True},
-            ),
-        ),
-        Scenario(
-            name="accounts_with_signed_out",
-            builder=lambda: render_accounts_page(
-                accounts=(account_a, account_b),
-                default_account_id="user-aaaaaa",
-                enabled_by_user_id={"user-aaaaaa": True, "user-bbbbbb": False},
-            ),
-        ),
-        # -- Workspace settings ------------------------------------------
-        Scenario(
-            name="workspace_settings_no_account",
-            builder=lambda: render_workspace_settings(
-                agent_id=str(agent_a),
-                ws_name="alpha",
-                current_account=None,
-                accounts=(account_a,),
-            ),
-        ),
-        Scenario(
-            name="workspace_settings_with_account",
-            builder=lambda: render_workspace_settings(
-                agent_id=str(agent_a),
-                ws_name="alpha",
-                current_account=account_a,
-                accounts=(account_a,),
-            ),
-        ),
-        # -- Workspace options panel -------------------------------------
-        Scenario(
-            name="workspace_options_share",
-            builder=lambda: render_workspace_options_modal_page(
-                agent_id=str(agent_a),
-                ws_name="alpha",
-                current_account=account_a,
-                accounts=(account_a,),
-                servers=("frontend", "newsreader", "system_interface"),
-                tab="share",
-                account_email=account_a.email,
-                has_account=True,
-                anchor_x=214,
-            ),
-        ),
-        Scenario(
-            name="workspace_options_share_no_account",
-            builder=lambda: render_workspace_options_modal_page(
-                agent_id=str(agent_a),
-                ws_name="alpha",
-                current_account=None,
-                accounts=(account_a,),
-                servers=("frontend",),
-                tab="share",
-                has_account=False,
-                anchor_x=214,
-            ),
-        ),
-        Scenario(
-            name="workspace_options_settings",
-            builder=lambda: render_workspace_options_modal_page(
-                agent_id=str(agent_a),
-                ws_name="alpha",
-                current_account=account_a,
-                accounts=(account_a,),
-                servers=("frontend", "system_interface"),
-                tab="settings",
-                account_email=account_a.email,
-                has_account=True,
-                anchor_x=214,
-            ),
-        ),
-        # -- Chrome (titlebar) -------------------------------------------
-        Scenario(name="chrome_mac_unauth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=False)),
-        Scenario(name="chrome_mac_auth", builder=lambda: render_chrome_page(is_mac=True, is_authenticated=True)),
-        Scenario(name="chrome_non_mac_auth", builder=lambda: render_chrome_page(is_mac=False, is_authenticated=True)),
-        # -- Sidebar -----------------------------------------------------
-        Scenario(name="sidebar", builder=lambda: render_sidebar_page(mngr_forward_origin="http://localhost:8421")),
-        # -- Login / login_redirect / auth_error / inbox_unavailable / inbox_empty ---
-        Scenario(name="login", builder=render_login_page),
-        Scenario(
-            name="login_redirect",
-            builder=lambda: render_login_redirect_page(one_time_code=OneTimeCode("abc123-secret-82341")),
-        ),
-        Scenario(
-            name="auth_error",
-            builder=lambda: render_auth_error_page(message="This code has already been used."),
-        ),
-        # -- App-level settings (page + centered modal) -------------------
-        Scenario(
-            name="settings_page",
-            builder=lambda: render_app_settings_page(
-                permissions_unavailable=False,
-                is_master_password_set=True,
-            ),
-        ),
-        Scenario(
-            name="settings_modal",
-            builder=lambda: render_settings_modal_page(
-                permissions_unavailable=False,
-                is_master_password_set=False,
-            ),
-        ),
-        Scenario(
-            name="accounts_modal",
-            builder=lambda: render_accounts_modal_page(
-                accounts=(account_a, account_b),
-                default_account_id=str(account_a.user_id),
-                enabled_by_user_id={str(account_a.user_id): True, str(account_b.user_id): False},
-            ),
-        ),
-        # -- Inbox --------------------------------------------------------
-        Scenario(
-            name="inbox_unavailable_fragment",
-            builder=lambda: render_inbox_unavailable_fragment(message="This request was already granted."),
-        ),
-        Scenario(
-            name="inbox_empty",
-            builder=lambda: render_inbox_page(cards=[], selected_id="", detail_html="", is_empty=True),
-        ),
-        # -- Dev styleguide ----------------------------------------------
-        Scenario(name="dev_styleguide", builder=render_dev_styleguide_page),
-        # -- Latchkey permission dialogs ---------------------------------
-        Scenario(
-            name="latchkey_predefined_some_checked",
-            builder=lambda: render_predefined_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I want to summarize today's messages.",
-                service=slack_service,
-                checked_permissions=("slack-read",),
-                will_open_browser=True,
-                mngr_forward_origin="http://localhost:8421",
-            ),
-        ),
-        Scenario(
-            name="latchkey_predefined_none_checked",
-            builder=lambda: render_predefined_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I haven't yet decided what permissions to ask for.",
-                service=slack_service,
-                checked_permissions=(),
-                will_open_browser=False,
-                mngr_forward_origin="http://localhost:8421",
-            ),
-        ),
-        Scenario(
-            name="latchkey_file_sharing_read",
-            builder=lambda: render_file_sharing_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I need to read this file to answer your question.",
-                file_path="/Users/alice/Documents/notes.md",
-                access="READ",
-                access_human_label="read-only",
-                mngr_forward_origin="http://localhost:8421",
-            ),
-        ),
-        Scenario(
-            name="latchkey_file_sharing_write",
-            builder=lambda: render_file_sharing_permission_dialog(
-                agent_id=str(agent_a),
-                request_id="req-00000000000000000000000000000001",
-                ws_name="alpha",
-                rationale="I need to update this file in place.",
-                file_path="/Users/alice/Documents/notes.md",
-                access="WRITE",
-                access_human_label="read & write",
-                mngr_forward_origin="http://localhost:8421",
-            ),
-        ),
-    ]
-
-
-# -- Capture subcommand --------------------------------------------------
+# -- Shared capture helpers -----------------------------------------------
 
 
 class _QuietStaticHandler(http.server.SimpleHTTPRequestHandler):
@@ -587,107 +196,6 @@ def _capture_full_page_screenshot(page: Any, path: Path, is_full_page_reliable: 
         page.screenshot(path=str(path))
     finally:
         page.set_viewport_size({"width": VIEWPORT_W, "height": VIEWPORT_H})
-
-
-def _render_all_html(scenarios: list[Scenario], html_dir: Path) -> None:
-    """Render every scenario's HTML to disk; log + record failures inline."""
-    for sc in scenarios:
-        try:
-            rendered = sc.builder()
-        except _BUILDER_EXCEPTIONS as exc:
-            logger.opt(exception=exc).warning("[render fail] {}: {}", sc.name, type(exc).__name__)
-            (html_dir / f"{sc.name}.html").write_text(f"<!-- RENDER FAILED: {html.escape(str(exc))} -->")
-            continue
-        (html_dir / f"{sc.name}.html").write_text(rendered)
-
-
-def _screenshot_all(scenarios: list[Scenario], png_dir: Path, port: int) -> None:
-    """Screenshot every scenario via Playwright."""
-    with sync_playwright() as pw:
-        browser, is_full_page_reliable = _launch_chromium(pw)
-        try:
-            context = browser.new_context(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
-            page = context.new_page()
-            for sc in scenarios:
-                target = f"http://127.0.0.1:{port}/html/{sc.name}.html"
-                try:
-                    page.goto(target, wait_until="networkidle", timeout=15000)
-                    # The chrome links the compiled Tailwind sheet
-                    # (/_static/app.min.css). ``networkidle`` requests it but
-                    # doesn't guarantee the browser has parsed it into
-                    # cssRules. Wait until that sheet is present and non-empty
-                    # before snapping -- otherwise we screenshot the unstyled
-                    # "ASCII-art" version of the page.
-                    page.wait_for_function(
-                        "() => Array.from(document.styleSheets).some(s => {"
-                        "  try { return (s.href || '').includes('app.min.css')"
-                        "    && s.cssRules.length > 0; }"
-                        "  catch (e) { return false; } })",
-                        timeout=10000,
-                    )
-                    for action in sc.interactions:
-                        action(page)
-                    _capture_full_page_screenshot(page, png_dir / f"{sc.name}.png", is_full_page_reliable)
-                    logger.info("[shot] {}", sc.name)
-                except _PLAYWRIGHT_EXCEPTIONS as exc:
-                    logger.opt(exception=exc).warning("[shot fail] {}: {}", sc.name, type(exc).__name__)
-        finally:
-            browser.close()
-
-
-def _build_css() -> None:
-    """Compile static/app.css -> static/app.min.css for the current branch.
-
-    The chrome no longer ships a runtime Tailwind JIT; styles come from the
-    compiled sheet, so a capture is only faithful if the sheet was just built
-    from this branch's source. Delegates to the same `build:css` pnpm script
-    used by `just minds-css`, with the pinned Node on PATH.
-    """
-    minds_dir = REPO_ROOT / "apps" / "minds"
-    logger.info("[capture] building app.min.css (pnpm run build:css)")
-    subprocess.run(
-        ["bash", "-c", ". scripts/select_node_version.sh && pnpm run build:css"],
-        cwd=str(minds_dir),
-        check=True,
-    )
-
-
-def _do_capture(label: str) -> Path:
-    output_dir = OUTPUT_ROOT / label
-    html_dir = output_dir / "html"
-    png_dir = output_dir / "png"
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    html_dir.mkdir(parents=True)
-    png_dir.mkdir(parents=True)
-
-    # The chrome's styles come from the compiled Tailwind sheet (app.min.css),
-    # which is gitignored and only exists after a build -- and must reflect the
-    # CURRENT branch's source so the diff is meaningful. Rebuild it here.
-    _build_css()
-
-    # Symlink static into the served root so /_static/app.min.css (+ the
-    # per-page JS) resolve. Symlink (not copy) so we always pick up the live
-    # file.
-    (output_dir / "_static").symlink_to(STATIC_DIR)
-
-    scenarios = _build_scenarios()
-    logger.info("[capture] rendering {} scenarios -> {}", len(scenarios), output_dir)
-
-    # 1. Render HTML for every scenario first. Failures here will catch
-    # any obviously-broken template before we spin up Playwright.
-    _render_all_html(scenarios, html_dir)
-
-    # 2. Boot HTTP server + Playwright; screenshot each.
-    httpd, _thread, port = _serve_directory(output_dir)
-    try:
-        _screenshot_all(scenarios, png_dir, port)
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-    logger.info("[capture] done: {}", output_dir)
-    return output_dir
 
 
 # -- SPA capture subcommand ------------------------------------------------
@@ -1014,7 +522,7 @@ def _structural_html_diff(left_html: str, right_html: str) -> str | None:
 
     We normalize whitespace (collapse runs to a single space) and compare.
     This catches missing/added elements, attribute drift, and changed text
-    content without flagging Jinja-vs-JinjaX whitespace cosmetics.
+    content without flagging whitespace-only cosmetic churn between captures.
     """
     nl = _collapse_whitespace(left_html)
     nr = _collapse_whitespace(right_html)
@@ -1035,9 +543,9 @@ def _structural_html_diff(left_html: str, right_html: str) -> str | None:
 def _classify_verdict(png_present: bool, png_identical: bool, html_diff: str | None) -> str:
     """Decide the per-scenario verdict.
 
-    PNG hash beats HTML diff because the Jinja-to-JinjaX migration
-    legitimately reshuffles whitespace and prefers literal Unicode over
-    HTML entities (``--`` vs ``&mdash;``), both of which render identically.
+    PNG hash beats HTML diff because markup changes can legitimately
+    reshuffle whitespace or swap literal Unicode for HTML entities
+    (``--`` vs ``&mdash;``), both of which render identically.
     """
     if png_identical:
         # PNGs are byte-identical, so the rendered pixels match;
@@ -1178,7 +686,7 @@ pre { background: #fafafa; padding: 8px; overflow: auto; max-height: 280px; font
 
 def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> str:
     """Hand-rolled HTML report -- no template engine to keep the tool
-    standalone (and to avoid bootstrapping JinjaX in this script).
+    standalone (free of any template-engine dependency).
 
     Each thumbnail in the table opens a click-through lightbox: the
     lightbox shows one side at full size; clicking the image swaps to
@@ -1363,13 +871,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_capture = sub.add_parser("capture", help="render all scenarios + screenshot")
-    p_capture.add_argument(
-        "--label",
-        required=True,
-        help="output dir label (e.g. 'main', 'jinjax'); written to .visual-diff/<label>/",
-    )
-
     p_capture_spa = sub.add_parser(
         "capture-spa", help="build the SPA bundle + screenshot every route with fixture data"
     )
@@ -1393,23 +894,14 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("label_a", help="baseline label")
     p_compare.add_argument("label_b", help="comparison label")
 
-    sub.add_parser("list-scenarios", help="print scenario names without rendering")
-
     args = parser.parse_args(argv)
 
-    if args.cmd == "capture":
-        _do_capture(args.label)
-        return 0
     if args.cmd == "capture-spa":
         routes = [r.strip() for r in args.routes.split(",") if r.strip()] if args.routes else None
         _do_capture_spa(args.label, routes, args.skip_build)
         return 0
     if args.cmd == "compare":
         _do_compare(args.label_a, args.label_b)
-        return 0
-    if args.cmd == "list-scenarios":
-        for sc in _build_scenarios():
-            logger.info("{}", sc.name)
         return 0
     return 1
 

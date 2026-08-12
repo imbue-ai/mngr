@@ -332,13 +332,6 @@ apps/minds_workspace_server/package-lock.json
 **/.reviewer/autofix/issues/
 .reviewer/logs/
 
-# Compiled Tailwind v4 stylesheet for the minds desktop client. Built from
-# static/app.css by `just minds-css` (pnpm run build:css); also rebuilt by the
-# pnpm `postinstall` hook, watched live during `just minds-start`, and produced
-# by `scripts/build.js` before packaging (force-included into the wheel via
-# [tool.hatch.build] artifacts). Not checked in -- it's a generated artifact.
-/apps/minds/imbue/minds/desktop_client/static/app.min.css
-
 # Built SPA bundle for the minds desktop client. Built from apps/minds/frontend
 # by `pnpm build` (vite, watched live via `pnpm dev`), and produced by the
 # wheel build hook before packaging (force-included into the wheel via

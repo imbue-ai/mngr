@@ -10,9 +10,10 @@ its literal ``type`` field. The same models feed three consumers:
    frontend generates its TypeScript types -- these models ARE the wire
    contract, so any breaking change must bump ``UI_SCHEMA_VERSION``.
 
-Shapes mirror the legacy ``/_chrome/events`` SSE payload builders in ``app.py``
-semantically, but with real types (booleans are booleans here; the SSE used
-``"true"`` strings).
+``app.py``'s row-derivation helpers still emit string-typed dict rows (a
+holdover from the deleted ``/_chrome/events`` SSE wire format, which encoded
+flags as ``"true"`` strings); its ``_ui_*_from_legacy_dict`` converters
+translate those rows into these models, where booleans are real booleans.
 """
 
 from enum import auto

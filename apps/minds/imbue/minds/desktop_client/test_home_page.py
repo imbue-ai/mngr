@@ -3,15 +3,13 @@
 The home page is an SPA surface: what an authenticated user sees at "/" is
 decided client-side (Shell + LandingPage) from a handful of server signals.
 These tests witness those server signals -- the observable contract the SPA
-routes off of -- and, where the behavior mandates specific user-facing copy,
-that copy as the server-rendered landing page actually renders it. Each test's
-``partial=`` note names the client-rendering residue it does not observe.
+routes off of. Each test's ``partial=`` note names the client-rendering
+residue it does not observe.
 
 Behaviors witnessed: ``apps/minds/behaviors/home-page/home-page.feature``.
 """
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -21,7 +19,6 @@ from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.mngr.primitives import AgentId
 
 
@@ -64,9 +61,10 @@ def test_consent_gate_is_asked_once_then_never_again(tmp_path: Path) -> None:
 
 @pytest.mark.witnesses(
     "home-page.discovering",
-    partial="asserts the mandated 'Discovering workspaces' copy and the page's own refresh timer "
-    "against the server-rendered landing page; the Mithril LandingPage carries the same copy but "
-    "is not drivable from pytest",
+    partial="witnesses the server signals (discovery incomplete, zero workspaces, none restorable) "
+    "that put the home page in the discovering state; the mandated 'Discovering workspaces' copy is "
+    "rendered by the Mithril LandingPage (frontend/src/views/pages/LandingPage.ts), and the page "
+    "refreshes via the /ui/ws channel rather than a timer -- both outside the Python witnessing surface",
 )
 def test_discovering_state_before_initial_discovery_finishes(tmp_path: Path) -> None:
     # Given a consented user, no workspaces known, and initial discovery still
@@ -87,16 +85,6 @@ def test_discovering_state_before_initial_discovery_finishes(tmp_path: Path) -> 
 
     status = json.loads(client.get("/ui/api/app-status").get_data(as_text=True))
     assert status["workspace_count"] == 0
-
-    # Then they see a "Discovering workspaces" progress page that refreshes
-    # itself: the rendered page names workspaces (never agents -- the corpus
-    # convention) and schedules its own refresh on a timer. Every other refresh
-    # dispatch on the landing page is event-driven, so the timer is searched for
-    # inside the block that carries the progress copy.
-    html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
-    assert "Discovering workspaces" in html
-    progress_block = html.split("Discovering workspaces", 1)[1]
-    assert re.search(r"setTimeout\(.*minds:refresh-local-page", progress_block) is not None
 
 
 @pytest.mark.witnesses(

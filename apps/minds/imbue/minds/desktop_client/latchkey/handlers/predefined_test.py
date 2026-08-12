@@ -1,5 +1,4 @@
 import json
-import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -16,6 +15,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.latchkey.handlers.account_choices import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import EMPTY_MANUAL_CREDENTIAL_SUBMISSION
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
@@ -23,7 +23,6 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
 from imbue.minds.desktop_client.latchkey.handlers.predefined import _build_account_choices
-from imbue.minds.desktop_client.latchkey.handlers.templates import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -415,14 +414,14 @@ def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Pat
     assert _read_recording(tmp_path / "auth_latchkey_report.jsonl") == []
 
 
-def test_render_detail_fragment_with_unknown_credentials_does_not_promise_browser(tmp_path: Path) -> None:
+def test_detail_payload_with_unknown_credentials_does_not_promise_browser(tmp_path: Path) -> None:
     # The dialog's progress notice must match what ``grant()`` will
     # actually do: UNKNOWN credential status proceeds straight to the
-    # grant (no ``latchkey auth browser``), so the fragment must show
-    # the generic notice, not the sign-in one. Empty auth options mirror
-    # the real degraded-UNKNOWN case (``services info`` fails for a
-    # non-latchkey scope) and hit the legacy "no auth options" fallback,
-    # which would falsely promise a browser under a plain not-VALID test.
+    # grant (no ``latchkey auth browser``), so the payload must not
+    # promise a sign-in browser. Empty auth options mirror the real
+    # degraded-UNKNOWN case (``services info`` fails for a non-latchkey
+    # scope) and hit the legacy "no auth options" fallback, which would
+    # falsely promise a browser under a plain not-VALID test.
     handler = _build_handler(
         tmp_path,
         credential_status="unknown",
@@ -434,33 +433,14 @@ def test_render_detail_fragment_with_unknown_credentials_does_not_promise_browse
         rationale="need to read a channel",
     )
 
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
     )
 
-    assert "Granting permission..." in body
-    assert "Opening a browser window for you to sign in to" not in body
-
-
-def test_render_detail_fragment_with_missing_credentials_promises_browser(tmp_path: Path) -> None:
-    # MISSING credentials with a browser auth option still run
-    # ``latchkey auth browser`` on Approve, so the notice must say so.
-    handler = _build_handler(tmp_path, credential_status="missing")
-    event = create_latchkey_predefined_permission_request_event(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        rationale="need to read a channel",
-    )
-
-    body = handler.render_request_detail_fragment(
-        req_event=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
-    )
-
-    assert "Opening a browser window for you to sign in to" in body
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    assert payload.will_open_browser is False
 
 
 def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:
@@ -1121,12 +1101,11 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     """Deny must work even when the request's scope is not in the gateway catalog.
 
     An agent can file a permission request under an unknown scope
-    (typo, stale catalog, etc.); the rendered detail fragment
-    (:func:`_render_unknown_scope_fragment`) offers Deny as the only
-    action. The deny HTTP path must therefore still tear down the
-    pending request, append a DENIED response event, and notify the
-    agent -- using the raw scope string in place of a catalog
-    display name.
+    (typo, stale catalog, etc.); the detail payload
+    (``UiUnknownScopeDetail``) offers Deny as the only action. The deny
+    HTTP path must therefore still tear down the pending request,
+    append a DENIED response event, and notify the agent -- using the
+    raw scope string in place of a catalog display name.
     """
     fake_client = FakeLatchkeyGatewayClient()
     handler = _build_handler(tmp_path, credential_status="valid")
@@ -1408,7 +1387,7 @@ def test_grant_fails_when_the_signed_in_account_is_ambiguous(tmp_path: Path) -> 
     assert load_response_events(tmp_path) == []
 
 
-def test_render_detail_fragment_offers_every_account_plus_a_new_one(tmp_path: Path) -> None:
+def test_detail_payload_offers_every_account_plus_a_new_one(tmp_path: Path) -> None:
     latchkey = _make_multi_account_latchkey(tmp_path, {"alice@x": "valid", "bob@x": "valid"})
     handler = _build_handler_for_latchkey(tmp_path, latchkey)
     event = create_latchkey_predefined_permission_request_event(
@@ -1418,21 +1397,22 @@ def test_render_detail_fragment_offers_every_account_plus_a_new_one(tmp_path: Pa
         account="bob@x",
     )
 
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
     )
 
-    assert 'value="alice@x"' in body
-    assert 'value="bob@x"' in body
-    assert f'value="{NEW_ACCOUNT_FORM_VALUE}"' in body
-    # The account the agent asked for is the preselected one (and the only one).
-    checked_values = re.findall(r'name="account" value="([^"]*)"[^>]*\bchecked\b', body)
-    assert checked_values == ["bob@x"]
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
+    account_values = [choice.value for choice in payload.account_choices]
+    assert "alice@x" in account_values
+    assert "bob@x" in account_values
+    assert NEW_ACCOUNT_FORM_VALUE in account_values
+    # The account the agent asked for is the preselected one.
+    assert payload.selected_account_value == "bob@x"
 
 
-def test_render_detail_fragment_offers_a_requested_account_that_is_not_connected(tmp_path: Path) -> None:
+def test_detail_payload_offers_a_requested_account_that_is_not_connected(tmp_path: Path) -> None:
     """An agent may name an account nobody has signed in to; the dialog must say so.
 
     Dropping it would silently preselect a *different* account, so approving
@@ -1448,20 +1428,23 @@ def test_render_detail_fragment_offers_a_requested_account_that_is_not_connected
         account="bob@x",
     )
 
-    body = handler.render_request_detail_fragment(
+    payload = handler.build_request_detail_payload(
         req_event=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="",
     )
 
+    if not isinstance(payload, UiPredefinedPermissionDetail):
+        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
     # The un-connected account is offered *and* preselected, next to the
-    # already-connected one.
-    assert 'value="alice@x"' in body
-    assert 'value="bob@x"' in body
-    assert re.findall(r'name="account" value="([^"]*)"[^>]*\bchecked\b', body) == ["bob@x"]
-    assert "not connected yet" in body
+    # already-connected one, and is flagged as needing sign-in.
+    account_values = [choice.value for choice in payload.account_choices]
+    assert "alice@x" in account_values
+    assert "bob@x" in account_values
+    assert payload.selected_account_value == "bob@x"
+    bob_choice = next(choice for choice in payload.account_choices if choice.value == "bob@x")
+    assert "not connected yet" in bob_choice.hint
     # Approving will therefore open a browser rather than granting silently.
-    assert "Opening a browser window for you to sign in to" in body
+    assert payload.will_open_browser is True
 
 
 def test_grant_for_a_requested_account_that_is_not_connected_signs_it_in(tmp_path: Path) -> None:

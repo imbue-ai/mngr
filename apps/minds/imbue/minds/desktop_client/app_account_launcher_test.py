@@ -1,10 +1,9 @@
-"""Unit tests for the account identity the chrome-events stream carries.
+"""Unit tests for the account identity the `/ui/ws` ``accounts`` frames carry.
 
-The home screen's bottom-left account launcher is server-rendered, but the page
-stays put while accounts change underneath it (sign-out and "Set default" both
-happen in an overlay modal on top of it). This payload is what re-labels it, so
-these tests drive the account list directly and assert what the launcher would
-be told.
+The home screen's bottom-left account launcher stays put while accounts change
+underneath it (sign-out and "Set default" both happen in a modal on top of
+it). This payload is what re-labels it, so these tests drive the account list
+directly and assert what the launcher would be told.
 """
 
 from pathlib import Path

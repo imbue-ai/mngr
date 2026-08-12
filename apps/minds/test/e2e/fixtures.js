@@ -21,9 +21,9 @@ const base = require('@playwright/test');
 const DEFAULT_APP_PATH = '/Applications/Minds.app/Contents/MacOS/Minds';
 
 // Each Minds window is a single web context now (the chrome page, which hosts
-// hub pages, the sandboxed workspace iframe, and the in-DOM overlay layer), so
+// hub pages, the sandboxed workspace iframe, and the in-DOM modals), so
 // the user-facing UI is simply the window whose URL is on the backend origin --
-// including `/_chrome`, the wrapper the page sits on while displaying a
+// including `/workspace/<id>`, the route the page sits on while displaying a
 // workspace. `_pick_content_page` in e2e_workspace_runner.py is the Python twin.
 const _BACKEND_ORIGIN_RE = /^http:\/\/localhost:\d+(?:\/|$)/;
 

@@ -90,9 +90,9 @@ payloads -- to the console.
 - The Electron main process re-validates ids with its own copies of the
   shape patterns before building URLs (never trust the renderer). Those
   constants live in `electron/main.js` and mirror this module's.
-- Workspace health/readiness/URL state flows through the minds backend's SSE
-  (`/_chrome/events`), not through postMessage: the chrome derives titlebar
-  state from its own navigation intents plus SSE, identically in Electron
+- Workspace health/readiness/URL state flows through the minds backend's
+  `/ui/ws` WebSocket channel, not through postMessage: the shell derives
+  titlebar state from its own route plus the channel, identically in Electron
   and browser mode.
 
 ## Version history

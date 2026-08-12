@@ -272,7 +272,7 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
 # Pre-migration workspaces (no ``color`` label) fall back to
 # ``DEFAULT_WORKSPACE_COLOR`` so the rollout doesn't visually break
 # existing workspaces. The titlebar derives its contrasting foreground
-# from the accent in pure CSS (see .titlebar-surface in app.css), so the
+# from the accent in pure CSS (see .titlebar-surface in frontend/src/style.css), so the
 # payload no longer carries an ``accent_fg``.
 
 

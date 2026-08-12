@@ -1,11 +1,10 @@
 """Frontend (web-UI / browser) Sentry configuration for the desktop client.
 
 The Python backend reports errors to Sentry via ``setup_sentry`` in
-:mod:`imbue.minds.utils.sentry.core`. The browser-side web UI served by the
-backend (the JinjaX pages under ``desktop_client/templates`` rendered through
-``Base.jinja``) reports its own JavaScript errors to Sentry too, using the
-vendored ``@sentry/browser`` bundle (``static/sentry.browser.min.js``) booted
-by ``static/sentry_init.js``.
+:mod:`imbue.minds.utils.sentry.core`. The browser-side SPA served by the
+backend (``serve_spa_index`` in ``desktop_client/ui_api.py``) reports its own
+JavaScript errors to Sentry too, using the vendored ``@sentry/browser`` bundle
+(``static/sentry.browser.min.js``) booted by ``static/sentry_init.js``.
 
 The Python backend reports to its own (Python) Sentry projects; all of minds'
 **JavaScript** -- both this browser web UI and the Electron main process
@@ -116,9 +115,9 @@ def frontend_sentry_browser_payload(is_error_reporting_enabled: bool, anonymous_
     """Browser-ready Sentry payload for the current process, or ``None`` if off.
 
     ``is_error_reporting_enabled`` is the user's ``report_unexpected_errors``
-    setting. This is the entry point the JinjaX ``Base`` layout reaches (via the
-    Catalog global registered in ``desktop_client/templates.py``, which supplies
-    the live setting and the install's anonymous user id) to decide whether --
-    and with what config -- to emit the Sentry bootstrap on every page.
+    setting. This is the entry point the SPA index page (``serve_spa_index`` in
+    ``desktop_client/ui_api.py``, which supplies the live setting and the
+    install's anonymous user id) reaches to decide whether -- and with what
+    config -- to emit the Sentry bootstrap.
     """
     return resolve_frontend_sentry_config(is_error_reporting_enabled, anonymous_user_id).to_browser_payload()

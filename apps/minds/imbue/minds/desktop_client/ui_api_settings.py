@@ -298,7 +298,7 @@ def _handle_account_plan(user_id: str) -> Response:
     """GET /ui/api/accounts/<user_id>/plan: one account's plan + usage (slow: connector round trip).
 
     A connector failure degrades to ``plan_view: null`` rather than an error
-    status, mirroring the legacy fragment's behavior.
+    status, so the card renders a plan-unavailable state instead of failing.
     """
     if not _is_settings_request_authenticated():
         return _unauthenticated_response()

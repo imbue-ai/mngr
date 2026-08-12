@@ -29,7 +29,6 @@ from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
-from imbue.minds.desktop_client.chrome_event_broadcast import ChromeEventBroadcaster
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -91,10 +90,6 @@ class DesktopClientState(MutableModel):
     minds_config: MindsConfig | None = Field(default=None, frozen=True, description="Per-user minds config store")
     geo_location_cache: GeoLocationCache = Field(
         default_factory=GeoLocationCache, description="One-shot IP-geolocation cache for region defaults"
-    )
-    chrome_event_broadcaster: ChromeEventBroadcaster = Field(
-        default_factory=ChromeEventBroadcaster,
-        description="Fans one-shot chrome-events SSE payloads (e.g. workspace_stopped, open_help) out to connections",
     )
     ui_channel_broadcaster: UiChannelBroadcaster = Field(
         default_factory=UiChannelBroadcaster,

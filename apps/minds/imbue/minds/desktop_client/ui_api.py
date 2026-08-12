@@ -40,6 +40,8 @@ from imbue.minds.desktop_client.ui_models import UiBootstrap
 from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.errors import MindError
+from imbue.minds.utils.sentry.core import resolve_anonymous_user_id
+from imbue.minds.utils.sentry.frontend import frontend_sentry_browser_payload
 
 _STATIC_UI_DIRECTORY: Path = Path(__file__).resolve().parent / "static" / "ui"
 _VITE_MANIFEST_PATH: Path = _STATIC_UI_DIRECTORY / ".vite" / "manifest.json"
@@ -150,6 +152,35 @@ def _build_bootstrap_json() -> str:
     return bootstrap.model_dump_json().replace("</", "<\\/")
 
 
+def _build_sentry_head_tags() -> str:
+    """The browser Sentry bootstrap tags for the SPA index, or "" when reporting is off.
+
+    Mirrors the old JinjaX ``Base`` layout: emitted only when the user's
+    ``report_unexpected_errors`` setting is on and a real DSN is configured for
+    the environment. The config rides as a JSON blob (not inline JS) that
+    ``sentry_init.js`` reads; the bundle + init load synchronously in ``<head>``,
+    before the SPA bundle, so early errors are captured.
+    """
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return ""
+    is_error_reporting_enabled = minds_config.get_report_unexpected_errors()
+    # Attach the install's stable anonymous user id (no PII) so browser events
+    # count as the same install as the backend's in Sentry's per-issue user counts.
+    anonymous_user_id = resolve_anonymous_user_id(minds_config.data_dir)
+    sentry_payload = frontend_sentry_browser_payload(is_error_reporting_enabled, anonymous_user_id)
+    if sentry_payload is None:
+        return ""
+    # "</" must not appear verbatim inside an inline <script> body (see the
+    # bootstrap blob below for the same rule).
+    payload_json = json.dumps(sentry_payload).replace("</", "<\\/")
+    return (
+        f'    <script type="application/json" id="minds-sentry-config">{payload_json}</script>\n'
+        '    <script src="/_static/sentry.browser.min.js"></script>\n'
+        '    <script src="/_static/sentry_init.js"></script>\n'
+    )
+
+
 def serve_spa_index(**_path_params: str) -> Response:
     """Serve the SPA index for any hub route.
 
@@ -171,6 +202,7 @@ def serve_spa_index(**_path_params: str) -> Response:
         '    <meta charset="utf-8">\n'
         '    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "    <title>minds</title>\n"
+        f"{_build_sentry_head_tags()}"
         f"    <script>window.__MINDS_BOOTSTRAP__ = {_build_bootstrap_json()};</script>\n"
         '    <script src="/_static/embed_contract.js"></script>\n'
         f"    {entry_tags}\n"

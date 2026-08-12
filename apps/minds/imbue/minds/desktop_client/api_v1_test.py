@@ -3,7 +3,6 @@ import os
 import queue
 import re
 import shlex
-import threading
 import time
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -54,6 +53,7 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
@@ -62,10 +62,9 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.templates import default_workspace_template_ref
-from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import restic_backup_a_file
+from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.errors import WorkspaceNameInUseError
@@ -1080,15 +1079,12 @@ def test_stop_workspace_broadcasts_workspace_stopped_event(
         mngr_binary=fake_mngr,
         mngr_host_dir=tmp_path / "host",
     )
-    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
-    wake_event = threading.Event()
-    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, wake_event)
+    client_queue = get_state(client.application).ui_channel_broadcaster.register()
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/stop", headers=_auth_header())
 
     assert response.status_code == 200
-    assert wake_event.is_set()
-    assert event_queue.get_nowait() == {"type": "workspace_stopped", "agent_id": str(agent_id)}
+    assert json.loads(client_queue.get_nowait() or "") == {"type": "workspace_stopped", "agent_id": str(agent_id)}
 
 
 def test_start_workspace_does_not_broadcast_workspace_stopped(
@@ -1106,30 +1102,26 @@ def test_start_workspace_does_not_broadcast_workspace_stopped(
         mngr_binary=fake_mngr,
         mngr_host_dir=tmp_path / "host",
     )
-    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
-    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, threading.Event())
+    client_queue = get_state(client.application).ui_channel_broadcaster.register()
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/start", headers=_auth_header())
 
     assert response.status_code == 200
-    assert event_queue.empty()
+    assert client_queue.empty()
 
 
-def test_workspace_refresh_broadcasts_to_every_chrome_connection(tmp_path: Path) -> None:
+def test_workspace_refresh_broadcasts_to_every_ui_connection(tmp_path: Path) -> None:
     """The refresh route reaches every open window, keyed to the path agent id.
 
     This is the whole mechanism: the agent has no other way to reach the shell,
-    so a payload that does not land on each subscribed chrome-events connection
+    so a frame that does not land on each registered ``/ui/ws`` connection
     means a window keeps rendering the pre-change interface.
     """
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
-    first_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
-    second_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
-    wake_event = threading.Event()
-    broadcaster = get_state(client.application).chrome_event_broadcaster
-    broadcaster.subscribe(first_queue, wake_event)
-    broadcaster.subscribe(second_queue, threading.Event())
+    broadcaster = get_state(client.application).ui_channel_broadcaster
+    first_queue = broadcaster.register()
+    second_queue = broadcaster.register()
 
     # Exactly what default-workspace-template's ``system/scripts/refresh_workspace_view.py``
     # puts on the wire: an empty JSON object with a JSON content type. The route
@@ -1138,10 +1130,9 @@ def test_workspace_refresh_broadcasts_to_every_chrome_connection(tmp_path: Path)
     response = client.post(f"/api/v1/agents/{agent_id}/refresh", json={}, headers=_auth_header())
 
     assert response.status_code == 200
-    assert wake_event.is_set()
     expected = {"type": "workspace_refresh", "agent_id": str(agent_id)}
-    assert first_queue.get_nowait() == expected
-    assert second_queue.get_nowait() == expected
+    assert json.loads(first_queue.get_nowait() or "") == expected
+    assert json.loads(second_queue.get_nowait() or "") == expected
 
 
 def test_workspace_refresh_succeeds_with_no_window_open(tmp_path: Path) -> None:

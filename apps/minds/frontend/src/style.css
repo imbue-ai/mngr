@@ -254,7 +254,8 @@
  * over Tailwind utilities they had when tokens.css was a separate stylesheet.
  *
  * The titlebar takes only --titlebar-bg (the workspace accent, set per-
- * workspace via inline style by chrome.js); .titlebar-surface derives the
+ * workspace on the document root by paintAccent in
+ * views/shell/shell-state.ts); .titlebar-surface derives the
  * contrasting foreground text tokens from it in pure CSS (lch relative color),
  * so there is no JS contrast math and no --titlebar-fg. --workspace-accent /
  * --titlebar-bg feed the .accent-spine / .accent-swatch / .titlebar-* rules
@@ -328,9 +329,8 @@
  * inset workspace card and its notice band, #local-page-scroll's right inset,
  * the titlebar's right-aligned buttons, tooltips, modal backdrops -- lands
  * 15px short, which reads as a right margin four times the left one. The
- * pre-SPA renderer reserved it globally for the scrolling document pages and
- * had the chrome page opt back out (``html_class="no-scrollbar-gutter"``,
- * still live in app.css for the pages served into the workspace iframe); the
+ * pre-SPA renderer reserved it globally for its scrolling document pages and
+ * had the chrome page opt back out (``html_class="no-scrollbar-gutter"``); the
  * SPA is only ever the chrome page, so here there is nothing to opt out of.
  * Its scroll containers set ``scrollbar-gutter: stable`` on themselves.
  */
@@ -424,8 +424,9 @@ body:has(#notice-band) .workspace-surface {
 
 /*
  * Titlebar self-theming. The bar is painted with the per-workspace color
- * (--titlebar-bg, set on the document root by chrome.js). The
- * ``.titlebar-surface`` class -- toggled onto #minds-titlebar by chrome.js only
+ * (--titlebar-bg, set on the document root by paintAccent in
+ * views/shell/shell-state.ts). The ``.titlebar-surface`` class -- toggled
+ * onto #minds-titlebar by the same code only
  * while a workspace accent is active -- derives a black-or-white contrast base
  * from that color entirely in CSS (relative color: lch lightness clamped to
  * 0/100 via the ``* infinity`` trick) and re-bases the foreground token VALUES
@@ -452,13 +453,13 @@ body:has(#notice-band) .workspace-surface {
 
 /*
  * Shared card surface (bg, border, rounded corners). No baseline shadow
- * -- non-clickable cards read as flat surfaces; the Card.jinja
- * ``interactive`` prop adds ``hover:shadow-sm`` so clickable cards lift
- * slightly on hover. The Card.jinja component composes this with
- * Tailwind utilities for layout (flex/justify) and padding. JS-rendered
- * surfaces that can't call the Jinja component -- e.g. the providers
- * list in templates/pages/Landing.jinja -- reference the same class
- * string so one edit here re-styles every card. Values mirror the
+ * -- non-clickable cards read as flat surfaces; the Card component's
+ * ``interactive`` prop (views/components/Card.ts) adds the hover
+ * border/shadow lift so clickable cards read as clickable. The Card
+ * component composes this with Tailwind utilities for layout
+ * (flex/justify) and padding, and surfaces that assemble the class
+ * string directly reference it too, so one edit here re-styles every
+ * card. Values mirror the
  * Tailwind utilities they replace: bg-surface-primary, border
  * border-default, rounded-lg.
  */
@@ -525,16 +526,12 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * Custom tooltip bubble -- shared appearance for the two render backends in
- * static/tooltip_triggers.js: the overlay surface (static/overlay.js, used by
- * the chrome titlebar + the modal pages) and the in-page fallback that
- * first-party content-view pages (e.g. the workspace-row buttons in
- * Landing.jinja) render themselves, because that view has no ``window.minds``
- * bridge. Both build the bubble in JS, so this is the "shared across files"
- * case that gets a named ``@apply`` class (see README) instead of an inline
- * utility string -- one definition keeps the two backends visually identical.
- * Layout that differs per backend (position / left / top / z-index) is set in
- * JS; this class is appearance only. ``type-helper`` is the 12px/1.4 hints
+ * Custom tooltip bubble, built in JS by the delegated tooltip controller
+ * (views/shell/tooltips.ts): one shared bubble element appended to <body>
+ * for every [data-tooltip] trigger. Because the markup lives in JS, this is
+ * the "shared across files" case that gets a named ``@apply`` class (see
+ * README) instead of an inline utility string. Layout (position / left /
+ * top / z-index) is set by the controller; this class is appearance only. ``type-helper`` is the 12px/1.4 hints
  * role and ``shadow-overlay`` the menus/modals/tooltips elevation; the
  * max-width + whitespace/pointer-events keep it a compact, non-interactive
  * label. The max-width is generous enough that short button labels (e.g.
@@ -891,8 +888,9 @@ body:has(#notice-band) .workspace-surface {
  * right, the machine below it. A pointer approves the request, and the
  * green button then travels across and settles as the link between the
  * cloud and the machine -- the same element throughout, so it reads as one
- * thing moving rather than two appearing. onboarding.js adds is-playing
- * when the step comes up, so the sequence starts over on each visit.
+ * thing moving rather than two appearing. The walkthrough renders the
+ * scene with is-playing on a keyed mount (views/pages/creating/graphics.ts),
+ * so the sequence starts over on each visit.
  */
 .connect-scene {
   position: relative;
@@ -1198,8 +1196,8 @@ body:has(#notice-band) .workspace-surface {
   100% { opacity: 0; transform: translateY(60px); }
 }
 
-/* Nothing should loop forever when motion is unwelcome, and app.css has no
- * blanket reduced-motion reset, so the loop is switched off explicitly (the
+/* Nothing should loop forever when motion is unwelcome, and this stylesheet
+ * has no blanket reduced-motion reset, so the loop is switched off explicitly (the
  * other connect animations get away without it only because they end where
  * their reduced-motion state puts them). One pulse rests mid-link so the
  * tunnel still reads as carrying something. */
@@ -1219,9 +1217,9 @@ body:has(#notice-band) .workspace-surface {
 
 /*
  * Sharing step: the arrow draws from the laptop to the phone, and the
- * phone's interface appears once it lands. onboarding.js adds is-playing
- * when the step comes up (and takes it off again), so the sequence starts
- * over on each visit.
+ * phone's interface appears once it lands. The walkthrough renders the
+ * scene with is-playing on a keyed mount (views/pages/creating/graphics.ts),
+ * so the sequence starts over on each visit.
  */
 #gfx-devices .devices-arrow-line {
   stroke-dasharray: 40;
@@ -1260,9 +1258,9 @@ body:has(#notice-band) .workspace-surface {
 /*
  * Chat step. The request types itself out, backspaces, and tries another
  * thing to build; the reply rises in underneath once the first request has
- * landed. onboarding.js owns the text, because a CSS typewriter (a clip
- * animation across a fixed width) cannot backspace through lines that differ
- * in length. The bubbles borrow the browser demo's chat language.
+ * landed. ChatTypewriter (models/walkthrough.ts) owns the text, because a
+ * CSS typewriter (a clip animation across a fixed width) cannot backspace
+ * through lines that differ in length. The bubbles borrow the browser demo's chat language.
  */
 .chat-bubble {
   /* 1rem rather than a type role, for the same reason .onboarding-copy is at
@@ -1596,10 +1594,11 @@ body:has(#notice-band) .workspace-surface {
 }
 /*
  * Split view (the tabs step): the agent pulls the app up beside the chat.
- * onboarding.js puts is-split on #theme-demo when the step shows; the chat
- * column narrows, the app column appears (which is also what starts the
- * charts' entrance animations, declared below), and the app's tab joins the
- * strip already selected -- no pointer, nothing to click.
+ * The tabs step renders #theme-demo with is-split
+ * (views/pages/creating/graphics.ts); the chat column narrows, the app
+ * column appears (which is also what starts the charts' entrance
+ * animations, declared below), and the app's tab joins the strip already
+ * selected -- no pointer, nothing to click.
  */
 .demo-chat-col {
   width: 100%;
@@ -1794,7 +1793,7 @@ body:has(#notice-band) .workspace-surface {
  */
 /*
  * App wheel: one big icon centered in the cloud with a smaller one either
- * side. onboarding.js moves each icon forward through
+ * side. CloudWheel (models/walkthrough.ts) moves each icon forward through
  * enter -> left -> center -> right -> exit on a timer, so the icons read as
  * a wheel spinning apps through the cloud. Positions are pure transforms
  * (composited) and every element only ever moves forward, so the motion
@@ -1887,8 +1886,9 @@ body:has(#notice-band) .workspace-surface {
 
 /*
  * Entry transition: the page zooms into the graphic before entering the
- * workspace. onboarding.js adds is-entering to #onboarding, waits for the
- * animation, then hands the redirect URL to the shell bridge.
+ * workspace. The walkthrough view adds is-entering to #onboarding
+ * (views/pages/creating/OnboardingWalkthrough.ts), waits for the
+ * animation, then navigates to the ready workspace.
  */
 @keyframes onboarding-enter-zoom {
   to { transform: scale(6); opacity: 0; }
@@ -1904,7 +1904,7 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * Electron window drag regions (ChromeShell.jinja parity). The titlebar is
+ * Electron window drag regions. The titlebar is
  * the window's drag handle on frameless (Linux) and hiddenInset (macOS)
  * windows; its buttons opt back out so they stay clickable.
  *

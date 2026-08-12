@@ -2712,7 +2712,7 @@ class AgentCreator(MutableModel):
                     self.system_interface_health_tracker.end_create_attempt_grace(canonical_id)
 
                 # The redirect URL is *absolute* and points at the plugin's
-                # bare origin. ``creating.js`` does
+                # bare origin. The SPA creating page does
                 # ``window.location.href = data.redirect_url`` directly; a
                 # relative ``/goto/...`` would navigate to the minds origin
                 # (port :8420) where ``/goto/`` is unrouted -- the user

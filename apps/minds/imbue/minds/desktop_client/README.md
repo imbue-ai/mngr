@@ -16,12 +16,12 @@ The local desktop client is a Flask app that handles authentication and traffic 
 > `ws_gateway.py`. First paint is seeded from a bootstrap document inlined
 > into the served page.
 >
-> The legacy server-rendered JinjaX pages (`templates/`, `templates.py`) and
-> the vanilla-JS `static/*.js` are being removed; new UI work belongs in the
-> `frontend/` package, not in a template. The `/_chrome/events` SSE stream is
-> no longer consumed by any UI -- its payloads ride the WebSocket now (the
-> route itself, and the broker bridge that feeds the publisher, go away with
-> the legacy deletion follow-up).
+> All UI work belongs in the `frontend/` package. The only server-rendered
+> documents left are the dependency-free static pages that must work before
+> (or without) the SPA bundle: the one-time-code login flow (`ui_login.py`)
+> and the friendly error pages (`static_pages.py`). `static/` holds only the
+> embed contract module, the vendored Sentry browser bundle + its init, the
+> service icons, and the built SPA bundle (`static/ui/`, gitignored).
 
 Each workspace already runs its own `system_interface`, which serves the dockview UI at the workspace's bare origin; every other registered service owns its own origin (`<service>.host-<hex>.localhost:PORT/`), so nothing proxies or rewrites service traffic. The desktop client's job is to route browser traffic for `[<service>.]host-<hex>.localhost:PORT/*` to the right in-workspace backend -- it does not rewrite paths or inject anything itself.
 

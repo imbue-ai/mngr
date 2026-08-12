@@ -67,7 +67,7 @@ class UiWorkspaceVerbChoice(FrozenModel):
 
 
 class UiPredefinedPermissionDetail(FrozenModel):
-    """Typed twin of the predefined (catalog-backed) permission detail fragment."""
+    """Inbox detail payload for a predefined (catalog-backed) permission request."""
 
     kind: Literal["predefined"] = "predefined"
     request_id: str = Field(description="Request event id (grant/deny routes key on it)")
@@ -94,7 +94,7 @@ class UiPredefinedPermissionDetail(FrozenModel):
 
 
 class UiFileSharingPermissionDetail(FrozenModel):
-    """Typed twin of the file-sharing permission detail fragment."""
+    """Inbox detail payload for a file-sharing permission request."""
 
     kind: Literal["file_sharing"] = "file_sharing"
     request_id: str = Field(description="Request event id")
@@ -109,7 +109,7 @@ class UiFileSharingPermissionDetail(FrozenModel):
 
 
 class UiWorkspacePermissionDetail(FrozenModel):
-    """Typed twin of the cross-workspace (minds-workspaces) permission detail fragment."""
+    """Inbox detail payload for a cross-workspace (minds-workspaces) permission request."""
 
     kind: Literal["workspace"] = "workspace"
     request_id: str = Field(description="Request event id")
@@ -124,7 +124,7 @@ class UiWorkspacePermissionDetail(FrozenModel):
 
 
 class UiAccountsPermissionDetail(FrozenModel):
-    """Typed twin of the accounts permission detail fragment (all-or-nothing approve)."""
+    """Inbox detail payload for an accounts permission request (all-or-nothing approve)."""
 
     kind: Literal["accounts"] = "accounts"
     request_id: str = Field(description="Request event id")
@@ -163,7 +163,7 @@ RequestDetailPayload = (
 class RequestEventHandler(MutableModel, ABC):
     """Per-``RequestType`` handler for the request inbox flow.
 
-    Each implementation owns rendering the request detail fragment,
+    Each implementation owns building the typed request detail payload,
     applying a grant, applying a deny, and providing the human-readable
     labels the inbox list uses to describe pending requests of its
     kind. The route layer guarantees that ``req_event.request_type``
@@ -190,30 +190,6 @@ class RequestEventHandler(MutableModel, ABC):
         """
 
     @abstractmethod
-    def render_request_detail_fragment(
-        self,
-        req_event: RequestEvent,
-        backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        """Render the right-pane HTML fragment for an inbox detail view.
-
-        The fragment is embedded inside the inbox modal's
-        ``#inbox-detail`` container (or innerHTML-swapped into it). It
-        must not include ``<html>``, a backdrop, a close button, or any
-        per-handler script tags: chrome and submission JS live in the
-        inbox shell and operate on shared element ids the fragment
-        emits (``#permissions-form``, ``#permissions-approve-btn``,
-        ``#permissions-error``, ``#permissions-progress``,
-        ``#permissions-manual-credentials``).
-
-        ``mngr_forward_origin`` is the bare-origin URL of the
-        ``mngr forward`` plugin (e.g. ``"http://localhost:8421"``);
-        handlers thread it into rendered templates so workspace links
-        target the plugin's ``/goto/<agent>/`` route rather than minds.
-        """
-
-    @abstractmethod
     def build_request_detail_payload(
         self,
         req_event: RequestEvent,
@@ -221,11 +197,9 @@ class RequestEventHandler(MutableModel, ABC):
     ) -> RequestDetailPayload:
         """Build the typed inbox-detail payload for the SPA's right pane.
 
-        The JSON twin of :meth:`render_request_detail_fragment`: same data,
-        typed instead of pre-rendered. The SPA renders the dialog client-side
-        and submits the same form fields to the legacy grant/deny routes, so
-        the values here must stay in lockstep with what
-        :meth:`apply_grant_request` parses.
+        The SPA renders the dialog client-side and submits the same form
+        fields to the grant/deny routes, so the values here must stay in
+        lockstep with what :meth:`apply_grant_request` parses.
         """
 
     @abstractmethod

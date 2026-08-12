@@ -45,7 +45,6 @@ from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_file_sharing_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -237,29 +236,6 @@ class FileSharingGrantHandler(RequestEventHandler):
         if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
             return ""
         return req_event.path
-
-    def render_request_detail_fragment(
-        self,
-        req_event: RequestEvent,
-        backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
-            return "<p>Unsupported request type</p>"
-        parsed_agent_id = AgentId(req_event.agent_id)
-        ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
-        return render_file_sharing_permission_dialog(
-            agent_id=req_event.agent_id,
-            request_id=str(req_event.event_id),
-            ws_name=ws_name,
-            rationale=req_event.rationale,
-            file_path=req_event.path,
-            access=req_event.access,
-            access_human_label=_access_human_label(req_event.access),
-            allowed_roots_json=json.dumps([str(root) for root in self.share_roots]),
-            home_dir=str(self.home_dir),
-            mngr_forward_origin=mngr_forward_origin,
-        )
 
     def build_request_detail_payload(
         self,

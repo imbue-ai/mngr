@@ -12,8 +12,8 @@ mngr's own host/agent locks, so there is no minds-owned version to If-Match).
 
 The small context helpers here are the successors of ``app.py``'s private
 ``_build_workspace_context`` family and ``templates.py``'s share-target
-splitters; the legacy copies die with the legacy pages in the final cleanup
-phase, after which this module is their single home.
+splitters, both deleted with the legacy pages; this module is their single
+home.
 """
 
 import json
@@ -42,8 +42,7 @@ from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.mngr.primitives import AgentId
 
-# The share target that grants the whole machine (the shell service). Twin of
-# templates.py's _WHOLE_MACHINE_SERVICE until the legacy copy is deleted.
+# The share target that grants the whole machine (the shell service).
 WHOLE_MACHINE_SERVICE: Final[str] = "system_interface"
 
 # Interfaces the workspace is built out of (or internal infrastructure) rather
@@ -95,8 +94,8 @@ def _is_options_request_authenticated() -> bool:
     """The same signed-cookie check as ui_api.is_ui_request_authenticated.
 
     Local twin because ui_api imports this module (registration), so importing
-    back would be circular; the final cleanup phase should hoist one shared
-    guard onto the /ui blueprint.
+    back would be circular; a shared guard hoisted onto the /ui blueprint
+    would remove the duplication.
     """
     if os.getenv("SKIP_AUTH", "0") == "1":
         return True

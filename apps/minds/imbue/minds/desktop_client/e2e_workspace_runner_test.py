@@ -78,7 +78,7 @@ class _FakeCreatingPage:
     the failure branch. ``urls`` / ``is_visible_results``
     are consumed one entry per poll iteration; the final entry repeats. An
     ``is_visible_results`` entry that is an exception is raised, simulating an
-    execution-context-destroyed error when the chrome view swaps to ``/_chrome``.
+    execution-context-destroyed error when the page routes onto ``/workspace/<id>``.
     """
 
     def __init__(
@@ -166,9 +166,9 @@ def test_wait_raises_with_surfaced_error_on_failure_view() -> None:
 
 
 def test_wait_recovers_from_context_destroyed_during_redirect() -> None:
-    # The first failure-view check raises (the chrome view swapped to /_chrome and
-    # destroyed the execution context); the next poll sees the content page reach
-    # the workspace URL and returns it cleanly.
+    # The first failure-view check raises (the page routed onto /workspace/<id>
+    # and destroyed the execution context); the next poll sees the content page
+    # reach the workspace URL and returns it cleanly.
     workspace = _FakeContentPage(urls=[_PENDING_URL, _READY_URL])
     creating = _FakeCreatingPage(
         urls=[_PENDING_URL],

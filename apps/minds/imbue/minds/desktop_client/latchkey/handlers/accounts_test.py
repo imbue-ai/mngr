@@ -91,24 +91,6 @@ def test_handler_claims_accounts_request_type(tmp_path: Path) -> None:
     assert handler.handles_request_type() == str(RequestType.ACCOUNTS_PERMISSION)
 
 
-def test_render_request_detail_fragment_shows_rationale_and_hidden_permission(tmp_path: Path) -> None:
-    handler, _sender = _make_accounts_handler(tmp_path, lambda _req: httpx.Response(200))
-    event = create_latchkey_accounts_permission_request_event(
-        agent_id=str(AgentId()),
-        rationale="needs to find the right account",
-    )
-    body = handler.render_request_detail_fragment(
-        event,
-        StaticBackendResolver(url_by_agent_and_service={}),
-        mngr_forward_origin="http://forward.invalid",
-    )
-    assert "needs to find the right account" in body
-    # All-or-nothing grant: a single hidden ``permissions`` input so the inbox
-    # shell's Approve button enables (no per-permission choice).
-    assert 'name="permissions"' in body
-    assert 'value="accounts"' in body
-
-
 def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 

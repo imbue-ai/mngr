@@ -12,19 +12,18 @@ from the neutral, workspace-less chrome. Users who really want one can
 still type it into the settings hex input; only the preset swatches and
 the auto-pick exclude them.
 
-This module sits below ``templates.py`` in the import graph -- it has
-no other minds imports -- so the ``BackendResolver`` (which is below
-``templates`` because ``templates`` imports ``agent_creator`` which
-imports ``backend_resolver``) can read the default color and normalize
-stored labels without creating a cycle.
+This module sits at the bottom of the desktop client's import graph --
+it has no other minds imports -- so anything from ``backend_resolver``
+up through the ``ui_api_*`` route modules can read the default color and
+normalize stored labels without creating a cycle.
 
-``normalize_workspace_color`` is mirrored as ``normalizeHex`` in
-``static/workspace_accent.js`` for the picker pages' local input
-validation. The palette itself is server-side only; a guard test in
-``templates_test.py`` asserts the JS never reintroduces a palette mirror.
-(Titlebar foreground contrast is no longer computed here -- the chrome
-derives it from the workspace color in pure CSS; see ``.titlebar-surface``
-in ``static/app.css``.)
+``normalize_workspace_color`` is mirrored as ``normalizeWorkspaceColorHex``
+in ``frontend/src/models/workspaceOptions.ts`` for the SPA color pickers'
+local input validation. The palette itself is server-side only: the SPA
+receives it through the workspace-options payload rather than keeping a
+second copy in sync. (Titlebar foreground contrast is no longer computed
+here -- the chrome derives it from the workspace color in pure CSS; see
+``.titlebar-surface`` in ``frontend/src/style.css``.)
 """
 
 import re

@@ -709,14 +709,6 @@ class _StubOtherHandler(RequestEventHandler):
     def display_name_for_event(self, req_event: RequestEvent) -> str:
         return ""
 
-    def render_request_detail_fragment(
-        self,
-        req_event: RequestEvent,
-        backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        return "ok"
-
     def build_request_detail_payload(
         self,
         req_event: RequestEvent,

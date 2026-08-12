@@ -16,8 +16,8 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
-from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
+from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
+from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import LaunchMode
 

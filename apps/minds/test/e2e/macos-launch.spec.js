@@ -16,7 +16,7 @@ const { test, expect } = require('./fixtures');
 test('main window launches to a usable state (Create or Welcome)', async ({ mindsApp }, testInfo) => {
   const { mainWindow, app, pickContentWindow } = mindsApp;
   // Assert against the content window, not firstWindow(): firstWindow()
-  // can return the `/_chrome` title-bar view (Projects / Home / Back /
+  // can return the SPA title-bar view (Projects / Home / Back /
   // Forward, no auth UI), which carries none of the landing elements.
   // pickContentWindow returns the view that renders the welcome splash or
   // projects home.

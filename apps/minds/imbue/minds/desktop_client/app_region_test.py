@@ -1,8 +1,7 @@
-"""Unit tests for the create-form region resolution helpers in ``app``."""
+"""Unit tests for the create-form region resolution helpers in ``workspace_create``."""
 
 from pathlib import Path
 
-from imbue.minds.desktop_client.app import _build_region_form_context
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.workspace_create import persist_region_for_launch_mode
@@ -45,18 +44,6 @@ def test_resolve_effective_region_prefers_stored_value_when_no_submission(tmp_pa
 
 def test_resolve_effective_region_is_empty_for_region_less_provider(tmp_path: Path) -> None:
     assert resolve_effective_region(LaunchMode.DOCKER, "US-WEST-OR", _config(tmp_path), GeoLocationCache()) == ""
-
-
-def test_build_region_form_context_covers_all_region_bearing_providers(tmp_path: Path) -> None:
-    options, selected = _build_region_form_context(_config(tmp_path), GeoLocationCache())
-    assert options[LaunchMode.IMBUE_CLOUD.value] == ["US-EAST-VA", "US-WEST-OR"]
-    assert "ewr" in options[LaunchMode.VULTR.value]
-    # AWS is bring-your-own-key-account only: no ambient region row (the account's
-    # pinned placement rules; the BYOK add-form has its own region list).
-    assert LaunchMode.AWS.value not in options
-    # With no stored value and no geo, defaults are the hardcoded per-provider values.
-    assert selected[LaunchMode.IMBUE_CLOUD.value] == "US-EAST-VA"
-    assert selected[LaunchMode.VULTR.value] == "ewr"
 
 
 def test_persist_region_writes_back_for_region_bearing_provider(tmp_path: Path) -> None:

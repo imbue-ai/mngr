@@ -38,6 +38,7 @@ from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.onboarding_services import list_onboarding_services
@@ -48,12 +49,11 @@ from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KE
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.state import get_state
-from imbue.minds.desktop_client.templates import default_workspace_git_url
-from imbue.minds.desktop_client.templates import default_workspace_template_ref
-from imbue.minds.desktop_client.templates import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
+from imbue.minds.desktop_client.workspace_defaults import default_workspace_git_url
+from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.mngr_settings.byok_accounts import is_bring_your_own_cloud_enabled
 from imbue.minds.mngr_settings.byok_accounts import list_cloud_account_providers
 from imbue.minds.primitives import BackupProvider

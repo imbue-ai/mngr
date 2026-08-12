@@ -152,7 +152,7 @@ def signout_user_via_plugin(user_id: str) -> None:
             logger.warning("`mngr imbue_cloud auth signout` failed for {}: {}", signed_out_email, exc)
     session_store.invalidate_identity_cache()
     _kick_sync_scheduler()
-    wake_chrome_event_streams()
+    wake_ui_state_publisher()
     if signed_out_email and unset_imbue_cloud_provider_for_account(
         signed_out_email, root=MindsRoot.from_environment()
     ):
@@ -166,16 +166,18 @@ def _kick_sync_scheduler() -> None:
         scheduler.kick()
 
 
-def wake_chrome_event_streams() -> None:
+def wake_ui_state_publisher() -> None:
     """Make every open window re-read the account state after an auth change.
 
-    The chrome-events stream carries the signed-in identity on each
-    ``workspaces`` frame, but only re-derives it when its loop wakes. Auth
-    changes originate on a Flask request thread and move nothing the resolver
-    watches, so without this nudge the home screen's account launcher would
-    keep the signed-out account's label until the loop's next idle timeout.
+    The ``/ui/ws`` channel carries the signed-in identity on its ``accounts``
+    frames, but the publisher only re-derives when a producer signals a
+    change. Auth changes originate on a Flask request thread and move nothing
+    the resolver watches, so without this nudge the home screen's account
+    launcher would keep the signed-out account's label indefinitely.
     """
-    get_state().chrome_event_broadcaster.wake_subscribers()
+    publisher = get_state().ui_publisher
+    if publisher is not None:
+        publisher.notify_change()
 
 
 # ---------------------------------------------------------------------------

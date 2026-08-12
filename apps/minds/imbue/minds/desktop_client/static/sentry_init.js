@@ -1,10 +1,11 @@
 // Boot the frontend (browser) Sentry SDK for the minds web UI.
 //
 // This runs synchronously in <head>, immediately after the vendored
-// `sentry.browser.min.js` bundle (see Base.jinja), so unhandled errors thrown
-// later while the page parses/executes are captured. The backend only emits
-// these scripts when frontend reporting is enabled and a real DSN is configured
-// for the environment (see imbue/minds/utils/sentry/frontend.py); the config is
+// `sentry.browser.min.js` bundle (both emitted by `serve_spa_index` in
+// desktop_client/ui_api.py), so unhandled errors thrown later while the page
+// parses/executes are captured. The backend only emits these scripts when
+// frontend reporting is enabled and a real DSN is configured for the
+// environment (see imbue/minds/utils/sentry/frontend.py); the config is
 // passed in as a JSON <script> blob rather than inline JS.
 //
 // To refresh the vendored bundle, re-download the matching pinned version from

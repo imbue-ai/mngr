@@ -1,13 +1,12 @@
 """/ui/api routes owned by tranche T5 (inbox/latchkey/help).
 
 The SPA inbox reads a typed card list + per-kind typed detail payloads and
-submits grants/denies to the legacy ``/requests/<id>/grant|deny`` routes (the
-handlers' form contracts are unchanged). The card/detail derivation mirrors
-the legacy SSR helpers in ``app.py`` (``_build_inbox_cards`` /
-``_handle_inbox_detail_fragment``); the duplication is deliberate and small
--- importing them from ``app.py`` would be a circular import (``app`` imports
-``ui_api`` imports this module) -- and the legacy copies are deleted with the
-rest of the SSR surface in the final cleanup phase.
+submits grants/denies to the ``/requests/<id>/grant|deny`` routes in
+``app.py`` (the handlers' form contracts are unchanged).
+``_displayable_pending_requests`` deliberately duplicates the same-named
+helper in ``app.py`` (still live there for the titlebar badge count):
+importing it from ``app.py`` would be a circular import (``app`` imports
+``ui_api`` imports this module).
 """
 
 import json
@@ -75,8 +74,8 @@ def _is_inbox_request_authenticated() -> bool:
     """Session-cookie check; mirrors ``ui_api.is_ui_request_authenticated``.
 
     Duplicated (5 lines) because ``ui_api`` imports this module at load time,
-    so importing back would be circular. Consolidated in the final cleanup
-    phase alongside the other per-area copies.
+    so importing back would be circular; a shared guard hoisted onto the /ui
+    blueprint would remove the duplication.
     """
     if os.getenv("SKIP_AUTH", "0") == "1":
         return True
@@ -101,9 +100,10 @@ def _displayable_pending_requests(
 ) -> list[RequestEvent]:
     """Pending requests whose originating agent's host is currently resolvable.
 
-    Twin of the legacy helper in ``app.py`` (kept in lockstep until the SSR
-    surface is deleted): requests from since-vanished workspaces would render
-    as meaningless hex ids, so they are hidden until their host reappears.
+    Twin of the same-named helper in ``app.py`` (which feeds the titlebar
+    badge count) -- keep the two in lockstep so the badge and the inbox list
+    agree. Requests from since-vanished workspaces would render as
+    meaningless hex ids, so they are hidden until their host reappears.
     """
     pending = inbox.get_pending_requests() if inbox else []
     displayable: list[RequestEvent] = []

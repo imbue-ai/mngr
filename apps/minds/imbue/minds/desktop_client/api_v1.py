@@ -127,12 +127,13 @@ from imbue.minds.desktop_client.backup_export import export_snapshot_zip
 from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
-from imbue.minds.desktop_client.chrome_event_broadcast import build_open_help_payload
-from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_refresh_payload
 from imbue.minds.desktop_client.create_helpers import REMOTE_SIGNIN_REDIRECT_URL
 from imbue.minds.desktop_client.create_helpers import color_for_new_workspace
 from imbue.minds.desktop_client.create_helpers import existing_workspace_host_names
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
+from imbue.minds.desktop_client.create_status import status_text_for
+from imbue.minds.desktop_client.host_names import normalize_host_name_slug
+from imbue.minds.desktop_client.host_names import resolve_create_host_name
 from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_workspace_id_label
@@ -156,14 +157,13 @@ from imbue.minds.desktop_client.sharing_handler import resolve_share_probe_host
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
-from imbue.minds.desktop_client.templates import default_workspace_template_ref
-from imbue.minds.desktop_client.templates import normalize_host_name_slug
-from imbue.minds.desktop_client.templates import resolve_create_host_name
-from imbue.minds.desktop_client.templates import status_text_for
+from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
+from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
 from imbue.minds.desktop_client.workspace_create import build_create_on_created_callback
 from imbue.minds.desktop_client.workspace_create import resolve_effective_region
+from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
+from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
@@ -1251,7 +1251,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
         get_state().mngr_binary,
         get_state().mngr_host_dir,
         parent_cg,
-        chrome_event_broadcaster=get_state().chrome_event_broadcaster,
+        ui_publisher=get_state().ui_publisher,
     )
     if not outcome.is_successful:
         reason = f": {outcome.failure_reason}" if outcome.failure_reason else ""
@@ -2356,9 +2356,9 @@ def _handle_bug_report(agent_id: str) -> OkResponse | Response:
     if not description:
         return _json_error("'description' field is required and must be a non-empty string", 400)
 
-    get_state().chrome_event_broadcaster.broadcast(
-        build_open_help_payload(description=description, workspace_agent_id=agent_id)
-    )
+    publisher = get_state().ui_publisher
+    if publisher is not None:
+        publisher.publish_one_shot(UiOpenHelpMessage(description=description, workspace_agent_id=agent_id))
     # The agent never submits to Sentry itself, so no report event is written here (the
     # response carries no ``event_id``); the human-reviewed send flows through ``/help/report``.
     return OkResponse(ok=True)
@@ -2388,7 +2388,9 @@ def _handle_workspace_refresh(agent_id: str) -> OkResponse:
     must not fail because the user happens to have the workspace closed. The
     response is ``ok`` either way.
     """
-    get_state().chrome_event_broadcaster.broadcast(build_workspace_refresh_payload(workspace_agent_id=agent_id))
+    publisher = get_state().ui_publisher
+    if publisher is not None:
+        publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id=agent_id))
     return OkResponse(ok=True)
 
 

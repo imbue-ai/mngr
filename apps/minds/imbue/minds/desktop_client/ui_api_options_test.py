@@ -9,6 +9,7 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.ui_api_options import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.ui_api_options import _workspace_host_coordinate_for_options
 from imbue.minds.desktop_client.ui_api_options import share_target_labels
 from imbue.minds.desktop_client.ui_api_options import split_share_targets
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -144,3 +145,29 @@ def test_share_target_labels_cover_targets_and_shell_only() -> None:
     )
 
     assert labels == {"web": "web-r4nd", "system_interface": "shell-r4nd"}
+
+
+# -- _workspace_host_coordinate_for_options ---------------------------------
+
+
+def test_workspace_host_coordinate_prefers_discovery() -> None:
+    resolver = _OptionsSeededResolver(
+        url_by_agent_and_service={},
+        display_info_by_agent_id={_AGENT_ID: AgentDisplayInfo(agent_name="sunny", host_id=_HOST_ID)},
+    )
+    assert _workspace_host_coordinate_for_options(resolver, None, _AGENT_ID) == _HOST_ID
+
+
+def test_workspace_host_coordinate_empty_for_undiscovered_agent_without_records() -> None:
+    resolver = _OptionsSeededResolver(url_by_agent_and_service={})
+    assert _workspace_host_coordinate_for_options(resolver, None, _AGENT_ID) == ""
+
+
+def test_workspace_host_coordinate_ignores_non_host_shaped_coordinates() -> None:
+    # A local workspace's coordinate is not a host-<hex> id; the sharing API
+    # has nothing to key by, so the pane must get '' rather than 'localhost'.
+    resolver = _OptionsSeededResolver(
+        url_by_agent_and_service={},
+        display_info_by_agent_id={_AGENT_ID: AgentDisplayInfo(agent_name="sunny", host_id="localhost")},
+    )
+    assert _workspace_host_coordinate_for_options(resolver, None, _AGENT_ID) == ""

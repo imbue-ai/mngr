@@ -13,39 +13,22 @@ The flow it preserves exactly:
 - A missing code renders a static explanation pointing the user at the login
   URL printed in the terminal.
 
-The SuperTokens account-auth pages (sign-up/sign-in, OAuth close, forgot
-password) are NOT part of this flow and still render from ``templates/auth/``;
-the full auth overhaul is a separate project.
+This is the *local session* with the desktop client itself; Imbue *account*
+sign-in happens on the connector's hosted accounts pages in the system browser
+(see ``supertokens_routes.py``).
 """
 
 import json
-from typing import Final
 
 from flask import Response
 from flask import request
 
+from imbue.minds.desktop_client.static_pages import build_static_page_html
 from imbue.minds.desktop_client.ui_api import is_ui_request_authenticated
-
-_PAGE_STYLE: Final[str] = (
-    "body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;"
-    "min-height:100vh;margin:0;background:#f7f7f5;color:#1a1a1a}"
-    "main{max-width:26rem;padding:2rem;text-align:center}"
-    "h1{font-size:1.25rem;margin-bottom:.75rem}"
-    "p{color:#555;line-height:1.5}"
-    "code{background:#ececec;border-radius:4px;padding:.1rem .35rem}"
-)
 
 
 def _render_login_document(body_html: str, head_extra: str = "") -> Response:
-    document = (
-        "<!doctype html>\n"
-        '<html lang="en">\n'
-        f'<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>minds</title><style>{_PAGE_STYLE}</style>{head_extra}</head>\n"
-        f"<body><main>{body_html}</main></body>\n"
-        "</html>\n"
-    )
-    return Response(document, mimetype="text/html")
+    return Response(build_static_page_html(body_html, head_extra=head_extra), mimetype="text/html")
 
 
 def render_missing_code_page() -> Response:

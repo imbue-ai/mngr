@@ -4,19 +4,18 @@ import threading
 import time
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.desktop_client.chrome_event_broadcast import ChromeEventBroadcaster
-from imbue.minds.desktop_client.chrome_event_broadcast import build_open_help_payload
-from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_refresh_payload
-from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_stopped_payload
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
+from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
+from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
+from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 
@@ -104,46 +103,34 @@ def test_publish_now_rebroadcasts_only_the_changed_message_type() -> None:
     assert [entry.name for entry in parsed.workspaces] == ["one"]
 
 
-def test_bridged_legacy_workspace_stopped_event_reaches_the_channel() -> None:
+def test_one_shot_workspace_stopped_event_reaches_the_channel() -> None:
     source = _MutableWorkspaceSource()
     publisher, client_queue = _build_publisher(source)
-    broker = ChromeEventBroadcaster()
-    publisher.bridge_legacy_broker(broker)
 
-    broker.broadcast(build_workspace_stopped_payload("agent-42"))
-    publisher.publish_now()
+    publisher.publish_one_shot(UiWorkspaceStoppedMessage(agent_id="agent-42"))
 
     frames = _drain_frames(client_queue)
-    stopped = [frame for frame in frames if frame["type"] == "workspace_stopped"]
-    assert stopped == [{"type": "workspace_stopped", "agent_id": "agent-42"}]
+    assert frames == [{"type": "workspace_stopped", "agent_id": "agent-42"}]
 
 
-def test_bridged_legacy_open_help_event_reaches_the_channel() -> None:
+def test_one_shot_open_help_event_reaches_the_channel() -> None:
     source = _MutableWorkspaceSource()
     publisher, client_queue = _build_publisher(source)
-    broker = ChromeEventBroadcaster()
-    publisher.bridge_legacy_broker(broker)
 
-    broker.broadcast(build_open_help_payload("the diagnosis", "agent-7"))
-    publisher.publish_now()
+    publisher.publish_one_shot(UiOpenHelpMessage(description="the diagnosis", workspace_agent_id="agent-7"))
 
     frames = _drain_frames(client_queue)
-    help_frames = [frame for frame in frames if frame["type"] == "open_help"]
-    assert help_frames == [{"type": "open_help", "description": "the diagnosis", "workspace_agent_id": "agent-7"}]
+    assert frames == [{"type": "open_help", "description": "the diagnosis", "workspace_agent_id": "agent-7"}]
 
 
-def test_bridged_legacy_workspace_refresh_event_reaches_the_channel() -> None:
+def test_one_shot_workspace_refresh_event_reaches_the_channel() -> None:
     source = _MutableWorkspaceSource()
     publisher, client_queue = _build_publisher(source)
-    broker = ChromeEventBroadcaster()
-    publisher.bridge_legacy_broker(broker)
 
-    broker.broadcast(build_workspace_refresh_payload("agent-13"))
-    publisher.publish_now()
+    publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id="agent-13"))
 
     frames = _drain_frames(client_queue)
-    refreshes = [frame for frame in frames if frame["type"] == "workspace_refresh"]
-    assert refreshes == [{"type": "workspace_refresh", "agent_id": "agent-13"}]
+    assert frames == [{"type": "workspace_refresh", "agent_id": "agent-13"}]
 
 
 def test_publish_health_broadcasts_immediately_without_diffing() -> None:

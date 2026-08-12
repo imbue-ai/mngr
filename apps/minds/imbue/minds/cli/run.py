@@ -94,9 +94,9 @@ from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forwar
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
-from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
-from imbue.minds.desktop_client.templates import FALLBACK_BRANCH
-from imbue.minds.desktop_client.templates import is_local_workspace_defaults_opt_in
+from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
+from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
+from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import read_device_label
 from imbue.minds.envs.docker_cleanup import DockerCleanupError

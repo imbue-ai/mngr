@@ -42,7 +42,6 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.templates import render_workspace_permission_dialog
 from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -158,40 +157,6 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         backend_resolver: BackendResolverInterface = get_state().backend_resolver
         target_name = _resolve_target_name(backend_resolver, req_event.target_workspace_id)
         return f"Workspace access: {target_name}" if target_name else "Machine access"
-
-    def render_request_detail_fragment(
-        self,
-        req_event: RequestEvent,
-        backend_resolver: BackendResolverInterface,
-        mngr_forward_origin: str,
-    ) -> str:
-        if not isinstance(req_event, LatchkeyWorkspacePermissionRequestEvent):
-            return "<p>Unsupported request type</p>"
-        parsed_agent_id = AgentId(req_event.agent_id)
-        ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
-        target_name = _resolve_target_name(backend_resolver, req_event.target_workspace_id)
-        requested = set(req_event.permissions)
-        # Pre-check the verbs the agent requested (intersected with the known
-        # verb catalog); the user may broaden or narrow in the dialog.
-        checked = tuple(verb.permission for verb in WORKSPACE_VERBS if verb.permission in requested)
-        # The dialog splits the verbs into a "general" (non-targeted) group and
-        # a "workspace-specific" (targeted) group; both always appear. Offer the
-        # all-vs-selected choice only when the request names a target workspace.
-        # With no named target the targeted verbs can still be granted, but only
-        # broadly ("all"), which the dialog makes explicit via a caution notice
-        # and a single pre-selected "All workspaces" option.
-        return render_workspace_permission_dialog(
-            agent_id=req_event.agent_id,
-            request_id=str(req_event.event_id),
-            ws_name=ws_name,
-            rationale=req_event.rationale,
-            verbs=WORKSPACE_VERBS,
-            checked_permissions=checked,
-            target_workspace_id=req_event.target_workspace_id,
-            target_workspace_name=target_name,
-            show_target_choice=bool(target_name),
-            mngr_forward_origin=mngr_forward_origin,
-        )
 
     def build_request_detail_payload(
         self,

@@ -103,7 +103,14 @@ const EXPECTED_SHA256 = {
 };
 
 const MAX_REDIRECTS = 5;
-const DOWNLOAD_RETRIES = 5;
+// GitHub's release CDN has been observed to reset connections ("socket hang
+// up") for windows of a minute or more, especially from cloud-builder egress
+// (e.g. the Modal image bake). Five 1-8s tries (~15s total) sat entirely
+// inside such a window; eight tries with the backoff capped at 30s (~1.5min
+// of backoff) ride it out without meaningfully delaying the permanent-failure
+// case, since 4xx and redirect-loop errors still fail immediately.
+const DOWNLOAD_RETRIES = 8;
+const MAX_RETRY_DELAY_MS = 30000;
 
 /** Parsed git-manifest.json: the pinned dugite-native tag, version, and per-target assets. */
 function readGitManifest() {
@@ -242,7 +249,7 @@ async function download(url) {
       lastErr = err;
       if (err.permanent) break;
       if (attempt === DOWNLOAD_RETRIES) break;
-      const delayMs = 1000 * 2 ** (attempt - 1);
+      const delayMs = Math.min(1000 * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS);
       console.log(`[download-binaries] ${url} failed (attempt ${attempt}/${DOWNLOAD_RETRIES}): ${err.message}. Retrying in ${delayMs}ms...`);
       await new Promise((r) => setTimeout(r, delayMs));
     }

@@ -21,8 +21,8 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.chrome_event_broadcast import ChromeEventBroadcaster
-from imbue.minds.desktop_client.chrome_event_broadcast import build_workspace_stopped_payload
+from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
+from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -93,7 +93,7 @@ def perform_mind_host_action(
     mngr_binary: str,
     mngr_host_dir: Path,
     concurrency_group: ConcurrencyGroup,
-    chrome_event_broadcaster: ChromeEventBroadcaster,
+    ui_publisher: UiStatePublisher | None,
 ) -> MindHostActionOutcome:
     """Stop or start one mind's host, running ``mngr`` to completion.
 
@@ -103,10 +103,10 @@ def perform_mind_host_action(
     flips immediately, reconciling on the next discovery snapshot); on failure
     clears any override so the UI reverts to the authoritative discovery state.
 
-    A successful STOP also broadcasts a one-shot ``workspace_stopped`` payload on
-    ``chrome_event_broadcaster``, so any window still open to the workspace
-    closes instead of observing the dead interface and auto-restarting the host
-    -- which would silently undo the stop.
+    A successful STOP also publishes a one-shot ``workspace_stopped`` frame on
+    the ``/ui/ws`` channel, so any window still open to the workspace closes
+    instead of observing the dead interface and auto-restarting the host --
+    which would silently undo the stop.
     """
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
@@ -179,6 +179,6 @@ def perform_mind_host_action(
                 backend_resolver.set_host_state_override(host_id, HostState.RUNNING)
             case _ as unreachable:
                 assert_never(unreachable)
-    if action is MindHostAction.STOP:
-        chrome_event_broadcaster.broadcast(build_workspace_stopped_payload(str(workspace_agent_id)))
+    if action is MindHostAction.STOP and ui_publisher is not None:
+        ui_publisher.publish_one_shot(UiWorkspaceStoppedMessage(agent_id=str(workspace_agent_id)))
     return MindHostActionOutcome(is_successful=True)

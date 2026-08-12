@@ -56,9 +56,9 @@ from imbue.minds.desktop_client.default_workspace_template_worktree import curre
 # apps/minds/test_desktop_client_e2e.py, where parents[2] was correct.)
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
 
-# The contentView page URL contains ``/_chrome`` only for the chrome
-# (sidebar/title-bar) view; the main content view never does. We match the
-# pure-localhost backend pages, not the ``host-<id>.localhost`` proxy.
+# Every SPA route (the hub pages and the ``/workspace/<id>`` workspace
+# surface) is served from the backend's bare-localhost origin. We match those
+# backend pages, not the ``host-<id>.localhost`` proxy.
 # The capturing group exposes the bare origin (``http://localhost:<port>``)
 # so :func:`_backend_origin_from_page` can reuse the same pattern instead of
 # re-encoding the localhost-origin contract a second time.
@@ -244,7 +244,7 @@ def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
     Mirrors ``just minds-start``: passes the DEFAULT_WORKSPACE_TEMPLATE path through the
     ``MINDS_WORKSPACE_GIT_URL`` prefill var (honored only when the explicit
     opt-in ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is also set -- see
-    ``_operator_workspace_default`` in templates.py), and scrubs any
+    ``_operator_workspace_default`` in workspace_defaults.py), and scrubs any
     ANTHROPIC creds the operator's shell might have exported so they
     don't silently leak into every workspace we create.
 
@@ -464,10 +464,10 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron window page that serves the chrome UI.
 
     Each window is a single web context now (the chrome page, which hosts
-    hub pages, the workspace iframe, and the in-DOM overlay layer), so the
-    right page is simply the one on the backend origin -- including the
-    ``/_chrome`` wrapper, which IS the top-level page while a workspace is
-    displayed. We poll until that page exists because Electron spawns the
+    hub pages, the workspace iframe, and the in-DOM modals), so the right
+    page is simply the one on the backend origin -- including the
+    ``/workspace/<id>`` route, which IS the top-level page while a workspace
+    is displayed. We poll until that page exists because Electron spawns the
     backend asynchronously after launch (the window sits on the file://
     shell.html loading screen until then).
     """
@@ -623,15 +623,15 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
     form is submitted:
 
     - **success**: the ready workspace opens inside the chrome page's sandboxed
-      content iframe on the ``host-<id>.localhost`` origin. ``creating.js``
-      hands the ready workspace's ``/goto`` URL to the ``window.minds`` bridge,
-      which navigates the window onto the ``/_chrome`` wrapper and arms the
+      content iframe on the ``host-<id>.localhost`` origin. The SPA creating page
+      extracts the workspace coordinate from the ready workspace's ``/goto``
+      URL and enters it in-app on the ``/workspace/<id>`` route, arming the
       iframe. This scans every page's FRAMES for the one that reached the
       agent subdomain (the workspace is a cross-origin iframe now, not its own
       CDP page).
     - **failure**: the loading screen's failure sub-view (``#failure-view``)
       becomes visible on ``creating_page`` (still showing the ``/creating``
-      loader) -- ``creating.js``'s ``showFailure()`` un-hides it once the status
+      loader) -- the SPA creating page un-hides it once the status
       poll/SSE reports FAILED.
 
     Polls both rather than only waiting for success, so a create attempt failure raises
@@ -650,9 +650,9 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
         try:
             failure_is_visible = creating_page.is_visible("#failure-view")
         except PlaywrightError:
-            # The window navigates onto the /_chrome wrapper the instant the
-            # bridge shows the workspace, which can destroy the execution
-            # context mid-check; loop so the next iteration re-scans the frames
+            # The page routes onto /workspace/<id> the instant the shell
+            # shows the workspace, which can destroy the execution context
+            # mid-check; loop so the next iteration re-scans the frames
             # and finds the workspace iframe on the agent subdomain.
             failure_is_visible = False
         if failure_is_visible:
@@ -746,8 +746,8 @@ def _drive_create_flow(
     # Race the workspace-ready content page against the create flow's failure
     # view, so a `mngr create` failure (e.g. an unregistered docker runtime)
     # fails this run fast with the surfaced error rather than blocking the whole
-    # navigation budget. The ready workspace opens on the content view (a separate
-    # page); this chrome-view page returns to /_chrome.
+    # navigation budget. The ready workspace opens inside the chrome page's
+    # content iframe once the page routes onto /workspace/<id>.
     workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
     logger.info("Machine ready at {}", workspace_page.url)
 
@@ -765,7 +765,7 @@ def _attach_renderer_diagnostics(page: Page) -> None:
     requests to loguru.
 
     Electron's stderr only carries main-process output, so a renderer-side
-    fault (e.g. ``creating.js`` throwing before it attaches its handlers, or
+    fault (e.g. the creating page's script throwing before it attaches its handlers, or
     failing to load) is otherwise invisible in CI. Mirroring those events into
     the run log makes a stuck create step diagnosable.
     """
@@ -811,7 +811,7 @@ def _attempt_create_workspace_via_electron(
             # must propagate (the attach phase above is the launch-flake part).
             try:
                 # Surface renderer console/JS errors into the run log so a stuck
-                # create step (creating.js handlers not attaching) is diagnosable.
+                # create step (creating-page handlers not attaching) is diagnosable.
                 _attach_renderer_diagnostics(page)
                 workspace_page = _drive_create_flow(
                     browser,
@@ -976,10 +976,11 @@ _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], ifram
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
 _CHAT_REPLY_TIMEOUT_SECONDS: Final[int] = 240
 _DESTROY_TIMEOUT_SECONDS: Final[int] = 300
-# The chrome Home button's handler is attached by chrome.js after the chrome
-# view loads (and that view reloads several times during the flow); an early
-# click can land before the handler is wired and silently no-op, so we re-pick
-# the chrome view and retry, allowing _NAV_SETTLE_SECONDS for each click to take.
+# The titlebar Home button's handler exists only once the SPA titlebar
+# (frontend/src/views/shell/Titlebar.ts) has mounted, and the page navigates
+# several times during the flow; an early click can land before the SPA is
+# mounted and silently no-op, so we re-pick the chrome view and retry,
+# allowing _NAV_SETTLE_SECONDS for each click to take.
 _HOME_CLICK_ATTEMPTS: Final[int] = 6
 _NAV_SETTLE_SECONDS: Final[int] = 12
 
@@ -1187,9 +1188,9 @@ def _navigate_home(browser: Browser, content_page: Page, backend_origin: str, wo
     """Click the titlebar Home button (retrying) and confirm the window lands home.
 
     The Home button lives on the same chrome page as everything else now; its
-    handler is wired by chrome.js after load, and the page can be mid-swap
-    when we click, so we retry, polling the page URL for the landing
-    navigation.
+    handler exists once the SPA titlebar has mounted, and the page can be
+    mid-navigation when we click, so we retry, polling the page URL for the
+    landing navigation.
     """
     del browser
     landing_targets = (backend_origin + "/", backend_origin)

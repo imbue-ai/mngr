@@ -1,12 +1,17 @@
 import json
+from collections.abc import Iterator
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
+import pytest
 from flask.testing import FlaskClient
+from pydantic import Field
 
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -15,8 +20,11 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.ui_api_lifecycle import _build_ssh_command
+from imbue.minds.desktop_client.ui_api_lifecycle import _resolve_workspace_coordinate_to_agent_id
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _DESTROYED_AGENT_ID = "agent-" + "9" * 32
 _TEST_USER_ID = "user-test-123"
@@ -211,3 +219,108 @@ def test_recovery_info_rejects_an_unknown_coordinate(tmp_path: Path) -> None:
     response = client.get("/ui/api/workspaces/host-00000000000000000000000000000abc/recovery-info")
 
     assert response.status_code == 404
+
+
+def test_build_ssh_command_renders_the_resolvers_ssh_info() -> None:
+    """The recovery page's SSH command matches what mngr emits for the host."""
+    agent_id = AgentId()
+    resolver = StaticBackendResolver(
+        url_by_agent_and_service={},
+        ssh_info_by_agent_id={
+            str(agent_id): RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key"))
+        },
+    )
+    assert _build_ssh_command(resolver, agent_id) == "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"
+
+
+def test_build_ssh_command_is_empty_without_ssh_info() -> None:
+    """An agent the resolver has no SSH info for yields no command (the copy button is then omitted)."""
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    assert _build_ssh_command(resolver, AgentId()) == ""
+
+
+# -- _resolve_workspace_coordinate_to_agent_id ------------------------------
+#
+# Workspace content URLs are keyed by host id while minds' records stay
+# agent-keyed; the resolver translates between the two coordinates for the
+# recovery page.
+
+_AGENT_A = AgentId("agent-" + "a" * 32)
+_AGENT_B = AgentId("agent-" + "b" * 32)
+_HOST_A = "host-" + "a" * 32
+_HOST_B = "host-" + "b" * 32
+
+
+class _HostAwareResolver(StaticBackendResolver):
+    """StaticBackendResolver that also carries the agent -> host coordinate map."""
+
+    host_id_by_agent_id: Mapping[str, str] = Field(
+        default_factory=dict, frozen=True, description="Agent id -> host id, mirroring discovery"
+    )
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        host_id = self.host_id_by_agent_id.get(str(agent_id))
+        if host_id is None:
+            return None
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id=host_id)
+
+
+def _resolver(host_id_by_agent_id: Mapping[str, str]) -> _HostAwareResolver:
+    return _HostAwareResolver(
+        url_by_agent_and_service={aid: {} for aid in host_id_by_agent_id},
+        host_id_by_agent_id=host_id_by_agent_id,
+    )
+
+
+def _record(host_id: str, agent_id: str) -> ReplicaRecord:
+    return ReplicaRecord(host_id=host_id, agent_id=agent_id)
+
+
+def test_agent_coordinate_passes_through_without_lookups() -> None:
+    resolved = _resolve_workspace_coordinate_to_agent_id(str(_AGENT_A), _resolver({}), [])
+    assert resolved == _AGENT_A
+
+
+def test_malformed_agent_coordinate_resolves_to_none() -> None:
+    assert _resolve_workspace_coordinate_to_agent_id("agent-nothex", _resolver({}), []) is None
+
+
+@pytest.mark.parametrize("workspace_id", ["", "workspace-1", "localhost", "create"])
+def test_non_coordinate_strings_resolve_to_none(workspace_id: str) -> None:
+    assert _resolve_workspace_coordinate_to_agent_id(workspace_id, _resolver({}), []) is None
+
+
+def test_host_coordinate_resolves_via_discovery() -> None:
+    resolver = _resolver({str(_AGENT_A): _HOST_A, str(_AGENT_B): _HOST_B})
+    assert _resolve_workspace_coordinate_to_agent_id(_HOST_B, resolver, []) == _AGENT_B
+
+
+def test_host_coordinate_resolution_does_not_touch_records_on_a_discovery_hit() -> None:
+    """Records are the fallback: a discovery hit must not list them (they can be slow)."""
+
+    def _exploding_records() -> Iterator[ReplicaRecord]:
+        raise AssertionError("records must not be listed when discovery resolves the host id")
+        # The unreachable yield makes this a generator, so the raise only
+        # fires if the records are actually iterated.
+        yield
+
+    resolver = _resolver({str(_AGENT_A): _HOST_A})
+    resolved = _resolve_workspace_coordinate_to_agent_id(_HOST_A, resolver, _exploding_records())
+    assert resolved == _AGENT_A
+
+
+def test_host_coordinate_falls_back_to_workspace_records() -> None:
+    """A stopped host discovery no longer reports still resolves via the record replica."""
+    records = [_record(_HOST_A, str(_AGENT_A)), _record(_HOST_B, str(_AGENT_B))]
+    resolved = _resolve_workspace_coordinate_to_agent_id(_HOST_B, _resolver({}), records)
+    assert resolved == _AGENT_B
+
+
+def test_host_coordinate_record_fallback_skips_agentless_records() -> None:
+    records = [_record(_HOST_A, "")]
+    assert _resolve_workspace_coordinate_to_agent_id(_HOST_A, _resolver({}), records) is None
+
+
+def test_unknown_host_coordinate_resolves_to_none() -> None:
+    resolver = _resolver({str(_AGENT_A): _HOST_A})
+    assert _resolve_workspace_coordinate_to_agent_id(_HOST_B, resolver, []) is None

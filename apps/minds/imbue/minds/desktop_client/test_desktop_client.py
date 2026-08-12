@@ -1,11 +1,7 @@
+import json
 import os
-import queue
 import subprocess
-import threading
 import time
-from datetime import datetime
-from datetime import timedelta
-from datetime import timezone
 from http.cookies import SimpleCookie
 from pathlib import Path
 
@@ -24,16 +20,13 @@ from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _collect_remote_workspace_tiles
 from imbue.minds.desktop_client.app import _finalize_and_mark_destroying
-from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
-from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -57,7 +50,6 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
-from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
@@ -66,7 +58,6 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
-from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
 def _create_test_desktop_client(
@@ -939,6 +930,27 @@ def test_set_default_account(tmp_path: Path) -> None:
     assert config.get_default_account_id() == "user-default-123"
 
 
+# -- welcome-splash skip tests --
+
+
+def test_welcome_skip_redirects_to_login_when_unauthenticated(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/welcome/skip", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login"
+
+
+def test_welcome_skip_sets_flag_and_redirects_home_when_authenticated(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/welcome/skip", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    assert get_state(client.application).is_account_setup_skipped is True
+
+
 # -- error-reporting consent + settings tests --
 
 
@@ -1211,9 +1223,7 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     pre-filled with the agent's description, scoped to the caller's own machine."""
     client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
     agent_id = AgentId()
-    event_queue: "queue.Queue[dict[str, str]]" = queue.Queue()
-    wake_event = threading.Event()
-    get_state(client.application).chrome_event_broadcaster.subscribe(event_queue, wake_event)
+    client_queue = get_state(client.application).ui_channel_broadcaster.register()
     response = client.post(
         f"/api/v1/agents/{agent_id}/report",
         json={"description": "agent saw an error"},
@@ -1224,9 +1234,8 @@ def test_api_v1_bug_report_opens_prefilled_modal_instead_of_submitting(tmp_path:
     assert body["ok"] is True
     # No Sentry submission happens here, so there is no event_id to return.
     assert "event_id" not in body
-    # The route broadcast an open_help SSE payload (scoped to the caller's workspace) instead of submitting.
-    assert wake_event.is_set()
-    assert event_queue.get_nowait() == {
+    # The route published an open_help frame (scoped to the caller's workspace) instead of submitting.
+    assert json.loads(client_queue.get_nowait() or "") == {
         "type": "open_help",
         "description": "agent saw an error",
         "workspace_agent_id": str(agent_id),
@@ -1247,24 +1256,6 @@ def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
 
 
 # -- system-interface restart + recovery tests --
-
-
-def test_ssh_command_for_agent_builds_command_from_resolver() -> None:
-    """_ssh_command_for_agent renders the resolver's SSH info as a runnable command."""
-    agent_id = AgentId()
-    resolver = StaticBackendResolver(
-        url_by_agent_and_service={},
-        ssh_info_by_agent_id={
-            str(agent_id): RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key"))
-        },
-    )
-    assert _ssh_command_for_agent(resolver, agent_id) == "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"
-
-
-def test_ssh_command_for_agent_returns_none_without_ssh_info() -> None:
-    """An agent the resolver has no SSH info for yields no command (button is then omitted)."""
-    resolver = StaticBackendResolver(url_by_agent_and_service={})
-    assert _ssh_command_for_agent(resolver, AgentId()) is None
 
 
 def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
@@ -1363,72 +1354,6 @@ def test_remove_workspace_record_unknown_host_is_404(tmp_path: Path) -> None:
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
     assert client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-nope"}).status_code == 404
-
-
-# -- Recently destroyed workspaces page --
-
-_DESTROYED_AGENT_ID = "agent-" + "9" * 32
-
-
-def _seed_destroyed_record(tmp_path: Path, cli: "FakeImbueCloudCli", destroyed_days_ago: int = 3) -> None:
-    """Tombstone one record for the signed-in test account over the shared data dir."""
-    seed_store = make_session_store_for_test(tmp_path, cli=cli)
-    assert seed_store.record_store is not None
-    destroyed_at = (datetime.now(timezone.utc) - timedelta(days=destroyed_days_ago)).isoformat()
-    seed_store.record_store.upsert_local_record(
-        "user-test-123",
-        "test@example.com",
-        ReplicaRecord(
-            host_id="host-destroyed1",
-            agent_id=_DESTROYED_AGENT_ID,
-            display_name="old-workspace",
-            state="destroyed",
-            destroyed_at=destroyed_at,
-        ),
-    )
-
-
-def _make_destroyed_delete_client(
-    tmp_path: Path, cli: "FakeImbueCloudCli"
-) -> tuple[FlaskClient, WorkspaceRecordStore]:
-    """An authenticated client whose app state carries a scheduler with a backup reaper.
-
-    The delete-backup route reaches the reaper via
-    ``get_state().sync_scheduler.backup_reaper``, so both delete tests need
-    this full stack; the record store is returned for assertions.
-    """
-    session_store = make_session_store_for_test(tmp_path, cli=cli)
-    record_store = session_store.record_store
-    assert record_store is not None
-    reaper = BackupReaperManager(
-        paths=record_store.paths,
-        record_store=record_store,
-        imbue_cloud_cli=None,
-        connector_url="",
-    )
-    scheduler = WorkspaceSyncScheduler(
-        record_store=record_store,
-        session_store=session_store,
-        resolver=StaticBackendResolver(url_by_agent_and_service={}),
-        backup_reaper=reaper,
-    )
-    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli, sync_scheduler=scheduler)
-    _authenticate_client(client, auth_store)
-    return client, record_store
-
-
-def test_destroyed_workspaces_delete_backup_reaps_record(tmp_path: Path) -> None:
-    """POST delete-backup runs the reaper's strict deletion and redirects back to the page."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-test-123", email="test@example.com")
-    _seed_destroyed_record(tmp_path, cli)
-    client, record_store = _make_destroyed_delete_client(tmp_path, cli)
-
-    response = client.post(f"/workspaces/destroyed/{_DESTROYED_AGENT_ID}/delete-backup")
-
-    assert response.status_code == 303
-    assert response.headers["Location"] == "/workspaces/destroyed"
-    assert record_store.list_records("user-test-123") == []
 
 
 def test_finalize_and_mark_destroying_deletes_the_machines_share(tmp_path: Path) -> None:

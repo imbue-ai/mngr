@@ -59,14 +59,6 @@ class _StubDetailHandler(RequestEventHandler):
     def display_name_for_event(self, req_event: RequestEvent) -> str:
         return "Stub Service"
 
-    def render_request_detail_fragment(
-        self,
-        req_event: RequestEvent,
-        backend_resolver: object,
-        mngr_forward_origin: str,
-    ) -> str:
-        return "<p>legacy fragment</p>"
-
     def build_request_detail_payload(
         self,
         req_event: RequestEvent,

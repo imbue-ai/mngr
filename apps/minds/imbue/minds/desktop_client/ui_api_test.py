@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.ui_api import _sanitize_accent
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 
@@ -77,6 +78,46 @@ def test_ui_index_bootstrap_seed_reflects_mac_user_agent(tmp_path: Path, monkeyp
         response.get_data(as_text=True).split("window.__MINDS_BOOTSTRAP__ = ", 1)[1].split(";</script>", 1)[0]
     )
     assert json.loads(bootstrap_json)["seed"]["is_mac"] is True
+
+
+def test_ui_index_omits_sentry_bootstrap_when_reporting_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MINDS_UI_MANIFEST_PATH", str(_write_manifest(tmp_path)))
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-data")
+    minds_config.set_report_unexpected_errors(False)
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    html = client.get("/ui/").get_data(as_text=True)
+
+    assert "minds-sentry-config" not in html
+    assert "sentry.browser.min.js" not in html
+    assert "sentry_init.js" not in html
+
+
+def test_ui_index_inlines_sentry_bootstrap_when_reporting_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MINDS_UI_MANIFEST_PATH", str(_write_manifest(tmp_path)))
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-data")
+    minds_config.set_report_unexpected_errors(True)
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    html = client.get("/ui/").get_data(as_text=True)
+
+    # The config blob precedes the bundle + init tags, all before the SPA entry.
+    assert '<script type="application/json" id="minds-sentry-config">' in html
+    assert '<script src="/_static/sentry.browser.min.js"></script>' in html
+    assert '<script src="/_static/sentry_init.js"></script>' in html
+    sentry_json = html.split('id="minds-sentry-config">', 1)[1].split("</script>", 1)[0]
+    sentry_config = json.loads(sentry_json)
+    assert sentry_config["dsn"].startswith("https://")
+    assert sentry_config["environment"]
+    assert html.index("minds-sentry-config") < html.index("window.__MINDS_BOOTSTRAP__")
 
 
 def test_ui_blueprint_registers_index_ws_and_area_stubs(tmp_path: Path) -> None:
