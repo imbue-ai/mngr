@@ -15,7 +15,7 @@ Once a session is authenticated, a background process discovers the user's works
 Before anything else, the one-time "Help improve Minds" consent screen is shown once per installation, overriding the normal home content until it is answered.
 While initial discovery is still running, "/" shows a self-refreshing progress page.
 After it finishes, "/" lists the user's workspaces if they have any, or shows the new-workspace form if they have none -- optionally pre-filled from a deep link.
-The progress page's user-facing string is asserted here as "Discovering workspaces"; the live UI still renders "Discovering agents", so `@discovering` is deliberately spec-ahead of the code until a witnessing test drives the fix.
+The progress page names the unit by the corpus's workspace-vs-agent convention: its user-facing string reads "Discovering workspaces".
 
 ## Out of scope
 

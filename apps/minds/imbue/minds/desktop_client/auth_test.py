@@ -26,6 +26,7 @@ def test_get_signing_key_returns_same_key_on_subsequent_access(tmp_path: Path) -
     assert key_first.get_secret_value() == key_second.get_secret_value()
 
 
+@pytest.mark.witnesses("browser-authorization.signing-key-minted-once")
 def test_get_signing_key_persists_across_instances(tmp_path: Path) -> None:
     auth_dir = tmp_path / "auth"
     store_a = FileAuthStore(data_directory=auth_dir)
@@ -37,6 +38,10 @@ def test_get_signing_key_persists_across_instances(tmp_path: Path) -> None:
     assert key_a.get_secret_value() == key_b.get_secret_value()
 
 
+@pytest.mark.witnesses(
+    "browser-authorization.signing-key-minted-once",
+    partial="witnesses a 32-thread first-access burst; agreement over every interleaving is universally quantified",
+)
 def test_get_signing_key_is_consistent_under_concurrent_first_access(tmp_path: Path) -> None:
     """Concurrent first-time callers must all converge on a single signing key.
 
@@ -68,6 +73,7 @@ def test_get_signing_key_is_consistent_under_concurrent_first_access(tmp_path: P
     assert keys == {on_disk_key}, "in-memory signing key diverged from the persisted one"
 
 
+@pytest.mark.witnesses("browser-authorization.signing-key-minted-once")
 def test_get_signing_key_raises_for_empty_key_file(tmp_path: Path) -> None:
     auth_dir = tmp_path / "auth"
     auth_dir.mkdir(parents=True)

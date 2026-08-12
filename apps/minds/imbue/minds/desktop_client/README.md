@@ -54,7 +54,7 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
     if you are authenticated:
         while the error-reporting consent question is unanswered, shows the consent screen
         if any workspaces are known (discovered locally or synced from other devices), lists them all -- even when there is exactly one
-        if none are known and the initial discovery is still running, shows a self-refreshing "Discovering agents" page
+        if none are known and the initial discovery is still running, shows a self-refreshing "Discovering workspaces" page
         once discovery completes with no workspaces, shows the agent creation form
 
 `/create` route (requires auth):

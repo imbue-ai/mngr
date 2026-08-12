@@ -368,7 +368,7 @@ def render_landing_page(
     once discovery propagates ``AgentDestroyed``. When None, no marker is
     shown.
 
-    When is_discovering is True, the page shows a "Discovering agents..." message
+    When is_discovering is True, the page shows a "Discovering workspaces..." message
     with auto-refresh instead of the empty state. This is used when the
     envelope-stream consumer hasn't completed initial agent discovery yet.
 

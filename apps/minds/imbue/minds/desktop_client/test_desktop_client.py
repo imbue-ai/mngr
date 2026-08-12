@@ -2,15 +2,21 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 import httpx
+import pytest
 from flask import Response
 from flask.testing import FlaskClient
+from itsdangerous import TimestampSigner
+from itsdangerous import URLSafeTimedSerializer
 from pydantic import SecretStr
+from werkzeug.test import TestResponse
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
@@ -33,6 +39,9 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
+from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
+from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
+from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
@@ -49,6 +58,7 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -64,8 +74,14 @@ def _create_test_desktop_client(
     backend_resolver: BackendResolverInterface,
     http_client: httpx.Client | None,
     agent_creator: AgentCreator | None = None,
+    minds_config: MindsConfig | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
-    """Create a desktop client with the given backend resolver."""
+    """Create a desktop client with the given backend resolver.
+
+    ``minds_config`` is only needed by tests that depend on the error-reporting
+    consent gate (unset leaves the gate absent, which post-login treats the
+    same as an answered consent question).
+    """
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
 
@@ -74,6 +90,7 @@ def _create_test_desktop_client(
         backend_resolver=backend_resolver,
         http_client=http_client,
         agent_creator=agent_creator,
+        minds_config=minds_config,
     )
     client = app.test_client()
 
@@ -118,6 +135,10 @@ def _authenticate_client(
     client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
 
 
+@pytest.mark.witnesses(
+    "browser-authorization.missing-code",
+    partial="covers only the /authenticate example; the outline's /login example conflicts with the documented static explanation page (see behavior_problems)",
+)
 def test_authenticate_without_one_time_code_returns_422(tmp_path: Path) -> None:
     """A missing one_time_code is a 422, not a 500."""
     client, _, _ = _setup_test_server(tmp_path)
@@ -125,6 +146,10 @@ def test_authenticate_without_one_time_code_returns_422(tmp_path: Path) -> None:
     assert response.status_code == 422
 
 
+@pytest.mark.witnesses(
+    "browser-authorization.fresh-code",
+    partial="drives only the /authenticate hop (not the /login open) and asserts the session cookie is set, not that the code becomes spent",
+)
 def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     code = OneTimeCode("auth-code-{}".format(AgentId()))
@@ -140,6 +165,10 @@ def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) 
     assert any(SESSION_COOKIE_NAME in header for header in response.headers.getlist("Set-Cookie"))
 
 
+@pytest.mark.witnesses(
+    "browser-authorization.fresh-code",
+    partial="drives only the /authenticate hop (not the /login open) and asserts the landing redirect, not that the session is authenticated or the code becomes spent",
+)
 def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     code = OneTimeCode("auth-code-{}".format(AgentId()))
@@ -155,6 +184,7 @@ def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:
     assert response.headers["location"] == "/"
 
 
+@pytest.mark.witnesses("browser-authorization.unknown-code")
 def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
     client, _, _ = _setup_test_server(tmp_path)
 
@@ -166,13 +196,21 @@ def test_authenticate_with_invalid_code_returns_403(tmp_path: Path) -> None:
 
     assert response.status_code == 403
     assert "invalid or has already been used" in response.text
+    # No session is established: the refusal sets no session cookie.
+    assert not any(SESSION_COOKIE_NAME in header for header in response.headers.getlist("Set-Cookie"))
 
 
+@pytest.mark.witnesses(
+    "browser-authorization.single-use-codes",
+    partial="witnesses one reuse over the /authenticate route; no interleaving or sequence is exhausted",
+)
+@pytest.mark.witnesses("browser-authorization.used-code")
 def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     code = OneTimeCode("once-only-{}".format(AgentId()))
     auth_store.add_one_time_code(code=code)
 
+    # Precondition: the code has already been used to authenticate a session.
     first_response = client.get(
         "/authenticate",
         query_string={"one_time_code": str(code)},
@@ -180,19 +218,85 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
     )
     assert first_response.status_code == 307
 
+    # Presenting the same (now spent) code again is refused, with an explanation.
     second_response = client.get(
         "/authenticate",
         query_string={"one_time_code": str(code)},
         follow_redirects=False,
     )
     assert second_response.status_code == 403
+    assert "invalid or has already been used" in second_response.text
+    # No new session is established by the refused re-use.
+    assert not any(SESSION_COOKIE_NAME in header for header in second_response.headers.getlist("Set-Cookie"))
 
 
-def test_post_login_redirects_to_create_when_no_workspaces(tmp_path: Path) -> None:
-    """A just-signed-in user with no machines lands on the create screen (/)."""
+@pytest.mark.witnesses("browser-authorization.fresh-code")
+def test_opening_fresh_authentication_url_authenticates_the_session(tmp_path: Path) -> None:
+    """Opening the printed authentication URL in a browser (the /login -> /authenticate
+    hop) lands on "/", authenticates the session, and spends the one-time code."""
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    code = OneTimeCode("fresh-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
+
+    # A browser opens the printed authentication URL. /login itself does not
+    # consume the code; its in-page script hands off to /authenticate.
+    login_response = client.get("/login", query_string={"one_time_code": str(code)}, follow_redirects=False)
+    assert login_response.status_code == 200
+    assert "/authenticate?one_time_code=" in login_response.get_data(as_text=True)
+
+    # The script's destination: /authenticate consumes the code and establishes
+    # the session, landing the browser on the home page "/".
+    authenticate_response = client.get(
+        "/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False
+    )
+    assert authenticate_response.status_code == 307
+    assert authenticate_response.headers["location"] == "/"
+    assert any(SESSION_COOKIE_NAME in header for header in authenticate_response.headers.getlist("Set-Cookie"))
+
+    # The session is now authenticated: the client's cookie jar carries the
+    # session, so an auth-gated route no longer bounces to /login.
+    post_login_response = client.get("/post-login", follow_redirects=False)
+    assert post_login_response.status_code == 302
+    assert post_login_response.headers["location"] != "/login"
+
+    # The one-time code is now spent: presenting it again is refused.
+    replay_response = client.get("/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False)
+    assert replay_response.status_code == 403
+
+
+@pytest.mark.witnesses("browser-authorization.prefetch")
+def test_prefetching_login_url_does_not_spend_the_code(tmp_path: Path) -> None:
+    """A prefetcher fetching /login without running its script must not consume the
+    code; the user can still authenticate later by really opening the URL."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    code = OneTimeCode("prefetch-code-{}".format(AgentId()))
+    auth_store.add_one_time_code(code=code)
+
+    prefetch_response = client.get("/login", query_string={"one_time_code": str(code)}, follow_redirects=False)
+    assert prefetch_response.status_code == 200
+    assert not any(SESSION_COOKIE_NAME in header for header in prefetch_response.headers.getlist("Set-Cookie"))
+
+    authenticate_response = client.get(
+        "/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False
+    )
+    assert authenticate_response.status_code == 307
+    assert any(SESSION_COOKIE_NAME in header for header in authenticate_response.headers.getlist("Set-Cookie"))
+
+
+@pytest.mark.witnesses("home-page.default-destination")
+def test_post_login_redirects_to_create_when_no_workspaces(tmp_path: Path) -> None:
+    """With consent answered and no workspaces, post-login lands on "/" (the new-workspace form)."""
+    consented_config = MindsConfig(data_dir=tmp_path)
+    consented_config.set_error_reporting_consent_given(True)
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None, minds_config=consented_config
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -201,14 +305,17 @@ def test_post_login_redirects_to_create_when_no_workspaces(tmp_path: Path) -> No
     assert response.headers["location"] == "/"
 
 
+@pytest.mark.witnesses("home-page.default-destination")
 def test_post_login_redirects_to_accounts_when_workspaces_exist(tmp_path: Path) -> None:
-    """A returning user who already has machines lands on the accounts page."""
+    """With consent answered and at least one workspace, post-login lands on the account-management page."""
+    consented_config = MindsConfig(data_dir=tmp_path)
+    consented_config.set_error_reporting_consent_given(True)
     agent_id = AgentId()
     backend_resolver = StaticBackendResolver(
         url_by_agent_and_service={str(agent_id): {"web": "http://backend"}},
     )
     client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None, minds_config=consented_config
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -228,11 +335,14 @@ def test_post_login_redirects_to_login_when_unauthenticated(tmp_path: Path) -> N
     assert response.headers["location"] == "/login"
 
 
+@pytest.mark.witnesses("home-page.safe-return-to")
 def test_post_login_honors_safe_return_to(tmp_path: Path) -> None:
-    """A ``return_to`` (e.g. /create, from the remote-preset sign-in flow) wins."""
+    """With consent answered, a same-origin ``return_to`` (e.g. /create) wins over the default destination."""
+    consented_config = MindsConfig(data_dir=tmp_path)
+    consented_config.set_error_reporting_consent_given(True)
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None, minds_config=consented_config
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -241,11 +351,22 @@ def test_post_login_honors_safe_return_to(tmp_path: Path) -> None:
     assert response.headers["location"] == "/create"
 
 
+@pytest.mark.witnesses("browser-authorization.post-login-return-to-confined")
+@pytest.mark.witnesses(
+    "browser-authorization.no-open-redirects",
+    partial="witnesses the /post-login route with one off-origin shape; the blanket property is universal",
+)
+@pytest.mark.witnesses(
+    "home-page.default-destination",
+    partial="covers only the rejected-as-unsafe return destination with no workspaces (the '/' row)",
+)
 def test_post_login_ignores_unsafe_return_to(tmp_path: Path) -> None:
-    """An off-origin ``return_to`` is ignored and the default destination is used."""
+    """With consent answered, an off-origin ``return_to`` is rejected and the default destination is used."""
+    consented_config = MindsConfig(data_dir=tmp_path)
+    consented_config.set_error_reporting_consent_given(True)
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None, minds_config=consented_config
     )
     _authenticate_client(client=client, auth_store=auth_store)
 
@@ -254,9 +375,159 @@ def test_post_login_ignores_unsafe_return_to(tmp_path: Path) -> None:
     assert response.headers["location"] == "/"
 
 
+# ``/post-login`` is the observable "page that requires a session": with a valid
+# session it routes the browser on to a destination (``/`` when there are no
+# workspaces), and without one it bounces to ``/login`` to authenticate. So a
+# ``location`` other than ``/login`` means "authenticated" and ``/login`` means
+# "treated as unauthenticated" -- the shape every scenario below asserts on.
+_UNAUTHENTICATED_LOCATION = "/login"
+
+
+def _session_cookie_from_response(response: TestResponse) -> str:
+    """Extract the ``minds_session`` cookie value from a response's Set-Cookie headers."""
+    jar: SimpleCookie = SimpleCookie()
+    for header in response.headers.getlist("Set-Cookie"):
+        jar.load(header)
+    return jar[SESSION_COOKIE_NAME].value
+
+
+class _ExpiredTimestampSigner(TimestampSigner):
+    """Signs exactly like the real cookie signer but stamps the token >30 days in the past.
+
+    ``verify_session_cookie`` builds its own serializer with a fixed ``max_age`` of
+    30 days, so a validly-signed cookie whose embedded timestamp is older than that
+    is the only way to exercise the expiry path. Subclassing the signer (rather than
+    patching ``time``) is the injection point itsdangerous gives for controlling the
+    stamped time.
+    """
+
+    def get_timestamp(self) -> int:
+        return int(time.time()) - _COOKIE_MAX_AGE_SECONDS - 24 * 60 * 60
+
+
+def _make_expired_session_cookie(signing_key: CookieSigningKey) -> str:
+    """Mint a validly-signed session cookie whose timestamp is older than 30 days."""
+    serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value(), signer=_ExpiredTimestampSigner)
+    return serializer.dumps(_SESSION_PAYLOAD, salt=_COOKIE_SALT)
+
+
+@pytest.mark.witnesses("browser-authorization.survives-restart")
+@pytest.mark.witnesses(
+    "browser-authorization.signing-key-minted-once",
+    partial="only that the persisted signing key keeps a live session valid across a restart; "
+    "does not exercise concurrent first-mint agreement or the corrupted-key hard failure",
+)
+@pytest.mark.witnesses(
+    "browser-authorization.single-use-codes",
+    partial="only that a code spent before the restart stays spent afterwards; not the full "
+    "no-interleaving-spends-twice quantifier",
+)
+def test_session_survives_desktop_client_restart(tmp_path: Path) -> None:
+    """A session established before a restart still authenticates afterward, with no new code."""
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    # Given an authenticated user: authenticate for real against this data directory,
+    # which mints and persists the signing key and consumes the one-time code.
+    client_before, auth_store_before = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=resolver, http_client=None
+    )
+    code = OneTimeCode("restart-code-{}".format(AgentId()))
+    auth_store_before.add_one_time_code(code=code)
+    auth_response = client_before.get(
+        "/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False
+    )
+    assert auth_response.status_code == 307
+    session_cookie = _session_cookie_from_response(auth_response)
+
+    # When the desktop client is stopped and started again: a fresh app + auth store
+    # over the SAME data directory (a new FileAuthStore reading the persisted key).
+    client_after, _auth_store_after = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=resolver, http_client=None
+    )
+
+    # And the user reloads the home page carrying the pre-restart cookie.
+    client_after.set_cookie(SESSION_COOKIE_NAME, session_cookie)
+    landing = client_after.get("/post-login", follow_redirects=False)
+
+    # Then they are still authenticated (routed onward, not bounced to authenticate).
+    assert landing.status_code == 302
+    assert landing.headers["location"] != _UNAUTHENTICATED_LOCATION
+    assert landing.headers["location"] == "/"
+
+    # And they do not need a new one-time code: the only code ever minted is already
+    # spent (replaying it is refused), yet the restored session authenticates on its own.
+    replay = client_after.get("/authenticate", query_string={"one_time_code": str(code)}, follow_redirects=False)
+    assert replay.status_code == 403
+
+
+@pytest.mark.witnesses("browser-authorization.tampered-cookie")
+@pytest.mark.witnesses(
+    "browser-authorization.sessions-unforgeable",
+    partial="only the any-alteration-invalidates clause, observed at the /post-login gate",
+)
+def test_tampered_session_cookie_is_unauthenticated(tmp_path: Path) -> None:
+    """A session cookie altered in any way is treated as unauthenticated at the page gate."""
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
+    )
+    valid_cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
+
+    tampered_cookie = valid_cookie[:-1] + ("A" if valid_cookie[-1] != "A" else "B")
+    assert tampered_cookie != valid_cookie
+    client.set_cookie(SESSION_COOKIE_NAME, tampered_cookie)
+
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
+
+
+@pytest.mark.witnesses("browser-authorization.foreign-cookie")
+@pytest.mark.witnesses(
+    "browser-authorization.sessions-unforgeable",
+    partial="only the cookies-from-another-installation-are-invalid clause, observed at the /post-login gate",
+)
+def test_foreign_installation_cookie_is_unauthenticated(tmp_path: Path) -> None:
+    """A cookie signed by a different data directory's key is not accepted here."""
+    this_client, this_auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path / "this",
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+    )
+    # A second installation: a different data directory mints its own signing key.
+    other_auth_store = FileAuthStore(data_directory=tmp_path / "other" / "auth")
+    assert other_auth_store.get_signing_key() != this_auth_store.get_signing_key()
+
+    foreign_cookie = create_session_cookie(signing_key=other_auth_store.get_signing_key())
+    this_client.set_cookie(SESSION_COOKIE_NAME, foreign_cookie)
+
+    response = this_client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
+
+
+@pytest.mark.witnesses("browser-authorization.expired-cookie")
+@pytest.mark.witnesses(
+    "browser-authorization.sessions-unforgeable",
+    partial="only the cookies-older-than-30-days-are-invalid clause, observed at the /post-login gate",
+)
+def test_expired_session_cookie_is_unauthenticated(tmp_path: Path) -> None:
+    """A validly-signed session cookie issued more than 30 days ago is treated as unauthenticated."""
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
+    )
+    # Signed with this installation's own key: only the >30-day age, not the signature, is wrong.
+    expired_cookie = _make_expired_session_cookie(signing_key=auth_store.get_signing_key())
+    client.set_cookie(SESSION_COOKIE_NAME, expired_cookie)
+
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
+
+
 # -- Leased imbue_cloud host account-binding tests --
 
 
+@pytest.mark.witnesses("browser-authorization.already-authenticated")
 def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
     client, auth_store, _ = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
@@ -271,6 +542,7 @@ def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
     )
     assert response.status_code == 307
     assert response.headers["location"] == "/"
+    assert auth_store.validate_and_consume_code(code=new_code) is True
 
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
@@ -686,6 +958,10 @@ def test_consent_submit_requires_auth(tmp_path: Path) -> None:
     assert MindsConfig(data_dir=tmp_path).get_error_reporting_consent_given() is False
 
 
+@pytest.mark.witnesses(
+    "home-page.consent-first",
+    partial="covers the no-return-destination arrival; the with-return-destination arrival is a separate test",
+)
 def test_post_login_routes_to_landing_while_consent_unanswered(tmp_path: Path) -> None:
     """While consent is unanswered, post-login routes to "/" (which shows consent), not /accounts."""
     cli = make_fake_imbue_cloud_cli()
@@ -693,6 +969,31 @@ def test_post_login_routes_to_landing_while_consent_unanswered(tmp_path: Path) -
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
     response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+
+@pytest.mark.witnesses("home-page.consent-first")
+def test_post_login_overrides_return_to_while_consent_unanswered(tmp_path: Path) -> None:
+    """An unanswered consent question overrides every other destination.
+
+    Even with a safe return destination requested and workspaces already
+    present -- the two inputs that would otherwise send the user to that path
+    or to /accounts -- an arrival at "/post-login" is still redirected to "/"
+    (where the consent screen is shown) until the consent question is answered.
+    """
+    unanswered_config = MindsConfig(data_dir=tmp_path)
+    assert unanswered_config.get_error_reporting_consent_given() is False
+    agent_id = AgentId()
+    backend_resolver = StaticBackendResolver(
+        url_by_agent_and_service={str(agent_id): {"web": "http://backend"}},
+    )
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None, minds_config=unanswered_config
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", query_string={"return_to": "/create"}, follow_redirects=False)
     assert response.status_code == 302
     assert response.headers["location"] == "/"
 

@@ -94,6 +94,10 @@ def test_ui_blueprint_registers_index_ws_and_area_stubs(tmp_path: Path) -> None:
     assert any(rule.startswith("/ui/api/destroyed-workspaces/") for rule in rules)
 
 
+@pytest.mark.witnesses(
+    "browser-authorization.no-data-without-session",
+    partial="witnesses the app-status surface; the absence of user data across every route is universally quantified",
+)
 def test_app_status_unauthenticated_discloses_nothing(tmp_path: Path) -> None:
     client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
 
