@@ -1,5 +1,6 @@
 import pytest
 
+from imbue.mngr_latchkey.core import HIDDEN_BUILTIN_SERVICES
 from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -178,6 +179,20 @@ def test_default_catalog_reads_the_bundled_file() -> None:
     slack = catalog.get_by_scope("slack-api")
     assert slack is not None
     assert slack.name == "slack"
+
+
+def test_default_catalog_omits_hidden_builtin_services() -> None:
+    """Drift guard: services hidden from agents must not appear in the generated catalog.
+
+    ``scripts/generate_services_json.py`` skips them, so a regeneration that let
+    one back in would offer the user grants for a service whose credentials
+    latchkey never injects (and, for ``notion``, resurrect the confusion with
+    the separate ``notion-mcp`` integration).
+    """
+    service_names = ServicesCatalog().all_service_names()
+    assert len(HIDDEN_BUILTIN_SERVICES) > 0
+    for hidden_service_name in HIDDEN_BUILTIN_SERVICES:
+        assert hidden_service_name not in service_names
 
 
 # -- Additional (custom) services merged into the bundled catalog -------------

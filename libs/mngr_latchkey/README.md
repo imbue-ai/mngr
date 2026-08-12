@@ -462,6 +462,12 @@ uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
 Display names and the service ordering are editorial metadata detent does
 not carry; they live as curated constants in that script.
 
+Services hidden from agents (`core.HIDDEN_BUILTIN_SERVICES`, currently just
+`notion`) are left out of the catalog: latchkey never injects their
+credentials, so an entry for one would only offer grants that can never be
+used. The generator skips them, so the catalog and the gateway's
+`settings.hideBuiltinServices` cannot drift apart.
+
 `services.json` also carries minds' own *additional* (custom) services --
 ones detent has no schemas for, currently `claude.ai`. Their definitions are
 hand-maintained in `imbue/mngr_latchkey/additional_services.json` (a

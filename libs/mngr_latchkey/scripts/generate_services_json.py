@@ -32,6 +32,11 @@ lets every reader of the catalog work from one file in one shape; that file
 remains the source of the extra data those services need beyond the catalog
 (their ``base_api_url`` and their inline detent schemas).
 
+Conversely, services minds hides from agents entirely
+(:data:`imbue.mngr_latchkey.core.HIDDEN_BUILTIN_SERVICES`) are left out of the
+catalog: latchkey never injects their credentials, so a catalog entry for one
+only offers grants that can never be used.
+
 Run with::
 
     uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
@@ -51,6 +56,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import setup_logging
 from imbue.mngr_latchkey.additional_services import additional_services_catalog_payload
+from imbue.mngr_latchkey.core import HIDDEN_BUILTIN_SERVICES
 
 # detent built-in schemas live under this subdirectory of a detent checkout.
 _BUILTIN_SCHEMAS_SUBPATH: Final[str] = "src/schemas/builtin"
@@ -85,7 +91,6 @@ _DISPLAY_NAME_BY_SCOPE: Final[Mapping[str, str]] = {
     "dropbox-api": "Dropbox",
     "linear-api": "Linear",
     "ngrok-api": "ngrok",
-    "notion-api": "Notion",
     "notion-mcp-api": "Notion (MCP)",
     "mailchimp-api": "Mailchimp",
     "zoom-api": "Zoom",
@@ -120,7 +125,6 @@ _SERVICE_ORDER: Final[Sequence[str]] = (
     "gitlab",
     "dropbox",
     "linear",
-    "notion",
     "notion-mcp",
     "mailchimp",
     "zoom",
@@ -300,6 +304,12 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
         if file_path.name in _NON_SERVICE_FILES:
             continue
         service_name = file_path.stem
+        # A detent schema file is named after the latchkey service it covers, so
+        # the services latchkey is told to hide from agents are dropped here by
+        # the same name.
+        if service_name in HIDDEN_BUILTIN_SERVICES:
+            logger.info("Skipping hidden built-in service {}", service_name)
+            continue
         schemas_by_name = _read_service_schema_file(file_path)
         scope_entries = _build_scope_entries_for_service(service_name, schemas_by_name)
         if len(scope_entries) > 0:

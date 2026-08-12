@@ -368,67 +368,6 @@
       "permissions": []
     }
   ],
-  "notion": [
-    {
-      "scope": "notion-api",
-      "display_name": "Notion",
-      "description": "Any request to the Notion API.",
-      "permissions": [
-        {
-          "name": "notion-read-all",
-          "description": "Read any Notion content, including searching across all resources."
-        },
-        {
-          "name": "notion-write-all",
-          "description": "Create, update, or delete any Notion content."
-        },
-        {
-          "name": "notion-read-pages",
-          "description": "Read Notion pages and their properties."
-        },
-        {
-          "name": "notion-write-pages",
-          "description": "Create or update Notion pages."
-        },
-        {
-          "name": "notion-read-blocks",
-          "description": "Read Notion blocks (the content elements within pages)."
-        },
-        {
-          "name": "notion-write-blocks",
-          "description": "Update or delete Notion blocks."
-        },
-        {
-          "name": "notion-read-databases",
-          "description": "Read Notion databases and their schemas."
-        },
-        {
-          "name": "notion-write-databases",
-          "description": "Create or update Notion databases."
-        },
-        {
-          "name": "notion-query-databases",
-          "description": "Query a Notion database to retrieve filtered and sorted entries."
-        },
-        {
-          "name": "notion-read-users",
-          "description": "List or retrieve Notion workspace users."
-        },
-        {
-          "name": "notion-read-comments",
-          "description": "Read comments on Notion pages or blocks."
-        },
-        {
-          "name": "notion-write-comments",
-          "description": "Add comments to Notion pages or blocks."
-        },
-        {
-          "name": "notion-search",
-          "description": "Search across all Notion pages and databases."
-        }
-      ]
-    }
-  ],
   "notion-mcp": [
     {
       "scope": "notion-mcp-api",
