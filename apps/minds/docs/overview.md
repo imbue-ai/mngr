@@ -42,7 +42,6 @@ Apps (tab-openable, with forwarded ports) are tracked in `data/.state/apps.toml`
 [[apps]]
 name = "web"
 url = "http://localhost:8000"
-global = true
 ```
 
 Each app gets two URLs:
