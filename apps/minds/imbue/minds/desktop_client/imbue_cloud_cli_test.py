@@ -8,6 +8,7 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import _CONNECTOR_URL_SUBPROCESS_ENV
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_conflict_stored
@@ -170,19 +171,6 @@ def test_create_share_malformed_output_error_omits_the_relay_token() -> None:
     assert "host_id" in message
 
 
-def test_auth_is_email_verified_parses_promotion_result() -> None:
-    """``auth_is_email_verified`` wraps ``auth is-verified`` and parses the typed status."""
-    body = {"verified": True, "user_id": "user-1", "email": "a@b.com", "display_name": "A"}
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(body)))
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    status = cli.auth_is_email_verified("a@b.com")
-
-    assert status.verified is True
-    assert status.user_id == "user-1"
-    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "is-verified", "--account", "a@b.com")
-
-
 def test_auth_resend_verification_reports_cooldown_suppression() -> None:
     caller = RecordingMngrCaller(
         result=MngrCallResult(returncode=0, stdout=json.dumps({"sent": False, "email": "a@b.com"}))
@@ -202,12 +190,22 @@ def test_auth_resend_verification_raises_on_malformed_output() -> None:
         cli.auth_resend_verification("a@b.com")
 
 
-def test_auth_forgot_password_invokes_plugin_subcommand() -> None:
-    caller = RecordingMngrCaller(
-        result=MngrCallResult(returncode=0, stdout=json.dumps({"sent": True, "email": "a@b.com"}))
+def test_expect_success_raises_typed_email_not_verified_error_with_the_email() -> None:
+    """A structured verification refusal surfaces typed, carrying the address the link goes to."""
+    cli = make_fake_imbue_cloud_cli()
+    body = json.dumps(
+        {
+            "error": "This action requires a verified email address (alice@example.com).",
+            "error_class": "ImbueCloudEmailNotVerifiedError",
+            "code": "email_not_verified",
+            "email": "alice@example.com",
+        },
+        indent=2,
     )
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+    result = MngrCallResult(returncode=1, stdout="", stderr="a log line first\n" + body + "\n")
 
-    cli.auth_forgot_password("a@b.com")
+    with pytest.raises(ImbueCloudEmailNotVerifiedCliError) as exc_info:
+        cli._expect_success(result, "account set-plan")
 
-    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "forgot-password", "--account", "a@b.com")
+    assert exc_info.value.email == "alice@example.com"
+    assert "verified email" in str(exc_info.value)

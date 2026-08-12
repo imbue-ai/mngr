@@ -359,6 +359,30 @@ just minds-start
 (For a one-off env tied to a feature you're working on, replace
 `dev-<your-user>` with e.g. `dev-<your-user>-3`.)
 
+### Per-env share relay
+
+Workspace sharing needs a relay, and each dev/ci env expects its OWN:
+`minds env deploy` pins the env's sharing secret to region label
+`<env-name>` (underscores mapped to hyphens) with endpoint
+`relay.<env-name>.minds-dev.com:7000`. A single shared dev relay cannot
+serve multiple envs -- its frps plugin-auth URL points at exactly one
+env's connector, so whichever env owns it locks every other env's
+shares out.
+
+Stand the env's relay up once (after the first deploy; requires a
+vault login):
+
+```bash
+just provision-dev-relay            # OVH region defaults to US-EAST-VA-1
+```
+
+This provisions a small OVH instance, installs frps pointed at the
+activated env's connector, and upserts the `relay.<env>` +
+`*.<env>` DNS records. Skip it if you never enable sharing from this
+env. Tear the instance down with `just list-share-relays` +
+`just destroy-share-relay <instance-id>` when destroying the env
+(relays are not part of `minds env destroy`).
+
 Re-deploy in place (idempotent -- picks up any new tier-shared Vault
 values and re-deploys both Modal apps):
 

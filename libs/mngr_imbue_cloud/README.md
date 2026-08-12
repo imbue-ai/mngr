@@ -18,18 +18,20 @@ There is no baked-in default connector URL: it comes from the per-instance `conn
 ## Sign in
 
 ```bash
+# Browser-based (the primary path): opens the hosted accounts page --
+# email/password, sign-up, or Continue with Google -- and hands the session
+# back to this machine via a localhost loopback + PKCE code exchange.
+mngr imbue_cloud auth login
+
+# Headless (tests, SSH sessions): email + password straight to the connector.
 mngr imbue_cloud auth signin --account alice@imbue.com
-# or browser-based OAuth:
-mngr imbue_cloud auth oauth google --account alice@imbue.com
 ```
 
-New email/password accounts must verify their email before they count as signed in. Until the verification link is clicked, the session is held as *pending*: it does not appear in `mngr imbue_cloud auth list`, cannot become the active account, and the connector rejects all other authenticated calls for it (only the verification-status check, verification-email resend, and sign-out are accepted). After clicking the link, run:
+`auth login` requires a connector that serves the hosted accounts pages. Against an older connector (e.g. a stale dev/CI env) it fails immediately with an actionable error -- redeploy the env with `minds env deploy`, or fall back to `auth signin`.
 
-```bash
-mngr imbue_cloud auth is-verified --account alice@imbue.com
-```
+Email verification is non-blocking: a fresh signup counts as signed in immediately, and no verification email is sent at signup. Only a few actions require a verified email (opening a workspace that was shared with you, and switching to the ally plan); hitting one of those triggers a contextual verification email. `mngr imbue_cloud auth is-verified` reports the current verification state, and `mngr imbue_cloud auth resend-verification` sends the link on demand (rate-limited server-side).
 
-which checks verification status and, on success, promotes the pending session (it becomes the active, listed account). `mngr imbue_cloud auth resend-verification --account alice@imbue.com` re-sends the verification email (rate-limited server-side).
+`mngr imbue_cloud auth signout` revokes only this machine's session; pass `--all-devices` to revoke every session for the account (other machines and the browser).
 
 ## Account plans and quotas
 

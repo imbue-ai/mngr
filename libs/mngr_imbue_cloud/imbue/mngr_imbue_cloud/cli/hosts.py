@@ -66,3 +66,29 @@ def release_host(host_db_id: str, account: str | None, connector_url: str | None
     if not is_released:
         fail_with_json("Connector returned non-success on release", error_class="ReleaseFailed")
     emit_json({"released": True, "host_db_id": host_db_id})
+
+
+@hosts.command(name="enable-sharing")
+@click.argument("host_ref")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def enable_sharing(host_ref: str, account: str | None, connector_url: str | None) -> None:
+    """Enable web access (server-side share bring-up) for a leased host.
+
+    HOST_REF is the lease's host_db_id (UUID), or the workspace's mngr host id
+    (host-<hex>), which is resolved against the account's leases first.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    host_db_id = host_ref
+    if host_ref.startswith("host-"):
+        leased = client.list_hosts(token)
+        match = next((entry for entry in leased if entry.host_id == host_ref), None)
+        if match is None:
+            fail_with_json(f"No lease with host id {host_ref} on this account", error_class="HostNotFound")
+        host_db_id = str(match.host_db_id)
+    result = client.enable_host_sharing(token, host_db_id)
+    emit_json(result)

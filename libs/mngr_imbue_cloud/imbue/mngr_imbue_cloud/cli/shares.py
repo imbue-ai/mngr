@@ -35,14 +35,23 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
 @click.argument("host_id")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
 @click.option("--connector-url", default=None, help="Override connector URL")
+@click.option(
+    "--entry-label",
+    default=None,
+    help=(
+        "The workspace's shell-service origin label (e.g. system_interface-<rand>); the hosted "
+        "web chrome enters the workspace at <entry-label>.<workspace-domain>. Omit to keep any "
+        "previously recorded label."
+    ),
+)
 @handle_imbue_cloud_errors
-def create_share(host_id: str, account: str | None, connector_url: str | None) -> None:
+def create_share(host_id: str, account: str | None, connector_url: str | None, entry_label: str | None) -> None:
     """Enable sharing for the given workspace host id (prints the one-time relay token)."""
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    info = client.create_share(token, host_id)
+    info = client.create_share(token, host_id, entry_label=entry_label)
     emit_json(_share_to_json(info, include_token=True))
 
 

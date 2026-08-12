@@ -31,6 +31,8 @@ This desktop client is a separate component from any individual workspace's web 
 
 Authentication is global (one session grants access to all agents). The desktop client uses `itsdangerous` for cookie signing. Auth works as follows:
 
+Note this is the *local* session with the desktop client itself. *Imbue account* sign-up/sign-in happens on the connector's hosted accounts pages in the system browser: the SPA drives `POST /auth/api/web-login/start` (which runs `mngr imbue_cloud auth login` -- browser + loopback + PKCE code exchange) and polls `GET /auth/api/web-login/status/<flow_id>` to render the waiting/copy-link modal. There are no in-app account sign-in pages anymore; the retired `/auth/login` and `/auth/signup` URLs 302 into the SPA with `?web-login=1`, which starts the browser flow on load.
+
 - **Signing key**: generated once on first server start, stored at `{data_directory}/signing_key`. Used to sign all auth cookies.
 - **One-time codes**: a login code is generated and printed to the terminal when the server starts. Codes are stored in `{data_directory}/one_time_codes.json` and can only be used once.
 - **Session cookie**: after successful authentication, the server sets a signed `minds_session` cookie. The cookie is host-only (no `Domain` attribute): browsers treat `localhost` as a public suffix and refuse to send `Domain=localhost` cookies to subdomains. Workspace subdomains instead get their own session via the forward server's `/goto/<agent-id>/` auth bridge, so a single bare-origin sign-in still covers every workspace.

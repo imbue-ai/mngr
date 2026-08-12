@@ -103,11 +103,6 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_options_modal_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
-from imbue.minds.desktop_client.templates_auth import render_auth_page
-from imbue.minds.desktop_client.templates_auth import render_check_email_page
-from imbue.minds.desktop_client.templates_auth import render_forgot_password_page
-from imbue.minds.desktop_client.templates_auth import render_oauth_close_page
-from imbue.minds.desktop_client.templates_auth import render_settings_page
 from imbue.minds.desktop_client.ui_api import read_vite_entry_tags
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
@@ -497,43 +492,6 @@ def _build_scenarios() -> list[Scenario]:
                 access="WRITE",
                 access_human_label="read & write",
                 mngr_forward_origin="http://localhost:8421",
-            ),
-        ),
-        # -- Auth pages (SuperTokens) ------------------------------------
-        Scenario(name="auth_signup_default", builder=lambda: render_auth_page(default_to_signup=True)),
-        Scenario(name="auth_signin_default", builder=lambda: render_auth_page(default_to_signup=False)),
-        Scenario(
-            name="auth_signup_with_message",
-            builder=lambda: render_auth_page(default_to_signup=True, message="Please sign up to continue."),
-        ),
-        Scenario(name="auth_check_email", builder=lambda: render_check_email_page(email="alice@example.com")),
-        Scenario(name="auth_forgot_password", builder=render_forgot_password_page),
-        Scenario(
-            name="auth_oauth_close_with_name",
-            builder=lambda: render_oauth_close_page(email="alice@example.com", display_name="Alice"),
-        ),
-        Scenario(
-            name="auth_oauth_close_without_name",
-            builder=lambda: render_oauth_close_page(email="alice@example.com"),
-        ),
-        Scenario(
-            name="auth_settings_email",
-            builder=lambda: render_settings_page(
-                email="alice@example.com",
-                display_name="Alice",
-                user_id="user-aaaaaa",
-                provider="email",
-                user_id_prefix="user-aa",
-            ),
-        ),
-        Scenario(
-            name="auth_settings_oauth",
-            builder=lambda: render_settings_page(
-                email="alice@example.com",
-                display_name=None,
-                user_id="user-aaaaaa",
-                provider="google",
-                user_id_prefix="user-aa",
             ),
         ),
     ]

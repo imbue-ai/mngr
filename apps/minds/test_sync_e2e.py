@@ -45,9 +45,11 @@ from test_snapshot_resume import _isolated_host_config_root
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
+from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import _backend_origin_from_page
 from imbue.minds.desktop_client.e2e_workspace_runner import _host_id_from_subdomain
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
@@ -74,7 +76,7 @@ _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 # sandbox -- not from fear. The measured cost of each step is noted so a
 # future regression shows up as a failure here instead of being absorbed by a
 # budget nobody re-derived.
-# Sign-in through the real /auth/login form: measured ~15s.
+# Headless `auth signin` + the app's account poll listing it on /accounts.
 _SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90
 # The account reaching the associate form's picker: measured ~7s.
 _ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 90
@@ -360,37 +362,60 @@ def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
     raise AssertionError(f"No agent on host {host_id!r} in `mngr list` output")
 
 
-def _sign_in_via_ui(page: Page, email: str, password: str) -> str:
-    """Sign in through the real /auth/login form; returns the backend origin.
+def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password: str) -> str:
+    """Sign in via the headless ``auth signin`` CLI; returns the backend origin.
 
-    Success is gated on the signed-in session (the account listed on
-    /accounts), NOT on a URL change: Electron's managed content view can
-    swallow auth.js's post-success ``window.location`` redirect (the same
-    interception ``_destroy_via_settings`` documents), while the sign-in
-    itself completes server-side.
+    The in-app email/password form was replaced by the hosted browser flow
+    (``mngr imbue_cloud auth login``), which opens a real system browser this
+    sandbox cannot drive; the hosted pages themselves are covered by the
+    connector deployment tests (apps/minds/deployment_tests/test_accounts_web.py).
+    The headless signin writes the same on-disk session store the app's own
+    ``mngr imbue_cloud`` subprocesses read, so the /accounts gate below still
+    proves the app discovered the session.
+
+    The subprocess runs from ``runtime.host_config_root`` (whose settings.toml
+    carries the pytest config-guard opt-in; the repo root's does not) with the
+    app's own MNGR_HOST_DIR/MNGR_PREFIX, after waiting for the app to have
+    initialized that mngr profile (the plugin's session store needs its
+    config.toml).
     """
     origin = _backend_origin_from_page(page)
-    page.goto(f"{origin}/auth/login", wait_until="domcontentloaded")
-    page.wait_for_selector("#signin-email", state="visible", timeout=30_000)
-    page.fill("#signin-email", email)
-    page.fill("#signin-password", password)
-    page.click("#signin-btn")
-
-    # auth.js re-enables the button once the /auth/api/signin fetch resolved
-    # (both on success and on error), so this bounds the request itself. A
-    # successful sign-in sometimes navigates the view away mid-probe (the
-    # redirect is only *sometimes* swallowed), destroying the JS context --
-    # treat that as progress and let the /accounts gate below decide.
-    try:
-        page.wait_for_function(
-            "() => { const btn = document.getElementById('signin-btn'); return btn && !btn.disabled; }",
-            timeout=_SIGN_IN_TIMEOUT_SECONDS * 1000,
-        )
-        error_element = page.query_selector("#signin-error")
-        if error_element is not None and "hidden" not in (error_element.get_attribute("class") or "").split():
-            raise AssertionError(f"Sign-in for {email} failed: {error_element.inner_text().strip()!r}")
-    except PlaywrightError as e:
-        logger.info("Sign-in probe interrupted by a navigation ({}); deferring to the session gate", e)
+    profile_config = mngr_host_dir_for(runtime.root_name) / "config.toml"
+    _wait_until(
+        f"the app's mngr profile config at {profile_config}",
+        _SIGN_IN_TIMEOUT_SECONDS,
+        lambda: True if profile_config.is_file() else None,
+    )
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--project",
+            str(_REPO_ROOT),
+            "mngr",
+            "imbue_cloud",
+            "auth",
+            "signin",
+            "--account",
+            email,
+            "--password",
+            password,
+            "--connector-url",
+            str(runtime.connector.base_url).rstrip("/"),
+        ],
+        env={
+            **os.environ,
+            "MNGR_HOST_DIR": str(mngr_host_dir_for(runtime.root_name)),
+            "MNGR_PREFIX": runtime.mngr_prefix,
+        },
+        cwd=runtime.host_config_root,
+        capture_output=True,
+        text=True,
+        timeout=_SIGN_IN_TIMEOUT_SECONDS,
+    )
+    assert result.returncode == 0, (
+        f"auth signin for {email} failed (exit {result.returncode}): {result.stderr.strip() or result.stdout.strip()}"
+    )
 
     def account_listed() -> bool | None:
         page.goto(f"{origin}/accounts", wait_until="domcontentloaded")
@@ -776,7 +801,9 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
             _browser,
             page,
         ):
-            origin = _sign_in_via_ui(page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value())
+            origin = _sign_in_headless(
+                runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
+            )
             _associate_workspace_via_ui(page, origin, agent_id, sync_e2e_account.email)
             _configure_backups_via_ui(page, origin, agent_id, "IMBUE_CLOUD")
             _set_master_password_via_ui(page, origin, master_password)
@@ -795,7 +822,9 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
             _browser,
             page,
         ):
-            origin = _sign_in_via_ui(page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value())
+            origin = _sign_in_headless(
+                runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
+            )
             _unlock_via_banner(page, origin, f"wrong-{master_password}", expect_success=False)
             _unlock_via_banner(page, origin, master_password)
             _assert_remote_row_visible(page, origin, agent_id)
@@ -853,7 +882,9 @@ def test_legacy_association_files_migrate_into_synced_records(
             _browser,
             page,
         ):
-            origin = _sign_in_via_ui(page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value())
+            origin = _sign_in_headless(
+                runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
+            )
 
             record = _wait_for_synced_secrets(runtime, sync_e2e_account, agent_id, _SYNC_CONVERGENCE_TIMEOUT_SECONDS)
             bundle = _wait_for_bundle(runtime, sync_e2e_account, _SYNC_CONVERGENCE_TIMEOUT_SECONDS)
@@ -889,7 +920,9 @@ def test_legacy_association_files_migrate_into_synced_records(
             _browser,
             page,
         ):
-            origin = _sign_in_via_ui(page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value())
+            origin = _sign_in_headless(
+                runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
+            )
             _unlock_via_banner(page, origin, legacy_password)
             _assert_remote_row_visible(page, origin, agent_id)
     finally:
@@ -935,7 +968,9 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             _browser,
             page,
         ):
-            origin = _sign_in_via_ui(page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value())
+            origin = _sign_in_headless(
+                runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
+            )
             _associate_workspace_via_ui(page, origin, agent_id, sync_e2e_account.email)
             _configure_backups_via_ui(
                 page, origin, agent_id, "API_KEY", api_key_env=f"RESTIC_REPOSITORY={tmp_path / 'pw-repo'}"
@@ -1001,7 +1036,9 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             _browser,
             page,
         ):
-            origin = _sign_in_via_ui(page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value())
+            origin = _sign_in_headless(
+                runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
+            )
             _unlock_via_banner(page, origin, password_three)
             _assert_remote_row_visible(page, origin, agent_id)
     finally:

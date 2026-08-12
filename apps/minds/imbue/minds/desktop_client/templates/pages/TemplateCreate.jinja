@@ -628,7 +628,8 @@
       if (window.minds && window.minds.openSigninModal) {
         window.minds.openSigninModal();
       } else {
-        window.location.href = '/auth/signin-modal';
+        // /auth/login redirects into the SPA's web-login flow.
+        window.location.href = '/auth/login';
       }
     }
 

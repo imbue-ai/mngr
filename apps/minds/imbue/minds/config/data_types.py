@@ -330,6 +330,40 @@ class PlanQuotasConfig(FrozenModel):
         }
 
 
+class WebWorkspacesConfig(FrozenModel):
+    """The ``[web_workspaces]`` block of a ``deploy.toml`` -- the tier's pinned web-create template.
+
+    Read by ``minds env deploy`` and pushed into the connector's per-deploy
+    Modal Secret as ``MINDS_WEB_TEMPLATE_*`` / ``MINDS_WEB_SHAPE_*`` env vars.
+    The connector's ``POST /hosts/claim`` (browser-driven workspace creation)
+    leases only pool hosts whose baked attributes match this pin exactly, so
+    advancing the pin is a deliberate deploy.toml edit folded into the release
+    process. Tiers without the block have web workspace creation disabled.
+    """
+
+    template_repo: NonEmptyStr = Field(
+        description=(
+            "Canonical repo key the pool bake stamps into row attributes "
+            "(``host/org/repo``, e.g. ``github.com/imbue-ai/default-workspace-template``)."
+        )
+    )
+    template_ref: NonEmptyStr = Field(
+        description="The pinned template branch or tag web creates lease (must match the pool bake)."
+    )
+    cpus: NonNegativeInt | None = Field(
+        default=None,
+        description="Blessed vCPU count for web creates; unset leaves the lease unconstrained on cpus.",
+    )
+    memory_gb: NonNegativeInt | None = Field(
+        default=None,
+        description="Blessed memory (GB) for web creates; unset leaves the lease unconstrained on memory.",
+    )
+    gpu_count: NonNegativeInt | None = Field(
+        default=None,
+        description="Blessed GPU count for web creates; unset leaves the lease unconstrained on GPUs.",
+    )
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds env create`.
 
@@ -395,6 +429,13 @@ class DeployEnvConfig(FrozenModel):
             "Plan definitions (plan name -> quota entitlements) written -- overwriting -- into the "
             "connector's plans table after migrations on every deploy. Git is the source of truth "
             "for plan defaults; per-user entitlement rows are managed via the admin API instead."
+        ),
+    )
+    web_workspaces: WebWorkspacesConfig | None = Field(
+        default=None,
+        description=(
+            "Pinned template + blessed compute shape for browser-driven workspace creation "
+            "(the connector's POST /hosts/claim). None (the default) disables web creates on the tier."
         ),
     )
 

@@ -282,14 +282,15 @@ def _load_private_key(private_key_path: Path) -> paramiko.PKey:
 
     The base ``VpsProvider`` produces SSH keypairs via
     ``ssh_utils.load_or_create_ssh_keypair`` -> ``generate_ssh_keypair``,
-    which currently returns an **RSA** key in TraditionalOpenSSL PEM
-    format. paramiko's per-class ``from_private_key_file`` constructors
-    are strict: ``Ed25519Key.from_private_key_file`` raises if the file
-    isn't an OpenSSH-format Ed25519 key, even though paramiko itself can
-    handle RSA fine. Rather than hardcode either type (which would break
-    if the base class swaps generator), try each type and use the one
-    that parses; this keeps the OVH provider working regardless of which
-    key flavor the base class produces.
+    which returns an OpenSSH-format Ed25519 key (older installs still hold
+    RSA keys in TraditionalOpenSSL PEM format from the previous generator).
+    paramiko's per-class ``from_private_key_file`` constructors are strict:
+    ``Ed25519Key.from_private_key_file`` raises if the file isn't an
+    OpenSSH-format Ed25519 key, even though paramiko itself can handle RSA
+    fine. Rather than hardcode either type (which would break if the base
+    class swaps generator), try each type and use the one that parses; this
+    keeps the OVH provider working regardless of which key flavor the base
+    class produces.
     """
     last_error: paramiko.SSHException | None = None
     for key_class in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):

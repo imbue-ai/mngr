@@ -113,6 +113,14 @@ describe("CreateFormModel", () => {
     expect(model.submitBody().runtime).toBe("RUNSC");
   });
 
+  it("sends the web-access toggle, off by default", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    expect(model.submitBody().enable_web_access).toBe(false);
+    model.enableWebAccess = true;
+    expect(model.submitBody().enable_web_access).toBe(true);
+  });
+
   it("seeds the repository and branch from the server defaults", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());

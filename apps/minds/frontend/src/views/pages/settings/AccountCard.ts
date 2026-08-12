@@ -7,9 +7,11 @@ import type {
   AccountEntry,
   AccountsDetailModel,
 } from "../../../models/accountsDetail";
-import { Button, ButtonLink } from "../../components/Button";
+import { Button } from "../../components/Button";
+import { webLogin } from "../../../models/webLogin";
 import { Card } from "../../components/Card";
 import { Link } from "../../components/Link";
+import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
 import { Select } from "../../components/FormControls";
 import { Spinner } from "../../components/Spinner";
@@ -43,10 +45,36 @@ function planSection(
   const view = plan.planView;
   const trim = plan.trimStatus;
   const isTrimRunning = trim?.is_running === true;
+  const verifyPrompt = model.verifyEmailPromptFor(account.user_id);
   // The draft lives in component state (keyed by user_id): a per-render
   // local would be reset by the redraw that follows the select's onchange.
   const selectedPlan = selectedPlanByUserId.get(account.user_id) ?? view.plan_name;
   return m("div", [
+    verifyPrompt !== null
+      ? m(Notice, { variant: "warn" }, [
+          m(
+            "div",
+            verifyPrompt.wasAutoSent
+              ? `Switching plans requires a verified email. We just sent a link to ${verifyPrompt.email} -- click it, then switch again.`
+              : `Switching plans requires a verified email. Use "Resend email" to get a link at ${verifyPrompt.email}, click it, then switch again.`,
+          ),
+          m("div", { class: "flex items-center gap-2 mt-1" }, [
+            m(
+              Button,
+              {
+                variant: "secondary",
+                disabled: verifyPrompt.isResending,
+                onclick: () =>
+                  void model.resendVerification(account.user_id),
+              },
+              verifyPrompt.isResending ? "Sending…" : "Resend email",
+            ),
+            verifyPrompt.wasResent
+              ? m("span", { class: "type-helper" }, "Sent.")
+              : null,
+          ]),
+        ])
+      : null,
     m("div", { class: "flex items-center justify-between mb-2" }, [
       m("div", { class: "type-label text-secondary" }, [
         "Plan: ",
@@ -176,8 +204,8 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
           m("div", { class: "flex gap-2" }, [
             !account.is_enabled
               ? m(
-                  ButtonLink,
-                  { href: "/auth/login", variant: "primary" },
+                  Button,
+                  { variant: "primary", onclick: () => void webLogin.start() },
                   "Sign in again",
                 )
               : null,
@@ -203,9 +231,12 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
               Button,
               {
                 variant: "danger",
+                disabled: model.isLoggingOut(account.user_id),
                 onclick: () => void model.logOut(account.user_id),
               },
-              "Log out",
+              model.isLoggingOut(account.user_id)
+                ? [m(Spinner, { size: "sm" }), "Logging out…"]
+                : "Log out",
             ),
           ]),
         ]),

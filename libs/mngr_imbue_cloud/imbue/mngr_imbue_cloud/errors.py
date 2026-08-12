@@ -62,6 +62,20 @@ class ImbueCloudQuotaExceededError(ImbueCloudError):
         self.current = current
 
 
+class ImbueCloudEmailNotVerifiedError(ImbueCloudError):
+    """Raised when the connector refuses an action because the account's email is unverified.
+
+    Carries the structured detail from the connector's 403 (``code:
+    email_not_verified``) so callers (e.g. the minds desktop client) can
+    respond with a contextual "verify your email" prompt instead of a
+    generic failure.
+    """
+
+    def __init__(self, message: str, email: str | None) -> None:
+        super().__init__(message)
+        self.email = email
+
+
 class ImbueCloudAccountError(ImbueCloudError):
     """Raised when an account (plan / entitlements / usage) operation fails."""
 

@@ -99,6 +99,7 @@ def _deploy_config(
     paid: PaidDefaultsConfig | None = None,
     plans: dict[str, PlanQuotasConfig] | None = None,
     lifecycle: DeployLifecycleConfig | None = None,
+    services: tuple[str, ...] = ("cloudflare",),
 ) -> DeployEnvConfig:
     if lifecycle is None:
         lifecycle = _DEV_LIFECYCLE if tier == "dev" else _SHARED_TIER_LIFECYCLE
@@ -107,7 +108,7 @@ def _deploy_config(
         modal_env=NonEmptyStr(modal_env),
         vault_path_prefix=NonEmptyStr(f"secrets/minds/{tier}"),
         cloudflare_domain=NonEmptyStr(f"{tier}.example.com"),
-        secrets=DeploySecretsConfig(services=(ServiceName("cloudflare"),)),
+        secrets=DeploySecretsConfig(services=tuple(ServiceName(name) for name in services)),
         lifecycle=lifecycle,
         min_containers=min_containers if min_containers is not None else MinContainersConfig(),
         scaledown_window=scaledown_window if scaledown_window is not None else ScaledownWindowConfig(),
@@ -196,7 +197,7 @@ def _build_fake_providers(
             raise SuperTokensProviderError("supertokens delete boom")
 
     def read_per_env_secret_values(service, tier_vault_prefix, overrides, cg):
-        call_log["calls"].append(("read_per_env_secret_values", service))
+        call_log["calls"].append(("read_per_env_secret_values", service, dict(overrides)))
         # Merge canned Vault baseline + caller overrides, mirroring the
         # real ``build_per_env_secret_values`` behaviour. Empty for
         # services the test setup didn't pre-populate.
@@ -783,6 +784,52 @@ def test_deploy_env_shared_tier_pushes_secrets_into_named_modal_env(
     assert pushed_secret_prefixes == {"cloudflare-production", "litellm-connector-production"}
     # All pushes target the tier's stable Modal env, not a per-dev one.
     assert all(c[2] == "main" for c in pushes)
+
+
+def test_deploy_dev_env_overrides_sharing_with_a_per_env_relay_region(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """Per-env-Modal tiers pin the sharing secret to the env's own relay.
+
+    The region label is the env name (underscores mapped to hyphens for DNS)
+    and the endpoint hostname is the deterministic ``relay.<region>.<domain>``,
+    so every dev env expects its own relay instead of competing for one shared
+    dev relay whose plugin-auth URL can only serve a single env's connector.
+    """
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("dev-jo_sh"),
+        tier="dev",
+        deploy_config=_deploy_config(services=("cloudflare", "sharing")),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    sharing_reads = [c for c in call_log["calls"] if c[0] == "read_per_env_secret_values" and c[1] == "sharing"]
+    assert len(sharing_reads) == 1
+    overrides = sharing_reads[0][2]
+    assert overrides["SHARE_DEFAULT_REGION"] == "dev-jo-sh"
+    assert overrides["SHARE_RELAY_ENDPOINTS"] == "dev-jo-sh=relay.dev-jo-sh.dev.example.com:7000"
+
+
+def test_deploy_env_shared_tier_keeps_the_vault_configured_relay_fleet(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """Staging / production sharing secrets get NO per-env relay overrides."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("production"),
+        tier="production",
+        deploy_config=_deploy_config(tier="production", modal_env="main", services=("cloudflare", "sharing")),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    sharing_reads = [c for c in call_log["calls"] if c[0] == "read_per_env_secret_values" and c[1] == "sharing"]
+    assert len(sharing_reads) == 1
+    assert sharing_reads[0][2] == {}
 
 
 def test_deploy_env_shared_tier_runs_both_modal_deploys(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:

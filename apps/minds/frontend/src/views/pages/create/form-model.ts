@@ -39,6 +39,7 @@ export interface CreateSubmitBody {
   backup_api_key_env: string;
   region: string;
   instance_type: string;
+  enable_web_access: boolean;
   runtime?: string;
 }
 
@@ -79,6 +80,9 @@ export class CreateFormModel {
   backupApiKeyEnv = "";
   accountId = "";
   runtime = "";
+  // "Enable web access" (default off): bring sharing up post-create so the
+  // workspace is reachable from the hosted web client.
+  enableWebAccess = false;
   selectedPreset: PresetName | null = "remote";
   isAdvancedOpen = false;
 
@@ -288,6 +292,7 @@ export class CreateFormModel {
       backup_api_key_env: this.backupProvider === "API_KEY" ? this.backupApiKeyEnv : "",
       region: this.regionOptions().length > 0 ? this.selectedRegion() : "",
       instance_type: this.instanceTypeOptions().length > 0 ? this.selectedInstanceType() : "",
+      enable_web_access: this.enableWebAccess,
     };
     if (this.isRuntimeShown()) body.runtime = this.runtime;
     return body;

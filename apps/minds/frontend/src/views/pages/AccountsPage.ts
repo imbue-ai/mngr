@@ -5,7 +5,8 @@
 
 import m from "mithril";
 import { AccountsDetailModel } from "../../models/accountsDetail";
-import { ButtonLink } from "../components/Button";
+import { webLogin } from "../../models/webLogin";
+import { Button } from "../components/Button";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
 import { AccountCard } from "./settings/AccountCard";
@@ -56,9 +57,15 @@ export function AccountsPage(): m.Component {
           "div",
           { class: "mt-4" },
           m(
-            ButtonLink,
-            { href: "/auth/login", variant: "primary" },
-            "Add account",
+            Button,
+            {
+              variant: "primary",
+              disabled: webLogin.isOpen,
+              onclick: () => void webLogin.start(),
+            },
+            webLogin.isOpen
+              ? [m(Spinner, { size: "sm" }), "Opening browser…"]
+              : "Add account",
           ),
         ),
       ];

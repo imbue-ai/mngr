@@ -25,6 +25,10 @@ from imbue.mngr.utils.testing import get_short_random_string
 
 @pytest.mark.acceptance
 @pytest.mark.rsync
+# Fresh Modal sandboxes transiently accept TCP before sshd answers the SSH
+# handshake; mngr's bounded banner-retry rides out the common case, but a slow
+# Modal window can outlast it, so offload retries the whole test.
+@pytest.mark.flaky
 @pytest.mark.timeout(300)
 def test_mngr_create_echo_command_on_modal(
     temp_source_dir: Path,
@@ -167,6 +171,7 @@ def test_mngr_create_with_invalid_snapshot_id_fails(
     )
 
 
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
@@ -217,6 +222,7 @@ def test_mngr_create_with_build_args_on_modal(
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
 
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(300)
@@ -406,6 +412,7 @@ def test_mngr_create_transfers_git_repo_with_untracked_files(
     assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
 
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_mngr_create_transfers_git_repo_with_new_branch(

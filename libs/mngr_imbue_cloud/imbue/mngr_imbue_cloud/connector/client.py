@@ -5,8 +5,9 @@ so the CLI commands and provider can share a single httpx instance per
 account.
 
 Authentication semantics:
-- Methods explicitly named ``*_auth_*`` (signin/signup/oauth/refresh) take no
-  bearer token and are intended for unauthenticated callers.
+- Methods explicitly named ``*_auth_*`` (signin/signup/refresh, the browser
+  login's device-token exchange) take no bearer token and are intended for
+  unauthenticated callers.
 - All other methods take an ``access_token`` (a SecretStr).
 - The session store handles persistence; this client never reads or writes
   session files itself.
@@ -51,6 +52,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
@@ -61,6 +63,14 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
+
+# What a user should do when their connector predates the hosted accounts
+# surface (browser sign-in). Shared by the login command's up-front probe and
+# the device-token exchange's 404 safety net.
+CONNECTOR_TOO_OLD_REMEDY = (
+    "If this is your own dev/CI env, update it by running `minds env deploy`; "
+    "otherwise sign in headlessly with `mngr imbue_cloud auth signin --account <email>`."
+)
 
 # Transient-transport retry policy for connector calls. The connector is a
 # Modal app that scales to zero, so a call hitting a cold/scaling instance can
@@ -135,6 +145,22 @@ class ImbueCloudConnectorClient(MutableModel):
                 current=float(detail.get("current", 0)),
             )
 
+    def _raise_if_email_not_verified(self, response: httpx.Response) -> None:
+        """Raise the typed verification error when a 403 carries the connector's structured detail."""
+        if response.status_code != 403:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        if isinstance(detail, dict) and detail.get("code") == "email_not_verified":
+            email = detail.get("email")
+            raise ImbueCloudEmailNotVerifiedError(
+                str(detail.get("message", "This action requires a verified email address")),
+                email=email if isinstance(email, str) else None,
+            )
+
     def _raise_if_grant_budget_exhausted(self, response: httpx.Response) -> None:
         """Raise the typed grant-budget error when a 403 carries the connector's structured detail."""
         if response.status_code != 403:
@@ -163,6 +189,7 @@ class ImbueCloudConnectorClient(MutableModel):
         """
         self._raise_if_quota_exceeded(response)
         self._raise_if_grant_budget_exhausted(response)
+        self._raise_if_email_not_verified(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
         if response.status_code in (200, 201, 204):
@@ -260,48 +287,102 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         return AuthRawResponse.model_validate(self._check(response, ImbueCloudAuthError))
 
-    def auth_oauth_authorize(self, provider_id: str, callback_url: str) -> dict[str, Any]:
-        response = httpx.post(
-            self._url("/auth/oauth/authorize"),
-            json={"provider_id": provider_id, "callback_url": callback_url},
-            timeout=self.timeout_seconds,
-        )
-        return self._check(response, ImbueCloudAuthError)
+    def supports_browser_login(self) -> bool:
+        """Whether the connector serves the hosted accounts surface (the browser login flow).
 
-    def auth_oauth_callback(
-        self,
-        provider_id: str,
-        callback_url: str,
-        query_params: dict[str, str],
-    ) -> AuthRawResponse:
-        response = httpx.post(
-            self._url("/auth/oauth/callback"),
-            json={
-                "provider_id": provider_id,
-                "callback_url": callback_url,
-                "query_params": query_params,
-            },
+        Probes the unauthenticated accounts-config endpoint; a 404 means the
+        connector predates the hosted accounts pages (a stale dev/CI env).
+        """
+        response = self._send(
+            "GET",
+            self._url("/accounts/api/config"),
+            exc_cls=ImbueCloudAuthError,
             timeout=self.timeout_seconds,
         )
+        if response.status_code == 404:
+            return False
+        self._check(response, ImbueCloudAuthError)
+        return True
+
+    def auth_device_token(self, code: str, code_verifier: str, redirect_uri: str) -> AuthRawResponse:
+        """Exchange a browser-login one-time code (+ PKCE verifier) for a fresh device session.
+
+        The code is single-use, so only connect-phase transport errors are
+        retried (a post-send retry would present an already-consumed code).
+        """
+        response = self._send(
+            "POST",
+            self._url("/auth/device/token"),
+            exc_cls=ImbueCloudAuthError,
+            idempotent=False,
+            json={"code": code, "code_verifier": code_verifier, "redirect_uri": redirect_uri},
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 400:
+            detail = _detail_from_response(response)
+            raise ImbueCloudAuthError(f"Device code exchange refused: {detail}")
+        if response.status_code == 404:
+            raise ImbueCloudAuthError(
+                "The connector does not serve the browser-login code exchange (it is too old). "
+                + CONNECTOR_TOO_OLD_REMEDY
+            )
         return AuthRawResponse.model_validate(self._check(response, ImbueCloudAuthError))
 
     def auth_refresh_session(self, refresh_token: SecretStr) -> dict[str, Any]:
-        """Returns ``{status, access_token, refresh_token}``."""
-        response = httpx.post(
+        """Returns ``{status, access_token, refresh_token}``.
+
+        Not idempotent: SuperTokens rotates the refresh token, and re-sending
+        an already-consumed one trips its token-theft detection, so only
+        connect-phase transport errors (request never reached the server) are
+        retried.
+        """
+        response = self._send(
+            "POST",
             self._url("/auth/session/refresh"),
+            exc_cls=ImbueCloudAuthError,
+            idempotent=False,
             json={"refresh_token": refresh_token.get_secret_value()},
             timeout=self.timeout_seconds,
         )
         return self._check(response, ImbueCloudAuthError)
 
     def auth_revoke_session(self, access_token: SecretStr) -> None:
-        response = httpx.post(
+        """Revoke EVERY session for the caller's user (all devices + browser).
+
+        Kept for the explicit sign-out-everywhere action; regular device
+        sign-out uses :meth:`auth_revoke_current_session`.
+        """
+        response = self._send(
+            "POST",
             self._url("/auth/session/revoke"),
+            exc_cls=ImbueCloudAuthError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
         # Treat 401 as "already revoked" (idempotent).
         if response.status_code in (200, 204, 401):
+            return
+        raise ImbueCloudAuthError(f"Revoke failed ({response.status_code}): {response.text[:200]}")
+
+    def auth_revoke_current_session(self, access_token: SecretStr) -> None:
+        """Revoke only the presented session (this device's sign-out).
+
+        Falls back to the revoke-all endpoint against a connector too old to
+        serve the device-scoped route, so sign-out never silently leaves the
+        token live. A 401 counts as already revoked (idempotent).
+        """
+        response = self._send(
+            "POST",
+            self._url("/auth/session/revoke-current"),
+            exc_cls=ImbueCloudAuthError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code in (200, 204, 401):
+            return
+        if response.status_code in (404, 405):
+            logger.debug("Connector lacks /auth/session/revoke-current; falling back to revoke-all")
+            self.auth_revoke_session(access_token)
             return
         raise ImbueCloudAuthError(f"Revoke failed ({response.status_code}): {response.text[:200]}")
 
@@ -461,6 +542,26 @@ class ImbueCloudConnectorClient(MutableModel):
             ) from exc
         self._check(response, ImbueCloudConnectorError)
 
+    def enable_host_sharing(self, access_token: SecretStr, host_db_id: str) -> dict[str, Any]:
+        """Bring sharing up for a leased host server-side (POST /hosts/{id}/enable-sharing).
+
+        The connector creates/rotates the share record and injects the share
+        materials (including the web chrome origin) into the container with
+        the pool key -- the primitive behind "enable web access". Idempotent;
+        returns the connector's ``{host_id, workspace_domain, region}`` body.
+        """
+        try:
+            response = httpx.post(
+                self._url(f"/hosts/{host_db_id}/enable-sharing"),
+                headers=self._bearer(access_token),
+                timeout=self.timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            raise ImbueCloudConnectorError(
+                f"enable-sharing request for host {host_db_id} could not reach the connector: {exc}"
+            ) from exc
+        return self._check(response, ImbueCloudConnectorError)
+
     def list_hosts(self, access_token: SecretStr) -> list[LeasedHostInfo]:
         response = httpx.get(
             self._url("/hosts"),
@@ -571,14 +672,23 @@ class ImbueCloudConnectorClient(MutableModel):
     # Shares (self-hosted relays)
     # ------------------------------------------------------------------
 
-    def create_share(self, access_token: SecretStr, host_id: str) -> ShareInfo:
-        """Enable sharing for one workspace; the returned relay token is only ever returned here."""
+    def create_share(self, access_token: SecretStr, host_id: str, entry_label: str | None = None) -> ShareInfo:
+        """Enable sharing for one workspace; the returned relay token is only ever returned here.
+
+        ``entry_label`` is the workspace's shell-service origin label -- the
+        routable origin the hosted web chrome enters and health-probes the
+        workspace at (the bare share domain is unrouted on the relay).
+        Omitting it keeps any label a previous bring-up recorded.
+        """
+        body_json: dict[str, str] = {"host_id": host_id}
+        if entry_label:
+            body_json["entry_label"] = entry_label
         response = self._send(
             "POST",
             self._url("/shares"),
             exc_cls=ImbueCloudShareError,
             headers=self._bearer(access_token),
-            json={"host_id": host_id},
+            json=body_json,
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudShareError)
@@ -741,6 +851,7 @@ class ImbueCloudConnectorClient(MutableModel):
         # get the typed quota error first.
         if response.status_code == 403:
             self._raise_if_quota_exceeded(response)
+            self._raise_if_email_not_verified(response)
             try:
                 detail = response.json().get("detail")
             except ValueError:

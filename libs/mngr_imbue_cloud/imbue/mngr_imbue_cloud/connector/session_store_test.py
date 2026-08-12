@@ -21,7 +21,6 @@ def _make_session(
     access_token: str = "header.payload.sig",
     refresh_token: str | None = "refresh-tok",
     access_token_expires_at: datetime | None = None,
-    is_pending_verification: bool = False,
 ) -> AuthSession:
     return AuthSession(
         user_id=SuperTokensUserId(user_id),
@@ -30,7 +29,6 @@ def _make_session(
         access_token=SecretStr(access_token),
         refresh_token=SecretStr(refresh_token) if refresh_token else None,
         access_token_expires_at=access_token_expires_at,
-        is_pending_verification=is_pending_verification,
     )
 
 
@@ -67,44 +65,26 @@ def test_list_accounts_returns_all_signed_in_users(tmp_path: Path) -> None:
     assert set(accounts) == {ImbueCloudAccount("alice@imbue.com"), ImbueCloudAccount("bob@imbue.com")}
 
 
-def test_pending_verification_flag_survives_save_and_load(tmp_path: Path) -> None:
+def test_legacy_pending_verification_session_files_still_parse(tmp_path: Path) -> None:
+    """Session files written by pre-web-login plugin versions carry the legacy flag; they must still load."""
     store = ImbueCloudSessionStore(sessions_dir=tmp_path)
-    store.save(_make_session(is_pending_verification=True))
+    store.save(_make_session())
+    session_path = next(p for p in tmp_path.iterdir() if p.name.endswith(".json") and p.name != "accounts.json")
+    raw = session_path.read_text()
+    legacy_raw = raw.rstrip().rstrip("}") + ',  "is_pending_verification": true\n}'
+    session_path.write_text(legacy_raw)
+
     loaded = store.load_by_account(ImbueCloudAccount("alice@imbue.com"))
+
     assert loaded is not None
-    assert loaded.is_pending_verification is True
+    assert loaded.access_token.get_secret_value() == "header.payload.sig"
 
 
-def test_promote_pending_session_clears_flag_on_disk(tmp_path: Path) -> None:
+def test_set_active_account_requires_a_session_on_disk(tmp_path: Path) -> None:
     store = ImbueCloudSessionStore(sessions_dir=tmp_path)
-    store.save(_make_session(is_pending_verification=True))
-    promoted = store.promote_pending_session(ImbueCloudAccount("alice@imbue.com"))
-    assert promoted is not None
-    assert promoted.is_pending_verification is False
-    reloaded = store.load_by_account(ImbueCloudAccount("alice@imbue.com"))
-    assert reloaded is not None
-    assert reloaded.is_pending_verification is False
-    # The tokens survive promotion unchanged.
-    assert reloaded.access_token.get_secret_value() == "header.payload.sig"
-
-
-def test_promote_pending_session_is_idempotent_and_handles_missing(tmp_path: Path) -> None:
-    store = ImbueCloudSessionStore(sessions_dir=tmp_path)
-    assert store.promote_pending_session(ImbueCloudAccount("nobody@example.com")) is None
-    store.save(_make_session(is_pending_verification=False))
-    promoted = store.promote_pending_session(ImbueCloudAccount("alice@imbue.com"))
-    assert promoted is not None
-    assert promoted.is_pending_verification is False
-
-
-def test_set_active_account_refuses_pending_session(tmp_path: Path) -> None:
-    store = ImbueCloudSessionStore(sessions_dir=tmp_path)
-    store.save(_make_session(is_pending_verification=True))
-    with pytest.raises(ImbueCloudAuthError, match="not verified"):
+    with pytest.raises(ImbueCloudAuthError, match="no session on disk"):
         store.set_active_account(ImbueCloudAccount("alice@imbue.com"))
-    assert store.get_active_account() is None
-    # After promotion the same call succeeds.
-    store.promote_pending_session(ImbueCloudAccount("alice@imbue.com"))
+    store.save(_make_session())
     store.set_active_account(ImbueCloudAccount("alice@imbue.com"))
     assert store.get_active_account() == ImbueCloudAccount("alice@imbue.com")
 
@@ -140,7 +120,6 @@ def test_make_session_from_tokens_extracts_exp() -> None:
         display_name=None,
         access_token=jwt_with_exp,
         refresh_token=None,
-        is_pending_verification=False,
     )
     assert session.access_token_expires_at is not None
     assert session.access_token_expires_at.year >= 2286

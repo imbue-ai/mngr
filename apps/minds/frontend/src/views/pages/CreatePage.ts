@@ -7,6 +7,7 @@
 import m from "mithril";
 import type { CreateFormDefaults } from "../../models/create";
 import { fetchCreateFormDefaults } from "../../models/create";
+import { webLogin } from "../../models/webLogin";
 import { Button, ButtonSubmit } from "../components/Button";
 import { FormLabel, Select, TextInput, Textarea } from "../components/FormControls";
 import { Link } from "../components/Link";
@@ -80,7 +81,15 @@ export const CreatePage: m.ClosureComponent = () => {
         }
         const error = normalizeCreateApiError(result.data);
         if (error.redirectUrl) {
-          window.location.href = error.redirectUrl;
+          // The remote preset needs a signed-in Imbue account: launch the
+          // browser sign-in and stay on the create form (the user re-submits
+          // once signed in).
+          model.isSubmitting = false;
+          void webLogin.start(
+            "Sign in or create an Imbue account to run your machine on Imbue Cloud. " +
+              "You can also cancel and run it directly on your computer.",
+          );
+          m.redraw();
           return;
         }
         model.isSubmitting = false;
@@ -265,6 +274,32 @@ export const CreatePage: m.ClosureComponent = () => {
                   },
                 }),
               ])
+            : null,
+        ]),
+        m("div", { id: "web-access-row" }, [
+          m("label", { class: "flex items-center gap-2 type-body text-primary cursor-pointer" }, [
+            m("input", {
+              id: "enable_web_access",
+              name: "enable_web_access",
+              type: "checkbox",
+              checked: model.enableWebAccess,
+              onchange: (event: Event) => {
+                model.enableWebAccess = (event.target as HTMLInputElement).checked;
+              },
+            }),
+            "Enable web access",
+          ]),
+          m(
+            "p",
+            { class: "mt-1 type-helper text-tertiary" },
+            "Make the machine reachable from the minds web client (only you are granted). Requires an account.",
+          ),
+          model.enableWebAccess && model.accountId === ""
+            ? m(
+                "p",
+                { id: "web-access-account-error", class: "mt-1 type-helper text-warning" },
+                "Web access requires a selected account.",
+              )
             : null,
         ]),
         regionOptions.length > 0

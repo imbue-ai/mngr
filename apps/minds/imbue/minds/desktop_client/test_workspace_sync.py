@@ -17,9 +17,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from pydantic import SecretStr
 
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
@@ -259,15 +260,11 @@ def _make_profiled_device(
 
 
 def _generate_test_ssh_private_key() -> str:
-    """A traditional-PEM RSA key, the exact flavor mngr's ``generate_ssh_keypair`` produces.
-
-    2048 bits (vs mngr's 4096) keeps test key generation fast; the container
-    format is what the materializer's parser must handle.
-    """
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    """An OpenSSH-format Ed25519 key, the exact flavor mngr's ``generate_ssh_keypair`` produces."""
+    private_key = ed25519.Ed25519PrivateKey.generate()
     return private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        format=serialization.PrivateFormat.OpenSSH,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode("utf-8")
 
@@ -334,7 +331,7 @@ def test_unlock_materializes_cloud_row_ssh_material_on_a_fresh_install(tmp_path:
     assert (key_path.stat().st_mode & 0o777) == 0o600
     # The derived public half exists (mngr regenerates the pair when it is missing).
     public_text = (key_dir_b / "ssh_key.pub").read_text()
-    assert public_text.startswith("ssh-rsa ")
+    assert public_text.startswith("ssh-ed25519 ")
     assert known_hosts_line in (key_dir_b / "known_hosts").read_text()
     # Idempotent: unchanged material reports nothing written.
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
@@ -464,3 +461,57 @@ def test_non_contributor_never_clobbers_anothers_secrets_with_partial_material(t
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
 
     assert cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"] == blob_before
+
+
+def test_desktop_push_in_a_cas_window_rebases_once_and_converges(tmp_path: Path) -> None:
+    """Desktop and web editing one record inside one CAS window converges.
+
+    The web client edited the record (bumping the server revision) between the
+    desktop's read and its push. The desktop's push conflicts, rebases once
+    onto the stored revision, and lands -- last actor wins outright for the
+    desktop (the documented ``_push_record`` semantics: its pushes come from
+    synchronous user actions), so the desktop's field values replace the
+    web's, and the replica converges on the server revision with no dirty row
+    left behind.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, session_a = _make_device(tmp_path, "laptop", cli)
+
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    resolver = _resolver_with_workspace(agent_id, host_id, "crossed-edit-ws")
+    session_a.associate_workspace(_USER_ID, str(agent_id), resolver)
+    server_rows = cli.sync_records_by_email[_EMAIL]
+    assert int(str(server_rows[str(host_id)]["revision"])) == 1
+
+    # The web chrome edits the record concurrently: revision 2 with a color
+    # the desktop's replica has never seen.
+    server_rows[str(host_id)] = {
+        **server_rows[str(host_id)],
+        "revision": 2,
+        "color": "#ff0000",
+        "display_name": "web-name",
+    }
+
+    # The desktop renames from its stale replica (still at revision 1): the
+    # push conflicts, rebases onto the stored revision, and wins.
+    stale_record = next(record for record in store_a.list_records(_USER_ID) if record.host_id == str(host_id))
+    assert stale_record.revision == 1
+    renamed = stale_record.model_copy_update(
+        to_update(stale_record.field_ref().display_name, "desktop-name"),
+    )
+    store_a.upsert_local_record(_USER_ID, _EMAIL, renamed)
+
+    stored_row = server_rows[str(host_id)]
+    assert int(str(stored_row["revision"])) == 3
+    assert stored_row["display_name"] == "desktop-name"
+    # Last-actor-wins is deliberate: the desktop's full local content replaced
+    # the web's edit (its color went with it). The web side is the merging
+    # side -- pushRecordWithCas re-applies its edit over the stored row.
+    assert stored_row["color"] is None
+
+    # The replica converged: server revision acknowledged, nothing dirty.
+    converged = next(record for record in store_a.list_records(_USER_ID) if record.host_id == str(host_id))
+    assert converged.revision == 3
+    assert converged.is_dirty is False

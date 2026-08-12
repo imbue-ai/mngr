@@ -11,6 +11,7 @@ import pytest
 from flask import Flask
 from flask.testing import FlaskClient
 from pydantic import AnyUrl
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -31,7 +32,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudVerificationStatus
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -69,10 +69,18 @@ class FakeImbueCloudCli(ImbueCloudCli):
     ``mngr`` process.
     """
 
+    # ``set_plan_error_to_raise`` holds an exception instance, which pydantic
+    # cannot schema-generate; allow arbitrary types for this test double.
+    model_config = ConfigDict(frozen=False, extra="forbid", arbitrary_types_allowed=True)
+
     mngr_caller: MngrCaller = Field(default_factory=RecordingMngrCaller)
     accounts_to_return: list[ImbueCloudAuthAccount] = Field(default_factory=list)
-    oauth_session_to_return: ImbueCloudAuthSession | None = Field(
-        default=None, description="Session auth_oauth returns; raises ImbueCloudCliError when unset"
+    login_session_to_return: ImbueCloudAuthSession | None = Field(
+        default=None, description="Session auth_login returns; raises ImbueCloudCliError when unset"
+    )
+    login_url_to_write: str = Field(
+        default="https://accounts.example.com/login?next=%2Faccounts%2Fauthorize",
+        description="Sign-in URL auth_login writes to its url_file (the copy-the-link fallback)",
     )
     is_auth_list_failing: bool = Field(
         default=False,
@@ -89,24 +97,17 @@ class FakeImbueCloudCli(ImbueCloudCli):
         description="When True, get_share_status raises ImbueCloudCliError (simulates a connector hiccup)",
     )
 
-    signup_session_to_return: ImbueCloudAuthSession | None = Field(
-        default=None, description="Session auth_signup returns; raises ImbueCloudCliError when unset"
-    )
-    signin_session_to_return: ImbueCloudAuthSession | None = Field(
-        default=None, description="Session auth_signin returns; raises ImbueCloudCliError when unset"
-    )
-    verification_status_by_email: dict[str, ImbueCloudVerificationStatus] = Field(
-        default_factory=dict,
-        description="auth_is_email_verified answers per email; unknown emails raise (no session)",
-    )
     resent_verification_emails: list[str] = Field(
         default_factory=list, description="Every email auth_resend_verification was called with, in order"
     )
     is_resend_suppressed: bool = Field(
         default=False, description="When True, auth_resend_verification reports the server cooldown (sent=False)"
     )
-    forgot_password_emails: list[str] = Field(
-        default_factory=list, description="Every email auth_forgot_password was called with, in order"
+    set_plan_calls: list[tuple[str, str]] = Field(
+        default_factory=list, description="(account email, plan) for every set_account_plan call, in order"
+    )
+    set_plan_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None, description="When set, set_account_plan raises this instead of switching"
     )
 
     def auth_list(self) -> list[ImbueCloudAuthAccount]:
@@ -114,43 +115,26 @@ class FakeImbueCloudCli(ImbueCloudCli):
             raise ImbueCloudCliError("fake transient auth list failure")
         return list(self.accounts_to_return)
 
-    def auth_signup(self, account: str, password: str) -> ImbueCloudAuthSession:
-        # Without a canned session, fall through to the real implementation so
-        # tests that drive the subprocess boundary (a failing ``mngr_caller``
-        # exercising ``_expect_success``) keep working.
-        if self.signup_session_to_return is None:
-            return super().auth_signup(account, password)
-        return self.signup_session_to_return
-
-    def auth_signin(self, account: str, password: str) -> ImbueCloudAuthSession:
-        if self.signin_session_to_return is None:
-            return super().auth_signin(account, password)
-        return self.signin_session_to_return
-
-    def auth_is_email_verified(self, account: str) -> ImbueCloudVerificationStatus:
-        status = self.verification_status_by_email.get(account)
-        if status is None:
-            raise ImbueCloudCliError(f"auth is-verified failed: No session for {account}; sign in first.")
-        return status
-
     def auth_resend_verification(self, account: str) -> bool:
         self.resent_verification_emails.append(account)
         return not self.is_resend_suppressed
 
-    def auth_forgot_password(self, account: str) -> None:
-        self.forgot_password_emails.append(account)
+    def set_account_plan(self, account: str, plan: str) -> dict[str, Any]:
+        self.set_plan_calls.append((account, plan))
+        if self.set_plan_error_to_raise is not None:
+            raise self.set_plan_error_to_raise
+        return {"plan_name": plan}
 
-    def auth_oauth(
+    def auth_login(
         self,
-        account: str,
-        provider_id: str,
-        callback_port: int | None = None,
-        no_browser: bool = False,
         success_redirect_url: str | None = None,
+        url_file: Path | None = None,
     ) -> ImbueCloudAuthSession:
-        if self.oauth_session_to_return is None:
-            raise ImbueCloudCliError("auth oauth: no fake OAuth session configured on FakeImbueCloudCli")
-        return self.oauth_session_to_return
+        if url_file is not None:
+            url_file.write_text(self.login_url_to_write + "\n")
+        if self.login_session_to_return is None:
+            raise ImbueCloudCliError("auth login: no fake login session configured on FakeImbueCloudCli")
+        return self.login_session_to_return
 
     def set_accounts(self, accounts: list[ImbueCloudAuthAccount]) -> None:
         self.accounts_to_return = list(accounts)
@@ -175,6 +159,26 @@ class FakeImbueCloudCli(ImbueCloudCli):
         self.accounts_to_return = [a for a in self.accounts_to_return if a.user_id != user_id]
 
     # -- In-memory machine shares (drives the teardown tests) --
+
+    web_access_calls: list[tuple[str, str]] = Field(
+        default_factory=list, description="(account email, host ref) for every enable_web_access call, in order"
+    )
+    web_access_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None, description="When set, enable_web_access raises this instead of recording the call"
+    )
+
+    def enable_web_access(self, *, account: str, host_ref: str) -> dict[str, Any]:
+        if self.web_access_error_to_raise is not None:
+            raise self.web_access_error_to_raise
+        self.web_access_calls.append((account, host_ref))
+        # Mirror the real primitive: the connector activates a share record,
+        # so a subsequent get_share_status sees it.
+        self.add_share(account, host_ref)
+        return {
+            "host_id": host_ref,
+            "workspace_domain": f"{host_ref}.owner1234.us1.shares.example",
+            "region": "us1",
+        }
 
     def add_share(self, account: str, host_id: str) -> None:
         self.shares_by_account.setdefault(account, {})[host_id] = "active"

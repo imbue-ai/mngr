@@ -25,6 +25,7 @@ import { Titlebar } from "./Titlebar";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
 import { RecoveryModal } from "../recovery/RecoveryModal";
+import { WebLoginModal } from "../components/WebLoginModal";
 import { DialogCloseButton } from "../components/Modal";
 import { Icon16 } from "../components/Icon";
 import { electronBridge } from "../../electron-bridge";
@@ -258,6 +259,9 @@ export function Shell(): m.Component<ShellAttrs> {
               onClose: () => shell.closeRecoveryModal(),
             })
           : null,
+        // The browser sign-in waiting modal: any page (welcome, accounts,
+        // create) can trigger it through the shared webLogin model.
+        m(WebLoginModal),
         isReconnecting
           ? m(
               "div",

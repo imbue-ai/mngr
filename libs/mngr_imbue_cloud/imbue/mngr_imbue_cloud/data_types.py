@@ -367,10 +367,9 @@ class AuthSession(FrozenModel):
     is_pending_verification: bool = Field(
         default=False,
         description=(
-            "True while the account's email is not yet verified. Pending sessions hold "
-            "tokens (needed to poll verification status) but are excluded from `auth list` "
-            "and never become the active account -- the account does not count as signed "
-            "in until `auth is-verified` observes the verification and promotes it."
+            "Legacy field, no longer consumed: email verification is non-blocking, so every "
+            "session counts as signed in. Kept so session files written by older plugin "
+            "versions still parse; new writes omit it."
         ),
     )
 

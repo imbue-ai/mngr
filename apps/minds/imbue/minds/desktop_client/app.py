@@ -74,6 +74,7 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
@@ -1504,11 +1505,57 @@ def _handle_account_set_plan(user_id: str) -> Response:
         return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
     try:
         cli.set_account_plan(str(account.email), plan)
+    except ImbueCloudEmailNotVerifiedCliError as exc:
+        # The verification-gated refusal is the contextual trigger for the
+        # verification email: auto-send it (the connector's per-user cooldown
+        # bounds repeats) and return the structured 403 so the SPA renders the
+        # "we just sent a link to ..." prompt with a resend button.
+        email = exc.email or str(account.email)
+        is_sent = _send_verification_email_best_effort(cli, email)
+        return make_response(
+            status_code=403,
+            content=json.dumps({"code": "email_not_verified", "email": email, "sent": is_sent}),
+            media_type="application/json",
+        )
     except ImbueCloudCliError as exc:
         # The connector's reason (e.g. "requires partner access") is the
         # user-facing explanation -- surface it plainly.
         return make_response(status_code=502, content=f"Could not switch {account.email} to '{plan}': {exc}")
     return make_response(status_code=303, headers={"Location": "/accounts"})
+
+
+def _send_verification_email_best_effort(cli: ImbueCloudCli, email: str) -> bool:
+    """Send the verification email for ``email``; False when suppressed or failed.
+
+    Best-effort: the caller's response already tells the user a link is on the
+    way (or to use resend), so a failed send must not turn the whole
+    plan-switch response into an error.
+    """
+    try:
+        return cli.auth_resend_verification(email)
+    except ImbueCloudCliError as exc:
+        logger.warning("Could not send the verification email for {}: {}", email, exc)
+        return False
+
+
+def _handle_account_resend_verification(user_id: str) -> Response:
+    """(Re-)send the verification email for one signed-in account (the SPA's resend button)."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None or cli is None:
+        return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
+    is_sent = _send_verification_email_best_effort(cli, str(account.email))
+    return make_response(
+        status_code=200,
+        content=json.dumps({"sent": is_sent, "email": str(account.email)}),
+        media_type="application/json",
+    )
 
 
 def _signed_in_accounts_by_user_id() -> dict[str, str]:
@@ -2966,6 +3013,11 @@ def create_desktop_client(
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
+    app.add_url_rule(
+        "/accounts/<user_id>/resend-verification",
+        view_func=_handle_account_resend_verification,
+        methods=["POST"],
+    )
     app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 

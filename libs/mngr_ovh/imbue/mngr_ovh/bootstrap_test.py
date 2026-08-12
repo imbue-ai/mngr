@@ -107,9 +107,10 @@ def test_wait_for_ssh_times_out_when_socket_refuses() -> None:
 def _write_rsa_private_key(tmp_path: Path, key_name: str = "id_rsa") -> Path:
     """Write an RSA private key in the TraditionalOpenSSL PEM format.
 
-    Matches what ``ssh_utils.generate_ssh_keypair`` produces for the base
-    ``VpsProvider``, so the regression test for Bug 4 reflects the
-    real on-disk format the OVH provider receives.
+    The legacy flavor ``ssh_utils.generate_ssh_keypair`` gave the base
+    ``VpsProvider`` before it switched to Ed25519; installs from that era
+    still hold these keys on disk, so the regression test for Bug 4 reflects
+    a real on-disk format the OVH provider receives.
     """
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = private_key.private_bytes(
@@ -130,12 +131,13 @@ def test_load_private_key_accepts_ed25519(tmp_path: Path) -> None:
 
 
 def test_load_private_key_accepts_rsa(tmp_path: Path) -> None:
-    """Bug 4: RSA keys produced by ``ssh_utils.generate_ssh_keypair`` must load.
+    """Bug 4: legacy RSA keys from older installs' ``generate_ssh_keypair`` must load.
 
     Pre-fix, ``pin_host_key_via_tofu`` hardcoded
     ``paramiko.Ed25519Key.from_private_key_file``, which raised
     ``SSHException("encountered RSA key, expected OPENSSH key")`` against
-    the RSA keys the base ``VpsProvider`` actually produces.
+    the RSA keys the base ``VpsProvider`` produced at the time (it now
+    generates Ed25519, but existing RSA keypairs on disk keep being used).
     """
     key_path = _write_rsa_private_key(tmp_path)
     loaded = _load_private_key(key_path)

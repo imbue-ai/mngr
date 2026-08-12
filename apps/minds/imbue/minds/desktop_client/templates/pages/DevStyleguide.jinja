@@ -54,7 +54,6 @@
   ("cards", "Cards"),
   ("preset-card", "Preset card"),
   ("page-container", "Page container"),
-  ("oauth-icons", "OAuth icons"),
   ("status-badges", "Status badges"),
   ("section-header", "Section header"),
   ("dialog-close", "Dialog close button"),
@@ -600,8 +599,6 @@
     </section>
 
     {# Icons -- 16x16 fill-based icons (Figma node 857-5091) + 12px chrome glyphs.
-       Brand marks (Google / GitHub) live in auth/OauthIcon.jinja
-       because they are multi-color and don't share the stroke shell.
        The 20x20 filled icons (DialogCloseButton X, Latchkey check)
        stay inline next to their use sites. Icons live in the design
        system: though each is a JinjaX component, the set is a shared
@@ -1086,20 +1083,6 @@
         </PageContainer>
       </div>
       <div class="mt-1 type-helper text-secondary font-mono">PageContainer.jinja</div>
-    </section>
-
-    {# OAuth icons #}
-    <section id="oauth-icons" class="scroll-mt-8 mb-6">
-      <h2 class="type-heading text-primary mb-2">OAuth icons</h2>
-      <div class="flex items-center gap-6">
-        <span class="inline-flex items-center gap-2 type-body text-primary">
-          <auth.OauthIcon provider="google" /> Google
-        </span>
-        <span class="inline-flex items-center gap-2 type-body text-primary">
-          <auth.OauthIcon provider="github" /> GitHub
-        </span>
-      </div>
-      <div class="mt-1 type-helper text-secondary font-mono">auth/OauthIcon.jinja</div>
     </section>
 
     {# Status badges #}

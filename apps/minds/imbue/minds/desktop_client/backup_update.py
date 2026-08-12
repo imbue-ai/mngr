@@ -15,7 +15,8 @@ like restart) so the settings view can poll step-level progress:
    apply script stop them first. Waiting is unbounded and cancellable (the
    cancel just stops polling; nothing has been mutated yet).
 2. Apply: one exec runs the mutating script (stash / checkout tag / commit /
-   ``uv sync`` / restart / verify), which auto-rolls-back via ``git revert``
+   ``uv sync --all-packages`` / restart / verify), which auto-rolls-back via
+   ``git revert``
    on failure. A stash-pop conflict is reported as a warning, never a failure.
 3. Env: re-inject the canonical ``restic.env`` when one exists.
 4. Verify: re-run the check; remaining code/env/service problems fail the

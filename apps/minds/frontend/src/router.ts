@@ -5,6 +5,7 @@
 // the channel's client_state registration.
 
 import m from "mithril";
+import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { Shell } from "./views/shell/Shell";
 import { workspaceDisplayIdFromPath, workspaceSurfaceIdFromPath } from "./views/shell/classify";
 import type { ShellState } from "./views/shell/shell-state";
@@ -106,6 +107,16 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
   }
   try {
     const parsed = new URL(url, window.location.origin);
+    // The Electron shell's auth_required nudge arrives here (not as a page
+    // load) when the window is a live SPA: its ``?web-login=1`` must start
+    // the sign-in flow now and be stripped from the routed URL, or no modal
+    // would open and the leftover param would spuriously restart the flow on
+    // the window's next full reload. Mirrors the boot-time consumption in
+    // index.ts.
+    const webLoginMessage = consumeWebLoginParams(parsed.searchParams);
+    if (webLoginMessage !== null) {
+      void webLogin.start(webLoginMessage);
+    }
     // A template deeplink (minds://create?git_url= -> /create/template?
     // git_url=) that lands while a machine is displayed floats the stepper as a
     // modal over that machine (create new OR add to it), the SPA heir of the

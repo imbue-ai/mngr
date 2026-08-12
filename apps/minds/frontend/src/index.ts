@@ -9,6 +9,7 @@ import { electronBridge } from "./electron-bridge";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { setPendingHelpLaunch } from "./models/help";
 import { attachInboxRequestsStore } from "./models/inbox";
+import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
 import { installTooltips } from "./views/shell/tooltips";
@@ -159,6 +160,21 @@ function main(): void {
   // buttons, etc.); one document-level install survives mithril's re-renders.
   installTooltips();
   channel.start();
+
+  // ``?web-login=1`` asks this window to start the browser sign-in as soon
+  // as it loads: the backend's legacy /auth page URLs redirect here, and the
+  // Electron shell navigates here on auth_required events. The optional
+  // message explains why the sign-in is being asked for.
+  const bootParams = new URLSearchParams(window.location.search);
+  const webLoginMessage = consumeWebLoginParams(bootParams);
+  if (webLoginMessage !== null) {
+    // The boot params are one-shot: the Electron shell reloads every window
+    // on auth_success (keeping the URL), so they must be consumed here or the
+    // post-sign-in reload would immediately restart the flow.
+    const query = bootParams.toString();
+    history.replaceState(null, "", window.location.pathname + (query ? `?${query}` : "") + window.location.hash);
+    void webLogin.start(webLoginMessage);
+  }
 }
 
 main();

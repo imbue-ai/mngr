@@ -28,6 +28,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
@@ -1216,3 +1217,120 @@ def test_list_shares_parses_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(items) == 1
     assert items[0].host_id == _SHARE_HOST_ID
     assert items[0].state == "inactive"
+
+
+# ----------------------------------------------------------------------
+# Browser-login support probe + device-token exchange
+# ----------------------------------------------------------------------
+
+
+def _make_transport_client(handler) -> ImbueCloudConnectorClient:
+    """Client using the injected-transport seam (no module-level httpx patching)."""
+    return ImbueCloudConnectorClient(
+        base_url=AnyUrl("https://example.com"),
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_supports_browser_login_true_when_accounts_config_is_served() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/accounts/api/config"
+        return httpx.Response(200, json={"turnstile_site_key": "", "google_enabled": False})
+
+    assert _make_transport_client(handler).supports_browser_login() is True
+
+
+def test_supports_browser_login_false_when_the_connector_is_too_old() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    assert _make_transport_client(handler).supports_browser_login() is False
+
+
+def test_auth_device_token_maps_404_to_a_too_old_connector_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    client = _make_transport_client(handler)
+    with pytest.raises(ImbueCloudAuthError, match="minds env deploy"):
+        client.auth_device_token(code="c", code_verifier="v", redirect_uri="http://127.0.0.1:1/callback")
+
+
+def test_auth_device_token_parses_a_successful_exchange() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content)
+        assert body == {"code": "c", "code_verifier": "v", "redirect_uri": "http://127.0.0.1:1/callback"}
+        return httpx.Response(
+            200,
+            json={
+                "status": "OK",
+                "user": {"user_id": "u-1", "email": "a@example.com", "display_name": None},
+                "tokens": {"access_token": "at", "refresh_token": "rt"},
+            },
+        )
+
+    response = _make_transport_client(handler).auth_device_token(
+        code="c", code_verifier="v", redirect_uri="http://127.0.0.1:1/callback"
+    )
+    assert response.status == "OK"
+    assert response.tokens == {"access_token": "at", "refresh_token": "rt"}
+
+
+def test_auth_revoke_current_session_treats_success_and_401_as_revoked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """200/204/401 all count as revoked (401 = already revoked); no fallback call is made."""
+    for status_code in (200, 204, 401):
+        calls: list[str] = []
+
+        def handler(request: httpx.Request, calls: list[str] = calls, status_code: int = status_code):
+            calls.append(request.url.path)
+            return httpx.Response(status_code)
+
+        client = _install_mock_httpx(monkeypatch, handler)
+        client.auth_revoke_current_session(SecretStr("tok"))
+        assert calls == ["/auth/session/revoke-current"]
+
+
+def test_auth_revoke_current_session_falls_back_to_revoke_all_on_an_old_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector without the device-scoped route (404) gets the revoke-all fallback, so the token never stays live."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/auth/session/revoke-current":
+            return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(204)
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    client.auth_revoke_current_session(SecretStr("tok"))
+    assert calls == ["/auth/session/revoke-current", "/auth/session/revoke"]
+
+
+def test_auth_revoke_current_session_raises_on_server_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAuthError, match="Revoke failed"):
+        client.auth_revoke_current_session(SecretStr("tok"))
+
+
+def test_set_account_plan_maps_structured_verification_403_to_typed_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/account/plan"
+        return httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "email_not_verified",
+                    "email": "alice@example.com",
+                    "message": "This action requires a verified email address (alice@example.com).",
+                }
+            },
+        )
+
+    client = _make_transport_client(handler)
+    with pytest.raises(ImbueCloudEmailNotVerifiedError) as exc_info:
+        client.set_account_plan(SecretStr("tok"), "ally")
+    assert exc_info.value.email == "alice@example.com"

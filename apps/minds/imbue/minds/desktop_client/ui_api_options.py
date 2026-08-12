@@ -46,11 +46,14 @@ from imbue.mngr.primitives import AgentId
 # templates.py's _WHOLE_MACHINE_SERVICE until the legacy copy is deleted.
 WHOLE_MACHINE_SERVICE: Final[str] = "system_interface"
 
-# Interfaces the workspace is built out of rather than apps built on top of
-# it: excluded from the per-app share targets (the whole machine remains the
-# deliberate way to grant everything).
+# Interfaces the workspace is built out of (or internal infrastructure) rather
+# than apps built on top of it: excluded from the per-app share targets (the
+# whole machine remains the deliberate way to grant everything). ``owner-exec``
+# is the internal SSH-equivalent exec channel (authorized by request signatures
+# against authorized_keys, never a share grant), so it must never be offered as
+# a per-app share target.
 _NON_APP_SHARE_SERVICES: Final[frozenset[str]] = frozenset(
-    {"chat", "chats", "terminal", "terminals", "browser", "browsers"}
+    {"chat", "chats", "terminal", "terminals", "browser", "browsers", "owner-exec"}
 )
 
 # A per-app share link is a real origin, so only DNS-label-safe names qualify.

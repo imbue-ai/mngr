@@ -120,6 +120,11 @@ MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
 # `test_deploy_rollback` uses to drive the auto-rollback path.
 INJECT_BROKEN_HEALTHCHECK_ENV_VAR: Final[str] = "MINDS_INJECT_BROKEN_HEALTHCHECK"
 
+# The frps tunnel-control port every relay listens on. Mirrors
+# ``DEFAULT_TUNNEL_CONTROL_PORT`` in ``apps/share_relay`` (not imported:
+# minds does not depend on the share_relay package); keep the two in sync.
+_RELAY_TUNNEL_CONTROL_PORT: Final[int] = 7000
+
 
 class ProviderCredentials(FrozenModel):
     """Per-provider credentials read from the dev-tier Vault secrets.
@@ -827,6 +832,7 @@ def _deploy_env_locked(
     first_pass_overrides = _compute_secret_overrides(
         name=name,
         lifecycle=lifecycle,
+        cloudflare_domain=str(deploy_config.cloudflare_domain),
         neon_record=neon_record,
         supertokens_record=supertokens_record,
         expected_connector_url=expected_connector_url,
@@ -868,6 +874,22 @@ def _deploy_env_locked(
         if generation_id is not None:
             connector_secret_overrides.setdefault(GENERATION_ID_KEY, generation_id)
         connector_secret_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
+        # The tier's pinned web-create template + blessed shape (deploy.toml
+        # [web_workspaces]) drive the connector's POST /hosts/claim; the chrome
+        # origin lets the hosted web chrome embed shared workspaces (the chrome
+        # is path-served on the connector origin, so the two are the same URL).
+        # Both are scoped to tiers that opt into web workspace creation.
+        if deploy_config.web_workspaces is not None:
+            web_workspaces = deploy_config.web_workspaces
+            connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REPO", str(web_workspaces.template_repo))
+            connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REF", str(web_workspaces.template_ref))
+            if web_workspaces.cpus is not None:
+                connector_secret_overrides.setdefault("MINDS_WEB_SHAPE_CPUS", str(int(web_workspaces.cpus)))
+            if web_workspaces.memory_gb is not None:
+                connector_secret_overrides.setdefault("MINDS_WEB_SHAPE_MEMORY_GB", str(int(web_workspaces.memory_gb)))
+            if web_workspaces.gpu_count is not None:
+                connector_secret_overrides.setdefault("MINDS_WEB_SHAPE_GPU_COUNT", str(int(web_workspaces.gpu_count)))
+            connector_secret_overrides.setdefault("SHARE_CHROME_ORIGIN", str(expected_connector_url).rstrip("/"))
         # When the operator sets MINDS_INJECT_BROKEN_HEALTHCHECK at deploy time,
         # propagate it into the deployed connector's Modal Secret so the
         # in-container healthcheck returns 500 and the auto-rollback path
@@ -1105,10 +1127,21 @@ def _expected_litellm_proxy_url(
             assert_never(unreachable)
 
 
+def relay_region_for_env(name: DevEnvName) -> str:
+    """The per-env relay region label: the env name as a DNS label.
+
+    Env names allow ``_`` (Modal/Neon accept it) but DNS labels do not, so
+    underscores map to hyphens. Collisions (``dev-a_b`` vs ``dev-a-b``) are
+    theoretically possible and acceptable on the dev/ci tiers this feeds.
+    """
+    return str(name).replace("_", "-").lower()
+
+
 def _compute_secret_overrides(
     *,
     name: DevEnvName,
     lifecycle: DeployLifecycleConfig,
+    cloudflare_domain: str,
     neon_record: NeonProjectRecord | None,
     supertokens_record: SuperTokensAppRecord | None,
     expected_connector_url: AnyUrl,
@@ -1126,6 +1159,20 @@ def _compute_secret_overrides(
         "supertokens": {"AUTH_WEBSITE_DOMAIN": str(expected_connector_url)},
         "litellm-connector": {"LITELLM_PROXY_URL": str(expected_litellm_proxy_url)},
     }
+    # Per-env Modal-env tiers (dev / ci) get a per-env relay region: the
+    # region label is the env name and the relay endpoint hostname is
+    # deterministic (``relay.<env>.<domain>``), so every dev env expects its
+    # OWN relay instead of competing for one shared dev relay whose
+    # plugin-auth URL can only point at a single env's connector. Stand the
+    # relay itself up with ``just provision-dev-relay`` (see
+    # docs/environments.md). Shared tiers (staging / production) keep their
+    # Vault-configured multi-region relay fleet untouched.
+    if lifecycle.modal_env_strategy == ModalEnvStrategy.PER_ENV:
+        region = relay_region_for_env(name)
+        overrides["sharing"] = {
+            "SHARE_DEFAULT_REGION": region,
+            "SHARE_RELAY_ENDPOINTS": f"{region}=relay.{region}.{cloudflare_domain}:{_RELAY_TUNNEL_CONTROL_PORT}",
+        }
     if lifecycle.creates_resources:
         assert neon_record is not None
         assert supertokens_record is not None

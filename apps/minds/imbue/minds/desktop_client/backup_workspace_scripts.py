@@ -19,7 +19,7 @@ out of arbitrarily noisy output:
   the backup-service code (``system/services/host_backup``,
   ``system/libs/host_backup``, or ``libs/host_backup``
   on pre-declutter workspaces) at the target tag, commit ``backup-update: <tag>``,
-  ``uv sync``, restart the service, verify it comes back, and auto-rollback
+  ``uv sync --all-packages``, restart the service, verify it comes back, and auto-rollback
   (``git revert``) on failure. Optionally stops running chats first.
 - the *restore* script: rewinds the whole backup root to a chosen restic
   snapshot, in place -- gate on chats/ticks, stop every supervisord service
@@ -31,7 +31,7 @@ out of arbitrarily noisy output:
   ``restic.env`` is written back afterwards, a ``restored`` snapshot of the
   restored state is appended (tagged with the source snapshot's time, so the
   timeline shows the restored version as a new "Restored from ..." entry),
-  then ``uv sync`` and a restart of every supervisord service. Every exit
+  then ``uv sync --all-packages`` and a restart of every supervisord service. Every exit
   path after the service stop restarts the services (best-effort). The
   snapshot's subpath (the directory inside the snapshot that corresponds to
   the backup root) and timestamp are resolved by minds and passed in via argv,
@@ -643,7 +643,10 @@ def _main():
         result["committed"] = True
 
     # Sync dependencies and bounce the service; roll back the commit on failure.
-    synced = _run(["uv", "sync"], timeout=900)
+    # --all-packages matters: a root-closure-scoped sync would prune workspace
+    # members that are not root dependencies from the venv, deleting their
+    # console scripts and spawn-erroring their supervisord programs.
+    synced = _run(["uv", "sync", "--all-packages"], timeout=900)
     failure_detail = ""
     if synced.returncode != 0:
         failure_detail = "uv sync failed: %s" % (synced.stderr or synced.stdout).strip()[-800:]
@@ -654,7 +657,7 @@ def _main():
             reverted = _git(["revert", "--no-edit", committed_sha], timeout=120)
             if reverted.returncode == 0:
                 result["rolled_back"] = True
-                _run(["uv", "sync"], timeout=900)
+                _run(["uv", "sync", "--all-packages"], timeout=900)
                 restore_detail = _restart_and_verify_service()
                 if restore_detail:
                     failure_detail += "; the rollback commit landed but restoring the service failed: %s" % restore_detail
@@ -1215,9 +1218,12 @@ def _main():
     result["restored_snapshot_taken"] = restored_snapshot == 0
 
     # Backups exclude regenerable trees (.venv etc.), so rebuild dependencies
-    # before the services come back.
+    # before the services come back. --all-packages matters: a root-closure
+    # sync would prune workspace members that are not root dependencies from
+    # the venv, deleting their console scripts and spawn-erroring their `uv
+    # run <name>` supervisord programs on the restart below.
     _progress("Reinstalling dependencies (uv sync)...")
-    synced = _run(["uv", "sync"], timeout=900, cwd=code_dir)
+    synced = _run(["uv", "sync", "--all-packages"], timeout=900, cwd=code_dir)
     if synced.returncode != 0:
         detail = "restored, but uv sync failed: %s" % (synced.stderr or synced.stdout).strip()[-800:]
         _finish(result, "failed", detail)

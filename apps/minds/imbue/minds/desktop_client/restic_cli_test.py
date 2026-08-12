@@ -85,6 +85,15 @@ def test_looks_like_transient_auth_failure_matches_known_signals() -> None:
     assert restic_cli._looks_like_transient_auth_failure("Fatal: open repository failed: Unauthorized") is True
     assert restic_cli._looks_like_transient_auth_failure("InvalidAccessKeyId: key is not valid") is True
     assert restic_cli._looks_like_transient_auth_failure("SignatureDoesNotMatch") is True
+    # restic renders a not-yet-propagated secret as this message, not the bare code.
+    assert (
+        restic_cli._looks_like_transient_auth_failure(
+            "Fatal: The request signature we calculated does not match the signature you provided"
+        )
+        is True
+    )
+    # The rendered access-key phrasing (spaces) is distinct from the bare InvalidAccessKeyId code.
+    assert restic_cli._looks_like_transient_auth_failure("Fatal: The provided invalid access key is not valid") is True
     assert restic_cli._looks_like_transient_auth_failure("Fatal: network unreachable") is False
     assert restic_cli._looks_like_transient_auth_failure("repository master key already initialized") is False
 

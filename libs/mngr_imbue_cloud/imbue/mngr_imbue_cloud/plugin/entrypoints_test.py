@@ -25,9 +25,7 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
 
-def _make_session(
-    email: str = "alice@imbue.com", user_id: str = "user-abc", is_pending_verification: bool = False
-) -> AuthSession:
+def _make_session(email: str = "alice@imbue.com", user_id: str = "user-abc") -> AuthSession:
     return AuthSession(
         user_id=SuperTokensUserId(user_id),
         email=ImbueCloudAccount(email),
@@ -35,7 +33,6 @@ def _make_session(
         access_token=SecretStr("header.payload.sig"),
         refresh_token=SecretStr("refresh-tok"),
         access_token_expires_at=None,
-        is_pending_verification=is_pending_verification,
     )
 
 
@@ -106,24 +103,6 @@ def test_on_load_config_does_not_inject_when_accounts_exist(tmp_path: Path) -> N
 
     default_name = ProviderInstanceName(IMBUE_CLOUD_BACKEND_NAME)
     assert default_name not in config_dict["providers"]
-
-
-def test_on_load_config_disables_default_when_only_pending_accounts(tmp_path: Path) -> None:
-    """A session still pending email verification does not count as signed in."""
-    profile_dir = _initialize_host_dir(tmp_path)
-    store = ImbueCloudSessionStore(sessions_dir=get_sessions_dir(profile_dir))
-    store.save(_make_session(is_pending_verification=True))
-
-    config_dict: dict[str, Any] = {
-        "default_host_dir": tmp_path,
-        "providers": {},
-    }
-
-    on_load_config(config_dict)
-
-    default_name = ProviderInstanceName(IMBUE_CLOUD_BACKEND_NAME)
-    assert default_name in config_dict["providers"]
-    assert config_dict["providers"][default_name].is_enabled is False
 
 
 def test_on_load_config_injects_when_default_host_dir_missing() -> None:

@@ -279,6 +279,15 @@ class CreateWorkspaceRequest(ApiRequestModel):
         default=None, description="Restic backup provider (default CONFIGURE_LATER)"
     )
     backup_api_key_env: str | None = Field(default=None, description="KEY=VALUE block for an API_KEY backup provider")
+    enable_web_access: bool | None = Field(
+        default=None,
+        description=(
+            "Bring sharing up post-create so the workspace is reachable from the hosted web "
+            "client (default off). Requires an account: imbue_cloud rows use the connector's "
+            "server-side enable-sharing; local docker/lima rows use the desktop share flow "
+            "with the owner granted."
+        ),
+    )
 
 
 class PatchWorkspaceRequest(ApiRequestModel):

@@ -62,15 +62,21 @@ def build_share_env_text(
     relay_token: str,
     connector_url: str,
     broker_url: str,
+    # The hosted web chrome's origin, allowed to embed the workspace and probe
+    # its gateway /_health; empty leaves the chrome locked out (pre-web shape).
+    chrome_origin: str,
 ) -> str:
     """Render share.env in the shape the workspace's share-gateway parses."""
-    return (
-        f"export SHARE_WORKSPACE_DOMAIN={workspace_domain}\n"
-        f"export SHARE_RELAY_ENDPOINT={relay_endpoint}\n"
-        f"export SHARE_RELAY_TOKEN={relay_token}\n"
-        f"export SHARE_CONNECTOR_URL={connector_url}\n"
-        f"export SHARE_BROKER_URL={broker_url}\n"
-    )
+    lines = [
+        f"export SHARE_WORKSPACE_DOMAIN={workspace_domain}",
+        f"export SHARE_RELAY_ENDPOINT={relay_endpoint}",
+        f"export SHARE_RELAY_TOKEN={relay_token}",
+        f"export SHARE_CONNECTOR_URL={connector_url}",
+        f"export SHARE_BROKER_URL={broker_url}",
+    ]
+    if chrome_origin:
+        lines.append(f"export SHARE_CHROME_ORIGIN={chrome_origin}")
+    return "\n".join(lines) + "\n"
 
 
 def _toml_string_array(values: list[str]) -> str:

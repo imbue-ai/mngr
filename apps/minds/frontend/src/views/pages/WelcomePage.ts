@@ -1,19 +1,18 @@
-// First-run splash: the three-choice account gate, matching the legacy
-// Welcome.jinja. Sign Up is the one primary action (most users landing on the
-// first-run splash need an account rather than a session); signing in is the
-// "Already have an account? Sign in" link below it; the third choice is
-// "Continue without an account", which records the skip so the first-run
-// routing stops returning here. Sign Up / Sign in are full-page navigations
-// to the backend-served /auth pages (the same surface the Accounts page's
-// "Add account" uses); their post-login return lands back in the app.
-// Self-advances to home the moment an account appears (e.g. a sign-in that
-// completed elsewhere): every channel `accounts` message triggers a redraw,
-// so the onupdate hook re-checks the accounts store.
+// First-run splash: the three-choice account gate. Sign Up is the one
+// primary action (most users landing on the first-run splash need an account
+// rather than a session); signing in is the "Already have an account? Sign
+// in" link below it; the third choice is "Continue without an account",
+// which records the skip so the first-run routing stops returning here.
+// Sign Up / Sign in both launch the hosted accounts page in the system
+// browser (the shared webLogin flow); the page self-advances to home the
+// moment an account appears -- every channel `accounts` message triggers a
+// redraw, so the onupdate hook re-checks the accounts store.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { skipAccountSetup } from "../../models/onboarding";
-import { Button, ButtonLink } from "../components/Button";
+import { webLogin } from "../../models/webLogin";
+import { Button } from "../components/Button";
 
 function WelcomePageComponent(): m.Component {
   let isBusy = false;
@@ -46,21 +45,28 @@ function WelcomePageComponent(): m.Component {
           m("h1", { class: "type-heading-lg text-primary mb-2" }, "Welcome to Minds"),
           m("p", { class: "text-secondary type-body mb-8" }, "Run persistent, autonomous AI agents."),
           m(
-            ButtonLink,
+            Button,
             {
-              href: "/auth/signup",
               variant: "primary",
               size: "lg",
               block: true,
               id: "welcome-signup-btn",
+              onclick: () => void webLogin.start(),
             },
             "Sign Up",
           ),
           m("div", { class: "mt-4 mb-8 type-body text-secondary" }, [
             "Already have an account? ",
+            // A button (not an href-less anchor) so it is keyboard-focusable;
+            // Tailwind preflight strips button chrome, so it renders as a link.
             m(
-              "a",
-              { href: "/auth/login", id: "welcome-login-btn", class: "font-medium text-primary hover:underline" },
+              "button",
+              {
+                type: "button",
+                id: "welcome-login-btn",
+                class: "font-medium text-primary hover:underline cursor-pointer",
+                onclick: () => void webLogin.start(),
+              },
               "Sign in",
             ),
           ]),

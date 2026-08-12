@@ -129,3 +129,157 @@ describe("AccountsDetailModel", () => {
     expect(observedContentType).toBe("application/x-www-form-urlencoded");
   });
 });
+
+describe("verify-email prompt", () => {
+  function makeModelWithPlanResponse(
+    planResponse: () => Response,
+    onResend?: () => Response,
+  ): AccountsDetailModel {
+    return new AccountsDetailModel(
+      async (input) => {
+        const url = String(input);
+        if (url === "/ui/api/accounts")
+          return jsonResponse({ accounts: [ACCOUNT] });
+        if (url === "/accounts/user-1/plan") return planResponse();
+        if (url === "/accounts/user-1/resend-verification" && onResend)
+          return onResend();
+        return jsonResponse({ plan_view: null, trim_status: null });
+      },
+      () => {},
+      (callback) => callback(),
+    );
+  }
+
+  it("shows the prompt on a structured email_not_verified 403 instead of the page error", async () => {
+    const model = makeModelWithPlanResponse(
+      () =>
+        new Response(
+          JSON.stringify({
+            code: "email_not_verified",
+            email: "alice@example.com",
+            sent: true,
+          }),
+          { status: 403 },
+        ),
+    );
+    await model.load();
+
+    await model.switchPlan("user-1", "ally");
+
+    expect(model.actionError).toBe("");
+    expect(model.verifyEmailPromptFor("user-1")).toEqual({
+      email: "alice@example.com",
+      wasAutoSent: true,
+      isResending: false,
+      wasResent: false,
+    });
+  });
+
+  it("records a suppressed auto-send so the prompt does not claim a link was sent", async () => {
+    const model = makeModelWithPlanResponse(
+      () =>
+        new Response(
+          JSON.stringify({
+            code: "email_not_verified",
+            email: "alice@example.com",
+            sent: false,
+          }),
+          { status: 403 },
+        ),
+    );
+    await model.load();
+
+    await model.switchPlan("user-1", "ally");
+
+    expect(model.verifyEmailPromptFor("user-1")).toEqual({
+      email: "alice@example.com",
+      wasAutoSent: false,
+      isResending: false,
+      wasResent: false,
+    });
+  });
+
+  it("keeps a plain 403 as the page error (no prompt)", async () => {
+    const model = makeModelWithPlanResponse(
+      () => new Response("The 'ally' plan requires partner access", { status: 403 }),
+    );
+    await model.load();
+
+    await model.switchPlan("user-1", "ally");
+
+    expect(model.verifyEmailPromptFor("user-1")).toBeNull();
+    expect(model.actionError).toBe("The 'ally' plan requires partner access");
+  });
+
+  it("does not claim a resend the server suppressed (200 with sent: false)", async () => {
+    const model = makeModelWithPlanResponse(
+      () =>
+        new Response(
+          JSON.stringify({ code: "email_not_verified", email: "alice@example.com", sent: true }),
+          { status: 403 },
+        ),
+      () => jsonResponse({ sent: false, email: "alice@example.com" }),
+    );
+    await model.load();
+    await model.switchPlan("user-1", "ally");
+
+    await model.resendVerification("user-1");
+
+    expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(false);
+    expect(model.verifyEmailPromptFor("user-1")?.isResending).toBe(false);
+  });
+
+  it("clears the prompt on the next switch attempt and marks a resend", async () => {
+    let planCalls = 0;
+    const model = makeModelWithPlanResponse(
+      () => {
+        planCalls += 1;
+        return new Response(
+          JSON.stringify({ code: "email_not_verified", email: "alice@example.com", sent: true }),
+          { status: 403 },
+        );
+      },
+      () => jsonResponse({ sent: true, email: "alice@example.com" }),
+    );
+    await model.load();
+    await model.switchPlan("user-1", "ally");
+
+    await model.resendVerification("user-1");
+    expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(true);
+
+    await model.switchPlan("user-1", "ally");
+    expect(planCalls).toBe(2);
+    expect(model.verifyEmailPromptFor("user-1")?.wasResent).toBe(false);
+  });
+});
+
+describe("log-out busy state", () => {
+  it("marks the account busy during the POST and clears it after", async () => {
+    let releaseLogout: (response: Response) => void = () => {};
+    const model = new AccountsDetailModel(
+      async (input) => {
+        const url = String(input);
+        if (url === "/ui/api/accounts")
+          return jsonResponse({ accounts: [ACCOUNT] });
+        if (url === "/accounts/user-1/logout")
+          return new Promise<Response>((resolve) => {
+            releaseLogout = resolve;
+          });
+        return jsonResponse({ plan_view: null, trim_status: null });
+      },
+      () => {},
+      (callback) => callback(),
+    );
+    await model.load();
+
+    const logoutDone = model.logOut("user-1");
+    expect(model.isLoggingOut("user-1")).toBe(true);
+    // A second click while busy is swallowed (no state churn, no extra POST).
+    await model.logOut("user-1");
+    expect(model.isLoggingOut("user-1")).toBe(true);
+
+    releaseLogout(new Response("", { status: 200 }));
+    await logoutDone;
+    expect(model.isLoggingOut("user-1")).toBe(false);
+  });
+});

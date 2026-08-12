@@ -68,6 +68,7 @@ mngr imbue_cloud auth signout [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--account` | text | Account email (defaults to the active account) | None |
+| `--all-devices` | boolean | Revoke EVERY session for this account (other devices and the browser), not just this machine's. | `False` |
 | `--connector-url` | text | Override connector URL | None |
 
 ## mngr imbue_cloud auth list
@@ -126,12 +127,12 @@ mngr imbue_cloud auth refresh [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
-## mngr imbue_cloud auth oauth
+## mngr imbue_cloud auth login
 
 **Usage:**
 
 ```text
-mngr imbue_cloud auth oauth [OPTIONS] {google|github}
+mngr imbue_cloud auth login [OPTIONS]
 ```
 **Options:**
 
@@ -139,10 +140,11 @@ mngr imbue_cloud auth oauth [OPTIONS] {google|github}
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--account` | text | Optional account email. When set, the OAuth response must come back with the same email or the call fails (useful when re-authing a known account). When omitted, whatever email the OAuth provider returns becomes this session's account email -- this is the right shape for first-time signin via Google or GitHub. | None |
-| `--callback-port` | integer | Bind the local OAuth callback listener to a specific port (default: auto-pick free port). | None |
-| `--no-browser` | boolean | Print the authorize URL instead of launching the browser; useful when running headless. | `False` |
-| `--success-redirect-url` | text | URL the success page links to once the OAuth callback lands (e.g. a minds:// deeplink so a click returns the user to the desktop app). Default: no link; the page just says to close the tab. | None |
+| `--account` | text | Optional account email. When set, the browser login must come back with the same email or the call fails (useful when re-authing a known account). When omitted, whatever account signs in on the hosted page becomes this session's account. | None |
+| `--callback-port` | integer | Bind the local callback listener to a specific port (default: auto-pick free port). | None |
+| `--no-browser` | boolean | Print the sign-in URL instead of launching the browser. The URL only works in a browser on THIS machine (it redirects back to a localhost listener); on a headless machine use `auth signin` instead. | `False` |
+| `--success-redirect-url` | text | URL the success page links to once the callback lands (e.g. a minds:// deeplink so a click returns the user to the desktop app). Default: no link; the page just says to close the tab. | None |
+| `--url-file` | file | Write the sign-in URL to this file once the callback listener is up. Lets an embedder (the minds desktop client) offer a copy-the-link fallback without parsing stderr. | None |
 | `--connector-url` | text | Override connector URL | None |
 
 ## mngr imbue_cloud auth forgot-password
@@ -299,6 +301,22 @@ mngr imbue_cloud hosts list [OPTIONS]
 
 ```text
 mngr imbue_cloud hosts release [OPTIONS] HOST_DB_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud hosts enable-sharing
+
+**Usage:**
+
+```text
+mngr imbue_cloud hosts enable-sharing [OPTIONS] HOST_REF
 ```
 **Options:**
 
@@ -560,6 +578,7 @@ mngr imbue_cloud shares create [OPTIONS] HOST_ID
 | ---- | ---- | ----------- | ------- |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
+| `--entry-label` | text | The workspace's shell-service origin label (e.g. system_interface-<rand>); the hosted web chrome enters the workspace at <entry-label>.<workspace-domain>. Omit to keep any previously recorded label. | None |
 
 ## mngr imbue_cloud shares delete
 

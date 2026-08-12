@@ -1,20 +1,17 @@
 {#def #}
 {#
   Welcome/splash page for first-time users. Sign Up is the one primary action;
-  signing in is the "Already have an account? Sign in" link below it (matching
-  the in-form footer of ``auth.AuthForm``), because everyone reaching this
-  splash is a first-run user and most of them need an account rather than a
-  session. The third choice is "continue without an account". The user must
-  resolve one of the three before moving on: the titlebar home button is
-  hidden here (chrome.js), and the home route bounces back to this splash
-  until an account exists or the skip was chosen.
+  signing in is the "Already have an account? Sign in" link below it, because
+  everyone reaching this splash is a first-run user and most of them need an
+  account rather than a session. The third choice is "continue without an
+  account". The user must resolve one of the three before moving on: the
+  titlebar home button is hidden here (chrome.js), and the home route bounces
+  back to this splash until an account exists or the skip was chosen.
 
-  Sign Up / Sign in open the centered sign-in modal on the shared overlay
-  surface. The splash is a trusted local page on the chrome surface, so it
-  calls the ``openSigninModal`` shell bridge directly. ``mode`` picks which
-  AuthForm tab leads; ``returnTo: '/'`` lands a successful sign-in on the home
-  screen. In a plain browser (no bridge) the links fall back to the full-page
-  /auth/* routes.
+  Sign Up / Sign in navigate to the /auth/* routes, which redirect into the
+  SPA and start the hosted browser sign-in flow (the web-login waiting
+  modal). On legacy shells that still expose the ``openSigninModal`` bridge,
+  the script below opens that shell modal instead.
 
   The skip link goes through "/welcome/skip" (which records the choice, then
   redirects to "/") rather than straight to "/create": recording the choice
@@ -27,9 +24,10 @@
 {% set _scripts %}
 <script>
   (function () {
-    // Trusted local page on the chrome surface: open the shared sign-in modal
-    // via the shell bridge. In a plain browser (no bridge) the links navigate
-    // to the full-page /auth/* routes on their own.
+    // Legacy shell bridge: older shells expose openSigninModal and handle the
+    // sign-in themselves. Without the bridge (current builds, plain browsers)
+    // the links navigate to the /auth/* routes, which bounce into the SPA's
+    // hosted browser sign-in flow.
     if (window.minds && window.minds.openSigninModal) {
       var openModal = function (mode) {
         window.minds.openSigninModal('/', mode);

@@ -81,7 +81,11 @@ def test_prevent_broad_exception_catch() -> None:
     # the same reason: it is the only publisher of chrome state, so an unexpected
     # exception in one pass must be logged (with traceback) and survived rather
     # than silently freezing every window's state for the process lifetime.
-    rc.check_broad_exception_catch(_DIR, snapshot(11))
+    # ``WebAccessEnabler.__call__`` carries the same guard for the same reason: it
+    # is a best-effort post-create side effect running in the create worker, so an
+    # unexpected failure must be logged (with traceback) and survived rather than
+    # crashing the worker and skipping the create's remaining steps.
+    rc.check_broad_exception_catch(_DIR, snapshot(12))
 
 
 def test_prevent_base_exception_catch() -> None:

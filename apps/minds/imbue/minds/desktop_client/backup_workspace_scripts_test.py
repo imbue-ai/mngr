@@ -135,6 +135,19 @@ def test_module_official_url_constant_matches_the_script_default() -> None:
     assert f'DEFAULT_OFFICIAL_REMOTE_URL = "{OFFICIAL_REMOTE_URL}"' in BACKUP_CHECK_SCRIPT
 
 
+def test_update_and_restore_scripts_sync_with_all_packages() -> None:
+    # `uv sync` is exact: a root-closure-scoped sync prunes uv workspace
+    # members that are not root dependencies from the venv, deleting their
+    # console scripts and spawn-erroring their `uv run <name>` supervisord
+    # programs on the restart that follows. Every sync these scripts run must
+    # therefore be --all-packages, matching the workspace's boot-time
+    # converge. The scripts ship verbatim as these constants, so asserting on
+    # the source covers all call sites (including the update rollback path).
+    for script in (BACKUP_APPLY_UPDATE_SCRIPT, BACKUP_RESTORE_SCRIPT):
+        assert '["uv", "sync", "--all-packages"]' in script
+        assert '["uv", "sync"]' not in script
+
+
 def test_extract_marker_json_finds_last_payload_amid_noise() -> None:
     stdout = 'warning: something\nMARKER:{"a": 1}\nnoise\nMARKER:{"a": 2}\ntrailing\n'
     assert extract_marker_json(stdout, "MARKER:") == {"a": 2}

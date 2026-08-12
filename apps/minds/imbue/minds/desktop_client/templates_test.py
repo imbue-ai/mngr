@@ -439,12 +439,12 @@ def test_render_create_form_opens_signin_modal_via_overlay_bridge() -> None:
     # desktop client's shared overlay layer (so it covers the title bar), not an
     # in-page dialog. The create page therefore no longer embeds the auth form
     # or loads auth.js itself; being a trusted local page on the chrome surface,
-    # it asks the Electron main process to open the /auth/signin-modal page via
-    # the window.minds shell bridge (falling back to navigating there directly in
-    # the browser).
+    # it asks the Electron main process to open the sign-in modal via the
+    # window.minds shell bridge (falling back to the /auth/login redirect into
+    # the SPA's web-login flow in the browser).
     html = render_create_form(accounts=[])
     assert "window.minds.openSigninModal()" in html
-    assert "/auth/signin-modal" in html
+    assert "/auth/login" in html
     # The auth form + its script now live in the overlay page, not here.
     assert 'id="signin-modal"' not in html
     assert 'id="signin-form"' not in html
@@ -1251,7 +1251,7 @@ def test_render_template_page_carries_branch_hidden_input() -> None:
 def test_render_template_page_opens_signin_modal_via_overlay_bridge() -> None:
     html = _render_template(accounts=[])
     assert "window.minds.openSigninModal()" in html
-    assert "/auth/signin-modal" in html
+    assert "/auth/login" in html
 
 
 def test_render_template_page_presets_match_create_form() -> None:
@@ -2285,28 +2285,6 @@ def test_form_label_inline_drops_block_and_mb() -> None:
     assert "type-label" in html
 
 
-def test_oauth_button_renders_google_label_and_brand_icon_with_hook_class() -> None:
-    html = CATALOG.render("auth.OauthButton", provider="google")
-    # The .oauth-btn hook is load-bearing -- static/auth.js queries for
-    # it to enable/disable all OAuth buttons as a group.
-    assert "oauth-btn" in html
-    # Label text + data-oauth provider attr.
-    assert "Continue with Google" in html
-    assert 'data-oauth="google"' in html
-    # Brand glyph from auth.OauthIcon is composed inline. The path
-    # fragment is one of the four <path d="..."> values unique to
-    # Google's blue triangle.
-    assert "M22.56 12.25" in html
-
-
-def test_oauth_button_github_uses_github_label_and_glyph() -> None:
-    html = CATALOG.render("auth.OauthButton", provider="github")
-    assert "Continue with GitHub" in html
-    assert 'data-oauth="github"' in html
-    # Path fragment that opens GitHub's mark glyph.
-    assert "M12 0C5.37 0 0 5.37" in html
-
-
 def test_page_narrow_container_default_padding_and_max_width() -> None:
     html = CATALOG.render("PageNarrowContainer", title="x", _content="<p>body</p>")
     # The narrow column itself is width/padding only: p-8 + max-w-[420px] +
@@ -2435,26 +2413,6 @@ def test_spinner_default_tone_omits_accent_class() -> None:
 def test_spinner_accent_tone_adds_accent_class() -> None:
     html = CATALOG.render("Spinner", size="sm", tone="accent")
     assert "spinner-accent" in html
-
-
-def test_oauth_icon_google_includes_google_svg_path() -> None:
-    html = CATALOG.render("auth.OauthIcon", provider="google")
-    # One of the four <path d="..."> values unique to the Google glyph
-    # (the blue triangle); shows the right SVG was selected.
-    assert "M22.56 12.25" in html
-
-
-def test_oauth_icon_github_includes_github_svg_path() -> None:
-    html = CATALOG.render("auth.OauthIcon", provider="github")
-    # The opening of GitHub's mark path.
-    assert "M12 0C5.37 0 0 5.37" in html
-
-
-def test_oauth_icon_unknown_provider_renders_nothing_visible() -> None:
-    # Defensive: the icon component has no fallback path, so an unexpected
-    # provider just produces empty output (no exception).
-    html = CATALOG.render("auth.OauthIcon", provider="not-a-provider").strip()
-    assert html == ""
 
 
 def test_text_input_default_radius_is_md() -> None:
@@ -3265,12 +3223,15 @@ def test_workspace_share_targets_exclude_the_workspaces_own_interfaces() -> None
     # "web", which is an ordinary user service and gets no special-casing.
     html = _options_modal(
         tab="share",
-        servers=("terminal", "browser", "chat", "web", "newsreader", "system_interface"),
+        servers=("terminal", "browser", "chat", "owner-exec", "web", "newsreader", "system_interface"),
     )
     assert 'data-share-target="newsreader"' in html
     assert 'data-share-target="web"' in html
     assert 'data-share-target="system_interface"' in html
-    for excluded in ("terminal", "browser", "chat"):
+    # owner-exec is the internal SSH-equivalent exec channel (authorized by
+    # request signatures, never a share grant), so it must never be offered as
+    # a per-app share target alongside the workspace's own interfaces.
+    for excluded in ("terminal", "browser", "chat", "owner-exec"):
         assert f'data-share-target="{excluded}"' not in html
 
 

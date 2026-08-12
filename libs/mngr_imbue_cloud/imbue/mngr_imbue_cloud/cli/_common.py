@@ -25,6 +25,7 @@ from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -210,6 +211,8 @@ def handle_imbue_cloud_errors(func):
     Quota rejections keep their structured detail (``code: quota_exceeded``
     plus entitlement/limit/current) so callers -- e.g. minds' quota-pressure
     eviction -- can key off the code instead of parsing message text.
+    Verification rejections likewise keep ``code: email_not_verified`` (plus
+    the email) so callers can prompt the user contextually.
     """
 
     @_functools.wraps(func)
@@ -224,6 +227,13 @@ def handle_imbue_cloud_errors(func):
                 entitlement=exc.entitlement,
                 limit=exc.limit,
                 current=exc.current,
+            )
+        except ImbueCloudEmailNotVerifiedError as exc:
+            fail_with_json(
+                str(exc),
+                error_class=type(exc).__name__,
+                code="email_not_verified",
+                email=exc.email,
             )
         except ImbueCloudError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__)

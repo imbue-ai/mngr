@@ -259,9 +259,10 @@ def derive_openssh_public_key_line(private_key_text: str) -> str | None:
     either half is missing, which would silently clobber a materialized key.
 
     Both container formats found in mngr profiles are handled: traditional /
-    PKCS#8 PEM (mngr's client keypairs are PEM RSA keys, ``-----BEGIN RSA
-    PRIVATE KEY-----``) and the OpenSSH format (``-----BEGIN OPENSSH PRIVATE
-    KEY-----``) -- ``cryptography`` needs a different loader for each.
+    PKCS#8 PEM (older mngr installs generated PEM RSA client keys,
+    ``-----BEGIN RSA PRIVATE KEY-----``) and the OpenSSH format that current
+    mngr Ed25519 client keys use (``-----BEGIN OPENSSH PRIVATE KEY-----``) --
+    ``cryptography`` needs a different loader for each.
     """
     key_bytes = private_key_text.encode("utf-8")
     loader_errors: list[str] = []

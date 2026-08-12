@@ -20,6 +20,7 @@ from typing import Final
 import httpx
 from loguru import logger
 
+from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -130,20 +131,39 @@ def _grants_have_any_grantee(workspace_grants: dict[str, list[str]], service_gra
     return False
 
 
-def _broker_base_url() -> str:
-    config = get_state().client_env_config
-    if config is None:
-        raise SharingError("Client environment config is unavailable; cannot determine the accounts broker URL.")
-    if config.accounts_base_url is not None:
-        return str(config.accounts_base_url).rstrip("/")
-    return str(config.connector_url).rstrip("/")
+def require_client_env_config() -> ClientEnvConfig:
+    """Resolve the client env config from the app state, or raise :class:`SharingError`.
 
-
-def _connector_base_url() -> str:
+    Reads ``get_state()``, so it MUST be called from a Flask app/request context
+    (a request handler, or a worker that captured the app). Callers that run in a
+    bare worker thread -- e.g. the post-create web-access enabler -- must instead
+    capture the config in the request context and thread it in, since ``get_state()``
+    falls back to ``current_app`` and raises "working outside of application context"
+    off a request.
+    """
     config = get_state().client_env_config
     if config is None:
         raise SharingError("Client environment config is unavailable; cannot determine the connector URL.")
-    return str(config.connector_url).rstrip("/")
+    return config
+
+
+def _broker_base_url(client_env_config: ClientEnvConfig) -> str:
+    if client_env_config.accounts_base_url is not None:
+        return str(client_env_config.accounts_base_url).rstrip("/")
+    return str(client_env_config.connector_url).rstrip("/")
+
+
+def _connector_base_url(client_env_config: ClientEnvConfig) -> str:
+    return str(client_env_config.connector_url).rstrip("/")
+
+
+def _is_imbue_cloud_agent(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> bool:
+    """Whether the agent runs on an imbue_cloud (leased pool host) provider instance."""
+    display_info = backend_resolver.get_agent_display_info(agent_id)
+    provider_name = display_info.provider_name if display_info is not None else None
+    if not provider_name:
+        return False
+    return provider_name == "imbue_cloud" or provider_name.startswith("imbue_cloud_")
 
 
 def enable_sharing(
@@ -156,11 +176,13 @@ def enable_sharing(
 
     When the machine is already actively shared, only the grants file is
     rewritten (no token rotation, no tunnel restart -- the gateway re-reads
-    grants per request). Otherwise the full provisioning flow runs: connector
-    share + relay token, then materials injection. Returns the sharing-status
-    document, which reports ``enabled`` true as soon as the connector share
-    exists; the UI separately polls the readiness endpoint for end-to-end
-    liveness of the shared hostname.
+    grants per request). Otherwise the full provisioning flow runs: for
+    imbue_cloud rows the connector's server-side enable-sharing primitive
+    (share record + pool-key materials injection, the same path web creates
+    use), for local rows the client-side connector share + materials
+    injection. Returns the sharing-status document, which reports ``enabled``
+    true as soon as the connector share exists; the UI separately polls the
+    readiness endpoint for end-to-end liveness of the shared hostname.
     """
     if not _grants_have_any_grantee(workspace_grants, service_grants):
         raise EmptyGrantsError("Sharing requires at least one email or email domain to grant access to.")
@@ -170,7 +192,27 @@ def enable_sharing(
     session_store = get_state().session_store
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
-    return _enable_sharing_with_cli(host_id, agent_id, workspace_grants, service_grants, cli, account_email)
+    # Resolved here (a request-context caller) rather than deep inside the
+    # share flow, so the same helper can serve the post-create enabler, which
+    # runs off a request context and must be handed the config explicitly.
+    return _enable_sharing_with_cli(
+        host_id,
+        agent_id,
+        workspace_grants,
+        service_grants,
+        cli,
+        account_email,
+        require_client_env_config(),
+        is_cloud_row=_is_imbue_cloud_agent(backend_resolver, agent_id),
+        entry_label=_resolve_entry_label(backend_resolver, agent_id),
+    )
+
+
+def _resolve_entry_label(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str | None:
+    """The workspace shell's origin label, recorded server-side as the chrome's entry origin."""
+    labels = backend_resolver.list_service_labels_for_agent(agent_id)
+    shell_label = next((label for name, label in labels.items() if str(name) == _SHELL_SERVICE_NAME), None)
+    return shell_label or None
 
 
 def _enable_sharing_with_cli(
@@ -180,6 +222,12 @@ def _enable_sharing_with_cli(
     service_grants: dict[str, dict[str, list[str]]],
     cli: ImbueCloudCli,
     account_email: str,
+    # Passed in (not resolved via ``get_state()`` here) so this can run off a
+    # request context -- the post-create web-access enabler runs in a worker
+    # thread where ``current_app`` is unbound.
+    client_env_config: ClientEnvConfig,
+    is_cloud_row: bool,
+    entry_label: str | None = None,
 ) -> dict[str, Any]:
     grants_toml = render_grants_toml(workspace_grants, service_grants)
 
@@ -217,8 +265,31 @@ def _enable_sharing_with_cli(
             raise SharingError(str(exc)) from exc
         return _share_status_document(host_id, existing, workspace_grants, service_grants)
 
+    if is_cloud_row:
+        # Leased pool hosts delegate the whole bring-up to the connector's
+        # server-side primitive (share record + pool-key materials injection --
+        # the same path web creates use), then overwrite its owner-only grants
+        # seed with the user's actual grants document.
+        try:
+            cli.enable_web_access(account=account_email, host_ref=host_id)
+        except ImbueCloudCliError as exc:
+            raise SharingError(f"Could not enable sharing: {describe_connector_failure(exc)}") from exc
+        try:
+            inject_share_grants_into_agent(agent_id, grants_toml, cli.mngr_caller)
+        except ShareInjectionError as exc:
+            raise SharingError(str(exc)) from exc
+        try:
+            enabled_share = cli.get_share_status(account=account_email, host_id=host_id)
+        except ImbueCloudCliError as exc:
+            raise SharingError(
+                f"Sharing was enabled but its status could not be read: {describe_connector_failure(exc)}"
+            ) from exc
+        if enabled_share is None:
+            raise SharingError("Sharing was enabled but the connector reports no share record for the machine.")
+        return _share_status_document(host_id, enabled_share, workspace_grants, service_grants)
+
     try:
-        share = cli.create_share(account=account_email, host_id=host_id)
+        share = cli.create_share(account=account_email, host_id=host_id, entry_label=entry_label)
     except ImbueCloudCliError as exc:
         raise SharingError(f"Could not enable sharing: {describe_connector_failure(exc)}") from exc
     if share.relay_token is None or not share.relay_endpoint:
@@ -228,8 +299,13 @@ def _enable_sharing_with_cli(
         workspace_domain=share.workspace_domain,
         relay_endpoint=share.relay_endpoint,
         relay_token=share.relay_token.get_secret_value(),
-        connector_url=_connector_base_url(),
-        broker_url=_broker_base_url(),
+        connector_url=_connector_base_url(client_env_config),
+        broker_url=_broker_base_url(client_env_config),
+        # The hosted chrome is path-served on the connector origin, which is
+        # also what `minds env deploy` pushes as the connector's own
+        # SHARE_CHROME_ORIGIN -- so desktop-shared workspaces are embeddable
+        # and health-probeable from /web exactly like connector-shared ones.
+        chrome_origin=_connector_base_url(client_env_config),
     )
     try:
         inject_share_grants_into_agent(agent_id, grants_toml, cli.mngr_caller)
@@ -237,6 +313,51 @@ def _enable_sharing_with_cli(
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
     return _share_status_document(host_id, share, workspace_grants, service_grants)
+
+
+def enable_web_access_for_workspace(
+    agent_id: AgentId,
+    host_id: str,
+    is_cloud_row: bool,
+    cli: ImbueCloudCli,
+    session_store: MultiAccountSessionStore | None,
+    backend_resolver: BackendResolverInterface,
+    # Captured by the caller in a request context and threaded in: this runs
+    # in the post-create worker thread, where ``get_state()`` cannot resolve
+    # ``current_app``. Only the local-row branch below actually needs it.
+    client_env_config: ClientEnvConfig,
+) -> None:
+    """Bring sharing up for a just-created workspace so it is reachable from /web.
+
+    The create form's "enable web access" toggle: imbue_cloud rows delegate to
+    the connector's server-side enable-sharing primitive (pool-key materials
+    injection, owner granted, chrome origin included); local docker/lima rows
+    run the desktop share flow with the owning account as the sole grantee.
+    Raises :class:`SharingError` when the workspace has no associated account
+    or the share bring-up fails.
+    """
+    account_email = resolve_account_email_for_workspace(session_store, agent_id)
+    if is_cloud_row:
+        try:
+            cli.enable_web_access(account=account_email, host_ref=host_id)
+        except ImbueCloudCliError as exc:
+            raise SharingError(f"Could not enable web access: {describe_connector_failure(exc)}") from exc
+        return
+    owner_grants = {"emails": [account_email], "email_domains": []}
+    _enable_sharing_with_cli(
+        host_id,
+        agent_id,
+        owner_grants,
+        {},
+        cli,
+        account_email,
+        client_env_config,
+        is_cloud_row=False,
+        # The chrome can only enter the workspace at <label>.<domain> (the
+        # bare domain is unrouted on the relay), so record the shell label
+        # like the settings-page enable does; None when not registered yet.
+        entry_label=_resolve_entry_label(backend_resolver, agent_id),
+    )
 
 
 def _share_status_document(
@@ -447,9 +568,8 @@ def resolve_share_probe_host(
     except SharingError as exc:
         logger.debug("Cannot resolve a share probe host for {} yet: {}", host_id, exc)
         return None
-    labels = backend_resolver.list_service_labels_for_agent(agent_id)
-    shell_label = next((label for name, label in labels.items() if str(name) == _SHELL_SERVICE_NAME), None)
-    if not shell_label:
+    shell_label = _resolve_entry_label(backend_resolver, agent_id)
+    if shell_label is None:
         return None
     return f"{shell_label}.{workspace_domain}"
 

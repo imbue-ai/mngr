@@ -46,6 +46,18 @@ export interface AccountPlanState {
   trimStatus: TrimStatus | null;
 }
 
+/** The contextual "verify your email" prompt shown after a plan switch was
+ * refused with the connector's structured email_not_verified 403. The server
+ * tries to auto-send the first verification email as part of that refusal;
+ * `wasAutoSent` is false when a cooldown suppressed that send (or it failed),
+ * so the prompt must not claim a link was just sent. */
+export interface VerifyEmailPrompt {
+  email: string;
+  wasAutoSent: boolean;
+  isResending: boolean;
+  wasResent: boolean;
+}
+
 const TRIM_POLL_MS = 4000;
 
 type FetchLike = typeof fetch;
@@ -57,6 +69,8 @@ export class AccountsDetailModel {
   isLoadFailed = false;
   actionError = "";
   planByUserId = new Map<string, AccountPlanState>();
+  verifyEmailPromptByUserId = new Map<string, VerifyEmailPrompt>();
+  loggingOutUserIds = new Set<string>();
 
   private readonly fetchImpl: FetchLike;
   private readonly redraw: () => void;
@@ -142,10 +156,13 @@ export class AccountsDetailModel {
     this.redraw();
   }
 
-  /** POST one of the legacy form routes; on success reload the whole list. */
+  /** POST one of the legacy form routes; on success reload the whole list.
+   * `onFailure` may consume a non-OK response (returning true suppresses the
+   * generic actionError). */
   async submitAccountForm(
     url: string,
     fields: Record<string, string>,
+    onFailure?: (status: number, bodyText: string) => boolean,
   ): Promise<void> {
     this.actionError = "";
     try {
@@ -156,9 +173,11 @@ export class AccountsDetailModel {
         body: new URLSearchParams(fields).toString(),
       });
       if (!response.ok) {
-        this.actionError =
-          (await response.text()) ||
-          `The action failed (HTTP ${response.status}).`;
+        const text = await response.text();
+        if (onFailure === undefined || !onFailure(response.status, text)) {
+          this.actionError =
+            text || `The action failed (HTTP ${response.status}).`;
+        }
         this.redraw();
         return;
       }
@@ -174,17 +193,88 @@ export class AccountsDetailModel {
   }
 
   async logOut(userId: string): Promise<void> {
-    await this.submitAccountForm(
-      `/accounts/${encodeURIComponent(userId)}/logout`,
-      {},
-    );
+    // Logging out runs a subprocess server-side (several seconds); the card's
+    // button reads this set to show a busy state and swallow double-clicks.
+    if (this.loggingOutUserIds.has(userId)) return;
+    this.loggingOutUserIds.add(userId);
+    this.redraw();
+    try {
+      await this.submitAccountForm(
+        `/accounts/${encodeURIComponent(userId)}/logout`,
+        {},
+      );
+    } finally {
+      this.loggingOutUserIds.delete(userId);
+      this.redraw();
+    }
+  }
+
+  isLoggingOut(userId: string): boolean {
+    return this.loggingOutUserIds.has(userId);
+  }
+
+  verifyEmailPromptFor(userId: string): VerifyEmailPrompt | null {
+    return this.verifyEmailPromptByUserId.get(userId) ?? null;
   }
 
   async switchPlan(userId: string, plan: string): Promise<void> {
+    this.verifyEmailPromptByUserId.delete(userId);
     await this.submitAccountForm(
       `/accounts/${encodeURIComponent(userId)}/plan`,
       { plan },
+      (status, bodyText) => {
+        const refusal = parseEmailNotVerified(status, bodyText);
+        if (refusal === null) return false;
+        this.verifyEmailPromptByUserId.set(userId, {
+          email: refusal.email,
+          wasAutoSent: refusal.wasAutoSent,
+          isResending: false,
+          wasResent: false,
+        });
+        return true;
+      },
     );
+  }
+
+  /** The verify-email prompt's resend button (the server applies a cooldown). */
+  async resendVerification(userId: string): Promise<void> {
+    const prompt = this.verifyEmailPromptByUserId.get(userId);
+    if (prompt === undefined || prompt.isResending) return;
+    this.verifyEmailPromptByUserId.set(userId, {
+      ...prompt,
+      isResending: true,
+      wasResent: false,
+    });
+    this.redraw();
+    let wasResent = false;
+    try {
+      const response = await this.fetchImpl(
+        `/accounts/${encodeURIComponent(userId)}/resend-verification`,
+        { method: "POST", credentials: "same-origin" },
+      );
+      // The route answers 200 even when the connector's cooldown (or a CLI
+      // failure) suppressed the send -- the body's `sent` flag is the truth,
+      // and the prompt must not claim a link the server did not confirm.
+      if (response.ok) {
+        const body: unknown = await response.json();
+        wasResent =
+          typeof body === "object" && body !== null && (body as { sent?: unknown }).sent === true;
+      }
+    } catch {
+      // A network or parse failure counts as not resent; wasResent stays false.
+    }
+    // The prompt may have been removed while the request was in flight (a
+    // concurrent plan switch deletes it first); a deleted prompt must not be
+    // resurrected here.
+    const current = this.verifyEmailPromptByUserId.get(userId);
+    if (current !== undefined) {
+      this.verifyEmailPromptByUserId.set(userId, {
+        ...current,
+        isResending: false,
+        wasResent,
+      });
+    }
+    this.redraw();
   }
 
   async trimBackups(userId: string): Promise<void> {
@@ -194,4 +284,30 @@ export class AccountsDetailModel {
     );
     await this.loadPlan(userId);
   }
+}
+
+/** The email and auto-send outcome from a structured email_not_verified 403
+ * body, or null when the response is not that refusal. A missing `sent` flag
+ * counts as not sent, so the prompt never claims a link the server did not
+ * confirm. */
+function parseEmailNotVerified(status: number, bodyText: string): { email: string; wasAutoSent: boolean } | null {
+  if (status !== 403) return null;
+  let body: unknown;
+  try {
+    body = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { code?: unknown }).code === "email_not_verified" &&
+    typeof (body as { email?: unknown }).email === "string"
+  ) {
+    return {
+      email: (body as { email: string }).email,
+      wasAutoSent: (body as { sent?: unknown }).sent === true,
+    };
+  }
+  return null;
 }

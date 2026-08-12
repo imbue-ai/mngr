@@ -1300,12 +1300,16 @@ def render_workspace_settings(
 # per-app target.
 _WHOLE_MACHINE_SERVICE: Final[str] = "system_interface"
 
-# Registered services that are the workspace's own interfaces rather than apps
-# someone would share on their own, so the Share machine list leaves them out
-# (see _split_share_targets). Singular and plural are both listed because the
-# name is whatever the in-workspace process registered, not a fixed vocabulary.
+# Registered services that are the workspace's own interfaces (or internal
+# infrastructure) rather than apps someone would share on their own, so the
+# Share machine list leaves them out (see _split_share_targets). Singular and
+# plural are both listed because the name is whatever the in-workspace process
+# registered, not a fixed vocabulary. ``owner-exec`` is the internal
+# SSH-equivalent exec channel (the web client drives the workspace through it);
+# it is authorized by request-signing against ``authorized_keys``, never by a
+# share grant, so it must never appear as a per-app share target.
 _NON_APP_SHARE_SERVICES: Final[frozenset[str]] = frozenset(
-    {"chat", "chats", "terminal", "terminals", "browser", "browsers"}
+    {"chat", "chats", "terminal", "terminals", "browser", "browsers", "owner-exec"}
 )
 
 # A service can only be a per-app share target if its name can be a hostname

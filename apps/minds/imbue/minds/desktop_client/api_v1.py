@@ -980,6 +980,11 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         return _json_error(f"Invalid backup_provider: {body.get('backup_provider')!r}", 400)
     backup_api_key_env = str(body.get("backup_api_key_env", ""))
     account_id = str(body.get("account_id", "")).strip()
+    is_web_access_enabled = bool(body.get("enable_web_access", False))
+    if is_web_access_enabled and not account_id:
+        # Web access is "shared with yourself": without an owning account there
+        # is nobody to grant, so fail fast instead of silently skipping later.
+        return _json_field_error("Web access requires a selected account.", "enable_web_access")
     submitted_region = str(body.get("region", "")).strip()
     instance_type = str(body.get("instance_type", "")).strip()
     if instance_type:
@@ -1095,7 +1100,13 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     else:
         region = resolve_effective_region(launch_mode, submitted_region, minds_config, get_state().geo_location_cache)
     on_created = build_create_on_created_callback(
-        account_id, minds_config, launch_mode, region, display_name=host_name or resolved_host_name, color=color
+        account_id,
+        minds_config,
+        launch_mode,
+        region,
+        display_name=host_name or resolved_host_name,
+        color=color,
+        is_web_access_enabled=is_web_access_enabled,
     )
 
     try:

@@ -13,10 +13,12 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -25,6 +27,8 @@ from imbue.minds.desktop_client.region_preference import default_region_for_prov
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.sharing_handler import SharingError
+from imbue.minds.desktop_client.sharing_handler import enable_web_access_for_workspace
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import WorkspaceSyncError
@@ -182,10 +186,62 @@ class OnCreatedCallback(MutableModel):
             self.backend_resolver.notify_change()
 
 
-class CreateOnCreatedCallback(MutableModel):
-    """Post-create-attempt hook that runs the account-association callback, then persists the region.
+class WebAccessEnabler(MutableModel):
+    """Post-create hook that brings sharing up so the new workspace is reachable from /web.
 
-    Composing these two effects into one callable (rather than a nested closure
+    Best-effort by design: it runs after the account association inside the
+    agent creator's ``on_created`` (which marks the whole create FAILED on any
+    raised exception), and a share bring-up hiccup must not flip an
+    already-successful create -- the user can enable sharing from the
+    workspace settings instead.
+    """
+
+    cli: ImbueCloudCli = Field(frozen=True, description="CLI used for the connector share bring-up")
+    session_store: MultiAccountSessionStore = Field(
+        frozen=True, description="Session store resolving the workspace's owning account"
+    )
+    is_cloud_row: bool = Field(
+        frozen=True, description="True for imbue_cloud compute (connector-side enable-sharing primitive)"
+    )
+    backend_resolver: BackendResolverInterface = Field(
+        frozen=True,
+        description="Resolves the workspace shell's origin label, recorded server-side as the chrome's entry origin",
+    )
+    client_env_config: ClientEnvConfig = Field(
+        frozen=True,
+        description=(
+            "Captured at construction (in the request context) so the connector/broker URLs can be resolved "
+            "in the post-create worker thread, where get_state()'s current_app is unbound."
+        ),
+    )
+
+    def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
+        try:
+            enable_web_access_for_workspace(
+                agent_id=agent_id,
+                host_id=str(host_id),
+                is_cloud_row=self.is_cloud_row,
+                cli=self.cli,
+                session_store=self.session_store,
+                backend_resolver=self.backend_resolver,
+                client_env_config=self.client_env_config,
+            )
+        except SharingError as exc:
+            logger.warning("Could not enable web access for {}: {}", agent_id, exc)
+        except Exception as exc:
+            # Best-effort side effect: any unexpected failure (a bug, a
+            # transport error the share flow did not wrap into SharingError)
+            # must be logged with a traceback but never propagate -- this runs
+            # in the post-create worker, and a raised error would both crash
+            # that worker and skip the create's remaining steps (region
+            # persistence). The user can still enable sharing from settings.
+            logger.opt(exception=exc).error("Unexpected error enabling web access for {}", agent_id)
+
+
+class CreateOnCreatedCallback(MutableModel):
+    """Post-create-attempt hook: account association, optional web access, then region persistence.
+
+    Composing these effects into one callable (rather than a nested closure
     at each create call site) keeps the shared create orchestration in one place
     and out of the route handlers.
     """
@@ -200,11 +256,46 @@ class CreateOnCreatedCallback(MutableModel):
     )
     launch_mode: LaunchMode = Field(frozen=True, description="Compute launch mode whose region default is updated.")
     region: str = Field(frozen=True, default="", description="Resolved region to persist on a successful create.")
+    web_access_enabler: WebAccessEnabler | None = Field(
+        frozen=True,
+        default=None,
+        description="Brings sharing up post-create when the form's web-access toggle was on.",
+    )
 
     def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
         if self.base_callback is not None:
             self.base_callback(agent_id, host_id)
+        # Web access rides on the association above (the share flows resolve
+        # the owning account through it), so it runs after.
+        if self.web_access_enabler is not None:
+            self.web_access_enabler(agent_id, host_id)
         persist_region_for_launch_mode(self.minds_config, self.launch_mode, self.region)
+
+
+def _build_web_access_enabler(launch_mode: LaunchMode, is_web_access_enabled: bool) -> WebAccessEnabler | None:
+    if not is_web_access_enabled:
+        return None
+    cli = get_state().imbue_cloud_cli
+    session_store = get_state().session_store
+    client_env_config = get_state().client_env_config
+    if cli is None or session_store is None or client_env_config is None:
+        # Without the CLI, accounts, or client env config there is nothing to
+        # grant (or no connector URL to point the workspace at); the route
+        # already refused a web-access create with no account, so this only
+        # covers apps assembled without the imbue_cloud integration. Captured
+        # here, in the request context, so the enabler -- which runs in a
+        # post-create worker thread -- never has to touch current_app.
+        logger.warning(
+            "Web access was requested but the imbue_cloud CLI, session store, or client env config is not configured"
+        )
+        return None
+    return WebAccessEnabler(
+        cli=cli,
+        session_store=session_store,
+        is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD,
+        backend_resolver=get_state().backend_resolver,
+        client_env_config=client_env_config,
+    )
 
 
 def build_create_on_created_callback(
@@ -214,8 +305,9 @@ def build_create_on_created_callback(
     region: str,
     display_name: str = "",
     color: str | None = None,
+    is_web_access_enabled: bool = False,
 ) -> CreateOnCreatedCallback:
-    """Build the composed post-create-attempt callback (account association + region persistence)."""
+    """Build the composed post-create-attempt callback (association + web access + region persistence)."""
     return CreateOnCreatedCallback(
         base_callback=build_on_created_callback(
             account_id,
@@ -226,6 +318,7 @@ def build_create_on_created_callback(
         minds_config=minds_config,
         launch_mode=launch_mode,
         region=region,
+        web_access_enabler=_build_web_access_enabler(launch_mode, is_web_access_enabled),
     )
 
 

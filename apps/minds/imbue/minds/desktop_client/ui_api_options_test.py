@@ -127,8 +127,11 @@ def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:
 
 
 def test_split_share_targets_filters_interfaces_and_non_dns_names() -> None:
+    # owner-exec is the internal SSH-equivalent exec channel (authorized by
+    # request signatures, never a share grant); like the chat/terminal/browser
+    # interfaces it must never be offered as a per-app share target.
     app_services, whole = split_share_targets(
-        ["system_interface", "web", "Terminal", "chats", "bad_name", "host-abc", "my-app"]
+        ["system_interface", "web", "Terminal", "chats", "owner-exec", "bad_name", "host-abc", "my-app"]
     )
 
     assert whole == WHOLE_MACHINE_SERVICE

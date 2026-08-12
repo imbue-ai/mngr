@@ -1428,7 +1428,7 @@ class FakeSharingCli(FakeImbueCloudCli):
             cert_not_after=self.share.cert_not_after,
         )
 
-    def create_share(self, *, account: str, host_id: str) -> ShareCliInfo:
+    def create_share(self, *, account: str, host_id: str, entry_label: str | None = None) -> ShareCliInfo:
         if self.create_share_error is not None:
             raise ImbueCloudCliError(self.create_share_error)
         self.created_shares.append(host_id)

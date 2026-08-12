@@ -66,7 +66,17 @@ _RESTORE_TIMEOUT_SECONDS: Final[float] = 600.0
 # bootstrap for a bounded window so provisioning rides out that propagation.
 _AUTH_PROPAGATION_RETRY_SECONDS: Final[float] = 60.0
 _AUTH_PROPAGATION_WAIT_SECONDS: Final[float] = 3.0
-_TRANSIENT_AUTH_SIGNALS: Final[tuple[str, ...]] = ("unauthorized", "invalidaccesskeyid", "signaturedoesnotmatch")
+# Both the raw S3 error codes and restic's rendered human phrasings: a
+# not-yet-propagated secret surfaces as a signature mismatch, which restic
+# prints as "The request signature we calculated does not match ..." rather
+# than the bare SignatureDoesNotMatch code.
+_TRANSIENT_AUTH_SIGNALS: Final[tuple[str, ...]] = (
+    "unauthorized",
+    "invalidaccesskeyid",
+    "invalid access key",
+    "signaturedoesnotmatch",
+    "request signature we calculated does not match",
+)
 # restic's message when it cannot write its lock file to the repository --
 # the failure mode of a read-only (storage-quota-downgraded) key. Read-only
 # operations retry once with --no-lock when they see it.

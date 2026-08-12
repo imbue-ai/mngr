@@ -27,6 +27,7 @@ Vault entry gets populated and ``minds env deploy`` is re-run.
 import json
 import os
 import re
+import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -157,6 +158,67 @@ def _litellm_app_file() -> Path:
 
 def _connector_app_file() -> Path:
     return _repo_root() / "apps" / "remote_service_connector" / "imbue" / "remote_service_connector" / "app.py"
+
+
+def _connector_frontend_dir() -> Path:
+    return _repo_root() / "apps" / "remote_service_connector" / "frontend"
+
+
+def _connector_web_chrome_dir() -> Path:
+    return _repo_root() / "apps" / "remote_service_connector" / "frontend_web"
+
+
+# pnpm install can hit the network on a cold store; the Vite build itself is
+# a few seconds.
+_CONNECTOR_FRONTEND_BUILD_TIMEOUT_SECONDS: Final[float] = 600.0
+
+
+def _build_connector_frontends(parent_cg: ConcurrencyGroup) -> None:
+    """Build both connector frontend bundles before ``modal deploy``.
+
+    The accounts bundle (``frontend/dist``, served at ``/login`` / ``/signup``
+    / ``/manage``) and the web-chrome SPA (``frontend_web/dist``, served under
+    ``/web``) are attached to the connector image by ``app.py``. Building here
+    (rather than committing the bundles) keeps the artifacts out of git; the
+    cost is that deploying machines need node + pnpm, which is checked up
+    front with a clear error.
+    """
+    _build_connector_bundle(parent_cg, _connector_frontend_dir(), "accounts-frontend")
+    # The web-chrome SPA (the hosted minds web client) ships the same way,
+    # attached at /root/web_chrome_frontend_dist and served under /web.
+    _build_connector_bundle(parent_cg, _connector_web_chrome_dir(), "web-chrome-frontend")
+
+
+def _build_connector_bundle(parent_cg: ConcurrencyGroup, frontend_dir: Path, label: str) -> None:
+    """pnpm install + build one connector frontend bundle, verifying dist/index.html exists."""
+    if not frontend_dir.is_dir():
+        raise RepoLayoutError(f"Connector frontend not found: {frontend_dir}")
+    if shutil.which("pnpm") is None:
+        raise ModalDeployError(
+            "`pnpm` is required to build the connector's hosted pages "
+            f"({frontend_dir}) before deploying. Install node + pnpm "
+            "(see apps/minds/docs/dev-setup.md) and re-run the deploy."
+        )
+    for step_name, command in (
+        ("install", ["pnpm", "install", "--frozen-lockfile"]),
+        ("build", ["pnpm", "build"]),
+    ):
+        cg = parent_cg.make_concurrency_group(name=f"{label}-{step_name}")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=command,
+                timeout=_CONNECTOR_FRONTEND_BUILD_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                cwd=frontend_dir,
+            )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            raise ModalDeployError(f"{label} {step_name} failed (exit {result.returncode}): {stderr}")
+    if not (frontend_dir / "dist" / "index.html").is_file():
+        raise ModalDeployError(
+            f"{label} build produced no dist/index.html; the deployed connector "
+            "would serve a 503 placeholder on its pages."
+        )
 
 
 def _verify_image_requirements_fresh(package_name: str, parent_cg: ConcurrencyGroup) -> None:
@@ -514,6 +576,8 @@ def deploy_remote_service_connector(
     load is a hard failure (the app raises ``DeployIdMissingError``).
     """
     _verify_image_requirements_fresh("remote-service-connector", parent_cg)
+    with info_span("building the connector frontends (accounts + web chrome)"):
+        _build_connector_frontends(parent_cg)
     with info_span("modal deploy rsc-{} into env {!r} (strategy={})", tier, modal_env, strategy.value):
         return _deploy_modal_app(
             app_file=_connector_app_file(),

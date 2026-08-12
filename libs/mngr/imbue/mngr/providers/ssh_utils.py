@@ -7,7 +7,6 @@ from pathlib import Path
 import paramiko
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives.asymmetric import rsa
 from pyinfra.api import Host as PyinfraHost
 from pyinfra.api import State as PyinfraState
 from pyinfra.api.inventory import Inventory
@@ -18,15 +17,17 @@ from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_until
 
 
-def generate_ssh_keypair() -> tuple[str, str]:
-    """Generate a new RSA keypair for SSH authentication.
+def _generate_ed25519_keypair() -> tuple[str, str]:
+    """Generate a new Ed25519 keypair, serialized as text.
 
-    Returns a tuple of (private_key_pem, public_key_openssh).
+    Returns a tuple of (private_key_pem, public_key_openssh): the private key
+    in the OpenSSH container format (PEM-armored) and the public key as an
+    OpenSSH one-line entry.
     """
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+    private_key = ed25519.Ed25519PrivateKey.generate()
     private_key_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        format=serialization.PrivateFormat.OpenSSH,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode("utf-8")
     public_key_openssh = (
@@ -38,6 +39,20 @@ def generate_ssh_keypair() -> tuple[str, str]:
         .decode("utf-8")
     )
     return private_key_pem, public_key_openssh
+
+
+def generate_ssh_keypair() -> tuple[str, str]:
+    """Generate a new Ed25519 keypair for SSH client authentication.
+
+    Ed25519 rather than RSA so the same client key also works with services
+    that only accept Ed25519 signatures (e.g. the minds workspaces' owner-exec
+    envelope auth). Every consumer auto-detects the key type, and existing RSA
+    keypairs on disk keep working -- load_or_create_ssh_keypair only generates
+    when no pair exists.
+
+    Returns a tuple of (private_key_pem, public_key_openssh).
+    """
+    return _generate_ed25519_keypair()
 
 
 def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Path]:
@@ -102,21 +117,7 @@ def generate_ed25519_host_keypair() -> tuple[str, str]:
     Returns a tuple of (private_key_pem, public_key_openssh).
     Ed25519 is preferred for SSH host keys due to its security and performance.
     """
-    private_key = ed25519.Ed25519PrivateKey.generate()
-    private_key_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.OpenSSH,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("utf-8")
-    public_key_openssh = (
-        private_key.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.OpenSSH,
-            format=serialization.PublicFormat.OpenSSH,
-        )
-        .decode("utf-8")
-    )
-    return private_key_pem, public_key_openssh
+    return _generate_ed25519_keypair()
 
 
 def load_or_create_host_keypair(key_dir: Path, key_name: str = "host_key") -> tuple[Path, str]:

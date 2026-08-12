@@ -1,16 +1,20 @@
 """`mngr imbue_cloud auth ...` subcommands."""
 
+import base64
 import getpass
+import hashlib
 import html
 import http.server
-import socket
+import secrets
 import threading
 import time
 import urllib.parse
 import webbrowser
+from pathlib import Path
 from typing import Any
 
 import click
+from loguru import logger
 
 from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr_imbue_cloud.cli._common import emit_json
@@ -23,14 +27,17 @@ from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import force_refresh
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.connector.client import AuthRawResponse
+from imbue.mngr_imbue_cloud.connector.client import CONNECTOR_TOO_OLD_REMEDY
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
+from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 
-_OAUTH_LISTEN_TIMEOUT_SECONDS = 300.0
-_OAUTH_CALLBACK_PATH = "/oauth/callback"
+_LOGIN_LISTEN_TIMEOUT_SECONDS = 300.0
+_LOGIN_CALLBACK_PATH = "/callback"
 
 
 @click.group(name="auth")
@@ -45,15 +52,14 @@ def _persist_auth_response(
 ) -> dict[str, Any]:
     """Convert a successful AuthRawResponse into a saved session and emit-json payload.
 
-    When ``expected_account`` is None (the OAuth-first-time-signin case), the
+    When ``expected_account`` is None (the first-time browser-login case), the
     email returned by the auth backend is accepted as-is. When it is set
     (signin / signup with explicit ``--account``), we validate that the
     backend returned the same account and fail otherwise.
 
-    An account whose email is not yet verified is saved as a *pending*
-    session: its tokens are kept (they drive the verification poll) but it
-    is excluded from ``auth list`` and never becomes the active account.
-    ``auth is-verified`` promotes it once the verification link is clicked.
+    Every OK response counts as signed in immediately -- email verification is
+    non-blocking (it is required only for specific actions, enforced
+    server-side), so there is no "pending session" state anymore.
     """
     if response.status != "OK":
         fail_with_json(
@@ -78,6 +84,11 @@ def _persist_auth_response(
             error_class="AuthMismatch",
         )
 
+    if response.needs_email_verification:
+        # Only an old connector still reports this (new ones pin it False);
+        # under the non-blocking model the account is signed in regardless.
+        logger.warning("Connector reported needs_email_verification; treating the account as signed in anyway")
+
     display_name_raw = user.get("display_name")
     display_name = display_name_raw if isinstance(display_name_raw, str) else None
     session = make_session_from_tokens(
@@ -86,26 +97,18 @@ def _persist_auth_response(
         display_name=display_name,
         access_token=access_token,
         refresh_token=refresh_token if isinstance(refresh_token, str) else None,
-        is_pending_verification=response.needs_email_verification,
     )
     store.save(session)
-    if response.needs_email_verification:
-        write_stderr_line(
-            f"Email verification required for {account_from_response}: click the link in your inbox, "
-            f"then run `mngr imbue_cloud auth is-verified --account {account_from_response}` to finish signing in."
-        )
-    else:
-        # Make the most-recently-touched account the active one. This is what
-        # users expect when they swap between accounts: ``auth signin --account
-        # bob`` then ``mngr create`` should default to bob without an extra
-        # ``auth use`` step. Power users who prefer pinning still have
-        # ``auth use --account <other>`` to override.
-        store.set_active_account(account_from_response)
+    # Make the most-recently-touched account the active one. This is what
+    # users expect when they swap between accounts: ``auth signin --account
+    # bob`` then ``mngr create`` should default to bob without an extra
+    # ``auth use`` step. Power users who prefer pinning still have
+    # ``auth use --account <other>`` to override.
+    store.set_active_account(account_from_response)
     return {
         "user_id": str(session.user_id),
         "email": str(session.email),
         "display_name": session.display_name,
-        "needs_email_verification": response.needs_email_verification,
     }
 
 
@@ -115,7 +118,11 @@ def _persist_auth_response(
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def signin(account: str, password: str | None, connector_url: str | None) -> None:
-    """Sign in with email + password and persist the session."""
+    """Sign in with email + password and persist the session.
+
+    The headless path (tests, SSH sessions, scripts). Interactive users
+    normally use ``auth login``, which drives the hosted browser page.
+    """
     parsed_account = parse_account(account)
     if password is None:
         password = getpass.getpass(prompt=f"Password for {parsed_account}: ")
@@ -170,7 +177,12 @@ def _prompt_password_with_confirmation(parsed_account: ImbueCloudAccount) -> str
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def signup(account: str, password: str | None, connector_url: str | None) -> None:
-    """Sign up with email + password (returns the new session)."""
+    """Sign up with email + password (returns the new session).
+
+    The headless path (tests, dev/CI tiers). Interactive users normally use
+    ``auth login``, which drives the hosted browser page (production signups
+    will eventually require it).
+    """
     parsed_account = parse_account(account)
     if password is None:
         password = _prompt_password_with_confirmation(parsed_account)
@@ -185,10 +197,28 @@ def signup(account: str, password: str | None, connector_url: str | None) -> Non
 
 @auth.command(name="signout")
 @click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option(
+    "--all-devices",
+    is_flag=True,
+    default=False,
+    help="Revoke EVERY session for this account (other devices and the browser), not just this machine's.",
+)
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
-def signout(account: str | None, connector_url: str | None) -> None:
-    """Revoke the SuperTokens session and remove local tokens for this account."""
+def signout(account: str | None, all_devices: bool, connector_url: str | None) -> None:
+    """Revoke this machine's SuperTokens session and remove the local tokens.
+
+    Only the local device's session is revoked by default -- the account's
+    browser session and other devices stay signed in (use ``--all-devices``
+    to revoke everything).
+
+    The local tokens are removed even when the connector cannot be reached;
+    the emitted ``server_session_revoked`` field reports whether the
+    server-side revocation actually happened. ``--all-devices`` instead fails
+    outright when the revocation does not land (killing every other session
+    is its whole point), keeping the local session so a retry can still
+    revoke.
+    """
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     session = store.load_by_account(parsed_account)
@@ -196,13 +226,65 @@ def signout(account: str | None, connector_url: str | None) -> None:
         emit_json({"removed": False, "reason": "no session"})
         return
     client = make_connector_client(connector_url)
-    try:
-        client.auth_revoke_session(session.access_token)
-    except ImbueCloudAuthError:
-        # Already revoked or expired -- still drop the local token.
-        pass
+    server_revoked = _revoke_server_sessions(store, client, parsed_account, session, all_devices=all_devices)
     store.delete_by_account(parsed_account)
-    emit_json({"removed": True, "user_id": str(session.user_id), "email": str(session.email)})
+    if not server_revoked:
+        write_stderr_line(
+            "Warning: the connector could not be reached to revoke the server-side session; "
+            "only the local tokens were removed."
+        )
+    emit_json(
+        {
+            "removed": True,
+            "user_id": str(session.user_id),
+            "email": str(session.email),
+            "server_session_revoked": server_revoked,
+        }
+    )
+
+
+def _revoke_server_sessions(
+    store: ImbueCloudSessionStore,
+    client: ImbueCloudConnectorClient,
+    account: ImbueCloudAccount,
+    session: AuthSession,
+    *,
+    all_devices: bool,
+) -> bool:
+    """Revoke the account's server-side session(s) with a fresh access token.
+
+    The stored access token may have expired since the last authenticated
+    call; the revoke endpoints answer 401 to an expired token and the client
+    treats 401 as "already revoked", which would silently skip the revocation
+    (worst for ``--all-devices``, whose whole point is killing every other
+    session). Refreshing first makes the revoke real; when the refresh itself
+    fails the session is already dead server-side, so falling back to the
+    stored token keeps the 401-as-already-revoked treatment truthful.
+
+    Returns whether the server-side revocation happened. The client already
+    treats a 401 revoke answer as success (the session was dead), so an
+    ``ImbueCloudAuthError`` here means the revocation did NOT land: the
+    connector was unreachable or answered a server error. For
+    ``--all-devices`` that failure propagates -- reporting "all sessions
+    revoked" when none were is dangerous (e.g. after a device compromise) --
+    while the default single-device sign-out returns ``False`` so the caller
+    can still drop the local tokens (signing out must work offline) and
+    report the failure.
+    """
+    try:
+        access_token = get_active_token(store, client, account)
+    except ImbueCloudAuthError:
+        access_token = session.access_token
+    try:
+        if all_devices:
+            client.auth_revoke_session(access_token)
+        else:
+            client.auth_revoke_current_session(access_token)
+    except ImbueCloudAuthError:
+        if all_devices:
+            raise
+        return False
+    return True
 
 
 @auth.command(name="list")
@@ -218,16 +300,14 @@ def list_accounts() -> None:
 
     Accounts whose session file is missing or unreadable are skipped
     silently -- callers should treat the output as the authoritative
-    list of "currently signed in". Sessions still pending email
-    verification are likewise excluded: an unverified account does not
-    count as signed in.
+    list of "currently signed in".
     """
     store = make_session_store()
     active = store.get_active_account()
     accounts: list[dict[str, Any]] = []
     for email in store.list_accounts():
         session = store.load_by_account(email)
-        if session is None or session.is_pending_verification:
+        if session is None:
             continue
         accounts.append(
             {
@@ -272,7 +352,6 @@ def status(account: str | None) -> None:
             "near_expiry": near_expiry,
             "has_refresh_token": session.refresh_token is not None,
             "is_active": active == session.email,
-            "pending_verification": session.is_pending_verification,
         }
     )
 
@@ -331,12 +410,12 @@ def refresh(account: str | None, connector_url: str | None) -> None:
 
 
 # ----------------------------------------------------------------------
-# OAuth (browser-based) flow
+# Browser-based login (the hosted accounts surface + loopback handoff)
 # ----------------------------------------------------------------------
 
 
-class _OAuthCaptureBox:
-    """Thread-safe box that holds the OAuth callback query params.
+class _CallbackCaptureBox:
+    """Thread-safe box that holds the loopback callback query params.
 
     The HTTP handler writes here once it receives a callback; the main thread
     polls the box to know when to stop the listener.
@@ -355,9 +434,9 @@ class _OAuthCaptureBox:
             return None if self._params is None else dict(self._params)
 
 
-# Inline styles for the OAuth success page: it is served from a localhost
+# Inline styles for the login success page: it is served from a localhost
 # listener with no other assets, so everything must be self-contained.
-_OAUTH_SUCCESS_PAGE_STYLE = (
+_LOGIN_SUCCESS_PAGE_STYLE = (
     "html,body{height:100%;margin:0}"
     "body{display:flex;align-items:center;justify-content:center;text-align:center;"
     'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;'
@@ -383,7 +462,7 @@ _MINDS_WORDMARK_SVG = (
 )
 
 
-def _oauth_success_page(success_redirect_url: str | None) -> bytes:
+def _login_success_page(success_redirect_url: str | None) -> bytes:
     """Build the HTML the callback listener serves to the browser.
 
     With a redirect URL, the page offers a link to it -- the minds desktop
@@ -406,23 +485,23 @@ def _oauth_success_page(success_redirect_url: str | None) -> bytes:
     page = (
         "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<style>{_OAUTH_SUCCESS_PAGE_STYLE}</style></head>"
+        f"<style>{_LOGIN_SUCCESS_PAGE_STYLE}</style></head>"
         f"<body><main>{body_html}</main></body></html>"
     )
     return page.encode("utf-8")
 
 
 def _make_callback_handler_class(
-    box: _OAuthCaptureBox, success_redirect_url: str | None
+    box: _CallbackCaptureBox, success_redirect_url: str | None
 ) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a handler class closed over a specific capture box.
 
     Closing over the box lets the handler push state without us touching the
     HTTPServer instance's attributes (which would trip the no-getattr ratchet).
     """
-    body = _oauth_success_page(success_redirect_url)
+    body = _login_success_page(success_redirect_url)
 
-    class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
+    class _LoginCallbackHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
             # Silence the default access log; we don't need it.
             return
@@ -430,10 +509,10 @@ def _make_callback_handler_class(
         def do_GET(self) -> None:
             parsed = urllib.parse.urlparse(self.path)
             params = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-            # Only the real /oauth/callback hit with query params is the callback. Browsers
+            # Only the real /callback hit with query params is the callback. Browsers
             # routinely fire secondary GETs (favicon.ico, prefetches, service-worker pings)
             # at the same listener; those must not overwrite the captured params.
-            if parsed.path == _OAUTH_CALLBACK_PATH and params:
+            if parsed.path == _LOGIN_CALLBACK_PATH and params:
                 box.set(params)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -441,101 +520,183 @@ def _make_callback_handler_class(
             self.end_headers()
             self.wfile.write(body)
 
-    return _OAuthCallbackHandler
+    return _LoginCallbackHandler
 
 
-def _free_localhost_port() -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+def make_pkce_verifier() -> str:
+    return secrets.token_urlsafe(48)
 
 
-@auth.command(name="oauth")
-@click.argument("provider_id", type=click.Choice(["google", "github"], case_sensitive=False))
+def compute_pkce_challenge(code_verifier: str) -> str:
+    """The S256 PKCE challenge: base64url(sha256(verifier)) without padding."""
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _ensure_connector_supports_browser_login(client: ImbueCloudConnectorClient) -> None:
+    """Fail fast with an actionable error when the connector predates the hosted accounts pages.
+
+    Without this probe, a login against a stale connector opens a 404 page in
+    the browser and the CLI hangs until the listen timeout -- the failure has
+    to be reported before anything opens.
+    """
+    if client.supports_browser_login():
+        return
+    fail_with_json(
+        f"The connector at {client.base_url} is too old for browser sign-in "
+        f"(it does not serve the hosted accounts pages). {CONNECTOR_TOO_OLD_REMEDY}",
+        error_class="AuthFailed",
+        status="CONNECTOR_TOO_OLD",
+    )
+
+
+def _bind_callback_listener(
+    callback_port: int | None, handler_class: type[http.server.BaseHTTPRequestHandler]
+) -> http.server.HTTPServer:
+    """Bind the localhost login-callback listener, failing with the structured JSON body.
+
+    Binds directly (port 0 = kernel-assigned) rather than probing for a free
+    port with a separate socket and rebinding, which leaves a TOCTOU window
+    (the pattern cli/conftest.py warns about). A bind failure (an occupied
+    ``--callback-port``, a privileged port) is an OSError, and a
+    ``--callback-port`` outside 0-65535 (click's ``type=int`` accepts any
+    integer) is an OverflowError from ``socket.bind`` -- neither is an
+    ImbueCloudError, so both would otherwise escape
+    ``handle_imbue_cloud_errors`` as a raw traceback instead of the JSON
+    error body embedders parse.
+    """
+    try:
+        return http.server.HTTPServer(("127.0.0.1", callback_port or 0), handler_class)
+    except (OSError, OverflowError) as exc:
+        fail_with_json(
+            f"Could not bind the login callback listener on 127.0.0.1:{callback_port or 0}: {exc}",
+            error_class="LoginFailed",
+        )
+
+
+def _write_login_url_file(url_file: str, login_url: str) -> None:
+    """Write the sign-in URL for the embedder, failing with the structured JSON body.
+
+    ``click.Path(dir_okay=False)`` does not validate writability or parent
+    existence, so a bad ``--url-file`` surfaces here as an OSError -- which
+    must become the JSON error body, not a raw traceback.
+    """
+    try:
+        Path(url_file).write_text(login_url + "\n")
+    except OSError as exc:
+        fail_with_json(f"Could not write the sign-in URL to {url_file}: {exc}", error_class="LoginFailed")
+
+
+def build_login_url(connector_url: str, callback_url: str, code_challenge: str, state: str) -> str:
+    """The hosted login page URL that authorizes a device handoff back to ``callback_url``."""
+    authorize_query = urllib.parse.urlencode(
+        {"redirect_uri": callback_url, "code_challenge": code_challenge, "state": state}
+    )
+    next_path = f"/accounts/authorize?{authorize_query}"
+    return f"{connector_url.rstrip('/')}/login?" + urllib.parse.urlencode({"next": next_path})
+
+
+@auth.command(name="login")
 @click.option(
     "--account",
     default=None,
     help=(
-        "Optional account email. When set, the OAuth response must come back with the same "
+        "Optional account email. When set, the browser login must come back with the same "
         "email or the call fails (useful when re-authing a known account). When omitted, "
-        "whatever email the OAuth provider returns becomes this session's account email -- "
-        "this is the right shape for first-time signin via Google or GitHub."
+        "whatever account signs in on the hosted page becomes this session's account."
     ),
 )
 @click.option(
     "--callback-port",
     default=None,
     type=int,
-    help="Bind the local OAuth callback listener to a specific port (default: auto-pick free port).",
+    help="Bind the local callback listener to a specific port (default: auto-pick free port).",
 )
 @click.option(
     "--no-browser",
     is_flag=True,
     default=False,
-    help="Print the authorize URL instead of launching the browser; useful when running headless.",
+    help=(
+        "Print the sign-in URL instead of launching the browser. The URL only works in a "
+        "browser on THIS machine (it redirects back to a localhost listener); on a headless "
+        "machine use `auth signin` instead."
+    ),
 )
 @click.option(
     "--success-redirect-url",
     default=None,
     help=(
-        "URL the success page links to once the OAuth callback lands (e.g. a minds:// "
+        "URL the success page links to once the callback lands (e.g. a minds:// "
         "deeplink so a click returns the user to the desktop app). Default: no link; "
         "the page just says to close the tab."
     ),
 )
+@click.option(
+    "--url-file",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help=(
+        "Write the sign-in URL to this file once the callback listener is up. Lets an "
+        "embedder (the minds desktop client) offer a copy-the-link fallback without "
+        "parsing stderr."
+    ),
+)
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
-def oauth(
-    provider_id: str,
+def login(
     account: str | None,
     callback_port: int | None,
     no_browser: bool,
     success_redirect_url: str | None,
+    url_file: str | None,
     connector_url: str | None,
 ) -> None:
-    """OAuth-based sign-in. Spins up a localhost callback listener.
+    """Sign in via the hosted browser page (email/password, sign-up, or Google).
 
-    The callback URL is registered with the connector when it returns the
-    authorize URL. Once the OAuth provider redirects back, the listener
-    captures the query params, exchanges them at /auth/oauth/callback, and
-    persists the resulting session.
+    Spins up a localhost callback listener, opens the connector's hosted
+    login page in the system browser, and exchanges the one-time code the
+    page hands back (PKCE-bound) for this machine's own session. The browser
+    session established along the way stays in the browser; this device gets
+    independent tokens.
     """
     parsed_account = parse_account(account) if account else None
-    port = callback_port if callback_port is not None else _free_localhost_port()
-    callback_url = f"http://127.0.0.1:{port}{_OAUTH_CALLBACK_PATH}"
 
     client = make_connector_client(connector_url)
     store = make_session_store()
+    _ensure_connector_supports_browser_login(client)
 
-    authorize_response = client.auth_oauth_authorize(provider_id.lower(), callback_url)
-    authorize_url = authorize_response.get("url") or authorize_response.get("authorize_url")
-    if not isinstance(authorize_url, str) or not authorize_url:
-        fail_with_json("Connector did not return an authorize URL", error_class="OAuthFailed")
+    code_verifier = make_pkce_verifier()
+    state = secrets.token_urlsafe(16)
 
-    capture_box = _OAuthCaptureBox()
+    capture_box = _CallbackCaptureBox()
     handler_class = _make_callback_handler_class(capture_box, success_redirect_url)
-    server = http.server.HTTPServer(("127.0.0.1", port), handler_class)
+    server = _bind_callback_listener(callback_port, handler_class)
+    port = server.server_address[1]
+    callback_url = f"http://127.0.0.1:{port}{_LOGIN_CALLBACK_PATH}"
+    login_url = build_login_url(str(client.base_url), callback_url, compute_pkce_challenge(code_verifier), state)
 
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-oauth-cb")
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-login-cb")
     server_thread.start()
 
-    if no_browser:
-        click.echo(f"Open this URL in your browser to sign in:\n  {authorize_url}", err=True)
-    else:
-        click.echo(f"Opening browser to: {authorize_url}", err=True)
-        try:
-            webbrowser.open(authorize_url)
-        except webbrowser.Error:
-            click.echo(
-                "Failed to launch browser; visit the URL above manually.",
-                err=True,
-            )
-
-    deadline = time.monotonic() + _OAUTH_LISTEN_TIMEOUT_SECONDS
+    deadline = time.monotonic() + _LOGIN_LISTEN_TIMEOUT_SECONDS
     captured: dict[str, str] | None = None
     try:
+        if url_file is not None:
+            # The listener is live, so the URL is usable the moment this appears.
+            _write_login_url_file(url_file, login_url)
+
+        if no_browser:
+            click.echo(f"Open this URL in your browser to sign in:\n  {login_url}", err=True)
+        else:
+            click.echo(f"Opening browser to: {login_url}", err=True)
+            try:
+                webbrowser.open(login_url)
+            except webbrowser.Error:
+                click.echo(
+                    "Failed to launch browser; visit the URL above manually.",
+                    err=True,
+                )
+
         while time.monotonic() < deadline:
             captured = capture_box.get()
             if captured:
@@ -546,14 +707,15 @@ def oauth(
         server.server_close()
 
     if not captured:
-        fail_with_json("Timed out waiting for OAuth callback", error_class="OAuthTimeout")
+        fail_with_json("Timed out waiting for the browser sign-in", error_class="LoginTimeout")
+    if captured.get("state") != state:
+        fail_with_json("Login callback state mismatch; refusing the response", error_class="LoginStateMismatch")
+    code = captured.get("code", "")
+    if not code:
+        fail_with_json("Login callback carried no code", error_class="LoginFailed")
 
-    callback_response = client.auth_oauth_callback(
-        provider_id=provider_id.lower(),
-        callback_url=callback_url,
-        query_params=captured,
-    )
-    payload = _persist_auth_response(callback_response, parsed_account, store)
+    token_response = client.auth_device_token(code=code, code_verifier=code_verifier, redirect_uri=callback_url)
+    payload = _persist_auth_response(token_response, parsed_account, store)
     emit_json(payload)
 
 
@@ -575,8 +737,10 @@ def forgot_password(account: str | None, connector_url: str | None) -> None:
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def resend_verification(account: str | None, connector_url: str | None) -> None:
-    """Re-send the email verification message for the given account.
+    """(Re-)send the email verification message for the given account.
 
+    Verification is non-blocking, but a few actions (visiting shares, the
+    ally plan) require a verified email; this sends the link on demand.
     ``sent`` is False when the connector suppressed the send because one
     went out moments ago (its per-user cooldown).
     """
@@ -600,11 +764,11 @@ def resend_verification(account: str | None, connector_url: str | None) -> None:
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def is_verified(account: str | None, connector_url: str | None) -> None:
-    """Check whether the account's email is verified; promote a pending session when it is.
+    """Check whether the account's email is verified (a plain status query).
 
-    Promotion clears the session's pending-verification flag (making the
-    account appear in ``auth list``) and marks it active -- the same
-    activation a fully-verified signin performs. Safe to poll repeatedly.
+    Verification is non-blocking: an unverified account is fully signed in,
+    and only specific actions (visiting shares, the ally plan) require the
+    email to be verified. Safe to poll repeatedly.
     """
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
@@ -617,9 +781,6 @@ def is_verified(account: str | None, connector_url: str | None) -> None:
     client = make_connector_client(connector_url)
     access_token = get_active_token(store, client, parsed_account)
     is_email_verified = client.auth_is_email_verified(access_token, str(session.email))
-    if is_email_verified and session.is_pending_verification:
-        store.promote_pending_session(parsed_account)
-        store.set_active_account(parsed_account)
     emit_json(
         {
             "verified": is_email_verified,

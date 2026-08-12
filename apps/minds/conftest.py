@@ -247,8 +247,9 @@ def sync_e2e_account(sync_e2e_env: SyncE2EEnv) -> Iterator[SyncE2EAccount]:
     that domain into ``paid_domains`` -- imbue-cloud backups (R2 bucket
     provisioning) are paid-gated, and these tests exercise them for real. The
     account is provisioned through the SuperTokens admin API (setup machinery,
-    not part of the user journey under test); the tests then sign in through
-    the real UI with the returned email + password.
+    not part of the user journey under test); the tests then sign in
+    headlessly with the returned email + password via ``mngr imbue_cloud auth
+    signin`` (the in-app form was replaced by the hosted browser flow).
     """
     email = f"sync-e2e-{get_short_random_string()}@imbue.com"
     password = SecretStr(f"pw-{uuid4().hex}")

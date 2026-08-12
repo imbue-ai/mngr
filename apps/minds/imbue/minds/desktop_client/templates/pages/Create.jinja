@@ -144,12 +144,12 @@
 
     function openSigninModal() {
       if (window.minds && window.minds.openSigninModal) {
-        // Trusted local page on the chrome surface: open the shared modal
-        // overlay (loaded with /auth/signin-modal) via the shell bridge.
+        // Trusted local page on the chrome surface: open the shared sign-in
+        // modal via the shell bridge.
         window.minds.openSigninModal();
       } else {
-        // Plain browser: navigate to the standalone sign-in page.
-        window.location.href = '/auth/signin-modal';
+        // Plain browser: /auth/login redirects into the SPA's web-login flow.
+        window.location.href = '/auth/login';
       }
     }
 

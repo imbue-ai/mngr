@@ -8,10 +8,8 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.hazmat.primitives.serialization import PublicFormat
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.serialization import load_ssh_private_key
 from pyinfra.api import Host as PyinfraHost
 
@@ -34,12 +32,12 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 # =============================================================================
 
 
-def test_generate_ssh_keypair_rsa_4096_bits() -> None:
-    """The RSA key should be 4096 bits."""
-    private_pem, _ = generate_ssh_keypair()
-    private_key = load_pem_private_key(private_pem.encode("utf-8"), password=None)
-    assert isinstance(private_key, rsa.RSAPrivateKey)
-    assert private_key.key_size == 4096
+def test_generate_ssh_keypair_produces_ed25519_openssh_format() -> None:
+    """Client keypairs are Ed25519 (owner-exec envelope auth accepts only Ed25519)."""
+    private_pem, public_openssh = generate_ssh_keypair()
+    private_key = load_ssh_private_key(private_pem.encode("utf-8"), password=None)
+    assert isinstance(private_key, ed25519.Ed25519PrivateKey)
+    assert public_openssh.startswith("ssh-ed25519 ")
 
 
 def test_generate_ssh_keypair_each_call_produces_unique_keys() -> None:
@@ -55,15 +53,15 @@ def test_generate_ssh_keypair_each_call_produces_unique_keys() -> None:
 
 
 def test_save_ssh_keypair_writes_valid_keys_with_correct_permissions(tmp_path: Path) -> None:
-    """save_ssh_keypair should write PEM private key (0o600) and OpenSSH public key (0o644)."""
+    """save_ssh_keypair should write an OpenSSH private key (0o600) and OpenSSH public key (0o644)."""
     key_dir = tmp_path / "keys"
     private_path, public_path = save_ssh_keypair(key_dir)
 
     assert private_path == key_dir / "ssh_key"
     assert public_path == key_dir / "ssh_key.pub"
 
-    assert private_path.read_text().startswith("-----BEGIN RSA PRIVATE KEY-----")
-    assert public_path.read_text().startswith("ssh-rsa ")
+    assert private_path.read_text().startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+    assert public_path.read_text().startswith("ssh-ed25519 ")
 
     assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(public_path.stat().st_mode) == 0o644
@@ -72,11 +70,11 @@ def test_save_ssh_keypair_writes_valid_keys_with_correct_permissions(tmp_path: P
 def test_save_ssh_keypair_custom_key_name(tmp_path: Path) -> None:
     """save_ssh_keypair should use the provided key name."""
     key_dir = tmp_path / "keys"
-    private_path, public_path = save_ssh_keypair(key_dir, key_name="id_rsa")
-    assert private_path == key_dir / "id_rsa"
-    assert public_path == key_dir / "id_rsa.pub"
-    assert private_path.read_text().startswith("-----BEGIN RSA PRIVATE KEY-----")
-    assert public_path.read_text().startswith("ssh-rsa ")
+    private_path, public_path = save_ssh_keypair(key_dir, key_name="id_custom")
+    assert private_path == key_dir / "id_custom"
+    assert public_path == key_dir / "id_custom.pub"
+    assert private_path.read_text().startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+    assert public_path.read_text().startswith("ssh-ed25519 ")
 
 
 def test_save_ssh_keypair_creates_parent_directories(tmp_path: Path) -> None:
@@ -98,7 +96,7 @@ def test_load_or_create_ssh_keypair_creates_keys_when_missing(tmp_path: Path) ->
     private_path, public_content = load_or_create_ssh_keypair(key_dir)
     assert private_path.exists()
     assert (key_dir / "ssh_key.pub").exists()
-    assert public_content.startswith("ssh-rsa ")
+    assert public_content.startswith("ssh-ed25519 ")
 
 
 def test_load_or_create_ssh_keypair_returns_existing_keys(tmp_path: Path) -> None:
@@ -179,7 +177,7 @@ def test_load_or_create_ssh_keypair_concurrent_first_creation_is_consistent(tmp_
 
     # The on-disk public key matches the private key (a real, parseable pair),
     # so no caller wrote a public key from a different generated keypair.
-    private_key = load_pem_private_key((key_dir / "vps_ssh_key").read_bytes(), password=None)
+    private_key = load_ssh_private_key((key_dir / "vps_ssh_key").read_bytes(), password=None)
     expected_public = (
         private_key.public_key().public_bytes(encoding=Encoding.OpenSSH, format=PublicFormat.OpenSSH).decode("utf-8")
     )

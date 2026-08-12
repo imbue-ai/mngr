@@ -8,7 +8,7 @@ session without calling the connector. The active-account marker
 ``active_account`` (a single line of plain text) records which account
 the default ``[providers.imbue_cloud]`` instance should use when its
 ``account`` field is unset; ``mngr imbue_cloud auth use --account
-<email>`` writes it, and ``auth signin``/``auth signup``/``auth oauth``
+<email>`` writes it, and ``auth login``/``auth signin``/``auth signup``
 update it implicitly so the most recently signed-in account becomes
 active.
 """
@@ -26,7 +26,6 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_imbue_cloud.data_types import AuthSession
@@ -181,7 +180,6 @@ class ImbueCloudSessionStore(MutableModel):
             "access_token_expires_at": (
                 session.access_token_expires_at.isoformat() if session.access_token_expires_at is not None else None
             ),
-            "is_pending_verification": session.is_pending_verification,
         }
         atomic_write(session_path, json.dumps(payload, indent=2))
         try:
@@ -192,29 +190,6 @@ class ImbueCloudSessionStore(MutableModel):
         index = self._load_index()
         index[session.email] = session.user_id
         self._save_index(index)
-
-    def promote_pending_session(self, account: ImbueCloudAccount) -> AuthSession | None:
-        """Clear the pending-verification flag on ``account``'s session.
-
-        Returns the (now non-pending) session, or None when no session exists.
-        Idempotent: promoting an already-promoted (non-pending) session
-        returns it unchanged.
-        """
-        with self._lock:
-            index = self._load_index()
-            user_id = index.get(account)
-            if user_id is None:
-                return None
-            session = self._load_by_user_id_unlocked(user_id)
-            if session is None:
-                return None
-            if not session.is_pending_verification:
-                return session
-            promoted = session.model_copy_update(
-                to_update(session.field_ref().is_pending_verification, False),
-            )
-            self._save_unlocked(promoted)
-            return promoted
 
     def delete_by_account(self, account: ImbueCloudAccount) -> None:
         """Remove the session and email index entry for an account.
@@ -293,10 +268,7 @@ class ImbueCloudSessionStore(MutableModel):
 
         Raises ``ImbueCloudAuthError`` if the account has no session on
         disk -- callers should sign in before pinning, so the on-disk
-        invariant ``active_account names a valid session`` holds. A session
-        still pending email verification is likewise refused: a pending
-        account does not count as signed in, so it must never become the
-        account other commands implicitly resolve to.
+        invariant ``active_account names a valid session`` holds.
         """
         with self._lock:
             index = self._load_index()
@@ -305,13 +277,6 @@ class ImbueCloudSessionStore(MutableModel):
                 raise ImbueCloudAuthError(
                     f"Cannot mark {account!s} active: no session on disk. "
                     f"Run `mngr imbue_cloud auth signin --account {account}` first."
-                )
-            session = self._load_by_user_id_unlocked(user_id)
-            if session is not None and session.is_pending_verification:
-                raise ImbueCloudAuthError(
-                    f"Cannot mark {account!s} active: its email is not verified yet. "
-                    f"Click the verification link in your inbox, then run "
-                    f"`mngr imbue_cloud auth is-verified --account {account}`."
                 )
             self._ensure_dir()
             atomic_write(self._active_account_path(), str(account) + "\n")
@@ -343,9 +308,8 @@ def make_session_from_tokens(
     display_name: str | None,
     access_token: str,
     refresh_token: str | None,
-    is_pending_verification: bool,
 ) -> AuthSession:
-    """Build an AuthSession from raw signin/oauth response tokens."""
+    """Build an AuthSession from raw signin/login response tokens."""
     return AuthSession(
         user_id=user_id,
         email=email,
@@ -353,7 +317,6 @@ def make_session_from_tokens(
         access_token=SecretStr(access_token),
         refresh_token=SecretStr(refresh_token) if refresh_token else None,
         access_token_expires_at=_decode_jwt_exp(access_token),
-        is_pending_verification=is_pending_verification,
     )
 
 

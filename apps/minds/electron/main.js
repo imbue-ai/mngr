@@ -1788,37 +1788,21 @@ async function handleMngrForwardStarted(event) {
 
 function handleAuthEvent(event) {
   if (event.event === 'auth_success') {
+    // Sign-in happens on the hosted browser page; the SPA's accounts channel
+    // frame carries the new identity, but pre-WS surfaces (and any window
+    // stuck on a stale state) pick it up from a plain reload.
     for (const b of bundles) {
       if (b.window.isDestroyed() || b.window.webContents.isDestroyed()) continue;
-      // A window sitting on a backend-served /auth page cannot pick the
-      // sign-in up from a reload: that just re-renders the pristine auth form
-      // and kills the page's own status poller (which loses a deterministic
-      // race anyway -- auth_success is emitted before the OAuth flow is
-      // marked done). Send it through /post-login, which owns the
-      // just-signed-in landing decision, preserving any ?return_to it
-      // carried. Other windows keep the legacy reload so pre-WS surfaces
-      // pick up has_accounts.
-      let authPageReturnTo = null;
-      let isOnAuthPage = false;
-      try {
-        const current = new URL(b.window.webContents.getURL());
-        isOnAuthPage = current.pathname.startsWith('/auth/');
-        authPageReturnTo = current.searchParams.get('return_to');
-      } catch { /* non-URL states (about:blank, shell.html) just reload */ }
-      if (isOnAuthPage && backendBaseUrl) {
-        const postLoginUrl = `${backendBaseUrl}/post-login` +
-          (authPageReturnTo ? `?return_to=${encodeURIComponent(authPageReturnTo)}` : '');
-        b.window.webContents.loadURL(postLoginUrl).catch(() => {});
-      } else {
-        b.window.webContents.reload();
-      }
+      b.window.webContents.reload();
     }
   } else if (event.event === 'auth_required') {
     const mru = getMostRecentWindow();
     if (!mru) return;
     focusBundle(mru);
     if (backendBaseUrl) {
-      const authUrl = `${backendBaseUrl}/auth/login?message=` +
+      // ``?web-login=1`` makes the SPA start the browser sign-in flow on
+      // load, with the message rendered in its waiting modal.
+      const authUrl = `${backendBaseUrl}/?web-login=1&web-login-message=` +
         encodeURIComponent('You need to sign in to Imbue in order to share');
       navigateBundle(mru, authUrl);
     }

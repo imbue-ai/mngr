@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_agents_json
@@ -637,9 +638,10 @@ def test_derive_openssh_public_key_line_roundtrips_an_openssh_format_key() -> No
 
 
 def test_derive_openssh_public_key_line_roundtrips_mngrs_traditional_pem_rsa_key() -> None:
-    # The exact flavor mngr's generate_ssh_keypair writes for client keys:
-    # RSA in traditional PEM ("-----BEGIN RSA PRIVATE KEY-----"), which needs
-    # the PEM loader, not the OpenSSH one.
+    # The legacy flavor older mngr installs wrote for client keys (mngr now
+    # generates Ed25519): RSA in traditional PEM ("-----BEGIN RSA PRIVATE
+    # KEY-----"), which needs the PEM loader, not the OpenSSH one. Records
+    # synced from those installs still carry these keys.
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     private_text = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -728,3 +730,74 @@ def test_reconcile_never_resurrects_other_device_tombstones(paths: WorkspacePath
     store.reconcile({user_id: _EMAIL}, resolver)
 
     assert store.list_records(user_id)[0].state == RECORD_STATE_DESTROYED
+
+
+def _empty_complete_resolver(provider_names: tuple[str, ...]) -> MngrCliBackendResolver:
+    """A resolver whose discovery completed cleanly and lists no workspaces at all."""
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    seed_provider_snapshots(
+        resolver,
+        error_by_provider_name={},
+    )
+    for provider_name in provider_names:
+        resolver.update_providers(
+            provider_name=ProviderInstanceName(provider_name),
+            provider=None,
+            error=None,
+            last_snapshot_at=datetime.now(timezone.utc),
+        )
+    return resolver
+
+
+def test_cloud_rows_are_never_tombstoned_as_definitively_absent(paths: WorkspacePaths) -> None:
+    """The tombstone-safety invariant for web-created / cloud workspaces.
+
+    A cloud (imbue_cloud) row may be created by a device that never
+    materializes its SSH key here, and its lease can be live while a listing
+    pass transiently misses it -- so "absent from this device's discovery"
+    must never tombstone it. Only the lease going away (server-driven) ends a
+    cloud row's life.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    user_id = _user_id()
+    cli.add_account(user_id=user_id, email=_EMAIL)
+    store = _make_store(paths, cli)
+
+    cloud_host_id = f"host-{uuid4().hex}"
+    cloud_record = ReplicaRecord(
+        host_id=cloud_host_id,
+        agent_id=_agent_id(),
+        display_name="web-created",
+        provider_kind="imbue_cloud_alice",
+        hosting_device_id=None,
+        device_label="web",
+        state=RECORD_STATE_ACTIVE,
+        revision=0,
+        is_dirty=True,
+    )
+    local_host_id = f"host-{uuid4().hex}"
+    local_record = ReplicaRecord(
+        host_id=local_host_id,
+        agent_id=_agent_id(),
+        display_name="local-docker",
+        provider_kind="docker",
+        hosting_device_id=store.device_id,
+        device_label="test-laptop",
+        state=RECORD_STATE_ACTIVE,
+        revision=0,
+        is_dirty=True,
+    )
+    store.upsert_local_record(user_id, _EMAIL, cloud_record)
+    store.upsert_local_record(user_id, _EMAIL, local_record)
+
+    # Discovery completed cleanly for both providers and lists nothing.
+    resolver = _empty_complete_resolver(("imbue_cloud_alice", "docker"))
+    store.reconcile({user_id: _EMAIL}, resolver)
+
+    pushed = cli.sync_records_by_email[_EMAIL]
+    # The locally-hosted row IS tombstoned (the absent pass works)...
+    assert pushed[local_host_id]["state"] == RECORD_STATE_DESTROYED
+    # ...but the cloud row survives untouched: never "definitively absent".
+    assert pushed[cloud_host_id]["state"] == RECORD_STATE_ACTIVE
+    replica_states = {record.host_id: record.state for record in store.list_records(user_id)}
+    assert replica_states[cloud_host_id] == RECORD_STATE_ACTIVE
