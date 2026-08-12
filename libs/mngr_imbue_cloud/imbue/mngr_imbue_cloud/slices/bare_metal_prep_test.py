@@ -46,11 +46,17 @@ def test_prep_script_installs_qemu_and_lima() -> None:
 
 def test_prep_script_never_invokes_limactl_as_root() -> None:
     # The script runs as root; limactl refuses to run as root, so it must only be
-    # extracted, never executed, here.
+    # extracted, never executed, here. The boot-autostart heredoc is excluded:
+    # its limactl calls run later as the lima user via the systemd unit's
+    # User= directive, not during root prep.
     script = _script()
     assert "tar -C /usr/local" in script
-    assert "limactl --version" not in script
-    assert "limactl start" not in script
+    autostart_start = script.index("<<'MNGR_SLICES_AUTOSTART'")
+    autostart_end = script.rindex("MNGR_SLICES_AUTOSTART")
+    root_executed_script = script[:autostart_start] + script[autostart_end:]
+    assert "limactl --version" not in root_executed_script
+    assert "limactl start" not in root_executed_script
+    assert "limactl list" not in root_executed_script
 
 
 def test_prep_script_creates_service_user_with_kvm_and_pool_key() -> None:
@@ -94,6 +100,57 @@ def test_prep_script_provisions_swapfile() -> None:
     assert "swapon /swapfile" in script
     assert "32G" in script
     assert "/swapfile none swap sw 0 0" in script
+
+
+def test_prep_script_pins_unattended_upgrades_to_never_auto_reboot() -> None:
+    # Slice boxes host user workspaces; an unattended-upgrades auto-reboot would
+    # take every slice on the box down unannounced (and nothing restarts them).
+    # The Debian default is already "false", but prep pins it explicitly so config
+    # drift cannot flip it.
+    script = _script()
+    assert "/etc/apt/apt.conf.d/99mngr-no-auto-reboot" in script
+    assert 'Unattended-Upgrade::Automatic-Reboot "false";' in script
+
+
+def test_prep_script_installs_boot_autostart_for_slice_vms() -> None:
+    # After a box reboot nothing else restarts the lima slice VMs (no linger, no
+    # lima boot integration), so prep installs a boot unit that starts them all.
+    # It must run as the lima user (lima refuses root) and be enabled, not
+    # started: prep runs on live boxes where the VMs are already up or were
+    # stopped on purpose.
+    script = _script()
+    assert "/usr/local/sbin/mngr-slices-autostart.sh" in script
+    assert "/etc/systemd/system/mngr-slices-autostart.service" in script
+    assert "User=limahost" in script
+    assert "WantedBy=multi-user.target" in script
+    assert "systemctl enable mngr-slices-autostart.service" in script
+    assert "systemctl start mngr-slices-autostart" not in script
+
+
+def test_prep_script_autostart_targets_only_stopped_slice_instances() -> None:
+    # The boot script must start every stopped slice VM (leased or available)
+    # and nothing else: not running instances (re-running the unit must be a
+    # no-op) and not non-slice VMs someone parked on the box.
+    script = _script()
+    assert "limactl list --format '{{.Name}} {{.Status}}'" in script
+    assert 'awk -v prefix="mngr-slice-" \'index($1, prefix) == 1 && $2 == "Stopped" {print $1}\'' in script
+
+
+def test_prep_script_autostart_bounds_parallelism_and_retries() -> None:
+    # A full box cold-booting 14 QEMU VMs at once is a boot storm, and fully
+    # serial keeps users down for ~10 minutes, so starts are capped at a small
+    # concurrency. Each instance gets one retry; a VM that still fails must fail
+    # the unit (xargs propagates the failure) so the breakage is visible in
+    # systemd rather than swallowed.
+    script = _script()
+    assert "xargs -n1 -P 4" in script
+    assert "retrying" in script
+    autostart_body = script[script.index("MNGR_SLICES_AUTOSTART") : script.rindex("MNGR_SLICES_AUTOSTART")]
+    assert "|| true" not in autostart_body
+    # A failing `limactl list` must fail the unit too, not read as "no VMs to
+    # start": errexit+pipefail with no stderr suppression on the listing.
+    assert "set -euo pipefail" in autostart_body
+    assert "2>/dev/null" not in autostart_body
 
 
 def test_prep_script_installs_libguestfs_for_image_customization() -> None:

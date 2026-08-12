@@ -1,6 +1,7 @@
 from typing import Final
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_LIMA_INSTANCE_PREFIX
 from imbue.mngr_imbue_cloud.slices.bare_metal import box_default_workspace_template_cache_dir
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_path
 from imbue.mngr_vps.host_setup import PINNED_CONTAINERD_APT_VERSION
@@ -20,6 +21,11 @@ DEFAULT_LIMA_VERSION: Final[str] = "2.2.0"
 # partitions), which is too small to matter.
 _SWAPFILE_SIZE_GIB: Final[int] = 32
 _SWAPFILE_PATH: Final[str] = "/swapfile"
+
+# How many slice VMs the boot autostart brings up concurrently. A full box
+# cold-booting 14 QEMU VMs at once is a boot storm (each start waits on guest
+# boot + lima requirement checks); fully serial keeps users down for ~10 minutes.
+_SLICE_AUTOSTART_PARALLELISM: Final[int] = 4
 
 # Packages the box needs to run lima/QEMU VMs and the slice bake (Docker lives
 # inside each VM, not on the box). ``libguestfs-tools`` provides ``virt-customize``,
@@ -55,8 +61,12 @@ def build_box_prep_script(
     Debian mirror. The staged image is additionally customized (via ``virt-customize``)
     to pre-install the pinned Docker Engine + inotify-tools, so each slice VM's
     first-boot provisioning finds them present and skips the per-VM download/install.
-    limactl is only ever installed here, never invoked as root (lima refuses to run as
-    root). Intended to be piped to ``sudo bash`` on the box.
+    Also hardens the box against reboots: pins unattended-upgrades to never auto-reboot,
+    and installs (enable-only) the ``mngr-slices-autostart.service`` boot unit that
+    starts every stopped ``mngr-slice-*`` VM as the lima user after a box reboot.
+    limactl is never invoked as root (lima refuses to run as root): prep itself only
+    installs it, and the autostart script's limactl calls run later as the lima user
+    via the unit's ``User=`` directive. Intended to be piped to ``sudo bash`` on the box.
     """
     apt_packages = " ".join(_BOX_APT_PACKAGES)
     lima_tarball = f"lima-{lima_version}-Linux-x86_64.tar.gz"
@@ -65,6 +75,7 @@ def build_box_prep_script(
     default_workspace_template_cache_dir = box_default_workspace_template_cache_dir(lima_service_user)
     swapfile_path = _SWAPFILE_PATH
     swapfile_size_gib = _SWAPFILE_SIZE_GIB
+    slice_autostart_parallelism = _SLICE_AUTOSTART_PARALLELISM
     return f"""\
 #!/bin/bash
 set -euo pipefail
@@ -170,6 +181,74 @@ if ! swapon --show=NAME --noheadings 2>/dev/null | grep -qx {swapfile_path}; the
     swapon {swapfile_path}
 fi
 grep -q "^{swapfile_path} " /etc/fstab || echo "{swapfile_path} none swap sw 0 0" >> /etc/fstab
+
+# 8. Pin unattended-upgrades to never reboot the box on its own. The Debian
+#    default is already "false", but an explicit pin survives config drift (an
+#    image or package update flipping it). Slice boxes host user workspaces:
+#    kernels stage and activate at the next operator-scheduled reboot instead.
+cat > /etc/apt/apt.conf.d/99mngr-no-auto-reboot <<'MNGR_NO_AUTO_REBOOT'
+// Managed by mngr (bare_metal_prep): never let unattended-upgrades reboot a
+// slice box on its own. Kernels stage and activate at the next operator-
+// scheduled reboot; slices are user workspaces and must not restart unannounced.
+Unattended-Upgrade::Automatic-Reboot "false";
+MNGR_NO_AUTO_REBOOT
+
+# 9. Boot autostart for the slice VMs. After a box reboot nothing else restarts
+#    the lima VMs ({lima_service_user} has no linger session and lima has no boot
+#    integration), so every workspace on the box stays down until an operator
+#    intervenes. This unit starts all stopped slice VMs at boot as the lima user
+#    (lima refuses root), with bounded parallelism and one retry per instance;
+#    a VM that still fails start fails the unit so the breakage is visible in
+#    systemd. Enable only (no start): with no reboot pending it must not run
+#    now, and starting stopped-on-purpose VMs is the boot path's job alone.
+#    In-VM recovery (workspace container + services agent) is handled inside
+#    each VM by its own minds-autostart units.
+cat > /usr/local/sbin/mngr-slices-autostart.sh <<'MNGR_SLICES_AUTOSTART'
+#!/bin/bash
+# Start every stopped mngr slice VM on this box (bounded parallelism, one retry
+# each). Runs as the lima service user via mngr-slices-autostart.service.
+set -euo pipefail
+export PATH=/usr/local/bin:$PATH
+
+start_one_slice() {{
+    if limactl start "$1"; then
+        return 0
+    fi
+    echo "first start of slice $1 failed; retrying" >&2
+    limactl start "$1"
+}}
+export -f start_one_slice
+
+# No stderr suppression and pipefail above: a failing listing must fail the
+# unit (visible in systemd), not read as "no VMs to start".
+stopped_instances=$(limactl list --format '{{{{.Name}}}} {{{{.Status}}}}' \\
+    | awk -v prefix="{SLICE_LIMA_INSTANCE_PREFIX}" 'index($1, prefix) == 1 && $2 == "Stopped" {{print $1}}')
+if [ -z "$stopped_instances" ]; then
+    echo "no stopped slice VMs to start"
+    exit 0
+fi
+printf '%s\\n' "$stopped_instances" | xargs -n1 -P {slice_autostart_parallelism} bash -c 'start_one_slice "$1"' _
+MNGR_SLICES_AUTOSTART
+chmod +x /usr/local/sbin/mngr-slices-autostart.sh
+cat > /etc/systemd/system/mngr-slices-autostart.service <<'MNGR_SLICES_UNIT'
+[Unit]
+Description=Start all mngr slice VMs on box boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User={lima_service_user}
+WorkingDirectory=/home/{lima_service_user}
+ExecStart=/usr/local/sbin/mngr-slices-autostart.sh
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=multi-user.target
+MNGR_SLICES_UNIT
+systemctl daemon-reload
+systemctl enable mngr-slices-autostart.service
 
 echo MNGR_BOX_PREP_DONE
 """
