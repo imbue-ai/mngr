@@ -9,7 +9,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FieldValue
@@ -89,13 +89,13 @@ class RepoPathsDataSource(FrozenModel):
     def compute(
         self,
         agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        cached_fields: dict[AgentId, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], Sequence[str]]:
         now = now_utc()
-        fields: dict[AgentName, dict[str, FieldValue]] = {}
+        fields: dict[AgentId, dict[str, FieldValue]] = {}
         for agent in agents:
             repo_path = repo_path_from_labels(agent.labels)
             if repo_path is not None:
-                fields[agent.name] = {FIELD_REPO_PATH: RepoPathField(path=repo_path, created=now)}
+                fields[agent.id] = {FIELD_REPO_PATH: RepoPathField(path=repo_path, created=now)}
         return fields, []

@@ -24,7 +24,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import CellRun
@@ -714,9 +714,9 @@ class GitHubDataSource(FrozenModel):
     def compute(
         self,
         agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        cached_fields: dict[AgentId, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], Sequence[str]]:
         cg = mngr_ctx.concurrency_group
         errors: list[str] = []
         now = now_utc()
@@ -727,18 +727,18 @@ class GitHubDataSource(FrozenModel):
         # to the cache only when labels no longer carry a remote -- in which
         # case the cached value is the only information we have and its
         # `created` correctly tags any derived field as stale.
-        agent_repos: dict[AgentName, str] = {}
-        agent_created: dict[AgentName, datetime] = {}
+        agent_repos: dict[AgentId, str] = {}
+        agent_created: dict[AgentId, datetime] = {}
         for agent in agents:
             label_repo = repo_path_from_labels(agent.labels)
             if label_repo is not None:
-                agent_repos[agent.name] = label_repo
-                agent_created[agent.name] = now
+                agent_repos[agent.id] = label_repo
+                agent_created[agent.id] = now
                 continue
-            cached_repo_field = _get_cached_repo_field(cached_fields, agent.name)
+            cached_repo_field = _get_cached_repo_field(cached_fields, agent.id)
             if cached_repo_field is not None:
-                agent_repos[agent.name] = cached_repo_field.path
-                agent_created[agent.name] = cached_repo_field.created
+                agent_repos[agent.id] = cached_repo_field.path
+                agent_created[agent.id] = cached_repo_field.created
 
         repo_branches, extra_branches_by_agent, lookup_errors = _plan_branch_lookup(
             agents, agent_repos, self.config, cg
@@ -756,9 +756,9 @@ class GitHubDataSource(FrozenModel):
         errors.extend(board.errors)
         fetch_failed = bool(board.errors)
 
-        fields: dict[AgentName, dict[str, FieldValue]] = {}
+        fields: dict[AgentId, dict[str, FieldValue]] = {}
         for agent in agents:
-            agent_repo = agent_repos.get(agent.name)
+            agent_repo = agent_repos.get(agent.id)
             if agent_repo is None:
                 continue
             agent_fields = _compute_agent_fields(
@@ -766,29 +766,29 @@ class GitHubDataSource(FrozenModel):
                 cached_fields,
                 agent,
                 agent_repo,
-                extra_branches_by_agent.get(agent.name, ()),
+                extra_branches_by_agent.get(agent.id, ()),
                 # `agent_created` is the staleness time for any field we
                 # synthesize for this agent: it reflects how stale the
                 # (repo, branch) lookup is (now if from labels,
                 # cached.created if we fell back to the cache). The PR data
                 # itself was fetched just now, but its attribution to this
                 # agent rides on a possibly-stale mapping.
-                agent_created[agent.name],
+                agent_created[agent.id],
                 self.config,
                 is_fetch_failed=fetch_failed,
             )
             if agent_fields:
-                fields[agent.name] = agent_fields
+                fields[agent.id] = agent_fields
 
         return fields, errors
 
 
 def _plan_branch_lookup(
     agents: Sequence[AgentDetails],
-    agent_repos: Mapping[AgentName, str],
+    agent_repos: Mapping[AgentId, str],
     config: GitHubDataSourceConfig,
     cg: ConcurrencyGroup,
-) -> tuple[list[tuple[str, str]], dict[AgentName, tuple[str, ...]], list[str]]:
+) -> tuple[list[tuple[str, str]], dict[AgentId, tuple[str, ...]], list[str]]:
     """Decide which (repo, branch) pairs one board refresh looks up.
 
     Returns the pairs to query, the extra branches backing each agent's PR
@@ -803,10 +803,10 @@ def _plan_branch_lookup(
     resolved inline rather than from a cached field so a newly checked-out
     branch shows its PR on this refresh instead of the next one.
     """
-    lookup_agents = [agent for agent in agents if agent.name in agent_repos and agent.initial_branch is not None]
+    lookup_agents = [agent for agent in agents if agent.id in agent_repos and agent.initial_branch is not None]
     worktree_branches = _resolve_worktree_branches(lookup_agents, cg) if config.pr else {}
     required_pairs: list[tuple[str, str]] = [
-        (agent_repos[agent.name], agent.initial_branch) for agent in lookup_agents if agent.initial_branch is not None
+        (agent_repos[agent.id], agent.initial_branch) for agent in lookup_agents if agent.initial_branch is not None
     ]
     extra_branches, dropped_branch_count = _select_branches_within_query_budget(
         list(agent_repos.values()), [branch for _repo, branch in required_pairs], worktree_branches
@@ -822,14 +822,14 @@ def _plan_branch_lookup(
 
     repo_branches: list[tuple[str, str]] = list(required_pairs)
     for agent in lookup_agents:
-        for branch in extra_branches.get(agent.name, ()):
-            repo_branches.append((agent_repos[agent.name], branch))
+        for branch in extra_branches.get(agent.id, ()):
+            repo_branches.append((agent_repos[agent.id], branch))
     return repo_branches, extra_branches, errors
 
 
 def _compute_agent_fields(
     board: FetchBoardResult,
-    cached_fields: dict[AgentName, dict[str, FieldValue]],
+    cached_fields: dict[AgentId, dict[str, FieldValue]],
     agent: AgentDetails,
     agent_repo: str,
     extra_branches: Sequence[str],
@@ -864,7 +864,7 @@ def _compute_agent_fields(
         # carries the additional PRs it was built with, so the whole cell
         # stays one consistent snapshot.
         agent_fields.update(
-            _compute_failed_fetch_fields(cached_fields, agent.name, branch, agent_repo, this_created, config)
+            _compute_failed_fetch_fields(cached_fields, agent.id, branch, agent_repo, this_created, config)
         )
     return agent_fields
 
@@ -897,7 +897,7 @@ def _resolve_additional_prs(
 def _resolve_worktree_branches(
     agents: Sequence[AgentDetails],
     cg: ConcurrencyGroup,
-) -> dict[AgentName, tuple[str, ...]]:
+) -> dict[AgentId, tuple[str, ...]]:
     """Resolve, per agent, the branches whose PRs belong in that agent's PR cell.
 
     Priority order is the checked-out branch, then the branch mngr recorded for
@@ -908,16 +908,16 @@ def _resolve_worktree_branches(
     Only a local work dir carries a readable branch history; every other agent
     falls back to its recorded branch alone.
     """
-    work_dir_by_agent: dict[AgentName, Path] = {
-        agent.name: agent.work_dir
+    work_dir_by_agent: dict[AgentId, Path] = {
+        agent.id: agent.work_dir
         for agent in agents
         if agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists()
     }
     worktrees_by_work_dir = read_worktree_branches(list(work_dir_by_agent.values()), cg)
 
-    branches_by_agent: dict[AgentName, tuple[str, ...]] = {}
+    branches_by_agent: dict[AgentId, tuple[str, ...]] = {}
     for agent in agents:
-        work_dir = work_dir_by_agent.get(agent.name)
+        work_dir = work_dir_by_agent.get(agent.id)
         worktree = worktrees_by_work_dir.get(work_dir) if work_dir is not None else None
         candidate_refs: list[str | None] = [None if worktree is None else worktree.current_branch]
         candidate_refs.append(agent.initial_branch)
@@ -925,7 +925,7 @@ def _resolve_worktree_branches(
             candidate_refs.extend(worktree.previously_checked_out_branches)
         branches = select_agent_branches(candidate_refs, MAX_BRANCHES_PER_AGENT)
         if branches:
-            branches_by_agent[agent.name] = branches
+            branches_by_agent[agent.id] = branches
     return branches_by_agent
 
 
@@ -933,8 +933,8 @@ def _resolve_worktree_branches(
 def _select_branches_within_query_budget(
     repos: Sequence[str],
     required_branches: Sequence[str],
-    branches_by_agent: Mapping[AgentName, tuple[str, ...]],
-) -> tuple[dict[AgentName, tuple[str, ...]], int]:
+    branches_by_agent: Mapping[AgentId, tuple[str, ...]],
+) -> tuple[dict[AgentId, tuple[str, ...]], int]:
     """Trim each agent's worktree branches to what one search query can carry.
 
     Returns the trimmed mapping and how many distinct branches were dropped.
@@ -967,18 +967,18 @@ def _select_branches_within_query_budget(
             admitted.add(branch)
             query_length += clause_length
     selected = {
-        agent_name: tuple(branch for branch in branches if branch in admitted)
-        for agent_name, branches in branches_by_agent.items()
+        agent_id: tuple(branch for branch in branches if branch in admitted)
+        for agent_id, branches in branches_by_agent.items()
     }
     return selected, len(dropped)
 
 
 @pure
 def _get_cached_repo_field(
-    cached_fields: dict[AgentName, dict[str, FieldValue]], agent_name: AgentName
+    cached_fields: dict[AgentId, dict[str, FieldValue]], agent_id: AgentId
 ) -> RepoPathField | None:
     """Get the cached RepoPathField (with its `created` timestamp) if available."""
-    agent_cached = cached_fields.get(agent_name)
+    agent_cached = cached_fields.get(agent_id)
     if agent_cached is None:
         return None
     repo_field = agent_cached.get(FIELD_REPO_PATH)
@@ -1061,8 +1061,8 @@ def _compute_pr_fields(
 
 @pure
 def _compute_failed_fetch_fields(
-    cached_fields: dict[AgentName, dict[str, FieldValue]],
-    agent_name: AgentName,
+    cached_fields: dict[AgentId, dict[str, FieldValue]],
+    agent_id: AgentId,
     branch: str,
     agent_repo: str,
     this_created: datetime,
@@ -1088,7 +1088,7 @@ def _compute_failed_fetch_fields(
     the success path.
     """
     agent_fields: dict[str, FieldValue] = {}
-    cached_agent = cached_fields.get(agent_name, {})
+    cached_agent = cached_fields.get(agent_id, {})
     cached_pr = cached_agent.get(FIELD_PR)
     if isinstance(cached_pr, PrField) and cached_pr.head_branch == branch:
         if config.pr:

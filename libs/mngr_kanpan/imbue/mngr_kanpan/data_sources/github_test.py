@@ -13,7 +13,7 @@ from tenacity import wait_none
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_CONFLICTS
@@ -185,20 +185,22 @@ def test_github_data_source_field_types_disabled() -> None:
 
 
 def test_get_cached_repo_field_found() -> None:
+    agent_id = AgentId.generate()
     repo_field = RepoPathField(path="org/repo", created=datetime(2028, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
-    cached: dict[AgentName, dict[str, FieldValue]] = {AgentName("a1"): {"repo_path": repo_field}}
-    assert _get_cached_repo_field(cached, AgentName("a1")) == repo_field
+    cached: dict[AgentId, dict[str, FieldValue]] = {agent_id: {"repo_path": repo_field}}
+    assert _get_cached_repo_field(cached, agent_id) == repo_field
 
 
 def test_get_cached_repo_field_not_found() -> None:
-    assert _get_cached_repo_field({}, AgentName("a1")) is None
+    assert _get_cached_repo_field({}, AgentId.generate()) is None
 
 
 def test_get_cached_repo_field_wrong_type() -> None:
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": make_pr_field(created=datetime(2028, 1, 1, 0, 0, 2, tzinfo=timezone.utc))},
+    agent_id = AgentId.generate()
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent_id: {"repo_path": make_pr_field(created=datetime(2028, 1, 1, 0, 0, 2, tzinfo=timezone.utc))},
     }
-    assert _get_cached_repo_field(cached, AgentName("a1")) is None
+    assert _get_cached_repo_field(cached, agent_id) is None
 
 
 # === _build_create_pr_url ===
@@ -661,8 +663,8 @@ def test_compute_mixed_agents_with_and_without_repo() -> None:
     )
     agent_without = make_agent_details(name="a2", initial_branch="branch-2", labels={})
     fields, _errors = ds.compute(agents=(agent_with, agent_without), cached_fields={}, mngr_ctx=ctx)
-    assert agent_with.name in fields
-    assert agent_without.name not in fields
+    assert agent_with.id in fields
+    assert agent_without.id not in fields
 
 
 def test_compute_pr_found_populates_all_fields() -> None:
@@ -682,7 +684,7 @@ def test_compute_pr_found_populates_all_fields() -> None:
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    af = fields[agent.name]
+    af = fields[agent.id]
     assert FIELD_PR in af and FIELD_CI in af and FIELD_CONFLICTS in af and FIELD_UNRESOLVED in af
     assert isinstance(af[FIELD_CONFLICTS], ConflictsField) and af[FIELD_CONFLICTS].has_conflicts is True  # ty: ignore[unresolved-attribute]
     assert isinstance(af[FIELD_UNRESOLVED], UnresolvedField) and af[FIELD_UNRESOLVED].has_unresolved is True  # ty: ignore[unresolved-attribute]
@@ -697,7 +699,7 @@ def test_compute_no_pr_for_branch_generates_create_url() -> None:
         name="a1", initial_branch="no-pr-branch", labels={"remote": "git@github.com:org/repo.git"}
     )
     fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    pr_field = fields[agent.name][FIELD_PR]
+    pr_field = fields[agent.id][FIELD_PR]
     assert isinstance(pr_field, CreatePrUrlField)
     assert "no-pr-branch" in pr_field.url
 
@@ -713,7 +715,7 @@ def test_compute_pr_fetch_error_adds_error() -> None:
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert len(errors) > 0
     # No cache to fall back to -- emit the fetch-failed sentinel.
-    pr_field = fields[agent.name].get(FIELD_PR)
+    pr_field = fields[agent.id].get(FIELD_PR)
     assert isinstance(pr_field, PrFetchFailedField)
     assert pr_field.repo == "org/repo"
 
@@ -728,8 +730,8 @@ def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
         number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 13, tzinfo=timezone.utc)
     )
     cached_ci = CiField(status=CiStatus.SUCCESS, created=datetime(2028, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        agent.name: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
     }
     cg = MagicMock()
     cg.run_process_in_background.side_effect = ProcessError(
@@ -737,8 +739,8 @@ def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
     )
     ctx = make_mngr_ctx_with_cg(cg)
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    assert fields[agent.name].get(FIELD_PR) == cached_pr
-    assert fields[agent.name].get(FIELD_CI) == cached_ci
+    assert fields[agent.id].get(FIELD_PR) == cached_pr
+    assert fields[agent.id].get(FIELD_CI) == cached_ci
 
 
 def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch_failed_field() -> None:
@@ -751,8 +753,8 @@ def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch
         number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 15, tzinfo=timezone.utc)
     )
     cached_ci = CiField(status=CiStatus.SUCCESS, created=datetime(2028, 1, 1, 0, 0, 16, tzinfo=timezone.utc))
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
     }
     cg = MagicMock()
     cg.run_process_in_background.side_effect = ProcessError(
@@ -760,10 +762,10 @@ def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch
     )
     ctx = make_mngr_ctx_with_cg(cg)
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    pr_field = fields[agent.name].get(FIELD_PR)
+    pr_field = fields[agent.id].get(FIELD_PR)
     assert isinstance(pr_field, PrFetchFailedField)
     assert pr_field.repo == "org/repo"
-    assert FIELD_CI not in fields[agent.name]
+    assert FIELD_CI not in fields[agent.id]
 
 
 def test_compute_conflicts_and_unresolved_not_emitted_for_closed_prs() -> None:
@@ -774,7 +776,7 @@ def test_compute_conflicts_and_unresolved_not_emitted_for_closed_prs() -> None:
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    af = fields[agent.name]
+    af = fields[agent.id]
     assert FIELD_PR in af and FIELD_CI in af
     assert FIELD_CONFLICTS not in af
     assert FIELD_UNRESOLVED not in af
@@ -790,12 +792,12 @@ def test_compute_falls_back_to_cached_repo_path_when_labels_lack_remote() -> Non
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={})
     cached_created = datetime(2028, 1, 1, 0, 0, 17, tzinfo=timezone.utc) - timedelta(hours=2)
-    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=cached_created)},
+    cached_fields: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {"repo_path": RepoPathField(path="org/repo", created=cached_created)},
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
-    pr = fields[AgentName("a1")][FIELD_PR]
-    ci = fields[AgentName("a1")][FIELD_CI]
+    pr = fields[agent.id][FIELD_PR]
+    ci = fields[agent.id][FIELD_CI]
     assert pr.created == cached_created
     assert ci.created == cached_created
 
@@ -810,11 +812,11 @@ def test_compute_uses_now_when_labels_carry_remote() -> None:
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     stale_cached = datetime(2028, 1, 1, 0, 0, 18, tzinfo=timezone.utc) - timedelta(hours=2)
-    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=stale_cached)},
+    cached_fields: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {"repo_path": RepoPathField(path="org/repo", created=stale_cached)},
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
-    pr = fields[AgentName("a1")][FIELD_PR]
+    pr = fields[agent.id][FIELD_PR]
     delta = datetime.now(timezone.utc) - pr.created
     assert delta.total_seconds() < 60
 
@@ -826,7 +828,7 @@ def test_compute_disabled_pr_and_ci() -> None:
     ctx = make_mngr_ctx_with_cg(cg)
     agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
     fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    agent_fields = fields.get(agent.name, {})
+    agent_fields = fields.get(agent.id, {})
     assert FIELD_PR not in agent_fields
     assert FIELD_CI not in agent_fields
 
@@ -849,7 +851,7 @@ def test_compute_one_graphql_call_per_refresh() -> None:
         make_agent_details(name="a3", initial_branch="b3", labels={"remote": "git@github.com:org/r1.git"}),
     )
     fields, _errors = ds.compute(agents=agents, cached_fields={}, mngr_ctx=ctx)
-    assert {a.name for a in agents} <= set(fields.keys())
+    assert {a.id for a in agents} <= set(fields.keys())
     # One single HTTP request covers all three agents across two repos.
     assert cg.run_process_in_background.call_count == 1
 
@@ -1053,7 +1055,7 @@ def test_compute_lists_a_follow_up_branch_pr_the_recorded_branch_misses(
     )
 
     assert errors == []
-    pr_field = fields[agent.name][FIELD_PR]
+    pr_field = fields[agent.id][FIELD_PR]
     assert isinstance(pr_field, PrField)
     assert pr_field.number == 2392
     assert [additional.number for additional in pr_field.additional_prs] == [2482]
@@ -1092,7 +1094,7 @@ def test_compute_lists_a_merged_pr_and_omits_a_branch_that_never_became_one(
         agents=(agent,), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
     )
 
-    pr_field = fields[agent.name][FIELD_PR]
+    pr_field = fields[agent.id][FIELD_PR]
     assert isinstance(pr_field, PrField)
     assert pr_field.number == 2482
     # `mngr/abandoned` has no PR, so it contributes nothing at all.
@@ -1159,7 +1161,7 @@ def test_compute_queries_no_branches_for_an_agent_with_none_recorded(
         agents=(branchless_agent, recorded_agent), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
     )
 
-    assert branchless_agent.name not in fields
+    assert branchless_agent.id not in fields
     invocations = gh_argv_log.read_text().splitlines()
     assert len(invocations) == 1
     assert "head:mngr/recorded-work" in invocations[0]
@@ -1184,7 +1186,7 @@ def test_compute_falls_back_to_the_recorded_branch_without_a_local_worktree(
         agents=(agent,), cached_fields={}, mngr_ctx=make_mngr_ctx_with_cg(test_cg)
     )
 
-    pr_field = fields[agent.name][FIELD_PR]
+    pr_field = fields[agent.id][FIELD_PR]
     assert isinstance(pr_field, PrField)
     assert pr_field.number == 17
     assert pr_field.additional_prs == ()
@@ -1209,12 +1211,12 @@ def test_compute_carries_the_cached_pr_cell_whole_through_a_failed_fetch() -> No
 
     fields, errors = _additional_prs_data_source().compute(
         agents=(agent,),
-        cached_fields={agent.name: {FIELD_PR: cached_pr}},
+        cached_fields={agent.id: {FIELD_PR: cached_pr}},
         mngr_ctx=make_mngr_ctx_with_cg(cg),
     )
 
     assert len(errors) > 0
-    assert fields[agent.name][FIELD_PR] == cached_pr
+    assert fields[agent.id][FIELD_PR] == cached_pr
 
 
 def test_compute_drops_a_cached_pr_cell_recorded_against_another_branch() -> None:
@@ -1236,11 +1238,11 @@ def test_compute_drops_a_cached_pr_cell_recorded_against_another_branch() -> Non
 
     fields, _errors = _additional_prs_data_source().compute(
         agents=(agent,),
-        cached_fields={agent.name: {FIELD_PR: cached_pr}},
+        cached_fields={agent.id: {FIELD_PR: cached_pr}},
         mngr_ctx=make_mngr_ctx_with_cg(cg),
     )
 
-    assert isinstance(fields[agent.name][FIELD_PR], PrFetchFailedField)
+    assert isinstance(fields[agent.id][FIELD_PR], PrFetchFailedField)
 
 
 def test_compute_degrades_to_the_recorded_branch_when_the_work_dir_is_not_a_repo(
@@ -1265,7 +1267,7 @@ def test_compute_degrades_to_the_recorded_branch_when_the_work_dir_is_not_a_repo
     )
 
     assert errors == []
-    pr_field = fields[agent.name][FIELD_PR]
+    pr_field = fields[agent.id][FIELD_PR]
     assert isinstance(pr_field, PrField)
     assert pr_field.number == 5
     assert pr_field.additional_prs == ()
@@ -1281,20 +1283,18 @@ def test_compute_degrades_to_the_recorded_branch_when_the_work_dir_is_not_a_repo
 _BUDGET_REPO = "org/repo"
 
 
-def _make_budget_inputs(
-    agent_count: int, branches_per_agent: int
-) -> tuple[list[str], dict[AgentName, tuple[str, ...]]]:
+def _make_budget_inputs(agent_count: int, branches_per_agent: int) -> tuple[list[str], dict[AgentId, tuple[str, ...]]]:
     """Build one board's worth of recorded branches and worktree branches.
 
     Each agent's worktree branches lead with its own recorded branch, the way
     `_resolve_worktree_branches` orders them.
     """
     required_branches: list[str] = []
-    branches_by_agent: dict[AgentName, tuple[str, ...]] = {}
+    branches_by_agent: dict[AgentId, tuple[str, ...]] = {}
     for agent_index in range(agent_count):
         recorded = f"mngr/agent-{agent_index:04d}-recorded-work"
         required_branches.append(recorded)
-        branches_by_agent[AgentName(f"a{agent_index}")] = (
+        branches_by_agent[AgentId.generate()] = (
             recorded,
             *(f"mngr/agent-{agent_index:04d}-extra-{rank:02d}" for rank in range(branches_per_agent - 1)),
         )

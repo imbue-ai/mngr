@@ -12,6 +12,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -76,6 +77,7 @@ def section_label(section: BoardSection) -> str:
 class AgentBoardEntry(FrozenModel):
     """A single agent entry on the kanpan board."""
 
+    agent_id: AgentId = Field(description="Globally unique agent ID")
     name: AgentName = Field(description="Agent name")
     state: AgentLifecycleState = Field(description="Agent lifecycle state")
     provider_name: ProviderInstanceName = Field(description="Provider instance name")
@@ -281,8 +283,8 @@ class KanpanPluginConfig(PluginConfig):
         description="Text shown at the right of the header, e.g. "
         "'{state == \"RUNNING\"} running / {total}'. Each braced CEL expression renders as the number "
         "of agents the board is showing that it holds for, counted against the same entry shape "
-        "`--format json` emits (name, state, provider_name, work_dir, branch, is_muted, section, "
-        "fields, cells). That shape is narrower than what --include sees, so an expression naming "
+        "`--format json` emits (agent_id, name, state, provider_name, work_dir, branch, is_muted, "
+        "section, fields, cells). That shape is narrower than what --include sees, so an expression naming "
         "anything else (labels, host, age) matches no agent and stays at zero. '{total}' counts "
         "every agent; '{{' and '}}' are literal braces. Unset (default) shows nothing.",
     )

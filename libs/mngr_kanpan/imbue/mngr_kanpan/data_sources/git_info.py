@@ -13,7 +13,7 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
@@ -63,31 +63,31 @@ class GitInfoDataSource(FrozenModel):
     def compute(
         self,
         agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        cached_fields: dict[AgentId, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], Sequence[str]]:
         cg = mngr_ctx.concurrency_group
 
         # Collect local work dirs for agents
-        agent_work_dirs: dict[AgentName, Path] = {}
+        agent_work_dirs: dict[AgentId, Path] = {}
         for agent in agents:
             if agent.host.provider_name == LOCAL_PROVIDER_NAME and agent.work_dir.exists():
-                agent_work_dirs[agent.name] = agent.work_dir
+                agent_work_dirs[agent.id] = agent.work_dir
 
         # Get commits-ahead counts for all unique dirs in parallel
         commits_ahead_map = _get_all_commits_ahead(list(set(agent_work_dirs.values())), cg)
 
         now = now_utc()
-        fields: dict[AgentName, dict[str, FieldValue]] = {}
+        fields: dict[AgentId, dict[str, FieldValue]] = {}
         for agent in agents:
-            work_dir = agent_work_dirs.get(agent.name)
+            work_dir = agent_work_dirs.get(agent.id)
             if work_dir is not None:
                 count = commits_ahead_map.get(work_dir)
-                fields[agent.name] = {
+                fields[agent.id] = {
                     FIELD_COMMITS_AHEAD: CommitsAheadField(count=count, has_work_dir=True, created=now),
                 }
             else:
-                fields[agent.name] = {
+                fields[agent.id] = {
                     FIELD_COMMITS_AHEAD: CommitsAheadField(count=None, has_work_dir=False, created=now),
                 }
 

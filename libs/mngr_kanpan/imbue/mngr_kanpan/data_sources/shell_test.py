@@ -3,7 +3,7 @@ from datetime import timedelta
 from datetime import timezone
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
@@ -90,8 +90,8 @@ def test_compute_success(test_cg: ConcurrencyGroup) -> None:
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
-    assert agent.name in fields
-    field = fields[agent.name]["custom"]
+    assert agent.id in fields
+    field = fields[agent.id]["custom"]
     assert isinstance(field, StringField)
     assert field.value == "output text"
 
@@ -105,7 +105,7 @@ def test_compute_empty_stdout_not_included(test_cg: ConcurrencyGroup) -> None:
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
-    assert agent.name not in fields
+    assert agent.id not in fields
 
 
 def test_compute_nonzero_exit_produces_error(test_cg: ConcurrencyGroup) -> None:
@@ -116,7 +116,7 @@ def test_compute_nonzero_exit_produces_error(test_cg: ConcurrencyGroup) -> None:
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert agent.name not in fields
+    assert agent.id not in fields
     assert any("Custom" in e and "agent-1" in e for e in errors)
 
 
@@ -148,14 +148,14 @@ def test_compute_propagates_oldest_declared_input(test_cg: ConcurrencyGroup) -> 
     ctx = make_mngr_ctx_with_cg(test_cg)
     older = datetime(2030, 1, 1, 0, 0, 5, tzinfo=timezone.utc) - timedelta(hours=2)
     newer = datetime(2030, 1, 1, 0, 0, 6, tzinfo=timezone.utc) - timedelta(minutes=5)
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("agent-1"): {
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {
             "older_input": StringField(value="x", created=older),
             "newer_input": StringField(value="y", created=newer),
         },
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    field = fields[AgentName("agent-1")]["custom"]
+    field = fields[agent.id]["custom"]
     assert field.created == older
 
 
@@ -168,7 +168,7 @@ def test_compute_uses_now_when_inputs_unset(test_cg: ConcurrencyGroup) -> None:
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    field = fields[AgentName("agent-1")]["custom"]
+    field = fields[agent.id]["custom"]
     delta = datetime.now(timezone.utc) - field.created
     assert delta.total_seconds() < 60
 
@@ -189,13 +189,13 @@ def test_compute_uses_now_when_no_inputs_declared_even_with_cached_fields(
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
     very_old = datetime(2030, 1, 1, 0, 0, 7, tzinfo=timezone.utc) - timedelta(days=7)
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("agent-1"): {
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {
             "some_other_field": StringField(value="x", created=very_old),
         },
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    field = fields[AgentName("agent-1")]["custom"]
+    field = fields[agent.id]["custom"]
     assert field.created != very_old
     delta = datetime.now(timezone.utc) - field.created
     assert delta.total_seconds() < 60
@@ -219,14 +219,14 @@ def test_compute_ignores_undeclared_cached_keys(test_cg: ConcurrencyGroup) -> No
     ctx = make_mngr_ctx_with_cg(test_cg)
     declared_age = datetime(2030, 1, 1, 0, 0, 8, tzinfo=timezone.utc) - timedelta(minutes=5)
     undeclared_age = datetime(2030, 1, 1, 0, 0, 9, tzinfo=timezone.utc) - timedelta(days=7)
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("agent-1"): {
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {
             "declared_input": StringField(value="x", created=declared_age),
             "noisy_other": StringField(value="y", created=undeclared_age),
         },
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    field = fields[AgentName("agent-1")]["custom"]
+    field = fields[agent.id]["custom"]
     assert field.created == declared_age
 
 
@@ -253,13 +253,13 @@ def test_compute_does_not_self_taint_even_when_self_is_declared(
     agent = make_agent_details(name="agent-1")
     ctx = make_mngr_ctx_with_cg(test_cg)
     very_old = datetime(2030, 1, 1, 0, 0, 10, tzinfo=timezone.utc) - timedelta(days=7)
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("agent-1"): {
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent.id: {
             "custom": StringField(value="prev", created=very_old),
         },
     }
     fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    field = fields[AgentName("agent-1")]["custom"]
+    field = fields[agent.id]["custom"]
     # With self in inputs, the new field inherits the very_old `created`. This
     # documents the contract: the operator chose this and the system honors it.
     assert field.created == very_old

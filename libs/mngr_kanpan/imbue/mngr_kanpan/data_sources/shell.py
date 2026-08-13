@@ -10,7 +10,7 @@ from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import StringField
 from imbue.mngr_kanpan.data_source import now_utc
@@ -70,28 +70,28 @@ class ShellCommandDataSource(FrozenModel):
     def compute(
         self,
         agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        cached_fields: dict[AgentId, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], Sequence[str]]:
         cg = mngr_ctx.concurrency_group
         errors: list[str] = []
-        fields: dict[AgentName, dict[str, FieldValue]] = {}
+        fields: dict[AgentId, dict[str, FieldValue]] = {}
 
-        processes: list[tuple[AgentName, RunningProcess]] = []
+        processes: list[tuple[AgentDetails, RunningProcess]] = []
         try:
             with cg.make_concurrency_group(
                 name=f"shell-{self.field_key}",
                 exit_timeout_seconds=self.timeout_seconds,
             ) as child_cg:
                 for agent in agents:
-                    env = _build_shell_env(agent, cached_fields.get(agent.name, {}))
+                    env = _build_shell_env(agent, cached_fields.get(agent.id, {}))
                     proc = child_cg.run_process_in_background(
                         ["sh", "-c", self.config.command],
                         timeout=self.timeout_seconds,
                         is_checked_by_group=False,
                         env=env,
                     )
-                    processes.append((agent.name, proc))
+                    processes.append((agent, proc))
         except ConcurrencyExceptionGroup as exc:
             n_failed = len(exc.exceptions)
             errors.append(f"Shell '{self.config.name}': {n_failed} process(es) timed out or failed")
@@ -106,18 +106,18 @@ class ShellCommandDataSource(FrozenModel):
         # `created` of the inputs they actually use.
         now = now_utc()
         declared_inputs = self.config.inputs
-        for agent_name, proc in processes:
+        for agent, proc in processes:
             rc = proc.returncode
             if rc == 0:
                 stdout = proc.read_stdout().strip()
                 if stdout:
-                    agent_cached = cached_fields.get(agent_name, {})
+                    agent_cached = cached_fields.get(agent.id, {})
                     input_fields = [agent_cached[key] for key in declared_inputs if key in agent_cached]
                     created = oldest_created(*input_fields) if input_fields else now
-                    fields[agent_name] = {self.field_key: StringField(value=stdout, created=created)}
+                    fields[agent.id] = {self.field_key: StringField(value=stdout, created=created)}
             else:
                 stderr = proc.read_stderr().strip()
-                msg = f"Shell '{self.config.name}' failed for {agent_name} (exit {rc})"
+                msg = f"Shell '{self.config.name}' failed for {agent.name} (exit {rc})"
                 if stderr:
                     msg = f"{msg}: {stderr}"
                 errors.append(msg)

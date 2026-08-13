@@ -7,7 +7,7 @@ from pydantic import TypeAdapter
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import FieldValue
 from imbue.mngr_kanpan.data_source import now_utc
@@ -64,17 +64,17 @@ class LabelsDataSource(FrozenModel):
     def compute(
         self,
         agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        cached_fields: dict[AgentId, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], Sequence[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], Sequence[str]]:
         label_key = self.config.label_key
         now = now_utc()
-        fields: dict[AgentName, dict[str, FieldValue]] = {}
+        fields: dict[AgentId, dict[str, FieldValue]] = {}
         # Every agent gets a field, empty value included: a local refresh merges over the
         # previous snapshot, so an omitted field leaves a cleared label's old cell on the board.
         for agent in agents:
             value = agent.labels.get(label_key, "")
-            fields[agent.name] = {
+            fields[agent.id] = {
                 self.field_key: _ColoredStringField(value=value, color=self.config.colors.get(value), created=now),
             }
         return fields, []

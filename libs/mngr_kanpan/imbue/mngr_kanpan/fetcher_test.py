@@ -8,7 +8,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentId
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_CI
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
@@ -167,7 +167,7 @@ def test_compute_section_wrong_pr_type() -> None:
 
 class _MockDataSource:
     def __init__(
-        self, name: str, result: dict[AgentName, dict[str, FieldValue]], errors: list[str] | None = None
+        self, name: str, result: dict[AgentId, dict[str, FieldValue]], errors: list[str] | None = None
     ) -> None:
         self._name = name
         self._result = result
@@ -194,7 +194,7 @@ class _MockDataSource:
         agents: object,
         cached_fields: object,
         mngr_ctx: object,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], list[str]]:
         return self._result, self._errors
 
 
@@ -220,7 +220,7 @@ class _FailingDataSource:
         agents: object,
         cached_fields: object,
         mngr_ctx: object,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], list[str]]:
         raise RuntimeError("data source crashed")
 
 
@@ -231,7 +231,7 @@ def test_run_data_sources_parallel_empty() -> None:
 
 
 def test_run_data_sources_parallel_single_source() -> None:
-    agent = AgentName("agent-1")
+    agent = AgentId.generate()
     pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 12, tzinfo=timezone.utc))
     source = _MockDataSource("github", {agent: {"pr": pr}})
     results, errors = _run_data_sources_parallel([source], (), {}, make_mngr_ctx())
@@ -253,7 +253,7 @@ def test_run_data_sources_parallel_source_raises_exception() -> None:
 
 
 def test_run_data_sources_parallel_multiple_sources() -> None:
-    a1 = AgentName("a1")
+    a1 = AgentId.generate()
     pr = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
     ci = CiField(status=CiStatus.SUCCESS, created=datetime(2026, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
     s1 = _MockDataSource("github", {a1: {"pr": pr}})
@@ -414,9 +414,9 @@ def _make_mock_data_source(field_key: str, field_type: type[FieldValue]) -> Kanp
 def test_save_field_cache_writes_json(tmp_path: Path) -> None:
     """save_field_cache creates a JSON file under profile_dir/kanpan/."""
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
-    agent_name = AgentName("agent-1")
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"pr_count": StringField(value="3", created=datetime(2026, 1, 1, 0, 0, 15, tzinfo=timezone.utc))},
+    agent_id = AgentId.generate()
+    cached: dict[AgentId, dict[str, FieldValue]] = {
+        agent_id: {"pr_count": StringField(value="3", created=datetime(2026, 1, 1, 0, 0, 15, tzinfo=timezone.utc))},
     }
     save_field_cache(ctx, cached)
     cache_file = tmp_path / "kanpan" / "field_cache.json"
@@ -433,16 +433,16 @@ def test_load_field_cache_returns_empty_when_no_file(tmp_path: Path) -> None:
 def test_save_load_field_cache_roundtrip(tmp_path: Path) -> None:
     """Fields saved with save_field_cache are correctly restored by load_field_cache."""
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
-    agent_name = AgentName("agent-1")
+    agent_id = AgentId.generate()
     created = datetime(2026, 1, 1, 0, 0, 16, tzinfo=timezone.utc)
-    original: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {"status": StringField(value="hello", created=created)},
+    original: dict[AgentId, dict[str, FieldValue]] = {
+        agent_id: {"status": StringField(value="hello", created=created)},
     }
     data_sources = [_make_mock_data_source("status", StringField)]
     save_field_cache(ctx, original)
     loaded = load_field_cache(ctx, data_sources)
-    assert agent_name in loaded
-    field = loaded[agent_name]["status"]
+    assert agent_id in loaded
+    field = loaded[agent_id]["status"]
     assert isinstance(field, StringField)
     assert field.value == "hello"
     assert field.created == created
@@ -454,10 +454,10 @@ def test_save_load_field_cache_polymorphic_slot_roundtrip(tmp_path: Path) -> Non
     slot must round-trip through the cache, regardless of which one was last persisted.
     """
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
-    a1 = AgentName("a1")
-    a2 = AgentName("a2")
-    a3 = AgentName("a3")
-    original: dict[AgentName, dict[str, FieldValue]] = {
+    a1 = AgentId.generate()
+    a2 = AgentId.generate()
+    a3 = AgentId.generate()
+    original: dict[AgentId, dict[str, FieldValue]] = {
         a1: {FIELD_PR: make_pr_field(number=42, created=datetime(2026, 1, 1, 0, 0, 17, tzinfo=timezone.utc))},
         a2: {
             FIELD_PR: CreatePrUrlField(
@@ -512,25 +512,28 @@ def test_load_field_cache_returns_empty_on_top_level_non_dict_json(tmp_path: Pat
     assert result == {}
 
 
-def test_load_field_cache_returns_empty_on_invalid_agent_name(tmp_path: Path) -> None:
-    """load_field_cache returns empty dict when a top-level key is not a valid AgentName.
+def test_load_field_cache_returns_empty_on_invalid_agent_id(tmp_path: Path) -> None:
+    """load_field_cache returns empty dict when a top-level key is not a valid AgentId.
 
-    The cache file may have been hand-edited or written by an older incompatible
-    version. AgentName construction enforces SafeName's regex and would otherwise
-    raise InvalidName; load_field_cache must swallow that and return {}.
+    A pre-existing cache file was keyed by AgentName before this migration, and a
+    name is not a valid AgentId format, so AgentId(...) raises InvalidRandomIdError.
+    load_field_cache must swallow that and return {} -- a dropped stale cache
+    triggers a correct full refetch, since the cache is only a performance
+    optimization.
 
     The payload here must be non-empty and validate against the supplied
     adapters -- otherwise deserialize_fields returns {} and the
-    ``if agent_fields:`` guard short-circuits before AgentName(...) is
+    ``if agent_fields:`` guard short-circuits before AgentId(...) is
     even called, which would not exercise the swallow path.
     """
     cache_dir = tmp_path / "kanpan"
     cache_dir.mkdir(parents=True)
     pr_payload = make_pr_field(created=datetime(2026, 1, 1, 0, 0, 20, tzinfo=timezone.utc)).model_dump(mode="json")
-    # 'a1/x' contains '/', which violates SafeName's regex. The PR payload
-    # makes deserialize_fields return a non-empty dict so that the
-    # AgentName("a1/x") constructor is actually reached.
-    cache_data = {"a1/x": {FIELD_PR: pr_payload}}
+    # 'my-old-agent' is a valid AgentName (the old cache key format) but not a
+    # valid AgentId, so AgentId("my-old-agent") raises. The PR payload makes
+    # deserialize_fields return a non-empty dict so that the AgentId(...)
+    # constructor is actually reached.
+    cache_data = {"my-old-agent": {FIELD_PR: pr_payload}}
     (cache_dir / "field_cache.json").write_text(json.dumps(cache_data))
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     data_sources = [GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))]
@@ -544,11 +547,9 @@ def test_load_field_cache_skips_unknown_types(tmp_path: Path) -> None:
     are no adapters, so every saved field key is unknown and the result is empty.
     """
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
-    agent_name = AgentName("agent-1")
-    original: dict[AgentName, dict[str, FieldValue]] = {
-        agent_name: {
-            "status": StringField(value="hello", created=datetime(2026, 1, 1, 0, 0, 21, tzinfo=timezone.utc))
-        },
+    agent_id = AgentId.generate()
+    original: dict[AgentId, dict[str, FieldValue]] = {
+        agent_id: {"status": StringField(value="hello", created=datetime(2026, 1, 1, 0, 0, 21, tzinfo=timezone.utc))},
     }
     save_field_cache(ctx, original)
     # No data sources -> no field-key adapters, so every saved key is unknown and dropped.
@@ -564,15 +565,17 @@ def test_load_field_cache_drops_legacy_entries_missing_created(tmp_path: Path) -
     ctx = make_mngr_ctx_with_profile_dir(tmp_path)
     cache_dir = tmp_path / "kanpan"
     cache_dir.mkdir(parents=True)
+    legacy_id = AgentId.generate()
+    fresh_id = AgentId.generate()
     # Hand-craft a cache file with one legacy entry (no created) and one fresh
     # entry. Using the post-`kind` wire format directly: per-field deserialize
     # via the StringField TypeAdapter, which rejects payloads missing required
     # fields (validation error, dropped silently).
     cache_payload = {
-        "agent-legacy": {
+        str(legacy_id): {
             "status": {"kind": "string", "value": "old"},
         },
-        "agent-fresh": {
+        str(fresh_id): {
             "status": {
                 "kind": "string",
                 "value": "new",
@@ -583,8 +586,8 @@ def test_load_field_cache_drops_legacy_entries_missing_created(tmp_path: Path) -
     (cache_dir / "field_cache.json").write_text(json.dumps(cache_payload))
     data_sources = [_make_mock_data_source("status", StringField)]
     loaded = load_field_cache(ctx, data_sources)
-    assert AgentName("agent-legacy") not in loaded
-    fresh = loaded[AgentName("agent-fresh")]["status"]
+    assert legacy_id not in loaded
+    fresh = loaded[fresh_id]["status"]
     assert isinstance(fresh, StringField)
     assert fresh.value == "new"
 

@@ -29,8 +29,8 @@ def test_labels_compute_agent_with_label() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    assert agent.name in fields
-    field = fields[agent.name]["priority"]
+    assert agent.id in fields
+    field = fields[agent.id]["priority"]
     assert isinstance(field, _ColoredStringField)
     assert field.value == "high"
     assert field.color is None
@@ -51,7 +51,7 @@ def test_labels_compute_agent_without_label_emits_empty_value() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    field = fields[agent.name]["priority"]
+    field = fields[agent.id]["priority"]
     assert isinstance(field, _ColoredStringField)
     assert field.value == ""
     assert field.color is None
@@ -74,7 +74,7 @@ def test_labels_compute_with_color_map() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    field = fields[agent.name]["priority"]
+    field = fields[agent.id]["priority"]
     assert isinstance(field, _ColoredStringField)
     assert field.color == "light red"
 
@@ -95,7 +95,7 @@ def test_labels_compute_color_not_in_map() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    field = fields[agent.name]["priority"]
+    field = fields[agent.id]["priority"]
     assert isinstance(field, _ColoredStringField)
     assert field.color is None
 
@@ -112,8 +112,8 @@ def test_labels_compute_label_key_differs_from_field_key() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    assert agent.name in fields
-    field = fields[agent.name]["prio_col"]
+    assert agent.id in fields
+    field = fields[agent.id]["prio_col"]
     assert isinstance(field, _ColoredStringField)
     assert field.value == "urgent"
 
@@ -149,6 +149,30 @@ def test_labels_compute_multiple_agents() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert errors == []
-    assert fields[agent_a.name]["status"].display().text == "active"
-    assert fields[agent_b.name]["status"].display().text == ""
-    assert fields[agent_c.name]["status"].display().text == "idle"
+    assert fields[agent_a.id]["status"].display().text == "active"
+    assert fields[agent_b.id]["status"].display().text == ""
+    assert fields[agent_c.id]["status"].display().text == "idle"
+
+
+def test_labels_compute_same_name_on_different_hosts_does_not_collide() -> None:
+    # Agent names are unique only per host, so two agents can share a name across
+    # different providers. Keying the per-agent output by the globally-unique
+    # AgentId keeps their fields separate; keying by name would collapse them into
+    # one entry and let the second agent overwrite the first.
+    ds = LabelsDataSource(
+        field_key="status",
+        config=LabelColumnConfig(header="STATUS", label_key="status"),
+    )
+    agent_here = make_agent_details(name="dup", provider_name="local", labels={"status": "active"})
+    agent_there = make_agent_details(name="dup", provider_name="modal", labels={"status": "idle"})
+    assert agent_here.name == agent_there.name
+    assert agent_here.id != agent_there.id
+    fields, errors = ds.compute(
+        agents=(agent_here, agent_there),
+        cached_fields={},
+        mngr_ctx=make_mngr_ctx(),
+    )
+    assert errors == []
+    assert len(fields) == 2
+    assert fields[agent_here.id]["status"].display().text == "active"
+    assert fields[agent_there.id]["status"].display().text == "idle"

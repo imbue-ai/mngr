@@ -47,6 +47,7 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.logging import CLEAR_SCREEN
@@ -443,8 +444,8 @@ class _KanpanState(MutableModel):
     loop: Any = None  # urwid MainLoop, set after construction
     spinner_index: int = 0
     refresh_future: Future[FetchResult] | None = None
-    # In-memory cache of fields from previous refresh cycle
-    cached_fields: dict[AgentName, dict[str, FieldValue]] = {}
+    # In-memory cache of fields from previous refresh cycle, keyed by agent id
+    cached_fields: dict[AgentId, dict[str, FieldValue]] = {}
     executor: ThreadPoolExecutor | None = None
     # The in-flight periodic local refresh, and the worker that serves it. An in-flight
     # fetch cannot be cancelled, so a tick that runs most of the time would hold
@@ -452,8 +453,9 @@ class _KanpanState(MutableModel):
     # that field is taken, would stop happening. Hence a worker and a field of its own.
     local_refresh_future: Future[FetchResult] | None = None
     local_refresh_executor: ThreadPoolExecutor | None = None
-    # Dired-style marks: agents flagged for batch operations, keyed by command key
-    marks: dict[AgentName, str] = {}
+    # Dired-style marks: command key an agent is flagged with, keyed by agent id so
+    # two agents that share a name (on different hosts) mark and act independently.
+    marks: dict[AgentId, str] = {}
     # Active batch execution state
     executing: bool = False
     # Failures from the most recent batch execution, rendered at the bottom of
@@ -462,8 +464,9 @@ class _KanpanState(MutableModel):
     # Maps list walker index -> AgentBoardEntry for selectable agent entries
     index_to_entry: dict[int, AgentBoardEntry] = {}
     list_walker: Any = None  # SimpleFocusListWalker, set during display build
-    # Name of the agent that was focused before refresh (for focus persistence)
-    focused_agent_name: AgentName | None = None
+    # Id of the agent that was focused before refresh (for focus persistence). Keyed by id,
+    # not name, so a refresh restores focus to the exact agent even when a name is shared.
+    focused_agent_id: AgentId | None = None
     # Steady-state footer left text (shown when nothing higher-priority is active)
     steady_footer_text: str = "  Loading..."
     # --- Footer rendering (single-owner model) ---
@@ -521,8 +524,10 @@ class _KanpanState(MutableModel):
     include_filters: tuple[str, ...] = ()
     exclude_filters: tuple[str, ...] = ()
     # --- Peek panel (None name => panel closed) ---
-    # Name of the agent currently shown in the peek panel.
+    # Name of the agent currently shown in the peek panel (for the panel title and focus).
     peek_agent_name: AgentName | None = None
+    # Id of that agent, used to resolve the transcript fetch and reply send unambiguously.
+    peek_agent_id: AgentId | None = None
     # Original frame footer (keybinding bar), restored when the peek panel or the
     # prompt closes. Shared because the two are mutually exclusive: the peek gate
     # precedes command dispatch, and the prompt gate precedes the peek key.
@@ -720,7 +725,7 @@ def _is_focus_on_first_selectable(state: _KanpanState) -> bool:
 
 def _clear_focus(state: _KanpanState) -> None:
     """Clear agent focus by moving to the first non-selectable widget."""
-    state.focused_agent_name = None
+    state.focused_agent_id = None
     if state.list_walker is not None and len(state.list_walker) > 0:
         state.list_walker.set_focus(0)
 
@@ -735,10 +740,10 @@ def _get_focused_entry(state: _KanpanState) -> AgentBoardEntry | None:
     return state.index_to_entry.get(focus_index)
 
 
-def _run_destroy(agent_names: list[str]) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+def _run_destroy(agent_ids: list[str]) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Run mngr destroy in a subprocess. Called from a background thread."""
     return subprocess.run(
-        ["mngr", "destroy", *agent_names, "--force"],
+        ["mngr", "destroy", *agent_ids, "--force"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -788,12 +793,12 @@ def _toggle_mark(state: _KanpanState, key: str) -> None:
         _show_transient_message(state, f"  Cannot push: {entry.name} has no local work_dir")
         return
 
-    existing = state.marks.get(entry.name)
+    existing = state.marks.get(entry.agent_id)
     if existing == key:
-        del state.marks[entry.name]
+        del state.marks[entry.agent_id]
         new_mark = None
     else:
-        state.marks[entry.name] = key
+        state.marks[entry.agent_id] = key
         new_mark = key
 
     _update_row_mark(state, focus_idx, new_mark)
@@ -810,8 +815,8 @@ def _unmark_focused(state: _KanpanState) -> None:
     entry = state.index_to_entry.get(focus_idx)
     if entry is None:
         return
-    if entry.name in state.marks:
-        del state.marks[entry.name]
+    if entry.agent_id in state.marks:
+        del state.marks[entry.agent_id]
         _update_row_mark(state, focus_idx, None)
         _update_mark_count_footer(state)
 
@@ -820,10 +825,10 @@ def _unmark_all(state: _KanpanState) -> None:
     """Remove all marks."""
     if not state.marks:
         return
-    marked_names = set(state.marks.keys())
+    marked_ids = set(state.marks.keys())
     state.marks.clear()
     for idx, entry in state.index_to_entry.items():
-        if entry.name in marked_names:
+        if entry.agent_id in marked_ids:
             _update_row_mark(state, idx, None)
     _update_mark_count_footer(state)
 
@@ -832,10 +837,10 @@ def _prune_orphaned_marks(state: _KanpanState) -> None:
     """Remove marks for agents that are no longer in the current snapshot."""
     if state.snapshot is None or not state.marks:
         return
-    current_names = {e.name for e in state.snapshot.entries}
-    orphaned = [name for name in state.marks if name not in current_names]
-    for name in orphaned:
-        del state.marks[name]
+    current_ids = {e.agent_id for e in state.snapshot.entries}
+    orphaned = [agent_id for agent_id in state.marks if agent_id not in current_ids]
+    for agent_id in orphaned:
+        del state.marks[agent_id]
     if orphaned:
         _update_mark_count_footer(state)
 
@@ -901,10 +906,14 @@ def _execute_marks(state: _KanpanState) -> None:
 
 
 class _BatchWorkItem(FrozenModel):
+    agent_id: AgentId
     name: AgentName
     key: str
     cmd: KanpanCommand
     entry: AgentBoardEntry | None
+    # Delete builtin only: every marked agent, batched into one `mngr destroy`. Parallel by
+    # index -- ids resolve the destroy and clear the marks, names label the per-agent results.
+    batch_ids: tuple[AgentId, ...] = ()
     batch_names: tuple[AgentName, ...] = ()
     # Answer collected once for this item's command, shared by every agent marked with it.
     input_text: str = ""
@@ -922,18 +931,29 @@ class _BatchItemResult(FrozenModel):
 @pure
 def _batch_item_label(item: _BatchWorkItem) -> str:
     """Format a human-readable label for a batch work item."""
-    if item.batch_names:
-        return f"{item.cmd.name} {len(item.batch_names)} agent(s)"
+    if item.batch_ids:
+        return f"{item.cmd.name} {len(item.batch_ids)} agent(s)"
     return f"{item.cmd.name} {item.name}"
 
 
-def _run_shell_command_sync(command: str, agent_name: str, input_text: str) -> subprocess.CompletedProcess[str]:
+def _run_shell_command_sync(
+    command: str, agent_name: str, input_text: str, agent_id: AgentId
+) -> subprocess.CompletedProcess[str]:
     """Run a custom command's shell string for one agent. Called from a background thread.
 
     A prompted command's typed text arrives as ``MNGR_INPUT`` rather than interpolated
     into the command string, keeping it out of the shell's parse phase.
+
+    ``MNGR_AGENT_ID`` is the globally unique handle a command uses to target the agent
+    unambiguously; ``MNGR_AGENT_NAME`` is unique only per host. Both are always set,
+    overriding any value inherited from the board's own environment.
     """
-    env = {**os.environ, "MNGR_AGENT_NAME": agent_name, "MNGR_INPUT": input_text}
+    env = {
+        **os.environ,
+        "MNGR_AGENT_NAME": agent_name,
+        "MNGR_AGENT_ID": str(agent_id),
+        "MNGR_INPUT": input_text,
+    }
     return subprocess.run(
         command,
         shell=True,
@@ -950,42 +970,52 @@ def _start_batch_execution(state: _KanpanState, input_text_by_key: Mapping[str, 
     # Clear failures from any previous run so a fresh attempt starts clean.
     state.execute_errors = ()
 
-    entries_by_name: dict[AgentName, AgentBoardEntry] = {}
+    entries_by_id: dict[AgentId, AgentBoardEntry] = {}
     if state.snapshot is not None:
-        entries_by_name = {e.name: e for e in state.snapshot.entries}
+        entries_by_id = {e.agent_id: e for e in state.snapshot.entries}
 
+    delete_ids: list[AgentId] = []
     delete_names: list[AgentName] = []
     individual_work: list[_BatchWorkItem] = []
-    for name, mark_key in state.marks.items():
+    for agent_id, mark_key in state.marks.items():
         cmd = state.commands.get(mark_key)
         if cmd is None:
+            continue
+        # A mark whose agent is no longer on the board is not actionable; skip it (pruning
+        # normally removes such marks already). This also guarantees a name for every item.
+        entry = entries_by_id.get(agent_id)
+        if entry is None:
             continue
         # Only the builtin delete batches all marked agents into one `mngr
         # destroy` call. A user-defined override of "d" (or any other key)
         # runs per-agent via the individual-work path.
         if isinstance(cmd, MarkableBuiltinCommand) and cmd.role == MarkableBuiltinRole.DELETE:
-            delete_names.append(name)
+            delete_ids.append(agent_id)
+            delete_names.append(entry.name)
         else:
             individual_work.append(
                 _BatchWorkItem(
-                    name=name,
+                    agent_id=agent_id,
+                    name=entry.name,
                     key=mark_key,
                     cmd=cmd,
-                    entry=entries_by_name.get(name),
+                    entry=entry,
                     input_text=input_text_by_key.get(mark_key, ""),
                 )
             )
 
     work: list[_BatchWorkItem] = []
-    if delete_names:
+    if delete_ids:
         delete_cmd = state.commands.get(_BUILTIN_COMMAND_KEY_DELETE)
         if delete_cmd is not None:
             work.append(
                 _BatchWorkItem(
+                    agent_id=delete_ids[0],
                     name=delete_names[0],
                     key=_BUILTIN_COMMAND_KEY_DELETE,
                     cmd=delete_cmd,
-                    entry=entries_by_name.get(delete_names[0]),
+                    entry=entries_by_id.get(delete_ids[0]),
+                    batch_ids=tuple(delete_ids),
                     batch_names=tuple(delete_names),
                 )
             )
@@ -1002,8 +1032,8 @@ def _submit_batch_item(
         case MarkableBuiltinCommand():
             match item.cmd.role:
                 case MarkableBuiltinRole.DELETE:
-                    names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
-                    return executor.submit(_run_destroy, names)
+                    ids = [str(i) for i in item.batch_ids] if item.batch_ids else [str(item.agent_id)]
+                    return executor.submit(_run_destroy, ids)
                 case MarkableBuiltinRole.PUSH:
                     if item.entry is None or item.entry.work_dir is None:
                         return None
@@ -1015,7 +1045,9 @@ def _submit_batch_item(
             return None
         case CustomCommand():
             if item.cmd.command:
-                return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name), item.input_text)
+                return executor.submit(
+                    _run_shell_command_sync, item.cmd.command, str(item.name), item.input_text, item.agent_id
+                )
             return None
         case _:
             assert_never(item.cmd)
@@ -1033,10 +1065,12 @@ def _record_batch_result(
         result = future.result()
         if result.returncode == 0:
             # The builtin delete runs every marked agent through one `mngr destroy`, so
-            # its single result stands for all of them.
-            for name in item.batch_names or (item.name,):
+            # its single result stands for all of them. Clear marks by id, label by name.
+            batch_ids = item.batch_ids or (item.agent_id,)
+            batch_names = item.batch_names or (item.name,)
+            for agent_id, name in zip(batch_ids, batch_names, strict=True):
                 results.append(_BatchItemResult(label=f"{item.cmd.name} {name}", is_success=True))
-                state.marks.pop(name, None)
+                state.marks.pop(agent_id, None)
         else:
             detail = result.stderr.strip() or f"exited with code {result.returncode}"
             results.append(_BatchItemResult(label=label, is_success=False, detail=detail))
@@ -1170,12 +1204,12 @@ def _apply_mute_to_entry(entry: AgentBoardEntry, is_muted: bool) -> AgentBoardEn
     return _with_fields(entry, {**entry.fields, FIELD_MUTED: muted})
 
 
-def _update_snapshot_mute(state: _KanpanState, agent_name: AgentName, is_muted: bool) -> None:
-    """Update the snapshot in-place by setting the mute state on the named agent."""
+def _update_snapshot_mute(state: _KanpanState, agent_id: AgentId, is_muted: bool) -> None:
+    """Update the snapshot in-place by setting the mute state on the agent with this id."""
     if state.snapshot is None:
         return
     new_entries = tuple(
-        _apply_mute_to_entry(entry, is_muted) if entry.name == agent_name else entry
+        _apply_mute_to_entry(entry, is_muted) if entry.agent_id == agent_id else entry
         for entry in state.snapshot.entries
     )
     state.snapshot = state.snapshot.model_copy_update(
@@ -1191,36 +1225,37 @@ def _mute_focused_agent(state: _KanpanState) -> None:
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
+    agent_id = entry.agent_id
     agent_name = entry.name
     new_muted = not entry.is_muted
 
     # Optimistic UI update. Stamped now, so a fetch that read this agent before the keypress
     # loses to it in `_prefer_later_read` however long it takes to land.
-    _update_snapshot_mute(state, agent_name, new_muted)
+    _update_snapshot_mute(state, agent_id, new_muted)
     _refresh_display(state)
     action = "Muted" if new_muted else "Unmuted"
     _show_transient_message(state, f"  {action} {agent_name}")
 
     # Persist in background
     def _do_mute() -> None:
-        set_agent_mute(state.mngr_ctx, agent_name, new_muted)
+        set_agent_mute(state.mngr_ctx, agent_id, new_muted)
 
     future = state.executor.submit(_do_mute)
     if state.loop is not None:
         state.loop.set_alarm_in(
-            SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, (state, future, agent_name, new_muted)
+            SPINNER_INTERVAL_SECONDS, _on_mute_persist_poll, (state, future, agent_id, agent_name, new_muted)
         )
 
 
-def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[None], AgentName, bool]) -> None:
+def _on_mute_persist_poll(loop: MainLoop, data: tuple[_KanpanState, Future[None], AgentId, AgentName, bool]) -> None:
     """Poll for mute persist completion. Revert UI on failure."""
-    state, future, agent_name, expected_muted = data
+    state, future, agent_id, agent_name, expected_muted = data
     if future.done():
         try:
             future.result()
         except Exception as e:
             # Revert the optimistic update
-            _update_snapshot_mute(state, agent_name, not expected_muted)
+            _update_snapshot_mute(state, agent_id, not expected_muted)
             _refresh_display(state)
             _show_transient_message(state, f"  Failed to persist mute for {agent_name}: {e}")
     else:
@@ -1255,7 +1290,7 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
         # clear it and show a connecting line so the handoff is not a flash of that
         # old command line before the agent's session paints over it.
         write_human_line(f"{CLEAR_SCREEN}  Connecting to {entry.name}...")
-        result = subprocess.run(["mngr", "connect", str(entry.name)], env=attach_env)
+        result = subprocess.run(["mngr", "connect", str(entry.agent_id)], env=attach_env)
     finally:
         # The attached session sets its own terminal title; take it back.
         _write_terminal_title(loop.screen, TERMINAL_TITLE)
@@ -1299,14 +1334,35 @@ def _focus_row_by_name(state: _KanpanState, name: AgentName) -> int | None:
     return None
 
 
-def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+def _find_entry_by_id(state: _KanpanState, agent_id: AgentId | None) -> AgentBoardEntry | None:
+    """Find the board entry with the given id among the currently displayed rows."""
+    if agent_id is None:
+        return None
+    for entry in state.index_to_entry.values():
+        if entry.agent_id == agent_id:
+            return entry
+    return None
+
+
+def _focus_row_by_id(state: _KanpanState, agent_id: AgentId) -> int | None:
+    """Move the board's list focus to the row for the agent with this id; report where it landed."""
+    if state.list_walker is None:
+        return None
+    for idx, entry in state.index_to_entry.items():
+        if entry.agent_id == agent_id:
+            state.list_walker.set_focus(idx)
+            return idx
+    return None
+
+
+def _run_transcript(agent: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Read the agent's user/assistant messages. Called from a background thread.
 
     The role filter excludes tool turns, keeping the readable conversation. No
     ``--tail`` window -- the whole thing is fetched and the panel keeps the tail.
     """
     return subprocess.run(
-        ["mngr", "transcript", agent_name, "--role", "user", "--role", "assistant"],
+        ["mngr", "transcript", agent, "--role", "user", "--role", "assistant"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -1314,7 +1370,7 @@ def _run_transcript(agent_name: str) -> subprocess.CompletedProcess[str]:  # pra
 
 
 @pure
-def _message_command(agent_name: str, message: str) -> list[str]:
+def _message_command(agent: str, message: str) -> list[str]:
     """Build the ``mngr message`` argv for a peek reply.
 
     ``--start`` brings up an offline host and (re)launches a ``STOPPED`` or ``DONE``
@@ -1322,10 +1378,10 @@ def _message_command(agent_name: str, message: str) -> list[str]:
     failing with its state. Reviving a ``DONE`` agent tears down its lingering tmux
     session, discarding that pane's content.
     """
-    return ["mngr", "message", agent_name, "--start", "-m", message]
+    return ["mngr", "message", agent, "--start", "-m", message]
 
 
-def _run_message(agent_name: str, message: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
+def _run_message(agent: str, message: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
     """Send a message to the agent. Called from a background thread.
 
     The timeout is a ceiling on how long one send may hold the single-worker reply
@@ -1335,7 +1391,7 @@ def _run_message(agent_name: str, message: str) -> subprocess.CompletedProcess[s
     agent takes a host lock that has no timeout at all. A send cut off here is
     reported as a failure whether or not the message landed.
     """
-    return subprocess.run(_message_command(agent_name, message), capture_output=True, text=True, timeout=180)
+    return subprocess.run(_message_command(agent, message), capture_output=True, text=True, timeout=180)
 
 
 def _ensure_peek_executor(state: _KanpanState) -> ThreadPoolExecutor:
@@ -1697,7 +1753,7 @@ def _update_peek_header(state: _KanpanState) -> None:
     """Refresh the peek box's border title from the currently peeked agent."""
     if state.peek_box is None:
         return
-    entry = _find_entry_by_name(state, state.peek_agent_name)
+    entry = _find_entry_by_id(state, state.peek_agent_id)
     if entry is None:
         state.peek_box.set_title("Peek")
         return
@@ -1723,10 +1779,10 @@ def _cancel_peek_alarm(state: _KanpanState) -> None:
 
 def _start_peek_capture(state: _KanpanState) -> None:
     """Kick off a background transcript read for the peeked agent and poll for it."""
-    if state.peek_agent_name is None or state.loop is None:
+    if state.peek_agent_id is None or state.loop is None:
         return
     executor = _ensure_peek_executor(state)
-    state.peek_capture_future = executor.submit(_run_transcript, str(state.peek_agent_name))
+    state.peek_capture_future = executor.submit(_run_transcript, str(state.peek_agent_id))
     state.peek_alarm = state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_capture_poll, state)
 
 
@@ -1775,7 +1831,8 @@ def _open_peek(state: _KanpanState) -> None:
     if entry is None:
         return
     state.peek_agent_name = entry.name
-    state.focused_agent_name = entry.name
+    state.peek_agent_id = entry.agent_id
+    state.focused_agent_id = entry.agent_id
     state.peek_transcript = ""
     state.peek_pending_replies = []
     state.peek_reply_error = ""
@@ -1790,13 +1847,15 @@ def _close_peek(state: _KanpanState) -> None:
     """Close the peek panel and restore the footer and board focus."""
     if state.peek_agent_name is None:
         return
-    closed_name = state.peek_agent_name
+    closed_id = state.peek_agent_id
     _cancel_peek_alarm(state)
     state.peek_capture_future = None
     state.peek_agent_name = None
+    state.peek_agent_id = None
     _restore_footer_belt(state)
-    state.focused_agent_name = closed_name
-    _focus_row_by_name(state, closed_name)
+    state.focused_agent_id = closed_id
+    if closed_id is not None:
+        _focus_row_by_id(state, closed_id)
     state.peek_box = None
     state.peek_body_text = None
     state.peek_input = None
@@ -1822,7 +1881,7 @@ def _submit_peek_reply(state: _KanpanState) -> None:
     right away (as a ``›`` line) and, once the agent accepts it and it shows up in the
     transcript, the echo is dropped in favour of the real message.
     """
-    if state.peek_agent_name is None or state.peek_input is None:
+    if state.peek_agent_name is None or state.peek_agent_id is None or state.peek_input is None:
         return
     text = state.peek_input.get_edit_text().strip()
     if not text:
@@ -1830,20 +1889,20 @@ def _submit_peek_reply(state: _KanpanState) -> None:
     state.peek_pending_replies = [*state.peek_pending_replies, text]
     state.peek_reply_error = ""
     executor = _ensure_peek_reply_executor(state)
-    state.peek_reply_future = executor.submit(_run_message, str(state.peek_agent_name), text)
+    state.peek_reply_future = executor.submit(_run_message, str(state.peek_agent_id), text)
     state.peek_input.set_edit_text("")
     _set_peek_body(state)
     if state.loop is not None:
         state.loop.set_alarm_in(
             SPINNER_INTERVAL_SECONDS,
             _on_peek_reply_poll,
-            (state, state.peek_reply_future, state.peek_agent_name, text),
+            (state, state.peek_reply_future, state.peek_agent_id, state.peek_agent_name, text),
         )
 
 
 def _on_peek_reply_poll(
     loop: MainLoop,
-    data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentName, str],
+    data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentId, AgentName, str],
 ) -> None:
     """Poll a sent reply; refresh the board either way, drop its optimistic echo on failure.
 
@@ -1853,7 +1912,7 @@ def _on_peek_reply_poll(
     attempted, and the exit code does not say whether it got that far. A failed send would
     otherwise leave the echo up forever, showing the message as delivered when it was not.
     """
-    state, future, agent_name, reply_text = data
+    state, future, agent_id, agent_name, reply_text = data
     if not future.done():
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, data)
         return
@@ -1866,7 +1925,7 @@ def _on_peek_reply_poll(
             _request_local_refresh(loop, state)
             return
         detail = _last_nonempty_line(result.stderr) or f"exited with code {result.returncode}"
-    if state.peek_agent_name == agent_name:
+    if state.peek_agent_id == agent_id:
         pending = list(state.peek_pending_replies)
         if reply_text in pending:
             pending.remove(reply_text)
@@ -2187,7 +2246,7 @@ def _close_search(state: _KanpanState, *, is_cancelled: bool) -> None:
     # snaps back to whichever row was focused before -- including when the search
     # ends on no row at all, which is a selection the memory has to record too.
     focused = _get_focused_entry(state)
-    state.focused_agent_name = focused.name if focused is not None else None
+    state.focused_agent_id = focused.agent_id if focused is not None else None
 
 
 def _handle_search_key(state: _KanpanState, key: str) -> bool | None:
@@ -2244,13 +2303,14 @@ def _launch_custom_command(
     executor: ThreadPoolExecutor,
     cmd: CustomCommand,
     agent_name: AgentName,
+    agent_id: AgentId,
     input_text: str,
 ) -> None:
     """Start a custom command in the background, showing the spinner and polling for it."""
     state.action_label = f"  Running {cmd.name} on {agent_name}"
     _render_footer(state)
     _ensure_animation_running(state)
-    future = executor.submit(_run_shell_command_sync, cmd.command, str(agent_name), input_text)
+    future = executor.submit(_run_shell_command_sync, cmd.command, str(agent_name), input_text, agent_id)
     if state.loop is not None:
         state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, (state, future, cmd, agent_name))
 
@@ -2262,7 +2322,7 @@ def _run_shell_command(state: _KanpanState, cmd: CustomCommand) -> None:
         return
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
-    _launch_custom_command(state, state.executor, cmd, entry.name, "")
+    _launch_custom_command(state, state.executor, cmd, entry.name, entry.agent_id, "")
 
 
 def _ensure_batch_executor(state: _KanpanState) -> ThreadPoolExecutor:
@@ -2285,9 +2345,12 @@ class _RunPromptedCommand(FrozenModel):
     state: _KanpanState
     cmd: CustomCommand
     agent_name: AgentName
+    agent_id: AgentId
 
     def __call__(self, input_text: str) -> None:
-        _launch_custom_command(self.state, _ensure_prompt_executor(self.state), self.cmd, self.agent_name, input_text)
+        _launch_custom_command(
+            self.state, _ensure_prompt_executor(self.state), self.cmd, self.agent_name, self.agent_id, input_text
+        )
 
 
 def _open_prompt_for_command(state: _KanpanState, cmd: CustomCommand) -> None:
@@ -2295,14 +2358,14 @@ def _open_prompt_for_command(state: _KanpanState, cmd: CustomCommand) -> None:
     entry = _get_focused_entry(state)
     if entry is None:
         return
-    state.focused_agent_name = entry.name
+    state.focused_agent_id = entry.agent_id
     # Title names only the agent: the caption is the command's own `prompt` text, which
     # already says what is being asked, so repeating the command name reads as a stutter.
     _open_prompt(
         state,
         title=f" {entry.name} ",
         caption=cmd.prompt,
-        on_submit=_RunPromptedCommand(state=state, cmd=cmd, agent_name=entry.name),
+        on_submit=_RunPromptedCommand(state=state, cmd=cmd, agent_name=entry.name, agent_id=entry.agent_id),
     )
 
 
@@ -2871,10 +2934,10 @@ def _carry_forward_fields(old: BoardSnapshot, new: BoardSnapshot) -> BoardSnapsh
     arrive fresh; the fields only remote sources produce (PR, CI, shell columns) are
     carried forward from the previous snapshot.
     """
-    old_by_name = {entry.name: entry for entry in old.entries}
+    old_by_id = {entry.agent_id: entry for entry in old.entries}
     updated_entries: list[AgentBoardEntry] = []
     for entry in new.entries:
-        old_entry = old_by_name.get(entry.name)
+        old_entry = old_by_id.get(entry.agent_id)
         if old_entry is not None:
             # Merge: new fields override old, but keep old fields not produced by local sources
             merged_fields = dict(old_entry.fields)
@@ -2896,10 +2959,10 @@ def _prefer_later_read(old: BoardSnapshot, new: BoardSnapshot, field_keys: Seque
     A fetch reads its values as of its start, so one still running when the board writes one
     of these holds an answer from before that write and would otherwise undo it.
     """
-    old_by_name = {entry.name: entry for entry in old.entries}
+    old_by_id = {entry.agent_id: entry for entry in old.entries}
     updated_entries: list[AgentBoardEntry] = []
     for entry in new.entries:
-        old_entry = old_by_name.get(entry.name)
+        old_entry = old_by_id.get(entry.agent_id)
         if old_entry is None:
             updated_entries.append(entry)
             continue
@@ -3354,7 +3417,7 @@ def _build_focus_map(
 def _build_board_widgets(
     snapshot: BoardSnapshot | None,
     column_defs: list[_ColumnDef],
-    marks: dict[AgentName, str] | None = None,
+    marks: dict[AgentId, str] | None = None,
     mark_attr_names: tuple[str, ...] = (),
     col_attr_names: tuple[str, ...] = (),
     section_order: tuple[BoardSection, ...] = BOARD_SECTION_ORDER,
@@ -3393,7 +3456,7 @@ def _build_board_widgets(
         has_content = True
 
         for entry in entries:
-            mark = marks.get(entry.name) if marks else None
+            mark = marks.get(entry.agent_id) if marks else None
             item = _build_agent_row(
                 entry,
                 col_widths,
@@ -3444,11 +3507,11 @@ def _focused_row_offset(state: _KanpanState, size: tuple[int, int] | None) -> in
 
 
 @pure
-def _nearest_surviving_name(
-    previous_order: Sequence[AgentName],
-    missing: AgentName,
-    present: AbstractSet[AgentName],
-) -> AgentName | None:
+def _nearest_surviving_id(
+    previous_order: Sequence[AgentId],
+    missing: AgentId,
+    present: AbstractSet[AgentId],
+) -> AgentId | None:
     """The agent closest to `missing` in the old board order that is still on the board.
 
     Searches outward from where the row used to be, preferring the one below it, which
@@ -3466,10 +3529,10 @@ def _nearest_surviving_name(
 
 def _refresh_display(state: _KanpanState) -> None:
     """Rebuild the body display from the current snapshot."""
-    # Save the currently focused agent name before rebuilding
+    # Save the currently focused agent id before rebuilding
     focused_entry = _get_focused_entry(state)
     if focused_entry is not None:
-        state.focused_agent_name = focused_entry.name
+        state.focused_agent_id = focused_entry.agent_id
 
     # Where the focused row sits on screen, so the rebuild can put it back there. A fresh
     # ListBox starts scrolled to the top, and moving the walker's focus does not tell the
@@ -3478,7 +3541,7 @@ def _refresh_display(state: _KanpanState) -> None:
     previous_offset = _focused_row_offset(state, body_size)
     # Board order as it stands, so a focused row that this refresh removes can hand its
     # place to whichever neighbour survived rather than dropping the anchor entirely.
-    previous_order = tuple(entry.name for _index, entry in sorted(state.index_to_entry.items()))
+    previous_order = tuple(entry.agent_id for _index, entry in sorted(state.index_to_entry.items()))
 
     # Update field color palette from snapshot and register new entries with the screen
     field_palette, field_attr_names = _build_field_color_palette(state.snapshot)
@@ -3501,19 +3564,19 @@ def _refresh_display(state: _KanpanState) -> None:
     state.frame.body = listbox
 
     # Restore focus to the previously focused agent, at the height it was already at.
-    if state.focused_agent_name is not None:
-        restored_index = _focus_row_by_name(state, state.focused_agent_name)
+    if state.focused_agent_id is not None:
+        restored_index = _focus_row_by_id(state, state.focused_agent_id)
         if restored_index is None and state.search_input is None:
             # The focused row is gone -- deleted, or filtered away. Anchoring on its
             # nearest surviving neighbour keeps the board where the eye left it; with no
             # anchor at all a fresh ListBox renders from the top. An open search anchors
             # itself, back to the row it started from, so it is left to do that.
-            replacement = _nearest_surviving_name(
-                previous_order, state.focused_agent_name, {entry.name for entry in state.index_to_entry.values()}
+            replacement = _nearest_surviving_id(
+                previous_order, state.focused_agent_id, {entry.agent_id for entry in state.index_to_entry.values()}
             )
             if replacement is not None:
-                state.focused_agent_name = replacement
-                restored_index = _focus_row_by_name(state, replacement)
+                state.focused_agent_id = replacement
+                restored_index = _focus_row_by_id(state, replacement)
         if restored_index is not None and previous_offset is not None and body_size is not None:
             listbox.change_focus(body_size, restored_index, offset_inset=previous_offset)
 

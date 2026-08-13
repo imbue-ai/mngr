@@ -1,6 +1,7 @@
 from datetime import datetime
 from datetime import timezone
 
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -102,7 +103,9 @@ def test_board_snapshot_to_json_preserves_order_within_section() -> None:
 
 
 def test_board_snapshot_to_json_entry_includes_cells_and_metadata() -> None:
+    agent_id = AgentId.generate()
     entry = AgentBoardEntry(
+        agent_id=agent_id,
         name=AgentName("agent-x"),
         state=AgentLifecycleState.WAITING,
         provider_name=ProviderInstanceName("local"),
@@ -113,6 +116,8 @@ def test_board_snapshot_to_json_entry_includes_cells_and_metadata() -> None:
     snapshot = make_board_snapshot(entries=(entry,))
     result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
     dumped = result["sections"][0]["entries"][0]
+    # The globally-unique id rides in the JSON so consumers can tell same-named agents apart.
+    assert dumped["agent_id"] == str(agent_id)
     assert dumped["name"] == "agent-x"
     assert dumped["state"] == "WAITING"
     assert dumped["branch"] == "mngr/agent-x"
@@ -130,6 +135,7 @@ def test_board_snapshot_to_json_entry_includes_per_run_cell_urls() -> None:
     reach every linked PR without re-parsing the joined display text.
     """
     entry = AgentBoardEntry(
+        agent_id=AgentId.generate(),
         name=AgentName("agent-x"),
         state=AgentLifecycleState.WAITING,
         provider_name=ProviderInstanceName("local"),
@@ -169,6 +175,7 @@ def test_board_snapshot_to_json_serializes_full_field_payload() -> None:
         created=_NOW,
     )
     entry = AgentBoardEntry(
+        agent_id=AgentId.generate(),
         name=AgentName("agent-x"),
         state=AgentLifecycleState.DONE,
         provider_name=ProviderInstanceName("local"),

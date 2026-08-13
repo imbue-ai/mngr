@@ -244,22 +244,22 @@ Add to your mngr settings file (e.g. `.mngr/settings.toml`):
 ```toml
 [plugins.kanpan.commands.c]
 name = "connect"
-command = "mngr connect $MNGR_AGENT_NAME"
+command = "mngr connect $MNGR_AGENT_ID"
 
 [plugins.kanpan.commands.l]
 name = "event"
-command = "mngr event $MNGR_AGENT_NAME"
+command = "mngr event $MNGR_AGENT_ID"
 refresh_afterwards = true
 ```
 
-Each entry defines a keybinding (the table key, e.g. `c`) that appears in the status bar and runs with the `MNGR_AGENT_NAME` environment variable set to the focused agent's name. Custom commands override builtins when they share the same key. Set `enabled = false` to disable a builtin.
+Each entry defines a keybinding (the table key, e.g. `c`) that appears in the status bar. The command runs with two environment variables set for the focused agent: `MNGR_AGENT_ID` (its globally unique ID) and `MNGR_AGENT_NAME` (its name). Prefer `$MNGR_AGENT_ID` for any command that targets the agent: a name is unique only within a host, so `$MNGR_AGENT_NAME` is ambiguous once two hosts hold same-named agents, whereas the ID always resolves to exactly one agent. Custom commands override builtins when they share the same key. Set `enabled = false` to disable a builtin.
 
 By default, custom commands run immediately on the focused agent. Set `markable = true` to make a command use dired-style batch marking instead: pressing the key marks agents, then `x` executes all marks at once. If any operation fails (including a builtin delete), the marks for the failed agents are kept so you can retry, and the failures are listed at the bottom of the board (alongside fetch errors) until the next execution.
 
 ```toml
 [plugins.kanpan.commands.s]
 name = "stop"
-command = "mngr stop $MNGR_AGENT_NAME"
+command = "mngr stop $MNGR_AGENT_ID"
 markable = true
 refresh_afterwards = true
 ```
@@ -281,7 +281,7 @@ Set `prompt` to ask for a value before the command runs. Pressing the key floats
 [plugins.kanpan.commands.R]
 name = "rename"
 prompt = "new name: "
-command = 'mngr rename "$MNGR_AGENT_NAME" "$MNGR_INPUT"'
+command = 'mngr rename "$MNGR_AGENT_ID" "$MNGR_INPUT"'
 refresh_afterwards = true
 ```
 
@@ -300,7 +300,7 @@ Combine `prompt` with `markable` to answer once for a whole batch: press the key
 [plugins.kanpan.commands.M]
 name = "message"
 prompt = "message: "
-command = 'mngr message "$MNGR_AGENT_NAME" -m "$MNGR_INPUT"'
+command = 'mngr message "$MNGR_AGENT_ID" -m "$MNGR_INPUT"'
 markable = "light cyan"
 ```
 
@@ -318,7 +318,7 @@ A prompted command that writes an agent label, plus a label-backed column that d
 [plugins.kanpan.commands.w]
 name = "note"
 prompt = "note: "
-command = 'mngr label "$MNGR_AGENT_NAME" -l "note=$MNGR_INPUT"'
+command = 'mngr label "$MNGR_AGENT_ID" -l "note=$MNGR_INPUT"'
 refresh_afterwards = true
 
 [plugins.kanpan.columns.note]
@@ -334,7 +334,7 @@ For a *status* -- a small fixed vocabulary you want colored -- a prompt is the w
 ```toml
 [plugins.kanpan.commands.B]
 name = "blocked"
-command = 'mngr label "$MNGR_AGENT_NAME" -l "status=blocked"'
+command = 'mngr label "$MNGR_AGENT_ID" -l "status=blocked"'
 refresh_afterwards = true
 
 [plugins.kanpan.columns.status]

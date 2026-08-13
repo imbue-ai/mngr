@@ -79,8 +79,8 @@ def test_compute_local_agent_with_upstream(temp_git_repo: Path, test_cg: Concurr
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
-    assert agent.name in fields
-    ca = fields[agent.name][FIELD_COMMITS_AHEAD]
+    assert agent.id in fields
+    ca = fields[agent.id][FIELD_COMMITS_AHEAD]
     assert isinstance(ca, CommitsAheadField)
     assert ca.has_work_dir is True
     assert ca.count == 0
@@ -92,8 +92,8 @@ def test_compute_remote_agent_no_work_dir(test_cg: ConcurrencyGroup) -> None:
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
-    assert agent.name in fields
-    ca = fields[agent.name][FIELD_COMMITS_AHEAD]
+    assert agent.id in fields
+    ca = fields[agent.id][FIELD_COMMITS_AHEAD]
     assert isinstance(ca, CommitsAheadField)
     assert ca.has_work_dir is False
     assert ca.count is None
@@ -109,7 +109,7 @@ def test_compute_nonexistent_work_dir(test_cg: ConcurrencyGroup) -> None:
     ctx = make_mngr_ctx_with_cg(test_cg)
     fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
     assert errors == []
-    assert agent.name in fields
-    ca = fields[agent.name][FIELD_COMMITS_AHEAD]
+    assert agent.id in fields
+    ca = fields[agent.id][FIELD_COMMITS_AHEAD]
     assert isinstance(ca, CommitsAheadField)
     assert ca.has_work_dir is False

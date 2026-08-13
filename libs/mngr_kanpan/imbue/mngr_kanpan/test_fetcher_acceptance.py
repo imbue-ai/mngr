@@ -21,6 +21,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
@@ -68,17 +69,18 @@ class _FakeRemoteDataSource:
     def compute(
         self,
         agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        cached_fields: dict[AgentId, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], list[str]]:
         return (
             {
-                AgentName("git-local-agent"): {
+                agent.id: {
                     FIELD_REPO_PATH: RepoPathField(
                         path="should/not/appear",
                         created=datetime.now(tz=timezone.utc),
                     )
                 }
+                for agent in agents
             },
             [],
         )
@@ -109,9 +111,9 @@ class _ClockRecordingDataSource:
     def compute(
         self,
         agents: tuple[AgentDetails, ...],
-        cached_fields: dict[AgentName, dict[str, FieldValue]],
+        cached_fields: dict[AgentId, dict[str, FieldValue]],
         mngr_ctx: MngrContext,
-    ) -> tuple[dict[AgentName, dict[str, FieldValue]], list[str]]:
+    ) -> tuple[dict[AgentId, dict[str, FieldValue]], list[str]]:
         self.ran_at = now_utc()
         return ({}, [])
 
@@ -194,11 +196,12 @@ def test_fetch_board_snapshot_entry_has_correct_fields(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Board entry for a real agent has expected field structure."""
-    create_test_agent_state(local_host, work_dir, "fields-agent")
+    agent = create_test_agent_state(local_host, work_dir, "fields-agent")
     result = fetch_board_snapshot(temp_mngr_ctx, [], {})
     entries = {e.name: e for e in result.snapshot.entries}
     entry = entries[AgentName("fields-agent")]
     assert isinstance(entry, AgentBoardEntry)
+    assert entry.agent_id == agent.id
     assert FIELD_MUTED in entry.fields
     muted_field = entry.fields[FIELD_MUTED]
     assert isinstance(muted_field, BoolField)
@@ -269,7 +272,7 @@ def test_fetch_board_snapshot_cached_fields_updated(
     agent = create_test_agent_state(local_host, work_dir, "cache-agent")
     agent.set_labels({"remote": "git@github.com:org/repo.git"})
     result = fetch_board_snapshot(temp_mngr_ctx, [RepoPathsDataSource()], {})
-    assert AgentName("cache-agent") in result.cached_fields
+    assert agent.id in result.cached_fields
 
 
 # =============================================================================
@@ -321,14 +324,14 @@ def test_set_agent_mute_writes_the_state_it_is_given(
     to flip what is stored instead, the two would disagree whenever the board had not yet
     caught up, and a second keypress would undo the first.
     """
-    create_test_agent_state(local_host, work_dir, "set-mute-agent")
+    agent = create_test_agent_state(local_host, work_dir, "set-mute-agent")
     name = AgentName("set-mute-agent")
 
-    set_agent_mute(temp_mngr_ctx, name, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, True)
     assert _read_persisted_mute(temp_mngr_ctx, name) is True
-    set_agent_mute(temp_mngr_ctx, name, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, True)
     assert _read_persisted_mute(temp_mngr_ctx, name) is True
-    set_agent_mute(temp_mngr_ctx, name, False)
+    set_agent_mute(temp_mngr_ctx, agent.id, False)
     assert _read_persisted_mute(temp_mngr_ctx, name) is False
 
 
@@ -364,8 +367,8 @@ def test_fetch_board_snapshot_muted_agent_in_muted_section(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """A muted agent appears in the MUTED section of the board snapshot."""
-    create_test_agent_state(local_host, work_dir, "muted-section-agent")
-    set_agent_mute(temp_mngr_ctx, AgentName("muted-section-agent"), True)
+    agent = create_test_agent_state(local_host, work_dir, "muted-section-agent")
+    set_agent_mute(temp_mngr_ctx, agent.id, True)
     result = fetch_board_snapshot(temp_mngr_ctx, [], {})
     entries = {e.name: e for e in result.snapshot.entries}
     entry = entries[AgentName("muted-section-agent")]
@@ -393,8 +396,8 @@ def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
     field generators) and is sourced through ``list_agents``, which tolerates a
     failing provider, so the muted agent must remain in MUTED.
     """
-    create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
-    set_agent_mute(temp_mngr_ctx, AgentName("muted-despite-failure-agent"), True)
+    agent = create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
+    set_agent_mute(temp_mngr_ctx, agent.id, True)
 
     failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
     result = fetch_board_snapshot(failing_ctx, [], {})

@@ -17,8 +17,8 @@ def test_repo_paths_compute_with_remote_label() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert len(errors) == 0
-    assert agent.name in fields
-    repo_field = fields[agent.name][FIELD_REPO_PATH]
+    assert agent.id in fields
+    repo_field = fields[agent.id][FIELD_REPO_PATH]
     assert isinstance(repo_field, RepoPathField)
     assert repo_field.path == "org/repo"
 
@@ -32,4 +32,4 @@ def test_repo_paths_compute_without_remote_label() -> None:
         mngr_ctx=make_mngr_ctx(),
     )
     assert len(errors) == 0
-    assert agent.name not in fields
+    assert agent.id not in fields
