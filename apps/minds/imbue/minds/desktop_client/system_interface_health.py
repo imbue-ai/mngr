@@ -2,10 +2,11 @@
 
 The plugin (``mngr_forward``) emits a ``system_interface_backend_failure``
 envelope each time it observes a backend failure (connection failure, mid-SSE
-EOF, or any non-2xx response). The plugin does not decide which of those
-matter -- that policy lives here: ``should_enroll_suspect_for_backend_failure``
-selects the ones that suggest the backend is unreachable, and minds routes only
-those into ``record_failure``.
+EOF, or any non-2xx response), and one more -- ``STALLED`` -- for a request the
+backend has not answered yet, which may still succeed. The plugin does not
+decide which of those matter -- that policy lives here:
+``should_enroll_suspect_for_backend_failure`` selects the ones that suggest the
+backend is unreachable, and minds routes only those into ``record_failure``.
 
 A failure envelope is only a *hint*. A single transient blip -- most commonly a
 mid-SSE EOF when an SSE stream is recycled -- is not evidence that the workspace
@@ -72,13 +73,22 @@ def should_enroll_suspect_for_backend_failure(
 ) -> bool:
     """Whether a ``system_interface_backend_failure`` should enroll a probe suspect.
 
-    The plugin emits a failure envelope for every non-2xx response and for
-    connection-level failures (which carry no status code). Minds acts only on
-    the ones that suggest the backend is unreachable: a connection-level failure
-    (``status_code is None``) or an infrastructure 5xx (502/503/504). Application
-    errors (app 500s, ordinary 4xx) mean the backend is alive and responding, so
-    they are left alone; the background probe still catches a genuinely-wrong or
-    wedged backend.
+    The plugin emits a failure envelope for every non-2xx response, for
+    connection-level failures (which carry no status code), and -- as
+    ``STALLED`` -- for a request still in flight that the backend has not
+    answered within the plugin's stall window. Minds acts only on the ones that
+    suggest the backend is unreachable: anything without a status code
+    (``CONNECT_ERROR`` / ``SSE_EOF`` / ``STALLED``) or an infrastructure 5xx
+    (502/503/504). Application errors (app 500s, ordinary 4xx) mean the backend
+    is alive and responding, so they are left alone; the background probe still
+    catches a genuinely-wrong or wedged backend.
+
+    ``STALLED`` is deliberately treated the same as a hard failure even though
+    the request may still succeed: a wedged backend is indistinguishable from a
+    slow one at that moment, and guessing wrong is cheap in only one direction.
+    Enrolling a merely-slow backend costs one probe, which answers 200 and
+    clears the flag; declining to enroll a wedged one leaves it undetected,
+    because a HEALTHY non-suspect agent is never probed.
 
     ``UNRESOLVED`` is ignored outright: it means the forward has no route for the
     agent at all. A restart routes *through* the forward, so it cannot help a

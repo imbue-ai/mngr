@@ -32,12 +32,23 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
       unchanged and does not interpret which codes matter -- the consumer
       decides whether (and how) to react to a given status.
     - ``UNRESOLVED``: the backend resolver had no entry for the agent.
+    - ``STALLED``: the plugin has waited on this request for its
+      stall-notice window without a response. The window starts when the
+      request is handed to the backend client, so it covers waiting for a
+      pooled slot and the dial -- the backend need not have accepted the
+      connection -- but not the routing and (for a remote agent) SSH tunnel
+      setup that precede it, which can add a comparable delay. Unlike every
+      other reason here the request has *not* failed -- it is still in
+      flight and may yet succeed. It is emitted purely so a consumer can
+      start probing a backend that may be wedged; a consumer must not treat
+      it as evidence that the request itself failed.
     """
 
     CONNECT_ERROR = auto()
     SSE_EOF = auto()
     ERROR_RESPONSE = auto()
     UNRESOLVED = auto()
+    STALLED = auto()
 
 
 class BackendUrl(NonEmptyStr):
@@ -84,17 +95,20 @@ class ReverseTunnelEstablishedPayload(FrozenModel):
 
 
 class SystemInterfaceBackendFailurePayload(FrozenModel):
-    """Emitted when the plugin observes a per-agent backend failure.
+    """Emitted when the plugin observes something notable about a per-agent backend.
 
-    The plugin's role is observation only: it surfaces the kind of failure
-    it saw (connection failure, mid-stream EOF, or a non-2xx response) so a
+    The plugin's role is observation only: it surfaces what it saw so a
     downstream consumer can apply its own policy (e.g. a health tracker's
-    HEALTHY -> STUCK transition).
+    HEALTHY -> STUCK transition). ``reason`` says what that was, and not all
+    of them report a request that failed -- ``STALLED`` reports one still in
+    flight.
     """
 
     type: Literal["system_interface_backend_failure"] = "system_interface_backend_failure"
-    agent_id: AgentId = Field(description="Agent whose backend failed")
-    reason: SystemInterfaceBackendFailureReason = Field(description="Why the forward attempt failed")
+    agent_id: AgentId = Field(description="Agent whose backend the observation is about")
+    reason: SystemInterfaceBackendFailureReason = Field(
+        description="What the plugin observed (see SystemInterfaceBackendFailureReason)"
+    )
     status_code: int | None = Field(
         default=None,
         description="HTTP status code returned by the backend (set when reason is ERROR_RESPONSE; None otherwise)",

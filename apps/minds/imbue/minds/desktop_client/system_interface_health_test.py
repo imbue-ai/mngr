@@ -38,6 +38,11 @@ _FAST_THRESHOLD: float = 0.05
         # the forward so it cannot help either way. Never enroll on it -- even
         # though it carries a None status code that would otherwise enroll.
         (SystemInterfaceBackendFailureReason.UNRESOLVED, None, False),
+        # STALLED reports a backend that has not answered yet -- the request is
+        # still in flight. Enrolling is right (a wedged backend looks exactly
+        # like this), and costs nothing when the backend was merely slow: the
+        # probe answers 200 and clears the suspect flag.
+        (SystemInterfaceBackendFailureReason.STALLED, None, True),
     ],
 )
 def test_should_enroll_suspect_for_backend_failure(

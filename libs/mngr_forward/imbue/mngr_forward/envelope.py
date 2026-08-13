@@ -107,10 +107,14 @@ class EnvelopeWriter(MutableModel):
     def emit_system_interface_backend_failure(self, payload: SystemInterfaceBackendFailurePayload) -> None:
         """Emit a ``system_interface_backend_failure`` plugin event.
 
-        Surfaces a per-agent backend failure observed in the forwarding
-        path so a downstream consumer can apply its own restart-recovery
-        policy. The plugin remains a dumb reverse proxy -- this is the
-        only forwarding-failure signal it exposes outside its own logs.
+        Surfaces a per-agent observation from the forwarding path so a
+        downstream consumer can apply its own restart-recovery policy. The
+        plugin remains a dumb reverse proxy -- this is the only per-agent
+        backend signal it exposes outside its own logs.
+
+        ``payload.reason`` says what was observed, and not every reason
+        reports a failed request: ``STALLED`` reports one still in flight
+        that may yet succeed. See ``SystemInterfaceBackendFailureReason``.
         """
         self._write_envelope(
             {

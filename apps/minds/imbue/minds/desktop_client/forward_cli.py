@@ -272,9 +272,11 @@ class EnvelopeStreamConsumer(MutableModel):
 
         The callback receives ``(agent_id, reason, status_code)``. ``reason``
         is a ``SystemInterfaceBackendFailureReason`` enum value (CONNECT_ERROR /
-        SSE_EOF / ERROR_RESPONSE / UNRESOLVED); ``status_code`` is set when
-        ``reason`` is ``ERROR_RESPONSE`` (the backend's non-2xx status) and
-        ``None`` otherwise.
+        SSE_EOF / ERROR_RESPONSE / UNRESOLVED / STALLED); ``status_code`` is set
+        when ``reason`` is ``ERROR_RESPONSE`` (the backend's non-2xx status) and
+        ``None`` otherwise. ``STALLED`` is the one reason that does not report a
+        failed request: it means the backend has not answered yet, and the
+        request may still succeed.
         Used by minds to feed its ``SystemInterfaceHealthTracker``.
         """
         with self._lock:

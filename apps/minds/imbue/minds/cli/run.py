@@ -491,9 +491,12 @@ def run(
     # otherwise early failures would dispatch against an empty list).
     system_interface_health_tracker = SystemInterfaceHealthTracker()
 
-    # The plugin reports every non-2xx response; minds decides which ones count.
-    # Only connection-level failures and infrastructure 5xx enroll a suspect --
-    # application errors (and UNRESOLVED, a routeless warm-up) are left alone.
+    # The plugin reports every backend failure it observes; minds decides which
+    # ones count. Only envelopes carrying no status code, or an infrastructure
+    # 5xx, enroll a suspect -- application errors (and UNRESOLVED, a routeless
+    # warm-up) are left alone. STALLED enrolls despite not reporting a failed
+    # request at all: a wedged backend and a slow one look identical until the
+    # probe adjudicates.
     consumer.add_on_system_interface_backend_failure_callback(
         lambda agent_id, reason, status_code: system_interface_health_tracker.record_failure(agent_id)
         if should_enroll_suspect_for_backend_failure(reason, status_code)

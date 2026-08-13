@@ -62,12 +62,14 @@ _SSH_KEEPALIVE_INTERVAL_SECONDS: Final[int] = 15
 # peer that silently went away waits an hour -- long enough that the tunnel is
 # effectively dead for the rest of the session.
 #
-# Set to the proxy's own request timeout (``server._PROXY_TIMEOUT_SECONDS``):
-# beyond that the request this open serves has already been abandoned, so
-# waiting longer buys nothing and holds that request's pooled connection while
-# it does. Deliberately no tighter, because hitting it closes the whole SSH
-# connection out from under every other channel on it -- a merely loaded sshd
-# must not pay that price.
+# Kept in step with the proxy's dial budget
+# (``server._PROXY_CONNECT_TIMEOUT_SECONDS``): this open is the tunnel's own
+# dial, and one open is a single round trip to sshd, so 30s is already far
+# beyond what a healthy link needs. It is deliberately NOT tied to how long
+# the request may then wait for a response -- that is bounded by the client
+# staying connected. Deliberately no tighter either, because hitting it closes
+# the whole SSH connection out from under every other channel on it -- a
+# merely loaded sshd must not pay that price.
 #
 # It bounds the wait, NOT the whole open: ``Transport.open_channel`` sends its
 # request before starting the clock, and that send can block independently. A

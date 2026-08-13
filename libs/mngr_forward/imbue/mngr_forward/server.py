@@ -78,7 +78,59 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 
-_PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
+# How long a backend may go without answering before the plugin emits an
+# advisory ``STALLED`` envelope. The request is deliberately *not* abandoned:
+# the envelope only enrolls the agent for active probing, and the probe --
+# not this timer -- decides whether the workspace is wedged. Cancelling here
+# would additionally cap every proxied request at this value, which silently
+# breaks any user app endpoint that legitimately takes longer.
+_STALL_NOTICE_SECONDS: Final[float] = 30.0
+
+# Backstop for a backend that goes silent. httpx applies this per read, not to
+# the request as a whole, so it bounds the gap between bytes: a backend that
+# answers headers and then keeps trickling never trips it, and is bounded only
+# by its client staying connected. That is the first line of defence anyway --
+# a request ends when its client disconnects, which is what keeps abandoned
+# requests (minds' 2s health probe against a wedged backend) from accumulating
+# against httpx's 100-connection pool. Nothing caps total request duration, by
+# design: a cap there breaks any user app endpoint that legitimately runs long.
+#
+# The write side gets the same budget, and for the same reason: a backend that
+# accepted the connection and then stopped reading the body is the mirror of one
+# that stopped answering. A short budget there would be worse than on reads,
+# because the body of a large upload is relayed byte-for-byte (over the SSH
+# channel, for a remote agent), so a slow link legitimately spends minutes on it.
+_PROXY_BACKSTOP_TIMEOUT_SECONDS: Final[float] = 600.0
+
+# Establishing the connection and acquiring a pooled slot keep a short budget:
+# unlike a slow response, neither is ever legitimately slow here (the dial is
+# loopback or a local unix socket).
+_PROXY_CONNECT_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# SSE gets a tight read budget rather than the backstop. A silent stream is the
+# chrome's fastest wedged-backend signal, and an SSE producer is expected to
+# heartbeat, so a 30s gap here really is evidence of a problem rather than slow
+# work. Its write side rides along on the same value, which costs nothing: an
+# SSE request carries no body worth speaking of.
+_SSE_READ_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Timeout for the non-SSE forwarding path: short to connect, long to respond.
+_PROXY_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
+    connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
+    pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
+    read=_PROXY_BACKSTOP_TIMEOUT_SECONDS,
+    write=_PROXY_BACKSTOP_TIMEOUT_SECONDS,
+)
+
+# Timeout for the SSE forwarding path: the same short connect budget, and a read
+# budget just as short.
+_SSE_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
+    connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
+    pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
+    read=_SSE_READ_TIMEOUT_SECONDS,
+    write=_SSE_READ_TIMEOUT_SECONDS,
+)
+
 
 _SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
 
@@ -397,7 +449,7 @@ def _get_tunnel_http_client(
         client = httpx.AsyncClient(
             transport=transport,
             follow_redirects=False,
-            timeout=_PROXY_TIMEOUT_SECONDS,
+            timeout=_PROXY_TIMEOUT,
         )
         ssh_http_clients[socket_path_str] = client
         return client
@@ -406,12 +458,56 @@ def _get_tunnel_http_client(
 # -- HTTP forwarding -------------------------------------------------------
 
 
+def _schedule_stall_notice(
+    envelope_writer: EnvelopeWriter, agent_id: AgentId, delay_seconds: float
+) -> asyncio.TimerHandle:
+    """Arm the advisory ``STALLED`` envelope for a request that has not answered yet.
+
+    The caller must cancel the returned handle once the backend responds (or
+    the attempt ends). Firing does not touch the request.
+    """
+    return asyncio.get_running_loop().call_later(
+        delay_seconds,
+        _emit_backend_failure,
+        envelope_writer,
+        agent_id,
+        SystemInterfaceBackendFailureReason.STALLED,
+        None,
+    )
+
+
+async def _wait_for_client_disconnect(request: Request) -> None:
+    """Block until the ASGI server reports that the client went away.
+
+    The request body is fully read before this runs, so the next message on
+    the channel is the disconnect itself (hypercorn puts one there when the
+    stream closes). ``Request.is_disconnected`` cannot serve this purpose: it
+    polls inside an already-cancelled scope and so answers immediately.
+
+    Anything else on the channel is skipped rather than treated as a
+    disconnect: mistaking one would abandon a request whose client is still
+    waiting, which is the failure this whole path exists to avoid.
+
+    Over HTTP/1.1 the message means read EOF, not strictly "stopped waiting":
+    hypercorn emits it once its socket read ends, so a client that half-closes
+    its request direction and then waits for the response is treated as gone.
+    That is accepted rather than worked around -- h11 cannot express the
+    difference, and no client the forward serves half-closes. HTTP/2 does
+    distinguish the two, and reports a disconnect only on stream reset or
+    connection close.
+    """
+    message = await request.receive()
+    while message["type"] != "http.disconnect":
+        message = await request.receive()
+
+
 async def _forward_workspace_http(
     request: Request,
     backend_url: str,
     http_client: httpx.AsyncClient,
     agent_id: AgentId,
     envelope_writer: EnvelopeWriter,
+    stall_notice_seconds: float,
 ) -> Response:
     base = backend_url.rstrip("/")
     path = request.url.path.lstrip("/")
@@ -439,7 +535,9 @@ async def _forward_workspace_http(
     is_likely_sse = "text/event-stream" in accept
 
     if is_likely_sse:
-        backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
+        backend_request = http_client.build_request(
+            method=request.method, url=url, headers=headers, content=body, timeout=_SSE_TIMEOUT
+        )
         try:
             backend_response = await http_client.send(backend_request, stream=True)
         except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
@@ -486,8 +584,37 @@ async def _forward_workspace_http(
             },
         )
 
+    # The stall notice fires *without* cancelling: a backend that is merely
+    # slow (a user app's own long-running endpoint) stays in flight, while a
+    # genuinely wedged one still gets enrolled for probing at the 30s mark.
+    stall_notice = _schedule_stall_notice(envelope_writer, agent_id, stall_notice_seconds)
+    # What ends the request is the client giving up, not a clock: race the
+    # backend against the disconnect so an abandoned request releases its
+    # pooled connection (and, for a remote agent, the SSH channel and relay
+    # thread behind it) as soon as nobody is waiting for it.
+    backend_task = asyncio.create_task(
+        http_client.request(method=request.method, url=url, headers=headers, content=body)
+    )
+    disconnect_task = asyncio.create_task(_wait_for_client_disconnect(request))
     try:
-        backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
+        done, _pending = await asyncio.wait({backend_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED)
+        # A backend that finished at all is in ``done``, even if it lost the
+        # race by a hair: ``asyncio.wait`` partitions on ``done()`` right before
+        # returning and nothing runs between that and here, so it reports every
+        # task that finished before its waiter resumed. Missing from ``done``
+        # therefore means still in flight, and its outcome below is the only
+        # one there is to read.
+        if backend_task not in done:
+            # Finishing is not the same as reporting a disconnect: if reading
+            # the ASGI channel raised instead, that must propagate rather than
+            # abandon a request whose client is in fact still waiting.
+            disconnect_task.result()
+            # Nothing reads this response -- the socket is already closed -- so
+            # it exists only to end the ASGI exchange. No envelope either: a
+            # client that gave up is evidence about the client, not the backend.
+            logger.debug("Client disconnected before the backend for {} answered at {}", agent_id, backend_url)
+            return Response(status_code=499, content="Client disconnected")
+        backend_response = backend_task.result()
     except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
         # System interface may not yet be listening, or it may have closed the
         # connection before sending headers (typical during startup). Surface
@@ -507,16 +634,24 @@ async def _forward_workspace_http(
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException as e:
-        # A wedged-but-listening backend produces a TimeoutException rather
-        # than ConnectError. Surface this as CONNECT_ERROR so a consumer still
-        # treats the agent as failing, matching the behaviour for a backend
-        # that returns a 504. Logged at warning while the connect failure above
-        # is not: a workspace still starting refuses the connection or closes
-        # it, so one that accepted it and then stayed silent is a different
-        # condition.
+        # Either the dial timed out, or the backstop expired on a backend that
+        # never answered at all. Both are genuine failures (the stall notice
+        # already covers merely-slow), so surface CONNECT_ERROR.
+        # Logged at warning while the connect failure above is not: a workspace
+        # still starting refuses the connection or closes it, so one that
+        # accepted it and then stayed silent is a different condition.
         logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
+    finally:
+        stall_notice.cancel()
+        # Cancelling the loser is what actually releases the backend
+        # connection; a no-op on a task that already finished. Both are
+        # cancelled here rather than after the race because ``asyncio.wait``,
+        # unlike ``gather``, leaves them running if this handler is itself
+        # cancelled (server shutdown).
+        backend_task.cancel()
+        disconnect_task.cancel()
 
     if not 200 <= backend_response.status_code < 300:
         # Any non-2xx response is surfaced as a single ``ERROR_RESPONSE`` signal
@@ -677,6 +812,7 @@ async def _handle_workspace_forward_http(
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
     use_http2: bool,
+    stall_notice_seconds: float,
 ) -> Response:
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
         return _handle_subdomain_auth_bridge(request, host_info, auth_store, use_http2)
@@ -761,6 +897,7 @@ async def _handle_workspace_forward_http(
         http_client=active_client,
         agent_id=agent_id,
         envelope_writer=envelope_writer,
+        stall_notice_seconds=stall_notice_seconds,
     )
 
 
@@ -1100,7 +1237,7 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     on_listening: Callable[[], None] | None,
 ) -> AsyncGenerator[None, None]:
-    inner_app.state.http_client = httpx.AsyncClient(follow_redirects=False, timeout=_PROXY_TIMEOUT_SECONDS)
+    inner_app.state.http_client = httpx.AsyncClient(follow_redirects=False, timeout=_PROXY_TIMEOUT)
     # Per-tunnel httpx clients are cached here so they outlive a single request
     # and their connection pools are reused. Lifespan teardown aclose's them
     # all; without this every request to a remote agent would leak a fresh
@@ -1141,6 +1278,7 @@ def create_forward_app(
     use_http2: bool = False,
     browser_bridge_token: str | None = None,
     embedder_origins: tuple[EmbedderOrigin, ...] = (),
+    stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
 ) -> FastAPI:
     """Create the FastAPI app for ``mngr forward``.
 
@@ -1151,6 +1289,13 @@ def create_forward_app(
     bound on the host's loopback at the registered port. Pass ``True`` only
     for setups that intentionally run agents directly on the host (the
     legacy ``LaunchMode.DEV`` flow).
+
+    ``stall_notice_seconds`` is how long a backend may go without answering a
+    buffered request before an advisory ``STALLED`` envelope is emitted (the
+    SSE path arms no such timer -- it still fails outright at its own read
+    budget). It never abandons the request: what ends one is its client
+    disconnecting, behind which ``_PROXY_BACKSTOP_TIMEOUT_SECONDS`` bounds only
+    how long the backend may stay silent, not the request as a whole.
 
     ``use_http2`` reflects whether the server terminates TLS (and negotiates
     HTTP/2); when set, the client-facing URLs this app constructs use
@@ -1199,6 +1344,7 @@ def create_forward_app(
             allow_host_loopback=allow_host_loopback,
             envelope_writer=envelope_writer,
             use_http2=use_http2,
+            stall_notice_seconds=stall_notice_seconds,
         )
         # The proxy owns embedding policy for every workspace origin: APPEND a
         # frame-ancestors CSP header (never modify what the service sent --

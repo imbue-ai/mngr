@@ -95,14 +95,16 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # 3: server.py has always been asyncio (the proxy is an async ASGI app), and
+    # 4: server.py has always been asyncio (the proxy is an async ASGI app), and
     # cli.py now does `asyncio.run(hypercorn.asyncio.serve(...))` to run that app
     # in-process -- the necessary replacement for uvicorn's sync `.run()` (which
     # itself ran an asyncio loop). Hypercorn exposes no non-asyncio serve path
     # for an in-process app object. cli_test.py exercises the serve loop's TLS
     # teardown behavior (bounded SSL shutdown + exception handler), which can
-    # only be tested from inside an asyncio loop.
-    rc.check_asyncio_import(_DIR, snapshot(3))
+    # only be tested from inside an asyncio loop. server_test.py is the fourth,
+    # for the same reason: the stall notice is an event-loop timer, so its stub
+    # backend must yield to the loop to let the timer run at all.
+    rc.check_asyncio_import(_DIR, snapshot(4))
 
 
 def test_prevent_pandas_import() -> None:
@@ -138,7 +140,14 @@ def test_prevent_async_await() -> None:
     # inherently async (FastAPI WS handler): racing the two relay legs with
     # asyncio.wait and explicitly closing the client leg when the backend
     # dies, so a send-quiet client cannot be left half-open forever.
-    rc.check_async_await(_DIR, snapshot(51))
+    # 60: the stall notice and the client-disconnect race. server.py waits on
+    # the ASGI receive channel and races it against the backend request, and
+    # server_test.py drives that path through the raw ASGI interface
+    # (TestClient only delivers a disconnect after the response is complete,
+    # which is the ordering under test) with a stub backend awaiting a sleep --
+    # a blocking sleep would hold the event loop and stop both the timer and
+    # the disconnect from ever being observed.
+    rc.check_async_await(_DIR, snapshot(60))
 
 
 # --- Hardcoded paths ---
