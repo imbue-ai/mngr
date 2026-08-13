@@ -482,8 +482,10 @@ class _KanpanState(MutableModel):
     animation_alarm: Any = None
     # All commands (builtins merged with user config), keyed by trigger key
     commands: dict[str, KanpanCommand] = {}
-    # Monotonic timestamp of the last completed refresh (for cooldown logic)
-    last_refresh_time: float = 0.0
+    # Monotonic timestamp of the refresh the stamp reports the age of. 0.0 until one lands.
+    last_successful_refresh_time: float = 0.0
+    # Monotonic timestamp of the last full refresh attempt, succeeded or not (for cooldown logic).
+    last_refresh_attempt_time: float = 0.0
     # Fetch duration of the last full refresh, shown briefly in the stamp.
     last_fetch_seconds: float | None = None
     # Whether the current in-flight refresh is local-only (no GitHub API)
@@ -491,6 +493,9 @@ class _KanpanState(MutableModel):
     # Whether a local refresh was asked for while one was already in flight, and so runs
     # once that one finishes. Only one is held: the board has a single state to catch up to.
     is_local_refresh_pending: bool = False
+    # Whether a periodic full refresh came due while a local-only one held the slot, and so
+    # runs once that one finishes.
+    is_full_refresh_pending: bool = False
     # Handle for the pending deferred refresh alarm (None if no alarm is pending)
     deferred_refresh_alarm: Any = None
     # Monotonic time the deferred refresh is scheduled to fire
@@ -1255,6 +1260,9 @@ def _attach_to_focused_agent(state: _KanpanState) -> None:  # pragma: no cover
         # The attached session sets its own terminal title; take it back.
         _write_terminal_title(loop.screen, TERMINAL_TITLE)
         loop.start()
+        # A terminal resized while the loop was stopped reached no handler, so urwid's cached
+        # size predates the attach. Clearing it makes the repaint below measure again.
+        loop.screen_size = None
         loop.screen.clear()
         # Force an immediate repaint so the board returns at once instead of waiting for
         # the next refresh, which would leave the detach output on screen.
@@ -2410,10 +2418,13 @@ def _refresh_stamp(seconds_ago: float, fetch_seconds: float | None) -> str:
 
 
 def _update_refresh_stamp(state: _KanpanState) -> None:
-    """Recompute the steady footer text from the time of the last full refresh."""
-    if not state.last_refresh_time:
+    """Recompute the steady footer text from the time of the last full refresh that landed.
+
+    Before any has, there is no age to report and the footer keeps whatever it is showing.
+    """
+    if not state.last_successful_refresh_time:
         return
-    seconds_ago = time.monotonic() - state.last_refresh_time
+    seconds_ago = time.monotonic() - state.last_successful_refresh_time
     state.steady_footer_text = _refresh_stamp(seconds_ago, state.last_fetch_seconds)
 
 
@@ -2531,20 +2542,43 @@ def _report_after_refresh(state: _KanpanState, message: str, loop: MainLoop) -> 
     _request_local_refresh(loop, state)
 
 
+def _is_repaint_outstanding(state: _KanpanState) -> bool:
+    """Whether a refresh that can show the board's latest change has yet to land.
+
+    A refresh in flight alongside a held request was started before that request, and so
+    before the change it was made for.
+    """
+    return state.refresh_future is not None or state.is_local_refresh_pending
+
+
 def _flush_pending_completion(state: _KanpanState) -> None:
-    """Show the outcome a command left waiting for its repaint, if there is one."""
+    """Show the outcome a command left waiting for its repaint, if there is one.
+
+    A notification already on the footer is left to finish: that slot answers whatever the user
+    did most recently, so an outcome from before it waits for the slot rather than taking it.
+    The command is over either way, so its in-progress label goes now.
+    """
     message = state.pending_completion_message
     if message is None:
         return
-    state.pending_completion_message = None
     state.action_label = None
+    if state.transient_message is not None:
+        _render_footer(state)
+        return
+    state.pending_completion_message = None
     _show_transient_message(state, message)
 
 
 def _on_transient_expire(loop: MainLoop, state: _KanpanState) -> None:
-    """Alarm callback: clear the transient notification and re-render."""
+    """Alarm callback: clear the transient notification and re-render.
+
+    Freeing the slot releases an outcome whose repaint has landed. One still waiting for its
+    repaint keeps waiting, and `_finish_refresh` releases it into the slot this frees.
+    """
     state.transient_alarm = None
     state.transient_message = None
+    if not _is_repaint_outstanding(state):
+        _flush_pending_completion(state)
     _render_footer(state)
 
 
@@ -2552,10 +2586,9 @@ def _request_refresh(loop: MainLoop, state: _KanpanState, cooldown_seconds: floa
     """Request a refresh, subject to a cooldown period."""
     if state.refresh_future is not None:
         return
-    elapsed = time.monotonic() - state.last_refresh_time
+    elapsed = time.monotonic() - state.last_refresh_attempt_time
     remaining = cooldown_seconds - elapsed
     if remaining <= 0:
-        _cancel_deferred_refresh(loop, state)
         _start_refresh(loop, state)
         return
     fire_at = time.monotonic() + remaining
@@ -2691,6 +2724,7 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Start a local-only background refresh (no GitHub API calls)."""
     if state.refresh_future is not None:
         return
+    state.is_local_refresh_pending = False
     _abandon_periodic_local_refresh(state)
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
@@ -2709,7 +2743,16 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
 
 
 def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
-    """Start a full background refresh and begin the spinner animation."""
+    """Start a full background refresh and begin the spinner animation.
+
+    A full refresh fetches everything a local one would and starts after every request
+    outstanding when it does, so starting one settles them all.
+    """
+    if state.refresh_future is not None:
+        return
+    state.is_full_refresh_pending = False
+    state.is_local_refresh_pending = False
+    _cancel_deferred_refresh(loop, state)
     _abandon_periodic_local_refresh(state)
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
@@ -2780,20 +2823,29 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
                     (*state.snapshot.errors, f"Refresh failed: {e}"),
                 ),
             )
+        else:
+            # No board yet to carry an error row and no stamp to age, so the footer is the
+            # only place left to say the first fetch never landed.
+            state.steady_footer_text = f"  Refresh failed: {e}"
     finally:
         state.refresh_future = None
         state.refresh_is_local_only = False
         if not was_local_only:
-            state.last_refresh_time = time.monotonic()
+            now = time.monotonic()
+            state.last_refresh_attempt_time = now
+            # Only a refresh that landed renews the stamp, so a board whose fetches are
+            # failing reports the age of what it is actually showing.
+            if not failed:
+                state.last_successful_refresh_time = now
 
     _refresh_display(state)
     _prune_orphaned_marks(state)
     # A held message waits for the repaint that shows what it is describing. This refresh
     # predates the change when another is pending, so the message rides that one instead.
-    if not state.is_local_refresh_pending:
+    if not _is_repaint_outstanding(state):
         _flush_pending_completion(state)
 
-    if state.snapshot is not None and not was_local_only:
+    if state.snapshot is not None and not was_local_only and not failed:
         state.last_fetch_seconds = state.snapshot.fetch_time_seconds
     _update_refresh_stamp(state)
     _render_footer(state)
@@ -2801,10 +2853,13 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
     if failed:
         _request_refresh(loop, state, state.retry_cooldown_seconds)
 
+    if state.is_full_refresh_pending and not failed:
+        # An owed tick fetches everything a held local request would, so it stands in for it.
+        # After a failure the retry sets the pace instead, and the debt rides until it starts.
+        _start_refresh(loop, state)
+        return
+
     if state.is_local_refresh_pending:
-        # A full refresh started by the failure retry above fetches everything a local one
-        # would, so it satisfies the held request and this call stands down for it.
-        state.is_local_refresh_pending = False
         _start_local_refresh(loop, state)
 
 
@@ -3482,13 +3537,21 @@ def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
 def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
     """Alarm callback for the periodic full refresh.
 
-    A firing that lands while a refresh is already running is skipped: the interval says
-    how often to start one, not how many to have going. Re-arming here rather than on
-    completion is what makes the interval a period and keeps the chain alive down every
-    path a refresh can take, including the ones that never reach completion.
+    A firing that lands while a full refresh is already running is skipped: the interval says
+    how often to start one, not how many to have going. A local-only refresh in the slot is
+    the weaker read -- it renews neither the remote columns nor the stamp -- so the tick it
+    displaces is owed rather than dropped, and runs as soon as that read finishes.
+
+    Re-arming here rather than on completion is what makes the interval a period and keeps
+    the chain alive down every path a refresh can take, including the ones that never reach
+    completion.
     """
     if state.refresh_future is None:
         _start_refresh(loop, state)
+    else:
+        # The tick is owed exactly when the slot holds the weaker read: a full refresh
+        # already covers it, a local-only one cannot.
+        state.is_full_refresh_pending = state.refresh_is_local_only
     _schedule_next_refresh(loop, state)
 
 

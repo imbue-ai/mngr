@@ -156,6 +156,7 @@ from imbue.mngr_kanpan.tui import _mute_focused_agent
 from imbue.mngr_kanpan.tui import _nearest_surviving_name
 from imbue.mngr_kanpan.tui import _on_auto_refresh_alarm
 from imbue.mngr_kanpan.tui import _on_batch_poll
+from imbue.mngr_kanpan.tui import _on_deferred_refresh
 from imbue.mngr_kanpan.tui import _on_local_refresh_alarm
 from imbue.mngr_kanpan.tui import _on_peek_capture_poll
 from imbue.mngr_kanpan.tui import _on_peek_reply_poll
@@ -277,7 +278,7 @@ def _make_state(
         list_walker=None,
         focused_agent_name=None,
         steady_footer_text="  Loading...",
-        last_refresh_time=0.0,
+        last_successful_refresh_time=0.0,
         refresh_is_local_only=False,
         deferred_refresh_alarm=None,
         deferred_refresh_fire_at=0.0,
@@ -2256,7 +2257,7 @@ def test_update_refresh_stamp_noop_before_first_refresh() -> None:
 
 def test_stamp_tick_updates_footer_and_reschedules() -> None:
     state = _make_state()
-    state.last_refresh_time = 1.0
+    state.last_successful_refresh_time = 1.0
     scheduled: list[float] = []
     loop = SimpleNamespace(set_alarm_in=lambda delay, cb, data: scheduled.append(delay), screen=_MockScreen())
     _on_stamp_tick(cast(Any, loop), state)
@@ -4395,6 +4396,20 @@ def _tall_board_state(count: int = 40) -> _KanpanState:
     return state
 
 
+def _landed_refresh() -> Future[FetchResult]:
+    """A refresh that has already come back, with an empty board."""
+    future: Future[FetchResult] = Future()
+    future.set_result(FetchResult(snapshot=make_board_snapshot(entries=()), cached_fields={}))
+    return future
+
+
+def _failed_refresh() -> Future[FetchResult]:
+    """A refresh that has already come back raising."""
+    future: Future[FetchResult] = Future()
+    future.set_exception(RuntimeError("discovery is down"))
+    return future
+
+
 def test_refresh_keeps_the_focused_row_at_the_same_height() -> None:
     # A fresh ListBox starts scrolled to the top and moving the walker's focus does not
     # tell it where to draw, so without the offset restore the view jumps on every
@@ -4452,13 +4467,49 @@ def test_a_held_outcome_waits_rather_than_reporting_twice_when_a_refresh_is_runn
     assert state.is_local_refresh_pending is True
 
 
+def test_an_outcome_waits_for_a_notification_already_on_the_footer() -> None:
+    # Releasing it over that notification answers a keypress the user just made with the result
+    # of an earlier command, naming an agent they did not touch.
+    state = _tall_board_state()
+    state.refresh_future = cast(Any, object())
+    _report_after_refresh(state, "  tag completed for agent-01", state.loop)
+    _show_transient_message(state, "  Muted agent-00")
+    _flush_pending_completion(state)
+    assert state.transient_message == "  Muted agent-00"
+    assert state.pending_completion_message == "  tag completed for agent-01"
+    # The command is over whether or not its outcome is on screen yet, so the in-progress label
+    # goes now rather than spinning behind the notification.
+    assert state.action_label is None
+
+
+def test_an_outcome_held_behind_a_notification_reports_once_that_notification_clears() -> None:
+    # Waiting must not become losing: a failed command's stderr reaches the user nowhere else.
+    state = _tall_board_state()
+    state.pending_completion_message = "  tag failed for agent-01: boom"
+    _show_transient_message(state, "  Muted agent-00")
+    _flush_pending_completion(state)
+    _on_transient_expire(state.loop, state)
+    assert state.transient_message == "  tag failed for agent-01: boom"
+    assert state.pending_completion_message is None
+
+
+def test_an_outcome_whose_repaint_is_still_outstanding_stays_held_when_the_footer_frees() -> None:
+    # Reporting it here answers the keypress before the rows it describes arrive, which is the
+    # two-beat ordering holding the outcome exists to avoid.
+    state = _tall_board_state()
+    state.refresh_future = cast(Any, object())
+    _report_after_refresh(state, "  tag completed for agent-01", state.loop)
+    _show_transient_message(state, "  Muted agent-00")
+    _on_transient_expire(state.loop, state)
+    assert state.transient_message is None
+    assert state.pending_completion_message == "  tag completed for agent-01"
+
+
 def test_an_in_flight_refresh_that_predates_the_change_does_not_release_the_outcome() -> None:
     # That fetch was started before the command ran, so its repaint cannot show what the
     # message describes. The held message waits for the refresh queued behind it.
     state = _tall_board_state()
-    done: Future[Any] = Future()
-    done.set_exception(RuntimeError("discovery is down"))
-    state.refresh_future = done
+    state.refresh_future = _failed_refresh()
     state.refresh_is_local_only = True
     state.pending_completion_message = "  note completed for agent-00"
     state.is_local_refresh_pending = True
@@ -4474,9 +4525,7 @@ def test_a_deferred_local_refresh_runs_once_the_in_flight_one_finishes() -> None
     # Without the drain the request is lost outright and the board keeps showing state
     # from before the change until the next manual `r` or the periodic timer.
     state = _tall_board_state()
-    done: Future[FetchResult] = Future()
-    done.set_result(FetchResult(snapshot=make_board_snapshot(entries=()), cached_fields={}))
-    state.refresh_future = done
+    state.refresh_future = _landed_refresh()
     state.refresh_is_local_only = True
     state.is_local_refresh_pending = True
     _finish_refresh(state.loop, state)
@@ -4491,9 +4540,7 @@ def test_a_failed_refresh_lets_its_full_retry_stand_in_for_the_deferred_local_on
     # The retry fetches everything a local refresh would, so the held request is satisfied
     # by it rather than queued behind it as a second fetch.
     state = _tall_board_state()
-    failed: Future[Any] = Future()
-    failed.set_exception(RuntimeError("discovery is down"))
-    state.refresh_future = failed
+    state.refresh_future = _failed_refresh()
     state.refresh_is_local_only = True
     state.is_local_refresh_pending = True
     _finish_refresh(state.loop, state)
@@ -4526,6 +4573,89 @@ def test_the_periodic_refresh_alarm_rearms_itself_when_it_starts_a_refresh() -> 
     assert any(call[1] is _on_auto_refresh_alarm for call in state.loop.set_alarm_in.calls)
     assert state.executor is not None
     state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_full_refresh_displaced_by_a_local_read_runs_once_that_read_finishes() -> None:
+    # Returning from an attach asks for a local read, and the periodic full refresh comes due
+    # against it. Dropping that tick leaves the remote columns and the stamp on the last full
+    # refresh for another whole interval, however long the board was away.
+    state = _tall_board_state()
+    state.refresh_future = cast(Any, object())
+    state.refresh_is_local_only = True
+    _on_auto_refresh_alarm(state.loop, state)
+    assert state.is_full_refresh_pending is True
+
+    state.refresh_future = _landed_refresh()
+    state.refresh_is_local_only = True
+    _finish_refresh(state.loop, state)
+    assert state.is_full_refresh_pending is False
+    assert state.refresh_future is not None
+    assert state.refresh_is_local_only is False
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_full_refresh_already_running_leaves_no_tick_owed() -> None:
+    # The interval says how often to start a full refresh, not how many to have going, so a
+    # firing against one already in flight is covered by it rather than owed after it.
+    state = _tall_board_state()
+    state.refresh_future = cast(Any, object())
+    state.refresh_is_local_only = False
+    _on_auto_refresh_alarm(state.loop, state)
+    assert state.is_full_refresh_pending is False
+
+
+def test_an_owed_full_refresh_stands_in_for_a_held_local_one() -> None:
+    # The full refresh fetches everything the held local request would, so running both would
+    # sweep the agent list twice for one answer.
+    state = _tall_board_state()
+    state.is_full_refresh_pending = True
+    state.is_local_refresh_pending = True
+    state.refresh_future = _landed_refresh()
+    state.refresh_is_local_only = True
+    _finish_refresh(state.loop, state)
+    assert state.is_local_refresh_pending is False
+    assert state.refresh_is_local_only is False
+    assert state.executor is not None
+    state.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_a_refresh_that_failed_leaves_the_stamp_reporting_the_age_of_what_is_shown() -> None:
+    # The board still shows the last fetch that landed, so moving the stamp on a failure has
+    # it claim a freshness the rows do not have.
+    state = _tall_board_state()
+    state.last_successful_refresh_time = 1.0
+    state.refresh_future = _failed_refresh()
+    state.refresh_is_local_only = False
+    _finish_refresh(state.loop, state)
+    assert state.last_successful_refresh_time == 1.0
+    assert state.last_refresh_attempt_time > 1.0
+
+
+def test_a_first_fetch_that_never_landed_says_so_in_the_footer() -> None:
+    # There is no board to carry an error row and no stamp to age, and the stamp is what used
+    # to take the footer off `Loading...`, so without this the failure shows up nowhere at all.
+    state = _tall_board_state()
+    state.snapshot = None
+    state.refresh_future = _failed_refresh()
+    state.refresh_is_local_only = False
+    _finish_refresh(state.loop, state)
+    assert state.steady_footer_text == "  Refresh failed: discovery is down"
+    # The retry waits out its cooldown, so nothing was started that this test has to close.
+    assert state.executor is None
+
+
+def test_a_failed_refresh_holds_its_retry_for_the_cooldown() -> None:
+    # The retry cadence comes from when the attempt was made rather than from the stamp, which
+    # a failure no longer moves -- reading the stamp instead would refetch on every completion.
+    state = _tall_board_state()
+    state.last_successful_refresh_time = 1.0
+    state.refresh_future = _failed_refresh()
+    state.refresh_is_local_only = False
+    _finish_refresh(state.loop, state)
+    assert state.refresh_future is None
+    deferred = [call for call in state.loop.set_alarm_in.calls if call[1] is _on_deferred_refresh]
+    assert deferred[-1][0] == pytest.approx(state.retry_cooldown_seconds, abs=1.0)
 
 
 def test_a_periodic_local_refresh_stands_down_for_a_full_refresh_in_flight() -> None:
@@ -4817,9 +4947,7 @@ def test_a_failed_refresh_still_releases_the_outcome_it_was_carrying() -> None:
     # The flush sits past `_finish_refresh`'s try/finally, so a refresh that raised does
     # not strand the message behind it.
     state = _tall_board_state()
-    failed: Future[Any] = Future()
-    failed.set_exception(RuntimeError("discovery is down"))
-    state.refresh_future = failed
+    state.refresh_future = _failed_refresh()
     state.refresh_is_local_only = True
     state.pending_completion_message = "  note completed for agent-00"
     _finish_refresh(state.loop, state)
