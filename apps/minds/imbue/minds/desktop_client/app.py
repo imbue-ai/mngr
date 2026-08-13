@@ -89,6 +89,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
+from imbue.minds.desktop_client.ssh_key_migration import SshKeyMigrationScheduler
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -2050,6 +2051,7 @@ def create_desktop_client(
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
     mngr_caller: MngrCaller | None = None,
     sync_scheduler: WorkspaceSyncScheduler | None = None,
+    ssh_key_migration_scheduler: SshKeyMigrationScheduler | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2154,6 +2156,7 @@ def create_desktop_client(
         discovery_health_watchdog=discovery_health_watchdog,
         mngr_caller=mngr_caller,
         sync_scheduler=sync_scheduler,
+        ssh_key_migration_scheduler=ssh_key_migration_scheduler,
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
     )

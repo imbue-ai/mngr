@@ -10,14 +10,14 @@ rationale.
 import os
 from typing import Final
 
+from imbue.minds.build_info import FALLBACK_BRANCH
+
 # Public alias: the default-workspace-template repo URL. The pre-baked Lima
 # image gate (lima_image_prefetch) keys on this to recognize the default workspace.
 DEFAULT_WORKSPACE_TEMPLATE_GIT_URL: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
 _FALLBACK_GIT_URL: Final[str] = DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
-# Pin to an annotated DEFAULT_WORKSPACE_TEMPLATE tag so a shipped binary clones the exact DEFAULT_WORKSPACE_TEMPLATE
-# snapshot it was verified against. Bump to a newer tag only after
-# re-verifying launch-to-msg CI against (this binary, the new tag).
-FALLBACK_BRANCH: Final[str] = "minds-v0.3.11"
+# The pinned DEFAULT_WORKSPACE_TEMPLATE release tag is defined in build_info
+# (imported above) so deploy-time code shares the same pin.
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an

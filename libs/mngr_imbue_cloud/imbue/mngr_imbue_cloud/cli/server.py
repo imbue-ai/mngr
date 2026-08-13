@@ -83,6 +83,9 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
+from imbue.mngr_imbue_cloud.slices.autostart_backfill import SliceAutostartBackfillOutcome
+from imbue.mngr_imbue_cloud.slices.autostart_backfill import backfill_box_autostart
+from imbue.mngr_imbue_cloud.slices.autostart_backfill import build_autostart_backfill_report
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
@@ -476,6 +479,72 @@ def list_servers(database_url: str | None, is_occupancy_verified: bool, env_name
             "{} box(es) could not be read, so their occupancy and tier state are UNKNOWN (not clean). "
             "See unaudited_boxes in the JSON above.",
             report.unaudited,
+        )
+
+
+@server.command(name="backfill-autostart")
+@click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
+@click.option(
+    "--server-id",
+    "server_ids",
+    multiple=True,
+    help="Restrict the sweep to these bare_metal_servers row ids (repeatable; default: every box).",
+)
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help="List the slice VMs that would be backfilled (with the per-VM start-script path) without applying.",
+)
+def backfill_autostart(database_url: str | None, server_ids: tuple[str, ...], is_dry_run: bool) -> None:
+    """Backfill the volume-gated minds-autostart units onto existing slice VMs.
+
+    The fleet half of the reboot-resilience rollout (minds
+    docs/reboot-resilience-rollout.md Step 2): slices baked before the merged
+    installer keep the old racy oneshot until this sweep re-applies it. The
+    installer is idempotent and safe on running workspaces; a VM whose data
+    volume is not mounted is refused by the installer itself and reported as a
+    per-VM failure to investigate. Needs POOL_SSH_PRIVATE_KEY (injected by
+    `minds server backfill-autostart`).
+    """
+    conn = psycopg2.connect(resolve_pool_database_url(database_url))
+    try:
+        capacities = fetch_server_capacities(conn)
+    finally:
+        conn.close()
+    selected = [c.server for c in capacities if not server_ids or str(c.server.id) in set(server_ids)]
+    if server_ids:
+        unknown_ids = set(server_ids) - {str(s.id) for s in selected}
+        if unknown_ids:
+            raise click.ClickException(f"Unknown --server-id value(s): {sorted(unknown_ids)}")
+    outcomes: list[SliceAutostartBackfillOutcome] = []
+    unreadable_boxes: list[str] = []
+    with _pool_private_key_path() as private_key_path:
+        for box_server in selected:
+            if not box_server.public_address:
+                logger.warning("Box {} has no public_address; skipping (state unknown)", box_server.id)
+                unreadable_boxes.append(str(box_server.id))
+                continue
+            client = LimaSliceVpsClient(
+                box_address=str(box_server.public_address),
+                box_ssh_user=box_server.lima_service_user or "limahost",
+                private_key_path=str(private_key_path),
+                box_host_public_key=box_server.box_host_public_key,
+            )
+            # One unreachable box must not cost the rest of the fleet its
+            # sweep (the same resilience rule as the occupancy audit).
+            try:
+                outcomes.extend(backfill_box_autostart(client, str(box_server.id), is_dry_run=is_dry_run))
+            except (LimaCommandError, BareMetalProvisioningError, OSError) as exc:
+                logger.warning("Could not sweep box {} ({}): {}", box_server.id, box_server.public_address, exc)
+                unreadable_boxes.append(str(box_server.id))
+    report = build_autostart_backfill_report(outcomes, unreadable_boxes)
+    emit_json(report.model_dump(mode="json"))
+    if report.failed or report.unreadable_boxes:
+        raise click.ClickException(
+            f"{report.failed} VM(s) failed to backfill and {len(report.unreadable_boxes)} box(es) were "
+            "unreachable; see the JSON above and re-run against them once fixed."
         )
 
 

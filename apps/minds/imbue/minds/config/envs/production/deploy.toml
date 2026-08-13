@@ -66,3 +66,13 @@ max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
+
+# Enable web workspace creation (the hosted chrome's POST /hosts/claim).
+# Deliberately unadvertised for now: only people who know the /web URL use it.
+# No explicit pins: the template repo/ref default to the canonical
+# default-workspace-template repo and the app's pinned release tag
+# (FALLBACK_BRANCH in imbue/minds/build_info.py), so the web pin advances with
+# each release automatically -- the same tag the pool is re-baked from.
+# Deploy-time env vars MINDS_WEB_TEMPLATE_REPO / MINDS_WEB_TEMPLATE_REF
+# override for one-off deploys.
+[web_workspaces]

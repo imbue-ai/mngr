@@ -1144,6 +1144,23 @@ mngr imbue_cloud admin server list [OPTIONS]
 | `--verify-occupancy` | boolean | SSH each box and report its REAL occupancy plus any cross-tier contamination (foreign-tier slices, extra authorized SSH keys). The plain table counts only this env's own DB rows, so it undercounts a shared box. Needs POOL_SSH_PRIVATE_KEY. | `False` |
 | `--env-name` | text | [--verify-occupancy] Activated env name, used to decide which slices are foreign-tier. Without it there is no tier to compare against, so only the authorized-key half of the audit runs (`minds server list --verify-occupancy` always passes it). | None |
 
+## mngr imbue_cloud admin server backfill-autostart
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server backfill-autostart [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
+| `--server-id` | text | Restrict the sweep to these bare_metal_servers row ids (repeatable; default: every box). | None |
+| `--dry-run` | boolean | List the slice VMs that would be backfilled (with the per-VM start-script path) without applying. | `False` |
+
 ## mngr imbue_cloud admin server register
 
 **Usage:**

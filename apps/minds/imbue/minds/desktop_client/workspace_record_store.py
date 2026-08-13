@@ -193,7 +193,7 @@ def read_device_label() -> str:
     return socket.gethostname()
 
 
-def _resolve_mngr_profile_dir(mngr_host_dir: Path) -> Path | None:
+def resolve_mngr_profile_dir(mngr_host_dir: Path) -> Path | None:
     """Resolve ``<host_dir>/profiles/<active-profile>``, or None when mngr is uninitialized.
 
     Mirrors the plugin's ``get_active_profile_dir`` without importing the
@@ -232,7 +232,7 @@ def collect_ssh_key_material(mngr_host_dir: Path, provider_kind: str, host_id: s
     without a recognizable key layout sync without SSH material -- the record
     still carries the backup env, which is the DR-critical part.
     """
-    profile_dir = _resolve_mngr_profile_dir(mngr_host_dir)
+    profile_dir = resolve_mngr_profile_dir(mngr_host_dir)
     if profile_dir is None:
         return None, None
     providers_dir = profile_dir / "providers"
@@ -812,7 +812,7 @@ class WorkspaceRecordStore(MutableModel):
         trusted from the wire), so materialized files always land where this
         install's provider will look.
         """
-        profile_dir = _resolve_mngr_profile_dir(self._effective_mngr_host_dir())
+        profile_dir = resolve_mngr_profile_dir(self._effective_mngr_host_dir())
         if profile_dir is None:
             return None
         instance_name = imbue_cloud_provider_name_for_account(account_email)

@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
+from imbue.minds.desktop_client.share_materials_injection import has_share_gateway_in_agent
 from imbue.minds.desktop_client.share_materials_injection import has_share_materials_in_agent
 from imbue.minds.desktop_client.share_materials_injection import inject_share_grants_into_agent
 from imbue.minds.desktop_client.share_materials_injection import inject_share_materials_into_agent
@@ -230,6 +231,21 @@ def _enable_sharing_with_cli(
     entry_label: str | None = None,
 ) -> dict[str, Any]:
     grants_toml = render_grants_toml(workspace_grants, service_grants)
+
+    # Workspaces created from a pre-share-gateway template (minds-v0.3.11 and
+    # older) have no service watching share.env, so a share enabled for them
+    # would go active on the connector and never become reachable. Refuse up
+    # front with the fix: update the workspace (update-self), then re-share --
+    # which self-heals, since the gateway picks the materials up on its own.
+    # CLEANUP: drop this guard (and has_share_gateway_in_agent) once no
+    # supported workspaces predate the share gateway -- i.e. after the first
+    # post-v0.3.11 release is deployed and old workspaces have run update-self.
+    if not has_share_gateway_in_agent(agent_id, cli.mngr_caller):
+        raise SharingError(
+            "This machine's workspace template is too old to support sharing. "
+            'Ask the machine to update itself (send it "update yourself", which runs '
+            "the update-self skill), then enable sharing again."
+        )
 
     try:
         existing = cli.get_share_status(account=account_email, host_id=host_id)

@@ -53,10 +53,13 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
+from imbue.minds.build_info import DEFAULT_WEB_TEMPLATE_REPO_KEY
+from imbue.minds.build_info import FALLBACK_BRANCH
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import DeployLifecycleConfig
 from imbue.minds.config.data_types import ModalEnvStrategy
+from imbue.minds.config.data_types import WebWorkspacesConfig
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import repo_tier_client_config_path
@@ -102,6 +105,28 @@ from imbue.minds.envs.secret_lifecycle import gc_old_per_tier_secrets
 from imbue.minds.envs.secret_lifecycle import make_deploy_id
 from imbue.minds.envs.secret_lifecycle import timestamped_secret_name
 from imbue.minds.errors import MindError
+
+
+def resolve_web_template_pin(web_workspaces: WebWorkspacesConfig) -> tuple[str, str]:
+    """Resolve the (template_repo, template_ref) pin for a tier's web creates.
+
+    Precedence per value: the ``MINDS_WEB_TEMPLATE_REPO`` /
+    ``MINDS_WEB_TEMPLATE_REF`` env var (deploy-time override, for dev
+    iteration on a branch) > the explicit deploy.toml pin > the default (the
+    canonical default-workspace-template repo key, and the app's pinned
+    release tag ``FALLBACK_BRANCH`` -- so the web pin moves with the release
+    automatically, matching the tag the pool is re-baked from).
+    """
+    repo_override = os.environ.get("MINDS_WEB_TEMPLATE_REPO")
+    ref_override = os.environ.get("MINDS_WEB_TEMPLATE_REF")
+    template_repo = repo_override or (
+        str(web_workspaces.template_repo) if web_workspaces.template_repo else DEFAULT_WEB_TEMPLATE_REPO_KEY
+    )
+    template_ref = ref_override or (
+        str(web_workspaces.template_ref) if web_workspaces.template_ref else FALLBACK_BRANCH
+    )
+    return template_repo, template_ref
+
 
 # Env var the deployed connector reads at startup to identify which
 # minds env it belongs to. Pushed alongside ``MINDS_TIER_GENERATION_ID``
@@ -881,8 +906,9 @@ def _deploy_env_locked(
         # Both are scoped to tiers that opt into web workspace creation.
         if deploy_config.web_workspaces is not None:
             web_workspaces = deploy_config.web_workspaces
-            connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REPO", str(web_workspaces.template_repo))
-            connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REF", str(web_workspaces.template_ref))
+            web_template_repo, web_template_ref = resolve_web_template_pin(web_workspaces)
+            connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REPO", web_template_repo)
+            connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REF", web_template_ref)
             if web_workspaces.cpus is not None:
                 connector_secret_overrides.setdefault("MINDS_WEB_SHAPE_CPUS", str(int(web_workspaces.cpus)))
             if web_workspaces.memory_gb is not None:

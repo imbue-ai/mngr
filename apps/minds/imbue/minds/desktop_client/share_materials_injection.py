@@ -143,6 +143,31 @@ def inject_share_materials_into_agent(agent_id: AgentId, share_env_text: str, mn
     _write_file_via_exec(agent_id, _SHARE_ENV_FILE, share_env_text, mngr_caller)
 
 
+_SHARE_GATEWAY_SERVICE_DIR: Final[str] = "system/services/share_gateway"
+
+
+def has_share_gateway_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> bool:
+    """Whether the workspace's template ships the share-gateway service.
+
+    Workspaces created from a pre-share-gateway template (minds-v0.3.11 and
+    older) have nothing watching ``share.env``, so injecting share materials
+    into them can never bring a share up. Conservative on exec failure:
+    reported as absent, so the caller refuses with the actionable
+    update-your-workspace message rather than provisioning a share that cannot
+    work (a retry after the transient failure clears is cheap).
+
+    # CLEANUP: this probe (and its caller's guard) can be removed once no
+    # supported workspaces predate the share gateway -- i.e. after the first
+    # post-v0.3.11 release is deployed and the remaining old workspaces have
+    # been updated via update-self (they cannot share until they update).
+    """
+    result = mngr_caller.call(
+        ["exec", str(agent_id), f"test -d {_SHARE_GATEWAY_SERVICE_DIR}", "--no-start"],
+        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+    )
+    return result.returncode == 0
+
+
 def has_share_materials_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> bool:
     """Whether share.env is present inside the agent (the share stack's on-switch).
 

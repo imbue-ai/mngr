@@ -485,6 +485,11 @@ def archive_todos_completed_before(
 
 
 # === Example block 22 ===
+# CLEANUP: drop this fallback (and the legacy parser it calls) once every
+# production workspace has been migrated to the v2 manifest format.
+
+
+# === Example block 23 ===
 
 
 _DEFAULT_TODO_PAGE_SIZE: Final[int] = 50
@@ -503,7 +508,7 @@ class _TodoTitleNormalizer:
     ...
 
 
-# === Example block 23 ===
+# === Example block 24 ===
 class TodoFilter(FrozenModel):
     """Options for filtering a todo list query."""
 
@@ -512,7 +517,7 @@ class TodoFilter(FrozenModel):
     is_overdue_only: bool = Field(description="Only show overdue todos")
 
 
-# === Example block 24 ===
+# === Example block 25 ===
 class TodoListCollection(FrozenModel):
     """Manages multiple todo lists for a user."""
 
@@ -521,7 +526,7 @@ class TodoListCollection(FrozenModel):
     )
 
 
-# === Example block 25 ===
+# === Example block 26 ===
 class TodoListStatistics(FrozenModel):
     """Tracks statistics about todos in a list."""
 
@@ -534,7 +539,7 @@ def get_todo_at_display_idx(self, display_idx: int) -> TodoItem:
     ...
 
 
-# === Example block 26 ===
+# === Example block 27 ===
 
 
 MAX_TODOS_PER_LIST: Final[int] = 1000
@@ -549,7 +554,7 @@ def find_todos_matching_title_or_description(
     ...
 
 
-# === Example block 27 ===
+# === Example block 28 ===
 
 
 @pure
@@ -563,7 +568,7 @@ def find_todos_with_any_tag(
     )
 
 
-# === Example block 28 ===
+# === Example block 29 ===
 
 
 @pure
@@ -574,7 +579,7 @@ def add_tag_to_todo(todo_item: TodoItem, tag_to_add: Tag) -> TodoItem:
     )
 
 
-# === Example block 29 ===
+# === Example block 30 ===
 class ValidatedTodoInput(FrozenModel):
     """Validated user input for creating a todo. Validation happens in the type."""
 
@@ -600,7 +605,7 @@ def create_todo_from_validated_input(validated_input: ValidatedTodoInput) -> Tod
     )
 
 
-# === Example block 30 ===
+# === Example block 31 ===
 def main() -> None:
     configuration = load_todo_app_configuration()
     todo_repository = create_todo_repository(configuration.storage_settings)
@@ -618,7 +623,7 @@ def add_todo_to_list(todo_item: TodoItem, todo_list: TodoList) -> TodoList:
     return todo_list.with_added_todo(todo_item)
 
 
-# === Example block 31 ===
+# === Example block 32 ===
 class ReminderId(RandomId):
     """Unique identifier for a reminder."""
 
@@ -639,7 +644,7 @@ class TodoReminder(FrozenModel):
         )
 
 
-# === Example block 32 ===
+# === Example block 33 ===
 
 
 
@@ -655,7 +660,7 @@ class TodoBatch(FrozenModel):
         return sum(1 for t in self.todos if t.priority == TodoPriority.HIGH)
 
 
-# === Example block 33 ===
+# === Example block 34 ===
 
 
 
@@ -679,7 +684,7 @@ class TodoRepositoryInterface(MutableModel, ABC):
         """Remove a todo from storage. Raises TodoNotFoundError if not found."""
 
 
-# === Example block 34 ===
+# === Example block 35 ===
 
 
 class TodoChange(FrozenModel):
@@ -710,7 +715,7 @@ class TodoSyncServiceInterface(MutableModel, ABC):
         """Download pending changes from the remote server."""
 
 
-# === Example block 35 ===
+# === Example block 36 ===
 
 
 
@@ -734,7 +739,7 @@ class FileTodoRepository(TodoRepositoryInterface):
         self.is_initialized = False
 
 
-# === Example block 36 ===
+# === Example block 37 ===
 class InMemoryTodoRepository(TodoRepositoryInterface):
     """In-memory implementation of the todo repository for testing."""
 
@@ -752,7 +757,7 @@ class InMemoryTodoRepository(TodoRepositoryInterface):
         del self.todo_by_id[todo_id]
 
 
-# === Example block 37 ===
+# === Example block 38 ===
 class TodoSummaryReport(FrozenModel):
     """A summary report of todo list status."""
 
@@ -791,7 +796,7 @@ def generate_todo_summary_report(
     )
 
 
-# === Example block 38 ===
+# === Example block 39 ===
 
 
 PRIORITY_SORT_ORDER: Final[dict[TodoPriority, int]] = {
@@ -813,7 +818,7 @@ def sort_todos_by_priority_then_due_date(
     )
 
 
-# === Example block 39 ===
+# === Example block 40 ===
 
 
 DEFAULT_PAGE_SIZE: Final[int] = 25
@@ -835,7 +840,7 @@ def main() -> None:
 
 
 
-# === Example block 40 ===
+# === Example block 41 ===
 class TodoArchive(FrozenModel):
     """An archive of completed todos."""
 
@@ -853,7 +858,7 @@ class TodoArchive(FrozenModel):
         )
 
 
-# === Example block 41 ===
+# === Example block 42 ===
 class TodoDisplayInterface(ABC, MutableModel):
     """Interface for displaying todos."""
 
@@ -880,16 +885,16 @@ class TodoDisplayService(TodoDisplayInterface):
         print(formatted)
 
 
-# === Example block 42 ===
+# === Example block 43 ===
 
 MAX_TODO_TITLE_LENGTH: Final[int] = 200
 
 
-# === Example block 43 ===
+# === Example block 44 ===
 # Always use absolute imports, never relative
 
 
-# === Example block 44 ===
+# === Example block 45 ===
 
 
 
@@ -901,12 +906,12 @@ def save_todo_to_repository(
         todo_repository.save_todo(todo_item)
 
 
-# === Example block 45 ===
+# === Example block 46 ===
 with log_span("Creating agent work directory from source {}", source_path, host=host_name):
     work_dir = host.create_work_dir(source_path)
 
 
-# === Example block 46 ===
+# === Example block 47 ===
 
 
 # In CLI code - info is appropriate
@@ -922,7 +927,7 @@ def create_todo(title: str) -> TodoItem:
     return todo
 
 
-# === Example block 47 ===
+# === Example block 48 ===
 
 
 class TodoStorageError(TodoAppError):
@@ -942,7 +947,7 @@ class TodoNotificationService(MutableModel):
             raise
 
 
-# === Example block 48 ===
+# === Example block 49 ===
 
 
 def main() -> None:
@@ -951,7 +956,7 @@ def main() -> None:
 
 
 
-# === Example block 49 ===
+# === Example block 50 ===
 
 
 
@@ -1004,7 +1009,7 @@ def load_todo_app_configuration() -> TodoAppConfiguration:
     return TodoAppConfiguration.model_validate(raw_config)
 
 
-# === Example block 50 ===
+# === Example block 51 ===
 
 
 
@@ -1057,7 +1062,7 @@ def list_todos(
     run_list_todos(arguments)
 
 
-# === Example block 51 ===
+# === Example block 52 ===
 
 
 def test_format_todo_for_display_shows_checkbox_and_title() -> None:
@@ -1084,7 +1089,7 @@ def test_format_todo_for_display_shows_completed_marker_when_done() -> None:
     assert formatted_output == snapshot("[x] Send email")
 
 
-# === Example block 52 ===
+# === Example block 53 ===
 
 
 
@@ -1124,7 +1129,7 @@ def test_export_large_todo_dataset_to_json_produces_expected_output() -> None:
     )
 
 
-# === Example block 53 ===
+# === Example block 54 ===
 def test_add_todo_to_list_appends_todo_to_end_of_list() -> None:
     todo_list = TodoList(list_id=TodoListId.generate(), todos=())
     new_todo = create_test_todo(title="New task")
@@ -1135,7 +1140,7 @@ def test_add_todo_to_list_appends_todo_to_end_of_list() -> None:
     assert updated_list.todos[0] == new_todo
 
 
-# === Example block 54 ===
+# === Example block 55 ===
 
 
 
@@ -1178,7 +1183,7 @@ def test_sync_todo_list_to_remote_server_handles_response_correctly(
     assert sync_response.synced_count == snapshot(1)
 
 
-# === Example block 55 ===
+# === Example block 56 ===
 
 
 @pytest.mark.acceptance
@@ -1188,7 +1193,7 @@ def test_sync_todos_to_remote_server_succeeds_with_valid_credentials() -> None:
     ...
 
 
-# === Example block 56 ===
+# === Example block 57 ===
 
 
 @pytest.mark.release
@@ -1198,7 +1203,7 @@ def test_full_end_to_end_workflow_with_all_providers() -> None:
     ...
 
 
-# === Example block 57 ===
+# === Example block 58 ===
 
 
 class TodoSyncError(TodoAppError):

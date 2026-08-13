@@ -19,6 +19,7 @@ import json
 import os
 from functools import cache
 from pathlib import Path
+from typing import Final
 
 from loguru import logger
 
@@ -27,6 +28,20 @@ GIT_SHA_ENV_VAR = "MINDS_GIT_SHA"
 
 UNKNOWN_RELEASE_ID = "0.0.0+unknown"
 UNKNOWN_GIT_SHA = "unknown"
+
+# The default-workspace-template release this app build is pinned to: an
+# annotated DEFAULT_WORKSPACE_TEMPLATE tag, so a shipped binary clones the
+# exact template snapshot it was verified against. Bumped by the release
+# process (see docs/release.md); bump to a newer tag only after re-verifying
+# launch-to-msg CI against (this binary, the new tag). Lives here (not in the
+# desktop client) so deploy-time code (`minds env deploy`) can read it
+# without importing the whole desktop client.
+FALLBACK_BRANCH: Final[str] = "minds-v0.3.11"
+
+# The canonical repo key the pool bake stamps into row attributes for the
+# default workspace template (`host/org/repo`), the default the web-create
+# template pin resolves to when a tier's deploy.toml does not override it.
+DEFAULT_WEB_TEMPLATE_REPO_KEY: Final[str] = "github.com/imbue-ai/default-workspace-template"
 
 
 def _source_package_json() -> Path:

@@ -336,19 +336,31 @@ class WebWorkspacesConfig(FrozenModel):
     Read by ``minds env deploy`` and pushed into the connector's per-deploy
     Modal Secret as ``MINDS_WEB_TEMPLATE_*`` / ``MINDS_WEB_SHAPE_*`` env vars.
     The connector's ``POST /hosts/claim`` (browser-driven workspace creation)
-    leases only pool hosts whose baked attributes match this pin exactly, so
-    advancing the pin is a deliberate deploy.toml edit folded into the release
-    process. Tiers without the block have web workspace creation disabled.
+    leases only pool hosts whose baked attributes match this pin exactly.
+    Tiers without the block have web workspace creation disabled; a tier with
+    the block but no explicit pins gets the defaults (the app's pinned release
+    tag ``FALLBACK_BRANCH`` and the canonical default-workspace-template repo
+    key), so the web pin advances with the release automatically -- the same
+    tag the pool is re-baked from. ``MINDS_WEB_TEMPLATE_REPO`` /
+    ``MINDS_WEB_TEMPLATE_REF`` env vars override at deploy time (dev
+    iteration on a branch), winning over both the deploy.toml pin and the
+    default.
     """
 
-    template_repo: NonEmptyStr = Field(
+    template_repo: NonEmptyStr | None = Field(
+        default=None,
         description=(
             "Canonical repo key the pool bake stamps into row attributes "
-            "(``host/org/repo``, e.g. ``github.com/imbue-ai/default-workspace-template``)."
-        )
+            "(``host/org/repo``, e.g. ``github.com/imbue-ai/default-workspace-template``). "
+            "Unset resolves to the canonical default-workspace-template key."
+        ),
     )
-    template_ref: NonEmptyStr = Field(
-        description="The pinned template branch or tag web creates lease (must match the pool bake)."
+    template_ref: NonEmptyStr | None = Field(
+        default=None,
+        description=(
+            "The pinned template branch or tag web creates lease (must match the pool bake). "
+            "Unset resolves to the app's pinned release tag (``FALLBACK_BRANCH``)."
+        ),
     )
     cpus: NonNegativeInt | None = Field(
         default=None,

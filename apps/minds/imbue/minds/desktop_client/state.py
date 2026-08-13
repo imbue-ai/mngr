@@ -40,6 +40,7 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
+from imbue.minds.desktop_client.ssh_key_migration import SshKeyMigrationScheduler
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
@@ -113,6 +114,9 @@ class DesktopClientState(MutableModel):
     )
     sync_scheduler: WorkspaceSyncScheduler | None = Field(
         default=None, frozen=True, description="Background workspace-record sync loop (kicked on auth changes)"
+    )
+    ssh_key_migration_scheduler: SshKeyMigrationScheduler | None = Field(
+        default=None, frozen=True, description="Background one-off RSA -> Ed25519 client-key migration loop"
     )
     request_inbox: RequestInbox | None = Field(
         default=None, description="Immutable pending-request inbox (reassigned)"

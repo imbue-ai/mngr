@@ -112,6 +112,12 @@ def mngr_prefix_for(root_name: str) -> str:
     return "{}-".format(root_name)
 
 
+def resolve_effective_mngr_host_dir() -> Path:
+    """The mngr host dir this process should use: the ``MNGR_HOST_DIR`` env override, else mngr's default ``~/.mngr``."""
+    mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
+    return Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else Path.home() / ".mngr"
+
+
 class MindsRoot:
     """The resolved identity of the active minds env: the root name and its derived paths.
 

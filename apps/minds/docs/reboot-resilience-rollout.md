@@ -44,8 +44,7 @@ Requires operator action:
   runs when you run it).
 - Backfilling the in-VM units on every existing slice VM (the installer only
   runs at host create, so the existing fleet keeps its old racy oneshot until
-  backfilled). **This needs a sweep script that does not exist yet** -- see
-  Step 2.
+  backfilled). Run the sweep via `just backfill-autostart` -- see Step 2.
 
 Already done (during incident response and verification):
 
@@ -100,8 +99,10 @@ start-rate limit, writes the `.minds-volume-ready` marker behind a hard
 `mountpoint` check, and enables + starts the path unit (which fires
 immediately and safely on a running workspace).
 
-**A sweep script must be written first** (tracked in mngr-internal#333). Do
-not hand-loop over the fleet; the script must handle:
+Run the sweep (`just backfill-autostart`, wrapping
+`mngr imbue_cloud admin server backfill-autostart`; start with `--dry-run`
+to see the per-VM plan). Do not hand-loop over the fleet; the sweep
+handles:
 
 - **Per-VM services-agent path.** The installer text launches the
   *current* tree's `minds_start_services_agent.sh`; older slices bake it at

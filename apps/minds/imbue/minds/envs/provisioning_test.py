@@ -11,6 +11,8 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.build_info import DEFAULT_WEB_TEMPLATE_REPO_KEY
+from imbue.minds.build_info import FALLBACK_BRANCH
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import DeployLifecycleConfig
 from imbue.minds.config.data_types import DeploySecretsConfig
@@ -19,6 +21,7 @@ from imbue.minds.config.data_types import ModalEnvStrategy
 from imbue.minds.config.data_types import PaidDefaultsConfig
 from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import ScaledownWindowConfig
+from imbue.minds.config.data_types import WebWorkspacesConfig
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.local_store import client_config_exists
 from imbue.minds.envs.local_store import env_root_exists
@@ -38,6 +41,7 @@ from imbue.minds.envs.provisioning import _assert_deploy_url_matches
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
+from imbue.minds.envs.provisioning import resolve_web_template_pin
 from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
@@ -1554,3 +1558,33 @@ def test_assert_deploy_url_matches_non_workspace_mismatch_keeps_formula_hint() -
     assert "workspace prefix matches" in message
     assert "hostname scheme" in message
     assert "bound to workspace" not in message
+
+
+def test_resolve_web_template_pin_defaults_to_the_release_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REF", raising=False)
+    template_repo, template_ref = resolve_web_template_pin(WebWorkspacesConfig())
+    assert template_repo == DEFAULT_WEB_TEMPLATE_REPO_KEY
+    assert template_ref == FALLBACK_BRANCH
+
+
+def test_resolve_web_template_pin_prefers_the_deploy_toml_pin_over_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REF", raising=False)
+    config = WebWorkspacesConfig(
+        template_repo=NonEmptyStr("github.com/example/custom-template"),
+        template_ref=NonEmptyStr("my/branch"),
+    )
+    assert resolve_web_template_pin(config) == ("github.com/example/custom-template", "my/branch")
+
+
+def test_resolve_web_template_pin_env_override_wins_over_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINDS_WEB_TEMPLATE_REPO", "github.com/example/override-template")
+    monkeypatch.setenv("MINDS_WEB_TEMPLATE_REF", "override/branch")
+    config = WebWorkspacesConfig(
+        template_repo=NonEmptyStr("github.com/example/custom-template"),
+        template_ref=NonEmptyStr("my/branch"),
+    )
+    assert resolve_web_template_pin(config) == ("github.com/example/override-template", "override/branch")

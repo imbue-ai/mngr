@@ -8,7 +8,7 @@ A release ships three pinned artifacts that must agree:
 | default workspace template | the `minds-v<version>` tag on `default-workspace-template` `main` |
 | `.app` bundle | a ToDesktop build keyed by that mngr SHA |
 
-Both repos tag with the **`minds-v<version>`** prefix (e.g. `minds-v0.3.1`), namespacing minds releases from each repo's own `v<version>`. The shipped binary clones the DEFAULT_WORKSPACE_TEMPLATE tag at runtime via `FALLBACK_BRANCH` in `apps/minds/imbue/minds/desktop_client/workspace_defaults.py`; tag immutability pins a binary to the snapshot it was verified against.
+Both repos tag with the **`minds-v<version>`** prefix (e.g. `minds-v0.3.1`), namespacing minds releases from each repo's own `v<version>`. The shipped binary clones the DEFAULT_WORKSPACE_TEMPLATE tag at runtime via `FALLBACK_BRANCH` in `apps/minds/imbue/minds/build_info.py`; tag immutability pins a binary to the snapshot it was verified against.
 
 Both repos release from **`main`**. Neither `main` is branch-protected, so a PR is **never a merge gate** — you can push or merge to `main` directly. Its only role here is as a **CI surface**: `ci.yml` runs on PRs (any branch) and on push to `main`, *never on a bare branch push*, so opening a PR is how you get traditional CI on a release branch. Nothing is opened for human *review* unless real code rides along. Each repo gets a short-lived **release branch** (mngr: the version bump; DEFAULT_WORKSPACE_TEMPLATE: the `system/vendor/mngr` refresh); you prove the pair green, land both on `main`, tag each `main`, then re-prove green against the tags. **Green CI on the tags concludes the release**; clicking *Release* in ToDesktop is an optional follow-up.
 
@@ -16,7 +16,7 @@ Both repos release from **`main`**. Neither `main` is branch-protected, so a PR 
 
 | Repo | Carries | Open a PR? |
 |---|---|---|
-| `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`workspace_defaults.py`), any mngr/minds code | Optional. Traditional CI on an inert bump is redundant with a green `main`, so a PR adds little — open one for a record, or when the branch also carries mngr/minds code you want CI/review on. |
+| `mngr` | version bump (`apps/minds/package.json`), `FALLBACK_BRANCH` (`imbue/minds/build_info.py`), any mngr/minds code | Optional. Traditional CI on an inert bump is redundant with a green `main`, so a PR adds little — open one for a record, or when the branch also carries mngr/minds code you want CI/review on. |
 | `default-workspace-template` | `system/vendor/mngr/` archived from the green mngr SHA, plus any consumer (`system_interface`) changes that vendor requires | Yes — as a **CI surface, not a review**. A pure vendor refresh isn't read, but a PR is the only way to run `ci.yml`'s `test` job (`uv sync` + `system_interface` tests) on the branch, which catches a `uv`-resolution or `system_interface` break fast on a big vendor jump. (You *can* skip it and lean on launch-to-msg, which covers the same end-to-end, just slower.) |
 
 **Vendor-match invariant.** DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` must be the `git archive` of the *exact* mngr SHA it's paired with — the `commit_sha` you verify and the mngr SHA you tag. The binary runs the mngr SHA; the in-VM agent imports `system/vendor/mngr`. If they diverge, the agent's mngr can mismatch the binary's API (how the `system_interface` → `send_message_to_agents` break slipped in). Re-archive whenever the mngr SHA changes. When iterating on CI this means dispatching a `template_ref` whose `system/vendor/mngr` is synced to the SHA you're building — never DEFAULT_WORKSPACE_TEMPLATE `main`, which lags: a stale vendor silently rejects a field the binary renamed, so the in-VM agent never starts and the e2e wedges at "Waiting for initial chat agent…" (looks like a frontend hang, is really vendor skew; seen for `use_env_config_dir` → `isolate_local_config_dir`). `just sync-vendor-mngr` produces a matching DEFAULT_WORKSPACE_TEMPLATE branch.
@@ -30,7 +30,7 @@ Both repos release from **`main`**. Neither `main` is branch-protected, so a PR 
 | What | Where |
 |---|---|
 | Version string | `apps/minds/package.json` `version` |
-| Baked DEFAULT_WORKSPACE_TEMPLATE tag | `apps/minds/imbue/minds/desktop_client/workspace_defaults.py` `FALLBACK_BRANCH` |
+| Baked DEFAULT_WORKSPACE_TEMPLATE tag | `apps/minds/imbue/minds/build_info.py` `FALLBACK_BRANCH` |
 | `default-workspace-template` checkout | `$DEFAULT_WORKSPACE_TEMPLATE` — your local clone; `just sync-vendor-mngr` (step 3) reads its path from a gitignored `apps/minds/.env`. See Session setup. |
 | `mngr` monorepo checkout | `$MNGR` — wherever you cloned it; you run `just` / `git` from here. See Session setup. |
 | Build / e2e CI | `.github/workflows/minds-launch-to-msg.yml` (`workflow_dispatch`) |
@@ -118,7 +118,7 @@ one-time bring-up runbook in `apps/apt_mirror/README.md`.
 
 ### 1. Bump version + FALLBACK_BRANCH (mngr branch)
 
-For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `workspace_defaults.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the DEFAULT_WORKSPACE_TEMPLATE ref via `template_ref`, so the tag is only hit in step 8.
+For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `imbue/minds/build_info.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the DEFAULT_WORKSPACE_TEMPLATE ref via `template_ref`, so the tag is only hit in step 8.
 
 ### 2. Traditional CI on both branches (parallel, not a serial gate)
 

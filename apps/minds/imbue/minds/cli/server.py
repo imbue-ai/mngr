@@ -1,11 +1,12 @@
-"""``minds server {list,prep}`` -- env-aware wrapper around ``mngr imbue_cloud admin server``.
+"""``minds server {list,prep,backfill-autostart}`` -- env-aware wrapper around ``mngr imbue_cloud admin server``.
 
 Mirrors the ``minds pool`` wrapper (see :mod:`imbue.minds.cli.pool`): from the
 activated minds env it resolves the host_pool DSN (Vault for staging/production,
 per-env secrets.toml for dev/ci) and, for every command that SSHes a box
-(``prep``, and ``list --verify-occupancy``), injects the tier's
-POOL_SSH_PRIVATE_KEY from Vault into the admin subprocess -- so operators never
-hand-export MINDS_HOST_POOL_DSN or the pool key to inspect or (re-)prep boxes.
+(``prep``, ``backfill-autostart``, and ``list --verify-occupancy``), injects the
+tier's POOL_SSH_PRIVATE_KEY from Vault into the admin subprocess -- so operators
+never hand-export MINDS_HOST_POOL_DSN or the pool key to inspect or (re-)prep
+boxes.
 ``list --verify-occupancy`` also forwards the activated env name, which is what
 tells the admin side which slices on a box belong to a foreign tier.
 The remaining ``admin server`` subcommands (order / register / setup / ...) also
@@ -22,10 +23,9 @@ from imbue.minds.cli._activated_env import require_activated_env_name
 from imbue.minds.cli.pool import DATABASE_URL_HELP
 from imbue.minds.cli.pool import POOL_PRIVATE_KEY_ENV_VAR
 from imbue.minds.cli.pool import raise_on_admin_command_failure
-from imbue.minds.cli.pool import read_pool_private_key_from_vault
+from imbue.minds.cli.pool import read_pool_private_key_from_vault_or_fail
 from imbue.minds.cli.pool import resolve_host_pool_dsn
 from imbue.minds.cli.pool import run_imbue_cloud_admin_command
-from imbue.minds.envs.primitives import VaultReadError
 
 
 def build_server_list_admin_args(*, database_url: str | None, env_name: str, is_occupancy_verified: bool) -> list[str]:
@@ -67,6 +67,20 @@ def build_server_prep_admin_args(
     return args
 
 
+def build_server_backfill_autostart_admin_args(
+    *, database_url: str | None, server_ids: tuple[str, ...], is_dry_run: bool
+) -> list[str]:
+    """Compose the ``mngr imbue_cloud admin server backfill-autostart`` argv."""
+    args = ["backfill-autostart"]
+    if database_url is not None:
+        args.extend(["--database-url", database_url])
+    for server_id in server_ids:
+        args.extend(["--server-id", server_id])
+    if is_dry_run:
+        args.append("--dry-run")
+    return args
+
+
 @click.group()
 def server() -> None:
     """Bare-metal server operations for the currently activated minds env."""
@@ -102,12 +116,7 @@ def server_list(database_url: str | None, is_occupancy_verified: bool) -> None:
     env_name = require_activated_env_name()
     extra_env: dict[str, str] | None = None
     if is_occupancy_verified:
-        try:
-            extra_env = {POOL_PRIVATE_KEY_ENV_VAR: read_pool_private_key_from_vault(env_name)}
-        except VaultReadError as exc:
-            raise click.ClickException(
-                f"Could not read the pool SSH private key from Vault for env {env_name!r}: {exc}"
-            ) from exc
+        extra_env = {POOL_PRIVATE_KEY_ENV_VAR: read_pool_private_key_from_vault_or_fail(env_name)}
     args = build_server_list_admin_args(
         database_url=resolve_host_pool_dsn(env_name, database_url),
         env_name=env_name,
@@ -160,12 +169,7 @@ def server_prep(
     bakes require).
     """
     env_name = require_activated_env_name()
-    try:
-        pool_private_key = read_pool_private_key_from_vault(env_name)
-    except VaultReadError as exc:
-        raise click.ClickException(
-            f"Could not read the pool SSH private key from Vault for env '{env_name}': {exc}"
-        ) from exc
+    pool_private_key = read_pool_private_key_from_vault_or_fail(env_name)
     args = build_server_prep_admin_args(
         server_id=server_id,
         database_url=resolve_host_pool_dsn(env_name, database_url),
@@ -176,5 +180,51 @@ def server_prep(
     raise_on_admin_command_failure(
         "server",
         "prep",
+        run_imbue_cloud_admin_command("server", args, extra_env={POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}),
+    )
+
+
+@server.command(name="backfill-autostart")
+@click.option(
+    "--server-id",
+    "server_ids",
+    multiple=True,
+    help="Restrict the sweep to these bare_metal_servers row ids (repeatable; default: every box).",
+)
+@click.option(
+    "--database-url",
+    required=False,
+    default=None,
+    type=str,
+    help=DATABASE_URL_HELP,
+)
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help="List the slice VMs that would be backfilled (with each VM's start-script path) without applying.",
+)
+def server_backfill_autostart(server_ids: tuple[str, ...], database_url: str | None, is_dry_run: bool) -> None:
+    """Backfill the volume-gated minds-autostart units onto existing slice VMs.
+
+    The fleet half of the reboot-resilience rollout
+    (docs/reboot-resilience-rollout.md Step 2). Forwards to
+    ``mngr imbue_cloud admin server backfill-autostart``, resolving the
+    host_pool DSN from the activated env and injecting the tier's
+    POOL_SSH_PRIVATE_KEY from Vault, mirroring ``minds server prep``.
+    Idempotent and safe on running workspaces; run staging first.
+    """
+    env_name = require_activated_env_name()
+    pool_private_key = read_pool_private_key_from_vault_or_fail(env_name)
+    args = build_server_backfill_autostart_admin_args(
+        database_url=resolve_host_pool_dsn(env_name, database_url),
+        server_ids=server_ids,
+        is_dry_run=is_dry_run,
+    )
+    logger.info("Backfilling minds-autostart units for env '{}'", env_name)
+    raise_on_admin_command_failure(
+        "server",
+        "backfill-autostart",
         run_imbue_cloud_admin_command("server", args, extra_env={POOL_PRIVATE_KEY_ENV_VAR: pool_private_key}),
     )

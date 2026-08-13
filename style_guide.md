@@ -654,6 +654,21 @@ def archive_todos_completed_before(
     )
 ```
 
+## CLEANUP comments
+
+Mark code that exists only to bridge a rollout -- compatibility shims, guards
+for not-yet-migrated data, temporary probes -- with a `# CLEANUP:` comment.
+Every CLEANUP comment must state both **what** can be cleaned up and **when**
+it becomes safe to do so:
+
+```python
+# CLEANUP: drop this fallback (and the legacy parser it calls) once every
+# production workspace has been migrated to the v2 manifest format.
+```
+
+The convention makes rollout debt greppable: after a deploy lands, search for
+`CLEANUP:` and remove every entry whose "when" has arrived.
+
 # Naming
 
 Always use very literal, concrete names (ex: `find_overdue_incomplete_todos`)

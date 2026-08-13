@@ -9,6 +9,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+from imbue.minds.cli.server import build_server_backfill_autostart_admin_args
 from imbue.minds.cli.server import build_server_list_admin_args
 from imbue.minds.cli.server import build_server_prep_admin_args
 from imbue.minds.cli.server import server
@@ -77,3 +78,24 @@ def test_server_prep_requires_server_id(_isolated_env: Path) -> None:
     result = CliRunner().invoke(server, ["prep"])
     assert result.exit_code != 0
     assert "--server-id" in result.output
+
+
+def test_build_server_backfill_autostart_admin_args_minimal() -> None:
+    args = build_server_backfill_autostart_admin_args(database_url=None, server_ids=(), is_dry_run=False)
+    assert args == ["backfill-autostart"]
+
+
+def test_build_server_backfill_autostart_admin_args_forwards_everything() -> None:
+    args = build_server_backfill_autostart_admin_args(
+        database_url="postgres://pool", server_ids=("s1", "s2"), is_dry_run=True
+    )
+    assert args == [
+        "backfill-autostart",
+        "--database-url",
+        "postgres://pool",
+        "--server-id",
+        "s1",
+        "--server-id",
+        "s2",
+        "--dry-run",
+    ]
