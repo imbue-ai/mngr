@@ -57,8 +57,13 @@ def _get_all_project_dirs() -> list[Path]:
 
 
 def _find_test_ratchets_file(project_dir: Path) -> Path | None:
-    """Find the test_ratchets.py file within a project directory."""
-    matches = list(project_dir.rglob("test_ratchets.py"))
+    """Find the test_ratchets.py file within a project directory.
+
+    Only non-gitignored files count: generated artifacts a project keeps in a
+    gitignored directory (e.g. apps/minds_evals/datasets/, whose harbor tasks
+    embed a full mngr-internal clone) must not be mistaken for project code.
+    """
+    matches = [f for f in _get_all_files_with_extension(project_dir, ".py") if f.name == "test_ratchets.py"]
     if len(matches) == 1:
         return matches[0]
     elif len(matches) == 0:
