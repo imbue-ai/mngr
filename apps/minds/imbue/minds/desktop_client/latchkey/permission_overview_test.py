@@ -11,25 +11,25 @@ from pydantic import JsonValue
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
-from imbue.minds.desktop_client.latchkey.permission_overview import _is_browser_sign_in_supported_by_service
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
+from imbue.minds.desktop_client.latchkey.permission_overview import probe_service_sign_in_options
+from imbue.minds.desktop_client.latchkey.permission_overview import probe_services_info
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
+from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_grant
-from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
-from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -135,9 +135,9 @@ def _resolver(agent_host_pairs: dict[str, HostId], names: dict[str, str]) -> _Mu
     )
 
 
-def _accounts_latchkey(tmp_path: Path, accounts_by_service: dict[str, list[str]]) -> "_AccountsLatchkey":
+def _accounts_latchkey(tmp_path: Path, accounts_by_service: dict[str, list[str]]) -> FakeAccountsLatchkey:
     """Return a :class:`Latchkey` double reporting the given stored accounts."""
-    return _AccountsLatchkey(
+    return FakeAccountsLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
         accounts_by_service=accounts_by_service,
@@ -233,11 +233,11 @@ def test_build_overview_omits_services_with_neither_accounts_nor_grants(tmp_path
 
 def test_build_overview_reports_whether_a_service_supports_browser_sign_in(tmp_path: Path) -> None:
     """The settings page disables "+ Add account" on this flag, so it must be per service."""
-    latchkey = _AccountsLatchkey(
+    latchkey = FakeAccountsLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
         accounts_by_service={"slack": ["alice@x"], "github": [""]},
-        services_without_browser_auth=("github",),
+        credential_example_by_service={"github": None},
     )
     agent, host = str(AgentId()), HostId()
     _seed_host(latchkey, host, ())
@@ -596,59 +596,8 @@ def test_workspace_parser_round_trips_canonical_gateway_names(tmp_path: Path) ->
 # -- Connector accounts (services info --offline) --
 
 
-class _AccountsLatchkey(Latchkey):
-    """``Latchkey`` double whose ``services_info`` / ``auth_clear`` operate on an in-memory account map.
-
-    ``services_info(--offline)`` reports the configured accounts for a service;
-    ``auth_clear`` records each call and removes the named account so
-    :func:`disconnect_account` sees the updated state on its follow-up read.
-    """
-
-    accounts_by_service: dict[str, list[str]] = Field(default_factory=dict)
-    cleared_calls: list[tuple[str, str | None]] = Field(default_factory=list)
-    services_without_browser_auth: tuple[str, ...] = Field(default=())
-
-    def _accounts_for(self, service_name: str) -> tuple[ServiceAccountCredential, ...]:
-        return tuple(
-            ServiceAccountCredential(account=account, credential_status=CredentialStatus.VALID)
-            for account in self.accounts_by_service.get(service_name, [])
-        )
-
-    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
-        del is_offline
-        accounts = self._accounts_for(service_name)
-        auth_options = (
-            frozenset({"set"}) if service_name in self.services_without_browser_auth else frozenset({"browser", "set"})
-        )
-        return LatchkeyServiceInfo(
-            credential_status=CredentialStatus.VALID if accounts else CredentialStatus.MISSING,
-            accounts=accounts,
-            auth_options=auth_options,
-            set_credentials_example=None,
-        )
-
-    def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
-        del is_offline
-        return {service: self._accounts_for(service) for service in self.accounts_by_service}
-
-    def auth_clear(
-        self,
-        service_name: str,
-        *,
-        account: str | None = None,
-        is_all: bool = False,
-    ) -> tuple[bool, str]:
-        del is_all
-        self.cleared_calls.append((service_name, account))
-        if account is not None and service_name in self.accounts_by_service:
-            self.accounts_by_service[service_name] = [
-                stored for stored in self.accounts_by_service[service_name] if stored != account
-            ]
-        return (True, "")
-
-
 def test_build_overview_lists_service_accounts(tmp_path: Path) -> None:
-    latchkey = _AccountsLatchkey(
+    latchkey = FakeAccountsLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
         accounts_by_service={"slack": ["hynek@imbue-ai", ""]},
@@ -668,7 +617,7 @@ def test_build_overview_lists_service_accounts(tmp_path: Path) -> None:
 
 
 def test_disconnect_account_clears_the_named_account(tmp_path: Path) -> None:
-    latchkey = _AccountsLatchkey(
+    latchkey = FakeAccountsLatchkey(
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
         accounts_by_service={"slack": ["a@x", "b@x"]},
@@ -681,7 +630,7 @@ def test_disconnect_account_clears_the_named_account(tmp_path: Path) -> None:
 
 
 def test_disconnect_account_raises_when_clear_fails(tmp_path: Path) -> None:
-    class _FailingClearLatchkey(_AccountsLatchkey):
+    class _FailingClearLatchkey(FakeAccountsLatchkey):
         def auth_clear(
             self,
             service_name: str,
@@ -711,8 +660,8 @@ def test_browser_sign_in_probes_run_concurrently(tmp_path: Path) -> None:
     service_names = ("slack", "github", "aws")
     barrier = threading.Barrier(len(service_names))
 
-    class _BarrierLatchkey(_AccountsLatchkey):
-        def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
+    class _BarrierLatchkey(FakeAccountsLatchkey):
+        def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo | None:
             barrier.wait(timeout=_BARRIER_TIMEOUT_SECONDS)
             return super().services_info(service_name, is_offline=is_offline)
 
@@ -720,10 +669,63 @@ def test_browser_sign_in_probes_run_concurrently(tmp_path: Path) -> None:
         latchkey_directory=tmp_path,
         latchkey_binary="/nonexistent",
         accounts_by_service=dict.fromkeys(service_names, ["a@x"]),
-        services_without_browser_auth=("aws",),
+        credential_example_by_service={"aws": None},
     )
 
-    is_supported_by_service = _is_browser_sign_in_supported_by_service(latchkey, service_names)
+    service_info_by_name = probe_services_info(latchkey, service_names)
 
-    assert is_supported_by_service == {"slack": True, "github": True, "aws": False}
+    assert {name: info.is_browser_auth_supported for name, info in service_info_by_name.items()} == {
+        "slack": True,
+        "github": True,
+        "aws": False,
+    }
     assert not barrier.broken, "the probes did not all run at the same time"
+
+
+class _FlakyProbeLatchkey(FakeAccountsLatchkey):
+    """``Latchkey`` double whose first probe of a service fails the way a real one does.
+
+    A failed ``latchkey services info`` does not raise: it returns ``None``.
+    Treating that as an answer (and remembering it) would offer a browser flow
+    forever to a service that has none.
+    """
+
+    failing_service_names: set[str] = Field(default_factory=set)
+    probed_service_names: list[str] = Field(default_factory=list)
+
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo | None:
+        self.probed_service_names.append(service_name)
+        if service_name in self.failing_service_names:
+            self.failing_service_names.discard(service_name)
+            return None
+        return super().services_info(service_name, is_offline=is_offline)
+
+
+def test_a_failed_probe_is_left_out_rather_than_reported_as_a_browser_sign_in(tmp_path: Path) -> None:
+    latchkey = _FlakyProbeLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"aws": ["a@x"]},
+        credential_example_by_service={"aws": None},
+        failing_service_names={"aws"},
+    )
+
+    assert probe_services_info(latchkey, ("aws",)) == {}
+
+
+def test_a_failed_probe_is_asked_again_rather_than_remembered(tmp_path: Path) -> None:
+    """The memo is for latchkey's answers, not for the fallback that stands in when it has none."""
+    latchkey = _FlakyProbeLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"aws": ["a@x"]},
+        credential_example_by_service={"aws": None},
+        failing_service_names={"aws"},
+    )
+
+    assert probe_service_sign_in_options(latchkey, ("aws",)) == {}
+    # The second build asks again and gets AWS's real answer: credentials, not a browser.
+    assert probe_service_sign_in_options(latchkey, ("aws",))["aws"].is_browser_auth_supported is False
+    # ...and that one is remembered, so a third build costs no subprocess.
+    assert probe_service_sign_in_options(latchkey, ("aws",))["aws"].is_browser_auth_supported is False
+    assert latchkey.probed_service_names == ["aws", "aws"]

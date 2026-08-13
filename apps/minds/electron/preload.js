@@ -40,8 +40,8 @@ contextBridge.exposeInMainWorld('mindsNative', {
 
   // The renderer owns the /ui/ws channel; the few events main still acts on
   // (workspaces summaries for OS titles + destroyed-window detach,
-  // system-interface health, workspace_stopped, open_help routing,
-  // focus_window asks) are relayed up through this one channel.
+  // system-interface health, workspace_stopped, open_help routing) are
+  // relayed up through this one channel.
   sendShellEvent: (event) => ipcRenderer.send('shell-event', event),
 
   // Main-process asks (notifications, deeplinks, main-driven routing).

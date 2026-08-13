@@ -6,8 +6,8 @@ import { HealthStore } from "./health";
 import { RequestsStore } from "./requests";
 import { WorkspacesStore } from "./workspaces";
 
-function requestsMessage(ids: string[], autoOpen: boolean): UiRequestsMessage {
-  return { type: "requests", count: ids.length, request_ids: ids, auto_open: autoOpen };
+function requestsMessage(ids: string[]): UiRequestsMessage {
+  return { type: "requests", count: ids.length, request_ids: ids };
 }
 
 describe("WorkspacesStore", () => {
@@ -56,36 +56,32 @@ describe("HealthStore", () => {
   });
 });
 
-describe("RequestsStore auto-open policy", () => {
-  it("never fires for the connect-time snapshot", () => {
+describe("RequestsStore", () => {
+  it("mirrors the pending set, replacing it wholesale on every message", () => {
     const store = new RequestsStore();
-    let fired = 0;
-    store.onAutoOpen(() => (fired += 1));
-    store.applyRequestsMessage(requestsMessage(["evt-1"], true));
-    expect(fired).toBe(0);
+    store.applyRequestsMessage(requestsMessage(["evt-1"]));
+    expect(store.requestIds).toEqual(["evt-1"]);
+    store.applyRequestsMessage(requestsMessage(["evt-2", "evt-3"]));
+    expect(store.requestIds).toEqual(["evt-2", "evt-3"]);
+    store.applyRequestsMessage(requestsMessage([]));
+    expect(store.requestIds).toEqual([]);
   });
 
-  it("fires once per genuinely new id and respects the preference", () => {
+  // A pending request must never open anything by itself: it waits behind the
+  // in-chat card's "Review & respond" button and the Waiting-on-you rows. The
+  // arrival of a genuinely new id is exactly what used to fire the auto-open
+  // policy, so the store is pinned to having no arrival hook at all -- putting
+  // one back (a listener set, a "new ids" callback, a first-message flag)
+  // fails here before it can reach a user.
+  it("gives a newly arrived request no hook that could open the popup", () => {
     const store = new RequestsStore();
-    const seenBatches: string[][] = [];
-    store.onAutoOpen((ids) => seenBatches.push([...ids]));
-    store.applyRequestsMessage(requestsMessage([], true));
-    store.applyRequestsMessage(requestsMessage(["evt-1"], true));
-    store.applyRequestsMessage(requestsMessage(["evt-1"], true));
-    expect(seenBatches).toEqual([["evt-1"]]);
-    store.applyRequestsMessage(requestsMessage(["evt-1", "evt-2"], false));
-    expect(seenBatches).toEqual([["evt-1"]]);
-  });
-
-  it("re-fires for an id that left and re-entered the pending set", () => {
-    const store = new RequestsStore();
-    let fired = 0;
-    store.onAutoOpen(() => (fired += 1));
-    store.applyRequestsMessage(requestsMessage([], true));
-    store.applyRequestsMessage(requestsMessage(["evt-1"], true));
-    store.applyRequestsMessage(requestsMessage([], true));
-    store.applyRequestsMessage(requestsMessage(["evt-1"], true));
-    expect(fired).toBe(2);
+    store.applyRequestsMessage(requestsMessage([]));
+    store.applyRequestsMessage(requestsMessage(["evt-brand-new"]));
+    expect(Object.keys(store)).toEqual(["requestIds"]);
+    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(store)).filter(
+      (name) => name !== "constructor",
+    );
+    expect(methods).toEqual(["applyRequestsMessage"]);
   });
 });
 
@@ -98,7 +94,7 @@ describe("boot seeding", () => {
         workspaces: workspacesMessage(),
         accounts: { type: "accounts", has_accounts: true, account_email: "a@b.c", extra_account_count: 1 },
         providers: { type: "providers", providers: [], last_event_at: null, last_full_snapshot_at: null },
-        requests: requestsMessage(["evt-9"], true),
+        requests: requestsMessage(["evt-9"]),
         health: [{ type: "health", agent_id: "agent-aa11", status: "restarting", error: null }],
         discovery_health: { type: "discovery_health", state: "healthy" },
       },
@@ -106,26 +102,23 @@ describe("boot seeding", () => {
     expect(boot.seed.isMac).toBe(true);
     expect(boot.stores.workspaces.workspaces).toHaveLength(1);
     expect(boot.stores.accounts.accountEmail).toBe("a@b.c");
-    expect(boot.stores.requests.count).toBe(1);
+    expect(boot.stores.requests.requestIds).toEqual(["evt-9"]);
     expect(boot.stores.health.statusFor("agent-aa11")).toBe("restarting");
   });
 
-  it("applySnapshotToStores treats snapshot requests as connect-time (no auto-open)", () => {
+  it("applySnapshotToStores lands the connect-time snapshot in every store", () => {
     const stores = createEmptyStores();
-    let fired = 0;
-    stores.requests.onAutoOpen(() => (fired += 1));
     applySnapshotToStores(stores, {
       snapshot: {
         workspaces: workspacesMessage(),
         accounts: { type: "accounts", has_accounts: true, account_email: "a@b.c", extra_account_count: 0 },
         providers: { type: "providers", providers: [], last_event_at: null, last_full_snapshot_at: null },
-        requests: requestsMessage(["evt-1"], true),
+        requests: requestsMessage(["evt-1"]),
         health: [],
         discovery_health: { type: "discovery_health", state: "healthy" },
       },
     });
-    expect(fired).toBe(0);
-    // The snapshot must actually land in the stores it was applied to.
+    expect(stores.requests.requestIds).toEqual(["evt-1"]);
     expect(stores.accounts.hasAccounts).toBe(true);
     expect(stores.accounts.accountEmail).toBe("a@b.c");
   });

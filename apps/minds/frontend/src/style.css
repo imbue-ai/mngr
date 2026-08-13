@@ -339,6 +339,9 @@ body {
   height: 100%;
   overflow: hidden;
 }
+body {
+  -webkit-font-smoothing: antialiased;
+}
 /*
  * The whole app background takes the per-workspace accent (--titlebar-bg, set
  * on the document root while a workspace is displayed; falls back to the
@@ -571,6 +574,158 @@ body:has(#notice-band) .workspace-surface {
   padding: 0.125rem 0.375rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.95em;
+}
+
+/*
+ * Toggle switch (the Permissions tab's per-permission control). Drawn
+ * entirely in CSS from one state attribute, so the view only flips
+ * ``aria-checked`` / ``checked`` and never touches classes: a 44x24 pill
+ * whose 20px white knob carries a small accent check when on (empty when
+ * off), the track filling with the accent in the on state. The knob is the
+ * ::after pseudo-element; the check is a ::before masked to a check glyph so
+ * it takes the accent token in both themes, riding the same transform as the
+ * knob. Disabled switches fade rather than disappear, so a grant that can't
+ * be restored from here is still legible.
+ */
+.perm-switch,
+.perm-switch-input {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  margin: 0;
+  border: none;
+  border-radius: 9999px;
+  background: var(--c-fill-active);
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+.perm-switch::after,
+.perm-switch-input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 150ms ease;
+}
+/* The knob's check glyph: masked so it takes the accent color, sitting over
+   the knob (::before paints after ::after here thanks to the explicit
+   z-index) and moving with it. Hidden until the switch is on. */
+.perm-switch::before,
+.perm-switch-input::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 6px;
+  left: 6px;
+  width: 12px;
+  height: 12px;
+  background: var(--c-accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  opacity: 0;
+  transition:
+    transform 150ms ease,
+    opacity 150ms ease;
+}
+.perm-switch[aria-checked="true"],
+.perm-switch-input:checked {
+  background: var(--c-accent);
+}
+.perm-switch[aria-checked="true"]::after,
+.perm-switch-input:checked::after {
+  transform: translateX(20px);
+}
+.perm-switch[aria-checked="true"]::before,
+.perm-switch-input:checked::before {
+  transform: translateX(20px);
+  opacity: 1;
+}
+.perm-switch:disabled,
+.perm-switch-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* A flip whose write is still in flight: keep the control visibly busy so a
+   second click (ignored while the request runs) reads as "wait", not
+   "broken". */
+.perm-switch.is-busy {
+  opacity: 0.6;
+  cursor: progress;
+}
+.perm-switch:focus-visible,
+.perm-switch-input:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+/* ``.perm-switch-input`` is the checkbox-backed variant for form controls
+   (the grant dialog's Adjust editor): a real ``<input type="checkbox">`` so
+   form semantics -- name/value/checked, and disabled inputs being omitted
+   from submission -- are untouched. */
+.perm-switch-input {
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+/*
+ * A permission scope row (Permissions tab and the grant dialog's Adjust
+ * editor). On hover the fill is widened 8px past the row's box on both sides
+ * with x-offset shadows, so the highlight breathes around the text without
+ * the row needing horizontal padding of its own.
+ */
+.perm-row:hover {
+  background: var(--c-fill-subtle);
+  box-shadow:
+    -8px 0 0 0 var(--c-fill-subtle),
+    8px 0 0 0 var(--c-fill-subtle);
+  border-radius: 8px;
+}
+
+/*
+ * A service's brand mark: the vendor's own logo, drawn as an <img>.
+ *
+ * An image and not a CSS mask because a mask keeps only the artwork's alpha
+ * and discards its color, and these logos are full-color. An <img> is also an
+ * isolated document, which Notion's mark needs -- it pairs a white path with
+ * an unfilled one, so inlining it under a `fill: currentColor` ancestor would
+ * repaint it.
+ */
+.service-mark {
+  display: inline-block;
+}
+.service-mark-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+/* Five brands are near-black and vanish on the dark surface. Each ships the
+ * vendor's own white variant as a second file and the theme picks between the
+ * two here, so no logo is ever recolored to suit the theme. The switch is a
+ * `.dark` ancestor rather than a media query or a JS read because that class
+ * is what themes this app, and it scopes subtrees as well as the document.
+ * Each rule below names the image by both its classes, so it out-ranks the
+ * base rule above whichever way that one is written. */
+.service-mark-img.on-dark-surface {
+  display: none;
+}
+.dark .service-mark-img.on-light-surface {
+  display: none;
+}
+.dark .service-mark-img.on-dark-surface {
+  display: block;
+}
+/* An account that is no longer connected: the same logo drained and dimmed, so
+ * the row reads as inactive without the mark changing shape or brand. */
+.service-mark-muted .service-mark-img {
+  filter: grayscale(1);
+  opacity: 0.55;
 }
 
 .spinner {
@@ -1788,8 +1943,9 @@ body:has(#notice-band) .workspace-surface {
 }
 /*
  * App cloud: the apps latchkey can connect to, floating in a soft cloud.
- * Icons are the monochrome simple-icons served as <img> (recolored to a
- * muted tone; inverted under the app dark theme).
+ * Icons are the bundled brand marks, inlined as data: URIs and drawn as
+ * <img>. They are shown as each vendor publishes them: nothing tints or
+ * inverts them, because that would rewrite the brands' own colors.
  */
 /*
  * App wheel: one big icon centered in the cloud with a smaller one either
@@ -1818,12 +1974,17 @@ body:has(#notice-band) .workspace-surface {
   --wheel-offset: 58px;
   --wheel-size: 40px;
 }
+/* The box is square but the vendors' marks are not (AWS is 256x153, Maps
+ * 256x367), so the artwork is fitted rather than stretched to the box. The
+ * silhouettes this replaced were all a square 24x24, which is why the box
+ * could get away without this before. */
 .cloud-wheel-item {
   position: absolute;
   left: 50%;
   top: 0;
   width: var(--wheel-size);
   height: var(--wheel-size);
+  object-fit: contain;
   margin-left: calc(var(--wheel-size) / -2);
   margin-top: calc(var(--wheel-size) / -2);
   opacity: 0;
@@ -1851,9 +2012,6 @@ body:has(#notice-band) .workspace-surface {
 .cloud-wheel-item.is-exit {
   transform: translateX(calc(var(--wheel-offset) * 1.5)) scale(0.4);
   opacity: 0;
-}
-.dark .cloud-wheel-item {
-  filter: invert(1);
 }
 /* The centered app's name, popping in under it as the icon lands. The
  * keyframes carry the -50% centering translate so the animation does not

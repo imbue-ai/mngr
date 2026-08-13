@@ -16,6 +16,7 @@ import { SETTINGS_SECTIONS, addAccountBlockedReason } from "../../../models/sett
 import { Button } from "../../components/Button";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
+import { navEntryClass, splitPane } from "../../components/SplitPane";
 
 interface SectionsAttrs {
   model: SettingsModel;
@@ -26,14 +27,11 @@ function navButton(
   name: SettingsSection,
   label: string,
 ): m.Children {
-  const isActive = model.activeSection === name;
   return m(
     "button",
     {
       type: "button",
-      class:
-        "flex items-center h-8 px-2 rounded-md cursor-pointer type-body text-left border-0 hover:text-primary hover:bg-fill-hover " +
-        (isActive ? "bg-fill-hover text-primary" : "text-secondary"),
+      class: navEntryClass(model.activeSection === name),
       onclick: () => model.selectSection(name),
     },
     label,
@@ -703,7 +701,9 @@ function revokeDialog(model: SettingsModel): m.Children {
   );
 }
 
-/** The two-column settings layout: grouped left nav + the active panel. */
+/** The grouped left nav + the active panel, in the same two-column pane every
+ * machine's options tabs use, so the section list keeps its own scroller
+ * instead of riding the card's and sliding off the top of it. */
 export function SettingsSections(): m.Component<SectionsAttrs> {
   const masterPasswordState: MasterPasswordState = {
     newPassword: "",
@@ -713,43 +713,45 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
     view(vnode) {
       const { model } = vnode.attrs;
       const groups: ("Permissions" | "Other")[] = ["Permissions", "Other"];
-      return m("div", { class: "flex gap-8 items-start" }, [
-        m(
-          "nav",
-          {
-            class: "w-44 shrink-0 flex flex-col gap-0.5",
-            "aria-label": "Settings sections",
-          },
-          groups.flatMap((group, groupIdx) => [
-            m(
-              "p",
-              {
-                class: `type-section text-tertiary px-2 mb-1${groupIdx > 0 ? " mt-4" : ""}`,
-              },
-              group,
-            ),
-            ...SETTINGS_SECTIONS.filter(
-              (section) => section.group === group,
-            ).map((section) => navButton(model, section.name, section.label)),
-          ]),
-        ),
-        m("div", { class: "flex-1 min-w-0" }, [
-          model.activeSection === "connectors" ? connectorsPanel(model) : null,
-          model.activeSection === "file-sharing"
-            ? fileSharingPanel(model)
-            : null,
-          model.activeSection === "workspace-delegation"
-            ? delegationPanel(model)
-            : null,
-          model.activeSection === "error-reporting"
-            ? errorReportingPanel(model)
-            : null,
-          model.activeSection === "backups"
-            ? masterPasswordPanel(model, masterPasswordState)
-            : null,
-        ]),
+      return [
+        splitPane({
+          navLabel: "Settings sections",
+          nav: m(
+            "div",
+            { class: "flex flex-col gap-0.5" },
+            groups.flatMap((group, groupIdx) => [
+              m(
+                "p",
+                {
+                  class: `type-section text-tertiary px-2 mb-1${groupIdx > 0 ? " mt-4" : ""}`,
+                },
+                group,
+              ),
+              ...SETTINGS_SECTIONS.filter(
+                (section) => section.group === group,
+              ).map((section) => navButton(model, section.name, section.label)),
+            ]),
+          ),
+          content: [
+            model.activeSection === "connectors" ? connectorsPanel(model) : null,
+            model.activeSection === "file-sharing"
+              ? fileSharingPanel(model)
+              : null,
+            model.activeSection === "workspace-delegation"
+              ? delegationPanel(model)
+              : null,
+            model.activeSection === "error-reporting"
+              ? errorReportingPanel(model)
+              : null,
+            model.activeSection === "backups"
+              ? masterPasswordPanel(model, masterPasswordState)
+              : null,
+          ],
+        }),
+        // Fixed-position when open and nothing at all when closed, so it rides
+        // beside the pane rather than as a third column inside it.
         revokeDialog(model),
-      ]);
+      ];
     },
   };
 }

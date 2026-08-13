@@ -29,7 +29,7 @@
 // contract by ADDING types, never by changing the meaning or payload of an
 // existing one. CONTRACT_VERSION below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "1";
+export const CONTRACT_VERSION = "2";
 
 // -- Message types ----------------------------------------------------------
 
@@ -55,6 +55,12 @@ export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 export const CLOSE_ACTIVE_TAB = "minds:close-active-tab";
 // embedder -> workspace: ack for OPEN_AI_KEYS_PAGE (see above). Payload: {}.
 export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
+// embedder -> workspace: the user resolved a permission request in the
+// shell's review popup. Payload: { requestId, resolution }, where resolution
+// is "granted" or "denied". Lets the asking workspace show the verdict at
+// once, ahead of the agent transcript's own resolution message; the workspace
+// still treats the transcript as authoritative once that lands.
+export const PERMISSION_REQUEST_RESOLVED = "minds:permission-request-resolved";
 
 // -- Payload validation ------------------------------------------------------
 
@@ -97,6 +103,10 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   },
   [OPEN_AI_KEYS_ACK]: function () {
     return true;
+  },
+  [PERMISSION_REQUEST_RESOLVED]: function (data) {
+    if (typeof data.requestId !== 'string' || !REQUEST_ID_PATTERN.test(data.requestId)) return false;
+    return data.resolution === 'granted' || data.resolution === 'denied';
   },
 };
 

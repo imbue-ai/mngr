@@ -27,6 +27,7 @@ narrowing) an existing grant is done through the ordinary agent-driven
 permission-request flow, not here.
 """
 
+import threading
 from collections.abc import Iterable
 from collections.abc import Sequence
 from pathlib import Path
@@ -44,6 +45,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
@@ -61,25 +63,27 @@ _WILDCARD_DESCRIPTION = "Unrestricted access: any request to this service is per
 # unions per-feature permission schemas onto it rather than minting dedicated
 # scopes). So the whole ``latchkey-self`` rule must never be deleted; each
 # feature is read back by its permission-name prefix and revoked by removing
-# only its own permission names from the rule.
-_SELF_SCOPE = "latchkey-self"
+# only its own permission names from the rule. Public because the
+# per-workspace toggle screen (:mod:`permission_toggles`) rewrites the same
+# rule.
+SELF_SCOPE = "latchkey-self"
 
 # File-sharing grants: per-path permission schemas named
 # ``minds-file-server-<access>-<absolute-path>`` (see the gateway's
 # ``permission_requests.mjs``).
-_FILE_SHARING_PERMISSION_PREFIX = "minds-file-server-"
+FILE_SHARING_PERMISSION_PREFIX = "minds-file-server-"
 _FILE_SHARING_READ = "read"
 _FILE_SHARING_WRITE = "write"
 # User-facing labels: a write grant is a read+write superset, so it reads as
 # "read and write"; a read-only grant reads as "read".
-_FILE_SHARING_READ_LABEL = "read"
-_FILE_SHARING_WRITE_LABEL = "read and write"
+FILE_SHARING_READ_LABEL = "read"
+FILE_SHARING_WRITE_LABEL = "read and write"
 
 # Cross-workspace-management grants: verb permission schemas named
 # ``minds-workspaces-<verb>`` (an all-workspaces grant) or
 # ``minds-workspaces-<verb>-<target_agent_id>`` (a grant pinned to one target
 # workspace). ``read`` / ``create`` are all-or-nothing; the rest are targeted.
-_WORKSPACE_PERMISSION_PREFIX = "minds-workspaces-"
+WORKSPACE_PERMISSION_PREFIX = "minds-workspaces-"
 _WORKSPACE_VERB_BY_PERMISSION = {verb.permission: verb for verb in WORKSPACE_VERBS}
 _TARGETED_WORKSPACE_VERB_PERMISSIONS = tuple(verb.permission for verb in WORKSPACE_VERBS if verb.is_targeted)
 
@@ -278,23 +282,27 @@ def _granted_permissions(
 _BROWSER_SUPPORT_PROBE_EXIT_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
-def _is_browser_sign_in_supported_by_service(
+def probe_services_info(
     latchkey: Latchkey,
     service_names: Sequence[str],
-) -> dict[str, bool]:
-    """Probe, for each service, whether latchkey can sign in to it through a browser.
+) -> dict[str, LatchkeyServiceInfo]:
+    """Read ``latchkey services info`` for several services at once.
 
-    Only ``services info`` knows this, and it is one subprocess per service, so
-    the probes run on a thread each (they are independent, and each writes its
-    own key) rather than adding up in series on the settings page's critical
-    path. ``--offline`` keeps every probe a local lookup.
+    How a service is signed in to (``is_browser_auth_supported``) and what
+    credentials it asks for (``set_credentials_example``) are only known from
+    this call, and it is one subprocess per service, so the probes run on a
+    thread each (they are independent, and each writes its own key) rather than
+    adding up in series on a page's critical path. ``--offline`` keeps every
+    probe a local lookup. A service whose probe did not report (``None``) is
+    absent from the result, so callers decide what an unknown service
+    defaults to instead of mistaking a guess for latchkey's answer.
     """
-    is_supported_by_service: dict[str, bool] = {}
+    service_info_by_name: dict[str, LatchkeyServiceInfo] = {}
 
     def _probe_one_service(service_name: str) -> None:
-        is_supported_by_service[service_name] = latchkey.services_info(
-            service_name, is_offline=True
-        ).is_browser_auth_supported
+        info = latchkey.services_info(service_name, is_offline=True)
+        if info is not None:
+            service_info_by_name[service_name] = info
 
     concurrency_group = ConcurrencyGroup(
         name="connectors-browser-support",
@@ -307,7 +315,70 @@ def _is_browser_sign_in_supported_by_service(
                 args=(service_name,),
                 name=f"browser-support-{service_name}",
             )
-    return is_supported_by_service
+    return service_info_by_name
+
+
+class ServiceSignInOptions(FrozenModel):
+    """How a service can be signed in to, from its ``services info`` probe.
+
+    The static half of that call: which auth options latchkey compiled in for
+    the service, and the credential command it advertises. Unlike the accounts
+    and credential status the same call returns, these are fixed properties of
+    the latchkey binary, which is why they can be remembered.
+    """
+
+    is_browser_auth_supported: bool = Field(description="Whether latchkey can sign this service in through a browser.")
+    set_credentials_example: str = Field(description="Advertised credential command, empty when it advertises none.")
+
+
+# Remembered per service for the life of the process. The probe is one
+# subprocess per service and the pane offers every catalog service, so probing
+# on each payload build put a burst of them on every toggle write. Only a probe
+# that reported is stored: one that timed out is retried on the next build
+# rather than remembered as a guess about how the service connects.
+_SIGN_IN_OPTIONS_BY_SERVICE: Final[dict[str, ServiceSignInOptions]] = {}
+_SIGN_IN_OPTIONS_LOCK: Final[threading.Lock] = threading.Lock()
+
+
+def clear_service_sign_in_options_cache() -> None:
+    """Forget how services connect, so the next probe asks latchkey again.
+
+    The answers are fixed for a given latchkey binary, so the only things that
+    invalidate them are that binary changing under a running process, and a
+    test swapping in a different latchkey.
+    """
+    with _SIGN_IN_OPTIONS_LOCK:
+        _SIGN_IN_OPTIONS_BY_SERVICE.clear()
+
+
+def probe_service_sign_in_options(
+    latchkey: Latchkey,
+    service_names: Sequence[str],
+) -> dict[str, ServiceSignInOptions]:
+    """How each service connects, probing only the ones not already known.
+
+    A service missing from the result is one whose probe did not report; the
+    caller decides what that defaults to.
+    """
+    with _SIGN_IN_OPTIONS_LOCK:
+        unknown = tuple(name for name in service_names if name not in _SIGN_IN_OPTIONS_BY_SERVICE)
+    if unknown:
+        probed = probe_services_info(latchkey, unknown)
+        for service_name in unknown:
+            if service_name not in probed:
+                logger.debug("No services-info probe for {}; assuming its browser sign-in", service_name)
+        with _SIGN_IN_OPTIONS_LOCK:
+            for service_name, info in probed.items():
+                _SIGN_IN_OPTIONS_BY_SERVICE[service_name] = ServiceSignInOptions(
+                    is_browser_auth_supported=info.is_browser_auth_supported,
+                    set_credentials_example=info.set_credentials_example or "",
+                )
+    with _SIGN_IN_OPTIONS_LOCK:
+        return {
+            service_name: _SIGN_IN_OPTIONS_BY_SERVICE[service_name]
+            for service_name in service_names
+            if service_name in _SIGN_IN_OPTIONS_BY_SERVICE
+        }
 
 
 def build_permission_overview(
@@ -327,7 +398,7 @@ def build_permission_overview(
     one account -- either one latchkey stores credentials for or one that only
     appears in a host's grants -- and the result is sorted by display name for a
     stable UI. Each listed service is then probed for browser-sign-in support,
-    all of them at once (see :func:`_is_browser_sign_in_supported_by_service`).
+    all of them at once (see :func:`probe_services_info`).
 
     Raises :class:`LatchkeyGatewayClientError` if a host file cannot be read.
     Because every host shares one gateway, a read error almost always means the
@@ -365,7 +436,7 @@ def build_permission_overview(
         account_overviews = tuple(
             ServiceAccountOverview(
                 account=account,
-                label=_account_label(account),
+                label=account_label(account),
                 is_connected=account in stored_account_names,
                 workspace_grants=_workspace_grants_for_account(
                     service_infos,
@@ -377,10 +448,7 @@ def build_permission_overview(
         if account_overviews:
             account_overviews_by_service[service_name] = account_overviews
 
-    is_browser_sign_in_supported_by_service = _is_browser_sign_in_supported_by_service(
-        latchkey,
-        tuple(account_overviews_by_service),
-    )
+    service_info_by_name = probe_services_info(latchkey, tuple(account_overviews_by_service))
     overviews = [
         ServicePermissionOverview(
             service_name=service_name,
@@ -388,7 +456,10 @@ def build_permission_overview(
             accounts=account_overviews,
             # A probe that somehow did not report leaves the sign-in offered
             # rather than disabling an action that may well work.
-            is_browser_sign_in_supported=is_browser_sign_in_supported_by_service.get(service_name, True),
+            is_browser_sign_in_supported=(
+                service_name not in service_info_by_name
+                or service_info_by_name[service_name].is_browser_auth_supported
+            ),
         )
         for service_name, account_overviews in account_overviews_by_service.items()
     ]
@@ -431,7 +502,7 @@ def _workspace_grants_for_account(
     return tuple(cards)
 
 
-def _account_label(account: str) -> str:
+def account_label(account: str) -> str:
     """Render a latchkey account key as a user-facing label (default account is unnamed)."""
     return _DEFAULT_ACCOUNT_LABEL if account == DEFAULT_ACCOUNT else account
 
@@ -443,7 +514,7 @@ def _service_accounts(accounts: Sequence[ServiceAccountCredential]) -> tuple[Ser
     any) shown last.
     """
     return tuple(
-        ServiceAccount(account=account.account, label=_account_label(account.account))
+        ServiceAccount(account=account.account, label=account_label(account.account))
         for account in sorted(accounts, key=lambda entry: (entry.account == DEFAULT_ACCOUNT, entry.account.lower()))
     )
 
@@ -460,11 +531,14 @@ def disconnect_account(latchkey: Latchkey, service_name: str, account: str) -> b
     is_success, detail = latchkey.auth_clear(service_name, account=account)
     if not is_success:
         raise PermissionOverviewError(f"Could not disconnect account '{account or 'default'}': {detail}")
-    remaining = latchkey.services_info(service_name, is_offline=True).accounts
-    return len(remaining) == 0
+    remaining_info = latchkey.services_info(service_name, is_offline=True)
+    # The clear itself already succeeded, so a follow-up probe that does not
+    # answer reads as "none left": claiming leftover accounts would only
+    # suppress the (idempotent) revoke-all cleanup.
+    return remaining_info is None or len(remaining_info.accounts) == 0
 
 
-def _parse_file_sharing_permission(permission_name: str) -> tuple[str, str] | None:
+def parse_file_sharing_permission(permission_name: str) -> tuple[str, str] | None:
     """Split a ``minds-file-server-<access>-<path>`` name into ``(access, path)``.
 
     Returns ``None`` for any permission name that is not a well-formed
@@ -473,9 +547,9 @@ def _parse_file_sharing_permission(permission_name: str) -> tuple[str, str] | No
     before the first ``-`` after the prefix; the remainder (which starts with
     ``/``) is the absolute path.
     """
-    if not permission_name.startswith(_FILE_SHARING_PERMISSION_PREFIX):
+    if not permission_name.startswith(FILE_SHARING_PERMISSION_PREFIX):
         return None
-    remainder = permission_name[len(_FILE_SHARING_PERMISSION_PREFIX) :]
+    remainder = permission_name[len(FILE_SHARING_PERMISSION_PREFIX) :]
     access, separator, path = remainder.partition("-")
     if not separator or access not in (_FILE_SHARING_READ, _FILE_SHARING_WRITE) or not path:
         return None
@@ -501,11 +575,11 @@ def build_file_sharing_overview(
     grants: list[WorkspaceFileSharingGrant] = []
     for host in _list_active_workspace_hosts(backend_resolver):
         path = permissions_path_for_host(plugin_data_dir, host.host_id)
-        permissions = gateway_client.get_permission_rules(path).get(_SELF_SCOPE, ())
+        permissions = gateway_client.get_permission_rules(path).get(SELF_SCOPE, ())
         read_paths: set[str] = set()
         write_paths: set[str] = set()
         for permission_name in permissions:
-            parsed = _parse_file_sharing_permission(permission_name)
+            parsed = parse_file_sharing_permission(permission_name)
             if parsed is None:
                 continue
             access, shared_path = parsed
@@ -517,7 +591,7 @@ def build_file_sharing_overview(
         shared_paths = tuple(
             SharedPath(
                 path=shared_path,
-                access_label=_FILE_SHARING_WRITE_LABEL if shared_path in write_paths else _FILE_SHARING_READ_LABEL,
+                access_label=FILE_SHARING_WRITE_LABEL if shared_path in write_paths else FILE_SHARING_READ_LABEL,
             )
             for shared_path in sorted(all_paths)
         )
@@ -543,11 +617,11 @@ def _revoke_file_sharing_at_path(gateway_client: LatchkeyGatewayClient, permissi
     ``schemas`` object; they are unreferenced and harmless, and a re-grant
     overwrites them by name.)
     """
-    permissions = gateway_client.get_permission_rules(permissions_file_path).get(_SELF_SCOPE, ())
-    kept = tuple(name for name in permissions if _parse_file_sharing_permission(name) is None)
+    permissions = gateway_client.get_permission_rules(permissions_file_path).get(SELF_SCOPE, ())
+    kept = tuple(name for name in permissions if parse_file_sharing_permission(name) is None)
     if len(kept) == len(permissions):
         return
-    gateway_client.set_permission_rule(permissions_file_path, _SELF_SCOPE, kept)
+    gateway_client.set_permission_rule(permissions_file_path, SELF_SCOPE, kept)
 
 
 def revoke_file_sharing_for_workspace(
@@ -560,7 +634,7 @@ def revoke_file_sharing_for_workspace(
 
     Raises :class:`PermissionOverviewError` for an unresolvable workspace.
     """
-    host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
+    host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
         raise PermissionOverviewError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",
@@ -614,7 +688,7 @@ class WorkspaceDelegationGrant(FrozenModel):
     verbs: tuple[WorkspaceDelegationVerb, ...] = Field(description="Granted verbs, in catalog order.")
 
 
-def _parse_workspace_permission(permission_name: str) -> tuple[str, str | None] | None:
+def parse_workspace_permission(permission_name: str) -> tuple[str, str | None] | None:
     """Split a ``minds-workspaces-*`` permission into ``(verb_permission, target)``.
 
     ``target`` is ``None`` for an all-workspaces grant (a broad verb name) and the
@@ -624,7 +698,7 @@ def _parse_workspace_permission(permission_name: str) -> tuple[str, str | None] 
     the known verb names (not naive ``-`` splitting) because verb names such as
     ``minds-workspaces-backups-export`` themselves contain hyphens.
     """
-    if not permission_name.startswith(_WORKSPACE_PERMISSION_PREFIX):
+    if not permission_name.startswith(WORKSPACE_PERMISSION_PREFIX):
         return None
     if permission_name in _WORKSPACE_VERB_BY_PERMISSION:
         return permission_name, None
@@ -637,7 +711,7 @@ def _parse_workspace_permission(permission_name: str) -> tuple[str, str | None] 
     return None
 
 
-def _resolve_target_workspace_name(backend_resolver: BackendResolverInterface, target_workspace_id: str) -> str:
+def resolve_target_workspace_name(backend_resolver: BackendResolverInterface, target_workspace_id: str) -> str:
     """Resolve a target workspace agent id to a display name, falling back to the raw id."""
     try:
         parsed = AgentId(target_workspace_id)
@@ -671,11 +745,11 @@ def build_workspace_overview(
     for host in _list_active_workspace_hosts(backend_resolver):
         permissions = gateway_client.get_permission_rules(
             permissions_path_for_host(plugin_data_dir, host.host_id)
-        ).get(_SELF_SCOPE, ())
+        ).get(SELF_SCOPE, ())
         # verb permission -> the targets it is granted on (``None`` == all workspaces).
         targets_by_verb: dict[str, set[str | None]] = {}
         for permission_name in permissions:
-            parsed = _parse_workspace_permission(permission_name)
+            parsed = parse_workspace_permission(permission_name)
             if parsed is None:
                 continue
             verb_permission, target = parsed
@@ -694,14 +768,14 @@ def build_workspace_overview(
             if not is_all_workspaces:
                 target_names = tuple(
                     sorted(
-                        (_resolve_target_workspace_name(backend_resolver, target) for target in targets if target),
+                        (resolve_target_workspace_name(backend_resolver, target) for target in targets if target),
                         key=str.lower,
                     )
                 )
             verbs.append(
                 WorkspaceDelegationVerb(
                     verb_permission=verb.permission,
-                    label=verb.permission.removeprefix(_WORKSPACE_PERMISSION_PREFIX),
+                    label=verb.permission.removeprefix(WORKSPACE_PERMISSION_PREFIX),
                     description=verb.description,
                     is_all_workspaces=is_all_workspaces,
                     target_names=target_names,
@@ -721,7 +795,7 @@ def build_workspace_overview(
 
 def _workspace_permission_has_verb(permission_name: str, verb_permission: str) -> bool:
     """Whether ``permission_name`` is a grant of ``verb_permission`` (any target)."""
-    parsed = _parse_workspace_permission(permission_name)
+    parsed = parse_workspace_permission(permission_name)
     return parsed is not None and parsed[0] == verb_permission
 
 
@@ -739,19 +813,19 @@ def revoke_workspace_verb_for_workspace(
     """
     if verb_permission not in _WORKSPACE_VERB_BY_PERMISSION:
         raise PermissionOverviewError(f"Unknown machine verb '{verb_permission}'.")
-    host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
+    host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
         raise PermissionOverviewError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",
         )
     path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
-    permissions = gateway_client.get_permission_rules(path).get(_SELF_SCOPE, ())
+    permissions = gateway_client.get_permission_rules(path).get(SELF_SCOPE, ())
     kept = tuple(name for name in permissions if not _workspace_permission_has_verb(name, verb_permission))
     if len(kept) != len(permissions):
-        gateway_client.set_permission_rule(path, _SELF_SCOPE, kept)
+        gateway_client.set_permission_rule(path, SELF_SCOPE, kept)
 
 
-def _resolve_host_id(
+def resolve_workspace_host_id(
     backend_resolver: BackendResolverInterface,
     workspace_agent_id: str,
 ) -> HostId | None:
@@ -807,7 +881,7 @@ def revoke_service_account_for_workspace(
     """
     if not services_catalog.get(service_name):
         raise PermissionOverviewError(f"Unknown service '{service_name}'.")
-    host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
+    host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
         raise PermissionOverviewError(
             f"Could not resolve host for workspace '{workspace_agent_id}'; cannot revoke.",

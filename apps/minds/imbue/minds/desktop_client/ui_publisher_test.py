@@ -8,6 +8,7 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
+from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -43,7 +44,7 @@ def _build_publisher(source: _MutableWorkspaceSource) -> tuple[UiStatePublisher,
         derive_workspaces=source.derive,
         derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
         derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
-        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=(), auto_open=True),
+        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_health_states=lambda: (),
     )
@@ -196,7 +197,7 @@ def test_replayed_health_frames_say_they_are_a_replay() -> None:
         derive_workspaces=_MutableWorkspaceSource().derive,
         derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
         derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
-        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=(), auto_open=True),
+        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_health_states=lambda: (failed,),
     )
@@ -218,7 +219,7 @@ def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> Non
     frames = [json.loads(frame) for frame in publisher.build_snapshot_frames()]
 
     assert frames[0]["type"] == "hello"
-    assert frames[0]["schema_version"] == 1
+    assert frames[0]["schema_version"] == UI_SCHEMA_VERSION
     assert [frame["type"] for frame in frames[1:]] == [
         "workspaces",
         "accounts",

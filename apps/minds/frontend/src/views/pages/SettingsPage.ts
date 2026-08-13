@@ -17,9 +17,16 @@ export function SettingsPage(): m.Component {
     },
     view(): m.Children {
       // Rendered inside the AppOverlay card (Shell), which supplies the width,
-      // padding, scroll, and close X -- so no PageContainer or back link.
+      // padding, and close X -- so no PageContainer or back link. The card's
+      // body is a bounded column here rather than a scroller, so the title is
+      // pinned (shrink-0) and the sections pane below it scrolls its own
+      // columns.
       return [
-        m("h1", { class: "type-heading-lg text-primary mb-8" }, "Settings"),
+        m(
+          "h1",
+          { class: "type-heading-lg text-primary mb-8 shrink-0" },
+          "Settings",
+        ),
         model.isLoadFailed
           ? m(
               Notice,

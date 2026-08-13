@@ -51,7 +51,17 @@ export interface MachineSharingResponse {
   grants: SharingGrantsDocument | null;
 }
 
-export type OptionsTab = "share" | "settings";
+/** The options panel's tabs, in the order the tab strip shows them. */
+export const OPTIONS_TABS = ["permissions", "share", "settings"] as const;
+export type OptionsTab = (typeof OPTIONS_TABS)[number];
+
+/** The single ?tab parse. The options page and the titlebar's tab highlight
+ * both resolve through it, so a tab the titlebar can open is never one the
+ * page reads as something else. */
+export function toOptionsTab(raw: string | null | undefined): OptionsTab {
+  return OPTIONS_TABS.find((tab) => tab === raw) ?? "share";
+}
+
 export type SettingsGroup = "general" | "account" | "backup";
 export type ShareLoadStatus = "idle" | "loading" | "load_failed" | "ready";
 export type SharePendingKind = "enable" | "disable" | "emails";

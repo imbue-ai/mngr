@@ -235,7 +235,7 @@ deploy-time secrets flow through HCP Vault.
 
 `~/.<root>/config.toml` is optional and holds user-personal
 preferences only (the default account for new workspaces, the
-auto-open behavior for the inbox). It carries no tier-bound
+error-reporting settings). It carries no tier-bound
 URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 `--config-file` as described above.
 

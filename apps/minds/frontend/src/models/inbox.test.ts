@@ -5,15 +5,39 @@ import {
   expandSharePathHome,
   isPermissionCheckboxDisabled,
   isSharePathWithinRoots,
+  submittedPermissions,
 } from "./inbox";
 import type {
   FileSharingPermissionDetail,
   ManualCredentialsPrompt,
   PredefinedPermissionDetail,
+  ResolvedRequest,
 } from "./inbox";
 
-const CARD_A = { id: "evt-a", kind_label: "permission", ws_name: "alpha", display_name: "Slack", accent: "#123456" };
-const CARD_B = { id: "evt-b", kind_label: "permission", ws_name: "beta", display_name: "Gmail", accent: "#654321" };
+// The workspace a card belongs to is NOT the agent that filed the request --
+// latchkey requests come from the workspace's system-services sibling -- so the
+// two ids are kept distinct here.
+const CARD_A = {
+  id: "evt-a",
+  kind_label: "permission",
+  ws_name: "alpha",
+  display_name: "Slack",
+  accent: "#123456",
+  workspace_agent_id: "agent-alpha",
+};
+const CARD_B = {
+  id: "evt-b",
+  kind_label: "permission",
+  ws_name: "beta",
+  display_name: "Gmail",
+  accent: "#654321",
+  workspace_agent_id: "agent-beta",
+};
+
+// Two more queue positions, so a successor picked by position can be told
+// apart from one picked off the head of the list.
+const CARD_C = { ...CARD_A, id: "evt-c", ws_name: "gamma" };
+const CARD_D = { ...CARD_A, id: "evt-d", ws_name: "delta" };
 
 const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -23,8 +47,33 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   rationale: "read the channel",
   scope: "slack-api",
   display_name: "Slack",
-  permission_schemas: ["any", "slack-read-all"],
-  description_by_permission_name: { "slack-read-all": "Read everything" },
+  service_name: "slack",
+  permission_groups: [
+    {
+      heading: "Full access",
+      is_extras: false,
+      rows: [
+        {
+          permission: "slack-read-all",
+          label: "Read everything",
+          description: "",
+          is_wildcard: false,
+        },
+      ],
+    },
+    {
+      heading: "Extras",
+      is_extras: true,
+      rows: [
+        {
+          permission: "any",
+          label: "Everything (unrestricted)",
+          description: "",
+          is_wildcard: true,
+        },
+      ],
+    },
+  ],
   checked_permissions: ["slack-read-all"],
   account_choices: [
     { value: "", label: "Default account", hint: "", is_credential_setup_needed: false, is_account_name_needed: false },
@@ -32,7 +81,6 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   selected_account_value: "",
   new_account_value: ":new-account",
   wildcard_permission: "any",
-  wildcard_label: "all",
   will_open_browser: false,
   manual_credentials: null,
 };
@@ -67,7 +115,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
     },
     {
       value: ":new-account",
-      label: "Use a new account",
+      label: "+ Add account",
       hint: "asks you for credentials",
       is_credential_setup_needed: true,
       is_account_name_needed: true,
@@ -92,7 +140,9 @@ const FILE_DETAIL: FileSharingPermissionDetail = {
 
 describe("share path helpers", () => {
   it("expands a leading tilde to the home dir but leaves ~user alone", () => {
-    expect(expandSharePathHome("~/notes.txt", "/home/u")).toBe("/home/u/notes.txt");
+    expect(expandSharePathHome("~/notes.txt", "/home/u")).toBe(
+      "/home/u/notes.txt",
+    );
     expect(expandSharePathHome("~", "/home/u")).toBe("/home/u");
     expect(expandSharePathHome("~other/x", "/home/u")).toBe("~other/x");
     expect(expandSharePathHome("~/x", "")).toBe("~/x");
@@ -112,9 +162,34 @@ describe("share path helpers", () => {
 describe("wildcard exclusivity", () => {
   it("disables specific permissions while the wildcard is checked", () => {
     const checked = new Set(["any"]);
-    expect(isPermissionCheckboxDisabled("slack-read-all", "any", checked)).toBe(true);
+    expect(isPermissionCheckboxDisabled("slack-read-all", "any", checked)).toBe(
+      true,
+    );
     expect(isPermissionCheckboxDisabled("any", "any", checked)).toBe(false);
-    expect(isPermissionCheckboxDisabled("slack-read-all", "any", new Set(["slack-read-all"]))).toBe(false);
+    expect(
+      isPermissionCheckboxDisabled(
+        "slack-read-all",
+        "any",
+        new Set(["slack-read-all"]),
+      ),
+    ).toBe(false);
+  });
+
+  it("drops the specific permissions from the submitted set whenever the wildcard is in it", () => {
+    expect(
+      submittedPermissions(new Set(["slack-read-all", "any"]), "any"),
+    ).toEqual(["any"]);
+    expect(
+      submittedPermissions(new Set(["any", "slack-read-all"]), "any"),
+    ).toEqual(["any"]);
+    expect(submittedPermissions(new Set(["slack-read-all"]), "any")).toEqual([
+      "slack-read-all",
+    ]);
+    // A detail with no wildcard submits its selection untouched.
+    expect(submittedPermissions(new Set(["slack-read-all", ""]), "")).toEqual([
+      "slack-read-all",
+      "",
+    ]);
   });
 });
 
@@ -124,6 +199,7 @@ describe("InboxModel", () => {
   function makeModel(
     responses: Record<string, () => Response>,
     onClose?: () => void,
+    onResolved?: (resolved: ResolvedRequest) => void,
   ): InboxModel {
     calls = [];
     return new InboxModel({
@@ -135,6 +211,7 @@ describe("InboxModel", () => {
         return Promise.resolve(producer());
       },
       onClose,
+      onResolved,
     });
   }
 
@@ -144,8 +221,10 @@ describe("InboxModel", () => {
 
   it("loads the card list and seeds detail state on selection", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_A, CARD_B], auto_open: true }),
-      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "GET /ui/api/inbox": () =>
+        jsonResponse({ cards: [CARD_A, CARD_B] }),
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({ detail: PREDEFINED_DETAIL }),
     });
     await model.loadList();
     expect(model.cards.map((card) => card.id)).toEqual(["evt-a", "evt-b"]);
@@ -158,11 +237,28 @@ describe("InboxModel", () => {
     expect(model.isApproveAllowed()).toBe(true);
   });
 
+  it("opens every request on its summary, including the one after an Adjust", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({ detail: PREDEFINED_DETAIL }),
+    });
+    await model.select("evt-a");
+    expect(model.isPermissionEditorShown).toBe(false);
+
+    model.showPermissionEditor();
+    expect(model.isPermissionEditorShown).toBe(true);
+
+    await model.select("evt-a");
+    expect(model.isPermissionEditorShown).toBe(false);
+  });
+
   it("surfaces a failed list load and lets the pending-set reconciliation retry it", async () => {
     let isServerUp = false;
     const model = makeModel({
       "GET /ui/api/inbox": () =>
-        isServerUp ? jsonResponse({ cards: [CARD_A], auto_open: true }) : jsonResponse({ error: "boom" }, 503),
+        isServerUp
+          ? jsonResponse({ cards: [CARD_A] })
+          : jsonResponse({ error: "boom" }, 503),
     });
 
     await model.loadList();
@@ -197,7 +293,8 @@ describe("InboxModel", () => {
 
   it("gates approve on the file-sharing path being inside a shared root", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: FILE_DETAIL }),
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({ detail: FILE_DETAIL }),
     });
     await model.select("evt-a");
 
@@ -214,10 +311,14 @@ describe("InboxModel", () => {
     let closed = false;
     const model = makeModel(
       {
-        "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_B], auto_open: true }),
-        "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
-        "GET /ui/api/inbox/evt-b/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
-        "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "done" }),
+        "GET /ui/api/inbox": () =>
+          jsonResponse({ cards: [CARD_B] }),
+        "GET /ui/api/inbox/evt-a/detail": () =>
+          jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "GET /ui/api/inbox/evt-b/detail": () =>
+          jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ outcome: "GRANTED", message: "done" }),
       },
       () => {
         closed = true;
@@ -238,6 +339,32 @@ describe("InboxModel", () => {
     expect(model.selectedId).toBe("evt-b");
     expect(closed).toBe(false);
   });
+
+  it("submits only the wildcard when a specific permission was ticked before it", async () => {
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+        "GET /ui/api/inbox/evt-a/detail": () =>
+          jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ outcome: "GRANTED" }),
+      },
+      () => undefined,
+    );
+    await model.select("evt-a");
+    // The detail arrives with the specific permission already ticked, so
+    // ticking the wildcard second is the order the disabled checkboxes leave
+    // in the set.
+    expect([...model.checkedPermissions]).toEqual(["slack-read-all"]);
+    model.checkedPermissions.add("any");
+
+    await model.approve();
+
+    const form = calls.find((call) => call.url.includes("/grant"))?.init
+      ?.body as FormData;
+    expect(form.getAll("permissions")).toEqual(["any"]);
+  });
+
 
   it("shows the credential form as soon as an account that needs credentials is selected", async () => {
     const model = makeModel({
@@ -294,7 +421,7 @@ describe("InboxModel", () => {
     const model = makeModel({
       "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: MANUAL_DETAIL }),
       "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }),
-      "GET /ui/api/inbox": () => jsonResponse({ cards: [], auto_open: true }),
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
     });
     await model.select("evt-a");
     model.manualCredentialValues["access-key-id"] = "AKIA-4471";
@@ -445,8 +572,10 @@ describe("InboxModel", () => {
 
   it("keeps the request pending and shows the reason on FAILED", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
-      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "FAILED", message: "sign-in failed" }),
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () =>
+        jsonResponse({ outcome: "FAILED", message: "sign-in failed" }),
     });
     await model.select("evt-a");
 
@@ -456,19 +585,22 @@ describe("InboxModel", () => {
     expect(model.isApproveBusy).toBe(false);
   });
 
-  it("dismisses instead of advancing when not in keep-open mode", async () => {
+  it("closes once the request it resolved was the last one pending", async () => {
     let closed = false;
     const model = makeModel(
       {
-        "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
-        "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }),
+        "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+        "GET /ui/api/inbox/evt-a/detail": () =>
+          jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ outcome: "GRANTED" }),
       },
       () => {
         closed = true;
       },
     );
-    model.isKeepOpen = false;
-    model.cards = [CARD_A, CARD_B];
+    model.cards = [CARD_A];
+    model.isListLoaded = true;
     await model.select("evt-a");
 
     await model.approve();
@@ -478,8 +610,10 @@ describe("InboxModel", () => {
 
   it("fires a keepalive deny, fades the card, and advances", async () => {
     const model = makeModel({
-      "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_A, CARD_B], auto_open: true }),
-      "GET /ui/api/inbox/evt-b/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "GET /ui/api/inbox": () =>
+        jsonResponse({ cards: [CARD_A, CARD_B] }),
+      "GET /ui/api/inbox/evt-b/detail": () =>
+        jsonResponse({ detail: PREDEFINED_DETAIL }),
       "POST /requests/evt-a/deny": () => jsonResponse({ outcome: "DENIED" }),
     });
     model.cards = [CARD_A, CARD_B];
@@ -496,16 +630,95 @@ describe("InboxModel", () => {
     expect(denyCall?.init?.keepalive).toBe(true);
   });
 
-  it("refreshes from a changed pending set and re-fetches a vanished selection", async () => {
+  it("advances a deny forwards, the same way an approve goes", async () => {
+    // Deny marks the request as denying before it advances, so a successor
+    // picked from the already-filtered queue loses the position it is measured
+    // from and lands on the head of the queue -- sending the user backwards to
+    // a request they had read past, while an approve on that same request went
+    // forwards.
+    const cards = [CARD_A, CARD_B, CARD_C, CARD_D];
+    const model = makeModel({
+      "GET /ui/api/inbox": () => jsonResponse({ cards }),
+      "GET /ui/api/inbox/evt-d/detail": () =>
+        jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-c/deny": () => jsonResponse({ outcome: "DENIED" }),
+    });
+    model.cards = cards;
+    model.isListLoaded = true;
+    model.selectedId = "evt-c";
+
+    model.deny();
+
+    await vi.waitFor(() => {
+      expect(model.selectedId).toBe("evt-d");
+    });
+  });
+
+  it("announces each verdict against the workspace the request belongs to", async () => {
+    const resolved: ResolvedRequest[] = [];
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () =>
+          jsonResponse({ cards: [CARD_B] }),
+        "GET /ui/api/inbox/evt-a/detail": () =>
+          jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "GET /ui/api/inbox/evt-b/detail": () =>
+          jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ outcome: "GRANTED" }),
+        "POST /requests/evt-b/deny": () => jsonResponse({ outcome: "DENIED" }),
+      },
+      undefined,
+      (announced) => resolved.push(announced),
+    );
+    model.cards = [CARD_A, CARD_B];
+    model.isListLoaded = true;
+    await model.select("evt-a");
+
+    await model.approve();
+    model.deny();
+
+    // Taken from each request's own card, not from whatever detail happens to
+    // be on screen when the verdict lands: PREDEFINED_DETAIL names the filing
+    // sibling ("agent-1"), which is never the workspace the user is looking at.
+    expect(resolved).toEqual([
+      { requestId: "evt-a", agentId: "agent-alpha", verdict: "granted" },
+      { requestId: "evt-b", agentId: "agent-beta", verdict: "denied" },
+    ]);
+  });
+
+  it("says nothing about a request the server left pending", async () => {
+    const resolved: ResolvedRequest[] = [];
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox/evt-a/detail": () =>
+          jsonResponse({ detail: PREDEFINED_DETAIL }),
+        "POST /requests/evt-a/grant": () =>
+          jsonResponse({ outcome: "FAILED", message: "upstream refused" }),
+      },
+      undefined,
+      (announced) => resolved.push(announced),
+    );
+    await model.select("evt-a");
+
+    await model.approve();
+
+    expect(model.errorMessage).toBe("upstream refused");
+    expect(resolved).toEqual([]);
+  });
+
+  it("advances off a selection another window resolved, never leaving its form up", async () => {
     let listCalls = 0;
     const model = makeModel({
       "GET /ui/api/inbox": () => {
         listCalls += 1;
-        return jsonResponse({ cards: [CARD_B], auto_open: true });
+        return jsonResponse({ cards: [CARD_B] });
       },
-      "GET /ui/api/inbox/evt-a/detail": () =>
-        jsonResponse({ detail: { kind: "unavailable", message: "It has already been processed." } }),
+      "GET /ui/api/inbox/evt-b/detail": () =>
+        jsonResponse({ detail: PREDEFINED_DETAIL }),
     });
+    model.cards = [CARD_A, CARD_B];
+    model.isListLoaded = true;
     model.selectedId = "evt-a";
 
     await model.refreshIfPendingChanged(["evt-b"]);
@@ -513,19 +726,87 @@ describe("InboxModel", () => {
     await model.refreshIfPendingChanged(["evt-b"]);
 
     expect(listCalls).toBe(1);
+    expect(model.selectedId).toBe("evt-b");
+    expect(model.detail?.kind).toBe("predefined");
+  });
+
+  it("leaves a stale link on its notice when an unrelated request arrives", async () => {
+    // The popup was opened straight onto a request that was already gone (a
+    // stale in-chat card), so it is showing "no longer available". A request
+    // arriving for some other machine must not swap that for a live
+    // Approve/Deny form the user never asked to review.
+    const model = makeModel({
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_B] }),
+      "GET /ui/api/inbox/evt-stale/detail": () => new Response("", { status: 404 }),
+    });
+    model.isListLoaded = true;
+    await model.select("evt-stale");
+    expect(model.detail?.kind).toBe("unavailable");
+
+    await model.refreshIfPendingChanged(["evt-b"]);
+
+    expect(model.selectedId).toBe("evt-stale");
     expect(model.detail?.kind).toBe("unavailable");
   });
 
-  it("posts the auto-open preference fire-and-forget", () => {
+  it("closes when the only pending request is resolved somewhere else", async () => {
+    let closed = false;
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+      },
+      () => {
+        closed = true;
+      },
+    );
+    model.cards = [CARD_A];
+    model.isListLoaded = true;
+    model.selectedId = "evt-a";
+
+    await model.refreshIfPendingChanged([]);
+
+    expect(closed).toBe(true);
+  });
+
+  it("leaves a running approval's dialog alone and reconciles once it finishes", async () => {
+    let listCalls = 0;
     const model = makeModel({
-      "POST /ui/api/inbox/auto-open": () => jsonResponse({ ok: true }),
+      "GET /ui/api/inbox": () => {
+        listCalls += 1;
+        return jsonResponse({ cards: [CARD_B] });
+      },
+      "GET /ui/api/inbox/evt-b/detail": () =>
+        jsonResponse({ detail: PREDEFINED_DETAIL }),
     });
+    model.cards = [CARD_A, CARD_B];
+    model.isListLoaded = true;
+    model.selectedId = "evt-a";
+    // An approval waiting on a browser sign-in must not have the dialog it is
+    // submitting swapped out from under it.
+    model.isApproveBusy = true;
 
-    model.setAutoOpen(false);
+    await model.refreshIfPendingChanged(["evt-b"]);
+    expect(model.selectedId).toBe("evt-a");
+    expect(listCalls).toBe(0);
 
-    expect(model.autoOpen).toBe(false);
-    const call = calls[0];
-    expect(call.url).toBe("/ui/api/inbox/auto-open");
-    expect(JSON.parse(String(call.init?.body))).toEqual({ enabled: false });
+    model.isApproveBusy = false;
+    await model.refreshIfPendingChanged(["evt-b"]);
+    expect(model.selectedId).toBe("evt-b");
+  });
+
+  it("skips the redundant list load for the pending set an open already showed", async () => {
+    let listCalls = 0;
+    const model = makeModel({
+      "GET /ui/api/inbox": () => {
+        listCalls += 1;
+        return jsonResponse({ cards: [CARD_A] });
+      },
+    });
+    model.markPendingSetSeen(["evt-a"]);
+    await model.loadList();
+
+    await model.refreshIfPendingChanged(["evt-a"]);
+
+    expect(listCalls).toBe(1);
   });
 });
