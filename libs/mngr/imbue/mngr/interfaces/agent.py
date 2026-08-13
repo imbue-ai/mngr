@@ -161,6 +161,15 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         """
         return LifecycleProbeResult(state=self.get_lifecycle_state())
 
+    def is_blocked_on_dialog(self) -> bool:
+        """Whether the agent is holding on a dialog only the user can answer.
+
+        Such an agent's lifecycle is WAITING rather than RUNNING. Best-effort: each agent
+        type detects the dialogs it knows about, so False means none was detected, not
+        that none is open.
+        """
+        return False
+
     @abstractmethod
     def get_initial_message(self) -> str | None:
         """Return the initial message to send to the agent on creation, or None if not set."""

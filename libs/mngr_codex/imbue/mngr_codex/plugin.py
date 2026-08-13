@@ -131,7 +131,6 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
@@ -375,22 +374,13 @@ class CodexAgent(
         # The codex CLI is a single Rust binary; ps/tmux show the literal name.
         return "codex"
 
-    def get_lifecycle_state(self) -> AgentLifecycleState:
-        """Get lifecycle state, accounting for the codex ``permissions_waiting`` marker.
+    def is_blocked_on_dialog(self) -> bool:
+        """Whether codex is holding on a tool-approval dialog.
 
-        The ``PermissionRequest`` hook touches a ``permissions_waiting`` file while
-        codex is blocked on a tool-approval dialog (verified live against codex
-        0.139.0: the marker is present for the whole time the dialog is open and is
-        cleared on ``PostToolUse``). The base state reads only the ``active`` marker,
-        which stays present during a dialog (the root turn has not stopped), so on
-        its own it would report RUNNING. Promote RUNNING -> WAITING while the agent
-        is blocked, since it cannot progress without user intervention. The promotion
-        rule itself lives in ``_resolve_lifecycle_state_for_permission`` so it can be
-        unit-tested without a live tmux pane.
+        The ``PermissionRequest`` hook touches ``permissions_waiting`` for as long as the
+        dialog is open; ``PostToolUse`` clears it.
         """
-        base_state = super().get_lifecycle_state()
-        is_blocked_on_permission = self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
-        return _resolve_lifecycle_state_for_permission(base_state, is_blocked_on_permission)
+        return self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
@@ -1330,39 +1320,15 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentT
     return ("codex", CodexAgent, CodexAgentConfig)
 
 
-def _resolve_lifecycle_state_for_permission(
-    base_state: AgentLifecycleState, is_blocked_on_permission: bool
-) -> AgentLifecycleState:
-    """Layer the ``permissions_waiting`` signal onto the base lifecycle state.
-
-    Promotes RUNNING -> WAITING while codex is blocked on a tool-approval dialog
-    (the base state, which reads only the ``active`` marker, would otherwise report
-    RUNNING since the root turn has not stopped). Every non-RUNNING base state
-    passes through unchanged. Kept pure (no agent/host) so ``get_lifecycle_state``'s
-    promotion rule is unit-testable without standing up a tmux pane.
-
-    Defers the gating decision to the shared ``classify_waiting_reason``: a RUNNING
-    base state means the ``active`` marker is present and the process is alive, so
-    the classifier's ``is_active`` gate is satisfied and a PERMISSIONS verdict is
-    what promotes RUNNING to WAITING. Sharing that one function keeps this promotion
-    and the ``waiting_reason`` field generator from drifting apart.
-    """
-    if base_state != AgentLifecycleState.RUNNING:
-        return base_state
-    reason = classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked_on_permission)
-    return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else base_state
-
-
 def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
     """Return why the agent is waiting based on marker files, or None.
 
-    Reads the agent state directory's marker files directly rather than calling
-    get_lifecycle_state() (which runs tmux/ps SSH commands), then delegates the
-    decision to the shared ``classify_waiting_reason`` so this and the lifecycle
-    promotion stay in lockstep. The markers are maintained by the codex lifecycle
-    hooks (see build_codex_hooks_config). ``permissions_waiting`` is only read when
-    ``active`` is present, both to short-circuit the idle case and because the
-    classifier ignores the permission signal when the agent is not in a turn.
+    Reads ``active`` directly rather than calling get_lifecycle_state() (which runs
+    tmux/ps SSH commands), and takes the block through the agent -- the same call the
+    lifecycle makes -- so the reason and the state cannot disagree about one agent. The
+    markers are maintained by the codex lifecycle hooks (see build_codex_hooks_config).
+    The block is only consulted while ``active`` is present, since the classifier
+    ignores it outside a turn.
 
     Known limitation: when a dialog is cancelled (Esc / "No"), codex 0.139.0 fires
     no terminal hook for the turn (verified live), so both the ``active`` and
@@ -1373,8 +1339,7 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     """
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     is_active = host.path_exists(agent_dir / ACTIVE_MARKER_FILENAME)
-    is_blocked_on_permission = is_active and host.path_exists(agent_dir / PERMISSIONS_WAITING_FILENAME)
-    return classify_waiting_reason(is_active, is_blocked_on_permission)
+    return classify_waiting_reason(is_active, is_active and agent.is_blocked_on_dialog())
 
 
 @hookimpl

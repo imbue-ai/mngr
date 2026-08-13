@@ -139,8 +139,8 @@ ACTIVE_MARKER_FILENAME: str = "active"
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while codex is blocked on a
 # tool-approval dialog. The ``PermissionRequest`` hook touches it; ``PostToolUse``
 # (the tool ran after approval) and the root ``Stop`` (a stranded dialog at turn
-# end) remove it. ``CodexAgent.get_lifecycle_state`` promotes RUNNING -> WAITING
-# while it is present, and ``_waiting_reason`` reports ``PERMISSIONS``. Unlike the
+# end) remove it. While it is present the lifecycle reads WAITING and
+# ``_waiting_reason`` reports ``PERMISSIONS``. Unlike the
 # ``active`` marker it is a plain touch/remove flag, not part of the lock-guarded
 # recompute: it tracks a single blocking dialog, not concurrent activity. This name
 # is also hardcoded as a literal in ``codex_marker_state.sh``; keep the two in sync.

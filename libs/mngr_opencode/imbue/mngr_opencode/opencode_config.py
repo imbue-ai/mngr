@@ -74,8 +74,8 @@ ACTIVE_MARKER_FILENAME: str = "active"
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while opencode is blocked on a
 # tool-approval prompt (its ``ask`` permission policy). The lifecycle plugin touches
 # it while one or more permissions are pending and removes it once they are all
-# answered; ``OpenCodeAgent.get_lifecycle_state`` promotes RUNNING -> WAITING while
-# it is present, and ``_waiting_reason`` reports ``PERMISSIONS``. The plugin
+# answered. While it is present the lifecycle reads WAITING and
+# ``_waiting_reason`` reports ``PERMISSIONS``. The plugin
 # hardcodes this same literal; keep the two in sync.
 PERMISSIONS_WAITING_FILENAME: str = "permissions_waiting"
 

@@ -58,7 +58,6 @@ from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
 from imbue.mngr_codex.plugin import CodexUpdatePolicy
 from imbue.mngr_codex.plugin import _resolve_adopt_session
-from imbue.mngr_codex.plugin import _resolve_lifecycle_state_for_permission
 from imbue.mngr_codex.plugin import _session_id_from_rollout_path
 from imbue.mngr_codex.plugin import _sessions_root_for_rollout
 from imbue.mngr_codex.plugin import _user_native_codex_home
@@ -872,41 +871,18 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
 
 # =============================================================================
-# Lifecycle promotion + waiting_reason field generator
+# Lifecycle state + waiting_reason field generator
 # =============================================================================
 
 
-@pytest.mark.parametrize(
-    "base_state, is_blocked, expected",
-    [
-        # Only a RUNNING base is promoted, and only while blocked on a dialog.
-        (AgentLifecycleState.RUNNING, True, AgentLifecycleState.WAITING),
-        (AgentLifecycleState.RUNNING, False, AgentLifecycleState.RUNNING),
-        # Every non-RUNNING base passes through unchanged, blocked or not.
-        (AgentLifecycleState.WAITING, True, AgentLifecycleState.WAITING),
-        (AgentLifecycleState.STOPPED, True, AgentLifecycleState.STOPPED),
-        (AgentLifecycleState.REPLACED, True, AgentLifecycleState.REPLACED),
-        (AgentLifecycleState.DONE, True, AgentLifecycleState.DONE),
-        (
-            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-            True,
-            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-        ),
-    ],
-)
-def test_resolve_lifecycle_state_for_permission(
-    base_state: AgentLifecycleState, is_blocked: bool, expected: AgentLifecycleState
-) -> None:
-    assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
-
-
 @pytest.mark.tmux
-def test_get_lifecycle_state_promotes_running_to_waiting_when_blocked_on_permission(
+def test_lifecycle_reports_waiting_when_blocked_on_permission(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """End-to-end override against a live pane: the base state is RUNNING, and a
-    permissions_waiting marker promotes it to WAITING; removing the marker restores
-    RUNNING. (The promotion rule itself is unit-tested above without tmux.)"""
+    """End-to-end against a live pane: the lifecycle reads RUNNING, and a
+    permissions_waiting marker turns it to WAITING; removing the marker restores RUNNING.
+    (The state rule itself is unit-tested without tmux in mngr core, over
+    ``determine_lifecycle_probe_result``.)"""
     agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
     # A long-lived process that ps reports as "codex" (the expected process name) so
     # the base lifecycle reads RUNNING -- the renamed-sleep trick from base_agent_test.
@@ -932,8 +908,11 @@ def test_get_lifecycle_state_promotes_running_to_waiting_when_blocked_on_permiss
         )
         (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
         assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+        # The agent listing reads the probe rather than get_lifecycle_state, so both must agree.
+        assert agent.probe_lifecycle().state == AgentLifecycleState.WAITING
         (agent_dir / PERMISSIONS_WAITING_FILENAME).unlink()
         assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+        assert agent.probe_lifecycle().state == AgentLifecycleState.RUNNING
     finally:
         cleanup_tmux_session(session_name)
 

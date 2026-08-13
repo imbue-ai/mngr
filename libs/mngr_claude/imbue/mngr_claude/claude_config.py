@@ -642,8 +642,15 @@ _CLAIM_MAIN_PID: Final[str] = (
     ' && mv "$MNGR_AGENT_STATE_DIR/claude_main_pid.tmp" "$MNGR_AGENT_STATE_DIR/claude_main_pid"; fi; '
 )
 
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while claude is blocked on a dialog --
+# a tool-approval prompt or an AskUserQuestion. The ``PermissionRequest`` hook touches it;
+# ``PostToolUse``/``PostToolUseFailure`` clear it once the tool resolves, and the idle,
+# ``Stop``, ``UserPromptSubmit`` and startup hooks clear any stranded marker. This name is
+# also a literal in the hook shell snippets below; keep the two in sync.
+PERMISSIONS_WAITING_FILENAME: Final[str] = "permissions_waiting"
+
 # Shell snippet that marks the agent idle: removes the 'active' and
-# 'permissions_waiting' marker files (so get_lifecycle_state reports WAITING
+# 'permissions_waiting' marker files (so the lifecycle probe reports WAITING
 # rather than RUNNING) and emits an activity event so `mngr observe` promptly
 # re-fetches the agent's state. Shared by the Notification idle_prompt hook and
 # the SessionStart startup/resume hook so the two stay byte-identical.

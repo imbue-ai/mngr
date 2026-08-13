@@ -366,6 +366,7 @@ def _find_process_pid_by_name(
 def determine_lifecycle_probe_result(
     tmux_info: str | None,
     is_active: bool,
+    is_blocked_on_dialog: bool,
     expected_process_name: str,
     ps_output: str,
     is_agent_type_known: bool = True,
@@ -403,8 +404,11 @@ def determine_lifecycle_probe_result(
     children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
     pid_str = _find_process_pid_by_name(pane_pid, expected_process_name, children_by_ppid, comm_by_pid)
     pid = int(pid_str) if pid_str is not None else None
+    # An agent holding on a dialog is inside a turn -- its `active` marker is still set -- but
+    # is making no progress, so its lifecycle is WAITING.
+    is_working = is_active and not is_blocked_on_dialog
     running_result = LifecycleProbeResult(
-        state=AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING,
+        state=AgentLifecycleState.RUNNING if is_working else AgentLifecycleState.WAITING,
         pid=pid,
     )
 
@@ -460,8 +464,8 @@ def determine_lifecycle_probe_result(
 def classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
     """Classify why an agent is waiting from two marker signals, or None if running.
 
-    Shared by agent plugins so that a lifecycle reader (the RUNNING -> WAITING
-    promotion in ``get_lifecycle_state``) and a ``waiting_reason`` field generator
+    Shared by agent plugins so that the lifecycle state (which reads the same block signal
+    through ``determine_lifecycle_probe_result``) and a ``waiting_reason`` field generator
     make the *same* decision from the same inputs and cannot drift. Callers differ
     only in how they derive ``is_active`` -- e.g. from the live process plus an
     ``active`` marker, or from a single cheap ``active`` marker read.

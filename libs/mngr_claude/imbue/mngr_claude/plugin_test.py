@@ -25,7 +25,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.model_update import to_update
-from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
@@ -84,6 +83,7 @@ from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
+from imbue.mngr_claude.claude_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
@@ -1471,30 +1471,20 @@ def test_build_credential_sync_hooks_config_structure() -> None:
     assert "MNGR_AGENT_STATE_DIR" in hook["command"]
 
 
-def test_get_lifecycle_state_returns_waiting_when_permissions_waiting(
+def test_is_blocked_on_dialog_tracks_the_permissions_waiting_marker(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """ClaudeAgent.get_lifecycle_state downgrades RUNNING to WAITING when permissions_waiting exists."""
+    """claude reports being blocked from the presence of the permissions_waiting marker."""
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     agent._get_agent_dir().mkdir(parents=True, exist_ok=True)
 
-    with patch.object(BaseAgent, "get_lifecycle_state", return_value=AgentLifecycleState.RUNNING):
-        assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+    assert agent.is_blocked_on_dialog() is False
 
-        (agent._get_agent_dir() / "permissions_waiting").touch()
-        assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+    (agent._get_agent_dir() / PERMISSIONS_WAITING_FILENAME).touch()
+    assert agent.is_blocked_on_dialog() is True
 
-    # Non-RUNNING states should pass through unchanged
-    (agent._get_agent_dir() / "permissions_waiting").touch()
-    for state in (
-        AgentLifecycleState.STOPPED,
-        AgentLifecycleState.WAITING,
-        AgentLifecycleState.REPLACED,
-        AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
-        AgentLifecycleState.DONE,
-    ):
-        with patch.object(BaseAgent, "get_lifecycle_state", return_value=state):
-            assert agent.get_lifecycle_state() == state
+    (agent._get_agent_dir() / PERMISSIONS_WAITING_FILENAME).unlink()
+    assert agent.is_blocked_on_dialog() is False
 
 
 def test_agent_field_generators_returns_correct_structure() -> None:

@@ -3010,6 +3010,9 @@ log "=== Shutdown script completed ==="
         lifecycle = determine_lifecycle_probe_result(
             tmux_info=agent_raw.get("tmux_info"),
             is_active=agent_raw.get("is_active", False),
+            # This listing stats marker files by fixed name and has no agent to ask, so a
+            # blocked agent reads RUNNING here.
+            is_blocked_on_dialog=False,
             expected_process_name=expected_process_name,
             ps_output=ps_output,
             is_agent_type_known=is_type_known,

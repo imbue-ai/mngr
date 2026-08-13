@@ -25,8 +25,8 @@
 //      `permission.asked` (one per blocked tool, carrying the request id) and
 //      `permission.replied` when it is answered. The plugin tracks the set of
 //      pending ids and keeps $MNGR_AGENT_STATE_DIR/permissions_waiting present iff
-//      the set is non-empty, so OpenCodeAgent.get_lifecycle_state can promote
-//      RUNNING -> WAITING and `mngr list` can report a PERMISSIONS reason. Cleared
+//      the set is non-empty, so the agent's lifecycle reads WAITING and `mngr list`
+//      reports a PERMISSIONS reason. Cleared
 //      as a safety net on root idle (a prompt stranded without a reply). The marker
 //      is independent of the active recompute -- the session stays busy (active
 //      present) the whole time a prompt is open. (The running binary emits

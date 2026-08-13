@@ -265,6 +265,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             probe = determine_lifecycle_probe_result(
                 tmux_info=tmux_info if tmux_info else None,
                 is_active=is_active,
+                is_blocked_on_dialog=self.is_blocked_on_dialog() if is_active else False,
                 expected_process_name=expected_process_name,
                 ps_output=ps_output,
                 is_agent_type_known=is_type_known,
