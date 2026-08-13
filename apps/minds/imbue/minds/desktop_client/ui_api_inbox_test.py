@@ -1,4 +1,4 @@
-"""Tests for the /ui/api inbox routes (typed cards, per-kind details)."""
+"""Tests for the /ui/api inbox routes (typed cards, per-kind details, auto-open)."""
 
 import uuid
 from pathlib import Path
@@ -15,6 +15,7 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -93,6 +94,7 @@ def _build_client(
     inbox: RequestInbox | None,
     known_agent_ids: tuple[AgentId, ...],
     is_authenticated: bool = True,
+    minds_config: MindsConfig | None = None,
 ) -> FlaskClient:
     resolver = _KnownAgentsResolver(url_by_agent_and_service={}, known_agent_ids=known_agent_ids)
     client, _app, _auth_store = build_desktop_client_for_test(
@@ -101,6 +103,7 @@ def _build_client(
         backend_resolver=resolver,
         request_inbox=inbox,
         request_event_handlers=(_StubDetailHandler(),),
+        minds_config=minds_config,
     )
     return client
 
@@ -131,6 +134,7 @@ def test_inbox_list_returns_cards_only_for_resolvable_agents(tmp_path: Path) -> 
     assert card["display_name"] == "Stub Service"
     assert card["ws_name"] == f"ws-{str(known_agent)[:8]}"
     assert card["accent"] == DEFAULT_WORKSPACE_COLOR
+    assert body["auto_open"] is True
 
 
 def test_inbox_detail_returns_typed_payload_from_the_owning_handler(tmp_path: Path) -> None:
@@ -180,6 +184,28 @@ def test_inbox_detail_reports_resolved_requests_as_unavailable(tmp_path: Path) -
     assert "already been processed" in detail["message"]
 
 
+def test_inbox_auto_open_toggle_persists_to_minds_config(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-data")
+    client = _build_client(tmp_path, inbox=RequestInbox(), known_agent_ids=(), minds_config=minds_config)
+
+    response = client.post("/ui/api/inbox/auto-open", json={"enabled": False})
+
+    assert response.status_code == 200
+    assert minds_config.get_auto_open_requests_panel() is False
+
+    response = client.post("/ui/api/inbox/auto-open", json={"enabled": True})
+    assert response.status_code == 200
+    assert minds_config.get_auto_open_requests_panel() is True
+
+
+def test_inbox_auto_open_rejects_bodies_without_enabled(tmp_path: Path) -> None:
+    client = _build_client(tmp_path, inbox=RequestInbox(), known_agent_ids=())
+
+    response = client.post("/ui/api/inbox/auto-open", json={"wrong": 1})
+
+    assert response.status_code == 400
+
+
 def test_real_accounts_request_flows_through_the_stubless_pipeline(tmp_path: Path) -> None:
     """A real accounts-permission event with no matching handler still lists as a generic card."""
     agent = AgentId()
@@ -200,59 +226,3 @@ def test_real_accounts_request_flows_through_the_stubless_pipeline(tmp_path: Pat
 def test_unsupported_detail_payload_shape_round_trips() -> None:
     payload = UiUnsupportedDetail(message="nope")
     assert payload.model_dump()["kind"] == "unsupported"
-
-
-class _SiblingAgentResolver(StaticBackendResolver):
-    """Resolver shaped like production: a workspace agent and the system-services
-    sibling that actually files its latchkey requests, sharing a workspace name."""
-
-    workspace_agent_id: AgentId = Field(description="The user-facing agent whose tile is on screen.")
-    sibling_agent_id: AgentId = Field(description="The agent that files the workspace's requests.")
-    workspace_name: str = Field(default="alpha", description="Name both agents report.")
-
-    def list_known_agent_ids(self) -> tuple[AgentId, ...]:
-        return (self.workspace_agent_id, self.sibling_agent_id)
-
-    def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
-        # Only the primary agent has a workspace tile; this is what makes the
-        # request's own agent id unusable as the workspace's identity.
-        return (self.workspace_agent_id,)
-
-    def get_workspace_name(self, agent_id: AgentId) -> str | None:
-        return self.workspace_name if agent_id in self.list_known_agent_ids() else None
-
-    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
-        if agent_id not in self.list_known_agent_ids():
-            return None
-        return AgentDisplayInfo(agent_name=self.workspace_name, host_id="host-" + "0" * 32)
-
-
-def test_inbox_card_names_the_workspace_not_the_agent_that_filed_the_request(tmp_path: Path) -> None:
-    """``workspace_agent_id`` is the tile's agent, resolved by name from the filer.
-
-    Latchkey requests are filed by the workspace's system-services sibling, so a
-    request's own ``agent_id`` never equals the id of the workspace on screen.
-    The shell addresses its instant-resolution message by this field, so getting
-    it wrong means either never flipping the card or posting one workspace's
-    request id into another workspace's page.
-    """
-    workspace_agent_id, sibling_agent_id = AgentId(), AgentId()
-    request = _make_stub_request(str(sibling_agent_id))
-    resolver = _SiblingAgentResolver(
-        url_by_agent_and_service={},
-        workspace_agent_id=workspace_agent_id,
-        sibling_agent_id=sibling_agent_id,
-    )
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path,
-        is_authenticated=True,
-        backend_resolver=resolver,
-        request_inbox=RequestInbox().add_request(request),
-        request_event_handlers=(_StubDetailHandler(),),
-    )
-
-    response = client.get("/ui/api/inbox")
-
-    assert response.status_code == 200
-    card = response.get_json()["cards"][0]
-    assert card["workspace_agent_id"] == str(workspace_agent_id)

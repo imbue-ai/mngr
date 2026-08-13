@@ -7,7 +7,6 @@ import { Card, cardClass } from "./Card";
 import { ICONS_12, ICONS_16 } from "./icons";
 import { Notice, noticeClass } from "./Notice";
 import { spinnerClass } from "./Spinner";
-import { navEntryClass, splitPane } from "./SplitPane";
 import { statusBadgeClass } from "./StatusBadge";
 import { titlebarButtonClass } from "./TitlebarButton";
 import { renderRoot } from "../../testing";
@@ -117,78 +116,6 @@ describe("class builders keep the legacy recipes", () => {
     expect(titlebarButtonClass("control", "danger", "")).toContain(
       "titlebar-btn-danger",
     );
-  });
-});
-
-describe("splitPane", () => {
-  function tokensOf(node: unknown): string[] {
-    const attrs = (node as ElementVnode).attrs ?? {};
-    return String(attrs.className ?? attrs.class ?? "")
-      .split(/\s+/)
-      .filter((token) => token !== "");
-  }
-
-  /** The nav column and the panel column, in that order. */
-  function columnsOf(row: m.Vnode): ElementVnode[] {
-    return row.children as unknown as ElementVnode[];
-  }
-
-  it("scrolls each column on its own rather than the pane as a whole", () => {
-    // The reason this component exists: one scroller around both columns takes
-    // the section list off the top with the panel it is meant to stay beside.
-    const row = splitPane({
-      navLabel: "Sections",
-      nav: "entries",
-      content: "panel",
-    }) as m.Vnode;
-    expect(tokensOf(row)).toEqual(
-      expect.arrayContaining(["flex", "flex-1", "min-h-0"]),
-    );
-    expect(tokensOf(row)).not.toContain("overflow-y-auto");
-    for (const column of columnsOf(row)) {
-      expect(tokensOf(column)).toEqual(
-        expect.arrayContaining(["overflow-y-auto", "min-h-0"]),
-      );
-    }
-  });
-
-  it("labels the nav and keeps its entries in real child position", () => {
-    // Children, not attrs: a nav handed to a component through an attr would
-    // sit outside every vnode.children walk, the call-site tests included.
-    const entry = m("button", { "data-entry": "one" });
-    const row = splitPane({
-      navLabel: "Settings sections",
-      nav: entry,
-      content: "panel",
-    }) as m.Vnode;
-    const [nav, content] = columnsOf(row);
-    expect((nav as unknown as { tag: string }).tag).toBe("nav");
-    expect(nav.attrs["aria-label"]).toBe("Settings sections");
-    expect((nav as unknown as m.Vnode).children).toContain(entry);
-    expect(tokensOf(content)).toContain("flex-1");
-  });
-
-  it("appends extra classes as whole literals the Tailwind scan can see", () => {
-    const row = splitPane({
-      navLabel: "Sections",
-      nav: null,
-      content: null,
-      extra: "mt-8",
-      contentExtra: "flex flex-col",
-    }) as m.Vnode;
-    expect(tokensOf(row)).toContain("mt-8");
-    expect(tokensOf(columnsOf(row)[1])).toEqual(
-      expect.arrayContaining(["flex", "flex-col", "overflow-y-auto"]),
-    );
-  });
-
-  it("fills and bolds the selected nav entry only", () => {
-    expect(navEntryClass(true)).toContain("bg-fill-hover font-semibold");
-    expect(navEntryClass(false)).not.toContain("font-semibold");
-    // The unselected recipe survives intact underneath the selected one.
-    for (const part of navEntryClass(false).split(" ")) {
-      expect(navEntryClass(true)).toContain(part);
-    }
   });
 });
 

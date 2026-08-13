@@ -34,7 +34,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
-from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.testing import device_id_for_test
@@ -523,16 +522,3 @@ def make_resolver_with_data(
             resolver.update_services(AgentId(agent_id_str), services, labels)
 
     return resolver
-
-
-@pytest.fixture(autouse=True)
-def _forget_service_sign_in_options() -> Iterator[None]:
-    """Keep each test's latchkey double out of the next test's sign-in cache.
-
-    How a service connects is remembered for the life of the process, since it
-    is a property of the latchkey binary. Tests swap that binary for a double
-    per test, so the memo has to go with it.
-    """
-    clear_service_sign_in_options_cache()
-    yield
-    clear_service_sign_in_options_cache()

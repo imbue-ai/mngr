@@ -70,7 +70,7 @@ def _message_sender() -> MngrMessageSender:
     """Build a recording message sender bound to the test's concurrency group."""
     cg = _MESSAGE_CONCURRENCY_GROUP["cg"]
     assert cg is not None
-    return MngrMessageSender(mngr_caller=RecordingMngrCaller(), concurrency_group=cg, retry_delays_seconds=())
+    return MngrMessageSender(mngr_caller=RecordingMngrCaller(), concurrency_group=cg)
 
 
 def _recorded_caller(handler: LatchkeyPermissionGrantHandler) -> RecordingMngrCaller:
@@ -1007,7 +1007,7 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
     mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
-    assert "denied" in argv[argv.index("-m") + 1].lower()
+    assert "denied" in argv[2].lower()
 
 
 def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: Path) -> None:
@@ -1143,9 +1143,8 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
-    message_text = argv[argv.index("-m") + 1]
-    assert "denied" in message_text.lower()
-    assert "not-in-catalog-scope" in message_text
+    assert "denied" in argv[2].lower()
+    assert "not-in-catalog-scope" in argv[2]
 
 
 def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Path) -> None:
@@ -1502,18 +1501,13 @@ def test_build_account_choices_keeps_a_single_sign_in_option_when_nothing_is_con
     assert selected == NEW_ACCOUNT_FORM_VALUE
 
 
-def _offered_permissions(payload: UiPredefinedPermissionDetail) -> tuple[str, ...]:
-    """Every permission the dialog offers, in the order its groups render them."""
-    return tuple(row.permission for group in payload.permission_groups for row in group.rows)
-
-
 def test_build_account_choices_promises_a_credential_form_without_browser_auth() -> None:
     """A service with no browser flow must not promise a browser sign-in."""
     choices, _ = _build_account_choices((), "alice@x", is_browser_auth_supported=False)
 
     assert [(choice.value, choice.label, choice.hint) for choice in choices] == [
-        ("alice@x", "alice@x", "not connected yet — asks you for credentials"),
-        (NEW_ACCOUNT_FORM_VALUE, "+ Add account", "asks you for credentials"),
+        ("alice@x", "alice@x", "not connected yet -- asks you for credentials"),
+        (NEW_ACCOUNT_FORM_VALUE, "Use a new account", "asks you for credentials"),
     ]
 
 
@@ -1562,87 +1556,16 @@ def test_build_request_detail_payload_mirrors_the_fragment_derivation(tmp_path: 
         pytest.fail(f"expected a predefined detail payload, got {payload!r}")
     assert payload.request_id == str(event.event_id)
     assert payload.scope == "slack-api"
-    assert "slack-read-all" in _offered_permissions(payload)
+    assert "slack-read-all" in payload.permission_schemas
     assert "slack-read-all" in payload.checked_permissions
     assert payload.rationale == "need to read a channel"
     # MISSING credentials + a browser auth option: approving will pop a
     # browser sign-in, exactly as the fragment's progress notice promises.
     assert payload.will_open_browser is True
     assert payload.new_account_value
+    assert payload.wildcard_label == "all"
     account_values = [choice.value for choice in payload.account_choices]
     assert payload.selected_account_value in account_values
-
-
-def test_build_request_detail_payload_groups_permissions_for_the_dialog(tmp_path: Path) -> None:
-    """Offered permissions arrive grouped, labelled, full access first and the wildcard last.
-
-    The dialog renders labels only, so every row must carry one, and the
-    catch-all must be flagged so the client can keep it exclusive and set it
-    apart visually.
-    """
-    handler = _build_handler(tmp_path, credential_status="valid")
-    event = create_latchkey_predefined_permission_request_event(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        permissions=("slack-chat-read",),
-        rationale="need to read a channel",
-    )
-
-    payload = handler.build_request_detail_payload(
-        req_event=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-    )
-
-    if not isinstance(payload, UiPredefinedPermissionDetail):
-        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
-    assert [(group.heading, group.is_extras) for group in payload.permission_groups] == [
-        ("Full access", False),
-        ("Chat", False),
-        ("Extras", True),
-    ]
-    # Every offered permission is grouped exactly once, and the wildcard is
-    # the sole occupant of the trailing group.
-    offered = _offered_permissions(payload)
-    catalog_info = handler.services_catalog.get_by_scope("slack-api")
-    if catalog_info is None:
-        pytest.fail("expected the test catalog to expose the slack-api scope")
-    assert sorted(offered) == sorted(catalog_info.permission_schemas)
-    assert len(offered) == len(set(offered))
-    assert [row.permission for row in payload.permission_groups[-1].rows] == [WILDCARD_PERMISSION_NAME]
-    # Labels are human-readable and never echo the schema name.
-    rows_by_permission = {row.permission: row for group in payload.permission_groups for row in group.rows}
-    assert rows_by_permission["slack-chat-read"].label == "Read chat"
-    assert rows_by_permission[WILDCARD_PERMISSION_NAME].label == "Everything (unrestricted)"
-    assert all(row.label != row.permission for row in rows_by_permission.values())
-    # Only the catch-all is flagged as the wildcard.
-    assert [row.permission for row in rows_by_permission.values() if row.is_wildcard] == [WILDCARD_PERMISSION_NAME]
-
-
-def test_build_request_detail_payload_carries_catalog_descriptions_on_the_rows(tmp_path: Path) -> None:
-    """A described permission carries that description on its own row.
-
-    The simple view shows it under the label, so it has to travel with the
-    row rather than in a separate lookup table. Permissions the catalog does
-    not describe carry an empty string, not a missing key.
-    """
-    handler = _build_handler(tmp_path, credential_status="valid")
-    event = create_latchkey_predefined_permission_request_event(
-        agent_id=str(AgentId()),
-        scope="slack-api",
-        permissions=("slack-read-all",),
-        rationale="need to read a channel",
-    )
-
-    payload = handler.build_request_detail_payload(
-        req_event=event,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
-    )
-
-    if not isinstance(payload, UiPredefinedPermissionDetail):
-        pytest.fail(f"expected a predefined detail payload, got {payload!r}")
-    rows_by_permission = {row.permission: row for group in payload.permission_groups for row in group.rows}
-    assert rows_by_permission["slack-read-all"].description == "All read operations across the Slack API."
-    assert rows_by_permission["slack-write-all"].description == ""
 
 
 class _FixedHostResolver(StaticBackendResolver):
@@ -1728,7 +1651,7 @@ def test_build_request_detail_payload_offers_but_never_auto_checks_the_wildcard(
 
     if not isinstance(payload, UiPredefinedPermissionDetail):
         pytest.fail(f"expected a predefined detail payload, got {payload!r}")
-    assert WILDCARD_PERMISSION_NAME in _offered_permissions(payload)
+    assert WILDCARD_PERMISSION_NAME in payload.permission_schemas
     assert WILDCARD_PERMISSION_NAME not in payload.checked_permissions
     assert set(payload.checked_permissions) == {"slack-read-all", "slack-chat-read"}
 

@@ -1,12 +1,7 @@
-// The workspace options panel body: the Permissions / Share machine / Machine
-// settings pane, rendered inside WorkspaceOptionsOverlay's docked card. The tab
-// strip lives in that overlay (it hangs from the titlebar icon-tabs); this owns
-// the pane title and the active pane's content.
-//
-// Share and Settings read one shared options-data load; Permissions has its
-// own, so an unreachable latchkey gateway cannot take the other two down (nor
-// they it). Only the tabs that need the options data wait behind its guard --
-// and Permissions renders its own title, so it is not behind this one either.
+// The workspace options panel body: the Share machine / Machine settings pane
+// for one shared options-data load, rendered inside WorkspaceOptionsOverlay's
+// docked card. The tab strip lives in that overlay (it hangs from the titlebar
+// icon-tabs); this owns the pane title and the active pane's content.
 
 import m from "mithril";
 import { Spinner } from "../../components/Spinner";
@@ -14,22 +9,14 @@ import { Notice } from "../../components/Notice";
 import { Button } from "../../components/Button";
 import { Icon16 } from "../../components/Icon";
 import type { OptionsTab, SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
-import type { PermissionsModel } from "../../../models/workspacePermissions";
-import { PermissionsTab } from "./PermissionsTab";
 import { SettingsGroups } from "./SettingsGroups";
 import { ShareTab } from "./ShareTab";
 
 export interface OptionsPanelAttrs {
   model: WorkspaceOptionsModel;
-  permissions: PermissionsModel;
   tab: OptionsTab;
   group: SettingsGroup;
-  /** ?section for the Permissions left nav, or null for "whatever is first". */
-  section: string | null;
   onSelectGroup: (group: SettingsGroup) => void;
-  onSelectSection: (section: string) => void;
-  /** Open the review popup on a request the Permissions tab is waiting on. */
-  onReviewRequest: (requestId: string) => void;
 }
 
 /** The pane heading (the legacy WorkspaceShareSection / WorkspaceSettingsSections
@@ -40,7 +27,7 @@ export interface OptionsPanelAttrs {
 function paneTitle(tab: OptionsTab, name: string): m.Child {
   const icon = tab === "share" ? "share" : "settings";
   const label = tab === "share" ? "Share machine:" : "Machine settings:";
-  return m("h1", { class: "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
+  return m("h1", { class: "type-heading text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
     m(Icon16, { name: icon, size: "lg", extra: "shrink-0" }),
     m("span", { class: "shrink-0" }, label),
     m("span", { class: "truncate max-w-[280px]" }, name),
@@ -50,18 +37,7 @@ function paneTitle(tab: OptionsTab, name: string): m.Child {
 export function OptionsPanel(): m.Component<OptionsPanelAttrs> {
   return {
     view(vnode) {
-      const { model, permissions, tab, group, section, onSelectGroup, onSelectSection, onReviewRequest } =
-        vnode.attrs;
-
-      if (tab === "permissions") {
-        return m(PermissionsTab, {
-          model: permissions,
-          workspaceName: model.data?.name ?? "",
-          requestedSection: section,
-          onSelectSection,
-          onReviewRequest,
-        });
-      }
+      const { model, tab, group, onSelectGroup } = vnode.attrs;
 
       if (model.status === "loading") {
         return m("p", { class: "type-body text-secondary flex items-center gap-2 pt-10" }, [

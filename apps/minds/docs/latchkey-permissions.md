@@ -32,67 +32,61 @@ second gateway URL or a different agent skill.
    `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl` with the latchkey
    service name and a one-paragraph rationale, then ends its turn and goes
    idle.
-4. **The user opens the request.** The desktop client consumes the
-   gateway's pending-request stream, but a pending request never opens
-   anything by itself: it waits behind the chat card's "Review & respond"
-   relay and the "Waiting on you" rows in a machine's Permissions tab.
-   Either one opens the permission popup as a **centered dialog** over the
-   current window, on a dim backdrop. There is no inbox drawer, no request
-   list page, and no titlebar Requests button: the popup is the only review
-   surface, and those two are the only ways in. It is not a route -- it
-   stacks over whatever is on screen, including the workspace-options panel
-   -- so dismissing it via Approve/Deny, the close button, a backdrop
-   click, or Escape returns the user to their work with nothing changed
-   underneath.
+4. **Desktop notifies the user.** The desktop client tails the agent's
+   request events file via `mngr event --follow`, adds a card to the
+   inbox drawer, and surfaces a notification.
+5. **User opens the dialog.** Clicking the card opens
+   `/inbox?selected=<event_id>` in a **modal overlay** over the current
+   window (a transparent full-window `WebContentsView` stacked above the
+   workspace, with a dim backdrop). The user's workspace view is never
+   navigated away, so dismissing the dialog -- via Approve/Deny, the close
+   button, a backdrop click, or Escape -- returns them to their work with
+   no context lost. (Opened directly in a browser, with no modal host, the
+   page degrades to a dimmed, centered card and dismissal navigates home.)
 
-   The popup shows one request at a time, headed by a "Permission request
-   for [dot] <workspace>" eyebrow. Resolving it advances to the next
-   pending request, and the popup dismisses itself when none remain; a
-   request resolved on another surface advances the popup the same way.
+   When the inbox was opened for a **single request** -- a notification
+   click, a workspace relay, or auto-open on a new request -- resolving
+   it via Approve/Deny dismisses the whole window. This is the default;
+   it prevents an unrelated, stale request from another agent suddenly
+   becoming visible after the user acts. Only when the user
+   **intentionally opens the whole inbox** via the Requests button (which
+   loads `/inbox?keep_open=1`) does resolving a request advance to the
+   next pending one instead of closing the window.
 
    The page renders a single-scope permission dialog:
-   * The dialog header is the service's brand mark in a rounded square
-     followed by the service name plainly (no monospace pill). The asking
-     machine is named once, in the popup's own "Permission request for
-     <workspace>" eyebrow, so the dialog does not repeat it. Below the
-     header sit the **Account** section (whenever anything is signed in,
-     see below) and then the agent's rationale under a **Reason** heading.
-   * By default the dialog shows a **simple, informative view**: a single
-     summary heading ("Approving will let the agent") above a read-only
-     list of what will be granted on Approve -- each permission in plain
-     English, never its schema name -- plus only the Approve / Deny
-     buttons. This keeps the common case approachable for non-technical
-     users.
-   * A small **"Adjust"** link, below the permission list and indented to
-     its text column, reveals the full **editor view**, which exposes a
-     switch per [Detent](https://github.com/imbue-ai/detent)
-     permission schema available for that scope, grouped by the area it
-     acts on. The available schemas are read from the bundled
-     `services.json` catalog (shipped with mngr_latchkey) and cached in
-     process for the lifetime of the desktop client. The selection lives in
-     the dialog rather than in the markup, so the two views are the same
-     set seen two ways and the simple view's Approve submits whatever the
-     editor was left holding. A **"Back to agent's picks"** link above the
-     editor returns to the summary and restores exactly the set the
-     request arrived with, discarding whatever was changed in the editor.
-   * The detent ``any`` schema (matches every request inside the scope)
-     is the sole member of a trailing **Extras** group, behind a divider
-     at the end of the editor, so the user can opt into unrestricted
-     access without it reading as one more area of the service. It is
-     **not** selected by default, and so never appears in the simple
-     view's read-only list. Turning it on is exclusive: the specific
-     switches gray out, and only the catch-all is submitted.
-   * The dialog preselects (and the simple view lists) the union of (a)
+   * The dialog header names the service plainly (no monospace pill) and
+     attributes the agent's rationale prominently as
+     "`<workspace>` says:" -- this is the main place the requesting
+     agent's name is surfaced. There is no separate "Workspace:" line.
+   * By default the dialog shows a **simple, informative view**: a
+     single summary sentence ("Approving will grant `<workspace>` and its
+     sibling agents the following permissions:") above a read-only list
+     of the permissions that will be granted on Approve (no checkboxes),
+     plus only the Approve / Deny buttons. This keeps the common case
+     approachable for non-technical users.
+   * A small **"Adjust"** link, rendered inside the permission list, reveals
+     the full **editor view**, which exposes a checkbox per [Detent](https://github.com/imbue-ai/detent)
+     permission schema available for that scope. The available schemas
+     are read from the bundled `services.json` catalog (shipped with
+     mngr_latchkey) and cached in process for the lifetime of the desktop
+     client. The checkbox inputs always exist in the page (the editor is
+     merely hidden by default), so the simple view's Approve still
+     submits the pre-checked set.
+   * The detent ``any`` schema (matches every request inside the scope) is
+     prepended as the first checkbox in the editor so the user can opt
+     into unrestricted access if they want. It is **not** pre-checked,
+     and so never appears in the simple view's read-only list.
+   * The dialog pre-checks (and the simple view lists) the union of (a)
      permissions already granted for that scope on the agent's host and
      (b) the permissions the agent declared in the request event.
      Approving without changes grants exactly that union; opening the
-     editor and turning more on broadens it, turning them off narrows or
-     revokes. The editor therefore doubles as a revocation UI.
-   * The Approve button stays disabled while nothing is selected, so if
-     the agent submitted an empty ``permissions`` tuple and the user has
-     no prior grants for the scope, the simple view shows a prompt to use
-     "Adjust" and the user must actively pick something there before
-     approving.
+     editor and ticking more broadens it, unticking narrows or revokes.
+     The editor therefore doubles as a revocation UI.
+   * The Approve button stays disabled while zero boxes are checked,
+     so if the agent submitted an empty ``permissions`` tuple and the
+     user has no prior grants for the scope, the simple view shows a
+     prompt to use "Adjust" and the user must actively pick something
+     there before approving.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
       `authOptions`, and `setCredentialsExample` (the same call that
@@ -126,16 +120,6 @@ second gateway URL or a different agent skill.
 7. **User denies.** The desktop client appends a `DENIED` response event
    and sends the agent a plain-English denial message. `latchkey_permissions.json`
    is not touched.
-8. **The asking workspace hears the verdict at once.** Either resolution
-   also sends the workspace a `minds:permission-request-resolved` embed
-   contract message (see `docs/embed-contract.md`), so its in-chat card
-   flips to Approved/Denied without waiting for the agent's own resolution
-   message to travel back through the transcript. It goes only to the
-   workspace that asked, and only when that workspace is the one on screen
-   -- the chrome mounts one workspace frame at a time, so no other
-   workspace has a live page to update. The transcript stays authoritative:
-   the workspace shows the shell-reported verdict only until the classified
-   one lands.
 
 ## Manual credential entry
 
@@ -166,19 +150,11 @@ Details worth knowing:
   a round trip. Approve stays disabled while any input is empty.
 
 * The account the credentials are stored under is the one the dialog's
-  **Account** dropdown selects. The dialog has two shapes, not three:
-  with nothing signed in there is no dropdown at all and Approve reads
-  "Sign in & approve", so the browser hop is not a surprise; with anything
-  signed in -- one account or several -- the dropdown appears, the account
-  the grant will ride on already selected and "+ Add account" last. A lone
-  account is not a third arrangement: a service can hold several accounts,
-  so a review that named none would leave which one unsaid. Choosing
-  "+ Add account" flips Approve back to "Sign in & approve" and leaves the
-  dropdown in place, so the choice can be taken back; nothing is signed in
-  until Approve. A service with no accounts yet resolves to latchkey's
-  unnamed default account; "+ Add account" on a service that already has
-  one also asks for an **account name** (`is_account_name_needed`), since
-  a manual connection cannot discover it the way a browser sign-in does.
+  account radio selects. "Connect" (a service with no accounts yet)
+  resolves to latchkey's unnamed default account; "Use a new account" on a
+  service that already has one also asks for an **account name**
+  (`is_account_name_needed`), since a manual connection cannot discover it
+  the way a browser sign-in does.
 
 * Two different things can go wrong, and they read differently:
 
@@ -414,11 +390,9 @@ Each entry has the shape:
   in its permission request's `scope` field.
 * `display_name` -- human-readable label shown in the dialog header.
 * `permissions` -- granular detent permission schemas the dialog offers
-  as switches. The catch-all ``any`` schema is added client-side as an
-  available option (the gateway file does not list it) at the head of
-  this list, though the dialog offers it last, in its trailing Extras
-  group; it is never preselected, but the user can opt into it
-  explicitly.
+  as checkboxes. The catch-all ``any`` schema is prepended client-side
+  as an available option (the gateway file does not list it); the
+  dialog never pre-checks it, but the user can opt into it explicitly.
 
 The minds desktop client caches the response in-process on first access
 so each request renders without re-fetching. To add a new builtin
@@ -502,73 +476,6 @@ Two per-service actions manage accounts:
 
 Below the accounts, the panel shows the existing per-workspace grants
 ("Allowed on all accounts:"), which are unchanged.
-
-This page is app-wide. To edit what one machine's agents may reach, see
-[Permissions tab (per machine)](#permissions-tab-per-machine) below.
-
-## Permissions tab (per machine)
-
-The workspace options panel's **Permissions** tab is the other half of the
-story above: Settings owns accounts across the app, this owns what agents
-in *one* machine may reach. It renders every permission that machine's
-host file can carry as a toggle, so the file is editable without going
-back through a request.
-
-The left nav has one entry per **connection** -- a (service, account) pair
-that either has stored credentials or still appears in the host's rules,
-so a grant left behind by a disconnected account is never invisible --
-plus **Add connection**, **Local files** (the `minds-file-server-*`
-shared-path grants) and **Other machines** (the `minds-workspaces-*`
-verbs). A "Waiting on you" strip leads the pane when this machine's agents
-have pending requests; each row opens the review popup on that request.
-
-Three properties are worth knowing:
-
-* **A flip posts one permission, and the server answers with the whole
-  view.** The client sends only the permission it flipped and its new
-  state; the desktop client reads the host's permissions file, recomputes
-  the affected rule's *complete* permission set, and writes that through
-  the gateway's `permissions` extension -- never a diff. Recomputing
-  server-side is what keeps a buggy or hostile client from clobbering the
-  baseline permissions that share the `latchkey-self` rule with the
-  toggleable ones. The response is the refreshed view, adopted verbatim,
-  so the pane shows what was stored rather than what it hoped for; a
-  refused write leaves the screen exactly as it was, with the reason
-  beside the row. Turning a connector rule's last permission off deletes
-  the rule rather than leaving an empty one behind.
-
-* **Add connection connects a service two ways**, because latchkey does:
-  the browser sign-in for the services that have one, and -- for AWS,
-  Coolify and the like -- a form with one input per value the service's
-  own `setCredentialsExample` asks for, stored by running that command
-  (see [Manual credential entry](#manual-credential-entry)). Which of the
-  two travels with each offered service, so the pane never offers a
-  sign-in that cannot happen. Either way the new account arrives with
-  nothing granted.
-
-* **Revoke all and Sign out are different in scope, deliberately.**
-  *Revoke all*, in a connection's heading, drops that account's grants
-  **on this machine only**; the account stays signed in and its grants on
-  other machines are untouched. *Sign out*, at the foot of the panel,
-  clears the stored credential itself -- so the account is gone from
-  **every** machine, and its grants, which would otherwise have nothing
-  behind them, are stripped from every active workspace's host file. It
-  asks first, naming the service and account. An account with leftover
-  grants but no stored credential offers no Sign out -- there is nothing
-  left to clear -- and its toggles can be turned off but not on, since
-  turning one on would grant something with no credentials behind it.
-
-Re-enabling a `latchkey-self` toggle needs the permission's schema
-definition to still be in the host file -- detent fails the whole check on
-a reference it cannot resolve. Revoking leaves the definition there
-precisely so the row can be turned back on. A grant whose definition has
-gone can still be turned off, but not back on: only the agent asking again
-brings it back.
-
-The pane loads independently of the panel's other tabs. A latchkey gateway
-that cannot be reached shows as "permissions can't be loaded" rather than
-an empty, misleading "nothing granted", and does not take Share machine or
-Machine settings down with it.
 
 ## Agent-side responsibilities
 

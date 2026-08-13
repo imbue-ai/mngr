@@ -7,11 +7,7 @@
 import m from "mithril";
 import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { Shell } from "./views/shell/Shell";
-import {
-  isWorkspaceOverlayPath,
-  workspaceDisplayIdFromPath,
-  workspaceSurfaceIdFromPath,
-} from "./views/shell/classify";
+import { workspaceDisplayIdFromPath, workspaceSurfaceIdFromPath } from "./views/shell/classify";
 import type { ShellState } from "./views/shell/shell-state";
 import { DevStyleguide } from "./views/pages/DevStyleguide";
 import { AccountsPage } from "./views/pages/AccountsPage";
@@ -56,8 +52,6 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   // The options overlay: rendered by the Shell OVER the workspace surface.
   { path: "/workspace/:agentId/options", component: WorkspaceOptionsPage },
   { path: "/workspace/:agentId/backups", component: WorkspaceBackupsPage },
-  // The request-review popup: an app-overlay route the Shell floats as a
-  // centered card, showing one request at a time and never a list.
   { path: "/inbox", component: InboxPage },
   { path: "/destroying/:agentId", component: DestroyingPage },
   { path: "/agents/:agentId/recovery", component: RecoveryPage },
@@ -80,10 +74,6 @@ export function mountRouter(root: Element, shell: ShellState): void {
       // Settings never tears down and reloads the workspace iframe.
       const workspaceParam = workspaceSurfaceIdFromPath(path);
       shell.handleRouteChanged(path, search);
-      // The options panel an app-level modal was opened over: the same page as
-      // the routed one on the options route, so the Shell's single slot for it
-      // keeps one component instance (and its loaded models) across the open.
-      const panelPath = (shell.panelRouteBehindOverlay ?? "").split("?")[0];
       return m(Shell, {
         shell,
         routePath: path,
@@ -92,7 +82,6 @@ export function mountRouter(root: Element, shell: ShellState): void {
         // The Home surface an app-level modal (settings/accounts/help) floats
         // over when no workspace is behind it; the router owns page identity.
         homeContent: m(LandingPage),
-        optionsContent: isWorkspaceOverlayPath(panelPath) ? m(WorkspaceOptionsPage) : null,
       });
     },
   });

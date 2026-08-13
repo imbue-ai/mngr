@@ -1,15 +1,14 @@
-// Inbox model: the pending-request queue + per-kind detail payloads + the
-// grant/deny flow behind the request-review popup.
+// Inbox model: typed card list + per-kind detail payloads + grant/deny flow.
 //
 // Ports the legacy Inbox.jinja shell semantics onto the /ui/api inbox routes:
-// one request shown at a time, Approve busy states (progress -> granted/denied
-// / needs-manual-credentials / failed), fire-and-forget Deny, advancing to the
-// next pending request on resolution (closing when none remain), the
+// master/detail selection, Approve busy states (progress -> granted/denied /
+// needs-manual-credentials / failed), fire-and-forget Deny with "(denying...)"
+// cards, advance-after-resolution vs dismiss (keep-open semantics), the
 // file-sharing path validation (home expansion + within-roots), and the
 // predefined dialog's wildcard-permission exclusivity. Grants/denies submit
 // the SAME form fields to the legacy /requests/<id>/grant|deny routes.
 
-import type { UiPermissionGrantGroup } from "../generated/ui";
+import type { RequestsStore } from "./requests";
 
 export interface InboxCard {
   id: string;
@@ -17,9 +16,6 @@ export interface InboxCard {
   ws_name: string;
   display_name: string;
   accent: string;
-  /** The WORKSPACE the request belongs to, not the sibling agent that filed
-   * it (see UiInboxCard). Empty when it could not be resolved. */
-  workspace_agent_id: string;
 }
 
 export interface PermissionAccountChoice {
@@ -61,15 +57,14 @@ export interface PredefinedPermissionDetail {
   rationale: string;
   scope: string;
   display_name: string;
-  /** Catalog service whose brand mark leads the dialog; "" when it has none. */
-  service_name: string;
-  /** Every offered permission, grouped: full access first, the wildcard last. */
-  permission_groups: UiPermissionGrantGroup[];
+  permission_schemas: string[];
+  description_by_permission_name: Record<string, string>;
   checked_permissions: string[];
   account_choices: PermissionAccountChoice[];
   selected_account_value: string;
   new_account_value: string;
   wildcard_permission: string;
+  wildcard_label: string;
   will_open_browser: boolean;
   manual_credentials: ManualCredentialsPrompt | null;
 }
@@ -134,8 +129,7 @@ export type InboxDetail =
   | UnavailableDetail;
 
 export interface GrantResponse {
-  outcome:
-    "GRANTED" | "DENIED" | "NEEDS_MANUAL_CREDENTIALS" | "FAILED" | string;
+  outcome: "GRANTED" | "DENIED" | "NEEDS_MANUAL_CREDENTIALS" | "FAILED" | string;
   message?: string;
   manual_credentials?: ManualCredentialsPrompt;
 }
@@ -148,19 +142,8 @@ export function expandSharePathHome(value: string, homeDir: string): string {
   return value;
 }
 
-/** The inverse, for display: a path under the home directory reads as `~/...`. */
-export function collapseSharePathHome(value: string, homeDir: string): string {
-  if (!homeDir) return value;
-  if (value === homeDir) return "~";
-  if (value.startsWith(homeDir + "/")) return "~" + value.slice(homeDir.length);
-  return value;
-}
-
 /** Case-insensitive, purely lexical at-or-beneath check mirroring the server. */
-export function isSharePathWithinRoots(
-  value: string,
-  roots: readonly string[],
-): boolean {
+export function isSharePathWithinRoots(value: string, roots: readonly string[]): boolean {
   if (!value) return false;
   const lower = value.toLowerCase();
   return roots.some((root) => {
@@ -169,9 +152,8 @@ export function isSharePathWithinRoots(
   });
 }
 
-/** While the wildcard permission is checked, the specific boxes are disabled.
- * They keep their own state, so unticking the wildcard restores the earlier
- * selection; `submittedPermissions` is what keeps that state off the wire. */
+/** While the wildcard permission is checked, the specific boxes are disabled
+ * (they keep their own state) so only the active side gets submitted. */
 export function isPermissionCheckboxDisabled(
   permission: string,
   wildcardPermission: string,
@@ -180,43 +162,30 @@ export function isPermissionCheckboxDisabled(
   return permission !== wildcardPermission && checked.has(wildcardPermission);
 }
 
-/** The permissions a predefined grant actually submits. The wildcard is
- * mutually exclusive with the specific ones, and disabling a checkbox does
- * not unset it: a permission ticked BEFORE the wildcard would otherwise ride
- * along and grant more than the dialog shows. Enforced here, at the only
- * place the set leaves the client, so no click order (and no server-seeded
- * set) can defeat it. */
-export function submittedPermissions(
-  checked: ReadonlySet<string>,
-  wildcardPermission: string,
-): string[] {
-  if (wildcardPermission !== "" && checked.has(wildcardPermission))
-    return [wildcardPermission];
-  return [...checked];
-}
-
 interface FetchLike {
   (url: string, init?: RequestInit): Promise<Response>;
-}
-
-export type RequestVerdict = "granted" | "denied";
-
-export interface ResolvedRequest {
-  requestId: string;
-  /** The agent that asked, or null for the detail kinds that name none. */
-  agentId: string | null;
-  verdict: RequestVerdict;
 }
 
 export interface InboxModelOptions {
   /** Injected in tests; defaults to window.fetch. */
   fetcher?: FetchLike;
-  /** Called when nothing is left to review, so the popup should dismiss. */
+  /** Called when resolving a request should dismiss the inbox surface. */
   onClose?: () => void;
-  /** Called the moment a request gets a verdict, before the queue advances. */
-  onResolved?: (resolved: ResolvedRequest) => void;
   /** Injected in tests; defaults to m.redraw (loaded lazily to keep the model DOM-free). */
   redraw?: () => void;
+}
+
+// The requests store the shell attaches at boot so an open inbox page reacts
+// to live pending-set changes. Attached from the app entrypoint; null until
+// then (the page still works, it just refreshes only on its own actions).
+let attachedRequestsStore: RequestsStore | null = null;
+
+export function attachInboxRequestsStore(store: RequestsStore): void {
+  attachedRequestsStore = store;
+}
+
+export function getAttachedRequestsStore(): RequestsStore | null {
+  return attachedRequestsStore;
 }
 
 export class InboxModel {
@@ -225,6 +194,7 @@ export class InboxModel {
   isListLoaded = false;
   /** User-visible reason the last list load failed; null when it succeeded. */
   listErrorMessage: string | null = null;
+  autoOpen = true;
   selectedId: string | null = null;
   detail: InboxDetail | null = null;
   isDetailLoading = false;
@@ -242,32 +212,26 @@ export class InboxModel {
   manualCredentialValues: Record<string, string> = {};
   /** Name for the new account the manually-entered credentials belong to. */
   manualAccountName = "";
-  /** Ids whose deny POST is in flight, so advancing never lands back on one. */
+  /** Ids whose deny POST is in flight (cards fade + become unclickable). */
   denyingIds = new Set<string>();
+  /** Whether resolving a request advances to the next one (true) or dismisses (false). */
+  isKeepOpen = true;
 
   // Per-detail editable state (lives here so views stay stateless).
   checkedPermissions = new Set<string>();
   selectedAccount = "";
   filePathValue = "";
   targetScope: "selected" | "all" = "selected";
-  /** Whether the predefined dialog shows its full editor instead of the summary. */
-  isPermissionEditorShown = false;
 
   private readonly options: InboxModelOptions;
-  /** The pending set this model has already reflected, or null for "none yet".
-   * Null rather than "" so an empty pending set is still a change worth
-   * reacting to (it is exactly the set that closes the popup). */
-  private lastPendingKey: string | null = null;
+  private lastPendingKey = "";
 
   constructor(options: InboxModelOptions = {}) {
     this.options = options;
   }
 
   private fetcher(): FetchLike {
-    return (
-      this.options.fetcher ??
-      ((url, init) => fetch(url, { credentials: "same-origin", ...init }))
-    );
+    return this.options.fetcher ?? ((url, init) => fetch(url, { credentials: "same-origin", ...init }));
   }
 
   private redraw(): void {
@@ -278,22 +242,6 @@ export class InboxModel {
     this.options.onClose?.();
   }
 
-  /** Announce a verdict, naming the workspace the resolved request belongs to.
-   *
-   * Read from the CARD for `requestId`, never from the live `detail`: an
-   * approval can await a browser sign-in, and anything that re-selects the
-   * popup meanwhile (a second entry point picking another request) swaps
-   * `detail` out from under it. Attributing the verdict to whatever was on
-   * screen would post one workspace's request id into another's page. */
-  private announceResolved(requestId: string, verdict: RequestVerdict): void {
-    const card = this.cards.find((entry) => entry.id === requestId) ?? null;
-    const agentId =
-      card !== null && card.workspace_agent_id !== ""
-        ? card.workspace_agent_id
-        : null;
-    this.options.onResolved?.({ requestId, agentId, verdict });
-  }
-
   async loadList(): Promise<void> {
     try {
       const response = await this.fetcher()("/ui/api/inbox");
@@ -301,8 +249,9 @@ export class InboxModel {
         this.markListLoadFailed();
         return;
       }
-      const body = (await response.json()) as { cards: InboxCard[] };
+      const body = (await response.json()) as { cards: InboxCard[]; auto_open: boolean };
       this.cards = body.cards;
+      this.autoOpen = body.auto_open;
     } catch {
       this.markListLoadFailed();
       return;
@@ -310,23 +259,18 @@ export class InboxModel {
     this.listErrorMessage = null;
     this.isListLoaded = true;
     // Prune deny markers for cards the server has dropped.
-    this.denyingIds = new Set(
-      [...this.denyingIds].filter((id) =>
-        this.cards.some((card) => card.id === id),
-      ),
-    );
+    this.denyingIds = new Set([...this.denyingIds].filter((id) => this.cards.some((card) => card.id === id)));
     this.redraw();
   }
 
   private markListLoadFailed(): void {
-    this.listErrorMessage =
-      "Could not load requests. They will be retried automatically.";
-    // The attempt completed: the popup's live-refresh gate (isListLoaded)
+    this.listErrorMessage = "Could not load requests. They will be retried automatically.";
+    // The attempt completed: the page's live-refresh gate (isListLoaded)
     // must open so the store-driven reconciliation keeps running...
     this.isListLoaded = true;
     // ...and the pending-set key must be forgotten so that reconciliation
     // actually retries the load instead of seeing an unchanged set.
-    this.lastPendingKey = null;
+    this.lastPendingKey = "";
     this.redraw();
   }
 
@@ -341,9 +285,7 @@ export class InboxModel {
     this.manualAccountName = "";
     this.isProgressShown = false;
     this.redraw();
-    const response = await this.fetcher()(
-      `/ui/api/inbox/${encodeURIComponent(id)}/detail`,
-    );
+    const response = await this.fetcher()(`/ui/api/inbox/${encodeURIComponent(id)}/detail`);
     this.isDetailLoading = false;
     if (!response.ok) {
       this.detail = { kind: "unavailable", message: "" };
@@ -361,9 +303,6 @@ export class InboxModel {
     this.selectedAccount = "";
     this.filePathValue = "";
     this.targetScope = "selected";
-    // Each request is reviewed from its summary; only this user's Adjust
-    // click opens the editor, and never for the request that follows.
-    this.isPermissionEditorShown = false;
     if (detail.kind === "predefined") {
       this.checkedPermissions = new Set(detail.checked_permissions);
       this.selectedAccount = detail.selected_account_value;
@@ -380,7 +319,7 @@ export class InboxModel {
     }
   }
 
-  /** The account currently picked, when the detail offers a choice. */
+  /** The account radio currently selected, when the detail offers one. */
   selectedAccountChoice(): PermissionAccountChoice | null {
     const detail = this.detail;
     if (detail === null || detail.kind !== "predefined") return null;
@@ -437,51 +376,19 @@ export class InboxModel {
       return this.checkedPermissions.size > 0;
     }
     if (detail.kind === "file_sharing") {
-      const expanded = expandSharePathHome(
-        this.filePathValue.trim(),
-        detail.home_dir,
-      );
-      return (
-        expanded.length > 0 &&
-        isSharePathWithinRoots(expanded, detail.allowed_roots)
-      );
+      const expanded = expandSharePathHome(this.filePathValue.trim(), detail.home_dir);
+      return expanded.length > 0 && isSharePathWithinRoots(expanded, detail.allowed_roots);
     }
     if (detail.kind === "accounts") return true;
     return false;
-  }
-
-  /** Reveal the predefined dialog's full permission editor. The summary is
-   * the default reading of the request; only a user who wants to change the
-   * grant leaves it, and `hidePermissionEditor` brings them back. */
-  showPermissionEditor(): void {
-    this.isPermissionEditorShown = true;
-    this.redraw();
-  }
-
-  /** Leave the editor for the summary, discarding the edits made in it: the
-   * way back is "back to the agent's picks", so it restores exactly the set
-   * the detail arrived with rather than keeping a half-made selection. */
-  hidePermissionEditor(): void {
-    const detail = this.detail;
-    if (detail !== null && detail.kind === "predefined") {
-      this.checkedPermissions = new Set(detail.checked_permissions);
-    }
-    this.isPermissionEditorShown = false;
-    this.redraw();
   }
 
   /** Non-empty but out-of-roots file path: show the instant hint (legacy parity). */
   isSharePathHintShown(): boolean {
     const detail = this.detail;
     if (detail === null || detail.kind !== "file_sharing") return false;
-    const expanded = expandSharePathHome(
-      this.filePathValue.trim(),
-      detail.home_dir,
-    );
-    return (
-      expanded.length > 0 &&
-      !isSharePathWithinRoots(expanded, detail.allowed_roots)
-    );
+    const expanded = expandSharePathHome(this.filePathValue.trim(), detail.home_dir);
+    return expanded.length > 0 && !isSharePathWithinRoots(expanded, detail.allowed_roots);
   }
 
   private buildGrantForm(): FormData {
@@ -489,24 +396,15 @@ export class InboxModel {
     const detail = this.detail;
     if (detail === null) return form;
     if (detail.kind === "predefined") {
-      for (const permission of submittedPermissions(
-        this.checkedPermissions,
-        detail.wildcard_permission,
-      )) {
-        form.append("permissions", permission);
-      }
+      for (const permission of this.checkedPermissions) form.append("permissions", permission);
       form.append("account", this.selectedAccount);
       this.appendManualCredentialFields(form);
     } else if (detail.kind === "workspace") {
-      for (const permission of this.checkedPermissions)
-        form.append("permissions", permission);
+      for (const permission of this.checkedPermissions) form.append("permissions", permission);
       form.append("target_scope", this.targetScope);
     } else if (detail.kind === "file_sharing") {
       form.append("permissions", "file-sharing");
-      form.append(
-        "file_path",
-        expandSharePathHome(this.filePathValue.trim(), detail.home_dir),
-      );
+      form.append("file_path", expandSharePathHome(this.filePathValue.trim(), detail.home_dir));
     } else {
       // Accounts grants carry no parameters (all-or-nothing approve).
     }
@@ -547,10 +445,6 @@ export class InboxModel {
       }
       const data = (await response.json()) as GrantResponse;
       if (data.outcome === "GRANTED" || data.outcome === "DENIED") {
-        this.announceResolved(
-          resolvedId,
-          data.outcome === "GRANTED" ? "granted" : "denied",
-        );
         await this.advanceAfterResolution(resolvedId);
         return;
       }
@@ -567,8 +461,7 @@ export class InboxModel {
       } else {
         // FAILED (and anything unrecognized): request stays pending; show
         // the reason and let the user retry.
-        this.errorMessage =
-          data.message ?? "Approval failed; please try again.";
+        this.errorMessage = data.message ?? "Approval failed; please try again.";
       }
     } catch (error) {
       this.isProgressShown = false;
@@ -584,7 +477,6 @@ export class InboxModel {
     const resolvedId = this.selectedId;
     if (resolvedId === null) return;
     this.denyingIds.add(resolvedId);
-    this.announceResolved(resolvedId, "denied");
     // Fire-and-forget (keepalive) so the user never waits on the mngr
     // message round trip and the next-item swap starts immediately.
     void this.fetcher()(`/requests/${encodeURIComponent(resolvedId)}/deny`, {
@@ -594,78 +486,64 @@ export class InboxModel {
     void this.advanceAfterResolution(resolvedId);
   }
 
-  /** Show the next pending request after `resolvedId`, or close when the queue
-   * is empty. The successor is chosen from the queue as it stood BEFORE the
-   * reload, so the order the user was reading survives the refresh. */
   async advanceAfterResolution(resolvedId: string): Promise<void> {
-    const nextId = this.findNextPendingId(resolvedId);
-    await this.loadList();
-    const isSelectable = (id: string): boolean =>
-      this.cards.some(
-        (card) => card.id === id && !this.denyingIds.has(card.id),
-      );
-    const fallback = this.cards.find(
-      (card) => card.id !== resolvedId && !this.denyingIds.has(card.id),
-    );
-    const target =
-      nextId !== null && isSelectable(nextId) ? nextId : (fallback?.id ?? null);
-    if (target === null) {
+    if (!this.isKeepOpen) {
+      // Opened for a single request (auto-open/notification): resolving it
+      // dismisses the surface rather than surfacing an unrelated stale one.
       this.close();
       return;
     }
-    await this.select(target);
+    const nextId = this.findNextPendingId(resolvedId);
+    await this.loadList();
+    let target = nextId;
+    if (target !== null) {
+      const stillSelectable = this.cards.some((card) => card.id === target && !this.denyingIds.has(card.id));
+      if (!stillSelectable) {
+        const fallback = this.cards.find((card) => !this.denyingIds.has(card.id));
+        target = fallback ? fallback.id : null;
+      }
+    }
+    if (target !== null) {
+      await this.select(target);
+    } else {
+      this.close();
+    }
   }
 
-  /** The request that follows `resolvedId` in the queue, wrapping backwards
-   * when it was last, or null when nothing else is reviewable.
-   *
-   * Positions come from the WHOLE queue and the "is it reviewable" filter
-   * applies only to candidates. `deny` marks the resolved id as denying before
-   * it advances, so filtering first would drop the very card the successor is
-   * measured from and hand back the head of the queue -- sending a deny
-   * backwards to a request the user had already read past, while an approve on
-   * the same request went forwards. */
   private findNextPendingId(resolvedId: string): string | null {
-    const isSelectable = (card: InboxCard): boolean =>
-      card.id !== resolvedId && !this.denyingIds.has(card.id);
-    const index = this.cards.findIndex((card) => card.id === resolvedId);
-    if (index === -1) return this.cards.find(isSelectable)?.id ?? null;
-    const after = this.cards.slice(index + 1).find(isSelectable);
+    const selectable = this.cards.filter((card) => !this.denyingIds.has(card.id));
+    const index = selectable.findIndex((card) => card.id === resolvedId);
+    if (index === -1) {
+      const other = selectable.find((card) => card.id !== resolvedId);
+      return other ? other.id : null;
+    }
+    const after = selectable.slice(index + 1).find((card) => card.id !== resolvedId);
     if (after) return after.id;
-    const before = [...this.cards.slice(0, index)].reverse().find(isSelectable);
+    const before = [...selectable.slice(0, index)].reverse().find((card) => card.id !== resolvedId);
     return before ? before.id : null;
-  }
-
-  /** Record `requestIds` as the pending set already on screen, so the first
-   * live reconciliation after an open does not refetch what it just loaded. */
-  markPendingSetSeen(requestIds: readonly string[]): void {
-    this.lastPendingKey = requestIds.join(",");
   }
 
   /** React to a live pending-set change (from the requests store). */
   async refreshIfPendingChanged(requestIds: readonly string[]): Promise<void> {
-    // A running approval owns the pane -- it may be waiting on a browser
-    // sign-in -- and the key is left unconsumed so this reconciles once it
-    // finishes.
-    if (this.isApproveBusy) return;
     const key = requestIds.join(",");
     if (key === this.lastPendingKey) return;
     this.lastPendingKey = key;
     const selected = this.selectedId;
-    // Only a request this popup HAD pending can have been resolved out from
-    // under it. A selection that was never in the queue is a stale link the
-    // user followed on purpose -- it is already saying the request is gone, and
-    // advancing would swap an unrelated machine's live Approve/Deny form in
-    // under a click aimed at dismissing it (see requestedSelection in
-    // InboxPage.ts).
-    const wasPending =
-      selected !== null && this.cards.some((card) => card.id === selected);
-    if (wasPending && !requestIds.includes(selected)) {
-      // Resolved on another surface (another window, the agent giving up):
-      // advance rather than leave a form up that can no longer be submitted.
-      await this.advanceAfterResolution(selected);
-      return;
-    }
     await this.loadList();
+    if (selected !== null && !requestIds.includes(selected)) {
+      // The selection was resolved elsewhere; the server owns the copy.
+      await this.select(selected);
+    }
+    this.redraw();
+  }
+
+  setAutoOpen(enabled: boolean): void {
+    this.autoOpen = enabled;
+    void this.fetcher()("/ui/api/inbox/auto-open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+      keepalive: true,
+    }).catch(() => undefined);
   }
 }

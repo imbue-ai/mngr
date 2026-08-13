@@ -1021,19 +1021,29 @@ function handleShellEvent(evt, senderBundle) {
     if (target && !target.window.isDestroyed() && !target.window.webContents.isDestroyed()) {
       target.window.webContents.send('open-overlay', { kind: 'help', workspace: wsId, description });
     }
+  } else if (evt.type === 'focus_window') {
+    // The SPA's requests auto-open policy asks main to surface the app (the
+    // legacy main-owned flow called bring-app-to-front itself). Every window
+    // relays the same broadcast, so act once and raise the sender's window
+    // (else the most recent one).
+    if (isDuplicateShellEvent('focus_window')) return;
+    const target = senderBundle && !senderBundle.window.isDestroyed() ? senderBundle : getMostRecentWindow();
+    if (target && !target.window.isDestroyed()) {
+      if (isMac) app.focus({ steal: true });
+      focusBundle(target);
+    }
   }
 }
 
 // The frame types main acts on; anything else is dropped before dispatch.
 // discovery_health is deliberately absent: a dead consumer is surfaced by the
-// SPA's own band now, so main has nothing to do with it. focus_window is
-// likewise absent: the request popup only opens on an explicit click, so
-// nothing asks main to raise a window on its behalf.
+// SPA's own band now, so main has nothing to do with it.
 const KNOWN_SHELL_EVENT_TYPES = new Set([
   'workspaces',
   'health',
   'workspace_stopped',
   'open_help',
+  'focus_window',
 ]);
 
 // Only the SPA page itself may drive window management: the sender must be a

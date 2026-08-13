@@ -341,6 +341,14 @@ class LatchkeyServiceInfo(FrozenModel):
         return LATCHKEY_AUTH_OPTION_BROWSER in self.auth_options or not self.auth_options
 
 
+_UNKNOWN_LATCHKEY_SERVICE_INFO: Final[LatchkeyServiceInfo] = LatchkeyServiceInfo(
+    credential_status=CredentialStatus.UNKNOWN,
+    accounts=(),
+    auth_options=frozenset(),
+    set_credentials_example=None,
+)
+
+
 def _allocate_free_port(host: str) -> int:
     """Pick a free TCP port on ``host`` by binding to port 0 and reading it back.
 
@@ -615,50 +623,6 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
         destination = extensions_dir / filename
         destination.write_text(bundled_gateway_extension_content(filename), encoding="utf-8")
     return extensions_dir
-
-
-# Maximum length of a condensed latchkey failure detail. Long enough for a real
-# error sentence (Playwright messages name both URLs), short enough that a
-# surface showing it verbatim stays readable.
-_FAILURE_SUMMARY_MAX_CHARS: Final[int] = 300
-
-# Line shapes that are Node.js crash scaffolding rather than the error itself.
-# A latchkey CLI crash prints the uncaught-exception preamble, the message, a
-# Playwright "Call log:", then the stack -- only the message line is meaningful
-# to a user.
-_FAILURE_NOISE_PREFIXES: Final[tuple[str, ...]] = (
-    "node:",
-    "at ",
-    "- ",
-    "{",
-    "}",
-    "^",
-    "call log:",
-    "node.js v",
-    "throw ",
-    "triggeruncaughtexception",
-)
-
-
-def summarize_latchkey_failure(raw_output: str, fallback: str) -> str:
-    """Condense a failed latchkey CLI's output to the single meaningful line.
-
-    The raw output of a crashed ``latchkey`` invocation is a Node.js uncaught
-    -exception dump -- internal frames, a ``Call log:``, the stack -- with the
-    actual error message buried in the middle. Surfaces show the returned
-    detail verbatim, so this keeps only the first line that reads as an error
-    message: preferring an explicit ``Error: ...`` line, then the first line
-    that is not recognizable crash scaffolding, then ``fallback``. The result
-    is capped at a sentence-ish length; callers that need the full output log
-    it before summarizing.
-    """
-    lines = [line.strip() for line in raw_output.splitlines() if line.strip()]
-    meaningful = [line for line in lines if not line.lower().startswith(_FAILURE_NOISE_PREFIXES)]
-    explicit_errors = [line for line in meaningful if line.lower().startswith("error")]
-    summary = explicit_errors[0] if explicit_errors else meaningful[0] if meaningful else fallback
-    if len(summary) > _FAILURE_SUMMARY_MAX_CHARS:
-        summary = summary[: _FAILURE_SUMMARY_MAX_CHARS - 1] + "…"
-    return summary
 
 
 def merge_hidden_builtin_services(existing_config_json: str | None) -> str:
@@ -1146,18 +1110,18 @@ class Latchkey(MutableModel):
 
     # -- Service introspection -----------------------------------------------
 
-    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo | None:
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
         """Run ``latchkey services info <service>`` and return the parsed output.
 
         Latchkey emits pretty-printed JSON to stdout; we parse it and pull
         out the per-account ``credentials`` object, ``authOptions``, and
         ``setCredentialsExample``. The per-account statuses are reduced to an
         aggregate ``credential_status`` (see :func:`_aggregate_credential_status`)
-        and the individual accounts are exposed on ``accounts``. A probe that
-        fails outright (process error, malformed output) returns ``None``
-        rather than raising, so every caller decides for itself what to do
-        when latchkey has no answer instead of receiving a plausible-looking
-        guess.
+        and the individual accounts are exposed on ``accounts``. Any failure
+        (process error, malformed output, unrecognized status string) yields a
+        service info with ``CredentialStatus.UNKNOWN``, no accounts, and empty
+        ``auth_options``, so the caller can fall back to its legacy behaviour
+        rather than wrongly assuming credentials are valid.
 
         When ``is_offline`` is set, ``--offline`` is passed so latchkey
         reports the *stored* credential state without any network
@@ -1182,7 +1146,7 @@ class Latchkey(MutableModel):
             # ``ConcurrencyGroup`` wraps the underlying error (e.g. a
             # ``ProcessSetupError`` when the latchkey binary is missing /
             # unexecutable) in an exception group on context-manager exit.
-            # The docstring promises any process error degrades to ``None``
+            # The docstring promises any process error degrades to UNKNOWN
             # rather than raising, so callers (e.g. the request dialog
             # renderer) can fall back to legacy behaviour instead of
             # crashing. Anything that isn't a process-setup failure is
@@ -1190,7 +1154,7 @@ class Latchkey(MutableModel):
             if not group.only_exception_is_instance_of(ProcessSetupError):
                 raise
             logger.warning("latchkey services info {} failed to start: {}", service_name, group)
-            return None
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
         if result.returncode != 0:
             logger.warning(
                 "latchkey services info {} exited {}: {}",
@@ -1198,17 +1162,17 @@ class Latchkey(MutableModel):
                 result.returncode,
                 result.stderr.strip(),
             )
-            return None
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
 
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as e:
             logger.warning("Could not parse 'latchkey services info {}' output as JSON: {}", service_name, e)
-            return None
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
 
         if not isinstance(payload, dict):
             logger.warning("'latchkey services info {}' returned non-object JSON", service_name)
-            return None
+            return _UNKNOWN_LATCHKEY_SERVICE_INFO
 
         accounts = _parse_accounts(payload, service_name)
         return LatchkeyServiceInfo(
@@ -1532,11 +1496,6 @@ class Latchkey(MutableModel):
         ``timeout_seconds`` bounds the child; leave it ``None`` for the
         interactive flows that wait on a human.
 
-        The failure ``detail`` is user-facing (the settings page and the
-        permission dialogs show it verbatim), so it is condensed to the
-        meaningful line via :func:`summarize_latchkey_failure`; the full
-        raw output still lands in the log.
-
         When ``is_ephemeral`` is set, :data:`LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR`
         is exported to the child so any browser flow starts from a clean session
         (used by :meth:`add_account`).
@@ -1564,15 +1523,15 @@ class Latchkey(MutableModel):
         if result.returncode == 0:
             logger.info("latchkey {} {} succeeded", log_label, service_name)
             return True, ""
-        raw_message = result.stderr.strip() or result.stdout.strip() or f"latchkey {log_label} failed"
+        message = result.stderr.strip() or result.stdout.strip() or f"latchkey {log_label} failed"
         logger.warning(
             "latchkey {} {} exited {}: {}",
             log_label,
             service_name,
             result.returncode,
-            raw_message,
+            message,
         )
-        return False, summarize_latchkey_failure(raw_message, fallback=f"latchkey {log_label} failed")
+        return False, message
 
     # -- Internals -----------------------------------------------------------
 

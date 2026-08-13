@@ -157,7 +157,6 @@ def _build_handler(
         mngr_message_sender=MngrMessageSender(
             mngr_caller=RecordingMngrCaller(),
             concurrency_group=ConcurrencyGroup(name="settings-routes-test-unused"),
-            retry_delays_seconds=(),
         ),
         gateway_client=gateway_client or build_fake_gateway_client(),
     )

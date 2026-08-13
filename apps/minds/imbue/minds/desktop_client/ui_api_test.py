@@ -6,7 +6,6 @@ import pytest
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.ui_api import _sanitize_accent
-from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 
 
@@ -64,7 +63,7 @@ def test_ui_index_inlines_bootstrap_and_hashed_asset_tags(tmp_path: Path, monkey
     assert "window.__MINDS_BOOTSTRAP__ = " in html
     bootstrap_json = html.split("window.__MINDS_BOOTSTRAP__ = ", 1)[1].split(";</script>", 1)[0]
     bootstrap = json.loads(bootstrap_json)
-    assert bootstrap["schema_version"] == UI_SCHEMA_VERSION
+    assert bootstrap["schema_version"] == 1
     assert bootstrap["snapshot"]["workspaces"]["type"] == "workspaces"
     assert bootstrap["seed"]["mngr_forward_origin"].startswith("https://localhost:")
 

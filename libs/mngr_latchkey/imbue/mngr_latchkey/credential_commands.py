@@ -13,10 +13,8 @@ store -- minds renders one labeled input per placeholder and runs the command
 itself, against the account the user picked in the permission dialog.
 
 This module owns both halves of that: parsing the example into argv tokens plus
-its placeholders, and substituting the user's values back into those tokens --
-plus, in :func:`fallback_set_credentials_example`, what to ask of a service
-that advertises no example at all. Running the result is
-:meth:`imbue.mngr_latchkey.core.Latchkey.auth_set_credentials`;
+its placeholders, and substituting the user's values back into those tokens.
+Running the result is :meth:`imbue.mngr_latchkey.core.Latchkey.auth_set_credentials`;
 :func:`describe_credential_command_failure` turns what it prints on a rejected
 credential into something worth showing next to those inputs.
 """
@@ -96,17 +94,6 @@ def _distinct_placeholder_names(argv_template: tuple[str, ...]) -> tuple[str, ..
     """Return every placeholder name in the tokens, deduplicated, first appearance first."""
     names = [match.group(1) for token in argv_template for match in _PLACEHOLDER_PATTERN.finditer(token)]
     return tuple(dict.fromkeys(names))
-
-
-@pure
-def fallback_set_credentials_example(service_name: str) -> str:
-    """Return a generic ``latchkey auth set`` invocation for a service that suggested none.
-
-    ``latchkey auth set`` stores raw request headers for any service, so a
-    bearer token is the one credential that can always be asked for. Callers
-    use it so a service latchkey cannot sign in to still gets a form.
-    """
-    return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
 
 
 @pure

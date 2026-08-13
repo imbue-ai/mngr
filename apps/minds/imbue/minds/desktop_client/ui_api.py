@@ -11,8 +11,8 @@ desktop client uses.
   needs zero extra round trips).
 - ``GET /ui/ws`` runs the channel connection (auth first, then handshake --
   see ``ui_channel.py``).
-- ``/ui/api/<area>`` routes are registered by the per-area modules; each page
-  tranche owns exactly one module, so parallel work never collides here.
+- ``/ui/api/<area>`` routes are registered by the six per-area modules; each
+  page tranche owns exactly one module, so parallel work never collides here.
 """
 
 import json
@@ -33,7 +33,6 @@ from imbue.minds.desktop_client.ui_api_inbox import register_inbox_routes
 from imbue.minds.desktop_client.ui_api_lifecycle import register_lifecycle_routes
 from imbue.minds.desktop_client.ui_api_onboarding import register_onboarding_routes
 from imbue.minds.desktop_client.ui_api_options import register_options_routes
-from imbue.minds.desktop_client.ui_api_permissions import register_permissions_routes
 from imbue.minds.desktop_client.ui_api_settings import register_settings_routes
 from imbue.minds.desktop_client.ui_channel import run_ui_websocket_connection
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
@@ -267,7 +266,7 @@ def _handle_ui_websocket() -> Response:
 
 
 def create_ui_blueprint() -> Blueprint:
-    """Assemble the `/ui` blueprint: index, channel, and the per-area route groups."""
+    """Assemble the `/ui` blueprint: index, channel, and the six per-area route groups."""
     blueprint = Blueprint("ui", __name__, url_prefix="/ui")
     blueprint.add_url_rule("/", view_func=serve_spa_index)
     blueprint.add_url_rule("/api/app-status", view_func=_handle_app_status)
@@ -277,7 +276,6 @@ def create_ui_blueprint() -> Blueprint:
     register_create_routes(blueprint)
     register_settings_routes(blueprint)
     register_options_routes(blueprint)
-    register_permissions_routes(blueprint)
     register_lifecycle_routes(blueprint)
     register_inbox_routes(blueprint)
     register_onboarding_routes(blueprint)

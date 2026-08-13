@@ -33,11 +33,6 @@ describe("classifyRoute", () => {
     expect(classifyRoute("/workspace/agent-ab12/options", "tab=settings&group=backup").activeTab).toBe(
       "settings",
     );
-    expect(classifyRoute("/workspace/agent-ab12/options", "tab=permissions").activeTab).toBe("permissions");
-    expect(
-      classifyRoute("/workspace/agent-ab12/options", "tab=permissions&section=local-files").activeTab,
-    ).toBe("permissions");
-    expect(classifyRoute("/workspace/agent-ab12/options", "tab=nonsense").activeTab).toBe("share");
   });
 
   it("labels hub pages and back visibility like the legacy chrome", () => {
@@ -107,7 +102,7 @@ describe("app overlay routing", () => {
     expect(overlayBehindWorkspaceId("/help", "workspace=host-99aa")).toBe("host-99aa");
     expect(overlayBehindWorkspaceId("/help", "")).toBeNull();
     expect(overlayBehindWorkspaceId("/help", "workspace=not-an-id")).toBeNull();
-    // The request popup floats over the workspace it was opened from, or Home.
+    // The inbox drawer floats over the workspace it was opened from, or Home.
     expect(overlayBehindWorkspaceId("/inbox", "workspace=agent-ab12")).toBe("agent-ab12");
     expect(overlayBehindWorkspaceId("/inbox", "")).toBeNull();
     // The New machine template stepper floats over the machine it was opened

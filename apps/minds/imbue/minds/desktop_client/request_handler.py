@@ -25,7 +25,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.request_events import RequestEvent
-from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
 
 
@@ -77,20 +76,14 @@ class UiPredefinedPermissionDetail(FrozenModel):
     rationale: str = Field(description="Agent's stated reason for the request")
     scope: str = Field(description="Detent scope schema (e.g. 'slack-api')")
     display_name: str = Field(description="Service display name for the dialog header")
-    service_name: str = Field(
-        description=(
-            "Catalog service name whose brand mark leads the dialog header (e.g. 'slack'). Empty when the "
-            "scope resolves to no catalog service, in which case the header draws its fallback glyph."
-        )
-    )
-    permission_groups: tuple[UiPermissionGrantGroup, ...] = Field(
-        description="Every grantable permission under the scope, grouped: full access first, the wildcard last"
-    )
+    permission_schemas: tuple[str, ...] = Field(description="All grantable permission schemas under the scope")
+    description_by_permission_name: dict[str, str] = Field(description="Permission descriptions keyed by schema name")
     checked_permissions: tuple[str, ...] = Field(description="Schemas to pre-check")
     account_choices: tuple[UiPermissionAccountChoice, ...] = Field(description="Accounts the grant can attach to")
     selected_account_value: str = Field(description="Preselected account choice value")
     new_account_value: str = Field(description="Form value of the sign-a-new-account-in choice")
     wildcard_permission: str = Field(description="The catch-all permission's submitted value (e.g. 'any')")
+    wildcard_label: str = Field(description="User-facing label for the catch-all permission (e.g. 'all')")
     will_open_browser: bool = Field(description="Whether approving is expected to pop a browser sign-in")
     manual_credentials: UiManualCredentialsPrompt | None = Field(
         description=(

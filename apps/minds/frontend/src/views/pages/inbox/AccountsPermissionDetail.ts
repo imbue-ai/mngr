@@ -3,7 +3,6 @@
 
 import m from "mithril";
 import type { AccountsPermissionDetail as Detail, InboxModel } from "../../../models/inbox";
-import { Icon16 } from "../../components/Icon";
 import { PermissionsShell } from "./PermissionsShell";
 
 export interface AccountsPermissionDetailAttrs {
@@ -17,8 +16,8 @@ export function AccountsPermissionDetailView(): m.Component<AccountsPermissionDe
       const { model, detail } = vnode.attrs;
       return m(PermissionsShell, {
         model,
-        headerLabel: "Device accounts",
-        mark: m(Icon16, { name: "key", extra: "text-primary" }),
+        headerLabel: "Account access",
+        wsName: detail.ws_name,
         rationale: detail.rationale,
         progressLabel: "Granting permission...",
         body: m(

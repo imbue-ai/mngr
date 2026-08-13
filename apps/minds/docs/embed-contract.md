@@ -1,6 +1,6 @@
 # The minds embed contract
 
-Version: 2 (tracks `CONTRACT_VERSION` in
+Version: 1 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The minds chrome (the "embedder") displays workspace content in a
@@ -45,7 +45,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v2)
+## Message inventory (v1)
 
 ### workspace -> embedder
 
@@ -62,20 +62,9 @@ see the `*_PATTERN` constants in the module.
 |---|---|---|
 | `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the active dockview tab. |
 | `minds:open-ai-keys-ack` | `{}` | A minds chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
-| `minds:permission-request-resolved` | `{ requestId, resolution }` | The user resolved that permission request in the shell's review popup; `resolution` is `granted` or `denied`. |
 
 The ack's semantic is "a minds chrome is present" -- NOT "the desktop app is
 present". Plain-browser chrome acks too.
-
-`permission-request-resolved` is a display shortcut, not a decision: it flips
-the workspace's in-chat card to its verdict without waiting for the agent
-transcript's own resolution message to make the round trip. The transcript
-stays authoritative -- the workspace shows the shell-reported verdict only
-until the classified one lands. The chrome sends it exclusively to the frame
-showing the workspace that ASKED (it knows, from the request's agent id): the
-chrome hosts one workspace frame at a time, so no other workspace has a live
-page to update, and posting one workspace's request id into another
-workspace's page would leak it across that boundary for nothing.
 
 ## Compatibility policy (tolerant)
 
@@ -114,7 +103,3 @@ payloads -- to the console.
   Electron-internal crash-page affordance) was deliberately dropped: the
   desktop app handles a crashed window natively, and neither mode observes a
   crashed workspace iframe (Electron exposes no OOPIF process-gone signal).
-- **2** -- added `permission-request-resolved` (embedder -> workspace),
-  restoring the instant in-chat card flip that the deleted Electron content
-  relay used to carry. Same postMessage path in Electron and plain browser;
-  no Electron IPC is involved.

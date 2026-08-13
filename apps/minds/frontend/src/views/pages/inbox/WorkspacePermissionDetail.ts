@@ -4,7 +4,6 @@
 
 import m from "mithril";
 import type { InboxModel, WorkspacePermissionDetail as Detail, WorkspaceVerbChoice } from "../../../models/inbox";
-import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
 import { PermissionsShell } from "./PermissionsShell";
 
@@ -43,8 +42,8 @@ export function WorkspacePermissionDetailView(): m.Component<WorkspacePermission
       const targetedVerbs = detail.verbs.filter((verb) => verb.is_targeted);
       return m(PermissionsShell, {
         model,
-        headerLabel: "Other machines",
-        mark: m(Icon16, { name: "key", extra: "text-primary" }),
+        headerLabel: "Machine access",
+        wsName: detail.ws_name,
         rationale: detail.rationale,
         progressLabel: "Granting permission...",
         body: m("div", { class: "flex flex-col gap-4" }, [
