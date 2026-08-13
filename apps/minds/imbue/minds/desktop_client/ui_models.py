@@ -149,6 +149,13 @@ class UiHealthMessage(FrozenModel):
     agent_id: str = Field(description="Workspace agent id")
     status: AgentHealth = Field(description="Current health classification")
     error: str | None = Field(default=None, description="Last restart error, present for RESTART_FAILED")
+    # A client that acts on transitions has to tell a replay from a live edge,
+    # and position in the frame sequence is not something the wire format
+    # promises.
+    is_snapshot: bool = Field(
+        default=False,
+        description="Whether this frame is the connect-time replay of current state rather than a live edge",
+    )
 
 
 class UiDiscoveryHealthMessage(FrozenModel):
@@ -174,7 +181,14 @@ class UiOpenHelpMessage(FrozenModel):
 
 
 class UiWorkspaceRefreshMessage(FrozenModel):
-    """An in-workspace agent changed the workspace's own interface; rebuild the displayed view."""
+    """This workspace's displayed view no longer matches what the machine would serve; rebuild it.
+
+    Two producers: an in-workspace agent POSTing to
+    ``/api/v1/agents/<id>/refresh`` after changing the workspace's own interface
+    (see that route for why the agent has to ask), and the system-interface
+    health tracker's recovery edge, for a machine that has just started
+    answering again after serving every window a dead page.
+    """
 
     type: Literal["workspace_refresh"] = "workspace_refresh"
     agent_id: str = Field(description="Workspace agent id whose view is stale")

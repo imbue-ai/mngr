@@ -20,20 +20,14 @@ import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
 export interface RecoveryModalAttrs {
   workspaceAnyId: string;
   onClose: () => void;
-  /** Whether the switcher popover is open above this card (it out-z-indexes
-   * the card). An Escape belongs to it then, not to the card. */
-  isSidebarAbove: boolean;
+  /** Whether the shell raised this card rather than the user. Only an
+   * auto-raised card leaves on its own when the machine comes back (the shell
+   * drops it); a card the user opened stays until they close it. */
+  isAutoRaised: boolean;
 }
 
 export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
   let model: RecoveryModel | null = null;
-  let onKeyDown: ((event: KeyboardEvent) => void) | null = null;
-  // What the document listener below reads, refreshed on every draw. It cannot
-  // close over a vnode: mithril builds a fresh one per update and leaves the
-  // create-time one untouched, so the listener would keep calling the first
-  // onClose it ever saw -- and that one names the machine this instance was
-  // mounted for, not the one it has since been rebound to.
-  let currentAttrs: RecoveryModalAttrs | null = null;
 
   function bindModel(workspaceAnyId: string): void {
     model?.stop();
@@ -41,53 +35,30 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
     void model.load();
   }
 
+  // Escape is the shell's (ShellState.handleEscape), which closes this card
+  // via closeOpenRecoveryModal. A listener here would have to know what is
+  // stacked above it to stay out of the way.
   return {
     oninit(vnode) {
-      currentAttrs = vnode.attrs;
       bindModel(vnode.attrs.workspaceAnyId);
     },
     // The shell renders this at a fixed position in an unkeyed list, so moving
-    // between two machines that both have a card up keeps this instance -- and
-    // without a rebind it would keep showing, and restarting, the machine the
-    // user just left.
+    // between two machines that are both restart_failed keeps this instance --
+    // and without a rebind it would keep showing, and restarting, the machine
+    // the user just left.
     onbeforeupdate(vnode) {
-      currentAttrs = vnode.attrs;
       if (model !== null && vnode.attrs.workspaceAnyId !== model.workspaceAnyId) {
         bindModel(vnode.attrs.workspaceAnyId);
       }
       return true;
     },
-    oncreate() {
-      onKeyDown = (event: KeyboardEvent) => {
-        if (event.key !== "Escape") return;
-        // Capture phase, and stopImmediatePropagation within it. The options
-        // overlay listens for Escape on this same document node, and among
-        // bubble listeners on one node the key goes to whichever registered
-        // first -- so to whichever surface mounted first, not to the one on
-        // top. The card can open over an already-open overlay, so on the
-        // bubble phase one Escape dismisses both. Capture runs ahead of every
-        // bubble listener, so the topmost surface is the one that closes.
-        event.stopImmediatePropagation();
-        // With the switcher popover above the card, the key is the popover's:
-        // the card stays, and the propagation stop above keeps the overlays
-        // beneath from acting on a keypress that was never theirs. (Electron's
-        // escape-pressed forward is what closes the popover; its redraw lands
-        // before any next keypress, so the card takes the one after.)
-        if (currentAttrs?.isSidebarAbove === true) return;
-        currentAttrs?.onClose();
-        m.redraw();
-      };
-      document.addEventListener("keydown", onKeyDown, true);
-    },
     onremove() {
-      if (onKeyDown !== null) document.removeEventListener("keydown", onKeyDown, true);
-      onKeyDown = null;
       model?.stop();
       model = null;
     },
     view(vnode) {
       if (model === null) return null;
-      const { onClose } = vnode.attrs;
+      const { onClose, isAutoRaised } = vnode.attrs;
       return m(
         "div#recovery-modal-backdrop",
         {
@@ -120,7 +91,12 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
                 m(Spinner, { size: "sm" }),
                 "Loading...",
               ])
-            : m(RecoveryPanel, { panelId: "recovery-modal-panel", model, onClose }),
+            : m(RecoveryPanel, {
+                panelId: "recovery-modal-panel",
+                model,
+                onClose,
+                isSelfDismissing: isAutoRaised,
+              }),
       );
     },
   };

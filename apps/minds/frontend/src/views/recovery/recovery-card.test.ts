@@ -67,7 +67,7 @@ describe("RecoveryCardBody", () => {
   });
 
   it("reads a restart nobody started here as busy, not as an idle machine", () => {
-    // The same machine's card in another window can be running one, so this
+    // The unattended dispatcher restarts a wedged machine on its own, so the
     // card must not sit there offering to start a second one.
     const text = renderCard({ ...UNRESPONSIVE, health: "restarting" });
     expect(text).toContain("Restarting my-machine...");
@@ -88,6 +88,17 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain("This machine is answering again.");
     expect(text).not.toContain("isn't responding yet");
     expect(text).not.toContain("Minds is still checking what's wrong.");
+  });
+
+  it("keeps reporting the restart as running on a card that is about to dismiss itself", () => {
+    // An auto-raised card leaves once the app's own probe confirms the machine.
+    // Until then, an idle-reading card would offer a Restart button for the
+    // restart that just ran.
+    const model = modelShowing(UNRESPONSIVE);
+    model.isRestartSucceeded = true;
+    const text = renderedText(renderRoot(RecoveryCardBody, { model, isSelfDismissing: true }));
+    expect(text).toContain("Restarting...");
+    expect(text).not.toContain("Restart Machine");
   });
 });
 

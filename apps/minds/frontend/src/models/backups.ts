@@ -787,12 +787,12 @@ export class RecoveryModel {
    * follow the operation itself rather than the tracker's summary of it.
    *
    * A restart this model is not already running is attached to, so a restart
-   * dispatched elsewhere -- the same machine's card in another window -- shows
-   * its progress and its logs here too. Attaching clears the previous
-   * restart's outcome, which describes a different run. Readings taken before
-   * a restart this model was following reported its outcome never get here
-   * (``pollInfoOnce`` drops them), so an outcome is only ever cleared by a
-   * restart that started after it.
+   * dispatched elsewhere -- the unattended one, or the same machine's card in
+   * another window -- shows its progress and its logs here too. Attaching
+   * clears the previous restart's outcome, which describes a different run.
+   * Readings taken before a restart this model was following reported its
+   * outcome never get here (``pollInfoOnce`` drops them), so an outcome is
+   * only ever cleared by a restart that started after it.
    *
    * The one restart never attached to is the one this model has already given
    * up following (``pollRestartOnce``'s bound). The tracker goes on reporting

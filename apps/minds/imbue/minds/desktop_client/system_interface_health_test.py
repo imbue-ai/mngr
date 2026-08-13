@@ -608,6 +608,78 @@ def test_end_create_attempt_grace_restores_normal_probe_accounting() -> None:
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
 
 
+# -- intentional-stop suppression --
+
+
+def test_a_machine_that_answers_again_is_no_longer_a_deliberate_stop() -> None:
+    """A probe success drops the intentional-stop marker.
+
+    Entering a stopped machine from its row dispatches a start-only restart,
+    which never goes through the in-app start that clears the marker. Without
+    this, such a machine would run for the rest of the process's life with
+    unattended recovery silently switched off.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.suppress_unattended_recovery(agent_id)
+
+    tracker.record_probe_success(agent_id)
+
+    assert tracker.is_unattended_recovery_suppressed(agent_id) is False
+
+
+def test_a_stopped_machine_keeps_its_marker_while_it_stays_unreachable() -> None:
+    """Only a machine that actually answers clears the marker.
+
+    A stopped host cannot serve a probe, so the clear above can never fire for
+    one -- the suppression has to survive exactly the failures a deliberate
+    stop produces.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.suppress_unattended_recovery(agent_id)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+    assert tracker.is_unattended_recovery_suppressed(agent_id) is True
+
+
+def test_a_probe_taken_while_the_stop_runs_does_not_clear_the_marker() -> None:
+    """A stop's own command is the one window where a 200 is not the machine coming back.
+
+    ``mngr stop`` blocks for tens of seconds (a cloud host, minutes) while the
+    interface answers for the first of them, so a probe target being stopped
+    gets polled mid-stop. Clearing on that 200 would hand the machine to the
+    unattended dispatch while the stop is still running.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.suppress_unattended_recovery(agent_id, is_stop_in_flight=True)
+
+    tracker.record_probe_success(agent_id)
+
+    assert tracker.is_unattended_recovery_suppressed(agent_id) is True
+
+
+def test_a_stop_that_has_returned_hands_the_marker_back_to_the_probes() -> None:
+    """Closing the in-flight window restores the ordinary probe-cleared lifetime.
+
+    Nothing can answer a probe once the stop has actually taken the host down,
+    so a later 200 really is the machine back -- started by a route that never
+    goes through the in-app start -- and must drop the marker again.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.suppress_unattended_recovery(agent_id, is_stop_in_flight=True)
+    tracker.suppress_unattended_recovery(agent_id)
+
+    tracker.record_probe_success(agent_id)
+
+    assert tracker.is_unattended_recovery_suppressed(agent_id) is False
+
+
 def test_probe_success_clears_create_attempt_grace() -> None:
     """A reachable machine drops its grace: later failures count normally."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)

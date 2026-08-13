@@ -63,6 +63,14 @@ function main(): void {
         m.route.set("/");
       }
     },
+    onHealthChanged: (message) => {
+      // Optional in the generated type only because the field has a server-side
+      // default; every frame on the wire sets it. Absent means live.
+      shell.handleHealthChanged(message.agent_id, message.status, message.is_snapshot === true);
+    },
+    onSnapshotStart: () => {
+      shell.handleSnapshotStart();
+    },
     onOpenHelp: (message) => {
       // An in-workspace agent escalated its diagnosis. In Electron, main
       // routes the (window-broadcast) event to exactly ONE window and asks
@@ -120,36 +128,28 @@ function main(): void {
     );
     m.redraw();
   });
-  // Esc forwarded by Electron main. Main forwards EVERY Escape, so a single
-  // keypress arrives here and (when focus is in this document) as the normal
-  // in-document keydown as well.
-  //
-  // The switcher popover is closed first, unconditionally: it has no
-  // in-document Escape listener, so this forward is its only closer.
-  //
-  // The overlay chain runs only when focus sits inside a cross-origin iframe
-  // (the workspace frame, or a service iframe in a panel), whose key events
-  // never reach this document -- the case the forward exists for. Everywhere
-  // else the keypress already reached the in-document listeners, which take
-  // the topmost surface themselves: the recovery card's capture-phase listener
-  // beats the overlays' bubble ones and stops in-document propagation.
-  // Running the chain here too would spend one Escape on two surfaces -- the
-  // card's listener closes the card, and this delivery (which no
-  // stopPropagation can reach) would then find no card and close the options
-  // overlay beneath it.
-  //
-  // The card comes before the two route-based overlays because it is not one
-  // -- it can be raised over the workspace options overlay, which it sits
-  // above. It is never raised over an app-level modal, so the chain never has
-  // to choose between the two.
+  // The app's only in-document Escape handler. Capture phase so it runs ahead
+  // of anything a page or panel registers, and the key is consumed only when a
+  // surface actually took it -- an Escape nobody wanted still reaches whatever
+  // is focused.
+  document.addEventListener(
+    "keydown",
+    (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (!shell.handleEscape()) return;
+      event.stopPropagation();
+      m.redraw();
+    },
+    true,
+  );
+  // The same Escape, forwarded by Electron main, which forwards EVERY one. It
+  // is needed only for the case the listener above cannot see -- focus inside a
+  // cross-origin iframe, whose key events never reach this document -- so it is
+  // gated on that: acting on both deliveries would spend one keypress on two
+  // surfaces.
   electronBridge.onEscapePressed(() => {
-    if (shell.isSidebarOpen) {
-      shell.closeSidebar();
-    } else if (document.activeElement instanceof HTMLIFrameElement) {
-      if (!shell.closeOpenRecoveryModal() && !shell.closeWorkspaceOverlay()) {
-        shell.closeAppOverlay();
-      }
-    }
+    if (!(document.activeElement instanceof HTMLIFrameElement)) return;
+    shell.handleEscape();
     m.redraw();
   });
 

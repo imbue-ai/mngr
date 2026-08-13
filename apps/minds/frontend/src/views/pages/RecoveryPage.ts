@@ -12,8 +12,11 @@
 // known not to work, and the way onward once the machine does answer is the
 // click-through's own ?return_to, honored below.
 //
-// NEVER auto-navigated to, and it never races a restart already under way. The
-// automatic dispatches here are the machines-list click-throughs:
+// NEVER auto-navigated to, and never linked to by the shell's band, which
+// raises the modal instead. Unattended recovery is dispatched by the server's
+// health tracker on the STUCK edge, so this page reports a restart already
+// under way rather than racing to start one. The way in, and the only thing
+// that dispatches from here, is a machines-list click-through:
 // ?intent=start ("open this stopped machine" -- a plain, idempotent start) and
 // ?intent=restart ("restart this machine" -- the full stop+start bounce).
 

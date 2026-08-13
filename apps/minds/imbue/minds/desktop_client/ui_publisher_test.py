@@ -6,6 +6,7 @@ import time
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
@@ -50,27 +51,13 @@ def _build_publisher(source: _MutableWorkspaceSource) -> tuple[UiStatePublisher,
     return publisher, client_queue
 
 
-def _drain_frames(client_queue: "queue.Queue[str | None]") -> list[dict[str, object]]:
-    frames: list[dict[str, object]] = []
-    is_drained = False
-    while not is_drained:
-        try:
-            item = client_queue.get_nowait()
-        except queue.Empty:
-            is_drained = True
-            continue
-        assert item is not None
-        frames.append(json.loads(item))
-    return frames
-
-
 def test_publish_now_broadcasts_every_message_type_on_first_pass() -> None:
     source = _MutableWorkspaceSource()
     publisher, client_queue = _build_publisher(source)
 
     publisher.publish_now()
 
-    types = [frame["type"] for frame in _drain_frames(client_queue)]
+    types = [frame["type"] for frame in drain_ui_channel_frames(client_queue)]
     assert sorted(types) == ["accounts", "discovery_health", "providers", "requests", "workspaces"]
 
 
@@ -78,23 +65,23 @@ def test_publish_now_suppresses_unchanged_frames_on_second_pass() -> None:
     source = _MutableWorkspaceSource()
     publisher, client_queue = _build_publisher(source)
     publisher.publish_now()
-    _drain_frames(client_queue)
+    drain_ui_channel_frames(client_queue)
 
     publisher.publish_now()
 
-    assert _drain_frames(client_queue) == []
+    assert drain_ui_channel_frames(client_queue) == []
 
 
 def test_publish_now_rebroadcasts_only_the_changed_message_type() -> None:
     source = _MutableWorkspaceSource()
     publisher, client_queue = _build_publisher(source)
     publisher.publish_now()
-    _drain_frames(client_queue)
+    drain_ui_channel_frames(client_queue)
 
     source.entries = (UiWorkspaceEntry(id="agent-1", name="one", accent="#112233"),)
     publisher.publish_now()
 
-    frames = _drain_frames(client_queue)
+    frames = drain_ui_channel_frames(client_queue)
     assert [frame["type"] for frame in frames] == ["workspaces"]
     # Re-parse the single frame through the typed wire model rather than
     # spelunking untyped JSON: the assertion is that the broadcast frame
@@ -109,7 +96,7 @@ def test_one_shot_workspace_stopped_event_reaches_the_channel() -> None:
 
     publisher.publish_one_shot(UiWorkspaceStoppedMessage(agent_id="agent-42"))
 
-    frames = _drain_frames(client_queue)
+    frames = drain_ui_channel_frames(client_queue)
     assert frames == [{"type": "workspace_stopped", "agent_id": "agent-42"}]
 
 
@@ -119,7 +106,7 @@ def test_one_shot_open_help_event_reaches_the_channel() -> None:
 
     publisher.publish_one_shot(UiOpenHelpMessage(description="the diagnosis", workspace_agent_id="agent-7"))
 
-    frames = _drain_frames(client_queue)
+    frames = drain_ui_channel_frames(client_queue)
     assert frames == [{"type": "open_help", "description": "the diagnosis", "workspace_agent_id": "agent-7"}]
 
 
@@ -129,7 +116,7 @@ def test_one_shot_workspace_refresh_event_reaches_the_channel() -> None:
 
     publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id="agent-13"))
 
-    frames = _drain_frames(client_queue)
+    frames = drain_ui_channel_frames(client_queue)
     assert frames == [{"type": "workspace_refresh", "agent_id": "agent-13"}]
 
 
@@ -140,7 +127,7 @@ def test_publish_health_broadcasts_immediately_without_diffing() -> None:
     publisher.publish_health(UiHealthMessage(agent_id="agent-9", status=AgentHealth.STUCK, error=None))
     publisher.publish_health(UiHealthMessage(agent_id="agent-9", status=AgentHealth.STUCK, error=None))
 
-    frames = _drain_frames(client_queue)
+    frames = drain_ui_channel_frames(client_queue)
     assert [frame["type"] for frame in frames] == ["health", "health"]
 
 
@@ -191,6 +178,37 @@ def test_publish_loop_survives_an_unexpected_derive_exception() -> None:
             is_published = item is not None and json.loads(item)["type"] == "workspaces"
         exploding_publisher.stop()
     assert is_published
+
+
+def test_replayed_health_frames_say_they_are_a_replay() -> None:
+    """A snapshot health frame is marked; the same state published live is not.
+
+    The SPA raises the recovery card on the edge into RESTART_FAILED, and a
+    failure that was already there when the window connected is not an edge. The
+    frame has to say which it is: nothing about the connect sequence's shape is
+    promised, so a client inferring it from position would go on inferring it
+    after any reordering, silently.
+    """
+    broadcaster = UiChannelBroadcaster()
+    failed = UiHealthMessage(agent_id="agent-ab12", status=AgentHealth.RESTART_FAILED, error="no answer")
+    publisher = UiStatePublisher(
+        broadcaster=broadcaster,
+        derive_workspaces=_MutableWorkspaceSource().derive,
+        derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
+        derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
+        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=(), auto_open=True),
+        derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
+        derive_health_states=lambda: (failed,),
+    )
+    client_queue = broadcaster.register()
+
+    snapshot_health = [
+        frame for frame in (json.loads(raw) for raw in publisher.build_snapshot_frames()) if frame["type"] == "health"
+    ]
+    publisher.publish_health(failed)
+
+    assert [frame["is_snapshot"] for frame in snapshot_health] == [True]
+    assert [frame["is_snapshot"] for frame in drain_ui_channel_frames(client_queue)] == [False]
 
 
 def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> None:

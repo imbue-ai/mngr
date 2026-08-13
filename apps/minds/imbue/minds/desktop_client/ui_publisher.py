@@ -28,6 +28,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
@@ -127,7 +128,11 @@ class UiStatePublisher(MutableModel):
         frames.append(snapshot.providers.model_dump_json())
         frames.append(snapshot.requests.model_dump_json())
         for health_message in snapshot.health:
-            frames.append(health_message.model_dump_json())
+            # Marked here rather than at the derive: the same derive backs the
+            # inlined bootstrap JSON, and these frames are the only ones a
+            # client sees as a replay.
+            marked = health_message.model_copy_update(to_update(health_message.field_ref().is_snapshot, True))
+            frames.append(marked.model_dump_json())
         frames.append(snapshot.discovery_health.model_dump_json())
         return frames
 

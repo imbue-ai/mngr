@@ -1,8 +1,13 @@
 // The shared modal scaffold used by every Shell overlay (the workspace options
 // panel, the app-level Minds settings / Accounts / Get help modals, and the
-// Requests inbox drawer): a dim click-away backdrop plus a document-level
-// Escape handler, both calling onDismiss. Callers render the card / panel /
-// drawer as children, so the backdrop geometry and Esc wiring live in one place.
+// Requests inbox drawer): a dim click-away backdrop calling onDismiss. Callers
+// render the card / panel / drawer as children, so the backdrop geometry lives
+// in one place.
+//
+// Escape is not handled here. Every one of these overlays is a surface the
+// shell itself opens and closes, and it is the shell that knows which is on
+// top -- see ShellState.handleEscape. A listener per overlay would order the
+// key by mount order instead.
 
 import m from "mithril";
 
@@ -20,22 +25,7 @@ export interface OverlayBackdropAttrs {
 }
 
 export function OverlayBackdrop(): m.Component<OverlayBackdropAttrs> {
-  let onKeyDown: ((event: KeyboardEvent) => void) | null = null;
-
   return {
-    oncreate(vnode) {
-      onKeyDown = (event: KeyboardEvent) => {
-        if (event.key !== "Escape") return;
-        event.stopPropagation();
-        vnode.attrs.onDismiss();
-        m.redraw();
-      };
-      document.addEventListener("keydown", onKeyDown);
-    },
-    onremove() {
-      if (onKeyDown !== null) document.removeEventListener("keydown", onKeyDown);
-      onKeyDown = null;
-    },
     view(vnode) {
       const positionClass = vnode.attrs.fullWindow
         ? "inset-0 z-[110]"

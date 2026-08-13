@@ -12,8 +12,9 @@
 // titlebar above the page is the way out.
 //
 // The card describes the machine's condition, not the history of what has
-// already been tried: what the user needs from it is what is wrong now and
-// what will fix it, and a restart that has already failed is neither.
+// already been tried. The app restarts a wedged machine on its own, so an
+// account of a failed restart would usually be describing an event the user
+// never caused and never saw.
 
 import m from "mithril";
 import { Button } from "../components/Button";
@@ -71,6 +72,10 @@ export function recoverySubheading(health: string, isHostOffline: boolean): stri
 
 export interface RecoveryCardAttrs {
   model: RecoveryModel;
+  /** Whether this surface dismisses itself once the machine is confirmed
+   * reachable, which gives it a settling window a card that stays put has
+   * none of (see ``isSettling`` below). */
+  isSelfDismissing?: boolean;
 }
 
 /** Open the bug-report surface for this machine, so the report identifies the
@@ -85,13 +90,18 @@ function reportProblem(agentId: string): void {
 export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
   return {
     view(vnode) {
-      const { model } = vnode.attrs;
+      const { model, isSelfDismissing = false } = vnode.attrs;
       const info = model.info;
       if (info === null) return null;
-      // A restart nobody started from this card counts too: the same machine's
-      // card in another window. Its progress is what is actually happening to
-      // the machine, so the card must not offer a Restart button beside it.
-      const isBusy = model.isRestartRunning || info.health === "restarting";
+      // On a surface that dismisses itself, a finished restart is still waiting
+      // on the confirmation that dismisses it. Reading as idle in that window
+      // would offer a Restart button for the restart that just ran.
+      const isSettling = isSelfDismissing && model.isRestartSucceeded;
+      // A restart nobody started from this card counts too: the unattended one,
+      // or the same machine's card in another window. Its progress is what is
+      // actually happening to the machine, so the card must not offer a Restart
+      // button beside it.
+      const isBusy = model.isRestartRunning || isSettling || info.health === "restarting";
       const health = isBusy ? "restarting" : info.health;
       return m("div", { class: "flex flex-col gap-4" }, [
         m("div", { class: "flex flex-col gap-2" }, [
@@ -189,8 +199,9 @@ function Disclosure(): m.Component<DisclosureAttrs> {
  * one: every server-side restart failure hands the same message to the tracker
  * and to the operation record, and printing it twice reads as two faults. They
  * are still both consulted, since either can be the only one there -- a
- * dispatch this card never got to start reports client-side only, and a
- * restart that failed before this card opened is the tracker's alone.
+ * dispatch this card never got to start reports client-side only, and an
+ * unattended restart that failed before this card opened is the tracker's
+ * alone.
  */
 export function RecoveryTroubleshooting(): m.Component<{ model: RecoveryModel }> {
   let openSection: "errors" | "ssh" | null = null;

@@ -1,17 +1,32 @@
 """Shared non-fixture test helpers for desktop_client tests."""
 
 import hashlib
+import json
 import os
+import queue
 import re
 import subprocess
+import threading
 from collections.abc import Iterator
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+from typing import Final
 
 from loguru import logger as loguru_logger
+from pydantic import PrivateAttr
 
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 
 
 def device_id_for_test(name: str) -> HostId:
@@ -59,6 +74,143 @@ def capture_error_logs() -> Iterator[list[str]]:
         yield records
     finally:
         loguru_logger.remove(sink_id)
+
+
+def drain_ui_channel_frames(client_queue: "queue.Queue[str | None]") -> list[dict[str, Any]]:
+    """Every frame waiting on one ``/ui/ws`` connection's queue, parsed, in order.
+
+    Takes the queue ``UiChannelBroadcaster.register`` hands a connection, which
+    is how a test stands in for a window without a socket. ``None`` on it is the
+    eviction/shutdown sentinel rather than a frame, so it is skipped.
+    """
+    frames: list[dict[str, Any]] = []
+    is_drained = False
+    while not is_drained:
+        try:
+            raw = client_queue.get_nowait()
+        except queue.Empty:
+            is_drained = True
+            continue
+        if raw is None:
+            continue
+        frames.append(json.loads(raw))
+    return frames
+
+
+# -- Backend resolvers, for the host lifecycle helpers that resolve agents --
+
+_DEFAULT_WORKSPACE_AGENT_NAME: Final[AgentName] = AgentName("my-claude-agent")
+
+
+def build_resolver_with_system_services(
+    workspace_agent: AgentId,
+    services_agent: AgentId,
+    *,
+    host_id: HostId | None = None,
+    host_state: HostState | None = None,
+    workspace_agent_name: AgentName = _DEFAULT_WORKSPACE_AGENT_NAME,
+    workspace_certified_data: Mapping[str, Any] | None = None,
+) -> MngrCliBackendResolver:
+    """Build a resolver where the machine agent and system-services agent share a host.
+
+    The shape every host lifecycle helper resolves against: it is the
+    system-services agent beside the workspace that stop / start / restart
+    actually target.
+
+    ``host_state`` records an observed lifecycle state for that shared host in
+    the snapshot; None leaves the host state undiscovered.
+    ``workspace_certified_data`` carries the workspace's ``data.json`` fields --
+    the ``workspace`` / ``is_primary`` labels a caller needs when it reads
+    liveness rather than just resolving agents.
+    """
+    resolved_host_id = host_id if host_id is not None else HostId.generate()
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(workspace_agent, services_agent),
+            discovered_agents=(
+                DiscoveredAgent(
+                    host_id=resolved_host_id,
+                    agent_id=workspace_agent,
+                    agent_name=workspace_agent_name,
+                    provider_name=ProviderInstanceName("docker"),
+                    certified_data=workspace_certified_data if workspace_certified_data is not None else {},
+                ),
+                DiscoveredAgent(
+                    host_id=resolved_host_id,
+                    agent_id=services_agent,
+                    agent_name=AgentName("system-services"),
+                    provider_name=ProviderInstanceName("docker"),
+                ),
+            ),
+            host_state_by_host_id=({str(resolved_host_id): host_state} if host_state is not None else {}),
+        )
+    )
+    return resolver
+
+
+# -- Stub mngr binaries, for the host lifecycle helpers that shell out --
+
+
+def write_stub_mngr(tmp_path: Path, name: str, body: str) -> str:
+    """Write an executable stub standing in for ``mngr`` with ``body`` as its script."""
+    script = tmp_path / name
+    script.write_text(f"#!/bin/sh\n{body}\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+# Iterations of the blocking stub's 0.05s poll before it gives up on its release
+# file. Bounded because a pytest run killed mid-test orphans this detached shell
+# with nothing left to write the file it waits for. Well clear of
+# SUPPRESSION_WAIT_SECONDS, so only an abandoned run reaches the ceiling.
+_BLOCKING_STUB_MAX_POLLS: Final[int] = 1200
+
+
+def write_blocking_stub_mngr(tmp_path: Path, name: str, release_path: Path) -> str:
+    """A stub ``mngr`` that does not return until ``release_path`` appears.
+
+    Stands in for a real stop, which runs for tens of seconds to minutes while
+    the machine's system interface is already gone -- the window in which the
+    intentional-stop mark has to hold.
+    """
+    body = (
+        "polls=0\n"
+        f'while [ ! -f "{release_path}" ]; do\n'
+        "  polls=$((polls + 1))\n"
+        f"  [ $polls -ge {_BLOCKING_STUB_MAX_POLLS} ] && exit 1\n"
+        "  sleep 0.05\n"
+        "done\n"
+        "exit 0"
+    )
+    return write_stub_mngr(tmp_path, name, body)
+
+
+# Ceiling on "the blocking command has reached the point where it marks the
+# tracker": the wait ends the instant the mark lands, so this only bounds a
+# failing run. Kept inside the suite's own ``--timeout=10`` per-test budget, so
+# a regression fails on the assertion that says what went wrong rather than on
+# pytest's opaque timeout.
+SUPPRESSION_WAIT_SECONDS: Final[float] = 5.0
+
+
+class SuppressionAnnouncingTracker(SystemInterfaceHealthTracker):
+    """A tracker that signals when an intentional-stop mark is set.
+
+    Lets a test observe the mark *while* the command that set it is still
+    running, rather than polling for a state it might miss: the window under
+    test opens the moment the stop marks and closes when its ``mngr`` returns.
+    """
+
+    _suppression_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def suppress_unattended_recovery(self, agent_id: AgentId, *, is_stop_in_flight: bool = False) -> None:
+        super().suppress_unattended_recovery(agent_id, is_stop_in_flight=is_stop_in_flight)
+        self._suppression_event.set()
+
+    def wait_for_suppression(self, timeout_seconds: float) -> bool:
+        """Block until the mark is set, reporting whether it arrived in time."""
+        return self._suppression_event.wait(timeout=timeout_seconds)
 
 
 def restic_backup_a_file(repository: str, password: str, source: Path) -> None:

@@ -1,17 +1,16 @@
 """Workspace recovery: host-health probe + restart worker.
 
-These are the engine behind the recovery flow (the recovery page's diagnostics
-list and its host restart action). They are extracted here -- away
-from :mod:`app` -- so the versioned ``/api/v1`` surface (:mod:`api_v1`) can
-drive them without importing :mod:`app` (which would form an import cycle, since
-``app`` imports ``api_v1``).
+These are the engine behind the recovery flow (the recovery card's state and its
+host restart action). They are extracted here -- away from :mod:`app` -- so the
+versioned ``/api/v1`` surface (:mod:`api_v1`) can drive them without importing
+:mod:`app` (which would form an import cycle, since ``app`` imports ``api_v1``).
 
 ``probe_workspace_health`` composes a :class:`HostHealthResponse` from the
 passive discovery resolver plus a batched in-container ``mngr exec`` probe.
 ``run_restart_sequence`` is the background worker body (``mngr stop`` + ``mngr
 start``, then await recovery) that drives both the
-:class:`SystemInterfaceHealthTracker` (so the existing recovery page keeps
-working) and a :class:`WorkspaceOperationRegistryInterface` (so the v1
+:class:`SystemInterfaceHealthTracker` (so the recovery surfaces re-label) and a
+:class:`WorkspaceOperationRegistryInterface` (so the v1
 ``/workspaces/operations/restart/<id>`` resource can report restart status + logs).
 """
 
@@ -22,14 +21,18 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
+from enum import auto
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -41,6 +44,7 @@ from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
@@ -127,9 +131,9 @@ def is_recovery_classification_trustworthy(
     a snapshot that predates the outage still carries the pre-outage host state
     (a just-stopped container still reads RUNNING), which would misclassify the
     tier. Until then the verdict path treats the classification as
-    untrustworthy and surfaces INDETERMINATE. The tiers are display-only (the
-    recovery restart is dispatched unconditionally on page entry), so this gate
-    protects the page copy, not an action.
+    untrustworthy and surfaces INDETERMINATE. Nothing destructive rides on this:
+    the unattended start is dispatched on the tracker's stuck edge with no
+    verdict at all, so this gate protects the verdict's copy, not an action.
 
     When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
     lacks one) fall back to the absolute-age freshness gate. Only the
@@ -255,6 +259,160 @@ class RestartWorkerFailureHandler(MutableModel):
         self.registry.fail(self.workspace_agent_id, message)
 
 
+class RestartDispatchOutcome(UpperCaseStrEnum):
+    """What a call to :func:`dispatch_host_restart` did."""
+
+    DISPATCHED = auto()
+    ALREADY_RUNNING = auto()
+    OPERATION_CONFLICT = auto()
+    SPAWN_FAILED = auto()
+
+
+def dispatch_host_restart(
+    workspace_agent_id: AgentId,
+    tracker: SystemInterfaceHealthTracker,
+    backend_resolver: BackendResolverInterface,
+    registry: WorkspaceOperationRegistryInterface,
+    concurrency_group: ConcurrencyGroup,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    mngr_forward_port: int,
+    mngr_forward_preauth_cookie: str | None,
+    skip_stop: bool,
+) -> RestartDispatchOutcome:
+    """Claim the restart for ``workspace_agent_id`` and spawn its worker.
+
+    The single dispatch path -- the ``/api/v1`` restart route and the unattended
+    STUCK dispatch both come through here -- so there is exactly one place that
+    claims RESTARTING, opens the operation record, and spawns the worker.
+
+    ``registry.start_if_idle`` is the one claim, and winning it is what makes
+    this caller the restart's owner. Workspace operations are serialized, so the
+    workspace's single operation slot decides: a caller that loses it to another
+    restart gets ``ALREADY_RUNNING`` and must not spawn a second worker racing
+    the first's stop/start commands, and one that loses it to a backup update /
+    configure / restore gets ``OPERATION_CONFLICT``. A spawn failure leaves the
+    tracker in RESTART_FAILED and the operation FAILED, so nothing polls forever.
+
+    One atomic claim rather than a read followed by an unconditional
+    ``registry.start``, which would *replace* whatever record won the race --
+    stranding that operation's poller and letting its terminal complete/fail
+    land on the restart's record. The unattended dispatch is what makes the race
+    real: it runs on the probe thread rather than a request thread, and a
+    restore stops the workspace's services for minutes, which is exactly what
+    drives the agent STUCK in the first place.
+
+    The tracker is marked only after the slot is won, so RESTARTING is never
+    claimed for a restart that turns out not to be this caller's to run.
+    """
+    if not registry.start_if_idle(
+        workspace_agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc), None
+    ):
+        # Which operation blocked us decides what the caller is told. Re-read
+        # rather than trusting a prior read: only the claim itself is ordered
+        # against the other dispatches, and the record may already have moved on.
+        blocking_operation = registry.get(workspace_agent_id)
+        if blocking_operation is not None and blocking_operation.kind == WorkspaceOperationKind.RESTART:
+            return RestartDispatchOutcome.ALREADY_RUNNING
+        return RestartDispatchOutcome.OPERATION_CONFLICT
+
+    tracker.mark_restarting(workspace_agent_id, start_only=skip_stop)
+
+    # is_checked=False + on_failure: a crash of the one-shot worker transitions
+    # the tracker to RESTART_FAILED and the registry to FAILED (so neither the
+    # recovery surface nor the operation poller hangs). The spawn itself can
+    # also raise when the group is shutting down; since RESTARTING is already
+    # claimed, roll both into the failed state.
+    try:
+        concurrency_group.start_new_thread(
+            target=run_restart_sequence,
+            kwargs={
+                "workspace_agent_id": workspace_agent_id,
+                "tracker": tracker,
+                "backend_resolver": backend_resolver,
+                "mngr_binary": mngr_binary,
+                "mngr_host_dir": mngr_host_dir,
+                "concurrency_group": concurrency_group,
+                "mngr_forward_port": mngr_forward_port,
+                "mngr_forward_preauth_cookie": mngr_forward_preauth_cookie,
+                "registry": registry,
+                "skip_stop": skip_stop,
+            },
+            name=f"workspace-restart-{workspace_agent_id}",
+            daemon=True,
+            is_checked=False,
+            on_failure=RestartWorkerFailureHandler(
+                tracker=tracker, workspace_agent_id=workspace_agent_id, registry=registry
+            ),
+        )
+    # Both concurrency families are named on purpose: an exited group raises
+    # InvalidConcurrencyGroupStateError (a ConcurrencyGroupError), but a group
+    # that is shutting down -- or that already has a failed checked strand --
+    # raises ConcurrencyExceptionGroup, which descends from ExceptionGroup
+    # instead. An escape here would kill the health-probe thread this can be
+    # called on, whose own dispatch catches only OSError/RuntimeError/ValueError.
+    except (OSError, RuntimeError, ConcurrencyGroupError, ConcurrencyExceptionGroup) as exc:
+        # Error level so the failure reaches Sentry: the recovery surface is
+        # quiet, so a restart that never even spawned must report itself.
+        logger.opt(exception=exc).error("Failed to spawn restart worker for {}: {}", workspace_agent_id, exc)
+        message = f"Could not start the restart worker: {exc}"
+        tracker.mark_restart_failed(workspace_agent_id, message)
+        registry.fail(workspace_agent_id, message)
+        return RestartDispatchOutcome.SPAWN_FAILED
+    return RestartDispatchOutcome.DISPATCHED
+
+
+class UnattendedRecoveryDispatcher(MutableModel):
+    """Stuck-edge callback that starts a machine back up when it wedges.
+
+    A machine that stops answering gets one idempotent ``mngr start`` without
+    the user asking, and the band reports it. Running in the backend rather than
+    a renderer means it also covers a machine no window is displaying.
+
+    Wired to ``add_on_stuck_edge_callback`` rather than the general on-change
+    firehose: it must run once per outage episode, and the edge is the
+    once-per-episode event -- the state is re-reported on every failing lap.
+
+    ``start_only`` throughout: a pure ``mngr start`` checks ground truth at
+    commit time and no-ops against a host that is already running, so an
+    unattended dispatch can never bounce a live container out from under
+    someone. Bouncing a running-but-wedged machine stays a decision the user
+    makes, on the recovery card.
+    """
+
+    tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Tracker whose edges drive this.")
+    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the host to restart.")
+    registry: WorkspaceOperationRegistryInterface = Field(frozen=True, description="Operation record for the restart.")
+    concurrency_group: ConcurrencyGroup = Field(frozen=True, description="Parent group for the restart worker.")
+    mngr_binary: str = Field(frozen=True, description="mngr executable the restart shells out to.")
+    mngr_host_dir: Path = Field(frozen=True, description="MNGR_HOST_DIR for the restart's mngr calls.")
+    mngr_forward_port: int = Field(frozen=True, description="Forward port used to probe for recovery.")
+    mngr_forward_preauth_cookie: str | None = Field(frozen=True, description="Preauth cookie for that probe.")
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def __call__(self, agent_id: AgentId) -> None:
+        # A machine the user stopped is unreachable on purpose. Starting it
+        # again here would undo an action they just took, with no window open
+        # to explain why it came back.
+        if self.tracker.is_unattended_recovery_suppressed(agent_id):
+            logger.info("Not auto-starting {}: it was stopped from inside the app", agent_id)
+            return
+        outcome = dispatch_host_restart(
+            workspace_agent_id=agent_id,
+            tracker=self.tracker,
+            backend_resolver=self.backend_resolver,
+            registry=self.registry,
+            concurrency_group=self.concurrency_group,
+            mngr_binary=self.mngr_binary,
+            mngr_host_dir=self.mngr_host_dir,
+            mngr_forward_port=self.mngr_forward_port,
+            mngr_forward_preauth_cookie=self.mngr_forward_preauth_cookie,
+            skip_stop=True,
+        )
+        logger.info("Unattended recovery for {}: {}", agent_id, outcome.value)
+
+
 def run_restart_sequence(
     workspace_agent_id: AgentId,
     tracker: SystemInterfaceHealthTracker,
@@ -280,15 +438,16 @@ def run_restart_sequence(
 
     Every RESTART_FAILED transition also logs at error level: the recovery
     surface is quiet (Principle 3), so a failed restart must reach error
-    reporting even though the page renders it for the user.
+    reporting even though the card renders it for the user.
 
-    ``skip_stop`` is set by the recovery page's unconditional entry dispatch
-    (the API's ``start_only``), which fires with no knowledge of the host's
-    state: the sequence must then never bounce a live container, and ``mngr
-    start`` alone guarantees that -- it checks ground truth at commit time,
-    no-ops on a running host, and cold-boots a stopped one. The manual
-    "Restart machine" click keeps the stop step, since it may target a
-    running-but-wedged container that only a bounce fixes.
+    ``skip_stop`` is set by the dispatches that fire with no knowledge of the
+    host's state (the API's ``start_only``): the unattended one on the tracker's
+    STUCK edge, and the stopped-machine click-through. The sequence must then
+    never bounce a live container, and ``mngr start`` alone guarantees that --
+    it checks ground truth at commit time, no-ops on a running host, and
+    cold-boots a stopped one. The "Restart machine" click on the recovery card
+    keeps the stop step, since it may target a running-but-wedged container
+    that only a bounce fixes.
     """
     registry.append_log(workspace_agent_id, "Starting host restart.")
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)

@@ -97,9 +97,106 @@ describe("recovery card openness", () => {
     vi.unstubAllGlobals();
   });
 
-  it("opens for the machine the user asked about", () => {
+  it("stays shut for every state but the one that means a restart is worth offering", () => {
+    displaying(shell, AGENT);
+    for (const health of ["stuck", "restarting", "healthy"] as const) {
+      shell.handleHealthChanged(AGENT, health, false);
+      expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+    }
+  });
+
+  it("raises itself on the edge into restart_failed for the displayed machine", () => {
+    displaying(shell, AGENT);
+    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+    expect(shell.isRecoveryModalAutoRaised(AGENT)).toBe(true);
+  });
+
+  it("does not raise itself for a failure that predates the window", () => {
+    // The connect snapshot replays the state the machine is already in. That
+    // is not a transition, so the band reports it and "Open recovery" is one
+    // click away -- a card taking over a window the user just opened is not.
+    displaying(shell, AGENT);
+    shell.handleHealthChanged(AGENT, "restart_failed", true);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("drops the card it raised once the machine answers again", () => {
+    // Nothing raised it but the failure, and the failure is over -- a machine
+    // that came back on its own would otherwise leave a window reading
+    // "unresponsive" over a working machine.
+    displaying(shell, AGENT);
+    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "healthy", false);
+
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("gives up a card it raised when a fresh snapshot starts", () => {
+    // A machine that recovered while the socket was down replays no frame at
+    // all, so nothing else would ever drop the card.
+    displaying(shell, AGENT);
+    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+
+    shell.handleSnapshotStart();
+
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("keeps a card the user opened across a snapshot", () => {
+    // Theirs to close. A reconnect is not an answer to why they opened it.
+    shell.openRecoveryModal(AGENT);
+
+    shell.handleSnapshotStart();
+
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("leaves a card the user opened up when the machine answers again", () => {
+    // They asked to be there, so the card gets to tell them how it ended.
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.handleHealthChanged(AGENT, "healthy", false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("does not raise itself for a machine the window is not showing", () => {
+    displaying(shell, "agent-cd34");
+    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("does not raise itself while the discovery consumer is dead", () => {
+    // Every machine reads unhealthy then, and the card's own actions route
+    // through the forward the dead consumer feeds -- so it would offer
+    // "Restart Machine" over a band correctly saying only the app restart helps.
+    displaying(shell, AGENT);
+    shell.stores.health.applyDiscoveryHealthMessage({ type: "discovery_health", state: "blocked" });
+    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("still opens on request while the consumer is dead", () => {
+    shell.stores.health.applyDiscoveryHealthMessage({ type: "discovery_health", state: "blocked" });
     shell.openRecoveryModal(AGENT);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("does not re-raise itself over a card the user is already looking at", () => {
+    // A second restart_failed frame -- a fresh failure reason on the same
+    // machine -- must not convert a deliberately opened card into one that
+    // will dismiss itself under the user.
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    expect(shell.isRecoveryModalAutoRaised(AGENT)).toBe(false);
+  });
+
+  it("marks a card the user asked for as theirs to close", () => {
+    shell.openRecoveryModal(AGENT);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+    expect(shell.isRecoveryModalAutoRaised(AGENT)).toBe(false);
   });
 
   it("does not follow the user to a different machine", () => {
@@ -130,9 +227,10 @@ describe("recovery card openness", () => {
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 
-  it("asks the frame to re-fetch when the card goes away", () => {
-    // Dropping the card without reloading would uncover the dead page the
-    // frame still holds, and report a recovery the window does not show.
+  it("asks the frame to re-fetch when the user closes the card", () => {
+    // A card can be closed while the machine is still down, so no recovery is
+    // coming to refresh the frame. Dropping the card without reloading would
+    // uncover the dead page the frame still holds.
     let reloadCount = 0;
     shell.workspaceFrame = {
       armedWorkspaceAnyId: () => AGENT,
@@ -143,6 +241,73 @@ describe("recovery card openness", () => {
     shell.closeRecoveryModal();
 
     expect(reloadCount).toBe(1);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("leaves the reload to the server when the machine recovers under the card", () => {
+    // The recovery edge broadcasts a workspace_refresh that every window
+    // applies to its own frame. Reloading here too would be a second owner of
+    // one behavior, on the same edge, covering only the windows with a card up.
+    // Driven through the health edges, since that is the only way production
+    // reaches the drop: the card has to be one the shell raised itself.
+    let reloadCount = 0;
+    displaying(shell, AGENT);
+    shell.workspaceFrame = {
+      armedWorkspaceAnyId: () => AGENT,
+      reload: () => (reloadCount += 1),
+    };
+
+    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "healthy", false);
+
+    expect(reloadCount).toBe(0);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+});
+
+describe("ShellState.handleEscape", () => {
+  let shell: ShellState;
+
+  beforeEach(() => {
+    shell = new ShellState(createEmptyStores());
+    shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("reports the key untaken when nothing is open", () => {
+    // The listener only consumes an Escape it used, so one nobody wanted still
+    // reaches whatever is focused.
+    displaying(shell, AGENT);
+
+    expect(shell.handleEscape()).toBe(false);
+  });
+
+  it("gives the key to the switcher popover over an open card", () => {
+    // The popover is the one surface that can open ON TOP of the card, so it
+    // has to be asked first -- and the card must survive the keypress.
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(shell.isSidebarOpen).toBe(false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("closes the card once the popover above it is gone", () => {
+    // The keypress after the one the popover took: the card is next in line,
+    // not skipped over because the popover was there first.
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
+    shell.handleEscape();
+
+    expect(shell.handleEscape()).toBe(true);
+
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 });

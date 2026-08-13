@@ -228,11 +228,9 @@ export function Shell(): m.Component<ShellAttrs> {
       // The card is a modal of its own, so it is raised only where it can sit
       // on top: the machine's own route. It out-z-indexes the docked options
       // overlay there, but an app-level modal shares its z and is emitted after
-      // it, so a card raised behind one would be dimmed and unclickable -- and
-      // its capture-phase Escape listener would still take the key, spending
-      // the episode's one dismissal on a card the user never saw. A machine
-      // behind an app modal keeps its band and gets its card back on the way
-      // out.
+      // it, so a card raised behind one would be dimmed and unclickable. A
+      // machine behind an app modal keeps its band and gets its card back on
+      // the way out.
       const isRecoveryOpen =
         workspaceParam !== null && agentScoped !== null && shell.isRecoveryModalOpenFor(agentScoped);
 
@@ -255,7 +253,7 @@ export function Shell(): m.Component<ShellAttrs> {
         isRecoveryOpen && workspaceParam !== null && agentScoped !== null
           ? m(RecoveryModal, {
               workspaceAnyId: workspaceParam,
-              isSidebarAbove: shell.isSidebarOpen,
+              isAutoRaised: shell.isRecoveryModalAutoRaised(agentScoped),
               onClose: () => shell.closeRecoveryModal(),
             })
           : null,

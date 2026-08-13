@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from typing import Final
+from typing import assert_never
 
 from flask import Blueprint
 from flask import Response
@@ -170,9 +171,9 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRecord
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
-from imbue.minds.desktop_client.workspace_recovery import RestartWorkerFailureHandler
+from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
+from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
-from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
@@ -1160,6 +1161,18 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     except ValueError:
         return _json_error(f"Cannot resolve a host to destroy for {agent_id}", 409)
 
+    # A destroy makes the machine unreachable on purpose, exactly as a stop
+    # does: its interface dies within seconds and the probe loop reads that as a
+    # wedge, so without the mark the unattended dispatch runs ``mngr start``
+    # against a host that is being torn down. Marked as in flight, since the
+    # interface answers for the first seconds of a teardown and a 200 taken
+    # there must not clear it. Nothing reconciles it afterwards -- this returns
+    # 202 with the destroy still running -- which is the intent: a destroyed
+    # machine never answers again, and one whose destroy failed is the user's to
+    # deal with rather than something to cold-boot.
+    tracker = get_state().system_interface_health_tracker
+    if tracker is not None:
+        tracker.suppress_unattended_recovery(parsed_id, is_stop_in_flight=True)
     destroying.start_destroy(parsed_id, paths, host_id, mngr_binary=get_state().mngr_binary)
     return OperationHandleResponse(operation_id=str(parsed_id), kind="destroy"), 202
 
@@ -1252,6 +1265,7 @@ def _perform_workspace_lifecycle(agent_id: str, action: str) -> WorkspaceLifecyc
         get_state().mngr_host_dir,
         parent_cg,
         ui_publisher=get_state().ui_publisher,
+        health_tracker=get_state().system_interface_health_tracker,
     )
     if not outcome.is_successful:
         reason = f": {outcome.failure_reason}" if outcome.failure_reason else ""
@@ -1411,8 +1425,8 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
 
     Body: ``{"scope": "host", "start_only"?: bool}``. The restart
     bounces the whole host; ``start_only`` skips the stop step and runs only
-    the idempotent ``mngr start`` (the recovery page's unconditional entry
-    dispatch). The former ``services`` scope (an in-place
+    the idempotent ``mngr start``, for callers dispatching with no knowledge of
+    the host's state. The former ``services`` scope (an in-place
     system-services restart) was removed and is rejected with a 400. Returns
     ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
     agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
@@ -1440,80 +1454,48 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         return _json_error("Machine restart is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
-    # The recovery page dispatches its restart unconditionally on entry, with
-    # no knowledge of the host's state, and it can race the workspace's own
-    # self-recovery -- but no guard is needed here: that dispatch runs only
-    # ``mngr start`` (``start_only`` skips the stop step), which checks ground
-    # truth at commit time, targets only STOPPED agents, and starts the host
-    # idempotently -- against a live or self-recovered workspace the whole
-    # restart degrades to a no-op. A veto keyed on tracker health would
-    # misfire here: the tracker reports default-HEALTHY for never-probed
-    # workspaces (e.g. a host offline since before this process started), so
-    # it would silently drop the cold-boot those workspaces need.
-    # Serialize with the backup operations: ``registry.start`` below replaces
-    # the workspace's record, so a RUNNING backup update/configure must be
-    # rejected here (its worker's terminal complete/fail would corrupt the
-    # restart's record, and restarting would bounce the host under an
-    # in-flight backup mutation). The backup dispatch routes reject in the
-    # other direction via their atomic ``start_if_idle``.
+    # A ``start_only`` caller can race the workspace's own self-recovery, and
+    # needs no guard: ``mngr start`` checks ground truth at commit time, targets
+    # only STOPPED agents, and degrades to a no-op against a live or
+    # self-recovered workspace. Do not add a veto keyed on tracker health -- the
+    # tracker reports default-HEALTHY for never-probed workspaces (a host
+    # offline since before this process started), so it would silently drop the
+    # cold-boot those workspaces need.
     registry = state.workspace_operation_registry
-    existing_operation = registry.get(parsed_id)
-    if (
-        existing_operation is not None
-        and existing_operation.status == WorkspaceOperationStatus.RUNNING
-        and existing_operation.kind != WorkspaceOperationKind.RESTART
-    ):
-        return _operation_conflict_error(existing_operation)
-    # start_only makes the restart a pure ``mngr start`` (the recovery page's
-    # unconditional entry dispatch, which must never bounce a live container);
-    # a manual restart keeps the stop step, since it may target a running but
-    # wedged container that only a bounce fixes. Resolved before the claim so
-    # the tracker can record the restart's flavor for the recovery page's copy.
+    # A manual restart keeps the stop step, since it may target a running but
+    # wedged container that only a bounce fixes.
     skip_stop = bool(body.get("start_only", False))
 
-    # A restart already in flight for this workspace -- don't stack a second
-    # worker racing the first's stop/start commands. mark_restarting decides the
-    # RESTARTING transition under its own lock and reports whether this caller won
-    # it, so this is an atomic check-and-claim against concurrent requests.
-    if not tracker.mark_restarting(parsed_id, start_only=skip_stop):
-        return handle, 202
-
-    registry.start(parsed_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
-
-    # is_checked=False + on_failure: a crash of the one-shot worker transitions
-    # the tracker to RESTART_FAILED and the registry to FAILED (so neither the
-    # recovery page nor the operation poller hangs). The spawn itself can also
-    # raise when the group is shutting down; since we've already claimed
-    # RESTARTING, roll both into the failed state and report 503.
-    try:
-        parent_cg.start_new_thread(
-            target=run_restart_sequence,
-            kwargs={
-                "workspace_agent_id": parsed_id,
-                "tracker": tracker,
-                "backend_resolver": backend_resolver,
-                "mngr_binary": state.mngr_binary,
-                "mngr_host_dir": state.mngr_host_dir,
-                "concurrency_group": parent_cg,
-                "mngr_forward_port": state.mngr_forward_port or 0,
-                "mngr_forward_preauth_cookie": state.mngr_forward_preauth_cookie,
-                "registry": registry,
-                "skip_stop": skip_stop,
-            },
-            name=f"workspace-restart-{parsed_id}",
-            daemon=True,
-            is_checked=False,
-            on_failure=RestartWorkerFailureHandler(tracker=tracker, workspace_agent_id=parsed_id, registry=registry),
-        )
-    except (OSError, RuntimeError, ConcurrencyGroupError) as exc:
-        # Error level so the failure reaches Sentry (Principle 3: the recovery
-        # surface is quiet, so a restart that never even spawned must report).
-        logger.error("Failed to spawn restart worker for {}: {}", parsed_id, exc)
-        message = f"Could not start the restart worker: {exc}"
-        tracker.mark_restart_failed(parsed_id, message)
-        registry.fail(parsed_id, message)
-        return _json_error(message, 503)
-    return handle, 202
+    outcome = dispatch_host_restart(
+        workspace_agent_id=parsed_id,
+        tracker=tracker,
+        backend_resolver=backend_resolver,
+        registry=registry,
+        concurrency_group=parent_cg,
+        mngr_binary=state.mngr_binary,
+        mngr_host_dir=state.mngr_host_dir,
+        mngr_forward_port=state.mngr_forward_port or 0,
+        mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
+        skip_stop=skip_stop,
+    )
+    match outcome:
+        # A refused dispatch leaves the record untouched, so it still names the
+        # operation that blocked this one.
+        case RestartDispatchOutcome.OPERATION_CONFLICT:
+            return _operation_conflict_error(registry.get(parsed_id))
+        # The outcome cannot carry the cause, but the dispatch recorded it on
+        # the operation record before failing it -- and no worker ever ran, so
+        # there are no logs to look at either.
+        case RestartDispatchOutcome.SPAWN_FAILED:
+            failed_operation = registry.get(parsed_id)
+            reason = None if failed_operation is None else failed_operation.error
+            return _json_error(reason if reason is not None else "Could not start the restart worker", 503)
+        # A restart already in flight is deduped onto the same handle rather
+        # than stacking a second worker, so both read as accepted.
+        case RestartDispatchOutcome.DISPATCHED | RestartDispatchOutcome.ALREADY_RUNNING:
+            return handle, 202
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 # Operation polling is segmented by type -- ``/operations/<type>/<id>`` -- so the
@@ -1653,10 +1635,11 @@ def _dispatch_backup_worker(
     """Claim the workspace's single operation slot and spawn the worker that ends it.
 
     Shared by the update and restore routes, whose dispatch differs only in the
-    worker and its extra kwargs. The claim is atomic (``start_if_idle``, like
-    restart's ``mark_restarting``): two concurrent requests must not both spawn
-    workers mutating the same workspace, and a request that loses to a running
-    operation of any kind is rejected rather than stacked.
+    worker and its extra kwargs. The claim is atomic (``start_if_idle``, the
+    same primitive ``dispatch_host_restart`` claims with): two concurrent
+    requests must not both spawn workers mutating the same workspace, and a
+    request that loses to a running operation of any kind is rejected rather
+    than stacked.
 
     The kind's name is the single source of the wire kind, the thread name and
     the operator-facing label, so they cannot drift apart.
@@ -2376,8 +2359,9 @@ def _handle_workspace_refresh(agent_id: str) -> OkResponse:
     ``mngr start --restart system-services`` -- leaves any open view running the
     pre-change frontend against the restarted backend. A restart that completes
     quickly never trips the system-interface health tracker's STUCK threshold, so
-    no recovery-page redirect reloads the view on the agent's behalf. This route
-    is the agent's explicit request for that reload.
+    the tracker's recovery edge -- the other producer of this frame -- never
+    fires and nothing rebuilds the view on the agent's behalf. This route is the
+    agent's explicit request for that reload.
 
     Takes no body: the path ``agent_id`` (which the gateway has already authorized)
     is the whole request. It names the *workspace*, so a sub-agent asking for a
@@ -3048,7 +3032,12 @@ def _handle_stop_hosts() -> Response:
         return _json_error("Machine host control is unavailable in this configuration", 503)
     requested_ids = request.args.getlist("agent_id")
     still_running = desktop_control.stop_workspace_hosts(
-        requested_ids, state.backend_resolver, state.mngr_binary, state.mngr_host_dir, parent_cg
+        requested_ids,
+        state.backend_resolver,
+        state.mngr_binary,
+        state.mngr_host_dir,
+        parent_cg,
+        health_tracker=state.system_interface_health_tracker,
     )
     return _json_response({"still_running": still_running})
 

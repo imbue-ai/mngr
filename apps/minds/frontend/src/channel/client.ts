@@ -8,6 +8,7 @@
 
 import m from "mithril";
 import type {
+  UiHealthMessage,
   UiOpenHelpMessage,
   UiServerMessage,
   UiWorkspaceRefreshMessage,
@@ -40,6 +41,13 @@ export interface ChannelOptions {
   onWorkspaceStopped?: (message: UiWorkspaceStoppedMessage) => void;
   onOpenHelp?: (message: UiOpenHelpMessage) => void;
   onWorkspaceRefresh?: (message: UiWorkspaceRefreshMessage) => void;
+  /** Called after each health message lands. The message's own ``is_snapshot``
+   * tells a connect-time replay of current state apart from a live edge. */
+  onHealthChanged?: (message: UiHealthMessage) => void;
+  /** A fresh snapshot is about to replay: the per-workspace health store has
+   * just been cleared and everything after this is the server restating the
+   * world. */
+  onSnapshotStart?: () => void;
   /** Relays state messages to the Electron main process (window bookkeeping);
    * called for workspaces/health/workspace_stopped/open_help. */
   relayShellEvent?: (message: UiServerMessage) => void;
@@ -170,6 +178,7 @@ export class UiChannelClient {
         // snapshot only carries non-HEALTHY agents: clear the per-workspace
         // health so agents that recovered while disconnected come back clean.
         stores.health.reset();
+        this.options.onSnapshotStart?.();
         this.handleHello(message.schema_version);
         break;
       case "workspaces":
@@ -186,6 +195,7 @@ export class UiChannelClient {
         break;
       case "health":
         stores.health.applyHealthMessage(message);
+        this.options.onHealthChanged?.(message);
         break;
       case "discovery_health":
         stores.health.applyDiscoveryHealthMessage(message);

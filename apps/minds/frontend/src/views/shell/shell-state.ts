@@ -5,6 +5,7 @@
 
 import m from "mithril";
 import type { AppStores } from "../../models/boot";
+import type { WorkspaceHealth } from "../../models/health";
 import type { UiChannelClient } from "../../channel/client";
 import {
   accentSourceForRoute,
@@ -32,13 +33,15 @@ export class ShellState {
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
   /**
-   * The one piece of recovery-card state: which machine's card is up.
+   * The one piece of recovery-card state: which machine's card is up, and
+   * whether the shell raised it or the user did.
    *
-   * Not derived from health. The card is raised by asking for it -- the band's
-   * "Open recovery" -- so there is nothing to re-derive from a state that is
-   * already on screen in the band.
+   * Not derived from health. The card auto-raises on a single edge, and an edge
+   * fires once, so there is nothing to re-derive and no dismissal to remember.
+   * The isAutoRaised bit decides one thing: whether the card leaves on its own
+   * when the machine comes back.
    */
-  private openRecoveryAgentId: string | null = null;
+  private openRecovery: { agentId: string; isAutoRaised: boolean } | null = null;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
@@ -109,7 +112,7 @@ export class ShellState {
    * returning to the surface it was opened over. Prefers history so the opener
    * (Home, Create, or the workspace) is restored exactly; falls back to routing
    * to the base when there is no history (a cold-start deep link). */
-  closeAppOverlay(): void {
+  closeAppOverlay(): boolean {
     const path = this.currentRoutePath();
     const search = this.currentRouteSearch();
     // The fixed app modals are always closeable; the New machine template
@@ -118,18 +121,41 @@ export class ShellState {
     const isCloseable =
       isAppOverlayPath(path) ||
       (path === "/create/template" && overlayBehindWorkspaceId(path, search) !== null);
-    if (!isCloseable) return;
+    if (!isCloseable) return false;
     // history.back() does not update the route synchronously, so a second
     // dismissal arriving before it lands (a repeated Escape) would fire
-    // another back() and over-navigate past the opener.
-    if (this.isAppOverlayClosing) return;
+    // another back() and over-navigate past the opener. Reported as handled
+    // even so: the key belongs to the overlay that is still on its way out.
+    if (this.isAppOverlayClosing) return true;
     this.isAppOverlayClosing = true;
     if (window.history.length > 1) {
       window.history.back();
-      return;
+      return true;
     }
     const behind = overlayBehindWorkspaceId(path, search);
     m.route.set(behind !== null ? `/workspace/${behind}` : "/");
+    return true;
+  }
+
+  /**
+   * Dismiss the topmost dismissible surface, reporting whether there was one.
+   *
+   * The one place that knows what is stacked over what, so the precedence is a
+   * plain ordered list rather than something the surfaces negotiate through
+   * listener registration order (which follows mount order, not z-order).
+   *
+   * The switcher popover leads: it is the only surface that can open over the
+   * recovery card. The card comes before the two route-based overlays because
+   * it is not one -- it can be raised over the workspace options overlay, and
+   * it sits above it. It is never raised over an app-level modal, so this never
+   * has to choose between those two.
+   */
+  handleEscape(): boolean {
+    if (this.isSidebarOpen) {
+      this.closeSidebar();
+      return true;
+    }
+    return this.closeOpenRecoveryModal() || this.closeWorkspaceOverlay() || this.closeAppOverlay();
   }
 
   /** Route-change hook: track displayed workspace, repaint accent, register. */
@@ -160,8 +186,8 @@ export class ShellState {
     const heldWorkspaceAnyId = this.displayedWorkspaceAnyId ?? overlayBehindWorkspaceId(path, search);
     const heldAgentScoped =
       heldWorkspaceAnyId === null ? null : this.stores.workspaces.toAgentScopedId(heldWorkspaceAnyId);
-    if (this.openRecoveryAgentId !== null && this.openRecoveryAgentId !== heldAgentScoped) {
-      this.openRecoveryAgentId = null;
+    if (this.openRecovery !== null && this.openRecovery.agentId !== heldAgentScoped) {
+      this.openRecovery = null;
     }
     this.channel?.setClientState(path, agentScoped);
   }
@@ -199,37 +225,103 @@ export class ShellState {
 
   /** Whether the recovery card is up over `agentId`. */
   isRecoveryModalOpenFor(agentId: string): boolean {
-    return this.openRecoveryAgentId === agentId;
+    return this.openRecovery?.agentId === agentId;
+  }
+
+  /** Whether the card that is up was raised by the shell rather than asked for. */
+  isRecoveryModalAutoRaised(agentId: string): boolean {
+    return this.openRecovery?.agentId === agentId && this.openRecovery.isAutoRaised;
   }
 
   /** The user asked for the card, from the band's "Open recovery". */
   openRecoveryModal(agentId: string): void {
-    this.openRecoveryAgentId = agentId;
+    this.openRecovery = { agentId, isAutoRaised: false };
   }
 
   /**
-   * The user closed the card, and the frame behind it is reloaded.
+   * A machine came back under an auto-raised card: drop the card.
    *
-   * The frame is still holding whatever the machine served while it was down
-   * -- an error page, or a half-loaded one -- and nothing about the recovery
-   * changes its URL, so it would sit there until the user navigated away and
-   * back. A card is only ever up mid-episode, so uncovering that dead page
-   * would report a recovery the window does not show.
+   * Does not reload the stale frame behind it. The server owns that: the
+   * tracker's recovery edge broadcasts a ``workspace_refresh``, which every
+   * window applies to its own frame -- including the ones with no card up.
    */
+  finishRecovery(): void {
+    this.openRecovery = null;
+  }
+
+  /** The user closed the card, which can happen while the machine is still
+   * down -- so no recovery edge is coming, and this is the only thing that
+   * repaints the dead page the frame is holding. */
   closeRecoveryModal(): void {
     this.workspaceFrame?.reload();
-    this.openRecoveryAgentId = null;
+    this.openRecovery = null;
   }
 
   /** Close the recovery card if one is up over the displayed machine,
-   * reporting whether there was one. For the Escape that Electron forwards
-   * out of the workspace iframe, whose keydowns never reach this document. */
+   * reporting whether there was one. ``handleEscape``'s step for the card,
+   * ahead of the two route-based overlays it can be raised over.
+   *
+   * Keyed on ``displayedWorkspaceAnyId``, which ``handleRouteChanged`` derives
+   * with the same ``workspaceSurfaceIdFromPath`` the router computes the
+   * Shell's ``workspaceParam`` from -- the condition the card is rendered
+   * under. The two must keep sharing that derivation: a card held through an
+   * app-level modal (see ``handleRouteChanged``) is not rendered, and reporting
+   * the key as spent on it would leave Escape unable to dismiss the modal that
+   * is actually on top. */
   closeOpenRecoveryModal(): boolean {
     const displayed = this.displayedWorkspaceAnyId;
     if (displayed === null) return false;
     if (!this.isRecoveryModalOpenFor(this.stores.workspaces.toAgentScopedId(displayed))) return false;
     this.closeRecoveryModal();
     return true;
+  }
+
+  /**
+   * A fresh snapshot is starting: give up any card this shell raised itself.
+   *
+   * After a reconnect the window no longer knows the edge that raised the card
+   * still stands. A machine that recovered while the socket was down sends no
+   * frame to say so -- hello clears the health store and the snapshot carries
+   * only unhealthy agents -- so nothing else would ever drop the card. If the
+   * failure does stand, the snapshot says so a moment later and the band
+   * offers "Open recovery". A card the user opened themselves survives.
+   */
+  handleSnapshotStart(): void {
+    if (this.openRecovery?.isAutoRaised === true) this.openRecovery = null;
+  }
+
+  /**
+   * Raise the card on the edge into restart_failed for the displayed machine,
+   * and drop an auto-raised one on the edge back into healthy.
+   *
+   * restart_failed means the app restarted the machine and it is still
+   * unresponsive. That is the end of the unattended path, and a one-line band
+   * is too quiet for it; every other condition leaves the band as the sole
+   * surface and waits to be asked.
+   *
+   * Only an edge raises it -- ``isSnapshotFrame`` marks the connect-time replay
+   * of current state -- so a window that opens onto a machine already in this
+   * state gets the band, whose "Open recovery" is one click away.
+   *
+   * Nothing raises itself while the discovery consumer is dead: every machine
+   * reads unhealthy then, and the card's actions all route through the forward
+   * that consumer feeds, so it would offer "Restart Machine" over a band
+   * correctly saying only restarting Minds can help.
+   *
+   * A card the user opened stays up when the machine answers -- they asked to
+   * be there, and it gets to tell them how it ended.
+   */
+  handleHealthChanged(agentId: string, health: WorkspaceHealth, isSnapshotFrame: boolean): void {
+    if (health === "healthy") {
+      if (this.openRecovery?.agentId === agentId && this.openRecovery.isAutoRaised) this.finishRecovery();
+      return;
+    }
+    if (isSnapshotFrame || health !== "restart_failed") return;
+    if (this.openRecovery !== null) return;
+    if (this.stores.health.discoveryHealth === "blocked") return;
+    const displayed = this.displayedWorkspaceAnyId;
+    if (displayed === null || this.stores.workspaces.toAgentScopedId(displayed) !== agentId) return;
+    this.openRecovery = { agentId, isAutoRaised: true };
   }
 
   openSidebar(anchor: { x: number; y: number; width: number; height: number }): void {

@@ -113,6 +113,7 @@ from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
+from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.webdav import create_webdav_app
@@ -121,6 +122,7 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIV
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
+from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.enablement import list_disabled_provider_names
@@ -2175,6 +2177,23 @@ def create_desktop_client(
             ui_publisher.publish_health(_ui_health_message(_health_tracker_for_ui, str(agent_id), status))
 
         _health_tracker_for_ui.add_on_change_callback(_publish_ui_health_edge)
+
+        _health_tracker_for_ui.add_on_recovery_callback(_WorkspaceViewRefresher(publisher=ui_publisher))
+        # The tracker fires its on-change callbacks before its stuck-edge ones,
+        # so the band is already showing STUCK by the time this dispatches.
+        if root_concurrency_group is not None:
+            _health_tracker_for_ui.add_on_stuck_edge_callback(
+                UnattendedRecoveryDispatcher(
+                    tracker=_health_tracker_for_ui,
+                    backend_resolver=backend_resolver,
+                    registry=state.workspace_operation_registry,
+                    concurrency_group=root_concurrency_group,
+                    mngr_binary=state.mngr_binary,
+                    mngr_host_dir=state.mngr_host_dir,
+                    mngr_forward_port=state.mngr_forward_port or 0,
+                    mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
+                )
+            )
     if discovery_health_watchdog is not None:
         discovery_health_watchdog.add_on_change_callback(ui_publisher.notify_change)
 
@@ -2314,6 +2333,29 @@ def create_desktop_client(
     )
 
     return app
+
+
+class _WorkspaceViewRefresher(FrozenModel):
+    """Recovery callback that tells every window to rebuild a recovered machine's view.
+
+    While the machine was down each window went on painting whatever it last
+    served -- an error page, or a half-loaded one -- and recovering does not
+    change the address that view was loaded from, so the dead page would sit
+    there until the user navigated away and back.
+
+    Hung on the recovery rather than on the restart that usually causes it, so
+    it also covers a machine that came back some other way: a cold boot that
+    finished on its own, or the user starting a machine they had stopped.
+    """
+
+    publisher: UiStatePublisher = Field(
+        frozen=True, description="Publishes the refresh frame onto the /ui/ws channel every window is on."
+    )
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+
+    def __call__(self, agent_id: AgentId) -> None:
+        self.publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id=str(agent_id)))
 
 
 class _MindsApiKeyProvider(FrozenModel):

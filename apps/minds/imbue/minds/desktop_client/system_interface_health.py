@@ -22,18 +22,27 @@ The state machine:
 - HEALTHY -> STUCK: the probe loop observes an unbroken run of probe failures
   lasting at least ``stuck_threshold_seconds``. Every second of that run is
   backed by a real HTTP probe against the live workspace, so STUCK is never
-  shown for an ephemeral signal. The chrome titlebar reacts by navigating the
-  content view to the recovery page.
-- STUCK -> RESTARTING: the restart endpoint marks the tracker so the recovery
-  page can render a different label and the probe loop keeps polling.
-- RESTARTING -> RESTART_FAILED: a restart tier failed to recover the workspace
-  within its window, or its ``mngr`` commands errored. The recovery page
-  renders the failure reason and an escalate / try-again affordance.
+  shown for an ephemeral signal. The SPA shows a notice band over the
+  still-rendered machine, and unattended recovery dispatches a start-only
+  restart without waiting to be asked.
+- STUCK -> RESTARTING: the restart dispatch marks the tracker so the recovery
+  card can render a different label. The background loop stands off a
+  RESTARTING agent (see ``snapshot_probe_targets``); the restart worker's own
+  readiness probe is what decides whether the machine came back.
+- RESTARTING -> RESTART_FAILED: a restart failed to recover the workspace
+  within its window, or its ``mngr`` commands errored. The recovery card
+  renders the failure reason and the restart affordance.
 - {STUCK, RESTARTING, RESTART_FAILED} -> HEALTHY: a successful probe.
 
 State changes fire registered on-change callbacks. Callbacks are invoked
 outside the internal lock so they may take the FastAPI app's own locks
 without deadlocking.
+
+The probe-confirmed HEALTHY -> STUCK edge additionally fires the *stuck-edge*
+callbacks, a separate channel for consumers that dispatch work. Only this edge
+means "an outage just started, nothing has been tried yet": it is the sole path
+into STUCK that a probe run established, and it carries the failure-run onset
+the recovery verdict reads. ``mark_stuck`` forces the same state with neither.
 
 There is no timer: the only path to STUCK is sustained, probe-confirmed
 failure. An agent that emits one bad request and then idles is still handled,
@@ -106,7 +115,7 @@ def should_enroll_suspect_for_backend_failure(
 
 
 class AgentHealth(str, Enum):
-    """Per-agent health classification used by the tracker + chrome SSE."""
+    """Per-agent health classification used by the tracker + the /ui/ws channel."""
 
     HEALTHY = "healthy"
     STUCK = "stuck"
@@ -116,6 +125,7 @@ class AgentHealth(str, Enum):
 
 OnChangeCallback = Callable[[AgentId, AgentHealth], None]
 OnRecoveryCallback = Callable[[AgentId], None]
+OnStuckEdgeCallback = Callable[[AgentId], None]
 
 
 class _AgentRecord(MutableModel):
@@ -173,7 +183,7 @@ class SystemInterfaceHealthTracker(MutableModel):
     (which calls ``record_failure``), the background probe loop (which calls
     ``record_probe_success`` / ``record_probe_failure``), the restart worker
     (``mark_restarting`` / ``mark_restart_failed`` / ``record_probe_success``),
-    and the chrome SSE generator (which subscribes via ``add_on_change_callback``).
+    and the callback subscribers wired in ``app.py``.
     """
 
     stuck_threshold_seconds: float = Field(
@@ -185,12 +195,21 @@ class SystemInterfaceHealthTracker(MutableModel):
     _records: dict[str, _AgentRecord] = PrivateAttr(default_factory=dict)
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
     _on_recovery_callbacks: list[OnRecoveryCallback] = PrivateAttr(default_factory=list)
+    _on_stuck_edge_callbacks: list[OnStuckEdgeCallback] = PrivateAttr(default_factory=list)
     # agent_id_str -> time.monotonic() deadline of an initial-create-attempt grace window.
     # While a create attempt is in flight (and until its readiness window expires), probe
     # failures must not drive the agent to STUCK: a cold build-in-VM Lima create
     # legitimately serves 503s for many minutes, and bouncing the user to the
     # recovery page mid-provisioning is exactly the takeover this suppresses.
     _create_attempt_grace_deadline_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
+    # Agents stopped from inside the app. Their interface is legitimately
+    # unreachable, so the unattended dispatch must not read STUCK as a failure
+    # and start the host back up (see suppress_unattended_recovery).
+    _unattended_recovery_suppressed_agents: set[str] = PrivateAttr(default_factory=set)
+    # The subset of those whose stop command has not returned yet. Their interface
+    # is still answering, so a probe success is the stop in progress rather than
+    # the machine back, and must not drop the mark above.
+    _in_flight_intentional_stop_agents: set[str] = PrivateAttr(default_factory=set)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -217,6 +236,22 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         with self._lock:
             self._on_recovery_callbacks.append(callback)
+
+    def add_on_stuck_edge_callback(self, callback: OnStuckEdgeCallback) -> None:
+        """Register a callback fired only on the probe-confirmed HEALTHY -> STUCK edge.
+
+        Narrower than :meth:`add_on_change_callback` on purpose: only this edge
+        means "an outage just started, nothing has been tried yet", and it fires
+        exactly once per outage episode, so a consumer that dispatches work (the
+        unattended restart) needs no latch of its own.
+
+        Not the same as filtering on-change for a STUCK result. :meth:`mark_stuck`
+        forces the state from anywhere, with no probe run behind it and no
+        failure-run onset recorded, so a consumer keyed on the state would be
+        dispatching against an assertion rather than against observed evidence.
+        """
+        with self._lock:
+            self._on_stuck_edge_callbacks.append(callback)
 
     def remove_on_change_callback(self, callback: OnChangeCallback) -> None:
         """Unregister a previously registered change callback.
@@ -267,6 +302,76 @@ class SystemInterfaceHealthTracker(MutableModel):
             del self._create_attempt_grace_deadline_by_agent[aid_str]
             return False
         return True
+
+    # -- Intentional stops ------------------------------------------------
+
+    def suppress_unattended_recovery(self, agent_id: AgentId, *, is_stop_in_flight: bool = False) -> None:
+        """Mark ``agent_id`` as deliberately stopped, so nothing auto-starts it.
+
+        A stopped host's system interface is unreachable, which is
+        indistinguishable from a wedge by probing alone: the agent goes STUCK
+        either way. Without this marker the unattended dispatch would read a
+        stop the user just asked for as a failure and start the host again,
+        silently undoing it -- and on a metered provider, billing them for it.
+
+        Remembered intent rather than observed state: a host that crashed or
+        shut down on its own reads STOPPED too, and that is exactly the case
+        unattended recovery exists for.
+
+        Set by the in-app stop -- before its ``mngr stop`` runs, and again once
+        that stop has succeeded -- by the quit prompt's bulk stop
+        (:func:`stop_workspace_hosts`), which needs it because a partial quit
+        offers Cancel quit and hands back an app whose machines are down, and by
+        the destroy route, whose machine is on its way to not existing at all.
+        Cleared by the in-app start, or by any probe that finds the machine
+        answering again. That probe clear is what makes the mark self-limiting:
+        a stopped machine can also be started by a route that never touches the
+        start endpoint (the machines-list click-through dispatches a start-only
+        restart), and those machines would otherwise stay suppressed for the
+        life of the process.
+
+        ``is_stop_in_flight`` covers the one window in which that probe clear
+        would be wrong: a stop's own command, which blocks for tens of seconds
+        (a cloud host, minutes) while the interface goes on answering for the
+        first of them. A machine being stopped is often a probe target already
+        (suspect-enrolled, STUCK, or RESTART_FAILED), so that 200 gets taken,
+        and dropping the mark on it would hand the machine to the dispatch
+        mid-stop. While a stop is in flight a probe success leaves the mark
+        alone; the stop closes the window when its command returns, either by
+        marking again with the default (keeping the mark, dropping the flag) or
+        by calling :meth:`allow_unattended_recovery` if it failed. A destroy
+        marks in flight and never reconciles: it is answered while the teardown
+        is still running, and a machine that is gone has no 200 left to give.
+
+        Scoped to this process, and to teardowns that went through those paths.
+        A machine stopped from the CLI, or left stopped across an app restart,
+        carries no mark, so merely reaching it is enough to auto-start it --
+        session restore does exactly that, and that is the point: a user who
+        accepted the quit prompt expects to be put back where they were.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            self._unattended_recovery_suppressed_agents.add(aid_str)
+            if is_stop_in_flight:
+                self._in_flight_intentional_stop_agents.add(aid_str)
+            else:
+                self._in_flight_intentional_stop_agents.discard(aid_str)
+        logger.debug("Suppressed unattended recovery for {} (stopped from inside the app)", agent_id)
+
+    def allow_unattended_recovery(self, agent_id: AgentId) -> None:
+        """Drop any intentional-stop marker for ``agent_id``, in flight or not. Idempotent."""
+        aid_str = str(agent_id)
+        with self._lock:
+            existed = aid_str in self._unattended_recovery_suppressed_agents
+            self._unattended_recovery_suppressed_agents.discard(aid_str)
+            self._in_flight_intentional_stop_agents.discard(aid_str)
+        if existed:
+            logger.debug("Allowed unattended recovery for {} again", agent_id)
+
+    def is_unattended_recovery_suppressed(self, agent_id: AgentId) -> bool:
+        """Whether ``agent_id`` was stopped from inside the app and left stopped."""
+        with self._lock:
+            return str(agent_id) in self._unattended_recovery_suppressed_agents
 
     # -- State updates ----------------------------------------------------
 
@@ -336,6 +441,7 @@ class SystemInterfaceHealthTracker(MutableModel):
                 stuck_after_seconds,
             )
             self._fire_on_change(agent_id, fire_health)
+            self._fire_on_stuck_edge(agent_id)
 
     def record_probe_success(self, agent_id: AgentId) -> None:
         """Record that a probe observed ``agent_id`` responding (HTTP 200).
@@ -355,6 +461,13 @@ class SystemInterfaceHealthTracker(MutableModel):
         with self._lock:
             # A reachable workspace no longer needs its create attempt grace.
             self._create_attempt_grace_deadline_by_agent.pop(aid_str, None)
+            # Nor is it still the stopped machine the marker was set for, no
+            # matter which route started it back up. A machine whose stop
+            # command has not returned yet is the exception: its interface
+            # answers for the first seconds of the stop, so this 200 is the stop
+            # in progress rather than the machine back.
+            if aid_str not in self._in_flight_intentional_stop_agents:
+                self._unattended_recovery_suppressed_agents.discard(aid_str)
             record = self._records.pop(aid_str, None)
             if record is None:
                 return
@@ -397,11 +510,12 @@ class SystemInterfaceHealthTracker(MutableModel):
         is recorded only when this call wins the transition, so a deduped later
         request never rewrites the flavor of the restart already in flight.
 
-        Returns ``True`` if this call transitioned the agent into RESTARTING
-        (the agent was not already RESTARTING), and ``False`` if it was already
-        RESTARTING. The transition is decided under the internal lock, so
-        callers can use the return value as an atomic compare-and-set to ensure
-        exactly one of several concurrent restart requests proceeds.
+        Returns whether this call transitioned the agent into RESTARTING (it
+        was not already RESTARTING). That reports the transition; it does not
+        decide who owns the restart. Ownership is the workspace's single
+        operation slot, which ``dispatch_host_restart`` wins before it gets
+        here -- a tracker-side compare-and-set could not serialize against the
+        backup operations, which never touch the tracker.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
@@ -545,3 +659,12 @@ class SystemInterfaceHealthTracker(MutableModel):
                 callback(agent_id)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("SystemInterfaceHealthTracker on-recovery callback failed for {}: {}", agent_id, e)
+
+    def _fire_on_stuck_edge(self, agent_id: AgentId) -> None:
+        with self._lock:
+            callbacks = list(self._on_stuck_edge_callbacks)
+        for callback in callbacks:
+            try:
+                callback(agent_id)
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning("SystemInterfaceHealthTracker stuck-edge callback failed for {}: {}", agent_id, e)

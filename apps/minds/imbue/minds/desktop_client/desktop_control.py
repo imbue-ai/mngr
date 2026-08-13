@@ -21,6 +21,7 @@ from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.mngr_settings.enablement import set_provider_is_enabled
@@ -111,6 +112,9 @@ def stop_workspace_hosts(
     mngr_binary: str,
     mngr_host_dir: Path,
     concurrency_group: ConcurrencyGroup,
+    # Nullable but NOT defaulted, as in ``perform_mind_host_action``: a default
+    # would let a new call site skip the suppression by omission.
+    health_tracker: SystemInterfaceHealthTracker | None,
 ) -> list[dict[str, str]]:
     """Stop the hosts of the requested workspaces in one ``mngr stop --stop-host``.
 
@@ -118,6 +122,17 @@ def stop_workspace_hosts(
     sharing its host (the host-stop target) and all are passed to a single
     synchronous ``mngr stop``. After the attempt, recomputes liveness and returns
     the requested workspaces still running (so the quit flow can offer Retry).
+
+    Marks every requested workspace on ``health_tracker`` for as long as it
+    stays down, the same intentional-stop mark the single-machine stop sets (see
+    :meth:`SystemInterfaceHealthTracker.suppress_unattended_recovery`). Quitting
+    is not over when this returns: a partial stop offers Cancel quit, which
+    resumes the app with these machines down. The mark goes on before the
+    blocking ``mngr`` call, since the interfaces die within seconds of it
+    starting, and goes on as an in-flight one so a 200 taken on the way down
+    cannot clear it. It is reconciled per machine afterwards: an ordinary mark
+    for the ones that went down, dropped for the ones still running, whose stop
+    did not take and which must go on healing themselves.
     """
     services_agent_ids: list[AgentId] = []
     host_ids: list[HostId] = []
@@ -140,6 +155,9 @@ def stop_workspace_hosts(
         [str(a) for a in services_agent_ids],
         [str(h) for h in host_ids],
     )
+    if health_tracker is not None:
+        for agent_id in requested_ids:
+            health_tracker.suppress_unattended_recovery(AgentId(agent_id), is_stop_in_flight=True)
     if services_agent_ids:
         env = dict(os.environ)
         env["MNGR_HOST_DIR"] = str(mngr_host_dir)
@@ -153,7 +171,18 @@ def stop_workspace_hosts(
             for host_id in host_ids:
                 backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
     requested_set = set(requested_ids)
-    return [entry for entry in running_workspace_entries(backend_resolver) if entry["id"] in requested_set]
+    still_running = [entry for entry in running_workspace_entries(backend_resolver) if entry["id"] in requested_set]
+    # Reconcile the pre-command mark against what actually went down, off the
+    # same liveness the caller is told about -- so a machine reported as still
+    # running is never one this leaves excluded from self-healing.
+    if health_tracker is not None:
+        still_running_ids = {entry["id"] for entry in still_running}
+        for agent_id in requested_ids:
+            if agent_id in still_running_ids:
+                health_tracker.allow_unattended_recovery(AgentId(agent_id))
+            else:
+                health_tracker.suppress_unattended_recovery(AgentId(agent_id))
+    return still_running
 
 
 def stop_state_container(mngr_host_dir: Path, concurrency_group: ConcurrencyGroup) -> bool:

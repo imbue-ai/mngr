@@ -63,6 +63,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import capture_error_logs
+from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
@@ -1048,6 +1049,42 @@ def test_destroy_unknown_workspace_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
+class _ResolverOnAParseableHost(StaticBackendResolver):
+    """Static resolver reporting a host id the lifecycle routes can parse.
+
+    The interface default reports the ``"localhost"`` placeholder, which the
+    destroy route refuses with a 409 before it gets anywhere near a teardown.
+    """
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id="host-" + "0" * 31 + "1")
+
+
+def test_destroying_a_machine_keeps_the_app_from_starting_it_back_up(tmp_path: Path) -> None:
+    """A destroy marks the machine, the same as a stop does.
+
+    The interface dies within seconds of the destroy starting, and the probe
+    loop reads that exactly as it reads a wedge -- so without the mark the
+    unattended dispatch would run ``mngr start`` against a host being torn down.
+    The mark goes on as an in-flight one, since the interface answers for the
+    first seconds of a teardown and that 200 must not clear it.
+    """
+    agent_id = AgentId()
+    tracker = SystemInterfaceHealthTracker()
+    client = _build_client(
+        tmp_path,
+        _ResolverOnAParseableHost(url_by_agent_and_service={str(agent_id): {}}),
+        mngr_binary=_write_fake_mngr(tmp_path / "bin"),
+        system_interface_health_tracker=tracker,
+    )
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/destroy", headers=_auth_header())
+
+    assert response.status_code == 202
+    tracker.record_probe_success(agent_id)
+    assert tracker.is_unattended_recovery_suppressed(agent_id) is True
+
+
 def test_lifecycle_without_concurrency_group_returns_501(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
@@ -1060,13 +1097,14 @@ def test_lifecycle_without_concurrency_group_returns_501(tmp_path: Path) -> None
 def test_stop_workspace_broadcasts_workspace_stopped_event(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """A successful v1 stop broadcasts a one-shot ``workspace_stopped`` chrome SSE payload.
+    """A successful v1 stop broadcasts a one-shot ``workspace_stopped`` frame on ``/ui/ws``.
 
     The Electron shell closes any window still open to the workspace off this
-    event (otherwise the open view would observe the dead interface, redirect
-    to recovery, and auto-restart the host -- silently undoing an
-    agent-requested stop). The landing-page stop shares this route, so both
-    stop paths emit through the one mechanism.
+    frame, rather than leaving it on an interface that is going away. What keeps
+    the app from starting the machine straight back up is a separate thing --
+    the health-tracker mark ``perform_mind_host_action`` applies before it runs
+    the stop -- so this frame must not be read as that guard. The landing-page
+    stop shares this route, so both stop paths emit through the one mechanism.
     """
     agent_id = AgentId()
     services_id = AgentId()
@@ -1149,6 +1187,69 @@ def test_workspace_refresh_succeeds_with_no_window_open(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True}
+
+
+def _drain_refresh_frames(client_queue: "queue.Queue[str | None]") -> list[dict[str, Any]]:
+    """Every ``workspace_refresh`` frame waiting on one ``/ui/ws`` connection.
+
+    Filtered by type because the tracker transitions these tests drive also
+    publish health frames onto the same channel.
+    """
+    return [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "workspace_refresh"]
+
+
+def test_a_machine_coming_back_tells_every_window_to_rebuild_its_view(tmp_path: Path) -> None:
+    """A recovered machine broadcasts the same refresh an in-workspace agent can ask for.
+
+    While the machine was down every window went on painting whatever it served
+    -- an error page, or a half-loaded one -- and nothing about the recovery
+    changes the content frame's URL, so that dead page would sit there until the
+    user navigated away and back. The unattended restart usually succeeds
+    without ever raising a recovery card, so the card cannot be what covers this.
+    """
+    agent_id = AgentId()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    client = _build_client(
+        tmp_path,
+        StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
+        system_interface_health_tracker=tracker,
+    )
+    window_queue = get_state(client.application).ui_channel_broadcaster.register()
+
+    # An outage, then the machine answering again -- the only thing that ends one.
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+    tracker.record_probe_success(agent_id)
+
+    assert _drain_refresh_frames(window_queue) == [{"type": "workspace_refresh", "agent_id": str(agent_id)}]
+
+
+def test_a_machine_that_never_went_down_does_not_refresh_windows(tmp_path: Path) -> None:
+    """Only the recovery edge refreshes: a probe success on a healthy machine is every probe.
+
+    The probe loop reports success continuously for the machines it watches, so
+    a refresh keyed on the probe rather than the edge would re-navigate every
+    window every couple of seconds. The lap that has to stay quiet is the one
+    where the tracker still holds a clean record (enrolled by a failure
+    envelope, still HEALTHY); after that record is dropped there is nothing to
+    compare and the lap is quiet either way.
+    """
+    agent_id = AgentId()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    client = _build_client(
+        tmp_path,
+        StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
+        system_interface_health_tracker=tracker,
+    )
+    window_queue = get_state(client.application).ui_channel_broadcaster.register()
+
+    tracker.record_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+    tracker.record_probe_success(agent_id)
+    tracker.record_probe_success(agent_id)
+
+    assert _drain_refresh_frames(window_queue) == []
 
 
 def test_operation_status_unknown_create_id_returns_404(tmp_path: Path) -> None:

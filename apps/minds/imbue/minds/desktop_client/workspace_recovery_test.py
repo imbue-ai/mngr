@@ -11,6 +11,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 
 from pydantic import PrivateAttr
 
@@ -20,14 +21,18 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.recovery_probe import DispatchTier
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
+from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
+from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
+from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
@@ -39,6 +44,13 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.polling import poll_until
+
+# Long enough that only a genuinely broken run reaches it. The wait ends the
+# instant the command turns up, so this bounds a failure, not a passing test --
+# and it is kept inside the suite's own ``--timeout=10`` per-test budget, so a
+# broken run fails on the assertion rather than on pytest's opaque timeout.
+_DISPATCH_WAIT_SECONDS: Final[float] = 5.0
 
 
 def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0) -> str:
@@ -67,37 +79,19 @@ def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
     return log_path.read_text().splitlines()
 
 
-def _resolver_with_system_services(
-    workspace_agent: AgentId, services_agent: AgentId, host_state: HostState | None = None
-) -> MngrCliBackendResolver:
-    """Build a resolver where the machine agent and system-services agent share a host.
+def _wait_for_mngr_invocation(mngr_binary: str, prefix: str) -> bool:
+    """Wait for a dispatched restart worker to actually reach ``mngr <prefix>``.
 
-    ``host_state`` records an observed lifecycle state for that shared host in
-    the snapshot; None leaves the host state undiscovered.
+    Must be called while the concurrency group is still open: the worker runs
+    its mngr commands *through* that group, and the ``with`` exit flips it out
+    of ACTIVE before joining the strands, so a worker not yet scheduled wakes to
+    a group that refuses to run processes.
     """
-    host_id = HostId.generate()
-    resolver = MngrCliBackendResolver()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(workspace_agent, services_agent),
-            discovered_agents=(
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=workspace_agent,
-                    agent_name=AgentName("my-claude-agent"),
-                    provider_name=ProviderInstanceName("docker"),
-                ),
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=services_agent,
-                    agent_name=AgentName("system-services"),
-                    provider_name=ProviderInstanceName("docker"),
-                ),
-            ),
-            host_state_by_host_id=({str(host_id): host_state} if host_state is not None else {}),
-        )
+    return poll_until(
+        lambda: any(line.startswith(prefix) for line in _read_fake_mngr_invocations(mngr_binary)),
+        timeout=_DISPATCH_WAIT_SECONDS,
+        poll_interval=0.02,
     )
-    return resolver
 
 
 def _started_registry(workspace_agent: AgentId) -> InMemoryWorkspaceOperationRegistry:
@@ -206,7 +200,7 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=False)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
@@ -232,7 +226,7 @@ def test_run_restart_sequence_fails_when_start_command_errors(tmp_path: Path) ->
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=False)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
@@ -263,7 +257,7 @@ def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=False)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
         run_restart_sequence(
@@ -296,7 +290,7 @@ def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Pa
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=False)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     missing_binary = str(tmp_path / "definitely_not_a_real_mngr")
 
     with ConcurrencyGroup(name="test-restart") as cg:
@@ -322,7 +316,7 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=False)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg:
@@ -351,7 +345,7 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=False)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
     # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported message (as Modal
     # does) and whose ``start`` succeeds -- mirrors a no-shutdown provider's restart. The stderr
@@ -392,7 +386,7 @@ def test_run_restart_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path)
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=True)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 
     with ConcurrencyGroup(name="test-restart") as cg:
@@ -421,7 +415,7 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker.mark_restarting(workspace_agent, start_only=False)
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 
     with ConcurrencyGroup(name="test-restart") as cg:
@@ -668,7 +662,7 @@ def test_probe_attempts_exec_and_resolves_when_discovery_is_stalled(tmp_path: Pa
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    resolver = _resolver_with_system_services(workspace_agent, services_agent)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     _drive_to_stuck_with_onset(tracker, workspace_agent)
     # No provider snapshot is ever recorded, so the classification never becomes
@@ -700,7 +694,7 @@ def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPED)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPED)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
     _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
@@ -732,7 +726,7 @@ def test_probe_attempts_exec_for_an_untrusted_non_offline_state(tmp_path: Path) 
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
     # A pre-onset snapshot: within the absolute freshness window but still holding
@@ -767,7 +761,7 @@ def test_probe_skips_exec_for_a_trusted_transitional_host(tmp_path: Path) -> Non
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
     _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
@@ -802,7 +796,7 @@ def test_probe_attempts_exec_for_a_trusted_unknown_host(tmp_path: Path) -> None:
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    resolver = _resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.UNKNOWN)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.UNKNOWN)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
     _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
@@ -822,3 +816,304 @@ def test_probe_attempts_exec_for_a_trusted_unknown_host(tmp_path: Path) -> None:
     exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
     assert exec_invocations, "a trusted UNKNOWN host must gather direct evidence via the exec"
     assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+
+
+# -- unattended recovery + the shared dispatch --
+
+
+def _dispatcher(
+    tracker: SystemInterfaceHealthTracker,
+    resolver: MngrCliBackendResolver,
+    registry: InMemoryWorkspaceOperationRegistry,
+    concurrency_group: ConcurrencyGroup,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+) -> UnattendedRecoveryDispatcher:
+    """The tracker callback wired in ``app.py``, built against test doubles."""
+    return UnattendedRecoveryDispatcher(
+        tracker=tracker,
+        backend_resolver=resolver,
+        registry=registry,
+        concurrency_group=concurrency_group,
+        mngr_binary=mngr_binary,
+        mngr_host_dir=mngr_host_dir,
+        mngr_forward_port=0,
+        mngr_forward_preauth_cookie=None,
+    )
+
+
+def test_unattended_recovery_starts_a_wedged_machine_without_bouncing_it(tmp_path: Path) -> None:
+    """The STUCK edge dispatches a start-only restart: ``mngr start`` runs, ``mngr stop`` does not.
+
+    start_only is what makes it safe to fire unprompted -- it can cold-boot a
+    stopped host but can never bounce a live one.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        dispatch = _dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path)
+        dispatch(workspace_agent)
+        is_started = _wait_for_mngr_invocation(mngr_binary, "start ")
+
+    assert is_started, "the unattended dispatch must reach mngr start"
+    assert not any(line.startswith("stop ") for line in _read_fake_mngr_invocations(mngr_binary))
+
+
+def test_unattended_recovery_leaves_a_machine_the_user_stopped_alone(tmp_path: Path) -> None:
+    """An in-app stop suppresses the dispatch, so it cannot undo the user's action.
+
+    A stopped host's interface is unreachable, so the probe loop drives it
+    STUCK exactly as a wedge would. Without the marker the app would start it
+    straight back up -- and bill for it on a metered provider.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+    tracker.suppress_unattended_recovery(workspace_agent)
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        dispatch = _dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path)
+        dispatch(workspace_agent)
+
+    assert _read_fake_mngr_invocations(mngr_binary) == []
+    assert tracker.get_health(workspace_agent) != AgentHealth.RESTARTING
+
+
+def test_unattended_recovery_resumes_after_the_user_starts_the_machine_again(tmp_path: Path) -> None:
+    """Starting from inside the app clears the suppression, so wedges self-heal again."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+    tracker.suppress_unattended_recovery(workspace_agent)
+    tracker.allow_unattended_recovery(workspace_agent)
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        dispatch = _dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path)
+        dispatch(workspace_agent)
+        is_started = _wait_for_mngr_invocation(mngr_binary, "start ")
+
+    assert is_started, "clearing the suppression must let a wedge reach mngr start again"
+
+
+def test_a_forced_stuck_does_not_re_dispatch(tmp_path: Path) -> None:
+    """Only the probe-confirmed HEALTHY -> STUCK edge dispatches, once per episode.
+
+    A ``mark_stuck`` and the probe failures that keep arriving while the
+    machine stays down re-report the state, but the edge has already fired;
+    a dispatcher keyed on the state instead would restart on every lap.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        tracker.add_on_stuck_edge_callback(_dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path))
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+        assert _wait_for_mngr_invocation(mngr_binary, "start "), "the outage edge must reach mngr start"
+        started_count = len(_read_fake_mngr_invocations(mngr_binary))
+        tracker.mark_stuck(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+
+    assert len(_read_fake_mngr_invocations(mngr_binary)) == started_count
+
+
+def test_dispatch_host_restart_does_not_stack_a_second_worker(tmp_path: Path) -> None:
+    """A restart already in flight reports ALREADY_RUNNING instead of racing the first."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    registry = InMemoryWorkspaceOperationRegistry()
+    # The claim the first caller already won: the workspace's operation slot,
+    # which is what owning a restart means.
+    registry.start(workspace_agent, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    tracker.mark_restarting(workspace_agent, start_only=True)
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        outcome = dispatch_host_restart(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            registry=registry,
+            concurrency_group=cg,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            skip_stop=True,
+        )
+
+    assert outcome == RestartDispatchOutcome.ALREADY_RUNNING
+
+
+def test_probe_failures_alone_drive_a_wedged_machine_back_up(tmp_path: Path) -> None:
+    """End to end through the real wiring: probe failures -> STUCK -> ``mngr start``.
+
+    The tracker is wired exactly as ``app.py`` wires it and then driven only by
+    probe results, so nothing but sustained unreachability triggers the restart.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        tracker.add_on_stuck_edge_callback(_dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path))
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+        is_started = _wait_for_mngr_invocation(mngr_binary, "start ")
+
+    assert is_started, "sustained probe failure must reach mngr start without anyone asking"
+    assert not any(line.startswith("stop ") for line in _read_fake_mngr_invocations(mngr_binary))
+
+
+def test_unattended_recovery_never_takes_a_backup_operation_s_slot(tmp_path: Path) -> None:
+    """A restore stops the machine's services, so the wedge it produces must not evict it.
+
+    ``registry.start`` replaces the workspace's record, so a restart that
+    claimed the slot mid-restore would strand the restore's poller and let the
+    restore worker's terminal complete/fail land on the restart's record --
+    reporting a restart that never ran as done.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+    registry.start(workspace_agent, WorkspaceOperationKind.BACKUP_RESTORE, datetime.now(timezone.utc))
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        tracker.add_on_stuck_edge_callback(_dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path))
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+
+    assert _read_fake_mngr_invocations(mngr_binary) == []
+    record = registry.get(workspace_agent)
+    assert record is not None and record.kind == WorkspaceOperationKind.BACKUP_RESTORE
+    assert record.status == WorkspaceOperationStatus.RUNNING
+    assert tracker.get_health(workspace_agent) != AgentHealth.RESTARTING
+
+
+def test_dispatch_host_restart_reports_a_conflicting_operation(tmp_path: Path) -> None:
+    """The route turns this outcome into its 409, so the enum has to name the case."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    registry = InMemoryWorkspaceOperationRegistry()
+    registry.start(workspace_agent, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        outcome = dispatch_host_restart(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            registry=registry,
+            concurrency_group=cg,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            skip_stop=False,
+        )
+
+    assert outcome == RestartDispatchOutcome.OPERATION_CONFLICT
+
+
+class _RegistryWithSlotStolenMidClaim(InMemoryWorkspaceOperationRegistry):
+    """A registry where a backup operation claims the slot during the restart's own claim.
+
+    Stands in for the interleaving a non-atomic claim would lose to: a backup
+    dispatch claiming from a request thread, against a restart dispatched from
+    the probe thread.
+    """
+
+    _thief_agent_id: AgentId | None = PrivateAttr(default=None)
+
+    def steal_slot_on_next_claim(self, agent_id: AgentId) -> None:
+        self._thief_agent_id = agent_id
+
+    def start_if_idle(
+        self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime, target: str | None
+    ) -> bool:
+        if self._thief_agent_id == agent_id:
+            self._thief_agent_id = None
+            super().start(agent_id, WorkspaceOperationKind.BACKUP_RESTORE, now)
+        return super().start_if_idle(agent_id, kind, now, target)
+
+
+def test_a_backup_that_claims_the_slot_first_is_not_evicted_by_the_restart(tmp_path: Path) -> None:
+    """The restart must lose the slot it did not win, not overwrite the winner's record.
+
+    ``registry.start`` *replaces* the record, so a restart that read an idle
+    slot and then filled it unconditionally would strand the restore's poller
+    and let the restore worker's terminal complete/fail land on the restart's
+    record -- reporting a restart that never ran as done. One atomic claim is
+    what closes that window, so this drives a backup into the middle of it.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = _RegistryWithSlotStolenMidClaim()
+    registry.steal_slot_on_next_claim(workspace_agent)
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        outcome = dispatch_host_restart(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            registry=registry,
+            concurrency_group=cg,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=tmp_path,
+            mngr_forward_port=0,
+            mngr_forward_preauth_cookie=None,
+            skip_stop=True,
+        )
+
+    assert outcome == RestartDispatchOutcome.OPERATION_CONFLICT
+    record = registry.get(workspace_agent)
+    assert record is not None and record.kind == WorkspaceOperationKind.BACKUP_RESTORE
+    assert record.status == WorkspaceOperationStatus.RUNNING
+    # Nothing of the restart may survive its lost claim: no worker, and no
+    # RESTARTING the recovery surfaces would render over the restore.
+    assert _read_fake_mngr_invocations(mngr_binary) == []
+    assert tracker.get_health(workspace_agent) != AgentHealth.RESTARTING
+
+
+def test_a_machine_that_answers_is_never_restarted(tmp_path: Path) -> None:
+    """The other half of the edge: a reachable machine stays untouched."""
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+
+    with ConcurrencyGroup(name="test-unattended") as cg:
+        tracker.add_on_stuck_edge_callback(_dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path))
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_success(workspace_agent)
+
+    assert _read_fake_mngr_invocations(mngr_binary) == []

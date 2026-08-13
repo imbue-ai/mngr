@@ -21,6 +21,7 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.mngr.primitives import AgentId
@@ -86,6 +87,21 @@ def _lead_with_error_lines(stderr: str) -> str:
     return "\n".join([*error_lines, *remainder])
 
 
+def _restore_unattended_recovery_after_failed_stop(
+    health_tracker: SystemInterfaceHealthTracker | None,
+    action: MindHostAction,
+    workspace_agent_id: AgentId,
+) -> None:
+    """Undo the pre-command STOP mark when the stop did not happen.
+
+    A stop that errored leaves the machine as it was, so it must go back to
+    healing itself; the mark would otherwise exclude it for the rest of the
+    process's life. No-op for START, which never marks.
+    """
+    if health_tracker is not None and action is MindHostAction.STOP:
+        health_tracker.allow_unattended_recovery(workspace_agent_id)
+
+
 def perform_mind_host_action(
     workspace_agent_id: AgentId,
     action: MindHostAction,
@@ -94,6 +110,10 @@ def perform_mind_host_action(
     mngr_host_dir: Path,
     concurrency_group: ConcurrencyGroup,
     ui_publisher: UiStatePublisher | None,
+    # Nullable but NOT defaulted: an install with no tracker wired passes None,
+    # but a caller must say so, since a default would let a new call site skip
+    # the unattended-recovery suppression by omission.
+    health_tracker: SystemInterfaceHealthTracker | None,
 ) -> MindHostActionOutcome:
     """Stop or start one mind's host, running ``mngr`` to completion.
 
@@ -105,8 +125,17 @@ def perform_mind_host_action(
 
     A successful STOP also publishes a one-shot ``workspace_stopped`` frame on
     the ``/ui/ws`` channel, so any window still open to the workspace closes
-    instead of observing the dead interface and auto-restarting the host --
-    which would silently undo the stop.
+    instead of observing the dead interface.
+
+    A STOP additionally marks ``health_tracker`` so unattended recovery leaves
+    the host alone, and a successful START clears that mark. The mark goes on
+    before the stop runs, alongside the optimistic host-state override: the
+    interface dies the moment the stop begins, and STUCK is reached seconds
+    later, so a mark applied only once ``mngr`` returned would lose that race.
+    That first mark says the stop is still in flight, which keeps a probe taken
+    on the way down from clearing it; it is set again as an ordinary mark on
+    success, and cleared if the stop failed. See
+    :meth:`SystemInterfaceHealthTracker.suppress_unattended_recovery`.
     """
     services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
     if services_agent_id is None:
@@ -142,6 +171,12 @@ def perform_mind_host_action(
         # swept once discovery re-lists the host on success.
         backend_resolver.mark_host_lifecycle_transition_started(host_id)
         backend_resolver.set_host_state_override(host_id, transitional_state)
+    # Likewise before the call: the stop takes the interface down within
+    # seconds, long before ``mngr`` returns, and the probe loop needs only
+    # ``stuck_threshold_seconds`` of that to hand the agent to the unattended
+    # dispatch.
+    if health_tracker is not None and action is MindHostAction.STOP:
+        health_tracker.suppress_unattended_recovery(workspace_agent_id, is_stop_in_flight=True)
 
     cg = concurrency_group.make_concurrency_group(name="workspace-lifecycle")
     try:
@@ -152,6 +187,7 @@ def perform_mind_host_action(
         if host_id is not None:
             backend_resolver.clear_host_state_override(host_id)
             backend_resolver.clear_host_lifecycle_transition(host_id)
+        _restore_unattended_recovery_after_failed_stop(health_tracker, action, workspace_agent_id)
         return MindHostActionOutcome(is_successful=False, failure_reason=f"could not run mngr: {exc}")
     if finished.returncode != 0:
         # mngr's own diagnosis, reordered to lead with its verdict; the warnings
@@ -169,6 +205,7 @@ def perform_mind_host_action(
         if host_id is not None:
             backend_resolver.clear_host_state_override(host_id)
             backend_resolver.clear_host_lifecycle_transition(host_id)
+        _restore_unattended_recovery_after_failed_stop(health_tracker, action, workspace_agent_id)
         return MindHostActionOutcome(is_successful=False, failure_reason=failure_reason)
 
     if host_id is not None:
@@ -179,6 +216,16 @@ def perform_mind_host_action(
                 backend_resolver.set_host_state_override(host_id, HostState.RUNNING)
             case _ as unreachable:
                 assert_never(unreachable)
+    # The START counterpart of the pre-command STOP mark. Only on success: a
+    # start still in flight leaves the interface unreachable too, and clearing
+    # early would let the dispatch stack its own restart on top of this one.
+    if health_tracker is not None and action is MindHostAction.START:
+        health_tracker.allow_unattended_recovery(workspace_agent_id)
+    # The STOP mark again, now as an ordinary one: nothing can answer a probe
+    # from here on, so the mark can go back to being cleared by the first
+    # machine that does.
+    if health_tracker is not None and action is MindHostAction.STOP:
+        health_tracker.suppress_unattended_recovery(workspace_agent_id)
     if action is MindHostAction.STOP and ui_publisher is not None:
         ui_publisher.publish_one_shot(UiWorkspaceStoppedMessage(agent_id=str(workspace_agent_id)))
     return MindHostActionOutcome(is_successful=True)
