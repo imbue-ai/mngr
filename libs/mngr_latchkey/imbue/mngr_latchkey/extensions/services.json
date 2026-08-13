@@ -1561,6 +1561,31 @@
       ]
     }
   ],
+  "huggingface": [
+    {
+      "scope": "huggingface-api",
+      "display_name": "Hugging Face",
+      "description": "Any Hugging Face API activity: the Hub API and repository file/git transfers on huggingface.co (or its hf.co alias), the Inference Providers router, the storage hosts that repository downloads and uploads are redirected to, and the dataset viewer. Does not cover, OAuth, the Hub MCP server, apps hosted on *.hf.space, or the Inference Endpoints management API.",
+      "permissions": [
+        {
+          "name": "huggingface-read-all",
+          "description": "Read anything from the Hugging Face APIs: list and search models, datasets and Spaces, inspect repositories, download files, and browse the dataset viewer. Safe methods only, including the HEAD request huggingface_hub issues before a download."
+        },
+        {
+          "name": "huggingface-write-all",
+          "description": "Change anything through the Hugging Face APIs: create repositories, upload files, push commits, edit settings, manage Spaces, and submit jobs. Covers every unsafe method except requests to the inference router."
+        },
+        {
+          "name": "huggingface-inference",
+          "description": "Run hosted inference through the Inference Providers router: a POST to router.huggingface.co. Consumes compute/quota."
+        },
+        {
+          "name": "huggingface-download",
+          "description": "Download repository contents by any transport: resolve/raw file requests, the redirected CDN and Xet storage hosts, and a read-only Git clone or fetch (including the LFS batch call it needs). Does not grant access to the rest of the Hub API."
+        }
+      ]
+    }
+  ],
   "ngrok": [
     {
       "scope": "ngrok-api",
@@ -1582,6 +1607,27 @@
         {
           "name": "ngrok-write-credentials",
           "description": "Mint, update, or delete tunnel credentials (create the ngrok agent authtokens used to bring up tunnels)."
+        }
+      ]
+    }
+  ],
+  "openrouter": [
+    {
+      "scope": "openrouter-api",
+      "display_name": "OpenRouter",
+      "description": "All requests to the OpenRouter API.",
+      "permissions": [
+        {
+          "name": "openrouter-read-all",
+          "description": "Read anything from the OpenRouter API: list models and providers, and read key, credit, and generation metadata."
+        },
+        {
+          "name": "openrouter-write-all",
+          "description": "Create, update, or delete through the OpenRouter API: manage API keys, workspaces, guardrails, files, and account settings. Also covers running inference."
+        },
+        {
+          "name": "openrouter-inference",
+          "description": "Run models through the OpenRouter inference endpoints (POST chat/completions, messages, responses, embeddings, rerank, images, videos, and audio speech/transcriptions), which consume credits. Verified against the OpenRouter OpenAPI spec."
         }
       ]
     }

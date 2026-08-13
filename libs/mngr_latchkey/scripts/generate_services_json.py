@@ -114,6 +114,8 @@ _DISPLAY_NAME_BY_SCOPE: Final[Mapping[str, str]] = {
     "google-slides-api": "Google Slides",
     "google-analytics-api": "Google Analytics",
     "google-directions-api": "Google Directions",
+    "huggingface-api": "Hugging Face",
+    "openrouter-api": "OpenRouter",
 }
 
 # Curated order in which services appear in the catalog (and thus in the
