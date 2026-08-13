@@ -1,3 +1,4 @@
+import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { workspacesMessage } from "../../testing";
@@ -47,6 +48,170 @@ function displaying(shell: ShellState, agentId: string): void {
 // visible behind the card while `displayedWorkspaceAnyId` is null, and the
 // Shell keeps it at a stable vtree position so dismissing the modal does not
 // remount it either. Keying off the frame is what covers those windows.
+const WORKSPACE_ID = "agent-ab12";
+const OPTIONS_ROUTE = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=local-files`;
+
+afterEach(() => {
+  // restoreAllMocks does NOT undo vi.stubGlobal; only unstubAllGlobals does.
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+function makeShell(): ShellState {
+  // Accent painting writes to the document; these cases are about routing, so
+  // the writes go to a stub rather than pulling a DOM into the suite.
+  vi.stubGlobal("document", {
+    documentElement: { style: { setProperty: () => undefined, removeProperty: () => undefined } },
+    getElementById: () => null,
+  });
+  const shell = new ShellState(createEmptyStores());
+  vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+  return shell;
+}
+
+/** Put the shell on `route` the way the router does, so the state it derives
+ * from a route (displayed workspace, the panel behind an overlay) is real. */
+function land(shell: ShellState, route: string): void {
+  vi.spyOn(m.route, "get").mockReturnValue(route);
+  const [path, search = ""] = route.split("?");
+  shell.handleRouteChanged(path, search);
+}
+
+
+describe("ShellState.openInbox", () => {
+  it("floats the popup over the workspace on screen, which stays mounted", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openInbox({ selected: "evt-a" });
+
+    expect(routeSet).toHaveBeenCalledWith("/inbox", { selected: "evt-a", workspace: WORKSPACE_ID }, undefined);
+  });
+
+  it("carries no workspace when it was opened from Home", () => {
+    const shell = makeShell();
+    land(shell, "/");
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openInbox();
+
+    expect(routeSet).toHaveBeenCalledWith("/inbox", {}, undefined);
+  });
+
+  it("remembers the options panel it was opened over, and forgets it on the way out", () => {
+    const shell = makeShell();
+    land(shell, OPTIONS_ROUTE);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openInbox({ selected: "evt-a" });
+    expect(shell.panelRouteBehindOverlay).toBe(OPTIONS_ROUTE);
+
+    // Still remembered while the popup is up, so the panel keeps rendering...
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}&selected=evt-a`);
+    expect(shell.panelRouteBehindOverlay).toBe(OPTIONS_ROUTE);
+
+    // ...and dropped once the route is no longer a modal's.
+    land(shell, OPTIONS_ROUTE);
+    expect(shell.panelRouteBehindOverlay).toBeNull();
+  });
+
+  it("keeps the panel underneath when a second request opens over the popup", () => {
+    const shell = makeShell();
+    land(shell, OPTIONS_ROUTE);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openInbox({ selected: "evt-a" });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}&selected=evt-a`);
+
+    shell.openInbox({ selected: "evt-b" });
+
+    expect(shell.panelRouteBehindOverlay).toBe(OPTIONS_ROUTE);
+    // ...and it swings the open popup over rather than stacking a second
+    // history entry, so one dismissal still lands back on the panel.
+    expect(routeSet).toHaveBeenLastCalledWith(
+      "/inbox",
+      { selected: "evt-b", workspace: WORKSPACE_ID },
+      { replace: true },
+    );
+  });
+
+  it("names no panel when the popup was opened over a bare workspace", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openInbox();
+
+    expect(shell.panelRouteBehindOverlay).toBeNull();
+  });
+});
+
+describe("ShellState displayed workspace", () => {
+  it("still counts the workspace a modal floats over as displayed", () => {
+    // What addresses a verdict to the machine that asked: the popup is the
+    // current route, but that machine's frame is mounted right behind it.
+    const shell = makeShell();
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}&selected=evt-a`);
+    expect(shell.displayedWorkspaceAnyId).toBe(WORKSPACE_ID);
+
+    land(shell, "/inbox");
+    expect(shell.displayedWorkspaceAnyId).toBeNull();
+  });
+});
+
+describe("ShellState permission-resolution relay", () => {
+  /** A shell showing `displayed`, with a mounted frame's sender registered. */
+  function relayOver(displayed: string | null): { shell: ShellState; sent: [string, string][] } {
+    const shell = makeShell();
+    const sent: [string, string][] = [];
+    shell.registerPermissionResolvedSender((requestId, verdict) => sent.push([requestId, verdict]));
+    shell.displayedWorkspaceAnyId = displayed;
+    return { shell, sent };
+  }
+
+  it("tells the workspace the resolved request belongs to", () => {
+    const { shell, sent } = relayOver(WORKSPACE_ID);
+
+    shell.notifyRequestResolved({ requestId: "evt-a", agentId: WORKSPACE_ID, verdict: "granted" });
+
+    expect(sent).toEqual([["evt-a", "granted"]]);
+  });
+
+  it("says nothing to a workspace that did not ask", () => {
+    const { shell, sent } = relayOver(WORKSPACE_ID);
+
+    shell.notifyRequestResolved({ requestId: "evt-a", agentId: "agent-other", verdict: "denied" });
+
+    expect(sent).toEqual([]);
+  });
+
+  it("says nothing with no workspace on screen, or no workspace on the card", () => {
+    const offScreen = relayOver(null);
+    offScreen.shell.notifyRequestResolved({ requestId: "evt-a", agentId: WORKSPACE_ID, verdict: "denied" });
+    expect(offScreen.sent).toEqual([]);
+
+    const unresolved = relayOver(WORKSPACE_ID);
+    unresolved.shell.notifyRequestResolved({ requestId: "evt-a", agentId: null, verdict: "denied" });
+    expect(unresolved.sent).toEqual([]);
+  });
+
+  it("keeps the live sender when a torn-down frame unregisters its own", () => {
+    const { shell, sent } = relayOver(WORKSPACE_ID);
+
+    shell.unregisterPermissionResolvedSender(() => undefined);
+    shell.notifyRequestResolved({ requestId: "evt-a", agentId: WORKSPACE_ID, verdict: "denied" });
+
+    expect(sent).toEqual([["evt-a", "denied"]]);
+  });
+});
+
+// The ask follows the MOUNTED FRAME, not the routed content surface. Those
+// diverge on the routes that float an app modal over a workspace (/help,
+// /inbox, /settings/ai-keys, /create/template): the frame stays mounted and
+// visible behind the card while `displayedWorkspaceAnyId` is null, and the
+// Shell keeps it at a stable vtree position so dismissing the modal does not
+// remount it either. Keying off the frame is what covers those windows.
+
 describe("ShellState.reloadWorkspaceFrame", () => {
   it("reloads the frame when the named workspace is the one on screen", () => {
     const { shell, reloadCount } = shellWithFrameOn("agent-aa11");
@@ -309,5 +474,69 @@ describe("ShellState.handleEscape", () => {
     expect(shell.handleEscape()).toBe(true);
 
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+});
+
+describe("ShellState.handleEscape over the request popup", () => {
+  it("closes the popup first and leaves the options panel standing", () => {
+    const shell = makeShell();
+    vi.stubGlobal("window", { history: { length: 4, back: vi.fn() } });
+    land(shell, OPTIONS_ROUTE);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openInbox({ selected: "evt-a" });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}&selected=evt-a`);
+
+    // The popup goes back to the panel it was opened over, and nothing else.
+    expect(shell.handleEscape()).toBe(true);
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+
+    // Only the NEXT Escape, once that navigation has landed, takes the panel down.
+    land(shell, OPTIONS_ROUTE);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    expect(shell.handleEscape()).toBe(true);
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
+  });
+
+  it("dismisses the popup once, however many times a single Escape reaches it", () => {
+    // Under Electron one keypress arrives twice (in-document listener + the
+    // main-process forward), and history.back() is not idempotent.
+    const shell = makeShell();
+    vi.stubGlobal("window", { history: { length: 4, back: vi.fn() } });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(window.history.back).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the workspace behind the popup on a cold-start deep link", () => {
+    const shell = makeShell();
+    vi.stubGlobal("window", { history: { length: 1, back: vi.fn() } });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(window.history.back).not.toHaveBeenCalled();
+    expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
+  });
+
+  it("takes the switcher popover before the panel, and reports nothing left", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
+
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isSidebarOpen).toBe(false);
+    // Bare workspace surface: no panel to close either.
+    expect(shell.handleEscape()).toBe(false);
+  });
+
+  it("reports nothing dismissed on a plain hub page", () => {
+    const shell = makeShell();
+    land(shell, "/workspaces/destroyed");
+    expect(shell.handleEscape()).toBe(false);
   });
 });

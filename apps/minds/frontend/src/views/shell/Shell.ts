@@ -9,10 +9,12 @@
 //   layer over it -- a docked panel hanging from the titlebar's icon-tabs (the
 //   SPA heir of the legacy docked WorkspaceOptionsModal), which self-chromes,
 //   so the Shell just floats it over the still-mounted surface.
-// - App-level modals (/settings, /accounts, /help): the routed content floats
-//   in a centered AppOverlay card over the surface it was opened from -- the
-//   live workspace (Get help forwards ?workspace=) or Home -- which stays
-//   mounted behind the dim backdrop, restoring the legacy overlay-layer modals.
+// - App-level modals (/settings, /accounts, /help, /inbox): the routed content
+//   floats in a centered AppOverlay card over the surface it was opened from --
+//   the live workspace (Get help and the request popup forward ?workspace=) or
+//   Home -- which stays mounted behind the dim backdrop, restoring the legacy
+//   overlay-layer modals. The options panel, when a modal was opened over it,
+//   stays mounted too: it holds the same vtree slot either way.
 
 import m from "mithril";
 import type { ShellState } from "./shell-state";
@@ -33,17 +35,19 @@ import { electronBridge } from "../../electron-bridge";
 interface AppOverlayAttrs {
   shell: ShellState;
   cardClass: string;
+  bodyClass: string;
 }
 
-/** The floating card for an app-level modal (Minds settings / Accounts / Get
- * help) in the shared OverlayBackdrop: a centered card with a close X. Esc and
- * backdrop clicks dismiss back to the surface it was opened over. The card
- * clips to its rounded corners and scrolls its body internally so the X stays
- * pinned. */
+/** The floating card for an app-level modal (the request popup, Minds settings,
+ * Accounts, Get help) in the shared OverlayBackdrop: a centered card with a
+ * close X. Esc and backdrop clicks dismiss back to the surface it was opened
+ * over. The card clips to its rounded corners and keeps its body inside itself
+ * -- scrolling it, or handing it a bounded column to scroll within -- so the X
+ * stays pinned. */
 function AppOverlay(): m.Component<AppOverlayAttrs> {
   return {
     view(vnode) {
-      const { shell, cardClass } = vnode.attrs;
+      const { shell, cardClass, bodyClass } = vnode.attrs;
       return m(
         OverlayBackdrop,
         { backdropId: "app-overlay-backdrop", fullWindow: true, onDismiss: () => shell.closeAppOverlay() },
@@ -58,7 +62,7 @@ function AppOverlay(): m.Component<AppOverlayAttrs> {
           },
           [
             m(DialogCloseButton, { onClose: () => shell.closeAppOverlay() }),
-            m("div", { class: "min-h-0 overflow-y-auto px-6 py-5" }, vnode.children),
+            m("div", { class: bodyClass }, vnode.children),
           ],
         ),
       );
@@ -66,77 +70,132 @@ function AppOverlay(): m.Component<AppOverlayAttrs> {
   };
 }
 
-/** Per-route sizing for the app modal card. Minds settings gets a tall floor so
- * it never looks cramped -- min() caps that floor at the shared max so it still
- * fits a short window. Accounts is a short list; Get help and the AI-keys mint
- * dialog are compact forms. */
+/** The #ws-tab-permissions (titlebar key tab) window rect, or null when no
+ * workspace titlebar is mounted (a hub-context or cold-start open). The button
+ * keeps its box while hidden by visibility, so the rect stays true even while
+ * the docked options panel has the titlebar's own tabs hidden. */
+function readKeyAnchor(): { x: number; y: number; height: number } | null {
+  const key = document.getElementById("ws-tab-permissions");
+  if (key === null) return null;
+  const rect = key.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return null;
+  return { x: rect.left, y: rect.top, height: rect.height };
+}
+
+/** Gutter kept clear beside the anchored request card at small window sizes. */
+const REQUEST_MIN_GUTTER_PX = 24;
+
+/** How far left of the key tab the request card's edge sits, so the card reads
+ * as hanging from the key rather than floating loose beside it. */
+const REQUEST_KEY_OVERHANG_PX = 20;
+
+const REQUEST_CARD_WIDTH_PX = 600;
+
+/** The request popup, hung from the titlebar's key tab. Reviewing a permission
+ * request is a Permissions surface, so the popup attaches to the same key icon
+ * the docked Permissions panel hangs from: a raised key tab filled with the
+ * card's surface, square-bottomed and joined to the card below it, wherever the
+ * popup was opened from (the in-chat card or a Waiting-on-you row). Keeps the
+ * centered AppOverlay's ids and dismissal chrome -- it IS the app overlay for
+ * /inbox -- and falls back to the centered card when no key tab is mounted to
+ * hang from (a hub-context or cold-start open). */
+function RequestOverlay(): m.Component<AppOverlayAttrs> {
+  let anchor = readKeyAnchor();
+
+  function remeasure(): void {
+    const next = readKeyAnchor();
+    if (next === null) return;
+    if (anchor === null || anchor.x !== next.x || anchor.y !== next.y || anchor.height !== next.height) {
+      anchor = next;
+      m.redraw();
+    }
+  }
+
+  return {
+    oncreate() {
+      remeasure();
+    },
+    onupdate() {
+      remeasure();
+    },
+    view(vnode) {
+      const { shell, cardClass, bodyClass } = vnode.attrs;
+      if (anchor === null) return m(AppOverlay, vnode.attrs, vnode.children);
+      // Left edge just left of the key, clamped so the card never leaves the
+      // window's gutters (a narrow window slides it left rather than clipping).
+      const leftLimit = Math.max(
+        REQUEST_MIN_GUTTER_PX,
+        window.innerWidth - REQUEST_MIN_GUTTER_PX - REQUEST_CARD_WIDTH_PX,
+      );
+      const gutterPx = Math.min(Math.max(REQUEST_MIN_GUTTER_PX, Math.round(anchor.x - REQUEST_KEY_OVERHANG_PX)), leftLimit);
+      return m(
+        OverlayBackdrop,
+        { backdropId: "app-overlay-backdrop", fullWindow: true, onDismiss: () => shell.closeAppOverlay() },
+        m(
+          "div",
+          {
+            class: "fixed left-0 right-0 bottom-3 flex items-start justify-start pointer-events-none",
+            style: `top: ${anchor.y + anchor.height}px; padding-left: ${gutterPx}px; padding-right: ${REQUEST_MIN_GUTTER_PX}px`,
+          },
+          [
+            // The raised key: the popup's own copy of the titlebar tab it hangs
+            // from, drawn over the dimmed real one at its measured rect.
+            m(
+              "div",
+              {
+                id: "app-overlay-key-tab",
+                class:
+                  "pointer-events-auto absolute z-10 inline-flex items-center justify-center p-1.5 " +
+                  "rounded-md rounded-b-none bg-surface-primary text-primary",
+                style: `left: ${anchor.x}px; top: -${anchor.height}px; height: ${anchor.height}px`,
+                "aria-hidden": "true",
+              },
+              m(Icon16, { name: "key" }),
+            ),
+            m(
+              "div#app-overlay-panel",
+              {
+                class:
+                  "pointer-events-auto relative " +
+                  cardClass +
+                  " max-w-full max-h-full flex flex-col " +
+                  "rounded-xl bg-surface-primary shadow-overlay overflow-hidden",
+              },
+              [
+                m(DialogCloseButton, { onClose: () => shell.closeAppOverlay() }),
+                m("div", { class: bodyClass }, vnode.children),
+              ],
+            ),
+          ],
+        ),
+      );
+    },
+  };
+}
+
+/** Per-route sizing for the app modal card. Minds settings takes a definite
+ * height -- its two columns scroll within it, and a card that resized itself
+ * per section would move the section list out from under the cursor -- capped
+ * to the window by the same min() the others' max uses. Accounts is a short
+ * list; the request popup is a grant dialog; Get help and the AI-keys mint
+ * dialog are compact forms, so those grow to their content. */
 function appOverlayCardClass(path: string): string {
-  if (path === "/settings") return "w-[880px] min-h-[min(600px,calc(100%-64px))]";
+  if (path === "/settings") return "w-[880px] h-[min(660px,calc(100%-64px))]";
+  if (path === "/inbox") return "w-[600px] min-h-0";
   if (path === "/accounts") return "w-[520px] min-h-0";
   if (path === "/settings/ai-keys") return "w-[460px] min-h-0";
   return "w-[460px] min-h-0"; // /help
 }
 
-interface InboxOverlayAttrs {
-  shell: ShellState;
-}
-
-/** The Requests inbox drawer: a full-height panel flush to the left edge (not
- * rounded, its right edge bordered), the SPA twin of the legacy inbox overlay
- * drawer. Its own 38px header -- matching the titlebar it covers -- carries the
- * title + close and is draggable so the window still moves; the backdrop dims
- * the strip to the drawer's right, which also carries a window-drag handle. */
-function InboxOverlay(): m.Component<InboxOverlayAttrs> {
-  return {
-    view(vnode) {
-      const { shell } = vnode.attrs;
-      return m(
-        OverlayBackdrop,
-        { backdropId: "inbox-backdrop", fullWindow: true, align: "start", onDismiss: () => shell.closeAppOverlay() },
-        [
-          m(
-            "div#inbox-dialog",
-            {
-              class:
-                "relative w-[90vw] lg:w-[75vw] max-w-[1100px] h-full flex flex-col " +
-                "bg-surface-primary border-r border-default shadow-overlay overflow-hidden",
-            },
-            [
-              m(
-                "div",
-                {
-                  class: "grid grid-cols-3 items-center px-2 h-[38px] shrink-0 border-b border-default",
-                  style: "-webkit-app-region: drag;",
-                },
-                [
-                  m("div"),
-                  m("h1", { class: "type-section text-primary text-center" }, "Requests"),
-                  m(
-                    "button",
-                    {
-                      type: "button",
-                      "aria-label": "Close",
-                      "data-tooltip": "Close",
-                      style: "-webkit-app-region: no-drag;",
-                      onclick: () => shell.closeAppOverlay(),
-                      class:
-                        "justify-self-end inline-flex items-center justify-center w-6 h-6 rounded-md " +
-                        "text-tertiary hover:text-primary hover:bg-fill-hover cursor-pointer",
-                    },
-                    m(Icon16, { name: "close" }),
-                  ),
-                ],
-              ),
-              m("div", { class: "flex-1 min-h-0" }, vnode.children),
-            ],
-          ),
-          // Drag strip over the backdrop to the right of the drawer, matching
-          // the titlebar height, so the window stays draggable there too.
-          m("div", { class: "flex-1 h-[38px] self-start", style: "-webkit-app-region: drag;" }),
-        ],
-      );
-    },
-  };
+/** How the card holds its body. Minds settings is a two-column pane that
+ * scrolls its own columns -- a scroller here would take its section list down
+ * with the panel -- so it gets a height-bounded column instead, the same shape
+ * the docked options card gives its panes. Every other overlay is a single
+ * column of prose or fields and scrolls as a whole, which is the default a new
+ * route falls through to. */
+function appOverlayBodyClass(path: string): string {
+  if (path === "/settings") return "flex-1 min-h-0 flex flex-col px-6 py-5";
+  return "min-h-0 overflow-y-auto px-6 py-5";
 }
 
 export interface ShellAttrs {
@@ -148,12 +207,20 @@ export interface ShellAttrs {
   // router owns route->page identity, so it names this (keeping the Shell
   // page-agnostic -- it only knows there is a base to render).
   homeContent: m.Children;
+  // The workspace-options panel to keep painted behind an app-level modal that
+  // was opened over it; null when no modal floats over the panel. Same page as
+  // the routed `content` on the options route, so the slot below holds one
+  // component instance across the modal opening and closing.
+  optionsContent: m.Children;
 }
 
 export function Shell(): m.Component<ShellAttrs> {
+  // Escape is handled by the app's single in-document listener (index.ts),
+  // which routes through ShellState.handleEscape -- not here, so the Shell
+  // never competes with it for the same keypress.
   return {
     view(vnode) {
-      const { shell, routePath, workspaceParam, content, homeContent } = vnode.attrs;
+      const { shell, routePath, workspaceParam, content, homeContent, optionsContent } = vnode.attrs;
       // The visual-diff harness captures with ?visual-diff=1 and no live
       // channel; suppress the indicator so screenshots stay deterministic.
       const isCaptureMode = new URLSearchParams(window.location.search).has("visual-diff");
@@ -166,9 +233,9 @@ export function Shell(): m.Component<ShellAttrs> {
       // create form, so it is not an overlay then.
       const isTemplateRoute = routePath === "/create/template";
       // The workspace surface kept mounted underneath: the agent surface itself,
-      // or the workspace a Get help / inbox / template modal was opened over.
-      // Rendering it at a stable vtree position keeps its iframe from reloading
-      // across open/close.
+      // or the workspace a Get help / request popup / template modal was
+      // opened over. Rendering it at a stable vtree position keeps its iframe
+      // from reloading across open/close.
       const behindWorkspaceId =
         isAppOverlay || isTemplateRoute ? overlayBehindWorkspaceId(routePath, routeSearch) : null;
       const isTemplateModal = isTemplateRoute && behindWorkspaceId !== null;
@@ -191,19 +258,24 @@ export function Shell(): m.Component<ShellAttrs> {
               [m(LocalPageNotice), isAppOverlay ? homeContent : content],
             );
 
+      // The options panel is its own docked overlay layer (backdrop + tab strip
+      // + card): the Shell just floats it over the mounted surface, from the
+      // route while it IS the route and from the router's remembered copy while
+      // a modal floats over it.
+      const optionsLayer = isWorkspaceOverlayPath(routePath) ? content : optionsContent;
+
       let overlay: m.Children = null;
-      if (isWorkspaceOverlayPath(routePath)) {
-        // The options page is its own docked overlay layer (backdrop + tab
-        // strip + card): the Shell just floats it over the mounted surface.
-        overlay = content;
-      } else if (routePath === "/inbox") {
-        overlay = m(InboxOverlay, { shell }, content);
-      } else if (isAppOverlay) {
-        overlay = m(AppOverlay, { shell, cardClass: appOverlayCardClass(routePath) }, content);
+      if (isAppOverlay) {
+        const cardClass = appOverlayCardClass(routePath);
+        // The request popup hangs from the titlebar's key tab; every other
+        // app modal is a centered card.
+        const component = routePath === "/inbox" ? RequestOverlay : AppOverlay;
+        overlay = m(component, { shell, cardClass, bodyClass: appOverlayBodyClass(routePath) }, content);
       } else if (isTemplateModal) {
         // The New machine template stepper over a live machine: a centered
         // card, dismissed back to that machine (closeAppOverlay handles it).
-        overlay = m(AppOverlay, { shell, cardClass: "w-[600px] min-h-0" }, content);
+        const bodyClass = appOverlayBodyClass(routePath);
+        overlay = m(AppOverlay, { shell, cardClass: "w-[600px] min-h-0", bodyClass }, content);
       }
 
       // The band speaks for whichever machine is painted, so it is keyed to the
@@ -270,7 +342,7 @@ export function Shell(): m.Component<ShellAttrs> {
               "Reconnecting…",
             )
           : null,
-        m("div#local-page-root", { style: "display: contents" }, [base, overlay]),
+        m("div#local-page-root", { style: "display: contents" }, [base, optionsLayer, overlay]),
       ]);
     },
   };

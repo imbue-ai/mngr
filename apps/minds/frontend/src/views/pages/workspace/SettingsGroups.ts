@@ -15,7 +15,7 @@ import { TextInput } from "../../components/FormControls";
 import type { SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import { normalizeWorkspaceColorHex } from "../../../models/workspaceOptions";
 import { BackupGroupSlot } from "./BackupGroupSlot";
-import { PANE_CONTENT_SCROLL, PANE_NAV_SCROLL } from "./paneScroll";
+import { navEntryClass, splitPane } from "../../components/SplitPane";
 
 const GROUPS: { id: SettingsGroup; icon: string; label: string }[] = [
   { id: "general", icon: "info", label: "General" },
@@ -50,11 +50,10 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
       const data = model.data;
       if (data === null) return null;
 
-      return m("div", { class: "mt-8 flex gap-8 flex-1 min-h-0" }, [
-        m(
-          "nav",
-          { class: "shrink-0 w-52 " + PANE_NAV_SCROLL, "aria-label": "Settings groups" },
-          m(
+      return [
+        splitPane({
+          navLabel: "Settings groups",
+          nav: m(
             "div",
             { class: "flex flex-col gap-0.5" },
             GROUPS.map((group) =>
@@ -64,25 +63,25 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
                   type: "button",
                   "data-settings-group": group.id,
                   "aria-pressed": group.id === selectedGroup ? "true" : "false",
-                  class:
-                    "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left type-body cursor-pointer " +
-                    "transition-colors text-primary hover:bg-fill-hover" +
-                    (group.id === selectedGroup ? " bg-fill-hover font-semibold" : ""),
+                  class: navEntryClass(group.id === selectedGroup),
                   onclick: () => onSelectGroup(group.id),
                 },
                 [m(Icon16, { name: group.icon, extra: "shrink-0" }), m("span", { class: "truncate" }, group.label)],
               ),
             ),
           ),
-        ),
-        m("div", { class: "flex-1 min-w-0 " + PANE_CONTENT_SCROLL }, [
-          selectedGroup === "general" ? renderGeneralGroup(model, local) : null,
-          selectedGroup === "account" ? renderAccountGroup(model, local) : null,
-          selectedGroup === "backup" ? m(BackupGroupSlot, { agentId: data.agent_id }) : null,
-        ]),
+          content: [
+            selectedGroup === "general" ? renderGeneralGroup(model, local) : null,
+            selectedGroup === "account" ? renderAccountGroup(model, local) : null,
+            selectedGroup === "backup" ? m(BackupGroupSlot, { agentId: data.agent_id }) : null,
+          ],
+          extra: "mt-8",
+        }),
+        // Fixed-position when open and nothing at all when closed, so they ride
+        // beside the pane rather than as extra columns inside it.
         renderDestroyDialog(model, local),
         renderUnlinkDialog(model, local),
-      ]);
+      ];
     },
   };
 }
@@ -374,7 +373,7 @@ function renderDestroyDialog(model: WorkspaceOptionsModel, local: SettingsGroups
       },
     },
     [
-      m("h2", { class: "type-heading text-primary mb-3" }, "Remove machine?"),
+      m("h2", { class: "type-heading-lg text-primary mb-3" }, "Remove machine?"),
       m("p", { class: "type-body text-primary mb-4" }, [
         "This will permanently destroy ",
         m("strong", data.name),
@@ -424,7 +423,7 @@ function renderUnlinkDialog(model: WorkspaceOptionsModel, local: SettingsGroupsL
       },
     },
     [
-      m("h2", { class: "type-heading text-primary mb-3" }, "Unlink this machine?"),
+      m("h2", { class: "type-heading-lg text-primary mb-3" }, "Unlink this machine?"),
       m("p", { class: "type-body text-primary mb-4" }, [
         "This stops all sharing for ",
         m("strong", data.name),

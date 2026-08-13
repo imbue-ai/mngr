@@ -505,12 +505,14 @@ def _services_with_stored_credentials(latchkey: Latchkey, service_names: frozens
     The offline probe reports stored state without a network round-trip.
     Non-``MISSING`` states (``VALID`` / ``INVALID`` / ``UNKNOWN``) are
     kept: the credentials exist (or their state is indeterminate), so the
-    re-encrypt can include them.
+    re-encrypt can include them. A probe that does not answer at all
+    (``None``) is kept for the same reason -- only a confirmed ``MISSING``
+    justifies dropping a granted service from the bundle.
     """
     present: set[str] = set()
     for service_name in sorted(service_names):
-        status = latchkey.services_info(service_name, is_offline=True).credential_status
-        if status is CredentialStatus.MISSING:
+        info = latchkey.services_info(service_name, is_offline=True)
+        if info is not None and info.credential_status is CredentialStatus.MISSING:
             logger.debug("Service {} has no stored credentials; excluding it from the bundle", service_name)
         else:
             present.add(service_name)

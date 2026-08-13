@@ -193,6 +193,18 @@ def _wait_until_not_running(manager: BackupTrimManager, user_id: str) -> BackupT
     return finished
 
 
+def _wait_for_dispatch(dispatcher: _RecordingNotificationDispatcher) -> list[tuple[str | None, str]]:
+    """The trim thread flips the status to its terminal state BEFORE it notifies, so a run
+    that has stopped running has not necessarily dispatched yet."""
+
+    def _dispatched() -> list[tuple[str | None, str]] | None:
+        return dispatcher.dispatched or None
+
+    dispatched, _poll_count, _elapsed = poll_for_value(_dispatched, timeout=10.0, poll_interval=0.01)
+    assert dispatched is not None, "the finished trim run never dispatched its notification"
+    return dispatched
+
+
 def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: Path) -> None:
     manager = BackupTrimManager()
     dispatcher = _RecordingNotificationDispatcher(is_electron=False)
@@ -208,7 +220,7 @@ def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: P
     assert started is True
     outcome = _wait_until_not_running(manager, "user-1")
     assert outcome.state == BackupTrimState.SUCCEEDED
-    assert dispatcher.dispatched == [("Backup cleanup finished", outcome.detail)]
+    assert _wait_for_dispatch(dispatcher) == [("Backup cleanup finished", outcome.detail)]
 
 
 def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) -> None:
@@ -243,7 +255,7 @@ def test_backup_trim_manager_records_failure_and_notifies(tmp_path: Path) -> Non
     assert status is not None
     assert status.state == BackupTrimState.FAILED
     assert "Backup cleanup failed" in status.detail
-    assert dispatcher.dispatched == [("Backup cleanup failed", status.detail)]
+    assert _wait_for_dispatch(dispatcher) == [("Backup cleanup failed", status.detail)]
 
 
 def test_backup_trim_manager_flips_unexpected_crash_to_failed(tmp_path: Path) -> None:

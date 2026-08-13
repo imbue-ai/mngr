@@ -1,16 +1,17 @@
-// The workspace-options overlay: the Share machine / Machine settings panel
-// docked under the titlebar's icon-tabs, a faithful port of the legacy
-// WorkspaceOptionsShell.jinja docked presentation.
+// The workspace-options overlay: the Permissions / Share machine / Machine
+// settings panel docked under the titlebar's icon-tabs, a faithful port of the
+// legacy WorkspaceOptionsShell.jinja docked presentation.
 //
 // The panel HANGS from the titlebar's #ws-tab-strip: it measures that strip's
 // window rect (the SPA analogue of chrome.js measuring it and packing the rect
 // into the legacy modal iframe's URL) and draws its OWN tab strip at that exact
 // spot, with the selected tab filled with the card's surface and square-
 // bottomed so it reads as physically joined to the panel below it. The card's
-// top sits at the strip's bottom and its width leaves the same margin on the
-// right that the strip's left leaves, so the whole thing reads as hanging from
-// the tabs. The Titlebar hides its own icon-tab buttons while this is up
-// (isWorkspaceOverlayPath) so the two never ghost through each other.
+// top sits at the strip's bottom and its left edge under the strip, so the whole
+// thing reads as hanging from the tabs; it stops widening at 880px and never
+// comes closer than a 24px gutter to either window edge. The Titlebar hides its
+// own icon-tab buttons while this is up (isWorkspaceOverlayPath) so the two
+// never ghost through each other.
 //
 // A cold-start deep link renders before the titlebar exists, so with no anchor
 // yet it falls back to a plain centered card (also the legacy no-anchor shape)
@@ -18,6 +19,7 @@
 
 import m from "mithril";
 import type { OptionsTab, SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
+import type { PermissionsModel } from "../../../models/workspacePermissions";
 import { OverlayBackdrop } from "../../shell/OverlayBackdrop";
 import { DialogCloseButton } from "../../components/Modal";
 import { Icon16 } from "../../components/Icon";
@@ -30,17 +32,37 @@ interface StripAnchor {
 }
 
 export interface WorkspaceOptionsOverlayAttrs {
+  /** The machine this panel is open on, so dismissing never has to re-read a
+   * route that may belong to a modal floating over the panel. */
+  agentId: string;
   model: WorkspaceOptionsModel;
+  permissions: PermissionsModel;
   tab: OptionsTab;
   group: SettingsGroup;
+  /** ?section for the Permissions left nav, or null for "whatever is first". */
+  section: string | null;
   onSelectTab: (tab: OptionsTab) => void;
   onSelectGroup: (group: SettingsGroup) => void;
+  onSelectSection: (section: string) => void;
+  /** Open the review popup on a request the Permissions tab is waiting on. */
+  onReviewRequest: (requestId: string) => void;
 }
 
-const TABS: { id: OptionsTab; icon: string; label: string }[] = [
+/** The docked strip's tabs, in order. Exported so the tab registration (this
+ * strip, the ?tab parse, and the titlebar's icon-tabs) is asserted in one
+ * place. */
+export const DOCKED_TABS: { id: OptionsTab; icon: string; label: string }[] = [
+  { id: "permissions", icon: "key", label: "Permissions" },
   { id: "share", icon: "share", label: "Share machine" },
   { id: "settings", icon: "settings", label: "Machine settings" },
 ];
+
+/** Gutter kept clear on both sides of the card at small window sizes. */
+const MIN_GUTTER_PX = 24;
+
+/** How far left of the titlebar tab strip the card's edge sits, so it reads as
+ * hanging from the tabs rather than floating loose beside them. */
+const STRIP_OVERHANG_PX = 20;
 
 // A fixed-height card, so a long pane (twenty share entries) scrolls inside it
 // rather than growing the card off-screen; capped to the window (max-h-full).
@@ -75,10 +97,10 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
     }
   }
 
-  function dismiss(): void {
+  function dismiss(agentId: string): void {
     // Back to the bare workspace surface (kept mounted behind the overlay),
     // mirroring shell.closeWorkspaceOverlay without needing a shell handle.
-    m.route.set(`/workspace/${m.route.param("agentId")}`);
+    m.route.set(`/workspace/${agentId}`);
   }
 
   /** The docked tab strip: icon-only, standing in for the titlebar icon-tabs it
@@ -99,7 +121,7 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
         class: "pointer-events-auto absolute z-10 flex items-center gap-1",
         style: positionStyle,
       },
-      TABS.map((entry) => {
+      DOCKED_TABS.map((entry) => {
         const isSelected = entry.id === currentTab;
         return m(
           "button",
@@ -123,23 +145,20 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
     );
   }
 
-  function renderCard(attrs: WorkspaceOptionsOverlayAttrs, extraClass: string, widthStyle: string): m.Child {
-    const { model, tab, group, onSelectGroup } = attrs;
-    return m(
-      "div#ws-options-panel",
-      { class: CARD_CLASS + (extraClass ? " " + extraClass : ""), style: widthStyle },
-      [
-        m(DialogCloseButton, { id: "ws-options-close", onClose: dismiss }),
-        // A column, not a scroller: the pane inside decides what stays pinned
-        // (its title + nav) and what scrolls, so a long pane never drags the
-        // title off the top with it.
-        m(
-          "div",
-          { class: "flex-1 min-h-0 flex flex-col px-6 py-4" },
-          m(OptionsPanel, { model, tab, group, onSelectGroup }),
-        ),
-      ],
-    );
+  function renderCard(attrs: WorkspaceOptionsOverlayAttrs): m.Child {
+    const { agentId, model, permissions, tab, group, section, onSelectGroup, onSelectSection, onReviewRequest } =
+      attrs;
+    return m("div#ws-options-panel", { class: CARD_CLASS + " w-full max-w-[880px]" }, [
+      m(DialogCloseButton, { id: "ws-options-close", onClose: () => dismiss(agentId) }),
+      // A column, not a scroller: the pane inside decides what stays pinned
+      // (its title + nav) and what scrolls, so a long pane never drags the
+      // title off the top with it.
+      m(
+        "div",
+        { class: "flex-1 min-h-0 flex flex-col px-6 py-4" },
+        m(OptionsPanel, { model, permissions, tab, group, section, onSelectGroup, onSelectSection, onReviewRequest }),
+      ),
+    ]);
   }
 
   return {
@@ -150,14 +169,15 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
       remeasure();
     },
     view(vnode) {
-      const { tab, onSelectTab } = vnode.attrs;
+      const { agentId, tab, onSelectTab } = vnode.attrs;
+      const gutterPx = anchor === null ? MIN_GUTTER_PX : Math.max(MIN_GUTTER_PX, Math.round(anchor.x - STRIP_OVERHANG_PX));
       const region =
         anchor !== null
           ? m(
               "div",
               {
-                class: "fixed left-0 right-0 bottom-3 flex items-start justify-center pointer-events-none",
-                style: `top: ${anchor.y + anchor.height}px`,
+                class: "fixed left-0 right-0 bottom-3 flex items-start justify-start pointer-events-none",
+                style: `top: ${anchor.y + anchor.height}px; padding-left: ${gutterPx}px; padding-right: ${MIN_GUTTER_PX}px`,
               },
               [
                 renderStrip(
@@ -165,18 +185,18 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
                   onSelectTab,
                   `left: ${anchor.x}px; top: -${anchor.height}px; height: ${anchor.height}px`,
                 ),
-                renderCard(vnode.attrs, "", `width: max(880px, calc(100% - 2 * (${anchor.x}px - 20px)))`),
+                renderCard(vnode.attrs),
               ],
             )
           : m(
               "div",
               { class: "fixed inset-0 flex items-center justify-center p-4 pointer-events-none" },
-              renderCard(vnode.attrs, "w-full max-w-[880px]", ""),
+              renderCard(vnode.attrs),
             );
 
       return m(
         OverlayBackdrop,
-        { backdropId: "ws-options-backdrop", fullWindow: true, onDismiss: dismiss },
+        { backdropId: "ws-options-backdrop", fullWindow: true, onDismiss: () => dismiss(agentId) },
         region,
       );
     },

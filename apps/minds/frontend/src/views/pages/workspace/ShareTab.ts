@@ -9,7 +9,7 @@ import { Notice } from "../../components/Notice";
 import { Spinner } from "../../components/Spinner";
 import { TextInput } from "../../components/FormControls";
 import type { ShareModel } from "../../../models/workspaceOptions";
-import { PANE_CONTENT_SCROLL, PANE_NAV_SCROLL } from "./paneScroll";
+import { navEntryClass, splitPane } from "../../components/SplitPane";
 
 const COPY_FLASH_MS = 1200;
 
@@ -35,9 +35,10 @@ export function ShareTab(): m.Component<ShareTabAttrs> {
       const { share } = vnode.attrs;
       const isWhole = share.currentTarget === shareWholeService(share);
 
-      return m("div", { class: "mt-8 flex gap-8 flex-1 min-h-0" }, [
-        renderTargetNav(share, local),
-        m("div", { class: "flex-1 min-w-0 " + PANE_CONTENT_SCROLL }, [
+      return splitPane({
+        navLabel: "Share targets",
+        nav: renderTargetNav(share, local),
+        content: [
           m("div", { class: "flex items-center gap-2" }, [
             m("span", { class: "shrink-0 text-primary" }, m(Icon16, { name: isWhole ? "panels-top-left" : "box", size: "lg" })),
             m("h2", { class: "type-heading text-primary" }, isWhole ? "Whole machine" : share.currentTarget),
@@ -68,8 +69,9 @@ export function ShareTab(): m.Component<ShareTabAttrs> {
               ])
             : null,
           share.status === "ready" ? renderEditor(share, local) : null,
-        ]),
-      ]);
+        ],
+        extra: "mt-8",
+      });
     },
   };
 }
@@ -89,10 +91,7 @@ function renderTargetNav(share: ShareModel, local: ShareTabLocalState): m.Childr
         type: "button",
         "data-share-target": target,
         "aria-pressed": target === share.currentTarget ? "true" : "false",
-        class:
-          "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left type-body cursor-pointer " +
-          "transition-colors text-primary hover:bg-fill-hover" +
-          (target === share.currentTarget ? " bg-fill-hover font-semibold" : ""),
+        class: navEntryClass(target === share.currentTarget),
         onclick: () => {
           local.addEntryDraft = "";
           cancelCopyFlash(local);
@@ -102,7 +101,7 @@ function renderTargetNav(share: ShareModel, local: ShareTabLocalState): m.Childr
       [m(Icon16, { name: icon, extra: "shrink-0" }), m("span", { class: "truncate" }, label)],
     );
 
-  return m("nav", { class: "shrink-0 w-52 " + PANE_NAV_SCROLL, "aria-label": "Share targets" }, [
+  return [
     appServices.length > 0
       ? [
           m(
@@ -114,7 +113,7 @@ function renderTargetNav(share: ShareModel, local: ShareTabLocalState): m.Childr
         ]
       : null,
     targetButton(wholeService, "Whole machine", "panels-top-left"),
-  ]);
+  ];
 }
 
 function renderEditor(share: ShareModel, local: ShareTabLocalState): m.Children {

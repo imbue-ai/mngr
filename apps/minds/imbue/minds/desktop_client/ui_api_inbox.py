@@ -23,7 +23,6 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
@@ -42,13 +41,20 @@ class UiInboxCard(FrozenModel):
     ws_name: str = Field(description="Workspace display name the request came from")
     display_name: str = Field(description="Secondary label (e.g. the friendly service name)")
     accent: str = Field(description="Workspace accent hex for the card's selection edge")
+    workspace_agent_id: str = Field(
+        description=(
+            "Agent id of the WORKSPACE the request belongs to -- the primary agent whose tile the user "
+            "sees, resolved by workspace name. This is deliberately not the request's own ``agent_id``: "
+            "latchkey requests are filed by the workspace's system-services sibling agent, so the two "
+            "never match. Empty when the workspace could not be resolved."
+        )
+    )
 
 
 class UiInboxListResponse(FrozenModel):
     """The SPA inbox's card list (most-recent-first, displayable requests only)."""
 
     cards: tuple[UiInboxCard, ...] = Field(description="Pending request cards in display order")
-    auto_open: bool = Field(description="Current auto-open-on-new-request preference")
 
 
 class UiInboxUnavailableDetail(FrozenModel):
@@ -62,12 +68,6 @@ class UiInboxDetailResponse(FrozenModel):
     """Envelope for the right-pane detail payload (discriminated by ``detail.kind``)."""
 
     detail: RequestDetailPayload | UiInboxUnavailableDetail = Field(description="The per-kind detail payload")
-
-
-class UiInboxAutoOpenRequest(FrozenModel):
-    """Body of POST /ui/api/inbox/auto-open."""
-
-    enabled: bool = Field(description="Whether the inbox should auto-open on new requests")
 
 
 def _is_inbox_request_authenticated() -> bool:
@@ -94,7 +94,7 @@ def _json_error(message: str, status_code: int) -> Response:
     return Response(json.dumps({"error": message}), status=status_code, mimetype="application/json")
 
 
-def _displayable_pending_requests(
+def displayable_pending_requests(
     inbox: RequestInbox | None,
     backend_resolver: BackendResolverInterface,
 ) -> list[RequestEvent]:
@@ -152,7 +152,12 @@ def _build_inbox_card(
         else DEFAULT_WORKSPACE_COLOR
     )
     return UiInboxCard(
-        id=str(req.event_id), kind_label=kind_label, ws_name=ws_name, display_name=display_name, accent=accent
+        id=str(req.event_id),
+        kind_label=kind_label,
+        ws_name=ws_name,
+        display_name=display_name,
+        accent=accent,
+        workspace_agent_id=primary_agent_id_str or "",
     )
 
 
@@ -162,16 +167,14 @@ def _handle_inbox_list() -> Response:
     state = get_state()
     backend_resolver = state.backend_resolver
     handlers: tuple[RequestEventHandler, ...] = state.request_event_handlers
-    pending = _displayable_pending_requests(state.request_inbox, backend_resolver)
+    pending = displayable_pending_requests(state.request_inbox, backend_resolver)
     primary_agent_id_by_ws_name: dict[str, str] = {}
     for aid in backend_resolver.list_known_workspace_ids():
         wn = backend_resolver.get_workspace_name(aid)
         if wn and wn not in primary_agent_id_by_ws_name:
             primary_agent_id_by_ws_name[wn] = str(aid)
     cards = tuple(_build_inbox_card(req, handlers, backend_resolver, primary_agent_id_by_ws_name) for req in pending)
-    minds_config: MindsConfig | None = state.minds_config
-    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
-    return _json_response(UiInboxListResponse(cards=cards, auto_open=auto_open))
+    return _json_response(UiInboxListResponse(cards=cards))
 
 
 def _handle_inbox_detail(request_id: str) -> Response:
@@ -200,21 +203,7 @@ def _handle_inbox_detail(request_id: str) -> Response:
     return _json_response(UiInboxDetailResponse(detail=payload))
 
 
-def _handle_inbox_auto_open() -> Response:
-    if not _is_inbox_request_authenticated():
-        return _json_error("Not authenticated", status_code=401)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict) or "enabled" not in body:
-        return _json_error("Request body must be a JSON object with 'enabled'", status_code=400)
-    parsed = UiInboxAutoOpenRequest(enabled=bool(body["enabled"]))
-    minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config is not None:
-        minds_config.set_auto_open_requests_panel(parsed.enabled)
-    return Response(json.dumps({"ok": True}), mimetype="application/json")
-
-
 def register_inbox_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
     blueprint.add_url_rule("/api/inbox", view_func=_handle_inbox_list, methods=["GET"])
     blueprint.add_url_rule("/api/inbox/<request_id>/detail", view_func=_handle_inbox_detail, methods=["GET"])
-    blueprint.add_url_rule("/api/inbox/auto-open", view_func=_handle_inbox_auto_open, methods=["POST"])

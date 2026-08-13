@@ -87,6 +87,29 @@ test('workspace endpoint send posts to the parent with the type merged in', () =
   assert.strictEqual(parentWin.posted[0].targetOrigin, '*');
 });
 
+test('workspace endpoint validates the permission-resolution payload', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: {
+      [contract.PERMISSION_REQUEST_RESOLVED]: (msg) => seen.push([msg.requestId, msg.resolution]),
+    },
+  });
+  const from = (data) => win.deliver({ source: parentWin, origin: 'o', data });
+  // Only the two verdicts the contract defines, and only ids of the
+  // server-issued shape, reach the card.
+  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-a', resolution: 'maybe' });
+  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-a' });
+  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-1/../admin', resolution: 'granted' });
+  from({ type: contract.PERMISSION_REQUEST_RESOLVED, resolution: 'granted' });
+  assert.deepStrictEqual(seen, []);
+  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-a', resolution: 'granted' });
+  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-b', resolution: 'denied' });
+  assert.deepStrictEqual(seen, [
+    ['evt-a', 'granted'],
+    ['evt-b', 'denied'],
+  ]);
+});
+
 test('embedder endpoint requires the frame source and a matching origin', () => {
   const frameWin = makeWindowDouble();
   const seen = [];

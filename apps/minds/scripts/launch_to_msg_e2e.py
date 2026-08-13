@@ -2226,21 +2226,26 @@ def _advance_approval(
     if decision not in ("approve", "deny"):
         raise E2EFailure(f"_advance_approval: decision must be approve|deny, got {decision!r}")
     snap_stage0, snap_stage1, snap_stage2_pre, snap_stage2_post = snap_prefix_pair
-    # The inbox is the /inbox route floated over the current surface (see
-    # find_inbox_frame); the master/detail split lives in that one
-    # document (left list = rows carrying data-request-id, right detail holds
-    # the Approve/Deny form, whose buttons carry the permissions-approve-btn
-    # and permissions-deny-btn ids).
-    # Stage 0 waits for the /inbox frame (it auto-opens on new pending
-    # requests by default, see MindsConfig.get_auto_open_requests_panel).
-    # Stage 1 clicks the inbox card for the slack request to load the detail
-    # fragment. Stage 2 clicks Approve / Deny within the same frame.
+    # The inbox renders as a modal iframe at /inbox inside the warm overlay
+    # host (see find_inbox_frame); the master/detail split lives in that one
+    # document (left list = .inbox-card, right detail loads via
+    # /inbox/detail/<id> fragment and contains the Approve/Deny form).
+    # Stage 0 waits for the /inbox frame. NOTE: this machinery is stale and
+    # this stage cannot currently advance on its own. Requests no longer open
+    # anything by themselves (the auto-open policy and the titlebar Inbox
+    # button are both gone), so the only ways in are the in-chat card's
+    # "Review & respond" button -- whose selector lives in the system_interface
+    # app -- and the Permissions tab's "Waiting on you" rows. Stage 1 is stale
+    # for the same reason: ``.inbox-card`` belonged to the deleted JinjaX
+    # master/detail inbox, and the popup now opens straight onto the detail
+    # with no left list. Stages 0-2 need reworking together against the SPA.
     if stage == 0:
-        # Check if the inbox already auto-opened (see find_inbox_frame).
+        # Check whether the review popup is already open (an /inbox iframe in
+        # the overlay host; see find_inbox_frame).
         found = find_inbox_frame(ctx)
         if found is not None:
             owner, _ = found
-            logger.info("inbox modal auto-opened; advancing to stage 1")
+            logger.info("review popup already open; advancing to stage 1")
             state["stage"] = 1
             snap_page(owner, snap_stage0)
             return
@@ -2260,10 +2265,9 @@ def _advance_approval(
         ):
             # Not ready yet.
             return
-        # Auto-open should fire on the SSE-pushed pending-set update; if
-        # it hasn't fired after a couple of polls, hit /inbox/toggle on
-        # the chrome titlebar as a fallback (the inbox icon's aria-label
-        # is "Inbox"; the old `button[title="Requests"]` is gone).
+        # Stale fallback: the titlebar Inbox button no longer exists, so this
+        # locator never matches. Kept only so the stage's shape is obvious to
+        # whoever reworks it against the in-chat "Review & respond" button.
         for w in all_pages(ctx):
             try:
                 btn = w.locator('button[aria-label="Inbox"], button[title="Inbox"]')

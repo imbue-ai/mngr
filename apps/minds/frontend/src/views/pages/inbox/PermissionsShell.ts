@@ -1,7 +1,7 @@
-// Shared chrome for every request-detail dialog: header, rationale card,
-// the credential form a manual-credentials service asks for, Approve/Deny row,
-// and the progress / error notices (the SPA twin of the Permissions* JinjaX
-// components + the inbox shell's submission UI states).
+// Shared chrome for every request-detail dialog: the marked header, the
+// Account section, Reason, the credential form a manual-credentials service
+// asks for, the Deny/Approve row, and the progress / error notices (the SPA
+// twin of the Permissions* JinjaX components + the shell's submission states).
 
 import m from "mithril";
 import type { InboxModel } from "../../../models/inbox";
@@ -103,8 +103,15 @@ function manualCredentialsForm(model: InboxModel): m.Children {
 export interface PermissionsShellAttrs {
   model: InboxModel;
   headerLabel: string;
-  wsName: string;
+  /** Glyph for the header's 32px square: the service's brand mark, or the
+   * category fallback for the kinds that name no service. */
+  mark: m.Children;
   rationale: string;
+  /** The account the grant rides on; null when nothing is signed in yet. */
+  account?: m.Children;
+  /** Approve's wording, when the kind wants to say what approving will do
+   * (a first connection signs in before it grants). Defaults to "Approve". */
+  approveLabel?: string;
   /** Notice shown while an approval is running (kind-specific copy). */
   progressLabel: string;
   body: m.Children;
@@ -113,45 +120,62 @@ export interface PermissionsShellAttrs {
 export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
   return {
     view(vnode) {
-      const { model, headerLabel, wsName, rationale, progressLabel, body } = vnode.attrs;
+      const { model, headerLabel, mark, rationale, account, progressLabel, body } = vnode.attrs;
+      const approveLabel = vnode.attrs.approveLabel ?? "Approve";
       // A credential form with no inputs is a dead end (Minds cannot work out
       // what to ask for), so Approve goes away entirely.
       const manualPrompt = model.manualCredentialsPrompt();
       const isApproveHidden = manualPrompt !== null && manualPrompt.parameters.length === 0;
       return m("div", { class: "flex flex-col gap-4" }, [
-        m("div", [
-          m("h2", { class: "type-heading text-primary" }, headerLabel),
-          m("p", { class: "type-helper text-tertiary mt-0.5" }, ["Requested by an agent in ", m("b", wsName)]),
+        // The asking machine is named in the popup's eyebrow, so the header is
+        // just the marked square and what is being asked for.
+        m("div", { class: "flex items-center gap-2" }, [
+          m(
+            "span",
+            {
+              id: "permissions-header-mark",
+              class: "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-fill-subtle",
+            },
+            mark,
+          ),
+          m("h2", { class: "min-w-0 flex-1 truncate type-heading-lg text-primary" }, headerLabel),
         ]),
+        account ?? null,
         rationale
-          ? m("div", { class: "rounded-md border border-default bg-fill-subtle p-3 type-body text-secondary" }, rationale)
+          ? m("div", { id: "permissions-reason" }, [
+              m("h3", { class: "type-section text-tertiary" }, "Reason"),
+              m("p", { class: "mt-1 type-body text-primary" }, rationale),
+            ])
           : null,
-        // The credential form comes first: it is what the user has to act on.
+        // The credential form comes next: it is what the user has to act on.
         manualCredentialsForm(model),
         body,
-        m("div", { class: "flex items-center gap-2" }, [
-          isApproveHidden
-            ? null
-            : m(
-                Button,
-                {
-                  variant: "primary",
-                  id: "permissions-approve-btn",
-                  disabled: !model.isApproveAllowed(),
-                  onclick: () => void model.approve(),
-                },
-                model.isApproveBusy ? [m(Spinner, { size: "sm", extra: "mr-1.5" }), "Approving…"] : "Approve",
-              ),
+        // Right-aligned, Deny then Approve, each in its answer's color.
+        m("div", { class: "flex items-center justify-end gap-2" }, [
           m(
             Button,
             {
-              variant: "secondary",
+              variant: "danger",
               id: "permissions-deny-btn",
               disabled: model.isApproveBusy,
               onclick: () => model.deny(),
             },
             "Deny",
           ),
+          isApproveHidden
+            ? null
+            : m(
+                Button,
+                {
+                  variant: "success",
+                  id: "permissions-approve-btn",
+                  disabled: !model.isApproveAllowed(),
+                  onclick: () => void model.approve(),
+                },
+                model.isApproveBusy
+                  ? [m(Spinner, { size: "sm", tone: "inverse", extra: "mr-1.5" }), "Approving…"]
+                  : approveLabel,
+              ),
         ]),
         model.isProgressShown
           ? m(

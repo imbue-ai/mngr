@@ -3,10 +3,13 @@
 // of content URLs (the swap engine's URL-sniffing is gone; the router is the
 // source of truth).
 
+import type { OptionsTab } from "../../models/workspaceOptions";
+import { toOptionsTab } from "../../models/workspaceOptions";
+
 export interface TitlebarContext {
   kind: "home" | "workspace" | "page" | "welcome";
   workspaceAnyId: string | null;
-  activeTab: "share" | "settings" | null;
+  activeTab: OptionsTab | null;
   pageLabel: string;
   isBackShown: boolean;
 }
@@ -19,7 +22,7 @@ const HOME_CONTEXT: TitlebarContext = {
   isBackShown: false,
 };
 
-function workspaceContext(anyId: string, activeTab: "share" | "settings" | null): TitlebarContext {
+function workspaceContext(anyId: string, activeTab: OptionsTab | null): TitlebarContext {
   return { kind: "workspace", workspaceAnyId: anyId, activeTab, pageLabel: "", isBackShown: false };
 }
 
@@ -52,8 +55,8 @@ export function isWorkspaceOverlayPath(path: string): boolean {
 
 /** App-level modal routes the Shell floats as a centered overlay over the
  * surface they were opened from (Minds settings, Accounts, Get help, the
- * Requests inbox, and the AI-keys mint dialog) instead of a full breadcrumbed
- * page. The AI-keys mint dialog is workspace-triggered ("Sign in with Imbue"
+ * request-review popup, and the AI-keys mint dialog) instead of a full
+ * breadcrumbed page. The AI-keys mint dialog is workspace-triggered ("Sign in with Imbue"
  * inside a machine) and floats over that machine, mirroring Get help. */
 const APP_OVERLAY_PATHS = new Set(["/settings", "/accounts", "/help", "/inbox", "/settings/ai-keys"]);
 
@@ -62,13 +65,13 @@ export function isAppOverlayPath(path: string): boolean {
 }
 
 /** The workspace kept mounted behind an app-overlay modal: the ?workspace= that
- * Get help, the Requests inbox, the New machine template flow, and the
+ * Get help, the request-review popup, the New machine template flow, and the
  * AI-keys mint dialog forward, so those overlays float over the live workspace
  * they were opened from (kept mounted, no reload). The AI-keys dialog forwards
  * the machine's HOST id (the mint endpoint keys on it); the others forward the
- * agent id. Settings / Accounts are launched from Home and carry none, the
- * inbox opened from Home carries none, and a template link with no machine
- * open redirects to the full create form -- so their overlay floats over Home /
+ * agent id. Settings / Accounts are launched from Home and carry none, a popup
+ * opened from Home carries none, and a template link with no machine open
+ * redirects to the full create form -- so their overlay floats over Home /
  * never renders (returns null). */
 const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set([
   "/help",
@@ -92,10 +95,9 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (match) return workspaceContext(match[1], "settings");
   match = path.match(new RegExp(`^/workspace/${ID_SEGMENT}/options$`, "i"));
   if (match) {
-    // Mirrors WorkspaceOptionsPage.requestedTab: the share pane is the
-    // default; only ?tab=settings selects the settings pane.
-    const tab = new URLSearchParams(search).get("tab") === "settings" ? "settings" : "share";
-    return workspaceContext(match[1], tab);
+    // Same parse WorkspaceOptionsPage.requestedTab uses, so the highlighted
+    // titlebar button is always the pane the page renders.
+    return workspaceContext(match[1], toOptionsTab(new URLSearchParams(search).get("tab")));
   }
   match = path.match(new RegExp(`^/workspace/${ID_SEGMENT}/backups$`, "i"));
   if (match) return workspaceContext(match[1], "settings");
@@ -114,10 +116,10 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
     return pageContext("New machine", path === "/create");
   }
   if (isAppOverlayPath(path)) {
-    // Minds settings / Accounts / Get help / the AI-keys mint dialog float as a
-    // centered modal over the surface they were opened from; the titlebar keeps
-    // that surface's context (the workspace behind Get help / AI-keys, else
-    // Home) rather than a back-button page.
+    // Minds settings / Accounts / Get help / the request popup / the AI-keys
+    // mint dialog float as a centered modal over the surface they were opened
+    // from; the titlebar keeps that surface's context (the workspace behind Get
+    // help / the popup / AI-keys, else Home) rather than a back-button page.
     const behind = overlayBehindWorkspaceId(path, search);
     return behind !== null ? workspaceContext(behind, null) : HOME_CONTEXT;
   }

@@ -21,8 +21,19 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
   rationale: "list the buckets",
   scope: "aws-api",
   display_name: "AWS",
-  permission_schemas: ["any", "aws-read-all"],
-  description_by_permission_name: {},
+  service_name: "aws",
+  permission_groups: [
+    {
+      heading: "Full access",
+      is_extras: false,
+      rows: [{ permission: "aws-read-all", label: "Read everything", description: "", is_wildcard: false }],
+    },
+    {
+      heading: "Extras",
+      is_extras: true,
+      rows: [{ permission: "any", label: "Everything (unrestricted)", description: "", is_wildcard: true }],
+    },
+  ],
   checked_permissions: ["aws-read-all"],
   account_choices: [
     {
@@ -36,7 +47,6 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
   selected_account_value: ":new-account",
   new_account_value: ":new-account",
   wildcard_permission: "any",
-  wildcard_label: "all",
   will_open_browser: false,
   manual_credentials: AWS_PROMPT,
 };
@@ -65,13 +75,14 @@ function modelWithDetail(detail: PredefinedPermissionDetail): InboxModel {
   return model;
 }
 
-function renderShell(model: InboxModel): ElementVnode[] {
+function renderShell(model: InboxModel, account: m.Children = null): ElementVnode[] {
   const instance = PermissionsShell() as unknown as m.Component;
   const attrs = {
     model,
-    headerLabel: "AWS permissions",
-    wsName: "alpha",
+    headerLabel: "AWS",
+    mark: m("span", { id: "permissions-mark-glyph" }),
     rationale: "list the buckets",
+    account,
     progressLabel: "Granting permission...",
     body: m("div", { id: "permissions-body" }),
   };
@@ -96,6 +107,12 @@ function findById(nodes: ElementVnode[], id: string): ElementVnode | undefined {
   return nodes.find((node) => node.attrs?.id === id);
 }
 
+/** Mithril rewrites a `class` attr to `className`; read whichever landed. */
+function classesOf(node: ElementVnode | undefined): string {
+  const attrs = node?.attrs ?? {};
+  return String(attrs.className ?? attrs.class ?? "");
+}
+
 /** Whether a node is the error-variant Notice (the design system's red box). */
 function isErrorNotice(node: ElementVnode | undefined): boolean {
   return node?.tag === Notice && node?.attrs?.variant === "error";
@@ -106,6 +123,42 @@ function hasScrollHooks(nodes: ElementVnode[]): boolean {
   const form = findById(nodes, "permissions-manual-credentials");
   return flatten(form).some((node) => typeof node.attrs?.oncreate === "function");
 }
+
+describe("PermissionsShell layout", () => {
+  it("leads with the marked title, then Account, then Reason, then the body", () => {
+    const nodes = renderShell(
+      modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }),
+      m("div", { id: "permissions-account" }),
+    );
+
+    // The mark sits in its own square ahead of the title.
+    const markBox = findById(nodes, "permissions-header-mark");
+    expect(classesOf(markBox)).toContain("bg-fill-subtle");
+    expect(flatten(markBox?.children).some((node) => node.attrs?.id === "permissions-mark-glyph")).toBe(true);
+    expect(JSON.stringify(nodes)).toContain("AWS");
+    // The agent's reason is a titled section, not an unlabeled grey box.
+    expect(JSON.stringify(findById(nodes, "permissions-reason"))).toContain("Reason");
+
+    const order = ["permissions-header-mark", "permissions-account", "permissions-reason", "permissions-body"];
+    const positions = order.map((id) => indexOfId(nodes, id));
+    expect(positions.every((position) => position > -1)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it("closes with Deny then Approve, right-aligned and in their answer colors", () => {
+    const nodes = renderShell(modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: null }));
+
+    const row = nodes.find((node) => classesOf(node).includes("justify-end"));
+    expect(row, "the action row is right-aligned").toBeDefined();
+    const buttons = flatten(row?.children).filter((node) =>
+      ["permissions-deny-btn", "permissions-approve-btn"].includes(String(node.attrs?.id)),
+    );
+    expect(buttons.map((node) => [node.attrs?.id, node.attrs?.variant])).toEqual([
+      ["permissions-deny-btn", "danger"],
+      ["permissions-approve-btn", "success"],
+    ]);
+  });
+});
 
 describe("PermissionsShell manual credentials", () => {
   it("renders no credential form for a service that signs in through a browser", () => {

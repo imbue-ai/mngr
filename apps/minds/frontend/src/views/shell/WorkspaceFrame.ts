@@ -10,7 +10,7 @@
 
 import m from "mithril";
 import { electronBridge } from "../../electron-bridge";
-import type { ShellState, WorkspaceFrameHandle } from "./shell-state";
+import type { PermissionResolvedSender, ShellState, WorkspaceFrameHandle } from "./shell-state";
 
 // The embed contract module is served verbatim at /_static/embed_contract.js
 // (single shared source with the workspace side; see docs/embed-contract.md).
@@ -21,6 +21,8 @@ interface EmbedContractModule {
   OPEN_AI_KEYS_ACK: string;
   BRING_APP_TO_FRONT: string;
   CLOSE_ACTIVE_TAB: string;
+  PERMISSION_REQUEST_RESOLVED: string;
+  REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
     isExpectedOrigin: (origin: string) => boolean;
@@ -42,6 +44,66 @@ export interface WorkspaceFrameAttrs {
   workspaceAnyId: string;
 }
 
+/** The request an OPEN_REQUEST_MODAL message names, or null when it names
+ * none. The id reached us from foreign workspace content, so it is
+ * re-validated here against the contract's server-issued shape before anything
+ * selects on it (a receiver never trusts the sender); an off-shape id opens
+ * the popup on whatever is pending instead. */
+export function requestIdFromMessage(
+  message: Record<string, unknown>,
+  requestIdPattern: RegExp,
+): string | null {
+  const requestId = message.requestId;
+  if (typeof requestId !== "string" || !requestIdPattern.test(requestId)) return null;
+  return requestId;
+}
+
+/** Dependencies the embed handlers act through, injected so the routing
+ * decisions can be asserted without a DOM, a router, or the real contract. */
+export interface EmbedHandlerDeps {
+  contract: EmbedContractModule;
+  navigate: (path: string, params?: Record<string, string>) => void;
+  sendAck: (type: string) => void;
+  bringAppToFront: () => void;
+  /** The mounted machine's agent-scoped id, for the ?workspace= an overlay
+   * floats over. */
+  workspaceAgentId: () => string;
+  /** The mounted machine's host-scoped id: the AI-keys mint endpoint resolves
+   * the owning account from it. */
+  workspaceHostId: () => string;
+  openRequestPopup: (requestId: string | null) => void;
+}
+
+/** The message-type -> handler map the embedder endpoint dispatches through.
+ * Built as a pure function of its dependencies so the mapping from a
+ * workspace's message to the surface it opens is directly testable. */
+export function buildEmbedHandlers(
+  deps: EmbedHandlerDeps,
+): Record<string, (message: Record<string, unknown>) => void> {
+  const { contract, navigate, sendAck, bringAppToFront, workspaceAgentId, workspaceHostId, openRequestPopup } =
+    deps;
+  const handlers: Record<string, (message: Record<string, unknown>) => void> = {};
+  handlers[contract.OPEN_REQUEST_MODAL] = (message) => {
+    openRequestPopup(requestIdFromMessage(message, contract.REQUEST_ID_PATTERN));
+  };
+  handlers[contract.OPEN_HELP] = () => {
+    // Float Get help over this machine (kept mounted), matching the titlebar
+    // bug button, rather than tearing the frame down to a page.
+    navigate("/help", { workspace: workspaceAgentId() });
+  };
+  handlers[contract.OPEN_AI_KEYS_PAGE] = (message) => {
+    // Float the AI-keys mint dialog over this machine (kept mounted), matching
+    // OPEN_HELP above. The mint page keys on the HOST id (ai_keys.py resolves
+    // the owning account from the workspace record's host_id): prefer the host
+    // id the workspace sent, else derive it from the mounted surface.
+    const messageHostId = typeof message.hostId === "string" ? message.hostId : null;
+    navigate("/settings/ai-keys", { workspace: messageHostId ?? workspaceHostId() });
+    sendAck(contract.OPEN_AI_KEYS_ACK);
+  };
+  handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
+  return handlers;
+}
+
 // electronBridge.onCloseActiveTab has no unregister, so the preload callback
 // is registered ONCE at module scope and forwards to whichever frame is
 // currently mounted; mount/unmount only swap this ref.
@@ -61,6 +123,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let armedWorkspaceAnyId: string | null = null;
   let unsubscribeWorkspaces: (() => void) | null = null;
   let closeActiveTabForwarder: (() => void) | null = null;
+  let permissionResolvedSender: PermissionResolvedSender | null = null;
   let frameHandle: WorkspaceFrameHandle | null = null;
   let isRemoved = false;
 
@@ -110,32 +173,19 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         // routes for an abandoned workspace.
         if (isRemoved) return;
         contract = loaded;
-        const handlers: Record<string, (message: Record<string, unknown>) => void> = {};
-        handlers[loaded.OPEN_REQUEST_MODAL] = () => {
-          // Float the inbox drawer over this machine (kept mounted), matching
-          // OPEN_HELP below, rather than tearing the frame down to Home.
-          const current = armedWorkspaceAnyId ?? workspaceAnyId;
-          m.route.set("/inbox", { workspace: shell.stores.workspaces.toAgentScopedId(current) });
-        };
-        handlers[loaded.OPEN_HELP] = () => {
-          // Float Get help over this machine (kept mounted), matching the
-          // titlebar bug button, rather than tearing the frame down to a page.
-          const current = armedWorkspaceAnyId ?? workspaceAnyId;
-          m.route.set("/help", { workspace: shell.stores.workspaces.toAgentScopedId(current) });
-        };
-        handlers[loaded.OPEN_AI_KEYS_PAGE] = (message) => {
-          // Float the AI-keys mint dialog over this machine (kept mounted),
-          // matching OPEN_HELP above, rather than tearing the frame down to a
-          // page. The mint page keys on the HOST id (ai_keys.py resolves the
-          // owning account from the workspace record's host_id): prefer the host
-          // id the workspace sent, else derive it from the mounted surface.
-          const current = armedWorkspaceAnyId ?? workspaceAnyId;
-          const messageHostId = typeof message.hostId === "string" ? message.hostId : null;
-          const hostId = messageHostId ?? shell.stores.workspaces.toHostScopedId(current);
-          m.route.set("/settings/ai-keys", { workspace: hostId });
-          endpoint?.send(loaded.OPEN_AI_KEYS_ACK);
-        };
-        handlers[loaded.BRING_APP_TO_FRONT] = () => electronBridge.bringAppToFront();
+        const mountedAnyId = (): string => armedWorkspaceAnyId ?? workspaceAnyId;
+        const handlers = buildEmbedHandlers({
+          contract: loaded,
+          navigate: (path, params) => m.route.set(path, params),
+          sendAck: (type) => endpoint?.send(type),
+          bringAppToFront: () => electronBridge.bringAppToFront(),
+          workspaceAgentId: () => shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
+          workspaceHostId: () => shell.stores.workspaces.toHostScopedId(mountedAnyId()),
+          openRequestPopup: (requestId) => {
+            shell.openInbox(requestId === null ? {} : { selected: requestId });
+            m.redraw();
+          },
+        });
         endpoint = loaded.createEmbedderEndpoint({
           getFrameWindow: () => {
             if (frameElement === null) return null;
@@ -159,6 +209,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         };
         activeCloseActiveTabForwarder = closeActiveTabForwarder;
         ensureCloseActiveTabRegistered();
+        permissionResolvedSender = (requestId, verdict) => {
+          endpoint?.send(loaded.PERMISSION_REQUEST_RESOLVED, { requestId, resolution: verdict });
+        };
+        shell.registerPermissionResolvedSender(permissionResolvedSender);
       });
     },
     onupdate(vnode) {
@@ -168,6 +222,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       isRemoved = true;
       if (activeCloseActiveTabForwarder === closeActiveTabForwarder) {
         activeCloseActiveTabForwarder = null;
+      }
+      if (permissionResolvedSender !== null) {
+        vnode.attrs.shell.unregisterPermissionResolvedSender(permissionResolvedSender);
+        permissionResolvedSender = null;
       }
       // Clear the shell's handle only if it is still ours, so this teardown can
       // never unhook a frame that is actually mounted.

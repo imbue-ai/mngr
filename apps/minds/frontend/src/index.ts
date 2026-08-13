@@ -8,7 +8,6 @@ import { UiChannelClient } from "./channel/client";
 import { electronBridge } from "./electron-bridge";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { setPendingHelpLaunch } from "./models/help";
-import { attachInboxRequestsStore } from "./models/inbox";
 import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
@@ -92,19 +91,6 @@ function main(): void {
   // Register the shared page-level context BEFORE mounting so page
   // components (which the router mounts without attrs) can read the stores.
   registerAppContext({ stores: bootContext.stores, shell });
-
-  // Let an open Inbox page react to live pending-set changes off the store.
-  attachInboxRequestsStore(bootContext.stores.requests);
-
-  // Requests auto-open: the SPA decides (the policy moved out of the main
-  // process); main is only asked to focus the window.
-  bootContext.stores.requests.onAutoOpen((newIds) => {
-    electronBridge.sendShellEvent({ type: "focus_window" });
-    // Pre-select the newest request so a single arriving request opens
-    // straight onto its detail (the legacy auto-open behavior). Float over the
-    // current workspace surface if one is displayed rather than dropping to Home.
-    shell.openInbox(newIds.length > 0 ? { selected: newIds[0] } : {});
-  });
 
   // Repaint the accent when the workspace list (and its accent cache)
   // changes -- covers the boot-before-mapping case and live color edits.

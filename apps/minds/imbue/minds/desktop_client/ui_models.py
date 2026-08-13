@@ -1,4 +1,4 @@
-"""Typed wire models for the SPA's `/ui/ws` channel and bootstrap payload.
+"""Typed wire models for the SPA's `/ui/ws` channel, bootstrap payload, and `/ui/api` responses.
 
 Every frame on the channel is one of the message models below, discriminated by
 its literal ``type`` field. The same models feed three consumers:
@@ -14,6 +14,11 @@ its literal ``type`` field. The same models feed three consumers:
 holdover from the deleted ``/_chrome/events`` SSE wire format, which encoded
 flags as ``"true"`` strings); its ``_ui_*_from_legacy_dict`` converters
 translate those rows into these models, where booleans are real booleans.
+
+The trailing section holds ``/ui/api`` request/response payloads rather than
+channel frames. They live here because the generated TypeScript comes from
+``UiWireSchema``, and because this module depends on nothing but pydantic --
+the payload builders import it, never the other way round.
 """
 
 from enum import auto
@@ -35,7 +40,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 1
+UI_SCHEMA_VERSION: int = 4
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -134,12 +139,11 @@ class UiProvidersMessage(FrozenModel):
 
 
 class UiRequestsMessage(FrozenModel):
-    """Pending-request inbox summary (badge count + exact id set + auto-open policy)."""
+    """Pending-request inbox summary (badge count + exact id set)."""
 
     type: Literal["requests"] = "requests"
     count: int = Field(description="Number of displayable pending requests")
     request_ids: tuple[str, ...] = Field(description="Pending request event ids in deterministic order")
-    auto_open: bool = Field(description="Whether the user allows the inbox to auto-open on new requests")
 
 
 class UiHealthMessage(FrozenModel):
@@ -260,6 +264,210 @@ class UiBootstrap(FrozenModel):
     snapshot: UiSnapshot = Field(description="Connect-time state snapshot")
 
 
+# -- Per-workspace permissions payloads (GET/POST /ui/api/workspaces/<agent_id>/permissions) --
+#
+# Field-for-field mirrors of the ``WorkspacePermissionsView`` tree that
+# ``latchkey/permission_toggles.py`` builds. They are mirrors rather than the
+# engine models themselves so this module keeps its pydantic-only dependency
+# set; ``ui_api_permissions`` converts by revalidating the engine model's dump,
+# so a field added, renamed, or dropped upstream fails loudly instead of
+# silently vanishing from the wire: ``extra=forbid`` rejects the first two,
+# and no mirror field carries a default, so a dropped one fails as missing.
+
+
+class UiPermissionToggle(FrozenModel):
+    """One toggleable catalog permission and its current state on the workspace's host."""
+
+    permission: str = Field(description="Detent permission schema name; the value posted back on a flip")
+    label: str = Field(description="Row label derived from the permission name")
+    description: str = Field(description="Plain-English summary; empty string when the catalog has none")
+    is_granted: bool = Field(description="Whether the host's rule currently grants this permission")
+
+
+class UiPermissionToggleGroup(FrozenModel):
+    """A titled group of catalog toggles (``Full access``, ``Messages``, ...)."""
+
+    heading: str = Field(description="Group heading, rendered as a section eyebrow")
+    toggles: tuple[UiPermissionToggle, ...] = Field(description="Toggle rows in catalog order")
+
+
+class UiPermissionScopePanel(FrozenModel):
+    """The grouped toggles of one detent scope a service exposes."""
+
+    scope: str = Field(description="Detent scope schema name; the rule-key half posted on a connector flip")
+    heading: str = Field(description="Scope display name, shown as a divider when a service has several scopes")
+    groups: tuple[UiPermissionToggleGroup, ...] = Field(description="Toggle groups, full access first, extras last")
+
+
+class UiCredentialParameter(FrozenModel):
+    """One value a service's credential command asks for, as an input in the pane."""
+
+    name: str = Field(description="Placeholder name; the key the value is submitted under")
+    label: str = Field(description="Label of the input the user types the value into")
+
+
+class UiServiceSignIn(FrozenModel):
+    """How the next account of a service is connected from Add connection.
+
+    ``is_browser_supported`` picks the action: latchkey's browser sign-in, or
+    the credential form built from ``credential_parameters``. No parameters and
+    no browser flow means the service cannot be connected from here at all.
+    """
+
+    is_browser_supported: bool = Field(description="Whether connecting runs a browser sign-in")
+    credential_parameters: tuple[UiCredentialParameter, ...] = Field(
+        description="Inputs the credential form renders; empty for a browser sign-in and for an unusable command"
+    )
+    is_account_name_required: bool = Field(
+        description="Whether the credential form also has to ask for a name for the new account"
+    )
+
+
+class UiPermissionConnection(FrozenModel):
+    """One connection entry: a (service, account) pair with its toggle panels."""
+
+    service_name: str = Field(description="Raw catalog service name; the revoke-all key")
+    display_name: str = Field(description="Human-readable service label")
+    account: str = Field(description="Latchkey account key ('' for the unnamed default); posted on a flip")
+    account_label: str = Field(description="User-facing account label")
+    is_connected: bool = Field(description="False for an account with grants but no stored credentials")
+    show_account_label: bool = Field(description="Whether the nav entry needs the account label to disambiguate")
+    granted_count: int = Field(description="Total permissions currently granted across the service's scopes")
+    scopes: tuple[UiPermissionScopePanel, ...] = Field(description="One toggle panel per scope the service exposes")
+    sign_in: UiServiceSignIn = Field(description="How connecting this service establishes its credentials")
+
+
+class UiAvailableConnection(FrozenModel):
+    """A catalog service with no signed-in account yet, offered by Add connection."""
+
+    service_name: str = Field(description="Raw catalog service name")
+    display_name: str = Field(description="Human-readable service label")
+    sign_in: UiServiceSignIn = Field(description="How connecting this service establishes its credentials")
+
+
+class UiSelfPermissionToggle(FrozenModel):
+    """One ``latchkey-self`` toggle row (a shared path, or a cross-workspace verb)."""
+
+    permission: str = Field(description="Full detent permission name; the value posted back on a flip")
+    label: str = Field(description="Primary row label (the shared path, or the verb display name)")
+    detail: str = Field(description="Secondary label (access level for paths, target for verbs); may be empty")
+    description: str = Field(description="Plain-English summary shown under the label; may be empty")
+    is_granted: bool = Field(description="Whether the ``latchkey-self`` rule currently carries the name")
+    can_enable: bool = Field(description="False once the permission's schema is gone; the agent must re-request")
+
+
+class UiWaitingPermissionRequest(FrozenModel):
+    """One "Waiting on you" row: a pending permission request from this workspace's agents."""
+
+    id: str = Field(description="Request event id; opens the review flow")
+    title: str = Field(description="Headline matching the review dialog's (service or category name)")
+    reason: str = Field(description="The agent's stated rationale; may be empty")
+    service_name: str = Field(description="Catalog service whose brand mark leads the row; '' for non-service kinds")
+
+
+class UiWorkspacePermissions(FrozenModel):
+    """Everything the workspace Permissions pane renders, in one response.
+
+    ``permissions_unavailable`` separates "could not load" from "nothing
+    granted": when it is true every toggle collection is empty because the
+    latchkey gateway (or the workspace's host) could not be reached, and the
+    pane must show its notice instead of an empty state. ``waiting_requests``
+    is served either way -- it comes from the local inbox, not the gateway.
+    """
+
+    host_id: str = Field(description="Host whose permissions file the toggles edit; '' when unavailable")
+    connections: tuple[UiPermissionConnection, ...] = Field(description="Connected / granted (service, account) pairs")
+    available_connections: tuple[UiAvailableConnection, ...] = Field(
+        description="Catalog services with no account yet"
+    )
+    file_sharing_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Local files (shared path) rows")
+    workspace_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Other machines (verb) rows")
+    waiting_requests: tuple[UiWaitingPermissionRequest, ...] = Field(
+        description="Pending permission requests from this workspace, oldest first"
+    )
+    permissions_unavailable: bool = Field(description="True when the permissions could not be loaded at all")
+
+
+class UiConnectorToggleRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/connector-toggle."""
+
+    scope: str = Field(description="Detent scope schema the permission belongs to")
+    account: str = Field(description="Latchkey account key ('' for the unnamed default)")
+    permission: str = Field(description="The single permission being flipped")
+    enabled: bool = Field(description="The permission's new state")
+
+
+class UiSelfToggleRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/self-toggle."""
+
+    permission: str = Field(description="A ``minds-file-server-*`` or ``minds-workspaces-*`` permission name")
+    enabled: bool = Field(description="The permission's new state")
+
+
+class UiConnectorRevokeAllRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/connector-revoke-all."""
+
+    service_name: str = Field(description="Catalog service whose grants are dropped for this workspace")
+    account: str = Field(description="Latchkey account key ('' for the unnamed default)")
+
+
+class UiConnectorDisconnectRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/connector-disconnect.
+
+    Names the connection being disconnected, not the workspace it was
+    disconnected from: clearing the credential is global, so the same body is
+    sent whichever workspace's pane the button was pressed in, and the
+    ``<agent_id>`` in the path only decides which workspace's refreshed view
+    comes back. Deliberately NOT :class:`UiConnectorRevokeAllRequest` despite
+    the identical fields -- that one drops this machine's grants and leaves the
+    account connected, and the generated TypeScript name is what the call site
+    reads.
+    """
+
+    service_name: str = Field(description="Catalog service the account is disconnected from, on every machine")
+    account: str = Field(description="Latchkey account key ('' for the unnamed default)")
+
+
+class UiConnectCredentialsRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/connect-credentials.
+
+    Carries what the user typed into the credential form of a service latchkey
+    cannot sign in to through a browser, so it must never be logged.
+    """
+
+    service_name: str = Field(description="Catalog service the credentials belong to")
+    value_by_parameter_name: dict[str, str] = Field(
+        description="Value typed for each parameter of the service's credential command, keyed by its name"
+    )
+    account_name: str = Field(
+        default="",
+        description="Name for the account the credentials create; ignored for a service's first account",
+    )
+
+
+# -- Grant-dialog permission rows (nested in the inbox detail payload) --
+#
+# The same classification the Permissions pane's toggles use, so one service
+# reads the same way in the pane and in the dialog that grants it.
+
+
+class UiPermissionGrantRow(FrozenModel):
+    """One permission the grant dialog offers, with its display strings precomputed."""
+
+    permission: str = Field(description="Detent permission schema name; the value the grant form submits")
+    label: str = Field(description="Row label; the dialog never shows the schema name, not even for the wildcard")
+    description: str = Field(description="Plain-English summary from the catalog; empty when it has none")
+    is_wildcard: bool = Field(description="Whether this is the catch-all, exclusive with every specific permission")
+
+
+class UiPermissionGrantGroup(FrozenModel):
+    """A titled group of grant-dialog rows (``Full access``, ``Messages``, ...)."""
+
+    heading: str = Field(description="Group heading, rendered as a section eyebrow")
+    is_extras: bool = Field(description="Whether this is the trailing wildcard group, rendered behind a divider")
+    rows: tuple[UiPermissionGrantRow, ...] = Field(description="Rows in catalog order")
+
+
 class UiWireSchema(FrozenModel):
     """Container whose JSON Schema is the single generated artifact for the frontend.
 
@@ -280,3 +488,10 @@ class UiWireSchema(FrozenModel):
     reload_ui: UiReloadMessage = Field(description="reload_ui frame")
     client_state: UiClientStateMessage = Field(description="client_state frame (client to server)")
     bootstrap: UiBootstrap = Field(description="bootstrap document")
+    workspace_permissions: UiWorkspacePermissions = Field(description="workspace permissions payload")
+    connector_toggle: UiConnectorToggleRequest = Field(description="connector-toggle request body")
+    self_toggle: UiSelfToggleRequest = Field(description="self-toggle request body")
+    connector_revoke_all: UiConnectorRevokeAllRequest = Field(description="connector-revoke-all request body")
+    connector_disconnect: UiConnectorDisconnectRequest = Field(description="connector-disconnect request body")
+    connect_credentials: UiConnectCredentialsRequest = Field(description="connect-credentials request body")
+    permission_grant_group: UiPermissionGrantGroup = Field(description="one grant-dialog permission group")

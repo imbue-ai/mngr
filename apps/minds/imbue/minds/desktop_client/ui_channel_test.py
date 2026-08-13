@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
+from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.ui_models import UiReloadMessage
 from imbue.minds.desktop_client.ws_gateway import create_websocket_aware_wsgi_server
@@ -167,7 +168,7 @@ def test_ws_connect_receives_hello_then_full_snapshot(tmp_path: Path) -> None:
         finally:
             client.close()
         assert frames[0]["type"] == "hello"
-        assert frames[0]["schema_version"] == 1
+        assert frames[0]["schema_version"] == UI_SCHEMA_VERSION
         assert [frame["type"] for frame in frames[1:]] == [
             "workspaces",
             "accounts",

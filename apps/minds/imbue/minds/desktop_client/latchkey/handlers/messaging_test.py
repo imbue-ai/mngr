@@ -1,3 +1,9 @@
+from collections.abc import Mapping
+from collections.abc import Sequence
+from pathlib import Path
+
+from pydantic import Field
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.messaging import stdout_reports_message_delivered
@@ -21,26 +27,30 @@ def test_stdout_reports_delivered_ignores_non_json_and_error_events() -> None:
     assert stdout_reports_message_delivered(stdout) is False
 
 
-def test_try_send_builds_message_argv(root_concurrency_group: ConcurrencyGroup) -> None:
-    caller = RecordingMngrCaller()
-    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
-
-    assert sender.try_send("some-agent", "hello") is True
-    # The text must go through ``-m`` and the target after ``--`` so it is not
-    # parsed as a second agent identifier.
-    assert caller.calls == [["message", "-m", "hello", "--", "some-agent"]]
+_DELIVERED_STDOUT = '{"event": "message_sent", "agent": "assistant", "message": "ok"}\n'
 
 
-def test_try_send_returns_false_on_nonzero_exit(root_concurrency_group: ConcurrencyGroup) -> None:
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="agent missing"))
-    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
+class _ScriptedMngrCaller(RecordingMngrCaller):
+    """RecordingMngrCaller returning one scripted result per call (last one repeats)."""
 
-    assert sender.try_send("missing-agent", "hello") is False
+    results: tuple[MngrCallResult, ...] = Field(description="Results returned call-by-call; the last one repeats.")
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        index = min(len(self.calls), len(self.results) - 1)
+        super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        return self.results[index]
 
 
 def test_send_does_not_raise_on_failure(root_concurrency_group: ConcurrencyGroup) -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="agent missing"))
-    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
+    # An empty retry schedule keeps the eventually-failing send to one attempt.
+    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group, retry_delays_seconds=())
 
     # Fire-and-forget: dispatching an eventually-failing send must not raise.
     sender.send(AgentId(), "hello")
@@ -49,7 +59,7 @@ def test_send_does_not_raise_on_failure(root_concurrency_group: ConcurrencyGroup
 
 
 def test_send_dispatches_on_concurrency_group_thread(root_concurrency_group: ConcurrencyGroup) -> None:
-    caller = RecordingMngrCaller()
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_DELIVERED_STDOUT))
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
     agent_id = AgentId()
 
@@ -57,7 +67,47 @@ def test_send_dispatches_on_concurrency_group_thread(root_concurrency_group: Con
     sender.send(agent_id, "hello")
 
     assert caller.called_event.wait(5.0)
-    assert caller.calls == [["message", "-m", "hello", "--", str(agent_id)]]
+    # send delivers via the jsonl form so the message_sent event is observable.
+    assert caller.calls == [["message", "--format", "jsonl", "-m", "hello", "--", str(agent_id)]]
+
+
+def test_send_retries_until_the_agent_receives_the_message(root_concurrency_group: ConcurrencyGroup) -> None:
+    """A resolution that races the agent's lifecycle still lands once the agent is back.
+
+    The chat's verdict badge and the agent's resume both ride on this one
+    message, so an undelivered attempt (agent stopped / mid-restart) must be
+    retried rather than dropped.
+    """
+    caller = _ScriptedMngrCaller(
+        results=(
+            MngrCallResult(returncode=1, stderr="Agent is not running (state: STOPPED)"),
+            MngrCallResult(returncode=0, stdout=""),
+            MngrCallResult(returncode=0, stdout=_DELIVERED_STDOUT),
+        ),
+    )
+    sender = MngrMessageSender(
+        mngr_caller=caller,
+        concurrency_group=root_concurrency_group,
+        retry_delays_seconds=(0.01, 0.01, 0.01),
+    )
+
+    assert sender._send_with_retries("some-agent", "hello") is True
+    assert len(caller.calls) == 3
+
+
+def test_send_retries_abandon_on_shutdown(root_concurrency_group: ConcurrencyGroup) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=""))
+    sender = MngrMessageSender(
+        mngr_caller=caller,
+        concurrency_group=root_concurrency_group,
+        retry_delays_seconds=(30.0,),
+    )
+    root_concurrency_group.shutdown_event.set()
+
+    # With the shutdown event already set, the backoff wait returns
+    # immediately and the retry loop abandons instead of sleeping 30s.
+    assert sender._send_with_retries("some-agent", "hello") is False
+    assert len(caller.calls) == 1
 
 
 def test_deliver_uses_jsonl_output_and_reports_delivered(root_concurrency_group: ConcurrencyGroup) -> None:

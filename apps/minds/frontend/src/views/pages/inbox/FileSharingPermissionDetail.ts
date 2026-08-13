@@ -6,7 +6,9 @@ import m from "mithril";
 import { INPUT_BASE } from "../../components/constants";
 import { electronBridge } from "../../../electron-bridge";
 import type { FileSharingPermissionDetail as Detail, InboxModel } from "../../../models/inbox";
+import { collapseSharePathHome } from "../../../models/inbox";
 import { Button } from "../../components/Button";
+import { Icon16 } from "../../components/Icon";
 import { PermissionsShell } from "./PermissionsShell";
 
 export interface FileSharingPermissionDetailAttrs {
@@ -31,8 +33,10 @@ export function FileSharingPermissionDetailView(): m.Component<FileSharingPermis
       const hasPicker = electronBridge.isDesktop;
       return m(PermissionsShell, {
         model,
-        headerLabel: "File access",
-        wsName: detail.ws_name,
+        // The requested path IS the request -- "Local files" said nothing. It
+        // stays the original ask even while the input below is edited.
+        headerLabel: collapseSharePathHome(detail.file_path, detail.home_dir),
+        mark: m(Icon16, { name: "folder", extra: "text-primary" }),
         rationale: detail.rationale,
         progressLabel: "Granting permission...",
         body: m("div", { class: "flex flex-col gap-2" }, [
