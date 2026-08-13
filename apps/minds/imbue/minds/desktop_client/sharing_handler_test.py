@@ -153,12 +153,17 @@ def test_enable_sharing_delegates_cloud_rows_to_the_connector_primitive() -> Non
     )
 
     assert cli.web_access_calls == [("owner@example.com", host_id)]
-    # Two execs through the injection channel: the share-gateway capability
-    # probe, then the grants write.
+    # Three execs go through the injection channel: the share-gateway capability
+    # probe, the grants write, and the owner-email file (the connector injects
+    # the relay materials server-side).
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
-    assert len(exec_calls) == 2
+    assert len(exec_calls) == 3
+    exec_commands = " ".join(part for call in exec_calls for part in call)
+    assert "system/services/share_gateway" in exec_commands
+    assert "share_grants.toml" in exec_commands
+    assert "data/.state/share/owner_email" in exec_commands
     assert document["enabled"] is True
     assert document["grants"]["workspace"] == grants
 

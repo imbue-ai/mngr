@@ -7,7 +7,13 @@ lives next to it at ``data/.secrets/share_grants.toml`` and is re-read by the
 gateway on every request, so a grants update takes effect immediately without
 restarting anything.
 
-Both files are written via ``mngr exec`` through the shared warm-process
+We also drop the owner's account email at ``data/.state/share/owner_email`` so
+in-workspace services can learn who owns the workspace (the gateway never
+reveals the owner's email in a per-request header). It exists only while the
+workspace is shared, so its presence doubles as a "this workspace is shared"
+signal; it is removed at unshare alongside the secrets.
+
+All files are written via ``mngr exec`` through the shared warm-process
 ``MngrCaller``, base64-encoded in transit so arbitrary emails and tokens never
 need shell quoting.
 """
@@ -26,6 +32,10 @@ from imbue.mngr.primitives import AgentId
 
 _SHARE_ENV_FILE: Final[str] = "data/.secrets/share.env"
 _SHARE_GRANTS_FILE: Final[str] = "data/.secrets/share_grants.toml"
+# App-readable (non-secret) owner email, present only while the workspace is
+# shared. Lives under data/.state (machine state) rather than data/.secrets so
+# services can read it without touching the relay token beside share.env.
+_SHARE_OWNER_EMAIL_FILE: Final[str] = "data/.state/share/owner_email"
 
 _SHARE_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 
@@ -143,6 +153,22 @@ def inject_share_materials_into_agent(agent_id: AgentId, share_env_text: str, mn
     _write_file_via_exec(agent_id, _SHARE_ENV_FILE, share_env_text, mngr_caller)
 
 
+def inject_share_owner_email_into_agent(agent_id: AgentId, owner_email: str, mngr_caller: MngrCaller) -> None:
+    """Write the owner-email file so shared-workspace services can learn the owner.
+
+    Best-effort: this is a convenience artifact (services must tolerate its
+    absence), so a failed write is logged but never fails the enable. An empty
+    email is skipped rather than writing a misleading empty file.
+    """
+    if not owner_email:
+        logger.debug("Skipping owner-email injection for agent {}: no owner email", agent_id)
+        return
+    try:
+        _write_file_via_exec(agent_id, _SHARE_OWNER_EMAIL_FILE, owner_email, mngr_caller)
+    except ShareInjectionError as exc:
+        logger.warning("Failed to inject owner email into agent {}: {}", agent_id, exc)
+
+
 _SHARE_GATEWAY_SERVICE_DIR: Final[str] = "system/services/share_gateway"
 
 
@@ -185,7 +211,7 @@ def has_share_materials_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> 
 
 
 def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> None:
-    """Remove share.env + the grants file; the share-gateway tears the stack down.
+    """Remove share.env + the grants file + the owner-email file; the share-gateway tears the stack down.
 
     Best-effort: a failure leaves stale materials (the connector-side relay
     token is already deleted, so the tunnel's next reconnect is rejected
@@ -193,7 +219,12 @@ def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller)
     from a stopped container must not cold-boot anything.
     """
     result = mngr_caller.call(
-        ["exec", str(agent_id), f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE}", "--no-start"],
+        [
+            "exec",
+            str(agent_id),
+            f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE} {_SHARE_OWNER_EMAIL_FILE}",
+            "--no-start",
+        ],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:

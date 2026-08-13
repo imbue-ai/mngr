@@ -25,6 +25,17 @@ class CookieSigningKey(SecretStr):
 
 MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 
+# Identity headers stamped onto every forwarded request so a workspace service
+# sees the same contract locally as it does over the share relay: X-Share-Owner
+# is always present, and X-Share-Email is present only for a non-owner. The
+# local proxy serves the single authenticated user, who is always the owner, so
+# it sets X-Share-Owner=true and never an email. Both are set with replace
+# semantics (any inbound copy is dropped first), so an agent-controlled backend
+# page can never forge them. This mirrors the share_gateway header contract in
+# the default-workspace-template.
+SHARE_OWNER_HEADER: Final[str] = "X-Share-Owner"
+SHARE_EMAIL_HEADER: Final[str] = "X-Share-Email"
+
 # The bare-origin browser auth bridge: a host application that spawned the
 # plugin with ``--browser-bridge-token`` 302s a browser here with the
 # spawn-time opaque token so the browser gets the bare-origin session cookie

@@ -70,6 +70,8 @@ from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import ParsedForwardHost
+from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
+from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
 from imbue.mngr_forward.primitives import ServiceLabel
 from imbue.mngr_forward.primitives import parse_forward_host
 from imbue.mngr_forward.resolver import ForwardResolver
@@ -327,6 +329,10 @@ def _connect_backend_websocket(
     tunnel_socket_path: Path | None,
 ) -> "websockets.asyncio.client.connect":
     ws_subprotocols = [websockets.Subprotocol(s) for s in subprotocols] if subprotocols else None
+    # The backend handshake carries only what we set here (client headers are not
+    # forwarded), so stamp the local owner identity -- matching the HTTP path and
+    # the share_gateway contract. There is no inbound copy to strip on this path.
+    additional_headers = {SHARE_OWNER_HEADER: "true"}
     if tunnel_socket_path is not None:
         sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
         try:
@@ -335,8 +341,10 @@ def _connect_backend_websocket(
         except OSError:
             sock.close()
             raise
-        return websockets.connect(ws_url, subprotocols=ws_subprotocols, sock=sock)
-    return websockets.connect(ws_url, subprotocols=ws_subprotocols)
+        return websockets.connect(
+            ws_url, subprotocols=ws_subprotocols, additional_headers=additional_headers, sock=sock
+        )
+    return websockets.connect(ws_url, subprotocols=ws_subprotocols, additional_headers=additional_headers)
 
 
 def _select_ws_receive_payload(event: Mapping[str, Any]) -> str | bytes | None:
@@ -529,6 +537,16 @@ async def _forward_workspace_http(
             headers["cookie"] = stripped
         else:
             del headers["cookie"]
+
+    # Stamp the local identity contract. The single authenticated user is always
+    # the workspace owner here, so X-Share-Owner is unconditionally true and no
+    # email is sent (matching the share_gateway contract for owner requests).
+    # Drop any inbound copy first -- Starlette lowercases header keys, so a
+    # forged header only appears in lowercase -- so a backend page cannot spoof
+    # its own ownership or email.
+    headers.pop(SHARE_OWNER_HEADER.lower(), None)
+    headers.pop(SHARE_EMAIL_HEADER.lower(), None)
+    headers[SHARE_OWNER_HEADER] = "true"
 
     body = await request.body()
     accept = request.headers.get("accept", "")

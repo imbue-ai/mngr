@@ -83,6 +83,23 @@ host application (the minds chrome). Two pieces make this work:
 at all, so any page could iframe a workspace origin. The default is now
 deny-external; embedders must be allowlisted via `--embedder-origin`.
 
+## Request identity headers
+
+Every forwarded request (HTTP and WebSocket) carries `X-Share-Owner: true`. The
+single authenticated user of a local forward is always the workspace owner, so
+the proxy stamps that flag unconditionally and never sends `X-Share-Email`. Any
+client-supplied copy of `X-Share-Owner` / `X-Share-Email` is dropped before the
+value is set, so an agent-controlled backend page cannot forge its own
+ownership or a caller email.
+
+This is the same contract a shared workspace gets from its in-container
+share-gateway (which additionally sends `X-Share-Email` for non-owner visitors),
+so an in-workspace service reads request identity identically whether it is
+reached locally or over the relay. See the default-workspace-template's
+`system/services/share_gateway/README.md` for the full contract, including how
+the owner's email is delivered (a file present only while shared), which never
+travels as a per-request header.
+
 ## TLS trust for plain browsers
 
 With `--use-http2` the proxy serves leaf certificates minted per startup from

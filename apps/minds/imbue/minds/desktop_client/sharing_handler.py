@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.share_materials_injection import has_share_gatew
 from imbue.minds.desktop_client.share_materials_injection import has_share_materials_in_agent
 from imbue.minds.desktop_client.share_materials_injection import inject_share_grants_into_agent
 from imbue.minds.desktop_client.share_materials_injection import inject_share_materials_into_agent
+from imbue.minds.desktop_client.share_materials_injection import inject_share_owner_email_into_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.state import get_state
@@ -279,6 +280,9 @@ def _enable_sharing_with_cli(
             inject_share_grants_into_agent(agent_id, grants_toml, cli.mngr_caller)
         except ShareInjectionError as exc:
             raise SharingError(str(exc)) from exc
+        # Refresh the owner-email file too, so a share enabled before this
+        # feature existed gains it on the next grants edit.
+        inject_share_owner_email_into_agent(agent_id, account_email, cli.mngr_caller)
         return _share_status_document(host_id, existing, workspace_grants, service_grants)
 
     if is_cloud_row:
@@ -294,6 +298,7 @@ def _enable_sharing_with_cli(
             inject_share_grants_into_agent(agent_id, grants_toml, cli.mngr_caller)
         except ShareInjectionError as exc:
             raise SharingError(str(exc)) from exc
+        inject_share_owner_email_into_agent(agent_id, account_email, cli.mngr_caller)
         try:
             enabled_share = cli.get_share_status(account=account_email, host_id=host_id)
         except ImbueCloudCliError as exc:
@@ -328,6 +333,7 @@ def _enable_sharing_with_cli(
         inject_share_materials_into_agent(agent_id, share_env_text, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
+    inject_share_owner_email_into_agent(agent_id, account_email, cli.mngr_caller)
     return _share_status_document(host_id, share, workspace_grants, service_grants)
 
 

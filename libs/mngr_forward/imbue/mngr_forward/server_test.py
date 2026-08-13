@@ -35,6 +35,8 @@ from imbue.mngr_forward.embedding import EmbedderOrigin
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
+from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
+from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import _PROXY_BACKSTOP_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _PROXY_TIMEOUT
@@ -348,6 +350,52 @@ def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
             cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
         )
     assert response.status_code == 200
+
+
+def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path: Path) -> None:
+    """The proxy stamps X-Share-Owner=true and never trusts a client-supplied identity.
+
+    The local user is always the workspace owner, so a forged X-Share-Owner /
+    X-Share-Email on the inbound request must be dropped and the authoritative
+    owner flag injected before the backend sees it.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.set_agent_host(agent_id, _TEST_HOST_ID)
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend"})
+    resolver.update_service_labels(agent_id, {"system_interface-shell111": "system_interface"})
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+    )
+
+    seen_headers: dict[str, str] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        seen_headers.update(request.headers)
+        return httpx.Response(200, json={"ok": True})
+
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        response = client.get(
+            "/api/health",
+            headers={
+                "accept": "application/json",
+                SHARE_OWNER_HEADER: "false",
+                SHARE_EMAIL_HEADER: "attacker@evil.example",
+            },
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert response.status_code == 200
+    assert seen_headers[SHARE_OWNER_HEADER.lower()] == "true"
+    assert SHARE_EMAIL_HEADER.lower() not in seen_headers
 
 
 def test_goto_unauthenticated_redirects_to_root(
@@ -1975,6 +2023,67 @@ def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> Non
                 assert outcomes == ["disconnect"], (
                     f"client leg did not observe the backend close (outcomes={outcomes})"
                 )
+    finally:
+        backend_server.shutdown()
+
+
+def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> None:
+    """The WS forward must stamp X-Share-Owner=true and never forward a client-supplied identity.
+
+    The WebSocket analogue of
+    ``test_forwarded_request_gets_owner_header_and_drops_forged_identity``: the
+    single authenticated local user is always the workspace owner, so the
+    backend handshake must carry the authoritative owner flag (and no email)
+    regardless of any forged ``X-Share-Owner`` / ``X-Share-Email`` the client
+    sends -- client headers are not forwarded on this path.
+    """
+    captured: dict[str, str | None] = {}
+
+    def backend_handler(connection: ServerConnection) -> None:
+        # The handshake request is always present inside the handler; assert it
+        # so the header reads are not against ``Request | None``.
+        assert connection.request is not None
+        captured["owner"] = connection.request.headers.get(SHARE_OWNER_HEADER)
+        captured["email"] = connection.request.headers.get(SHARE_EMAIL_HEADER)
+        connection.send("hello-from-backend")
+
+    backend_server = ws_serve(backend_handler, "127.0.0.1", 0)
+    backend_port = backend_server.socket.getsockname()[1]
+    server_thread = threading.Thread(target=backend_server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        auth_store = FileAuthStore(data_directory=tmp_path)
+        resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+        agent_id = AgentId()
+        resolver.add_known_agent(agent_id)
+        resolver.set_agent_host(agent_id, _TEST_HOST_ID)
+        resolver.update_services(agent_id, {"system_interface": f"http://127.0.0.1:{backend_port}"})
+        preauth = "preauth-cookie-ws-owner-header"
+        app = create_forward_app(
+            auth_store=auth_store,
+            resolver=resolver,
+            tunnel_manager=SSHTunnelManager(),
+            envelope_writer=EnvelopeWriter(output=io.StringIO()),
+            listen_host="127.0.0.1",
+            listen_port=18421,
+            preauth_cookie_value=preauth,
+            allow_host_loopback=True,
+        )
+
+        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421") as client:
+            with client.websocket_connect(
+                f"ws://{_TEST_HOST_ID}.localhost:18421/api/ws",
+                headers={
+                    "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                    SHARE_OWNER_HEADER: "false",
+                    SHARE_EMAIL_HEADER: "attacker@evil.example",
+                },
+            ) as websocket_session:
+                # Receiving the backend's message guarantees its handler ran and
+                # captured the handshake headers (capture precedes the send).
+                assert websocket_session.receive_text() == "hello-from-backend"
+        assert captured["owner"] == "true"
+        assert captured["email"] is None
     finally:
         backend_server.shutdown()
 

@@ -16,6 +16,7 @@ from imbue.minds.desktop_client.share_materials_injection import build_share_env
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
 from imbue.minds.desktop_client.share_materials_injection import inject_share_grants_into_agent
 from imbue.minds.desktop_client.share_materials_injection import inject_share_materials_into_agent
+from imbue.minds.desktop_client.share_materials_injection import inject_share_owner_email_into_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -191,6 +192,35 @@ def test_read_share_grants_raises_on_an_unrecognized_exec_envelope() -> None:
         read_share_grants_from_agent(AgentId(), caller)
 
 
+def test_inject_share_owner_email_writes_the_app_readable_state_file() -> None:
+    caller = RecordingMngrCaller()
+    agent_id = AgentId()
+
+    inject_share_owner_email_into_agent(agent_id, "owner@example.com", caller)
+
+    call = " ".join(caller.calls[0])
+    assert "data/.state/share/owner_email" in call
+    # Rides base64-encoded like the other materials, so arbitrary emails never
+    # need shell quoting.
+    assert base64.b64encode(b"owner@example.com").decode("ascii") in call
+
+
+def test_inject_share_owner_email_skips_an_empty_email() -> None:
+    caller = RecordingMngrCaller()
+
+    inject_share_owner_email_into_agent(AgentId(), "", caller)
+
+    assert caller.calls == []
+
+
+def test_inject_share_owner_email_is_best_effort_on_exec_failure() -> None:
+    # A convenience artifact must never fail the enable: a failed write is
+    # swallowed (logged), unlike the critical share.env / grants writes.
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
+
+    inject_share_owner_email_into_agent(AgentId(), "owner@example.com", caller)
+
+
 def test_clear_share_materials_is_best_effort_and_no_start() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
 
@@ -199,6 +229,8 @@ def test_clear_share_materials_is_best_effort_and_no_start() -> None:
     joined = " ".join(caller.calls[0])
     assert "rm -f" in joined
     assert "--no-start" in joined
+    # The owner-email file is removed alongside the secrets at unshare.
+    assert "data/.state/share/owner_email" in joined
 
 
 def test_writes_use_a_unique_tmp_name_per_write() -> None:
