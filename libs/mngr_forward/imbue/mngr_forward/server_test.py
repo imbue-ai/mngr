@@ -352,6 +352,139 @@ def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
     assert response.status_code == 200
 
 
+def _make_legacy_workspace_app(tmp_path: Path) -> tuple[FastAPI, FileAuthStore]:
+    """An app whose agent has label-less (pre-origin-label) service registrations.
+
+    Mirrors a workspace baked before origin labels existed: the shell and the
+    ``terminal`` / ``browser`` services are registered by name only, so the
+    shell serves on the bare origin and services resolve via the
+    label-as-name fallback.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.set_agent_host(agent_id, _TEST_HOST_ID)
+    resolver.update_services(
+        agent_id,
+        {
+            "system_interface": "http://stub-shell",
+            "terminal": "http://stub-terminal",
+            "browser": "http://stub-browser",
+        },
+    )
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+    )
+    return app, auth_store
+
+
+def test_legacy_service_path_navigation_redirects_to_service_origin(tmp_path: Path) -> None:
+    """A navigation to ``/service/<name>/`` on the shell's (bare) origin 307s to the
+    service's own origin, preserving the query -- so old system_interface builds'
+    service iframes skip their service-worker bootstrap entirely."""
+    app, auth_store = _make_legacy_workspace_app(tmp_path)
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+        response = client.get(
+            "/service/terminal/?arg=_&arg=session&arg=terminal-1",
+            headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert response.status_code == 307
+    assert (
+        response.headers["location"]
+        == f"http://terminal.{_TEST_HOST_ID}.localhost:18421/?arg=_&arg=session&arg=terminal-1"
+    )
+
+
+def test_legacy_service_path_navigation_preserves_subpath(tmp_path: Path) -> None:
+    """The path after the ``/service/<name>`` prefix survives the redirect verbatim."""
+    app, auth_store = _make_legacy_workspace_app(tmp_path)
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+        response = client.get(
+            "/service/browser/viewer/index.html?session=abc",
+            headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert response.status_code == 307
+    assert (
+        response.headers["location"] == f"http://browser.{_TEST_HOST_ID}.localhost:18421/viewer/index.html?session=abc"
+    )
+
+
+def test_legacy_service_path_unknown_service_passes_through_to_shell(tmp_path: Path) -> None:
+    """A ``/service/<name>/`` navigation naming a service the agent has not
+    registered is NOT redirected -- it forwards to the shell, whose own handler
+    owns the unknown-service response."""
+    app, auth_store = _make_legacy_workspace_app(tmp_path)
+
+    def _shell_marker(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="shell served this")
+
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
+        response = client.get(
+            "/service/never-registered/",
+            headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert response.status_code == 200
+    assert response.text == "shell served this"
+
+
+def test_legacy_service_path_non_navigation_passes_through_to_shell(tmp_path: Path) -> None:
+    """Only navigations are redirected: a subresource fetch under ``/service/...``
+    (no ``sec-fetch-mode: navigate``) forwards to the shell unchanged, so a
+    cross-origin redirect can never break a same-origin XHR."""
+    app, auth_store = _make_legacy_workspace_app(tmp_path)
+
+    def _shell_marker(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="shell served this")
+
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
+        response = client.get(
+            "/service/terminal/__sw.js",
+            headers={"accept": "*/*"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert response.status_code == 200
+    assert response.text == "shell served this"
+
+
+def test_legacy_service_path_on_non_shell_origin_passes_through(tmp_path: Path) -> None:
+    """A ``/service/...`` path on a NON-shell service origin is that service's own
+    path space and must be proxied to it untouched."""
+    app, auth_store = _make_legacy_workspace_app(tmp_path)
+
+    def _terminal_marker(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="terminal served this")
+
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(
+        app, base_url=f"http://terminal.{_TEST_HOST_ID}.localhost:18421", follow_redirects=False
+    ) as client:
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_terminal_marker), follow_redirects=False
+        )
+        response = client.get(
+            "/service/terminal/whatever",
+            headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert response.status_code == 200
+    assert response.text == "terminal served this"
+
+
 def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path: Path) -> None:
     """The proxy stamps X-Share-Owner=true and never trusts a client-supplied identity.
 

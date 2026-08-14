@@ -146,6 +146,28 @@ _GOTO_HOST_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"host-[a-f0-9]{32}")
 # applies only to the service name itself).
 _SUB_ORIGIN_LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z0-9_-]+")
 
+# CLEANUP: drop this pattern together with ``_parse_legacy_service_path`` and the
+# legacy ``/service/<name>/`` redirect in ``_handle_workspace_forward_http`` once no
+# supported workspace predates default-workspace-template's deletion of the
+# ``/service/`` path-prefix proxy (dwt 222b95ef; every pre-minds-v0.3.12-era
+# workspace clears it by running ``update-self``).
+#
+# Path shape of that legacy in-workspace service proxy: old system_interface
+# builds render every non-shell service panel as an iframe at
+# ``/service/<name>/...`` on the shell's own origin. The name charset matches
+# the origin-label grammar so the redirect can reuse the name as a hostname
+# label verbatim.
+_LEGACY_SERVICE_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^/service/([a-z0-9_-]+)(/.*)?$")
+
+
+def _parse_legacy_service_path(path: str) -> tuple[str, str] | None:
+    """Split a legacy ``/service/<name>/<rest>`` path into ``(name, "/<rest>")``, or None."""
+    match = _LEGACY_SERVICE_PATH_PATTERN.match(path)
+    if match is None:
+        return None
+    return match.group(1), match.group(2) or "/"
+
+
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {"transfer-encoding", "content-encoding", "content-length"}
 )
@@ -848,6 +870,36 @@ async def _handle_workspace_forward_http(
         # host is gone). There is no agent to attribute a failure envelope to,
         # so just serve the auto-retrying loader.
         return _service_unavailable_response(request)
+
+    # CLEANUP: drop this redirect (with ``_parse_legacy_service_path`` and
+    # ``ForwardResolver.is_shell_target``) once no supported workspace predates
+    # default-workspace-template's deletion of the ``/service/`` path-prefix
+    # proxy (dwt 222b95ef; ``update-self`` clears it per workspace).
+    #
+    # Old system_interface builds serve service panels at ``/service/<name>/...``
+    # on their own origin, behind a service-worker bootstrap whose
+    # ``document.cookie`` write the desktop's partitioned content embedding
+    # rejects -- so the bootstrap page reloads forever. Send the navigation to
+    # the service's own origin instead, where the proxy serves the service
+    # directly and no bootstrap is involved. The service name doubles as the
+    # origin label: ``resolve_by_origin_label`` falls back to treating an
+    # unmapped label as the name itself, which is exactly the label-less legacy
+    # registration case. Scoped to navigations that would route to the shell,
+    # for services that actually resolve; anything else passes through.
+    legacy_service = _parse_legacy_service_path(request.url.path)
+    if (
+        legacy_service is not None
+        and request.headers.get("sec-fetch-mode") == "navigate"
+        and resolver.is_shell_target(agent_id, host_info.service_name)
+    ):
+        legacy_service_name, legacy_remainder_path = legacy_service
+        if resolver.resolve(agent_id, legacy_service_name) is not None:
+            scheme = "https" if use_http2 else "http"
+            next_path = legacy_remainder_path
+            if request.url.query:
+                next_path = f"{next_path}?{request.url.query}"
+            location = f"{scheme}://{legacy_service_name}.{host_info.workspace_domain}:{listen_port}{next_path}"
+            return Response(status_code=307, headers={"Location": location})
 
     if host_info.service_name is None:
         # Bare origin: redirect HTML navigations to the shell service's own

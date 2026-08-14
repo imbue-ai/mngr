@@ -183,3 +183,13 @@ a dev/ci env first where possible.
   `update-self` restarts their services, at which point `forward_port.py`
   mints origin labels for legacy rows automatically; meanwhile the forwarder
   and desktop route them by service name.
+
+- Old workspaces' system_interface still renders service panels (terminal,
+  browser) as iframes at `/service/<name>/...` on its own origin, behind a
+  service-worker bootstrap whose `document.cookie` write the new desktop's
+  partitioned content embedding rejects -- without mitigation the panel
+  reloads forever (found in the dev-josh-1 rehearsal of this deployment).
+  The forward proxy now 307-redirects those navigations to the service's own
+  origin (CLEANUP-marked in `mngr_forward/server.py`), so pre-update
+  workspaces keep working terminals; `update-self` retires the whole
+  mechanism per workspace.

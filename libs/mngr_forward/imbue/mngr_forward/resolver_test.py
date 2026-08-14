@@ -135,6 +135,31 @@ def test_shell_origin_label_is_none_before_labels_known_and_in_port_mode() -> No
     assert port_resolver.shell_origin_label(TEST_AGENT_ID_1) is None
 
 
+def test_is_shell_target_matches_bare_origin_and_shell_labels() -> None:
+    """The bare origin and any label mapping (directly or via the identity
+    fallback) to the shell service name are shell targets; other labels are not."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    resolver.update_service_labels(
+        TEST_AGENT_ID_1,
+        {"system_interface-shell111": "system_interface", "terminal-term1111": "terminal"},
+    )
+    assert resolver.is_shell_target(TEST_AGENT_ID_1, None)
+    assert resolver.is_shell_target(TEST_AGENT_ID_1, "system_interface-shell111")
+    # Identity fallback: an unmapped label is treated as the name itself.
+    assert resolver.is_shell_target(TEST_AGENT_ID_1, "system_interface")
+    assert not resolver.is_shell_target(TEST_AGENT_ID_1, "terminal-term1111")
+    assert not resolver.is_shell_target(TEST_AGENT_ID_1, "terminal")
+
+
+def test_is_shell_target_is_false_in_port_mode() -> None:
+    """Port-forward mode has no shell service, so nothing is a shell target."""
+    resolver = ForwardResolver(strategy=ForwardPortStrategy(remote_port=PositiveInt(8080)))
+    resolver.add_known_agent(TEST_AGENT_ID_1)
+    assert not resolver.is_shell_target(TEST_AGENT_ID_1, None)
+    assert not resolver.is_shell_target(TEST_AGENT_ID_1, "terminal")
+
+
 def test_resolve_named_service_works_in_port_strategy_mode() -> None:
     """Manual port mode still resolves named services from the registered map;
     only the bare origin maps to the fixed port."""

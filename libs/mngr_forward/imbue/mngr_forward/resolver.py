@@ -177,6 +177,27 @@ class ForwardResolver(MutableModel):
             service_name = self._label_to_name_by_agent.get(str(agent_id), {}).get(origin_label, origin_label)
         return self.resolve(agent_id, service_name)
 
+    def is_shell_target(self, agent_id: AgentId, origin_label: str | None) -> bool:
+        """Whether a request with this origin label (None = bare origin) routes to the shell service.
+
+        Used by the legacy ``/service/<name>/`` redirect to fire only on requests
+        the shell itself would serve: the bare workspace origin, or a label that
+        maps (directly or via the identity fallback) to the shell service name.
+        Port-forward mode has no shell, so nothing is a shell target there.
+        """
+        match self.strategy:
+            case ForwardServiceStrategy(service_name=shell_service_name):
+                if origin_label is None:
+                    return True
+                with self._lock:
+                    mapped_name = self._label_to_name_by_agent.get(str(agent_id), {}).get(origin_label, origin_label)
+                return mapped_name == shell_service_name
+            case ForwardPortStrategy():
+                return False
+            case _ as unreachable:
+                assert_never(unreachable)
+                raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
+
     def shell_origin_label(self, agent_id: AgentId) -> str | None:
         """The origin label of the configured shell service, for the bare-origin redirect.
 
