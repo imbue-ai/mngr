@@ -7,9 +7,12 @@ import queue
 import re
 import subprocess
 import threading
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler
+from http.server import HTTPServer
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -27,6 +30,9 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_forward.testing import make_in_memory_test_ca
+from imbue.mngr_forward.tls import build_server_ssl_context
+from imbue.mngr_forward.tls import generate_server_credentials
 
 
 def device_id_for_test(name: str) -> HostId:
@@ -226,3 +232,74 @@ def restic_backup_a_file(repository: str, password: str, source: Path) -> None:
         timeout=120.0,
     )
     assert result.returncode == 0, result.stderr
+
+
+class _ScriptedWorkspaceProbeHandler(BaseHTTPRequestHandler):
+    """Stands in for the ``mngr forward`` plugin: 503 for the first N probes, then 200.
+
+    Models a container that is still booting: the plugin itself answers, but the
+    inner system interface is not listening yet, which is the 503 the real
+    plugin's auto-refresh page returns.
+    """
+
+    not_ready_count: int = 0
+    request_count: int = 0
+    lock: threading.Lock = threading.Lock()
+    # Fired on the first probe. Lets a test act at the exact moment a readiness
+    # wait is known to have started, instead of racing it with a sleep.
+    on_first_request: Callable[[], None] | None = None
+
+    def do_GET(self) -> None:
+        with type(self).lock:
+            type(self).request_count += 1
+            attempt = type(self).request_count
+        on_first_request = type(self).on_first_request
+        if attempt == 1 and on_first_request is not None:
+            on_first_request()
+        is_booting = attempt <= type(self).not_ready_count
+        self.send_response(503 if is_booting else 200)
+        self.end_headers()
+        self.wfile.write(b"booting" if is_booting else b"ok")
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+@contextmanager
+def scripted_workspace_probe_server(
+    not_ready_count: int, on_first_request: Callable[[], None] | None = None
+) -> Iterator[int]:
+    """Serve a plugin stand-in on loopback, yielding its port.
+
+    Answers 503 for the first ``not_ready_count`` probes and 200 thereafter, so a
+    readiness wait sees a workspace that becomes reachable partway through
+    (``10**6`` stands in for "never ready"). Shared by every test that drives a
+    readiness poll -- the create attempt's wait and the restart worker's -- so
+    both exercise the same stand-in.
+
+    Speaks TLS with the proxy's own CA-backed cert helpers: minds always runs
+    ``mngr forward`` with HTTP/2, so a readiness probe dials https and would fail
+    the handshake against a plain-HTTP socket.
+    """
+    handler_cls = type(
+        "_ScopedWorkspaceProbeHandler",
+        (_ScriptedWorkspaceProbeHandler,),
+        {
+            "not_ready_count": not_ready_count,
+            "request_count": 0,
+            "lock": threading.Lock(),
+            # Wrapped in staticmethod so the class attribute stays a plain
+            # callable rather than binding as a method on each handler instance.
+            "on_first_request": staticmethod(on_first_request) if on_first_request is not None else None,
+        },
+    )
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
+    ca = make_in_memory_test_ca()
+    chain_pem, key_pem = generate_server_credentials(ca)
+    server.socket = build_server_ssl_context(chain_pem, key_pem, ca).wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()

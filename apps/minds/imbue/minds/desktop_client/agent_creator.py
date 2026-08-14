@@ -877,6 +877,21 @@ _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
 _PREBAKED_IMAGE_WAIT_TIMEOUT_SECONDS: Final[float] = 600.0
 _PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
+# How long a cold-booted workspace is given to answer its first HTTP 200 through
+# the plugin. First-boot provisioning (uv sync, npm ci + run build for the
+# system_interface frontend) regularly takes 90-180s on a fresh VM or Docker
+# host, so this is sized for the slow end of a cold boot rather than the typical
+# one; the earlier 60s left users staring at the recovery surface while the
+# workspace was still finishing provisioning. The probe is cheap, so a generous
+# ceiling costs nothing.
+#
+# Every wait for a cold-booted workspace's interface is sized from this one
+# number -- the create attempt's readiness wait (``workspace_ready_timeout_seconds``
+# below) and the restart worker's post-``mngr start`` wait in
+# :mod:`workspace_recovery` -- so the two can never drift into disagreeing about
+# how long a cold boot takes.
+WORKSPACE_READY_TIMEOUT_SECONDS: Final[float] = 300.0
+
 # Readiness window for a Lima create with no pre-baked image. Such a create
 # builds the whole workspace inside the VM (setup_system.sh +
 # install_dependencies.sh + build_workspace.sh, serially, at 2 vCPU / 4 GB)
@@ -1870,15 +1885,13 @@ class AgentCreator(MutableModel):
         ),
     )
     workspace_ready_timeout_seconds: float = Field(
-        default=300.0,
+        default=WORKSPACE_READY_TIMEOUT_SECONDS,
         frozen=True,
         description=(
             "Maximum time to wait for the new agent's system_interface to return HTTP 200. "
-            "First-boot provisioning (uv sync, npm ci + run build for the system_interface "
-            "frontend) regularly takes 90-180s on a fresh VM or Docker host, so the previous "
-            "60s default left users on the recovery page while the agent was still finishing "
-            "provisioning. The probe is cheap so a generous cap is harmless; we still publish "
-            "the redirect anyway if it expires."
+            "Defaults to the shared cold-boot budget (``WORKSPACE_READY_TIMEOUT_SECONDS``); "
+            "see that constant for how it is sized. We still publish the redirect anyway "
+            "if it expires."
         ),
     )
     workspace_ready_poll_interval_seconds: float = Field(

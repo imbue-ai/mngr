@@ -7,6 +7,7 @@ failure modes (unresolved system-services agent, stop/start command failures,
 the host-already-stopped fast path).
 """
 
+import time
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -16,6 +17,7 @@ from typing import Final
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.recovery_probe import DispatchTier
@@ -23,11 +25,15 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import capture_error_logs
+from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
+from imbue.minds.desktop_client.workspace_recovery import RestartReadinessOutcome
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
+from imbue.minds.desktop_client.workspace_recovery import _HOST_RESTART_STARTUP_WAIT_SECONDS
+from imbue.minds.desktop_client.workspace_recovery import _await_system_interface_ready
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
@@ -1117,3 +1123,136 @@ def test_a_machine_that_answers_is_never_restarted(tmp_path: Path) -> None:
         tracker.record_probe_success(workspace_agent)
 
     assert _read_fake_mngr_invocations(mngr_binary) == []
+
+
+# -- post-restart readiness wait --
+
+
+def test_restart_readiness_budget_covers_a_cold_boot() -> None:
+    """The restart's readiness budget is the calibrated cold-boot budget, not its own guess.
+
+    ``mngr start`` cold-boots the container, so the restart worker waits for
+    exactly the event the create flow already measures. Sizing both from one
+    constant is what keeps an ordinary slow restart from tripping the failure
+    branch: the budget was independently set to 30s against a cold boot that
+    regularly runs 90-180s, so a workspace that was merely slow got reported --
+    at error level, to error reporting -- as a failed restart.
+    """
+    assert _HOST_RESTART_STARTUP_WAIT_SECONDS == WORKSPACE_READY_TIMEOUT_SECONDS
+
+
+def test_run_restart_sequence_recovers_a_workspace_that_boots_slowly(tmp_path: Path) -> None:
+    """A workspace that only answers after several polls recovers rather than failing.
+
+    The interface stays 503 for the first two polls and answers on the third, so
+    the wait must keep polling across them and end in HEALTHY with the operation
+    DONE -- and, crucially, log no error: a slow boot is not a failed restart.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent, start_only=True)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    registry = _started_registry(workspace_agent)
+
+    with scripted_workspace_probe_server(not_ready_count=2) as port:
+        with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
+            run_restart_sequence(
+                workspace_agent_id=workspace_agent,
+                tracker=tracker,
+                backend_resolver=resolver,
+                mngr_binary=_write_fake_mngr(tmp_path),
+                mngr_host_dir=tmp_path,
+                concurrency_group=cg,
+                mngr_forward_port=port,
+                mngr_forward_preauth_cookie="cookie",
+                registry=registry,
+                skip_stop=True,
+                # Comfortably past the ~2s the scripted boot takes, so the
+                # budget is not what ends the wait.
+                startup_wait_seconds=30.0,
+            )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    record = registry.get(workspace_agent)
+    assert record is not None and record.status == WorkspaceOperationStatus.DONE
+    assert error_records == []
+
+
+def test_await_system_interface_ready_reports_a_slow_boot_that_answers() -> None:
+    """The wait polls past not-ready responses and reports READY on the first 200."""
+    with scripted_workspace_probe_server(not_ready_count=2) as port:
+        with ConcurrencyGroup(name="test-wait") as cg:
+            outcome = _await_system_interface_ready(str(HostId.generate()), port, "cookie", 30.0, concurrency_group=cg)
+    assert outcome is RestartReadinessOutcome.READY
+
+
+def test_await_system_interface_ready_times_out_when_nothing_ever_answers() -> None:
+    """A budget that elapses with no answer is a TIMED_OUT verdict (the real failure)."""
+    with ConcurrencyGroup(name="test-wait") as cg:
+        # Port 1 refuses connections, so every poll fails fast.
+        outcome = _await_system_interface_ready(str(HostId.generate()), 1, "cookie", 0.1, concurrency_group=cg)
+    assert outcome is RestartReadinessOutcome.TIMED_OUT
+
+
+def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
+    """A shutdown cuts the wait short well inside the cold-boot budget, and is not a timeout.
+
+    The budget spans a full cold boot -- far longer than the concurrency group's
+    ~10s exit budget -- so a quit during a restart must not leave this thread
+    parked until the budget expires. Sleeping on the shutdown event rather than a
+    bare timer is what bounds it.
+    """
+    with ConcurrencyGroup(name="test-wait") as cg:
+        cg.shutdown()
+        started = time.monotonic()
+        # Port 1 refuses connections, so only the shutdown check can end this.
+        outcome = _await_system_interface_ready(
+            str(HostId.generate()), 1, "cookie", _HOST_RESTART_STARTUP_WAIT_SECONDS, concurrency_group=cg
+        )
+        elapsed = time.monotonic() - started
+
+    assert outcome is RestartReadinessOutcome.ABANDONED
+    assert elapsed < 5.0, f"the wait ran {elapsed:.1f}s past a shutdown"
+
+
+def test_run_restart_sequence_does_not_report_a_failure_when_shutdown_cuts_it_short(tmp_path: Path) -> None:
+    """A restart truncated by app shutdown is not reported as a failed restart.
+
+    Shutdown says nothing about whether the workspace recovered, and the tracker
+    and operation registry are per-process, so there is nothing left to render a
+    verdict to. Claiming RESTART_FAILED here would report a failure that was
+    never observed -- and would reach error reporting on every quit that lands
+    mid-restart.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_restarting(workspace_agent, start_only=True)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    registry = _started_registry(workspace_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg:
+        # Quit at the first readiness probe: by then ``mngr start`` has already
+        # run, so this lands the shutdown inside the wait -- the real ordering --
+        # rather than before the sequence's subprocess steps.
+        with scripted_workspace_probe_server(not_ready_count=10**6, on_first_request=cg.shutdown) as port:
+            with capture_error_logs() as error_records:
+                run_restart_sequence(
+                    workspace_agent_id=workspace_agent,
+                    tracker=tracker,
+                    backend_resolver=resolver,
+                    mngr_binary=_write_fake_mngr(tmp_path),
+                    mngr_host_dir=tmp_path,
+                    concurrency_group=cg,
+                    mngr_forward_port=port,
+                    mngr_forward_preauth_cookie="cookie",
+                    registry=registry,
+                    skip_stop=True,
+                    startup_wait_seconds=_HOST_RESTART_STARTUP_WAIT_SECONDS,
+                )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTARTING
+    assert error_records == []
+    record = registry.get(workspace_agent)
+    assert record is not None and record.status == WorkspaceOperationStatus.RUNNING

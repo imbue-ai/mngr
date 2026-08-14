@@ -16,7 +16,6 @@ start``, then await recovery) that drives both the
 
 import os
 import shlex
-import threading
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -34,6 +33,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -71,8 +71,23 @@ _MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 # cap rather than inheriting the 120s default.
 _HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 # How long we wait for the system interface to answer again after a restart.
-# The host restart cold-boots the container, so this is sized for a full boot.
-_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = 30.0
+# ``mngr start`` cold-boots the container, so this waits for exactly the event
+# the create flow's readiness wait already measures -- a cold-booted workspace's
+# system interface answering 200 through the plugin. Sized from that one
+# calibrated number rather than a second, independent guess: a restart's boot
+# does strictly less work than a first boot (the workspace is already
+# provisioned; the worst case, a provider that can only recreate the host from a
+# snapshot, is the first boot again), so the create budget is a sound ceiling
+# and the two cannot drift into contradicting each other about a cold boot.
+#
+# The previous value was an independent 30s, well under the 90-180s a cold boot
+# regularly takes, so an ordinary slow-but-successful restart tripped the
+# failure branch below and error-logged. The workspace then came up anyway: the
+# RESTART_FAILED that branch sets is itself a background-probe target (a
+# RESTARTING one is not), so the health probe loop picked the workspace up and
+# quietly flipped it to HEALTHY once the boot finished -- which is what made the
+# report a false alarm rather than a symptom anyone could act on.
+_HOST_RESTART_STARTUP_WAIT_SECONDS: Final[float] = WORKSPACE_READY_TIMEOUT_SECONDS
 # Poll cadence while waiting for the system interface to come back post-restart.
 _RESTART_PROBE_INTERVAL_SECONDS: Final[float] = 1.0
 # How recent the last discovery snapshot must be to trust the host state it
@@ -212,16 +227,42 @@ def _run_mngr_capturing(
     return finished.stdout, returncode, finished.stderr
 
 
+class RestartReadinessOutcome(UpperCaseStrEnum):
+    """How the post-restart wait for the system interface ended."""
+
+    # The interface answered 200: the restart converged.
+    READY = auto()
+    # The whole cold-boot budget elapsed with no answer: the restart did not converge.
+    TIMED_OUT = auto()
+    # The process is shutting down, so the wait was cut short. This says nothing
+    # about whether the workspace recovered -- it is not a verdict either way.
+    ABANDONED = auto()
+
+
 def _await_system_interface_ready(
-    workspace_host_id: str, mngr_forward_port: int, preauth_cookie: str, wait_seconds: float
-) -> bool:
-    """Poll the system interface through the plugin until it answers 200, or ``wait_seconds`` elapses."""
+    workspace_host_id: str,
+    mngr_forward_port: int,
+    preauth_cookie: str,
+    wait_seconds: float,
+    concurrency_group: ConcurrencyGroup,
+) -> RestartReadinessOutcome:
+    """Poll the system interface through the plugin until it answers 200, the budget elapses, or shutdown.
+
+    The wait spans a full cold boot, which is far longer than the group's ~10s
+    exit budget, so it sleeps on the group's shutdown event rather than a bare
+    timer: a quit during a restart must not leave this thread parked in an
+    uninterruptible sleep that outlives the join and fails the group's exit.
+    Shutdown is reported as its own outcome (never as a timeout), because a
+    truncated wait is not evidence that the restart failed.
+    """
     deadline = time.monotonic() + wait_seconds
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie,
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
     ) as probe_client:
         while time.monotonic() < deadline:
+            if concurrency_group.is_shutting_down():
+                return RestartReadinessOutcome.ABANDONED
             status = probe_workspace_through_plugin(
                 mngr_forward_port=mngr_forward_port,
                 preauth_cookie=preauth_cookie,
@@ -230,9 +271,10 @@ def _await_system_interface_ready(
                 client=probe_client,
             )
             if status == 200:
-                return True
-            threading.Event().wait(timeout=_RESTART_PROBE_INTERVAL_SECONDS)
-    return False
+                return RestartReadinessOutcome.READY
+            if concurrency_group.shutdown_event.wait(timeout=_RESTART_PROBE_INTERVAL_SECONDS):
+                return RestartReadinessOutcome.ABANDONED
+    return RestartReadinessOutcome.TIMED_OUT
 
 
 class RestartWorkerFailureHandler(MutableModel):
@@ -438,7 +480,11 @@ def run_restart_sequence(
 
     Every RESTART_FAILED transition also logs at error level: the recovery
     surface is quiet (Principle 3), so a failed restart must reach error
-    reporting even though the card renders it for the user.
+    reporting even though the card renders it for the user. That is also why the
+    readiness wait is given a full cold-boot budget: below it, a restart that was
+    merely slow reports itself as a failure, to the user and to error reporting
+    alike. A shutdown that truncates the wait is the one ending that yields no
+    verdict at all -- it observed nothing, so it claims nothing.
 
     ``skip_stop`` is set by the dispatches that fire with no knowledge of the
     host's state (the API's ``start_only``): the unattended one on the tracker's
@@ -525,12 +571,24 @@ def run_restart_sequence(
         return
 
     registry.append_log(workspace_agent_id, "Waiting for the system interface to respond.")
-    if _await_system_interface_ready(
-        str(display_info.host_id), mngr_forward_port, mngr_forward_preauth_cookie, startup_wait_seconds
-    ):
+    outcome = _await_system_interface_ready(
+        str(display_info.host_id),
+        mngr_forward_port,
+        mngr_forward_preauth_cookie,
+        startup_wait_seconds,
+        concurrency_group,
+    )
+    if outcome is RestartReadinessOutcome.READY:
         tracker.record_probe_success(workspace_agent_id)
         registry.append_log(workspace_agent_id, "The system interface is responding again.")
         registry.complete(workspace_agent_id)
+    elif outcome is RestartReadinessOutcome.ABANDONED:
+        # The app is quitting mid-restart. Nothing is left to report to: both the
+        # tracker and the operation registry are per-process and die with it, and
+        # no window is up to render a verdict. Reporting a failure here would be a
+        # claim about the workspace we never actually observed, so this stays an
+        # info line -- there is no persistent condition for it to hide.
+        logger.info("Host restart of {} was cut short by shutdown before the interface answered", workspace_agent_id)
     else:
         message = f"The system interface did not respond within {int(startup_wait_seconds)}s of the host restart."
         logger.error("Host restart of {} failed: {}", workspace_agent_id, message)

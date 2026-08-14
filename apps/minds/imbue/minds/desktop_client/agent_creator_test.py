@@ -65,6 +65,7 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -81,9 +82,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
-from imbue.mngr_forward.testing import make_in_memory_test_ca
-from imbue.mngr_forward.tls import build_server_ssl_context
-from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
 
@@ -1130,51 +1128,6 @@ def _make_test_creator(
     )
 
 
-class _ScriptedRequestHandler(BaseHTTPRequestHandler):
-    """Returns 503 for the first ``not_ready_count`` requests, then 200."""
-
-    not_ready_count: int = 0
-    request_count: int = 0
-    lock: threading.Lock = threading.Lock()
-
-    def do_GET(self) -> None:
-        with type(self).lock:
-            type(self).request_count += 1
-            attempt = type(self).request_count
-        if attempt <= type(self).not_ready_count:
-            self.send_response(503)
-            self.end_headers()
-            self.wfile.write(b"not yet")
-        else:
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-
-    def log_message(self, format: str, *args: object) -> None:
-        del format, args
-
-
-def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.Thread, int]:
-    handler_cls = type(
-        "_ScopedHandler",
-        (_ScriptedRequestHandler,),
-        {"not_ready_count": not_ready_count, "request_count": 0, "lock": threading.Lock()},
-    )
-    server = HTTPServer(("127.0.0.1", 0), handler_cls)
-    # The readiness probe dials the proxy over https (minds always runs it with
-    # HTTP/2), so the stand-in server must speak TLS to match -- otherwise the
-    # probe's TLS handshake fails against a plain-HTTP socket. Reuse the proxy's
-    # own CA-backed cert helpers so the test exercises the real https path.
-    ca = make_in_memory_test_ca()
-    chain_pem, key_pem = generate_server_credentials(ca)
-    ssl_context = build_server_ssl_context(chain_pem, key_pem, ca)
-    server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    port = server.server_address[1]
-    return server, thread, port
-
-
 def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) -> None:
     """A backup setup that keeps failing notifies the user once the retry budget is spent.
 
@@ -1230,8 +1183,7 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
 
 def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     """The probe stops as soon as the (subdomain) endpoint returns 200."""
-    server, _thread, port = _start_scripted_server(not_ready_count=2)
-    try:
+    with scripted_workspace_probe_server(not_ready_count=2) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1247,8 +1199,6 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
         # plausible-looking AgentId so the Host header is well-formed.
         aid = AgentId.generate()
         creator._wait_for_workspace_ready(aid, HostId.generate(), log_sink, creator.workspace_ready_timeout_seconds)
-    finally:
-        server.shutdown()
     drained = list(log_sink.read_chunk(0, timeout_seconds=0.0).lines)
     assert any("Waiting for system interface" in line for line in drained)
     # Assert the *success* line specifically -- the timeout-warning line also
@@ -1274,8 +1224,7 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
     # de-enrolls it so the background probe loop stops polling it.
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
-    server, _thread, port = _start_scripted_server(not_ready_count=0)
-    try:
+    with scripted_workspace_probe_server(not_ready_count=0) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1288,8 +1237,6 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
         creator._wait_for_workspace_ready(
             aid, HostId.generate(), CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds
         )
-    finally:
-        server.shutdown()
     # ``record_probe_success`` de-enrolled the agent, so it is no longer a
     # probe target and the background loop will stop polling it.
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
@@ -1390,8 +1337,7 @@ def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
     """If the probe times out, we still return so the caller can publish the redirect."""
-    server, _thread, port = _start_scripted_server(not_ready_count=10**6)
-    try:
+    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -1405,8 +1351,6 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
         started = time.monotonic()
         creator._wait_for_workspace_ready(aid, HostId.generate(), log_sink, creator.workspace_ready_timeout_seconds)
         elapsed = time.monotonic() - started
-    finally:
-        server.shutdown()
     # The probe should give up around the timeout; allow a generous margin
     # so we don't flake under load.
     assert 0.2 <= elapsed <= 1.5
@@ -2084,8 +2028,7 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
     monkeypatch.setenv("PATH", f"{fake_bin_dir}{os.pathsep}{os.environ['PATH']}")
     # The readiness probe never answers 200, so the create attempt sits in
     # WAITING_FOR_READY for the whole (short) ready window.
-    server, _thread, port = _start_scripted_server(not_ready_count=10**6)
-    try:
+    with scripted_workspace_probe_server(not_ready_count=10**6) as port:
         creator = _make_test_creator(
             tmp_path,
             mngr_forward_port=port,
@@ -2112,8 +2055,6 @@ def test_canonical_agent_id_is_published_during_ready_wait(tmp_path: Path, monke
         assert observed_waiting, "the create attempt never reached WAITING_FOR_READY"
         assert info is not None and info.status is AgentCreateAttemptStatus.DONE
         creator.wait_for_all()
-    finally:
-        server.shutdown()
 
 
 def test_scratch_clone_roots_are_unique_per_create_attempt() -> None:
