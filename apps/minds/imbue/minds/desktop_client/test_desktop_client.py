@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
 from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
@@ -463,8 +464,12 @@ def test_tampered_session_cookie_is_unauthenticated(tmp_path: Path) -> None:
     )
     valid_cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
 
-    tampered_cookie = valid_cookie[:-1] + ("A" if valid_cookie[-1] != "A" else "B")
+    # Mutate the signature's FIRST character: its last carries only 4 significant bits, so several
+    # characters there decode to the same bytes and leave the cookie valid.
+    signature = valid_cookie.rsplit(".", 1)[-1]
+    tampered_cookie = valid_cookie[: -len(signature)] + ("A" if signature[0] != "A" else "B") + signature[1:]
     assert tampered_cookie != valid_cookie
+    assert not verify_session_cookie(cookie_value=tampered_cookie, signing_key=auth_store.get_signing_key())
     client.set_cookie(SESSION_COOKIE_NAME, tampered_cookie)
 
     response = client.get("/post-login", follow_redirects=False)
