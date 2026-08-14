@@ -18,7 +18,7 @@ Feature: Browser-authorization invariants
       Given the user has no session
       When they visit "/"
       Then they see an authentication prompt directing them to the authentication URL printed in the terminal
-      And the page reveals nothing about existing machines
+      And the page reveals nothing about existing workspaces
 
     @unauthenticated-arrival
     Example: An arrival at "/post-login" with no session is sent to authenticate, not to a destination
@@ -53,10 +53,10 @@ Feature: Browser-authorization invariants
       Then that destination is not honored
 
   @single-credential
-  Rule: The authenticated session is the only credential for reaching your machines through the browser authorization component
-    Authenticating a session once, with the one-time code from the terminal, is all it takes to reach every machine on this origin.
+  Rule: The authenticated session is the only credential for reaching your workspaces through the browser authorization component
+    Authenticating a session once, with the one-time code from the terminal, is all it takes to reach every workspace on this origin.
     The browser authorization component never asks the user for a second credential to get there.
-    Any other credential the product asks for gates an optional cloud-backed feature, never the path to a machine; those credentials are specified elsewhere.
+    Any other credential the product asks for gates an optional cloud-backed feature, never the path to a workspace; those credentials are specified elsewhere.
 
   @fetch-never-spends
   Rule: Merely fetching a URL never spends a code

@@ -61,8 +61,8 @@ def test_consent_gate_is_asked_once_then_never_again(tmp_path: Path) -> None:
 
 @pytest.mark.witnesses(
     "home-page.discovering",
-    partial="witnesses the server signals (discovery incomplete, zero machines, none restorable) "
-    "that put the home page in the discovering state; the mandated 'Discovering machines' copy is "
+    partial="witnesses the server signals (discovery incomplete, zero workspaces, none restorable) "
+    "that put the home page in the discovering state; the mandated 'Discovering workspaces' copy is "
     "rendered by the Mithril LandingPage (frontend/src/views/pages/LandingPage.ts), and the page "
     "refreshes via the /ui/ws channel rather than a timer -- both outside the Python witnessing surface",
 )
@@ -89,8 +89,8 @@ def test_discovering_state_before_initial_discovery_finishes(tmp_path: Path) -> 
 
 @pytest.mark.witnesses(
     "home-page.empty-shows-create-form",
-    partial="witnesses the server signals (discovery complete, zero machines, none restorable) "
-    "that make the home page the new-machine form; rendering the form is a frontend concern",
+    partial="witnesses the server signals (discovery complete, zero workspaces, none restorable) "
+    "that make the home page the new-workspace form; rendering the form is a frontend concern",
 )
 def test_empty_after_discovery_shows_the_create_form(tmp_path: Path) -> None:
     # Given a consented user and an initial discovery that finished without
@@ -111,9 +111,9 @@ def test_empty_after_discovery_shows_the_create_form(tmp_path: Path) -> None:
 
 
 @pytest.mark.witnesses(
-    "home-page.lists-machines",
+    "home-page.lists-workspaces",
     partial="witnesses the locally-discovered case: the derive that feeds the workspaces channel "
-    "surfaces every known machine as a row. The synced-from-another-device (remote tile) variant "
+    "surfaces every known workspace as a row. The synced-from-another-device (remote tile) variant "
     "and the rendered DOM rows are not exercised here",
 )
 def test_every_discovered_workspace_is_listed(tmp_path: Path) -> None:

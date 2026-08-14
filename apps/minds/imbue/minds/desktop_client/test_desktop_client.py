@@ -350,7 +350,7 @@ def test_post_login_honors_safe_return_to(tmp_path: Path) -> None:
 )
 @pytest.mark.witnesses(
     "home-page.default-destination",
-    partial="covers only the rejected-as-unsafe return destination with no machines (the '/' row)",
+    partial="covers only the rejected-as-unsafe return destination with no workspaces (the '/' row)",
 )
 def test_post_login_ignores_unsafe_return_to(tmp_path: Path) -> None:
     """With consent answered, an off-origin ``return_to`` is rejected and the default destination is used."""

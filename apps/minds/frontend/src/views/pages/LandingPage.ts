@@ -565,7 +565,7 @@ export const LandingPage: m.ClosureComponent = () => {
             ])
           : isDiscovering
             ? m("div", { class: "flex flex-col items-center justify-center min-h-[80vh] gap-6" }, [
-                m("p", { class: "text-tertiary text-center" }, "Discovering machines..."),
+                m("p", { class: "text-tertiary text-center" }, "Discovering workspaces..."),
                 m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
               ])
             : m("div", { class: "text-center py-12" }, [

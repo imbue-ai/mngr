@@ -1,7 +1,7 @@
 # Browser authorization
 
 The **browser authorization component** -- fully, the *desktop-app backend-server* browser authorization component -- is the browser-facing part of the minds *desktop client*: the bare-origin web UI served by `minds run` (`apps/minds/imbue/minds/desktop_client/`) that serves every page the browser reaches, carries the session, and authenticates it.
-It is the gateway through which the user reaches all their machines.
+It is the gateway through which the user reaches all their workspaces.
 
 The features in this folder cover authenticating a session with a one-time code, and the session that authentication establishes.
 The Rules in `invariants.feature` bind all of them.
@@ -31,6 +31,6 @@ Which destination "/post-login" then chooses for an authenticated user is first-
 ## Out of scope
 
 - Imbue-cloud account sign-in (the `/auth/*` pages) -- a separate account system layered on top of the local session -- is out of scope; only `/post-login`, where it returns control to this component, is touched here (see above), and the destination it chooses is routing specified in `home-page/`.
-- The machine-origin bridge served by the forward server (`libs/mngr_forward/`), which extends a session from the browser authorization component to each machine's own origin -- specified in `libs/mngr_forward/behaviors/`.
+- The workspace-origin bridge served by the forward server (`libs/mngr_forward/`), which extends a session from the browser authorization component to each workspace's own origin -- specified in `libs/mngr_forward/behaviors/`.
 - The authenticated user's home-page experience at "/" -- specified in `home-page/`.
 - The `SKIP_AUTH=1` environment variable, a development escape hatch that bypasses every session check; it is intentionally left unspecified.

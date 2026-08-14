@@ -1,11 +1,11 @@
 # Minds behavior corpus
 
 This corpus specifies the externally observable behavior of the minds *desktop client*.
-Established minds terms are defined in the [minds glossary](../docs/workspace/glossary.md) and are not redefined in this corpus; corpus-specific terms are defined in the overview of the folder that specifies them.
+Established minds terms are defined in the [workspace glossary](../docs/workspace/glossary.md) and are not redefined in this corpus; corpus-specific terms are defined in the overview of the folder that specifies them.
 
 ## Corpus-wide conventions
 
-The user-facing unit throughout is the *machine* (an mngr host); an *agent* is a distinct mngr process running inside a machine, and this corpus never uses *agent* to mean *machine*.
+The user-facing unit throughout is the *workspace* (an mngr host); an *agent* is a distinct mngr process running inside a workspace, and this corpus never uses *agent* to mean *workspace*.
 
 ## Out of scope for the whole corpus
 
