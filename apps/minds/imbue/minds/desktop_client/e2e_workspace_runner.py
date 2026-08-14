@@ -106,7 +106,14 @@ _ELECTRON_LAUNCH_ATTEMPTS: Final[int] = 3
 # attach phase waits for the backend page in short rounds and reconnects
 # between rounds instead of trusting one session for the full budget.
 _PICK_ROUND_SECONDS: Final[int] = 20
-_CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
+# Budget for the whole create flow after submitting the form, which includes a
+# full docker build of the workspace image inside the CI sandbox -- legitimately
+# ~8-10.5 minutes there (the build-minds-snapshot job measured a healthy run
+# overshooting the old 600s budget at 625s, and the job failed on roughly
+# alternating main runs from exactly this deadline). The build's duration is
+# network-bound (apt/pip mirrors), so headroom -- not a tighter deadline -- is
+# what keeps this signal meaningful.
+_CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 900
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 

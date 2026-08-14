@@ -96,20 +96,25 @@ The merged installer block (in default-workspace-template `main`,
 pool/slice provider blocks) is explicitly designed as the backfill path: it
 removes the old direct enablement, revives units a past boot left dead of a
 start-rate limit, writes the `.minds-volume-ready` marker behind a hard
-`mountpoint` check, and enables + starts the path unit (which fires
-immediately and safely on a running workspace).
+`mountpoint` check, enables + starts the path unit, and explicitly fires the
+service (`systemctl restart --no-block`) -- starting the path unit alone
+never re-runs a service the old installer's boot-time oneshot left latched
+active, which is exactly the state of a wedge-recovered VM.
 
 Run the sweep (`just backfill-autostart`, wrapping
 `mngr imbue_cloud admin server backfill-autostart`; start with `--dry-run`
 to see the per-VM plan). Do not hand-loop over the fleet; the sweep
 handles:
 
-- **Per-VM services-agent path.** The installer text launches the
-  *current* tree's `minds_start_services_agent.sh`; older slices bake it at
-  `/mngr/code/scripts/...` while newer ones use
-  `/home/user/workspace/system/scripts/...`. Extract the path from each VM's
-  existing `/usr/local/sbin/minds-outer-autostart.sh` and substitute it,
-  rather than assuming the current layout.
+- **Per-generation services-agent script.** The installer's relaunch step
+  probes the known in-container locations itself
+  (`/home/user/workspace/system/scripts/minds_start_services_agent.sh`, then
+  the older `/mngr/code/scripts/...`). A container that predates the script
+  entirely (minds-v0.3.1) is started with its sshd brought up and a journal
+  notice instead of failing -- a permanent failure would otherwise retrigger-loop
+  the unthrottled path unit. Such VMs report `backfilled` with a
+  container-start-only note in the JSON `detail`; their services agents
+  relaunch via `mngr start` / the desktop client.
 - **Reach.** VMs are only reachable via each box's lima user with the pool
   key (`limactl shell <instance> sudo ...`); the script should sweep
   box-by-box from `minds server list` / `minds pool list` data.
@@ -118,11 +123,16 @@ handles:
   installer's own `mountpoint` guard makes it refuse to run on a VM whose
   data volume is not mounted -- treat that as a per-VM failure to
   investigate, not something to bypass.
+- **Verification.** A VM only reports `backfilled` after the sweep observes
+  a service run that started after the install and ended in success (unit
+  state alone cannot tell a fresh success from the stale latched-active
+  state) -- so a `backfilled: N, failed: 0` report means every workspace on
+  the box actually started, and re-running the sweep is always safe.
 
 No database migrations are needed for any of this: neither fix touches the
 `pool_hosts` schema or the connector.
 
-Verify per VM:
+Verify per VM (the sweep already checks all of this; for spot checks):
 
 ```bash
 systemctl is-active minds-autostart.path        # -> active

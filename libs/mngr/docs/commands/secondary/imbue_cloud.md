@@ -1159,7 +1159,7 @@ mngr imbue_cloud admin server backfill-autostart [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
 | `--server-id` | text | Restrict the sweep to these bare_metal_servers row ids (repeatable; default: every box). | None |
-| `--dry-run` | boolean | List the slice VMs that would be backfilled (with the per-VM start-script path) without applying. | `False` |
+| `--dry-run` | boolean | List the slice VMs that would be backfilled (probing each VM's reachability) without applying. | `False` |
 
 ## mngr imbue_cloud admin server register
 

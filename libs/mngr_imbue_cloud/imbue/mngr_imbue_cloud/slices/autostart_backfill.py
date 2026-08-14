@@ -5,21 +5,26 @@ The merged installer (default-workspace-template ``.mngr/settings.toml``,
 baked before the reboot-resilience fixes keep the old racy oneshot until an
 operator re-applies it (see minds' ``docs/reboot-resilience-rollout.md`` Step
 2). This module is that sweep: box by box, it applies the installer to every
-``mngr-slice-*`` VM through the box's lima user (``limactl shell``), with the
-one per-VM substitution the runbook calls out -- the services-agent start
-script path, which older slices bake at ``/mngr/code/scripts/...`` and newer
-ones at ``/home/user/workspace/system/scripts/...``. The path is extracted
-from each VM's existing ``/usr/local/sbin/minds-outer-autostart.sh`` rather
-than assumed.
+``mngr-slice-*`` VM through the box's lima user (``limactl shell``).
 
 The installer text is a verbatim copy of the template's block (kept in sync by
 hand; the template is the source of truth). It is idempotent, refuses to run
 on a VM whose data volume is not mounted (reported as a per-VM failure to
 investigate, never bypassed), and applying it to a healthy running workspace
-is a no-op for the user.
+is a no-op for the user. The in-container relaunch step probes the known
+per-generation script locations itself, so no per-VM path substitution is
+needed; containers that predate the start script entirely degrade to a
+container+sshd start with a journal notice (surfaced in the outcome detail).
+
+Applying the units is not enough to know the workspace actually started: the
+installer fires the service explicitly (``systemctl restart --no-block``,
+because starting the path unit alone never re-runs a service the old
+installer's boot-time oneshot left latched active), and the sweep then watches
+the service until it observes a run that started after the install and ended
+in success -- the watch runs as one in-VM shell loop so each VM costs a single
+extra SSH round trip.
 """
 
-import re
 import shlex
 from enum import auto
 from typing import Final
@@ -30,25 +35,42 @@ from pydantic import Field
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
-
-# The services-agent path the current template bakes; older slices carry
-# /mngr/code/scripts/minds_start_services_agent.sh instead, which is why the
-# path is extracted per VM and substituted into the installer.
-DEFAULT_SERVICES_AGENT_PATH: Final[str] = "/home/user/workspace/system/scripts/minds_start_services_agent.sh"
-
-_SERVICES_AGENT_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"(/\S+/minds_start_services_agent\.sh)")
 
 # Only lima instances with this prefix are slice VMs; anything else on a box
 # (nothing today) is left alone.
 _SLICE_INSTANCE_PREFIX: Final[str] = "mngr-slice-"
 
-# Reading one small file is quick; the installer itself only writes files and
-# enables/starts the path unit (the started unit fires the actual workspace
-# start asynchronously), so neither command should run long.
+# Reading one unit property is quick; the installer itself only writes files,
+# enables the path unit, and fires the service without waiting for it
+# (--no-block), so neither command should run long. The verification command
+# is the one that deliberately waits (in-VM) for the fired run to finish.
 _READ_TIMEOUT_SECONDS: Final[float] = 120.0
 _INSTALL_TIMEOUT_SECONDS: Final[float] = 300.0
+
+# How long the in-VM verification loop waits for a fresh successful service
+# run. The data volume is already mounted when verification runs (the
+# installer refuses otherwise), so the run should only need docker start +
+# `mngr start` -- normally well under a minute.
+_VERIFY_DEADLINE_SECONDS: Final[int] = 120
+_VERIFY_TIMEOUT_SECONDS: Final[float] = _VERIFY_DEADLINE_SECONDS + 60.0
+
+# Markers the in-VM verification loop prints; the sweep parses them out of
+# stdout so an SSH-level failure (non-zero exit) stays distinguishable from a
+# service run that failed.
+VERIFY_SUCCESS_MARKER: Final[str] = "MNGR_AUTOSTART_VERIFIED"
+VERIFY_FAILURE_MARKER: Final[str] = "MNGR_AUTOSTART_FAILED"
+
+# The journal notice the installer's relaunch step emits when the container
+# generation predates minds_start_services_agent.sh (see the installer text);
+# its presence classifies a successful run as container-start-only.
+_SCRIPTLESS_NOTICE_FRAGMENT: Final[str] = "no minds_start_services_agent.sh in this container generation"
+
+# Outcome detail for a run that succeeded via the scriptless fallback.
+CONTAINER_START_ONLY_DETAIL: Final[str] = (
+    "services-agent script absent in this container generation; container and sshd started, "
+    "agent relaunch left to mngr/the desktop client"
+)
 
 # Verbatim from default-workspace-template .mngr/settings.toml
 # (post_host_create_outer_command__extend of the pool/slice provider blocks);
@@ -97,7 +119,18 @@ for cid in $(docker ps -aq --filter "label=com.imbue.mngr.host-id"); do
         FAILED=1
         continue
     fi
-    if ! docker exec --workdir / "$cid" bash -lc 'exec /home/user/workspace/system/scripts/minds_start_services_agent.sh'; then
+    # Run the in-container start script from whichever location this
+    # container's generation carries. A container older than the script
+    # itself has none: for those, make sure sshd is up (its entrypoint is a
+    # bare keep-alive) and succeed with a journal notice -- a permanently
+    # missing script must not fail the unit, because the path unit
+    # retriggers a failing oneshot with no rate limit (the unit sets
+    # StartLimitIntervalSec=0 for transient failures), which would hot-loop
+    # forever on a condition that can never clear.
+    # CLEANUP: drop the /mngr/code candidate and the sshd fallback once no
+    # leased workspace container predates minds-v0.3.2 (the first version
+    # that ships minds_start_services_agent.sh).
+    if ! docker exec --workdir / "$cid" bash -lc 'for s in /home/user/workspace/system/scripts/minds_start_services_agent.sh /mngr/code/scripts/minds_start_services_agent.sh; do if test -x "$s"; then exec "$s"; fi; done; mkdir -p /run/sshd; grep -lxs sshd /proc/[0-9]*/comm >/dev/null 2>&1 || /usr/sbin/sshd -o MaxSessions=100 -o MaxStartups=100:30:200 || echo "warning: could not start sshd in this container" >&2; echo "no minds_start_services_agent.sh in this container generation; started container and sshd only" >&2'; then
         echo "relaunching the services agent in container $cid failed" >&2
         FAILED=1
     fi
@@ -154,20 +187,31 @@ touch /mngr-btrfs/.minds-volume-ready
 # the data volume exists. Remove any direct boot enablement left by the
 # previous installer (a no-op on fresh VMs), revive units a past boot may have
 # left dead of a start-rate limit (re-running this installer is the fleet
-# backfill path), then enable + start the watcher -- starting it now makes the
-# fix take effect without a reboot: the marker is already visible at install
-# time, so the service fires immediately (safe: `docker start` and
-# `mngr start` are no-ops on a running workspace).
+# backfill path), then enable + start the watcher. Starting the path unit
+# alone does NOT fire the service when it is already active -- the previous
+# installer's boot-time oneshot swallowed its own failures and exited 0, and
+# RemainAfterExit=yes then latches the unit active, which is exactly the
+# state of a VM recovered from a wedge -- so explicitly restart the service
+# to run the start NOW. --no-block keeps this installer fast (the service
+# body may legitimately wait minutes for the data-volume mount), and the run
+# is safe on a healthy workspace (`docker start` and `mngr start` are
+# no-ops).
 rm -f /etc/systemd/system/multi-user.target.wants/minds-autostart.service
 systemctl daemon-reload
 systemctl reset-failed minds-autostart.path minds-autostart.service 2>/dev/null || true
 systemctl enable minds-autostart.path
 systemctl start minds-autostart.path
+systemctl restart --no-block minds-autostart.service
 """
 
-
-class AutostartScriptReadError(ImbueCloudError):
-    """Raised when a slice VM's existing autostart script cannot be read (the VM is likely unreachable)."""
+# Reads the monotonic start stamp of the service's last run (microseconds
+# since boot; 0 when it never ran or the unit does not exist yet). Taken
+# BEFORE the install so the verification loop can demand a strictly newer
+# run -- `is-active` alone cannot tell a fresh success from the stale
+# latched-active state the old installer leaves behind.
+_PRE_STAMP_COMMAND: Final[str] = (
+    "systemctl show minds-autostart.service -p ExecMainStartTimestampMonotonic --value 2>/dev/null || echo 0"
+)
 
 
 class SliceAutostartBackfillStatus(LowerCaseStrEnum):
@@ -184,16 +228,16 @@ class SliceAutostartBackfillOutcome(FrozenModel):
     server_id: str = Field(description="The bare_metal_servers row id of the VM's box")
     vm_name: str = Field(description="The slice's lima instance name on the box")
     status: SliceAutostartBackfillStatus = Field(description="How the VM ended up")
-    services_agent_path: str | None = Field(
-        default=None, description="The per-VM start-script path the installer was (or would be) rendered with"
+    detail: str | None = Field(
+        default=None,
+        description="Failure description, or the container-start-only note on a degraded success",
     )
-    detail: str | None = Field(default=None, description="Failure description (failed only)")
 
 
 class SliceAutostartBackfillReport(FrozenModel):
     """The summary the backfill emits: per-VM outcomes plus counts."""
 
-    backfilled: int = Field(description="VMs the installer was applied to and verified on")
+    backfilled: int = Field(description="VMs the installer was applied to and whose start run was verified")
     failed: int = Field(description="VMs whose backfill failed (investigate individually)")
     would_backfill: int = Field(description="VMs a non-dry run would apply to (dry runs only)")
     unreadable_boxes: tuple[str, ...] = Field(
@@ -202,22 +246,91 @@ class SliceAutostartBackfillReport(FrozenModel):
     vms: tuple[SliceAutostartBackfillOutcome, ...] = Field(description="Per-VM outcomes")
 
 
-@pure
-def extract_services_agent_path(autostart_script_text: str) -> str | None:
-    """Pull the services-agent start-script path out of an existing autostart script.
+class AutostartRunVerdict(FrozenModel):
+    """Parsed result of the in-VM verification loop's stdout."""
 
-    Matches any absolute path ending in ``minds_start_services_agent.sh`` (the
-    one line every installer generation has carried), so both the old
-    ``/mngr/code/scripts/...`` and the current layout resolve.
+    is_verified: bool = Field(description="Whether a fresh successful service run was observed")
+    is_container_start_only: bool = Field(
+        description="Whether the run's journal carries the scriptless-generation notice"
+    )
+    detail: str | None = Field(default=None, description="The failure line plus journal tail (failures only)")
+
+
+@pure
+def build_autostart_verify_script(pre_install_stamp_microseconds: int) -> str:
+    """Render the in-VM loop that waits for a service run newer than the given stamp.
+
+    Runs entirely inside the VM (one SSH round trip; remote operations are
+    slow, so the waiting must not be client-side polling). Prints
+    ``MNGR_AUTOSTART_VERIFIED notice=<n>`` once a fresh run has succeeded and
+    the path unit is active, or ``MNGR_AUTOSTART_FAILED <reason>`` plus a
+    journal tail when the run failed or the deadline passed. Both outcomes
+    exit 0 -- a non-zero exit from this command means the SSH/limactl
+    invocation itself broke, which callers must report separately.
     """
-    match = _SERVICES_AGENT_PATH_PATTERN.search(autostart_script_text)
-    return match.group(1) if match is not None else None
+    return f"""\
+set -u
+pre={pre_install_stamp_microseconds}
+waited=0
+while :; do
+    stamp=$(systemctl show minds-autostart.service -p ExecMainStartTimestampMonotonic --value 2>/dev/null || echo 0)
+    active=$(systemctl show minds-autostart.service -p ActiveState --value 2>/dev/null || echo unknown)
+    result=$(systemctl show minds-autostart.service -p Result --value 2>/dev/null || echo unknown)
+    path_state=$(systemctl is-active minds-autostart.path 2>/dev/null || true)
+    if [ "$stamp" -gt "$pre" ] 2>/dev/null; then
+        if [ "$active" = "active" ] && [ "$result" = "success" ] && [ "$path_state" = "active" ]; then
+            notice=$(journalctl -u minds-autostart -n 40 --no-pager --output=cat 2>/dev/null | grep -c "{_SCRIPTLESS_NOTICE_FRAGMENT}" || true)
+            echo "{VERIFY_SUCCESS_MARKER} notice=$notice"
+            exit 0
+        fi
+        if [ "$active" = "failed" ]; then
+            echo "{VERIFY_FAILURE_MARKER} the fired minds-autostart run failed"
+            journalctl -u minds-autostart -n 8 --no-pager --output=cat 2>/dev/null || true
+            exit 0
+        fi
+    fi
+    if [ "$waited" -ge {_VERIFY_DEADLINE_SECONDS} ]; then
+        echo "{VERIFY_FAILURE_MARKER} no fresh successful run within {_VERIFY_DEADLINE_SECONDS}s (stamp=$stamp pre=$pre active=$active result=$result path=$path_state)"
+        journalctl -u minds-autostart -n 8 --no-pager --output=cat 2>/dev/null || true
+        exit 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+done
+"""
 
 
 @pure
-def build_autostart_installer_script(services_agent_path: str) -> str:
-    """Render the installer with the VM's own services-agent path substituted in."""
-    return _AUTOSTART_INSTALLER_SCRIPT.replace(DEFAULT_SERVICES_AGENT_PATH, services_agent_path)
+def parse_pre_install_stamp(stdout: str) -> int:
+    """Parse the microsecond stamp printed by the pre-install read (0 when unparseable)."""
+    stripped = stdout.strip()
+    return int(stripped) if stripped.isdigit() else 0
+
+
+@pure
+def parse_autostart_verify_output(stdout: str) -> AutostartRunVerdict:
+    """Interpret the verification loop's stdout into a verdict.
+
+    Output without either marker counts as a failure (the loop always prints
+    one, so its absence means the command was cut short).
+    """
+    for line_idx, line in enumerate(stdout.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith(VERIFY_SUCCESS_MARKER):
+            is_scriptless = "notice=0" not in stripped
+            return AutostartRunVerdict(is_verified=True, is_container_start_only=is_scriptless)
+        elif stripped.startswith(VERIFY_FAILURE_MARKER):
+            reason = stripped.removeprefix(VERIFY_FAILURE_MARKER).strip()
+            journal_tail = "\n".join(stdout.splitlines()[line_idx + 1 :]).strip()
+            detail = f"{reason}\n{journal_tail}".strip() if journal_tail else reason
+            return AutostartRunVerdict(is_verified=False, is_container_start_only=False, detail=detail)
+        else:
+            continue
+    return AutostartRunVerdict(
+        is_verified=False,
+        is_container_start_only=False,
+        detail=f"verification produced no verdict marker: {stdout[-300:]!r}",
+    )
 
 
 def _run_in_vm(
@@ -228,58 +341,44 @@ def _run_in_vm(
     return client.run_on_box(remote_command, timeout=timeout, label=label)
 
 
-def _resolve_vm_services_agent_path(client: LimaSliceVpsClient, vm_name: str) -> str:
-    """The VM's existing start-script path, else the current template default.
-
-    A VM without the script (or one whose script carries no recognizable path)
-    was never autostart-installed at all; the current layout is the only
-    sensible rendering for it, and the installer is safe either way.
-
-    Raises :class:`AutostartScriptReadError` when the read command itself
-    fails: the in-VM command ends with ``|| true``, so a non-zero exit means
-    the ``limactl shell`` / box SSH invocation broke (e.g. a stopped VM), and
-    defaulting there could render an old-layout VM's installer with the wrong
-    path.
-    """
-    returncode, stdout, stderr = _run_in_vm(
-        client,
-        vm_name,
-        "cat /usr/local/sbin/minds-outer-autostart.sh 2>/dev/null || true",
-        timeout=_READ_TIMEOUT_SECONDS,
-        label=f"read-autostart-{vm_name}",
-    )
-    if returncode != 0:
-        raise AutostartScriptReadError(
-            f"could not read {vm_name}'s existing autostart script: "
-            f"{stderr.strip() or f'read command exited {returncode}'}"
-        )
-    extracted_path = extract_services_agent_path(stdout)
-    return extracted_path if extracted_path is not None else DEFAULT_SERVICES_AGENT_PATH
-
-
 def backfill_box_autostart(
     client: LimaSliceVpsClient,
     server_id: str,
     *,
     is_dry_run: bool,
 ) -> list[SliceAutostartBackfillOutcome]:
-    """Apply (or, dry, plan) the autostart installer on every slice VM of one box."""
+    """Apply (or, dry, plan) the autostart installer on every slice VM of one box.
+
+    Each VM costs three SSH round trips: read the service's pre-install run
+    stamp (which doubles as the reachability probe -- a wedged or stopped VM
+    fails here and is reported rather than guessed about), apply the
+    installer, then wait in-VM for a run newer than the stamp to succeed.
+    Dry runs stop after the first step.
+    """
     outcomes: list[SliceAutostartBackfillOutcome] = []
     slice_vm_names = sorted(name for name in client.list_instance_names() if name.startswith(_SLICE_INSTANCE_PREFIX))
     for vm_name in slice_vm_names:
-        # A VM whose script cannot even be read (stopped, unreachable) is
-        # reported as its own failure rather than aborting the box sweep --
-        # or, worse, being rendered with a silently guessed path.
-        try:
-            services_agent_path = _resolve_vm_services_agent_path(client, vm_name)
-        except AutostartScriptReadError as exc:
-            logger.warning("Could not plan autostart backfill for {} (box {}): {}", vm_name, server_id, exc)
+        # Read the pre-install stamp; a VM this cannot reach (stopped,
+        # wedged) is reported as its own failure rather than aborting the
+        # box sweep.
+        stamp_returncode, stamp_stdout, stamp_stderr = _run_in_vm(
+            client,
+            vm_name,
+            _PRE_STAMP_COMMAND,
+            timeout=_READ_TIMEOUT_SECONDS,
+            label=f"read-autostart-stamp-{vm_name}",
+        )
+        if stamp_returncode != 0:
+            logger.warning("Could not read {}'s service state (box {}): {}", vm_name, server_id, stamp_stderr.strip())
             outcomes.append(
                 SliceAutostartBackfillOutcome(
                     server_id=server_id,
                     vm_name=vm_name,
                     status=SliceAutostartBackfillStatus.FAILED,
-                    detail=str(exc),
+                    detail=(
+                        f"could not read the VM's service state: "
+                        f"{stamp_stderr.strip() or f'stamp read exited {stamp_returncode}'}"
+                    ),
                 )
             )
             continue
@@ -289,43 +388,62 @@ def backfill_box_autostart(
                     server_id=server_id,
                     vm_name=vm_name,
                     status=SliceAutostartBackfillStatus.WOULD_BACKFILL,
-                    services_agent_path=services_agent_path,
                 )
             )
             continue
-        installer_script = build_autostart_installer_script(services_agent_path)
-        returncode, _stdout, stderr = _run_in_vm(
-            client, vm_name, installer_script, timeout=_INSTALL_TIMEOUT_SECONDS, label=f"install-autostart-{vm_name}"
+        pre_install_stamp = parse_pre_install_stamp(stamp_stdout)
+
+        # Apply the installer (writes the script + units, enables the path
+        # unit, and fires the service without waiting for it).
+        install_returncode, _install_stdout, install_stderr = _run_in_vm(
+            client,
+            vm_name,
+            _AUTOSTART_INSTALLER_SCRIPT,
+            timeout=_INSTALL_TIMEOUT_SECONDS,
+            label=f"install-autostart-{vm_name}",
         )
-        if returncode != 0:
+        if install_returncode != 0:
             outcomes.append(
                 SliceAutostartBackfillOutcome(
                     server_id=server_id,
                     vm_name=vm_name,
                     status=SliceAutostartBackfillStatus.FAILED,
-                    services_agent_path=services_agent_path,
-                    detail=stderr.strip() or f"installer exited {returncode}",
+                    detail=install_stderr.strip() or f"installer exited {install_returncode}",
                 )
             )
             continue
+
+        # Wait (in-VM) for a service run newer than the pre-install stamp to
+        # finish successfully -- this is what proves the workspace start
+        # actually happened, not just that the units are on disk.
         verify_returncode, verify_stdout, verify_stderr = _run_in_vm(
             client,
             vm_name,
-            "systemctl is-active minds-autostart.path",
-            timeout=_READ_TIMEOUT_SECONDS,
+            build_autostart_verify_script(pre_install_stamp),
+            timeout=_VERIFY_TIMEOUT_SECONDS,
             label=f"verify-autostart-{vm_name}",
         )
-        if verify_returncode != 0 or verify_stdout.strip() != "active":
+        if verify_returncode != 0:
             outcomes.append(
                 SliceAutostartBackfillOutcome(
                     server_id=server_id,
                     vm_name=vm_name,
                     status=SliceAutostartBackfillStatus.FAILED,
-                    services_agent_path=services_agent_path,
                     detail=(
-                        "installer succeeded but minds-autostart.path is not active: "
-                        f"{verify_stdout.strip() or verify_stderr.strip() or 'unknown'}"
+                        f"installer succeeded but the verification command could not run: "
+                        f"{verify_stderr.strip() or f'verification exited {verify_returncode}'}"
                     ),
+                )
+            )
+            continue
+        verdict = parse_autostart_verify_output(verify_stdout)
+        if not verdict.is_verified:
+            outcomes.append(
+                SliceAutostartBackfillOutcome(
+                    server_id=server_id,
+                    vm_name=vm_name,
+                    status=SliceAutostartBackfillStatus.FAILED,
+                    detail=verdict.detail,
                 )
             )
             continue
@@ -335,7 +453,7 @@ def backfill_box_autostart(
                 server_id=server_id,
                 vm_name=vm_name,
                 status=SliceAutostartBackfillStatus.BACKFILLED,
-                services_agent_path=services_agent_path,
+                detail=CONTAINER_START_ONLY_DETAIL if verdict.is_container_start_only else None,
             )
         )
     return outcomes
