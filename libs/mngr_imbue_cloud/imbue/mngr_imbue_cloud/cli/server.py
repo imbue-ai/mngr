@@ -100,6 +100,8 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
 from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import foreign_tier_slice_names
+from imbue.mngr_imbue_cloud.slices.bare_metal import parse_degraded_md_arrays
+from imbue.mngr_imbue_cloud.slices.bare_metal import parse_raw_swap_devices
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import POOL_HOST_STATUS_LEASED
@@ -346,6 +348,7 @@ def audit_box_against_tier(
         box_host_public_key=server_to_audit.box_host_public_key,
     )
     disk_names = client.list_disk_names()
+    mdstat_text, proc_swaps_text = client.read_box_health_texts()
     return BoxTierAudit(
         server_id=str(server_to_audit.id),
         public_address=str(server_to_audit.public_address),
@@ -355,6 +358,8 @@ def audit_box_against_tier(
         foreign_tier_slices=tuple(sorted(foreign_tier_slice_names(disk_names, env_name)))
         if env_name is not None
         else (),
+        degraded_md_arrays=tuple(parse_degraded_md_arrays(mdstat_text)),
+        raw_swap_devices=tuple(parse_raw_swap_devices(proc_swaps_text)),
     )
 
 

@@ -124,6 +124,8 @@ def _audit(*, authorized_key_count: int = 1, foreign_tier_slices: tuple[str, ...
         box_used_slots=2,
         authorized_key_count=authorized_key_count,
         foreign_tier_slices=foreign_tier_slices,
+        degraded_md_arrays=(),
+        raw_swap_devices=(),
     )
 
 

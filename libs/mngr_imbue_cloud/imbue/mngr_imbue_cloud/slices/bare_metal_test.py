@@ -35,6 +35,8 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import foreign_tier_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_slice_owned_by_env
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_valid_status_transition
 from imbue.mngr_imbue_cloud.slices.bare_metal import next_server_status
+from imbue.mngr_imbue_cloud.slices.bare_metal import parse_degraded_md_arrays
+from imbue.mngr_imbue_cloud.slices.bare_metal import parse_raw_swap_devices
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_name_env_owner
@@ -384,3 +386,60 @@ def test_count_authorized_key_lines_counts_only_key_bearing_lines() -> None:
     assert count_authorized_key_lines("ssh-ed25519 AAAApool\nssh-ed25519 AAAAother dev-tier\n") == 2
     # A file with no trailing newline must not lose its last key.
     assert count_authorized_key_lines("ssh-ed25519 AAAApool\nssh-ed25519 AAAAother") == 2
+
+
+# Verbatim from the 2026-08-07 production incident box (51.81.185.229): nvme0
+# dropped off the bus, both RAID1 arrays run degraded on nvme1, and the dead
+# disk's raw swap partition lingers as a "(deleted)" entry.
+_DEGRADED_MDSTAT = """\
+Personalities : [raid1] [linear] [multipath] [raid0] [raid6] [raid5] [raid4] [raid10]
+md2 : active raid1 nvme1n1p2[1]
+      1046528 blocks super 1.2 [2/1] [_U]
+      bitmap: 1/1 pages [4KB], 65536KB chunk
+
+md3 : active raid1 nvme1n1p3[1]
+      936244224 blocks super 1.2 [2/1] [_U]
+      bitmap: 7/7 pages [28KB], 65536KB chunk
+
+unused devices: <none>
+"""
+
+_HEALTHY_MDSTAT = """\
+Personalities : [raid1]
+md3 : active raid1 nvme0n1p3[0] nvme1n1p3[1]
+      935460864 blocks super 1.2 [2/2] [UU]
+md2 : active raid1 nvme0n1p2[0] nvme1n1p2[1]
+      1046528 blocks super 1.2 [2/2] [UU]
+unused devices: <none>
+"""
+
+_INCIDENT_PROC_SWAPS = """\
+Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority
+/dev/nvme1n1p4                          partition\t524284\t\t220932\t\t-2
+/dev/nvme0n1p4\\040(deleted)             partition\t524284\t\t346108\t\t-3
+/swapfile                               file\t\t33554428\t1426020\t\t-4
+"""
+
+
+def test_parse_degraded_md_arrays_reports_arrays_missing_a_member() -> None:
+    assert parse_degraded_md_arrays(_DEGRADED_MDSTAT) == ["md2", "md3"]
+
+
+def test_parse_degraded_md_arrays_reports_nothing_for_healthy_arrays() -> None:
+    assert parse_degraded_md_arrays(_HEALTHY_MDSTAT) == []
+    assert parse_degraded_md_arrays("") == []
+
+
+def test_parse_raw_swap_devices_flags_partitions_but_not_the_swapfile() -> None:
+    # Both raw partitions are flagged -- including the dead disk's lingering
+    # "(deleted)" entry -- while the mirrored swapfile is not.
+    assert parse_raw_swap_devices(_INCIDENT_PROC_SWAPS) == [
+        "/dev/nvme1n1p4",
+        "/dev/nvme0n1p4\\040(deleted)",
+    ]
+
+
+def test_parse_raw_swap_devices_ignores_md_backed_swap_and_empty_input() -> None:
+    md_swap = "Filename\tType\tSize\tUsed\tPriority\n/dev/md1 partition 524284 0 -2\n"
+    assert parse_raw_swap_devices(md_swap) == []
+    assert parse_raw_swap_devices("") == []

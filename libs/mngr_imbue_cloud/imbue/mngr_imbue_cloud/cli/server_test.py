@@ -469,6 +469,8 @@ def test_build_box_tier_audit_report_counts_each_verdict_separately() -> None:
         box_used_slots=1,
         authorized_key_count=1,
         foreign_tier_slices=(),
+        degraded_md_arrays=(),
+        raw_swap_devices=(),
     )
     contaminated = BoxTierAudit(
         server_id="b",
@@ -477,6 +479,8 @@ def test_build_box_tier_audit_report_counts_each_verdict_separately() -> None:
         box_used_slots=2,
         authorized_key_count=2,
         foreign_tier_slices=(),
+        degraded_md_arrays=(),
+        raw_swap_devices=(),
     )
     report = build_box_tier_audit_report(
         env_name="staging",

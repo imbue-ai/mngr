@@ -124,7 +124,13 @@ a dev/ci env first where possible.
 - [ ] `just prep-server` on every existing production box (box-level slice
   autostart unit + the unattended-upgrades no-auto-reboot pin; also applies
   any pending lima upgrade) -- from
-  [reboot-resilience-rollout.md](./reboot-resilience-rollout.md).
+  [reboot-resilience-rollout.md](./reboot-resilience-rollout.md). This sweep
+  now ALSO retires the unmirrored per-disk swap partitions (the 2026-08-07
+  nvme-failure blast radius; prep step 7b), so run it even on boxes already
+  prepped for the autostart unit. Verify per box:
+  `cat /proc/swaps` as `limahost@<box>` must list only `/swapfile`, and
+  `just audit-boxes` must show empty `raw_swap_devices` /
+  `degraded_md_arrays` for every box.
 
 ## Post-deploy cleanup
 

@@ -199,11 +199,13 @@ def test_unleased_teardown_query_filters_by_the_claimable_status_set() -> None:
 
 def test_destroy_eligible_statuses_require_force_for_leased() -> None:
     # The default claim set covers available rows, stale 'removing' rows (a retry of a
-    # prior failed teardown), and the legacy 'released' value; only --force adds leased.
+    # prior failed teardown), the legacy 'released' value, and 'unreachable' rows the
+    # connector quarantined at lease time; only --force adds leased.
     assert destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=False) == (
         "available",
         "released",
         "removing",
+        "unreachable",
     )
     assert "leased" in destroy_eligible_pool_host_statuses(is_leased_destroy_allowed=True)
 

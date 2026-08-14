@@ -15,12 +15,16 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
 # Wire / DB values for pool_hosts.status. Rows are inserted 'available', flipped to
 # 'leased' by the connector's /hosts/lease, and to 'removing' (the durable, retryable
 # in-progress teardown marker) by both the connector's release path and the admin
-# destroy's atomic claim. 'released' is a legacy value nothing writes anymore (release
-# deletes the row); it stays claimable so historical rows can still be destroyed.
+# destroy's atomic claim. 'unreachable' is the connector's lease-time quarantine (a
+# row whose SSH key injection failed): inert to leasing and quota queries, claimable
+# by the admin destroy so drained dead boxes clean up normally. 'released' is a
+# legacy value nothing writes anymore (release deletes the row); it stays claimable
+# so historical rows can still be destroyed.
 POOL_HOST_STATUS_AVAILABLE: Final[str] = "available"
 POOL_HOST_STATUS_LEASED: Final[str] = "leased"
 POOL_HOST_STATUS_REMOVING: Final[str] = "removing"
 POOL_HOST_STATUS_RELEASED: Final[str] = "released"
+POOL_HOST_STATUS_UNREACHABLE: Final[str] = "unreachable"
 
 # Admin tooling writes bare_metal_servers + slice pool_hosts rows directly to the
 # connector's host_pool Neon DB (laptop-side), mirroring how `admin pool create`
@@ -294,10 +298,17 @@ def destroy_eligible_pool_host_statuses(is_leased_destroy_allowed: bool) -> tupl
     """The statuses an admin destroy may atomically claim.
 
     'removing' is always claimable so a destroy that failed mid-teardown can be
-    retried by re-running with the same id; 'leased' requires the explicit
-    ``--force`` opt-in (it tears down a user's live workspace).
+    retried by re-running with the same id; 'unreachable' (the connector's
+    lease-time quarantine) is claimable so a dead box's rows drain without a
+    manual status flip; 'leased' requires the explicit ``--force`` opt-in (it
+    tears down a user's live workspace).
     """
-    base = (POOL_HOST_STATUS_AVAILABLE, POOL_HOST_STATUS_RELEASED, POOL_HOST_STATUS_REMOVING)
+    base = (
+        POOL_HOST_STATUS_AVAILABLE,
+        POOL_HOST_STATUS_RELEASED,
+        POOL_HOST_STATUS_REMOVING,
+        POOL_HOST_STATUS_UNREACHABLE,
+    )
     if is_leased_destroy_allowed:
         return base + (POOL_HOST_STATUS_LEASED,)
     return base

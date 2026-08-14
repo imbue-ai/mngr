@@ -182,6 +182,23 @@ if ! swapon --show=NAME --noheadings 2>/dev/null | grep -qx {swapfile_path}; the
 fi
 grep -q "^{swapfile_path} " /etc/fstab || echo "{swapfile_path} none swap sw 0 0" >> /etc/fstab
 
+# 7b. Retire the OS-install per-disk swap partitions (idempotent). They sit on raw
+#     partitions OUTSIDE the md RAID mirrors, so when a disk dies its swapped-out
+#     pages are gone and every process touching one gets SIGBUS -- which killed 13
+#     of 14 slice VMs over several days in the 2026-08-07 production nvme failure.
+#     Worse, the kernel activates them at boot before the swapfile, so their
+#     default priorities make them the PREFERRED swap. All swap belongs on the
+#     mirrored swapfile: turn the partitions off (swapoff migrates their few pages;
+#     a failure here must fail prep loudly, not leave unmirrored swap in use),
+#     drop them from fstab, and wipe their signatures so nothing re-activates them.
+for swap_partition in $(swapon --show=NAME --noheadings 2>/dev/null | grep '^/dev/' || true); do
+    swapoff "$swap_partition"
+done
+awk '!($3 == "swap" && $1 != "{swapfile_path}")' /etc/fstab > /etc/fstab.mngr-tmp && mv /etc/fstab.mngr-tmp /etc/fstab
+for swap_partition in $(blkid -t TYPE=swap -o device 2>/dev/null || true); do
+    wipefs -a "$swap_partition"
+done
+
 # 8. Pin unattended-upgrades to never reboot the box on its own. The Debian
 #    default is already "false", but an explicit pin survives config drift (an
 #    image or package update flipping it). Slice boxes host user workspaces:

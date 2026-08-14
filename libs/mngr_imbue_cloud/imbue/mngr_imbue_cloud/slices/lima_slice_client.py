@@ -55,6 +55,9 @@ _LIMA_SHORT_TIMEOUT_SECONDS: Final[float] = 120.0
 # more room than a plain limactl call while keeping the lock hold bounded.
 _LIMA_RESERVE_TIMEOUT_SECONDS: Final[float] = 600.0
 _BOX_CONNECT_TIMEOUT_SECONDS: Final[int] = 30
+# Separator line between the /proc/mdstat and /proc/swaps halves of the
+# one-round-trip box-health read.
+_BOX_HEALTH_SPLIT_MARKER: Final[str] = "MNGR_BOX_HEALTH_SPLIT"
 
 
 def _is_already_absent_error(stderr: str) -> bool:
@@ -385,6 +388,25 @@ class LimaSliceVpsClient(VpsClientInterface):
                 f"(exit {read_rc}): {read_err.strip()}"
             )
         return count_authorized_key_lines(read_out)
+
+    def read_box_health_texts(self) -> tuple[str, str]:
+        """Return the box's ``/proc/mdstat`` and ``/proc/swaps`` contents in one round-trip.
+
+        The audit's disk-health inputs: degraded md arrays and unmirrored
+        (raw-partition) swap devices are parsed from these by the pure helpers in
+        ``bare_metal``. Both files are world-readable, so this needs no root.
+        """
+        read_rc, read_out, read_err = self.run_on_box(
+            f"cat /proc/mdstat && echo {_BOX_HEALTH_SPLIT_MARKER} && cat /proc/swaps",
+            timeout=_LIMA_SHORT_TIMEOUT_SECONDS,
+            label="read-box-health",
+        )
+        if read_rc != 0:
+            raise BareMetalProvisioningError(
+                f"could not read /proc/mdstat + /proc/swaps on {self.box_address} (exit {read_rc}): {read_err.strip()}"
+            )
+        mdstat_text, _, proc_swaps_text = read_out.partition(f"{_BOX_HEALTH_SPLIT_MARKER}\n")
+        return mdstat_text, proc_swaps_text
 
     def destroy_disk(self, disk_name: str) -> None:
         """Delete a lima data disk on the box, unlocking it first so a leaked locked disk still goes.

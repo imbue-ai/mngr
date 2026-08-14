@@ -100,6 +100,15 @@ class BoxTierAudit(FrozenModel):
     foreign_tier_slices: tuple[str, ...] = Field(
         description="Slice resources on the box stamped for an env belonging to another tier, sorted"
     )
+    degraded_md_arrays: tuple[str, ...] = Field(
+        description="md RAID arrays on the box running with a failed member (from /proc/mdstat)"
+    )
+    raw_swap_devices: tuple[str, ...] = Field(
+        description=(
+            "Swap devices that are raw (non-md) partitions, i.e. unmirrored -- a disk death loses "
+            "their pages and SIGBUS-kills processes; fixed by a prep re-run (from /proc/swaps)"
+        )
+    )
 
     @computed_field
     @property
