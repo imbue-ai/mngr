@@ -9,11 +9,18 @@ granted access to it exactly like a builtin service.
 
 The data ships as ``additional_services.json`` beside this module, keyed by
 canonical service name. Each value carries the human-readable ``display_name``,
-the ``base_api_url`` latchkey matches requests against, the optional
-``browser_login`` (the page ``latchkey auth browser`` opens plus the generic
-latchkey login flow it runs there), the single Detent ``scope`` the service
-exposes (its schema-name plus the inline scope schema), and the ``permissions``
-grantable under it (each with an inline permission schema).
+the ``registration`` latchkey stores for the service, the single Detent
+``scope`` the service exposes (its schema-name plus the inline scope schema),
+and the ``permissions`` grantable under it (each with an inline permission
+schema).
+
+``registration`` is written in latchkey's *own* shape -- it is the value that
+lands verbatim under ``registeredServices.<name>`` in latchkey's config, so a
+service is described here the same way ``latchkey services register`` would
+persist it. This module therefore neither models nor validates its contents:
+latchkey owns that schema and checks it when it loads the config, and a field a
+later latchkey release adds (a ``serviceFamily``, another login flow's params)
+reaches the gateway without touching this file's readers.
 
 Nothing reads this file to answer "what services exist": the *catalog* entries
 are folded into ``services.json`` by ``scripts/generate_services_json.py``, so
@@ -100,49 +107,18 @@ class _AdditionalServiceScopeEntry(FrozenModel):
     )
 
 
-class _AdditionalServiceLoginFlowEntry(FrozenModel):
-    """The kind of generic browser sign-in latchkey runs, and how it is configured.
-
-    Latchkey ships a small set of service-agnostic login flows (currently
-    ``cookie-capture``) that a registered service can opt into instead of
-    borrowing a builtin service's flow. ``params`` is passed through verbatim;
-    latchkey validates it against the named flow's own schema, and a flow it
-    cannot resolve costs the service its browser sign-in without breaking the
-    rest of the registration.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    name: str = Field(min_length=1, description="Latchkey login-flow name, e.g. ``cookie-capture``.")
-    params: Mapping[str, JsonValue] = Field(
-        default_factory=dict, description="Parameters of the flow, in the shape that flow documents."
-    )
-
-
-class _AdditionalServiceBrowserLoginEntry(FrozenModel):
-    """How ``latchkey auth browser`` signs the user in to an additional service.
-
-    The page to open and the flow to run it with are one field, not two
-    independent ones, because latchkey silently ignores a flow with no page to
-    open -- a service would come out registered but unsignable-into.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    url: str = Field(min_length=1, description="URL ``latchkey auth browser`` opens to sign the user in.")
-    flow: _AdditionalServiceLoginFlowEntry = Field(description="The generic latchkey login flow run against ``url``.")
-
-
 class _AdditionalServiceEntry(FrozenModel):
     """One additional service, as modeled from an ``additional_services.json`` value."""
 
     model_config = ConfigDict(extra="ignore")
 
     display_name: str = Field(min_length=1, description="Human-readable label shown in the permission dialog.")
-    base_api_url: str = Field(min_length=1, description="Base API URL latchkey matches requests against.")
-    browser_login: _AdditionalServiceBrowserLoginEntry | None = Field(
-        default=None,
-        description="The browser sign-in latchkey offers for this service; absent when only ``auth set`` works.",
+    registration: Mapping[str, JsonValue] = Field(
+        description=(
+            "The service's entry in latchkey's ``registeredServices`` config block, in latchkey's own "
+            "shape (``baseApiUrl``, plus ``loginUrl`` / ``loginFlow`` for a browser sign-in). Copied "
+            "through verbatim; latchkey owns the schema and validates it."
+        )
     )
     scope: _AdditionalServiceScopeEntry = Field(description="The single Detent scope this service exposes.")
     permissions: tuple[_AdditionalServicePermissionEntry, ...] = Field(
@@ -196,36 +172,19 @@ def additional_services_catalog_payload() -> dict[str, list[dict[str, object]]]:
     }
 
 
-def _registration_entry(entry: _AdditionalServiceEntry) -> dict[str, JsonValue]:
-    """Project one service into the ``registeredServices`` value latchkey persists.
-
-    A service with no browser sign-in gets neither key at all rather than a
-    ``null`` for each: latchkey's config schema types both as
-    absent-or-a-value, and a ``null`` would make the whole entry unreadable to
-    it (costing the service its registration entirely).
-    """
-    registration: dict[str, JsonValue] = {"baseApiUrl": entry.base_api_url}
-    if entry.browser_login is not None:
-        registration["loginUrl"] = entry.browser_login.url
-        registration["loginFlow"] = {
-            "name": entry.browser_login.flow.name,
-            "params": dict(entry.browser_login.flow.params),
-        }
-    return registration
-
-
 def additional_service_registration_entries() -> dict[str, JsonValue]:
     """Return every additional service as latchkey's ``registeredServices`` block.
 
-    The result is keyed by canonical service name, and each value is exactly the
-    object ``latchkey services register`` would persist into ``config.json``
-    (see :func:`_registration_entry`). :mod:`imbue.mngr_latchkey.core` merges it
-    into the config of every gateway that must inject these services'
-    credentials -- the desktop's and each VPS's -- so the registration always
-    travels with the credentials it belongs to.
+    The bundled file already stores each service's registration in latchkey's
+    own shape, so this is a copy rather than a translation: nothing here knows
+    what a registration contains, and a field latchkey adds later needs no code
+    change to reach it. :mod:`imbue.mngr_latchkey.core` merges the result into
+    the config of every gateway that must inject these services' credentials --
+    the desktop's and each VPS's -- so the registration always travels with the
+    credentials it belongs to.
     """
     entries = _load_additional_service_entries()
-    return {name: _registration_entry(entry) for name, entry in entries.items()}
+    return {name: dict(entry.registration) for name, entry in entries.items()}
 
 
 def additional_service_shared_schemas() -> dict[str, JsonValue]:

@@ -4,8 +4,6 @@ import pytest
 from pydantic import ValidationError
 
 from imbue.mngr_latchkey.additional_services import _ADDITIONAL_SERVICES_ADAPTER
-from imbue.mngr_latchkey.additional_services import _AdditionalServiceEntry
-from imbue.mngr_latchkey.additional_services import _registration_entry
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.additional_services import additional_service_shared_schemas
 from imbue.mngr_latchkey.additional_services import additional_services_catalog_payload
@@ -28,22 +26,20 @@ def test_registration_entries_include_claude_ai() -> None:
     }
 
 
-def test_registration_entry_omits_the_login_keys_without_a_browser_sign_in() -> None:
-    """A service with no browser sign-in gets no ``loginUrl`` / ``loginFlow`` keys at all.
+def test_every_bundled_registration_is_one_latchkey_can_act_on() -> None:
+    """Guard the two latchkey rules that fail *silently* on a malformed registration.
 
-    Latchkey's config schema types both as absent-or-a-value, so a ``null``
-    would make the whole entry unreadable to it -- costing the service its
-    registration. Every bundled service currently has a sign-in, so the
-    projection is exercised here against a service that does not.
+    Registrations are copied into latchkey's config verbatim, so latchkey does
+    the validating -- but two of its rules degrade quietly rather than erroring,
+    and both would ship as a config that looks fine: a service with no
+    ``baseApiUrl`` matches no request, and a ``loginFlow`` with no ``loginUrl``
+    is dropped, leaving a service registered but impossible to sign in to.
     """
-    entry = _AdditionalServiceEntry.model_validate(
-        {
-            "display_name": "Example",
-            "base_api_url": "https://example.com/api/",
-            "scope": {"name": "example", "schema": {}},
-        }
-    )
-    assert _registration_entry(entry) == {"baseApiUrl": "https://example.com/api/"}
+    for name, registration in additional_service_registration_entries().items():
+        assert isinstance(registration, dict), name
+        assert registration.get("baseApiUrl"), name
+        if "loginFlow" in registration:
+            assert registration.get("loginUrl"), name
 
 
 def test_a_service_name_latchkey_would_reject_is_refused_at_load() -> None:
@@ -61,7 +57,7 @@ def test_a_service_name_latchkey_would_reject_is_refused_at_load() -> None:
             {
                 "claude.ai": {
                     "display_name": "Claude",
-                    "base_api_url": "https://claude.ai/",
+                    "registration": {"baseApiUrl": "https://claude.ai/"},
                     "scope": {"name": "claude-ai", "schema": {}},
                 }
             }

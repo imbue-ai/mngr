@@ -1,10 +1,10 @@
 {
   "claude-ai": {
     "display_name": "Claude",
-    "base_api_url": "https://claude.ai/",
-    "browser_login": {
-      "url": "https://claude.ai/login",
-      "flow": {
+    "registration": {
+      "baseApiUrl": "https://claude.ai/",
+      "loginUrl": "https://claude.ai/login",
+      "loginFlow": {
         "name": "cookie-capture",
         "params": {
           "cookieKeys": ["sessionKey"],

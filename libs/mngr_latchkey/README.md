@@ -471,21 +471,28 @@ used. The generator skips them, so the catalog and the gateway's
 `services.json` also carries minds' own *additional* (custom) services --
 ones detent has no schemas for, currently `claude.ai`. Their definitions are
 hand-maintained in `imbue/mngr_latchkey/additional_services.json` (a
-`display_name`, a `base_api_url`, an optional `browser_login`, the single
-Detent `scope` it exposes with an inline scope `schema`, and its grantable
-`permissions`, each with an inline `schema`), and the generator *folds their
-catalog entries into* `services.json`. That way every reader of the catalog --
-`ServicesCatalog` and both gateway extensions -- works from one file in one
-shape and never has to know which of the two sources a service came from.
+`display_name`, a `registration`, the single Detent `scope` it exposes with an
+inline scope `schema`, and its grantable `permissions`, each with an inline
+`schema`), and the generator *folds their catalog entries into* `services.json`.
+That way every reader of the catalog -- `ServicesCatalog` and both gateway
+extensions -- works from one file in one shape and never has to know which of
+the two sources a service came from.
 
-`browser_login` gives the service a `latchkey auth browser` sign-in: a `url`
-to open and the generic latchkey login `flow` to run there (latchkey ships
-these flows so a service outside its builtin catalog can still be signed into).
+`registration` is written in **latchkey's own shape**: it is the object that
+lands verbatim under `registeredServices.<name>` in latchkey's `config.json`,
+so a service is described here exactly as `latchkey services register` would
+persist it. Nothing on the Python side models or validates its contents --
+latchkey owns that schema and checks it when it loads the config -- so adding
+a service, or picking up a field a later latchkey adds, is a data-only change.
+
+For `claude-ai` that is a `baseApiUrl` plus a `loginUrl` and a `loginFlow`,
+which give it a `latchkey auth browser` sign-in (latchkey ships these generic
+flows so a service outside its builtin catalog can still be signed into).
 `claude-ai` uses `cookie-capture`, which finishes once the named cookies have
 been set and stores them as a `Cookie` header -- for claude.ai, the single
 `sessionKey` cookie, scoped by `cookieUrl` to claude.ai itself because sign-in
-may start on another host. Without it a custom service can only be
-authenticated by hand with `latchkey auth set`.
+may start on another host. A service registered with only a `baseApiUrl` can
+be authenticated by hand with `latchkey auth set` instead.
 
 Because a custom scope is not a detent builtin, its schemas have to reach the
 gateway's permission check. Rather than inlining them into every host file,
