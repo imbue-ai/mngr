@@ -23,6 +23,7 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
@@ -1520,7 +1521,14 @@ class FakeSharingCli(FakeImbueCloudCli):
             cert_not_after=self.share.cert_not_after,
         )
 
-    def create_share(self, *, account: str, host_id: str, entry_label: str | None = None) -> ShareCliInfo:
+    def create_share(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        entry_label: str | None = None,
+        preferred_region: str | None = None,
+    ) -> ShareCliInfo:
         if self.create_share_error is not None:
             raise ImbueCloudCliError(self.create_share_error)
         self.created_shares.append(host_id)
@@ -2242,22 +2250,32 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"ready": True}
+    assert json.loads(response.data) == {"ready": True, "cert_not_after": None, "last_tunnel_login_at": None}
     # It probed the shell LABEL origin, never the bare machine domain.
     assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
 
 
 def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: Path) -> None:
     # Enabled share, but the workspace has not registered its shell service yet,
-    # so there is no routable origin to probe -- report not-ready.
+    # so there is no routable origin to probe -- report not-ready, but still
+    # surface the per-step provisioning signals from the share record.
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share())
+    bare_share = _active_share()
+    share = bare_share.model_copy_update(
+        to_update(bare_share.field_ref().cert_not_after, "2027-01-01 00:00:00+00:00"),
+        to_update(bare_share.field_ref().last_tunnel_login_at, "2026-08-13 12:00:00+00:00"),
+    )
+    cli = _fake_sharing_cli(share=share)
     client = _sharing_client(tmp_path, agent_id, cli, http_client=httpx.Client())
 
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"ready": False}
+    assert json.loads(response.data) == {
+        "ready": False,
+        "cert_not_after": "2027-01-01 00:00:00+00:00",
+        "last_tunnel_login_at": "2026-08-13 12:00:00+00:00",
+    }
 
 
 def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> None:
@@ -2267,7 +2285,7 @@ def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> No
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"ready": False}
+    assert json.loads(response.data) == {"ready": False, "cert_not_after": None, "last_tunnel_login_at": None}
 
 
 def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None:
@@ -2277,7 +2295,7 @@ def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path)
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"ready": False}
+    assert json.loads(response.data) == {"ready": False, "cert_not_after": None, "last_tunnel_login_at": None}
 
 
 # -- Workspace recovery: health probe + restart --

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { settle } from "../testing";
-import type { MachineSharingResponse, SharingGrantsDocument } from "./workspaceOptions";
+import type {
+  MachineSharingResponse,
+  SharingGrantsDocument,
+} from "./workspaceOptions";
 import {
   ShareModel,
   WorkspaceOptionsModel,
@@ -28,7 +31,9 @@ describe("defaultFetchJson", () => {
 
     expect(result.ok).toBe(false);
     expect(result.status).toBe(0);
-    expect(errorMessageFromBody(result.body, "fallback")).toBe("Could not reach the app server.");
+    expect(errorMessageFromBody(result.body, "fallback")).toBe(
+      "Could not reach the app server.",
+    );
   });
 });
 
@@ -41,8 +46,17 @@ interface RecordedRequest {
 }
 
 function makeFetchStub(
-  responder: (url: string, init?: RequestInit) => { ok: boolean; status: number; body: unknown },
-): { requests: RecordedRequest[]; fetchJson: (url: string, init?: RequestInit) => Promise<ReturnType<typeof responder>> } {
+  responder: (
+    url: string,
+    init?: RequestInit,
+  ) => { ok: boolean; status: number; body: unknown },
+): {
+  requests: RecordedRequest[];
+  fetchJson: (
+    url: string,
+    init?: RequestInit,
+  ) => Promise<ReturnType<typeof responder>>;
+} {
   const requests: RecordedRequest[] = [];
   return {
     requests,
@@ -50,7 +64,10 @@ function makeFetchStub(
       requests.push({
         url,
         method: init?.method ?? "GET",
-        body: typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : null,
+        body:
+          typeof init?.body === "string"
+            ? (JSON.parse(init.body) as unknown)
+            : null,
       });
       return Promise.resolve(responder(url, init));
     },
@@ -58,7 +75,10 @@ function makeFetchStub(
 }
 
 function makeShareModel(
-  responder: (url: string, init?: RequestInit) => { ok: boolean; status: number; body: unknown },
+  responder: (
+    url: string,
+    init?: RequestInit,
+  ) => { ok: boolean; status: number; body: unknown },
   overrides: Partial<ConstructorParameters<typeof ShareModel>[0]> = {},
 ): { model: ShareModel; requests: RecordedRequest[] } {
   const stub = makeFetchStub(responder);
@@ -78,7 +98,9 @@ function makeShareModel(
   return { model, requests: stub.requests };
 }
 
-function sharingResponse(overrides: Partial<MachineSharingResponse> = {}): MachineSharingResponse {
+function sharingResponse(
+  overrides: Partial<MachineSharingResponse> = {},
+): MachineSharingResponse {
   return {
     enabled: false,
     url: null,
@@ -89,7 +111,11 @@ function sharingResponse(overrides: Partial<MachineSharingResponse> = {}): Machi
 
 describe("ShareModel grants document building", () => {
   it("always writes the owner into an enabled scope and splits emails from domains", async () => {
-    const { model } = makeShareModel(() => ({ ok: true, status: 200, body: sharingResponse() }));
+    const { model } = makeShareModel(() => ({
+      ok: true,
+      status: 200,
+      body: sharingResponse(),
+    }));
     await model.load();
     model.addEntry("friend@example.com");
     model.addEntry("example.org");
@@ -109,7 +135,12 @@ describe("ShareModel grants document building", () => {
         url: "https://m-abc.relay.example/",
         grants: {
           workspace: { emails: [], email_domains: [] },
-          services: { "phantom-service": { emails: ["other@example.com"], email_domains: [] } },
+          services: {
+            "phantom-service": {
+              emails: ["other@example.com"],
+              email_domains: [],
+            },
+          },
         },
       }),
     }));
@@ -117,7 +148,10 @@ describe("ShareModel grants document building", () => {
 
     const doc = model.buildGrantsDocument({ web: true });
 
-    expect(doc.services["phantom-service"]).toEqual({ emails: ["other@example.com"], email_domains: [] });
+    expect(doc.services["phantom-service"]).toEqual({
+      emails: ["other@example.com"],
+      email_domains: [],
+    });
     expect(doc.services["web"]?.emails).toEqual([OWNER]);
   });
 
@@ -130,7 +164,11 @@ describe("ShareModel grants document building", () => {
         return {
           ok: true,
           status: 200,
-          body: sharingResponse({ enabled: true, url: "https://m.relay.example/", grants: body }),
+          body: sharingResponse({
+            enabled: true,
+            url: "https://m.relay.example/",
+            grants: body,
+          }),
         };
       }
       return { ok: true, status: 200, body: sharingResponse() };
@@ -152,28 +190,40 @@ describe("ShareModel grants document building", () => {
   });
 
   it("blocks enable when the add box still holds un-added text", async () => {
-    const { model, requests } = makeShareModel(() => ({ ok: true, status: 200, body: sharingResponse() }));
+    const { model, requests } = makeShareModel(() => ({
+      ok: true,
+      status: 200,
+      body: sharingResponse(),
+    }));
     await model.load();
-    const writesBefore = requests.filter((request) => request.method !== "GET").length;
+    const writesBefore = requests.filter(
+      (request) => request.method !== "GET",
+    ).length;
 
     await model.enable("someone@example.com");
 
     expect(model.errorMessage).toContain("someone@example.com");
-    expect(requests.filter((request) => request.method !== "GET")).toHaveLength(writesBefore);
+    expect(requests.filter((request) => request.method !== "GET")).toHaveLength(
+      writesBefore,
+    );
   });
 });
 
 describe("ShareModel disable", () => {
   it("DELETEs the share when the last enabled target is turned off", async () => {
     const { model, requests } = makeShareModel((url, init) => {
-      if (init?.method === "DELETE") return { ok: true, status: 200, body: null };
+      if (init?.method === "DELETE")
+        return { ok: true, status: 200, body: null };
       return {
         ok: true,
         status: 200,
         body: sharingResponse({
           enabled: true,
           url: "https://m.relay.example/",
-          grants: { workspace: { emails: [OWNER], email_domains: [] }, services: {} },
+          grants: {
+            workspace: { emails: [OWNER], email_domains: [] },
+            services: {},
+          },
         }),
       };
     });
@@ -196,7 +246,11 @@ describe("ShareModel disable", () => {
         return {
           ok: true,
           status: 200,
-          body: sharingResponse({ enabled: true, url: "https://m.relay.example/", grants: body }),
+          body: sharingResponse({
+            enabled: true,
+            url: "https://m.relay.example/",
+            grants: body,
+          }),
         };
       }
       return {
@@ -207,7 +261,9 @@ describe("ShareModel disable", () => {
           url: "https://m.relay.example/",
           grants: {
             workspace: { emails: [OWNER], email_domains: [] },
-            services: { web: { emails: [OWNER, "guest@example.com"], email_domains: [] } },
+            services: {
+              web: { emails: [OWNER, "guest@example.com"], email_domains: [] },
+            },
           },
         }),
       };
@@ -226,7 +282,11 @@ describe("ShareModel disable", () => {
 
 describe("ShareModel load failures", () => {
   it("locks the editor when the status read fails", async () => {
-    const { model } = makeShareModel(() => ({ ok: false, status: 502, body: { error: "relay down" } }));
+    const { model } = makeShareModel(() => ({
+      ok: false,
+      status: 502,
+      body: { error: "relay down" },
+    }));
     await model.load();
 
     expect(model.status).toBe("load_failed");
@@ -239,7 +299,11 @@ describe("ShareModel load failures", () => {
     const { model } = makeShareModel(() => ({
       ok: true,
       status: 200,
-      body: sharingResponse({ enabled: true, url: "https://m.relay.example/", grants: null }),
+      body: sharingResponse({
+        enabled: true,
+        url: "https://m.relay.example/",
+        grants: null,
+      }),
     }));
     await model.load();
 
@@ -253,17 +317,28 @@ describe("ShareModel target urls", () => {
     const { model } = makeShareModel(() => ({
       ok: true,
       status: 200,
-      body: sharingResponse({ enabled: true, url: "https://machine.relay.example/" }),
+      body: sharingResponse({
+        enabled: true,
+        url: "https://machine.relay.example/",
+      }),
     }));
     await model.load();
 
-    expect(model.targetUrl("web")).toBe("https://web-r4nd.machine.relay.example/");
+    expect(model.targetUrl("web")).toBe(
+      "https://web-r4nd.machine.relay.example/",
+    );
     expect(model.targetUrl("docs")).toBe("https://docs.machine.relay.example/");
-    expect(model.targetUrl("system_interface")).toBe("https://shell-r4nd.machine.relay.example/");
+    expect(model.targetUrl("system_interface")).toBe(
+      "https://shell-r4nd.machine.relay.example/",
+    );
   });
 
   it("selecting an unknown target falls back to the whole machine", async () => {
-    const { model } = makeShareModel(() => ({ ok: true, status: 200, body: sharingResponse() }));
+    const { model } = makeShareModel(() => ({
+      ok: true,
+      status: 200,
+      body: sharingResponse(),
+    }));
     await model.load();
 
     model.selectTarget("no-such-service");
@@ -283,7 +358,11 @@ describe("ShareModel write serialization", () => {
         return {
           ok: true,
           status: 200,
-          body: sharingResponse({ enabled: true, url: "https://m.relay.example/", grants: body }),
+          body: sharingResponse({
+            enabled: true,
+            url: "https://m.relay.example/",
+            grants: body,
+          }),
         };
       }
       return { ok: true, status: 200, body: sharingResponse() };
@@ -317,7 +396,11 @@ describe("ShareModel readiness polling", () => {
           return {
             ok: true,
             status: 200,
-            body: sharingResponse({ enabled: true, url: "https://m.relay.example/", grants: body }),
+            body: sharingResponse({
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: body,
+            }),
           };
         }
         return { ok: true, status: 200, body: sharingResponse() };
@@ -345,6 +428,157 @@ describe("ShareModel readiness polling", () => {
     expect(model.isAwaitingLink("system_interface")).toBe(false);
   });
 
+  it("derives provisioning steps from cert issuance and a changed tunnel-login stamp", async () => {
+    const scheduled: (() => void)[] = [];
+    let probeCount = 0;
+    // A re-share: the stale tunnel stamp from the previous share must not
+    // count as "tunnel connected" -- only a CHANGED stamp does.
+    const readinessBodies = [
+      {
+        ready: false,
+        cert_not_after: null,
+        last_tunnel_login_at: "2026-01-01 00:00:00",
+      },
+      {
+        ready: false,
+        cert_not_after: "2027-01-01",
+        last_tunnel_login_at: "2026-01-01 00:00:00",
+      },
+      {
+        ready: false,
+        cert_not_after: "2027-01-01",
+        last_tunnel_login_at: "2026-08-13 12:00:00",
+      },
+      {
+        ready: true,
+        cert_not_after: "2027-01-01",
+        last_tunnel_login_at: "2026-08-13 12:00:00",
+      },
+    ];
+    const { model } = makeShareModel(
+      (url, init) => {
+        if (url.endsWith("/readiness")) {
+          const body =
+            readinessBodies[Math.min(probeCount, readinessBodies.length - 1)];
+          probeCount += 1;
+          return { ok: true, status: 200, body };
+        }
+        if (init?.method === "PUT") {
+          const body = JSON.parse(init.body as string) as SharingGrantsDocument;
+          return {
+            ok: true,
+            status: 200,
+            body: sharingResponse({
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: body,
+            }),
+          };
+        }
+        return { ok: true, status: 200, body: sharingResponse() };
+      },
+      {
+        setTimer: (callback: () => void) => {
+          scheduled.push(callback);
+          return scheduled.length;
+        },
+      },
+    );
+    await model.load();
+    await model.enable("");
+    expect(model.isCertIssued).toBe(false);
+    expect(model.isTunnelConnected).toBe(false);
+
+    const runNextProbe = async () => {
+      const next = scheduled.shift();
+      if (next) next();
+      await settle();
+    };
+
+    // Probe 1: stale stamp is only snapshotted; nothing is done yet.
+    await runNextProbe();
+    expect(model.isCertIssued).toBe(false);
+    expect(model.isTunnelConnected).toBe(false);
+    // Probe 2: the certificate has been issued.
+    await runNextProbe();
+    expect(model.isCertIssued).toBe(true);
+    expect(model.isTunnelConnected).toBe(false);
+    // Probe 3: the stamp changed -- the tunnel reconnected under the new token.
+    await runNextProbe();
+    expect(model.isTunnelConnected).toBe(true);
+    expect(model.isLive).toBe(false);
+    // Probe 4: end-to-end ready.
+    await runNextProbe();
+    expect(model.isLive).toBe(true);
+  });
+
+  it("keeps the tunnel-stamp snapshot across a mid-wait target switch", async () => {
+    const scheduled: (() => void)[] = [];
+    let probeCount = 0;
+    // The step signals are machine-level: switching the on-screen target away
+    // and back mid-provisioning must not re-baseline the tunnel snapshot, or
+    // a reconnect spanning the switch would go undetected.
+    const readinessBodies = [
+      {
+        ready: false,
+        cert_not_after: null,
+        last_tunnel_login_at: "2026-01-01 00:00:00",
+      },
+      {
+        ready: false,
+        cert_not_after: "2027-01-01",
+        last_tunnel_login_at: "2026-08-14 09:00:00",
+      },
+    ];
+    const { model } = makeShareModel(
+      (url, init) => {
+        if (url.endsWith("/readiness")) {
+          const body =
+            readinessBodies[Math.min(probeCount, readinessBodies.length - 1)];
+          probeCount += 1;
+          return { ok: true, status: 200, body };
+        }
+        if (init?.method === "PUT") {
+          const body = JSON.parse(init.body as string) as SharingGrantsDocument;
+          return {
+            ok: true,
+            status: 200,
+            body: sharingResponse({
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: body,
+            }),
+          };
+        }
+        return { ok: true, status: 200, body: sharingResponse() };
+      },
+      {
+        setTimer: (callback: () => void) => {
+          scheduled.push(callback);
+          return scheduled.length;
+        },
+      },
+    );
+    await model.load();
+    await model.enable("");
+
+    // Probe 1 snapshots the stale stamp.
+    scheduled.shift()?.();
+    await settle();
+    expect(model.isTunnelConnected).toBe(false);
+
+    // Switch away (polling stops: the other target is not enabled) and back
+    // (polling restarts). The snapshot must survive the round trip.
+    model.selectTarget("web");
+    model.selectTarget("system_interface");
+
+    // The next probe sees the changed stamp: still detected as a reconnect.
+    scheduled.shift()?.();
+    await settle();
+    expect(model.isTunnelConnected).toBe(true);
+    expect(model.isCertIssued).toBe(true);
+  });
+
   it("assumes an already-published share is live (no provisioning wait on load)", async () => {
     const { model } = makeShareModel(() => ({
       ok: true,
@@ -352,7 +586,10 @@ describe("ShareModel readiness polling", () => {
       body: sharingResponse({
         enabled: true,
         url: "https://m.relay.example/",
-        grants: { workspace: { emails: [OWNER], email_domains: [] }, services: {} },
+        grants: {
+          workspace: { emails: [OWNER], email_domains: [] },
+          services: {},
+        },
       }),
     }));
     await model.load();
@@ -379,7 +616,11 @@ describe("WorkspaceOptionsModel", () => {
             is_leased_imbue_cloud: false,
             has_account: true,
             account_email: OWNER,
-            current_account: { user_id: "u1", email: OWNER, display_name: null },
+            current_account: {
+              user_id: "u1",
+              email: OWNER,
+              display_name: null,
+            },
             accounts: [],
             app_services: [],
             service_labels: {},
@@ -392,7 +633,11 @@ describe("WorkspaceOptionsModel", () => {
     const model = new WorkspaceOptionsModel("agent-" + "b".repeat(32), {
       fetchJson: stub.fetchJson,
       redraw: () => undefined,
-      shareOverrides: { setTimer: () => 0, clearTimer: () => undefined, monotonicNowMs: () => 0 },
+      shareOverrides: {
+        setTimer: () => 0,
+        clearTimer: () => undefined,
+        monotonicNowMs: () => 0,
+      },
     });
 
     await model.load();
@@ -403,7 +648,11 @@ describe("WorkspaceOptionsModel", () => {
   });
 
   it("rename requires a non-empty name and surfaces server errors", async () => {
-    const stub = makeFetchStub(() => ({ ok: false, status: 409, body: { error: "name taken" } }));
+    const stub = makeFetchStub(() => ({
+      ok: false,
+      status: 409,
+      body: { error: "name taken" },
+    }));
     const model = new WorkspaceOptionsModel("agent-" + "c".repeat(32), {
       fetchJson: stub.fetchJson,
       redraw: () => undefined,
@@ -418,14 +667,20 @@ describe("WorkspaceOptionsModel", () => {
 
   it("reverts the color preview when the save is refused", async () => {
     const painted: string[] = [];
-    const stub = makeFetchStub(() => ({ ok: false, status: 422, body: { error: "invalid_hex" } }));
+    const stub = makeFetchStub(() => ({
+      ok: false,
+      status: 422,
+      body: { error: "invalid_hex" },
+    }));
     const model = new WorkspaceOptionsModel("agent-" + "d".repeat(32), {
       fetchJson: stub.fetchJson,
       redraw: () => undefined,
     });
     model.lastSavedColor = "#0b292b";
 
-    const isSaved = await model.saveColor("#123456", (hex) => painted.push(hex));
+    const isSaved = await model.saveColor("#123456", (hex) =>
+      painted.push(hex),
+    );
 
     expect(isSaved).toBe(false);
     expect(painted).toEqual(["#123456", "#0b292b"]);
@@ -444,13 +699,18 @@ describe("pure helpers", () => {
   });
 
   it("maps color error codes to their messages", () => {
-    expect(colorErrorMessageFor(422, { error: "stale_provider" })).toContain("unreachable");
+    expect(colorErrorMessageFor(422, { error: "stale_provider" })).toContain(
+      "unreachable",
+    );
     expect(colorErrorMessageFor(500, {})).toBe("Save failed (HTTP 500).");
   });
 
   it("documentGrantsAnyone sees workspace and service scopes", () => {
     expect(
-      documentGrantsAnyone({ workspace: { emails: [], email_domains: [] }, services: {} }),
+      documentGrantsAnyone({
+        workspace: { emails: [], email_domains: [] },
+        services: {},
+      }),
     ).toBe(false);
     expect(
       documentGrantsAnyone({

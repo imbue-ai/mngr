@@ -67,10 +67,16 @@ export type ShareLoadStatus = "idle" | "loading" | "load_failed" | "ready";
 export type SharePendingKind = "enable" | "disable" | "emails";
 
 export interface FetchJson {
-  (url: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: unknown }>;
+  (
+    url: string,
+    init?: RequestInit,
+  ): Promise<{ ok: boolean; status: number; body: unknown }>;
 }
 
-export async function defaultFetchJson(url: string, init?: RequestInit): Promise<{
+export async function defaultFetchJson(
+  url: string,
+  init?: RequestInit,
+): Promise<{
   ok: boolean;
   status: number;
   body: unknown;
@@ -92,7 +98,11 @@ export async function defaultFetchJson(url: string, init?: RequestInit): Promise
     // inside void'd async model methods, so a rejection would be unhandled
     // and their busy flags would stick forever. Status 0 mirrors the
     // browser's "no HTTP response" convention.
-    return { ok: false, status: 0, body: { error: "Could not reach the app server." } };
+    return {
+      ok: false,
+      status: 0,
+      body: { error: "Could not reach the app server." },
+    };
   }
 }
 
@@ -138,6 +148,10 @@ export class ShareModel {
   isMachineEnabled = false;
   machineUrl = "";
   isLive = false;
+  /** Provisioning-step signals while awaiting the link (machine-level; reset
+   * only when a fresh provisioning wait begins, see beginProvisioningWait). */
+  isCertIssued = false;
+  isTunnelConnected = false;
   currentTarget: string;
   errorMessage: string | null = null;
   isRetryOffered = false;
@@ -150,6 +164,13 @@ export class ShareModel {
   private readinessTimerId: number | null = null;
   private pollingTarget: string | null = null;
   private pollStartedAtMs = 0;
+  // The tunnel-login stamp seen on the first readiness poll of this
+  // provisioning wait (machine-level; it survives poll restarts from target
+  // switches, see beginProvisioningWait). The stamp survives re-shares, so
+  // "tunnel connected" means the value CHANGED (or appeared) since then --
+  // not merely that one exists.
+  // undefined = no poll response seen yet this wait.
+  private tunnelLoginAtSnapshot: string | null | undefined = undefined;
   private isDisposed = false;
 
   constructor(options: ShareModelOptions) {
@@ -159,7 +180,8 @@ export class ShareModel {
 
   get knownTargets(): string[] {
     const targets = [...this.options.appServices];
-    if (!targets.includes(this.options.wholeService)) targets.push(this.options.wholeService);
+    if (!targets.includes(this.options.wholeService))
+      targets.push(this.options.wholeService);
     return targets;
   }
 
@@ -184,7 +206,10 @@ export class ShareModel {
     this.syncReadinessPolling();
   }
 
-  targetState(target: string): { isEnabled: boolean; entries: readonly string[] } {
+  targetState(target: string): {
+    isEnabled: boolean;
+    entries: readonly string[];
+  } {
     return this.mutableTargetState(target);
   }
 
@@ -193,7 +218,10 @@ export class ShareModel {
   }
 
   get isEditorEditable(): boolean {
-    return this.status === "ready" && this.pendingKindByTarget.get(this.currentTarget) === undefined;
+    return (
+      this.status === "ready" &&
+      this.pendingKindByTarget.get(this.currentTarget) === undefined
+    );
   }
 
   /** The public link for a target (label-prefixed service origin), '' when unknown. */
@@ -214,7 +242,10 @@ export class ShareModel {
 
   isAwaitingLink(target: string): boolean {
     return (
-      this.status === "ready" && this.mutableTargetState(target).isEnabled && !this.isLive && this.machineUrl !== ""
+      this.status === "ready" &&
+      this.mutableTargetState(target).isEnabled &&
+      !this.isLive &&
+      this.machineUrl !== ""
     );
   }
 
@@ -228,7 +259,8 @@ export class ShareModel {
     if (!result.ok) {
       this.status = "load_failed";
       this.errorMessage =
-        "Could not load sharing status: " + errorMessageFromBody(result.body, `HTTP ${result.status}`);
+        "Could not load sharing status: " +
+        errorMessageFromBody(result.body, `HTTP ${result.status}`);
       this.isRetryOffered = true;
       this.redraw();
       return;
@@ -286,11 +318,15 @@ export class ShareModel {
     this.startPending(target, "enable");
     const wasMachineEnabled = this.isMachineEnabled;
     try {
-      const body = await this.enqueueWrite(() => this.putGrants(this.buildGrantsDocument({ [target]: true })));
+      const body = await this.enqueueWrite(() =>
+        this.putGrants(this.buildGrantsDocument({ [target]: true })),
+      );
       this.adoptDocument(body);
-      if (!wasMachineEnabled) this.isLive = false;
+      if (!wasMachineEnabled) this.beginProvisioningWait();
     } catch (error) {
-      this.errorMessage = "Could not enable sharing: " + (error instanceof Error ? error.message : String(error));
+      this.errorMessage =
+        "Could not enable sharing: " +
+        (error instanceof Error ? error.message : String(error));
     } finally {
       this.endPending(target);
     }
@@ -304,14 +340,20 @@ export class ShareModel {
       const remaining = this.buildGrantsDocument({ [target]: false });
       if (!documentGrantsAnyone(remaining)) {
         await this.enqueueWrite(async () => {
-          const result = await this.fetchJson(this.shareApiBase(), { method: "DELETE" });
-          if (!result.ok) throw new Error(errorMessageFromBody(result.body, `HTTP ${result.status}`));
+          const result = await this.fetchJson(this.shareApiBase(), {
+            method: "DELETE",
+          });
+          if (!result.ok)
+            throw new Error(
+              errorMessageFromBody(result.body, `HTTP ${result.status}`),
+            );
           return null;
         });
         this.isMachineEnabled = false;
         this.machineUrl = "";
-        this.isLive = false;
-        for (const knownTarget of this.knownTargets) this.mutableTargetState(knownTarget).isEnabled = false;
+        this.beginProvisioningWait();
+        for (const knownTarget of this.knownTargets)
+          this.mutableTargetState(knownTarget).isEnabled = false;
         this.extraServiceGrants = {};
         this.status = "ready";
       } else {
@@ -320,19 +362,26 @@ export class ShareModel {
       }
       this.mutableTargetState(target).isEnabled = false;
     } catch (error) {
-      this.errorMessage = "Could not disable sharing: " + (error instanceof Error ? error.message : String(error));
+      this.errorMessage =
+        "Could not disable sharing: " +
+        (error instanceof Error ? error.message : String(error));
     } finally {
       this.endPending(target);
     }
   }
 
   /** Build the grants document as it should be after a write. Exposed for tests. */
-  buildGrantsDocument(overrides: Record<string, boolean> = {}): SharingGrantsDocument {
+  buildGrantsDocument(
+    overrides: Record<string, boolean> = {},
+  ): SharingGrantsDocument {
     const isOn = (target: string): boolean =>
       Object.prototype.hasOwnProperty.call(overrides, target)
         ? overrides[target]
         : this.mutableTargetState(target).isEnabled;
-    const doc: SharingGrantsDocument = { workspace: { emails: [], email_domains: [] }, services: {} };
+    const doc: SharingGrantsDocument = {
+      workspace: { emails: [], email_domains: [] },
+      services: {},
+    };
     for (const target of this.knownTargets) {
       if (!isOn(target)) continue;
       const grantList = this.grantListFor(target);
@@ -388,10 +437,16 @@ export class ShareModel {
     const data = body as MachineSharingResponse;
     this.isMachineEnabled = Boolean(data.enabled);
     this.machineUrl = data.url ?? "";
-    const grants = data.grants ?? { workspace: { emails: [], email_domains: [] }, services: {} };
+    const grants = data.grants ?? {
+      workspace: { emails: [], email_domains: [] },
+      services: {},
+    };
     const services = grants.services ?? {};
     for (const target of this.knownTargets) {
-      const scope = target === this.options.wholeService ? grants.workspace : services[target];
+      const scope =
+        target === this.options.wholeService
+          ? grants.workspace
+          : services[target];
       const state = this.mutableTargetState(target);
       if (scopeGrantsAnyone(scope)) {
         state.isEnabled = true;
@@ -404,7 +459,10 @@ export class ShareModel {
     for (const [name, scope] of Object.entries(services)) {
       if (this.knownTargets.includes(name)) continue;
       if (!scopeGrantsAnyone(scope)) continue;
-      this.extraServiceGrants[name] = { emails: [...scope.emails], email_domains: [...scope.email_domains] };
+      this.extraServiceGrants[name] = {
+        emails: [...scope.emails],
+        email_domains: [...scope.email_domains],
+      };
     }
     this.status = "ready";
     this.syncReadinessPolling();
@@ -416,7 +474,10 @@ export class ShareModel {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(doc),
     });
-    if (!result.ok) throw new Error(errorMessageFromBody(result.body, `HTTP ${result.status}`));
+    if (!result.ok)
+      throw new Error(
+        errorMessageFromBody(result.body, `HTTP ${result.status}`),
+      );
     return result.body;
   }
 
@@ -424,11 +485,14 @@ export class ShareModel {
     const target = this.currentTarget;
     this.startPending(target, "emails");
     try {
-      const body = await this.enqueueWrite(() => this.putGrants(this.buildGrantsDocument()));
+      const body = await this.enqueueWrite(() =>
+        this.putGrants(this.buildGrantsDocument()),
+      );
       this.adoptDocument(body);
     } catch (error) {
       this.errorMessage =
-        "Could not update who this is shared with: " + (error instanceof Error ? error.message : String(error));
+        "Could not update who this is shared with: " +
+        (error instanceof Error ? error.message : String(error));
     } finally {
       this.endPending(target);
     }
@@ -456,7 +520,10 @@ export class ShareModel {
   }
 
   private setTimer(callback: () => void, delayMs: number): number {
-    return (this.options.setTimer ?? ((cb, ms) => window.setTimeout(cb, ms)))(callback, delayMs);
+    return (this.options.setTimer ?? ((cb, ms) => window.setTimeout(cb, ms)))(
+      callback,
+      delayMs,
+    );
   }
 
   private clearTimer(timerId: number): void {
@@ -475,6 +542,20 @@ export class ShareModel {
     this.pollingTarget = null;
   }
 
+  /** Start a fresh provisioning wait: nothing is live and no step is done yet.
+   *
+   * The step flags and the tunnel-stamp snapshot are MACHINE-level (one share
+   * per machine), so they are reset only here -- never on a poll restart. A
+   * target switch mid-wait restarts polling, and re-baselining the snapshot
+   * there could swallow a tunnel reconnect that already happened.
+   */
+  private beginProvisioningWait(): void {
+    this.isLive = false;
+    this.isCertIssued = false;
+    this.isTunnelConnected = false;
+    this.tunnelLoginAtSnapshot = undefined;
+  }
+
   /** Keep exactly one readiness poll running while the on-screen target awaits its link. */
   private syncReadinessPolling(): void {
     if (!this.isAwaitingLink(this.currentTarget)) {
@@ -491,7 +572,10 @@ export class ShareModel {
 
   private scheduleReadinessProbe(target: string, elapsedMs: number): void {
     if (this.isDisposed || this.pollingTarget !== target) return;
-    const interval = elapsedMs < READINESS_FAST_PHASE_MS ? READINESS_FAST_INTERVAL_MS : READINESS_SLOW_INTERVAL_MS;
+    const interval =
+      elapsedMs < READINESS_FAST_PHASE_MS
+        ? READINESS_FAST_INTERVAL_MS
+        : READINESS_SLOW_INTERVAL_MS;
     this.readinessTimerId = this.setTimer(() => {
       void this.probeReadiness(target);
     }, interval);
@@ -508,33 +592,62 @@ export class ShareModel {
     }
     const result = await this.fetchJson(`${this.shareApiBase()}/readiness`);
     if (this.isDisposed || this.pollingTarget !== target) return;
-    const isReady = result.ok && (result.body as { ready?: boolean } | null)?.ready === true;
-    if (isReady) {
+    const body = result.ok
+      ? (result.body as {
+          ready?: boolean;
+          cert_not_after?: string | null;
+          last_tunnel_login_at?: string | null;
+        } | null)
+      : null;
+    if (body) {
+      if (body.cert_not_after != null) this.isCertIssued = true;
+      const tunnelStamp = body.last_tunnel_login_at ?? null;
+      if (this.tunnelLoginAtSnapshot === undefined) {
+        this.tunnelLoginAtSnapshot = tunnelStamp;
+      } else if (
+        tunnelStamp !== null &&
+        tunnelStamp !== this.tunnelLoginAtSnapshot
+      ) {
+        this.isTunnelConnected = true;
+      }
+    }
+    if (body?.ready === true) {
       this.markLive();
       return;
     }
+    this.redraw();
     this.scheduleReadinessProbe(target, this.nowMs() - this.pollStartedAtMs);
   }
 
   private markLive(): void {
     this.isLive = true;
+    this.isCertIssued = true;
+    this.isTunnelConnected = true;
     this.stopReadinessPolling();
     this.redraw();
   }
 }
 
-export function scopeGrantsAnyone(scope: SharingGrantList | undefined | null): boolean {
-  return Boolean(scope && (scope.emails.length > 0 || scope.email_domains.length > 0));
+export function scopeGrantsAnyone(
+  scope: SharingGrantList | undefined | null,
+): boolean {
+  return Boolean(
+    scope && (scope.emails.length > 0 || scope.email_domains.length > 0),
+  );
 }
 
-export function scopeEntries(scope: SharingGrantList | undefined | null, ownerEmail: string): string[] {
+export function scopeEntries(
+  scope: SharingGrantList | undefined | null,
+  ownerEmail: string,
+): string[] {
   if (!scope) return [];
   const entries = scope.emails.filter((email) => email !== ownerEmail);
   return [...entries, ...scope.email_domains];
 }
 
 export function documentGrantsAnyone(doc: SharingGrantsDocument): boolean {
-  if (doc.workspace.emails.length > 0 || doc.workspace.email_domains.length > 0) return true;
+  if (doc.workspace.emails.length > 0 || doc.workspace.email_domains.length > 0)
+    return true;
   return Object.values(doc.services).some((scope) => scopeGrantsAnyone(scope));
 }
 
@@ -564,7 +677,11 @@ export class WorkspaceOptionsModel {
 
   constructor(
     agentId: string,
-    dependencies: { fetchJson?: FetchJson; redraw?: () => void; shareOverrides?: Partial<ShareModelOptions> } = {},
+    dependencies: {
+      fetchJson?: FetchJson;
+      redraw?: () => void;
+      shareOverrides?: Partial<ShareModelOptions>;
+    } = {},
   ) {
     this.agentId = agentId;
     this.fetchJsonImpl = dependencies.fetchJson ?? defaultFetchJson;
@@ -575,10 +692,15 @@ export class WorkspaceOptionsModel {
   async load(): Promise<void> {
     this.status = "loading";
     this.redrawImpl();
-    const result = await this.fetchJsonImpl(`/ui/api/workspaces/${encodeURIComponent(this.agentId)}/options`);
+    const result = await this.fetchJsonImpl(
+      `/ui/api/workspaces/${encodeURIComponent(this.agentId)}/options`,
+    );
     if (!result.ok) {
       this.status = "load_failed";
-      this.loadErrorMessage = errorMessageFromBody(result.body, `HTTP ${result.status}`);
+      this.loadErrorMessage = errorMessageFromBody(
+        result.body,
+        `HTTP ${result.status}`,
+      );
       this.redrawImpl();
       return;
     }
@@ -615,14 +737,20 @@ export class WorkspaceOptionsModel {
     this.renameErrorMessage = "";
     this.isRenameSaving = true;
     this.redrawImpl();
-    const result = await this.fetchJsonImpl(`/api/v1/workspaces/${encodeURIComponent(this.agentId)}/rename`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: trimmed }),
-    });
+    const result = await this.fetchJsonImpl(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/rename`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      },
+    );
     this.isRenameSaving = false;
     if (!result.ok) {
-      this.renameErrorMessage = errorMessageFromBody(result.body, `Rename failed (HTTP ${result.status})`);
+      this.renameErrorMessage = errorMessageFromBody(
+        result.body,
+        `Rename failed (HTTP ${result.status})`,
+      );
       this.redrawImpl();
       return false;
     }
@@ -631,17 +759,23 @@ export class WorkspaceOptionsModel {
     return true;
   }
 
-  async saveColor(normalizedHex: string, previewAccent: (hex: string) => void): Promise<boolean> {
+  async saveColor(
+    normalizedHex: string,
+    previewAccent: (hex: string) => void,
+  ): Promise<boolean> {
     if (normalizedHex === this.lastSavedColor) return true;
     previewAccent(normalizedHex);
     this.isColorSaving = true;
     this.colorErrorMessage = "";
     this.redrawImpl();
-    const result = await this.fetchJsonImpl(`/api/v1/workspaces/${encodeURIComponent(this.agentId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ color: normalizedHex }),
-    });
+    const result = await this.fetchJsonImpl(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ color: normalizedHex }),
+      },
+    );
     this.isColorSaving = false;
     if (result.ok) {
       this.lastSavedColor = normalizedHex;
@@ -660,14 +794,20 @@ export class WorkspaceOptionsModel {
     this.isAccountBusy = true;
     this.accountErrorMessage = "";
     this.redrawImpl();
-    const result = await this.fetchJsonImpl(`/api/v1/workspaces/${encodeURIComponent(this.agentId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ account_id: accountId }),
-    });
+    const result = await this.fetchJsonImpl(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_id: accountId }),
+      },
+    );
     this.isAccountBusy = false;
     if (!result.ok) {
-      this.accountErrorMessage = errorMessageFromBody(result.body, `HTTP ${result.status}`);
+      this.accountErrorMessage = errorMessageFromBody(
+        result.body,
+        `HTTP ${result.status}`,
+      );
       this.redrawImpl();
       return false;
     }
@@ -681,14 +821,20 @@ export class WorkspaceOptionsModel {
     this.isDestroyPending = true;
     this.destroyErrorMessage = "";
     this.redrawImpl();
-    const result = await this.fetchJsonImpl(`/api/v1/workspaces/${encodeURIComponent(this.agentId)}/destroy`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
+    const result = await this.fetchJsonImpl(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/destroy`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
     this.isDestroyPending = false;
     if (!result.ok) {
-      this.destroyErrorMessage = errorMessageFromBody(result.body, `HTTP ${result.status}`);
+      this.destroyErrorMessage = errorMessageFromBody(
+        result.body,
+        `HTTP ${result.status}`,
+      );
       this.redrawImpl();
       return false;
     }
@@ -701,11 +847,18 @@ export class WorkspaceOptionsModel {
     this.redrawImpl();
     const result = await this.fetchJsonImpl(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/${action}`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
     );
     this.isLifecycleBusy = false;
     if (!result.ok) {
-      this.lifecycleErrorMessage = errorMessageFromBody(result.body, `HTTP ${result.status}`);
+      this.lifecycleErrorMessage = errorMessageFromBody(
+        result.body,
+        `HTTP ${result.status}`,
+      );
       this.redrawImpl();
       return false;
     }

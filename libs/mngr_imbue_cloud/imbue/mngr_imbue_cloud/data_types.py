@@ -408,6 +408,15 @@ class ShareInfo(FrozenModel):
     cert_not_after: str | None = Field(default=None, description="Expiry of the newest issued certificate")
 
 
+class ShareRelayMap(FrozenModel):
+    """The relay fleet as reported by the connector: region -> tunnel-control endpoint."""
+
+    relay_endpoint_by_region: dict[str, str] = Field(
+        description="Relay tunnel-control endpoint (host:port) per region code"
+    )
+    default_region: str = Field(description="Region used when no datacenter mapping or preference applies")
+
+
 class R2BucketInfo(FrozenModel):
     """Metadata about an R2 bucket owned by the account."""
 

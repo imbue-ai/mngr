@@ -13,7 +13,11 @@ materials + connector ``shares delete`` (the relay token dies, so the tunnel's
 next reconnect is rejected even if the materials linger).
 """
 
+import socket
+import time
 import tomllib
+from collections.abc import Callable
+from collections.abc import Mapping
 from typing import Any
 from typing import Final
 
@@ -43,6 +47,10 @@ from imbue.mngr.primitives import AgentId
 # How long the readiness probe waits on a single fetch of the shared hostname
 # before treating the share as not-ready-yet.
 SHARE_READINESS_PROBE_TIMEOUT_SECONDS: Final[float] = 4.0
+
+# How long one relay latency probe (a bare TCP connect to the relay's
+# tunnel-control endpoint) may take before that relay is skipped.
+RELAY_LATENCY_PROBE_TIMEOUT_SECONDS: Final[float] = 1.5
 
 # Signals in the plugin's JSON error body for the two failures a user can
 # actually do something about. Matched on the message text because the plugin
@@ -122,6 +130,93 @@ def resolve_agent_for_host(
                 if record.host_id == host_id and record.state == RECORD_STATE_ACTIVE and record.agent_id:
                     return AgentId(record.agent_id)
     raise SharingError(f"No workspace is known for machine '{host_id}'.")
+
+
+def split_relay_endpoint(endpoint: str) -> tuple[str, int] | None:
+    """Split a relay ``host:port`` endpoint into (host, port), or None when malformed.
+
+    Handles bracketed IPv6 literals (``[::1]:7000``) by unwrapping the
+    brackets; an unbracketed IPv6 literal has no unambiguous port split and is
+    refused.
+    """
+    raw_host, separator, port_text = endpoint.rpartition(":")
+    if not separator or not raw_host:
+        return None
+    if raw_host.startswith("[") and raw_host.endswith("]"):
+        host = raw_host[1:-1]
+    elif ":" in raw_host:
+        return None
+    else:
+        host = raw_host
+    if not host:
+        return None
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    return (host, port)
+
+
+def _measure_tcp_connect_seconds(endpoint: str, timeout_seconds: float) -> float | None:
+    """Time a bare TCP connect to a ``host:port`` endpoint; None when unparseable or unreachable."""
+    host_and_port = split_relay_endpoint(endpoint)
+    if host_and_port is None:
+        logger.debug("Skipping unparseable relay endpoint: {}", endpoint)
+        return None
+    host, port = host_and_port
+    started_at = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            pass
+    except OSError as exc:
+        logger.debug("Relay latency probe to {} failed: {}", endpoint, exc)
+        return None
+    return time.monotonic() - started_at
+
+
+def pick_lowest_latency_relay_region(
+    relay_endpoint_by_region: Mapping[str, str],
+    # Injected for tests: measures one endpoint's connect time in seconds
+    # (None = unreachable). Production callers pass _measure_tcp_connect_seconds.
+    measure_connect_seconds: Callable[[str], float | None],
+) -> str | None:
+    """The region whose relay answered a TCP connect fastest, or None when none did.
+
+    With a single region (dev tiers) the measurement is skipped entirely --
+    there is nothing to choose between.
+    """
+    if len(relay_endpoint_by_region) <= 1:
+        return next(iter(relay_endpoint_by_region), None)
+    seconds_by_region = {
+        region: seconds
+        for region, endpoint in relay_endpoint_by_region.items()
+        if (seconds := measure_connect_seconds(endpoint)) is not None
+    }
+    if not seconds_by_region:
+        return None
+    return min(seconds_by_region, key=lambda region: seconds_by_region[region])
+
+
+def _pick_preferred_relay_region(cli: ImbueCloudCli, account_email: str) -> str | None:
+    """Best-effort: the lowest-latency relay region as measured from this machine.
+
+    Used only for a first-time share of a local workspace (the workspace runs
+    on this machine, so the desktop's own latency is the right proximity
+    signal). Any failure degrades to None -- the connector then falls back to
+    its default region.
+    """
+    try:
+        relay_endpoint_by_region = cli.list_share_relays(account=account_email)
+    except ImbueCloudCliError as exc:
+        logger.debug("Could not list share relays for region picking: {}", exc)
+        return None
+    region = pick_lowest_latency_relay_region(
+        relay_endpoint_by_region,
+        lambda endpoint: _measure_tcp_connect_seconds(endpoint, RELAY_LATENCY_PROBE_TIMEOUT_SECONDS),
+    )
+    if region is not None:
+        logger.debug("Picked relay region {} by connect latency", region)
+    return region
 
 
 def _grants_have_any_grantee(workspace_grants: dict[str, list[str]], service_grants: dict[str, Any]) -> bool:
@@ -309,8 +404,14 @@ def _enable_sharing_with_cli(
             raise SharingError("Sharing was enabled but the connector reports no share record for the machine.")
         return _share_status_document(host_id, enabled_share, workspace_grants, service_grants)
 
+    # First-time local shares pick the relay by measured latency from this
+    # machine (the workspace runs here). A re-share keeps its region
+    # server-side, so the measurement is skipped then.
+    preferred_region = _pick_preferred_relay_region(cli, account_email) if existing is None else None
     try:
-        share = cli.create_share(account=account_email, host_id=host_id, entry_label=entry_label)
+        share = cli.create_share(
+            account=account_email, host_id=host_id, entry_label=entry_label, preferred_region=preferred_region
+        )
     except ImbueCloudCliError as exc:
         raise SharingError(f"Could not enable sharing: {describe_connector_failure(exc)}") from exc
     if share.relay_token is None or not share.relay_endpoint:

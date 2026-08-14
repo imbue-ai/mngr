@@ -25,11 +25,16 @@ interface ShareTabLocalState {
 }
 
 export function ShareTab(): m.Component<ShareTabAttrs> {
-  const local: ShareTabLocalState = { addEntryDraft: "", isCopyConfirmed: false, copyFlashTimer: null };
+  const local: ShareTabLocalState = {
+    addEntryDraft: "",
+    isCopyConfirmed: false,
+    copyFlashTimer: null,
+  };
 
   return {
     onremove() {
-      if (local.copyFlashTimer !== null) window.clearTimeout(local.copyFlashTimer);
+      if (local.copyFlashTimer !== null)
+        window.clearTimeout(local.copyFlashTimer);
     },
     view(vnode) {
       const { share } = vnode.attrs;
@@ -40,8 +45,19 @@ export function ShareTab(): m.Component<ShareTabAttrs> {
         nav: renderTargetNav(share, local),
         content: [
           m("div", { class: "flex items-center gap-2" }, [
-            m("span", { class: "shrink-0 text-primary" }, m(Icon16, { name: isWhole ? "panels-top-left" : "box", size: "lg" })),
-            m("h2", { class: "type-heading text-primary" }, isWhole ? "Whole machine" : share.currentTarget),
+            m(
+              "span",
+              { class: "shrink-0 text-primary" },
+              m(Icon16, {
+                name: isWhole ? "panels-top-left" : "box",
+                size: "lg",
+              }),
+            ),
+            m(
+              "h2",
+              { class: "type-heading text-primary" },
+              isWhole ? "Whole machine" : share.currentTarget,
+            ),
           ]),
           m(
             "p",
@@ -63,7 +79,14 @@ export function ShareTab(): m.Component<ShareTabAttrs> {
                   ? m(
                       "div",
                       { class: "mt-2" },
-                      m(Button, { variant: "secondary", onclick: () => void share.load() }, "Try again"),
+                      m(
+                        Button,
+                        {
+                          variant: "secondary",
+                          onclick: () => void share.load(),
+                        },
+                        "Try again",
+                      ),
                     )
                   : null,
               ])
@@ -80,11 +103,20 @@ function shareWholeService(share: ShareModel): string {
   return share.wholeService;
 }
 
-function renderTargetNav(share: ShareModel, local: ShareTabLocalState): m.Children {
+function renderTargetNav(
+  share: ShareModel,
+  local: ShareTabLocalState,
+): m.Children {
   const wholeService = shareWholeService(share);
-  const appServices = share.knownTargets.filter((target) => target !== wholeService);
+  const appServices = share.knownTargets.filter(
+    (target) => target !== wholeService,
+  );
 
-  const targetButton = (target: string, label: string, icon: string): m.Children =>
+  const targetButton = (
+    target: string,
+    label: string,
+    icon: string,
+  ): m.Children =>
     m(
       "button",
       {
@@ -98,7 +130,10 @@ function renderTargetNav(share: ShareModel, local: ShareTabLocalState): m.Childr
           share.selectTarget(target);
         },
       },
-      [m(Icon16, { name: icon, extra: "shrink-0" }), m("span", { class: "truncate" }, label)],
+      [
+        m(Icon16, { name: icon, extra: "shrink-0" }),
+        m("span", { class: "truncate" }, label),
+      ],
     );
 
   return [
@@ -116,7 +151,10 @@ function renderTargetNav(share: ShareModel, local: ShareTabLocalState): m.Childr
   ];
 }
 
-function renderEditor(share: ShareModel, local: ShareTabLocalState): m.Children {
+function renderEditor(
+  share: ShareModel,
+  local: ShareTabLocalState,
+): m.Children {
   const target = share.currentTarget;
   const state = share.targetState(target);
   const pending = share.pendingKind(target);
@@ -126,7 +164,11 @@ function renderEditor(share: ShareModel, local: ShareTabLocalState): m.Children 
 
   return m("div", { class: "mt-6 flex flex-col gap-6" }, [
     m("section", [
-      m("h3", { class: "type-body font-semibold text-primary" }, "Who are you sharing with?"),
+      m(
+        "h3",
+        { class: "type-body font-semibold text-primary" },
+        "Who are you sharing with?",
+      ),
       m("div", { id: "ws-share-emails", class: "mt-3 flex flex-col gap-1.5" }, [
         ownerEmail ? renderAclRow(share, ownerEmail, true) : null,
         ...state.entries.map((entry) => renderAclRow(share, entry, false)),
@@ -163,91 +205,187 @@ function renderEditor(share: ShareModel, local: ShareTabLocalState): m.Children 
     ]),
 
     m("section", [
-      m("h3", { class: "type-body font-semibold text-primary mb-3" }, "Share link"),
+      m(
+        "h3",
+        { class: "type-body font-semibold text-primary mb-3" },
+        "Share link",
+      ),
       !state.isEnabled && !isDisabling
-        ? m("div", { id: "ws-share-enable-row", class: "flex items-center gap-3" }, [
-            m(
-              Button,
-              {
-                id: "ws-share-enable-btn",
-                variant: "primary",
-                disabled: pending !== null,
-                onclick: () => void share.enable(local.addEntryDraft),
-              },
-              pending === "enable" ? "Enabling..." : "Enable sharing",
-            ),
-            pending === "enable"
-              ? m("span", { id: "ws-share-enable-status", class: "type-helper text-tertiary" }, [
-                  m(Spinner, { size: "sm", extra: "mr-1" }),
-                  " Setting up the share (link, certificate, tunnel)... this can take a minute.",
-                ])
-              : null,
-          ])
+        ? m(
+            "div",
+            { id: "ws-share-enable-row", class: "flex items-center gap-3" },
+            [
+              m(
+                Button,
+                {
+                  id: "ws-share-enable-btn",
+                  variant: "primary",
+                  disabled: pending !== null,
+                  onclick: () => void share.enable(local.addEntryDraft),
+                },
+                pending === "enable" ? "Enabling..." : "Enable sharing",
+              ),
+              pending === "enable"
+                ? m(
+                    "span",
+                    {
+                      id: "ws-share-enable-status",
+                      class: "type-helper text-tertiary",
+                    },
+                    [
+                      m(Spinner, { size: "sm", extra: "mr-1" }),
+                      " Registering the share link...",
+                    ],
+                  )
+                : null,
+            ],
+          )
         : null,
       state.isEnabled && !isDisabling
-        ? m("div", { id: "ws-share-url-row", class: "flex items-center gap-2 flex-wrap" }, [
-            m(
-              "button",
-              {
-                id: "ws-share-url-btn",
-                type: "button",
-                class:
-                  "inline-flex items-center gap-2 max-w-full rounded-full border border-default " +
-                  "bg-fill-subtle px-3 py-1.5 type-body font-mono text-primary cursor-pointer " +
-                  "hover:bg-fill-hover transition-colors",
-                style: local.isCopyConfirmed
-                  ? "border-color: var(--c-success); background-color: var(--c-success-surface);"
-                  : "",
-                "aria-label": "Copy the share link",
-                onclick: () => void copyShareUrl(share, local),
-              },
-              [
-                m("span", { id: "ws-share-url", class: "truncate" }, url),
-                m(Icon16, {
-                  name: local.isCopyConfirmed ? "check" : "copy",
-                  extra: local.isCopyConfirmed ? "shrink-0 text-primary" : "shrink-0 text-tertiary",
-                }),
-              ],
-            ),
-            m(
-              Button,
-              { variant: "secondary", disabled: pending !== null, onclick: () => void share.disable() },
-              "Stop sharing",
-            ),
-          ])
+        ? m(
+            "div",
+            {
+              id: "ws-share-url-row",
+              class: "flex items-center gap-2 flex-wrap",
+            },
+            [
+              m(
+                "button",
+                {
+                  id: "ws-share-url-btn",
+                  type: "button",
+                  class:
+                    "inline-flex items-center gap-2 max-w-full rounded-full border border-default " +
+                    "bg-fill-subtle px-3 py-1.5 type-body font-mono text-primary cursor-pointer " +
+                    "hover:bg-fill-hover transition-colors",
+                  style: local.isCopyConfirmed
+                    ? "border-color: var(--c-success); background-color: var(--c-success-surface);"
+                    : "",
+                  "aria-label": "Copy the share link",
+                  onclick: () => void copyShareUrl(share, local),
+                },
+                [
+                  m("span", { id: "ws-share-url", class: "truncate" }, url),
+                  m(Icon16, {
+                    name: local.isCopyConfirmed ? "check" : "copy",
+                    extra: local.isCopyConfirmed
+                      ? "shrink-0 text-primary"
+                      : "shrink-0 text-tertiary",
+                  }),
+                ],
+              ),
+              m(
+                Button,
+                {
+                  variant: "secondary",
+                  disabled: pending !== null,
+                  onclick: () => void share.disable(),
+                },
+                "Stop sharing",
+              ),
+            ],
+          )
         : null,
       isDisabling
-        ? m("p", { id: "ws-share-busy", class: "flex items-center gap-2 type-body text-secondary" }, [
-            m(Spinner, { size: "sm" }),
-            "Stopping sharing and revoking the link...",
-          ])
+        ? m(
+            "p",
+            {
+              id: "ws-share-busy",
+              class: "flex items-center gap-2 type-body text-secondary",
+            },
+            [
+              m(Spinner, { size: "sm" }),
+              "Stopping sharing and revoking the link...",
+            ],
+          )
         : null,
       pending === "emails"
-        ? m("p", { class: "flex items-center gap-2 type-body text-secondary mt-2" }, [
-            m(Spinner, { size: "sm" }),
-            "Updating who can open this link...",
-          ])
+        ? m(
+            "p",
+            { class: "flex items-center gap-2 type-body text-secondary mt-2" },
+            [m(Spinner, { size: "sm" }), "Updating who can open this link..."],
+          )
         : null,
       share.isAwaitingLink(target) && !isDisabling
         ? m(
             "div",
             { id: "ws-share-provisioning", class: "mt-3" },
-            m(
-              Notice,
-              { variant: "info" },
-              "The link is being set up (certificate + tunnel) and is not live yet. It usually takes under a minute.",
-            ),
+            m(Notice, { variant: "info" }, [
+              m(
+                "p",
+                "The link is not live yet -- setting it up usually takes under a minute:",
+              ),
+              renderProvisioningChecklist(share),
+            ]),
           )
         : null,
     ]),
   ]);
 }
 
+interface ProvisioningStep {
+  label: string;
+  isDone: boolean;
+}
+
+// The provisioning checklist shown while the link is not yet live: each step's
+// signal comes from the readiness poll (certificate issuance and a fresh
+// tunnel login from the connector's share status; the end-to-end check is the
+// probe itself, which dismisses this whole notice when it succeeds).
+function renderProvisioningChecklist(share: ShareModel): m.Children {
+  const steps: ProvisioningStep[] = [
+    { label: "Share link registered", isDone: true },
+    { label: "TLS certificate issued", isDone: share.isCertIssued },
+    { label: "Tunnel connected to the relay", isDone: share.isTunnelConnected },
+    { label: "Link answers end to end", isDone: false },
+  ];
+  const firstNotDoneIdx = steps.findIndex((step) => !step.isDone);
+  return m(
+    "ul",
+    { id: "ws-share-provisioning-steps", class: "mt-2 flex flex-col gap-1" },
+    steps.map((step, idx) =>
+      m(
+        "li",
+        {
+          class: "flex items-center gap-2",
+          "data-step-done": step.isDone ? "true" : "false",
+        },
+        [
+          step.isDone
+            ? m(Icon16, { name: "check", extra: "shrink-0 text-primary" })
+            : idx === firstNotDoneIdx
+              ? m(Spinner, { size: "sm", extra: "shrink-0" })
+              : m(
+                  "span",
+                  {
+                    class:
+                      "inline-block w-4 shrink-0 text-center text-tertiary",
+                  },
+                  "-",
+                ),
+          m(
+            "span",
+            {
+              class:
+                step.isDone || idx === firstNotDoneIdx ? "" : "text-tertiary",
+            },
+            step.label,
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 function shareOwnerEmail(share: ShareModel): string {
   return share.ownerEmail;
 }
 
-function renderAclRow(share: ShareModel, entry: string, isOwner: boolean): m.Children {
+function renderAclRow(
+  share: ShareModel,
+  entry: string,
+  isOwner: boolean,
+): m.Children {
   const isEmail = entry.includes("@");
   return m(
     "div",
@@ -259,7 +397,9 @@ function renderAclRow(share: ShareModel, entry: string, isOwner: boolean): m.Chi
       m("span", { class: "type-body text-primary truncate" }, [
         entry,
         isOwner ? m("span", { class: "text-tertiary" }, " (you)") : null,
-        !isOwner && !isEmail ? m("span", { class: "text-tertiary" }, " (anyone at this domain)") : null,
+        !isOwner && !isEmail
+          ? m("span", { class: "text-tertiary" }, " (anyone at this domain)")
+          : null,
       ]),
       !isOwner
         ? m(
@@ -287,13 +427,18 @@ function addDraftEntry(share: ShareModel, local: ShareTabLocalState): void {
   local.addEntryDraft = "";
 }
 
-async function copyShareUrl(share: ShareModel, local: ShareTabLocalState): Promise<void> {
+async function copyShareUrl(
+  share: ShareModel,
+  local: ShareTabLocalState,
+): Promise<void> {
   const url = share.targetUrl(share.currentTarget);
   if (!url) return;
   try {
     await navigator.clipboard.writeText(url);
   } catch (error) {
-    share.errorMessage = "Could not copy the link: " + (error instanceof Error ? error.message : String(error));
+    share.errorMessage =
+      "Could not copy the link: " +
+      (error instanceof Error ? error.message : String(error));
     m.redraw();
     return;
   }

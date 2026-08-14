@@ -171,6 +171,26 @@ def test_create_share_malformed_output_error_omits_the_relay_token() -> None:
     assert "host_id" in message
 
 
+def test_list_share_relays_parses_the_relay_map() -> None:
+    body = {"relays": {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}, "default_region": "us1"}
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(body)))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    relays = cli.list_share_relays(account="owner@example.com")
+
+    assert relays == {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}
+    assert caller.recorded_calls[0].argv == ("imbue_cloud", "shares", "relays", "--account", "owner@example.com")
+
+
+def test_list_share_relays_raises_on_malformed_output() -> None:
+    """A body without a relays map is a broken plugin contract, not an empty fleet."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps({"default_region": "us1"})))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    with pytest.raises(ImbueCloudCliError, match="Malformed shares relays output"):
+        cli.list_share_relays(account="owner@example.com")
+
+
 def test_auth_resend_verification_reports_cooldown_suppression() -> None:
     caller = RecordingMngrCaller(
         result=MngrCallResult(returncode=0, stdout=json.dumps({"sent": False, "email": "a@b.com"}))

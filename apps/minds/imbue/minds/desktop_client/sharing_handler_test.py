@@ -2,20 +2,25 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import Field
 
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import _enable_sharing_with_cli
 from imbue.minds.desktop_client.sharing_handler import _parse_grants_toml
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
+from imbue.minds.desktop_client.sharing_handler import pick_lowest_latency_relay_region
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
+from imbue.minds.desktop_client.sharing_handler import split_relay_endpoint
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
@@ -51,6 +56,56 @@ def test_probe_share_readiness_false_on_transport_error() -> None:
 
     client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
     assert probe_share_readiness(client, _DOMAIN) is False
+
+
+def test_split_relay_endpoint_handles_hostnames_and_ipv6_literals() -> None:
+    assert split_relay_endpoint("relay-us1.example:7000") == ("relay-us1.example", 7000)
+    assert split_relay_endpoint("203.0.113.9:7000") == ("203.0.113.9", 7000)
+    # Bracketed IPv6 literals unwrap to the bare address.
+    assert split_relay_endpoint("[::1]:7000") == ("::1", 7000)
+    assert split_relay_endpoint("[2001:db8::2]:7000") == ("2001:db8::2", 7000)
+    # Malformed shapes: no port, empty host, non-numeric port, unbracketed
+    # IPv6 (ambiguous port split), empty brackets.
+    assert split_relay_endpoint("relay-us1.example") is None
+    assert split_relay_endpoint(":7000") is None
+    assert split_relay_endpoint("relay-us1.example:web") is None
+    assert split_relay_endpoint("2001:db8::2:7000") is None
+    assert split_relay_endpoint("[]:7000") is None
+
+
+def test_pick_lowest_latency_relay_region_prefers_the_fastest_reachable_relay() -> None:
+    relays = {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}
+    seconds_by_endpoint = {"relay-us1.example:7000": 0.120, "relay-us2.example:7000": 0.030}
+
+    picked = pick_lowest_latency_relay_region(relays, lambda endpoint: seconds_by_endpoint[endpoint])
+
+    assert picked == "us2"
+
+
+def test_pick_lowest_latency_relay_region_skips_unreachable_relays() -> None:
+    relays = {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}
+    seconds_by_endpoint: dict[str, float | None] = {
+        "relay-us1.example:7000": None,
+        "relay-us2.example:7000": 0.500,
+    }
+
+    picked = pick_lowest_latency_relay_region(relays, lambda endpoint: seconds_by_endpoint[endpoint])
+
+    assert picked == "us2"
+
+
+def test_pick_lowest_latency_relay_region_returns_none_when_nothing_answers() -> None:
+    relays = {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}
+
+    assert pick_lowest_latency_relay_region(relays, lambda endpoint: None) is None
+
+
+def test_pick_lowest_latency_relay_region_skips_measurement_for_a_single_region() -> None:
+    def _must_not_measure(endpoint: str) -> float | None:
+        raise AssertionError(f"unexpected measurement of {endpoint}")
+
+    assert pick_lowest_latency_relay_region({"us1": "relay-us1.example:7000"}, _must_not_measure) == "us1"
+    assert pick_lowest_latency_relay_region({}, _must_not_measure) is None
 
 
 def test_grants_toml_roundtrips_through_render_and_parse() -> None:
@@ -205,3 +260,74 @@ def test_enable_sharing_cloud_row_surfaces_a_connector_refusal() -> None:
         _enable_sharing_with_cli(
             host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=True
         )
+
+
+class _PreferredRegionRecordingCli(FakeImbueCloudCli):
+    """Records ``create_share``'s ``preferred_region``, then fails so the flow stops at the create.
+
+    Same seam-pinning pattern as ``_RecordingCreateShareCli`` in
+    ``workspace_create_web_access_test.py``: the raise keeps the test at the
+    call under test instead of continuing into materials injection.
+    """
+
+    recorded_preferred_regions: list[str | None] = Field(
+        default_factory=list, description="preferred_region for every create_share call, in order"
+    )
+    relay_list_call_count: int = Field(default=0, description="How many times list_share_relays was consulted")
+
+    def list_share_relays(self, *, account: str) -> dict[str, str]:
+        self.relay_list_call_count += 1
+        return super().list_share_relays(account=account)
+
+    def create_share(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        entry_label: str | None = None,
+        preferred_region: str | None = None,
+    ) -> ShareCliInfo:
+        self.recorded_preferred_regions.append(preferred_region)
+        raise ImbueCloudCliError("recorded; stopping the bring-up here")
+
+
+def test_enable_sharing_first_time_local_share_passes_the_measured_preferred_region() -> None:
+    # A first-time local share (no existing share record) steers the relay by
+    # measured latency. A single configured region short-circuits the
+    # measurement (no sockets are opened), but the picked region must still be
+    # forwarded to the connector's create.
+    cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    cli.relays_to_return = {"us9": "relay-us9.example:7000"}
+    agent_id = AgentId("agent-" + "c" * 32)
+    host_id = "host-" + "d" * 32
+    grants = {"emails": ["owner@example.com"], "email_domains": []}
+
+    with pytest.raises(SharingError):
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+        )
+
+    assert cli.recorded_preferred_regions == ["us9"]
+    assert cli.relay_list_call_count == 1
+
+
+def test_enable_sharing_re_share_sends_no_preferred_region() -> None:
+    # A machine with an existing share record keeps its region server-side
+    # (the region is baked into the workspace domain), so a re-share must not
+    # measure latency and must not send any preference.
+    cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    cli.relays_to_return = {"us9": "relay-us9.example:7000"}
+    agent_id = AgentId("agent-" + "c" * 32)
+    host_id = "host-" + "d" * 32
+    # An inactive record routes past the grants-only fast path into the full
+    # (re-)provisioning create.
+    cli.shares_by_account.setdefault("owner@example.com", {})[host_id] = "inactive"
+    grants = {"emails": ["owner@example.com"], "email_domains": []}
+
+    with pytest.raises(SharingError):
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+        )
+
+    assert cli.recorded_preferred_regions == [None]
+    assert cli.relay_list_call_count == 0

@@ -579,6 +579,7 @@ mngr imbue_cloud shares create [OPTIONS] HOST_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 | `--entry-label` | text | The workspace's shell-service origin label (e.g. system_interface-<rand>); the hosted web chrome enters the workspace at <entry-label>.<workspace-domain>. Omit to keep any previously recorded label. | None |
+| `--preferred-region` | text | Preferred relay region code (e.g. us1) for a first-time share of a local workspace. Ignored for pool hosts, unknown regions, and re-shares (the existing region sticks). | None |
 
 ## mngr imbue_cloud shares delete
 
@@ -618,6 +619,22 @@ mngr imbue_cloud shares status [OPTIONS] HOST_ID
 
 ```text
 mngr imbue_cloud shares list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud shares relays
+
+**Usage:**
+
+```text
+mngr imbue_cloud shares relays [OPTIONS]
 ```
 **Options:**
 

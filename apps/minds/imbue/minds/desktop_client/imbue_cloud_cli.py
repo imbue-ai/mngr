@@ -577,16 +577,28 @@ class ImbueCloudCli(MutableModel):
     # Shares (self-hosted relays)
     # ------------------------------------------------------------------
 
-    def create_share(self, *, account: str, host_id: str, entry_label: str | None = None) -> ShareCliInfo:
+    def create_share(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        entry_label: str | None = None,
+        preferred_region: str | None = None,
+    ) -> ShareCliInfo:
         """Enable sharing for a workspace host; the returned relay token is only ever returned here.
 
         ``entry_label`` is the workspace's shell-service origin label, recorded
         server-side so the hosted web chrome knows the routable origin to enter
         the workspace at; None keeps any previously recorded label.
+        ``preferred_region`` steers a first-time share of a local workspace to
+        a specific relay region; the connector ignores it for pool hosts and
+        keeps an existing share's region.
         """
         args = ["shares", "create", host_id, "--account", account]
         if entry_label:
             args.extend(["--entry-label", entry_label])
+        if preferred_region:
+            args.extend(["--preferred-region", preferred_region])
         result = self._run(
             args,
             cg_name="imbue-cloud-shares-create",
@@ -617,6 +629,18 @@ class ImbueCloudCli(MutableModel):
         if not isinstance(body, dict) or body.get("state") in (None, "", "none"):
             return None
         return ShareCliInfo.model_validate(body)
+
+    def list_share_relays(self, *, account: str) -> dict[str, str]:
+        """The relay fleet as ``{region: tunnel-control endpoint}`` (for latency-based region picking)."""
+        result = self._run(
+            ["shares", "relays", "--account", account],
+            cg_name="imbue-cloud-shares-relays",
+        )
+        body = self._expect_success(result, "shares relays")
+        relays = body.get("relays") if isinstance(body, dict) else None
+        if not isinstance(relays, dict):
+            raise ImbueCloudCliError("Malformed shares relays output: expected a relays map")
+        return {str(region): str(endpoint) for region, endpoint in relays.items()}
 
     # ------------------------------------------------------------------
     # R2 buckets (one per workspace; used to back up the host_dir via restic)

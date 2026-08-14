@@ -1112,6 +1112,67 @@ def test_create_share_parses_token_and_domain(monkeypatch: pytest.MonkeyPatch) -
     assert info.relay_token.get_secret_value() == "secret-relay-token"
 
 
+def test_create_share_sends_preferred_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/shares"
+        assert _json.loads(request.content) == {"host_id": _SHARE_HOST_ID, "preferred_region": "us2"}
+        return httpx.Response(
+            200,
+            json={
+                "host_id": _SHARE_HOST_ID,
+                "workspace_domain": _SHARE_DOMAIN,
+                "region": "us2",
+                "relay_endpoint": "relay-us2.infra.imbue.com:7000",
+                "relay_token": "secret-relay-token",
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    info = client.create_share(SecretStr("tok"), _SHARE_HOST_ID, preferred_region="us2")
+
+    assert info.region == "us2"
+
+
+def test_list_share_relays_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/shares/relays"
+        assert request.method == "GET"
+        assert request.headers["authorization"] == "Bearer tok"
+        return httpx.Response(
+            200,
+            json={
+                "relays": {
+                    "us1": "relay-us1.infra.imbue.com:7000",
+                    "us2": "relay-us2.infra.imbue.com:7000",
+                },
+                "default_region": "us1",
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    relay_map = client.list_share_relays(SecretStr("tok"))
+
+    assert relay_map.relay_endpoint_by_region == {
+        "us1": "relay-us1.infra.imbue.com:7000",
+        "us2": "relay-us2.infra.imbue.com:7000",
+    }
+    assert relay_map.default_region == "us1"
+
+
+def test_list_share_relays_raises_on_a_malformed_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A body without a relays map must raise rather than degrade to an empty
+    # map (which would silently disable latency-based region picking).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": True})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudShareError, match="malformed relays response"):
+        client.list_share_relays(SecretStr("tok"))
+
+
 def test_create_share_quota_surfaces_as_quota_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

@@ -2763,7 +2763,10 @@ def _handle_machine_sharing_readiness(host_id: str) -> SharingReadinessResponse:
     """Probe whether the machine's shared hostname is live end to end yet.
 
     The domain to probe comes from the connector's share record for this
-    machine, never from caller input. Contract: ``{"ready": bool}``.
+    machine, never from caller input. Besides the end-to-end ``ready`` bit,
+    the response carries the connector's per-step provisioning signals
+    (certificate issuance, tunnel liveness stamp) so the UI can show which
+    step a still-provisioning share is on.
     """
     state = get_state()
     http_client = state.http_client
@@ -2777,9 +2780,12 @@ def _handle_machine_sharing_readiness(host_id: str) -> SharingReadinessResponse:
     # Probe the shell's routable label origin, not the bare machine domain
     # (which does not route on a share). Not-ready until the shell label is known.
     probe_host = resolve_share_probe_host(state.backend_resolver, state.session_store, host_id, share.workspace_domain)
-    if probe_host is None:
-        return SharingReadinessResponse(ready=False)
-    return SharingReadinessResponse(ready=probe_share_readiness(http_client, probe_host))
+    is_ready = probe_host is not None and probe_share_readiness(http_client, probe_host)
+    return SharingReadinessResponse(
+        ready=is_ready,
+        cert_not_after=share.cert_not_after,
+        last_tunnel_login_at=share.last_tunnel_login_at,
+    )
 
 
 # -- Desktop namespace routes (cookie-or-bearer; no agent verb) --

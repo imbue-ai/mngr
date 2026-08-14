@@ -39,6 +39,7 @@ from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
 from imbue.mngr_imbue_cloud.data_types import ShareInfo
+from imbue.mngr_imbue_cloud.data_types import ShareRelayMap
 from imbue.mngr_imbue_cloud.data_types import StorageCleanupGrant
 from imbue.mngr_imbue_cloud.data_types import StorageRecheckResult
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
@@ -672,17 +673,29 @@ class ImbueCloudConnectorClient(MutableModel):
     # Shares (self-hosted relays)
     # ------------------------------------------------------------------
 
-    def create_share(self, access_token: SecretStr, host_id: str, entry_label: str | None = None) -> ShareInfo:
+    def create_share(
+        self,
+        access_token: SecretStr,
+        host_id: str,
+        entry_label: str | None = None,
+        preferred_region: str | None = None,
+    ) -> ShareInfo:
         """Enable sharing for one workspace; the returned relay token is only ever returned here.
 
         ``entry_label`` is the workspace's shell-service origin label -- the
         routable origin the hosted web chrome enters and health-probes the
         workspace at (the bare share domain is unrouted on the relay).
         Omitting it keeps any label a previous bring-up recorded.
+        ``preferred_region`` steers a first-time share of a local workspace
+        (a host the connector has no datacenter record of) to a specific
+        relay region; the connector ignores it for pool hosts and always
+        keeps an existing share's region.
         """
         body_json: dict[str, str] = {"host_id": host_id}
         if entry_label:
             body_json["entry_label"] = entry_label
+        if preferred_region:
+            body_json["preferred_region"] = preferred_region
         response = self._send(
             "POST",
             self._url("/shares"),
@@ -728,6 +741,28 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         body = self._check(response, ImbueCloudShareError)
         return [_parse_share_info(entry, state=str(entry.get("state", ""))) for entry in body.get("shares", [])]
+
+    def list_share_relays(self, access_token: SecretStr) -> ShareRelayMap:
+        """The relay fleet (region -> tunnel-control endpoint) plus the default region."""
+        response = self._send(
+            "GET",
+            self._url("/shares/relays"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudShareError)
+        relays = body.get("relays")
+        default_region = body.get("default_region")
+        # Strict: a malformed body must not degrade to an empty relay map --
+        # the desktop's region picker would silently fall back to the default
+        # region and the misbehaving connector would go unnoticed.
+        if not isinstance(relays, dict) or not isinstance(default_region, str):
+            raise ImbueCloudShareError(f"Connector returned a malformed relays response: {str(body)[:200]}")
+        return ShareRelayMap(
+            relay_endpoint_by_region={str(region): str(endpoint) for region, endpoint in relays.items()},
+            default_region=default_region,
+        )
 
     def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""

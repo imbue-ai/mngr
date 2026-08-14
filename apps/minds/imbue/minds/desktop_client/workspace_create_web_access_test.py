@@ -59,7 +59,14 @@ class _RecordingCreateShareCli(FakeImbueCloudCli):
         default_factory=list, description="(account email, host id, entry label) for every create_share call, in order"
     )
 
-    def create_share(self, *, account: str, host_id: str, entry_label: str | None = None) -> ShareCliInfo:
+    def create_share(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        entry_label: str | None = None,
+        preferred_region: str | None = None,
+    ) -> ShareCliInfo:
         self.create_share_calls.append((account, host_id, entry_label))
         raise ImbueCloudCliError("recorded; stopping the bring-up here")
 
@@ -166,7 +173,14 @@ class _SucceedingCreateShareCli(FakeImbueCloudCli):
     writes), so a test can assert the whole off-request-context path.
     """
 
-    def create_share(self, *, account: str, host_id: str, entry_label: str | None = None) -> ShareCliInfo:
+    def create_share(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        entry_label: str | None = None,
+        preferred_region: str | None = None,
+    ) -> ShareCliInfo:
         return ShareCliInfo(
             host_id=host_id,
             workspace_domain=f"{host_id}.owner1234.us1.shares.example",

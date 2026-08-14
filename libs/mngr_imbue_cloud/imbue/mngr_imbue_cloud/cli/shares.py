@@ -44,14 +44,28 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
         "previously recorded label."
     ),
 )
+@click.option(
+    "--preferred-region",
+    default=None,
+    help=(
+        "Preferred relay region code (e.g. us1) for a first-time share of a local workspace. "
+        "Ignored for pool hosts, unknown regions, and re-shares (the existing region sticks)."
+    ),
+)
 @handle_imbue_cloud_errors
-def create_share(host_id: str, account: str | None, connector_url: str | None, entry_label: str | None) -> None:
+def create_share(
+    host_id: str,
+    account: str | None,
+    connector_url: str | None,
+    entry_label: str | None,
+    preferred_region: str | None,
+) -> None:
     """Enable sharing for the given workspace host id (prints the one-time relay token)."""
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    info = client.create_share(token, host_id, entry_label=entry_label)
+    info = client.create_share(token, host_id, entry_label=entry_label, preferred_region=preferred_region)
     emit_json(_share_to_json(info, include_token=True))
 
 
@@ -100,3 +114,22 @@ def list_shares(account: str | None, connector_url: str | None) -> None:
     token = get_active_token(store, client, parsed_account)
     items = client.list_shares(token)
     emit_json([_share_to_json(entry, include_token=False) for entry in items])
+
+
+@shares.command(name="relays")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def list_share_relays(account: str | None, connector_url: str | None) -> None:
+    """Show the relay fleet (region -> tunnel-control endpoint) and the default region."""
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    relay_map = client.list_share_relays(token)
+    emit_json(
+        {
+            "relays": relay_map.relay_endpoint_by_region,
+            "default_region": relay_map.default_region,
+        }
+    )

@@ -97,6 +97,13 @@ class FakeImbueCloudCli(ImbueCloudCli):
         default=False,
         description="When True, get_share_status raises ImbueCloudCliError (simulates a connector hiccup)",
     )
+    relays_to_return: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Relay map list_share_relays returns. Empty (the default) makes the "
+            "latency-based region picker a no-op, so tests never probe the network."
+        ),
+    )
 
     resent_verification_emails: list[str] = Field(
         default_factory=list, description="Every email auth_resend_verification was called with, in order"
@@ -201,6 +208,9 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def delete_share(self, *, account: str, host_id: str) -> None:
         self.deleted_share_host_ids.append(host_id)
         self.shares_by_account.get(account, {}).pop(host_id, None)
+
+    def list_share_relays(self, *, account: str) -> dict[str, str]:
+        return dict(self.relays_to_return)
 
     # -- In-memory storage-cleanup backend (drives the backup-trim tests) --
 
