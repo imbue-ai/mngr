@@ -471,12 +471,21 @@ used. The generator skips them, so the catalog and the gateway's
 `services.json` also carries minds' own *additional* (custom) services --
 ones detent has no schemas for, currently `claude.ai`. Their definitions are
 hand-maintained in `imbue/mngr_latchkey/additional_services.json` (a
-`display_name`, a `base_api_url`, the single Detent `scope` it exposes with
-an inline scope `schema`, and its grantable `permissions`, each with an
-inline `schema`), and the generator *folds their catalog entries into*
-`services.json`. That way every reader of the catalog -- `ServicesCatalog`
-and both gateway extensions -- works from one file in one shape and never
-has to know which of the two sources a service came from.
+`display_name`, a `base_api_url`, an optional `browser_login`, the single
+Detent `scope` it exposes with an inline scope `schema`, and its grantable
+`permissions`, each with an inline `schema`), and the generator *folds their
+catalog entries into* `services.json`. That way every reader of the catalog --
+`ServicesCatalog` and both gateway extensions -- works from one file in one
+shape and never has to know which of the two sources a service came from.
+
+`browser_login` gives the service a `latchkey auth browser` sign-in: a `url`
+to open and the generic latchkey login `flow` to run there (latchkey ships
+these flows so a service outside its builtin catalog can still be signed into).
+`claude-ai` uses `cookie-capture`, which finishes once the named cookies have
+been set and stores them as a `Cookie` header -- for claude.ai, the single
+`sessionKey` cookie, scoped by `cookieUrl` to claude.ai itself because sign-in
+may start on another host. Without it a custom service can only be
+authenticated by hand with `latchkey auth set`.
 
 Because a custom scope is not a detent builtin, its schemas have to reach the
 gateway's permission check. Rather than inlining them into every host file,
@@ -491,11 +500,21 @@ ships the shared file alongside the permissions file). Granting a custom scope
 is then a plain rule write -- no per-host schema inlining.
 
 `imbue.mngr_latchkey.additional_services` is the single Python chokepoint for
-the file. It exposes the registration list (each service is registered with the
-`latchkey` CLI at gateway bring-up), the merged schemas used to materialize the
-shared file, and the catalog projection the generator folds into
-`services.json`. No gateway extension reads it -- they only read
+the file. It exposes the registration entries, the merged schemas used to
+materialize the shared file, and the catalog projection the generator folds
+into `services.json`. No gateway extension reads it -- they only read
 `services.json`.
+
+The registration entries are minds' half of latchkey's own `config.json`:
+`core.merge_minds_latchkey_config` read-merges them into the file's
+`registeredServices` block (alongside `settings.hideBuiltinServices`) rather
+than shelling out to `latchkey services register`, which cannot update a
+registration that already exists. That merge runs for **every** gateway that
+serves minds agents -- the desktop one at `initialize()` and each gateway spawn,
+and a VPS one during remote provisioning. It has to: the registration is what
+lets a gateway resolve a request to a custom service at all, so a VPS holding
+the synchronized credentials but not the registration would silently never
+inject them.
 
 A typical end-to-end shell flow:
 

@@ -433,13 +433,26 @@ Beyond detent's builtin catalog, minds ships a small hardcoded list of
 Their catalog entries are folded into `services.json` by that package's
 generator, so the dialog and the gateway extensions treat them exactly like a
 builtin service. These are third-party services minds supports itself, using
-two latchkey features:
+three latchkey features:
 
-* **Registration.** At gateway bring-up, `Latchkey.initialize()` runs
-  `latchkey services register <name> --base-api-url <url>` for each
-  additional service (skipping any already registered, since that command
-  is not idempotent), so latchkey can inject the user's stored credentials
-  for the service's domain.
+* **Registration.** minds writes each additional service into the
+  `registeredServices` block of latchkey's own `config.json` -- the same
+  place `latchkey services register` would -- so latchkey can match the
+  service's domain and inject the user's stored credentials for it. Every
+  gateway that serves minds agents gets this: the desktop one (at
+  `Latchkey.initialize()` and again at each gateway spawn) and each
+  VPS-resident one (during remote provisioning, before its gateway starts).
+  A VPS needs it as much as the desktop does -- the credentials
+  synchronized to it are unusable by a gateway that cannot resolve a
+  request to the service in the first place. Writing the config rather than
+  shelling out to the CLI also means a definition that changes in a later
+  release reaches installs that already carry the old one; `services
+  register` refuses a name that already exists.
+* **Browser sign-in (optional).** A service may name a login URL and one of
+  latchkey's generic login flows, which is what `latchkey auth browser`
+  then runs for it. `claude.ai` uses the `cookie-capture` flow: latchkey
+  opens the claude.ai login page and stores the `sessionKey` session cookie
+  as the credentials.
 * **Self-shipped detent schemas, referenced via `include`.** A custom scope
   is not one of detent's builtin schemas, so each additional service ships
   its own scope schema (matching the service domain) plus a permission
@@ -458,11 +471,11 @@ two latchkey features:
 Additional services are merged into the same catalog the dialog reads, so
 they appear and are granted exactly like builtin ones. The seed entry is
 `claude.ai`, which exposes a single `everything` permission (full access
-to the `claude.ai` domain). Because registered services support only
-static-argument credentials, authenticating one is a manual
-`latchkey auth set <name> -H "..."` (the browser sign-in flow does not
-apply); granting the permission and supplying credentials are independent
-steps.
+to the `claude.ai` domain) and signs in through the browser like any other
+service. An additional service that ships without a browser sign-in is
+authenticated by hand instead, with `latchkey auth set <name> -H "..."`;
+either way, granting the permission and supplying credentials are
+independent steps.
 
 ## Connectors and accounts (Settings page)
 

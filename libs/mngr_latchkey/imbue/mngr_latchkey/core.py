@@ -49,9 +49,10 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
-from imbue.mngr_latchkey.additional_services import AdditionalServiceRegistration
-from imbue.mngr_latchkey.additional_services import load_additional_service_registrations
+from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogError
+from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.additional_services import shared_schemas_file_content
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
@@ -105,11 +106,6 @@ _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
 # services, validates the credentials over the network first. Unlike the browser
 # flows it never waits on a human, so it must not run unbounded.
 _AUTH_SET_TIMEOUT_SECONDS: Final[float] = 60.0
-
-# Listing services and registering an additional (custom) service are quick
-# config-store operations, but can stall on slow keychains like the others.
-_SERVICES_LIST_TIMEOUT_SECONDS: Final[float] = 15.0
-_SERVICES_REGISTER_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # ``latchkey --version`` is normally a print-and-exit, but the upstream CLI
 # runs its credential-store data-format migrations before printing anything --
@@ -185,7 +181,9 @@ REMOTE_GATEWAY_EXTENSION_FILENAME: Final[str] = "desktop_gateway_proxy.mjs"
 
 # Filename of the upstream latchkey CLI's JSON config file, directly under
 # ``LATCHKEY_DIRECTORY``. Latchkey (>= 3.1.0) reads its ``settings`` block --
-# including ``hideBuiltinServices`` -- from here.
+# including ``hideBuiltinServices`` -- from here, and its ``registeredServices``
+# block, which is how any gateway learns about a custom (non-builtin) service.
+# :func:`merge_minds_latchkey_config` owns minds' half of both.
 CONFIG_FILENAME: Final[str] = "config.json"
 
 # Built-in latchkey services hidden from agents via
@@ -661,19 +659,36 @@ def summarize_latchkey_failure(raw_output: str, fallback: str) -> str:
     return summary
 
 
-def merge_hidden_builtin_services(existing_config_json: str | None) -> str:
-    """Merge :data:`HIDDEN_BUILTIN_SERVICES` into a latchkey ``config.json``.
+def merge_minds_latchkey_config(existing_config_json: str | None) -> str:
+    """Merge minds' own state into a latchkey ``config.json``.
 
-    Returns the serialized config text with every service in
-    :data:`HIDDEN_BUILTIN_SERVICES` present in ``settings.hideBuiltinServices``,
-    preserving any other content the input config holds (the ``settings``
-    block is read-merged, not clobbered). ``existing_config_json`` is the
-    current config text, or ``None`` when there is no config yet (a fresh
-    config starts from an empty object). Existing hidden entries are kept in
-    order and only the missing ones are appended, so the result is stable
-    across repeated applications. Raises :class:`LatchkeyError` if the input
-    is not a valid JSON object, rather than silently discarding it; callers
-    that read from a file add the file's path to the surfaced error.
+    Two things minds owns live in the upstream CLI's config file, and both must
+    hold for *every* gateway that serves minds agents -- the desktop one and the
+    VPS-resident one alike:
+
+    * ``settings.hideBuiltinServices`` lists :data:`HIDDEN_BUILTIN_SERVICES`, so
+      agents never see the built-in services that would confuse them.
+    * ``registeredServices`` carries minds' additional (custom) services (see
+      :func:`imbue.mngr_latchkey.additional_services.additional_service_registration_entries`),
+      which is what lets the gateway resolve a request to one of them and inject
+      its credentials. A gateway that holds the credentials but not the
+      registration cannot use them at all, so the registration travels with them.
+
+    Returns the serialized config text, preserving any other content the input
+    config holds: the ``settings`` and ``registeredServices`` blocks are
+    read-merged, not clobbered, and unrelated top-level keys (e.g. latchkey's
+    discovered ``browser``) are kept verbatim. ``existing_config_json`` is the
+    current config text, or ``None`` when there is no config yet (a fresh config
+    starts from an empty object). Existing hidden entries are kept in order and
+    only the missing ones are appended, so the result is stable across repeated
+    applications. minds' own registrations are rewritten each time rather than
+    only filled in when absent, so a definition that changes in a later release
+    (a new base URL, a newly-added browser sign-in) reaches installs that already
+    carry the old one; minds owns those service names.
+
+    Raises :class:`LatchkeyError` if the input is not a valid JSON object, rather
+    than silently discarding it; callers that read from a file add the file's
+    path to the surfaced error.
     """
     if existing_config_json:
         try:
@@ -694,24 +709,34 @@ def merge_hidden_builtin_services(existing_config_json: str | None) -> str:
             hidden.append(service)
     settings["hideBuiltinServices"] = hidden
     config["settings"] = settings
+    registered_value = config.get("registeredServices")
+    registered = registered_value if isinstance(registered_value, dict) else {}
+    try:
+        registered.update(additional_service_registration_entries())
+    except AdditionalServicesCatalogError as e:
+        raise LatchkeyError(f"Could not read the bundled additional services: {e}") from e
+    config["registeredServices"] = registered
     return json.dumps(config, indent=2)
 
 
-def _ensure_hidden_builtin_services(latchkey_directory: Path) -> None:
-    """Ensure ``LATCHKEY_DIRECTORY/config.json`` hides :data:`HIDDEN_BUILTIN_SERVICES`.
+def _ensure_minds_latchkey_config(latchkey_directory: Path) -> None:
+    """Ensure ``LATCHKEY_DIRECTORY/config.json`` carries minds' hidden services + registrations.
 
-    Read-merge-write (via :func:`merge_hidden_builtin_services`) so latchkey's
-    own settings survive. Called before each gateway spawn so a package upgrade
-    keeps the hidden list current even for a directory latchkey created without
-    it.
+    Read-merge-write (via :func:`merge_minds_latchkey_config`) so latchkey's own
+    settings survive. Called at ``initialize`` (so the registrations are in place
+    for every local ``latchkey`` invocation, e.g. the connectors page's
+    ``services info``) and again before each gateway spawn, so a package upgrade
+    keeps both blocks current even for a directory latchkey created without them.
+    The write is atomic: latchkey rewrites this same file when it discovers a
+    browser, and a half-written config is unparseable to it.
     """
     config_path = latchkey_directory / CONFIG_FILENAME
     existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
     try:
-        content = merge_hidden_builtin_services(existing)
+        content = merge_minds_latchkey_config(existing)
     except LatchkeyError as e:
         raise LatchkeyError(f"Failed to update latchkey config at {config_path}: {e}") from e
-    config_path.write_text(content, encoding="utf-8")
+    atomic_write(config_path, content)
 
 
 def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
@@ -842,12 +867,11 @@ class Latchkey(MutableModel):
         Also materializes the shared additional-services schemas file that every
         per-host permissions baseline references via detent's ``include`` (so a
         granted custom scope resolves without inlining its schema per host), and
-        registers minds' additional (custom) latchkey services (see
-        :func:`imbue.mngr_latchkey.additional_services.load_additional_service_registrations`)
-        so the gateway can inject their credentials. This happens before the
-        gateway is spawned so the running gateway picks up the registrations.
-        Registration is best-effort: a failure is logged and does not abort
-        initialization (only that service's credential injection is affected).
+        writes minds' state into latchkey's own ``config.json`` -- the hidden
+        built-in services and the registrations of minds' additional (custom)
+        services (see :func:`merge_minds_latchkey_config`), so the gateway can
+        resolve their requests and inject their credentials. This happens before
+        the gateway is spawned so the running gateway picks the registrations up.
 
         There is intentionally **no** cross-process gateway-record
         reconciliation: the new ``mngr latchkey forward`` /
@@ -874,7 +898,7 @@ class Latchkey(MutableModel):
         # migration stamps the include into existing files).
         write_shared_schemas_file(self.plugin_data_dir, shared_schemas_file_content())
         run_data_format_migrations(self.plugin_data_dir, self.latchkey_directory, self.latchkey_binary)
-        self._register_additional_services()
+        _ensure_minds_latchkey_config(self.latchkey_directory)
         with self._lock:
             self._is_initialized = True
 
@@ -1648,103 +1672,6 @@ class Latchkey(MutableModel):
                 f"upgrade the binary at {self.latchkey_binary}."
             )
 
-    def _register_additional_services(self) -> None:
-        """Register minds' additional (custom) latchkey services, skipping any already present.
-
-        ``latchkey services register`` is not idempotent -- it exits non-zero
-        when a service of the same name already exists -- so we consult
-        ``latchkey services list`` first and only register the missing ones.
-        Best-effort: a failure to list or to register one service is logged and
-        does not abort gateway bring-up.
-        """
-        registrations = load_additional_service_registrations()
-        if not registrations:
-            return
-        existing_service_names = self._list_service_names()
-        for registration in registrations:
-            if registration.name in existing_service_names:
-                continue
-            self._register_one_additional_service(registration)
-
-    def _list_service_names(self) -> frozenset[str]:
-        """Return every service name latchkey currently knows (builtin + registered).
-
-        Runs ``latchkey services list`` (a JSON array of names). Returns an empty
-        set on any failure so the caller falls back to attempting registration
-        (itself guarded and best-effort).
-        """
-        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        cg = ConcurrencyGroup(name="latchkey-services-list")
-        try:
-            with cg:
-                result = cg.run_process_to_completion(
-                    command=[self.latchkey_binary, "services", "list"],
-                    timeout=_SERVICES_LIST_TIMEOUT_SECONDS,
-                    is_checked_after=False,
-                    env=env,
-                )
-        except ConcurrencyExceptionGroup as group:
-            if not group.only_exception_is_instance_of(ProcessSetupError):
-                raise
-            logger.warning("Failed to launch 'latchkey services list': {}", group)
-            return frozenset()
-        if result.returncode != 0:
-            logger.warning(
-                "'latchkey services list' exited {}: {}",
-                result.returncode,
-                result.stderr.strip() or result.stdout.strip(),
-            )
-            return frozenset()
-        try:
-            parsed = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            logger.warning("Could not parse 'latchkey services list' output: {}", e)
-            return frozenset()
-        if not isinstance(parsed, list):
-            logger.warning("'latchkey services list' returned an unexpected shape: {!r}", parsed)
-            return frozenset()
-        service_names: list[str] = []
-        for name in parsed:
-            if not isinstance(name, str):
-                logger.warning("'latchkey services list' returned a non-string entry: {!r}", name)
-                return frozenset()
-            service_names.append(name)
-        return frozenset(service_names)
-
-    def _register_one_additional_service(self, registration: AdditionalServiceRegistration) -> None:
-        """Register a single additional service via ``latchkey services register`` (best-effort)."""
-        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        cg = ConcurrencyGroup(name="latchkey-services-register")
-        try:
-            with cg:
-                result = cg.run_process_to_completion(
-                    command=[
-                        self.latchkey_binary,
-                        "services",
-                        "register",
-                        registration.name,
-                        "--base-api-url",
-                        registration.base_api_url,
-                    ],
-                    timeout=_SERVICES_REGISTER_TIMEOUT_SECONDS,
-                    is_checked_after=False,
-                    env=env,
-                )
-        except ConcurrencyExceptionGroup as group:
-            if not group.only_exception_is_instance_of(ProcessSetupError):
-                raise
-            logger.warning("Failed to launch 'latchkey services register' for {!r}: {}", registration.name, group)
-            return
-        if result.returncode != 0:
-            logger.warning(
-                "Failed to register additional latchkey service {!r}: 'latchkey services register' exited {}: {}",
-                registration.name,
-                result.returncode,
-                result.stderr.strip() or result.stdout.strip(),
-            )
-            return
-        logger.debug("Registered additional latchkey service {!r}", registration.name)
-
     def _spawn_gateway(
         self,
         concurrency_group: ConcurrencyGroup,
@@ -1796,11 +1723,11 @@ class Latchkey(MutableModel):
         # so a package upgrade overrides any stale on-disk copy.
         _materialize_bundled_extensions(self.latchkey_directory)
 
-        # Hide latchkey's built-in services that would confuse agents (e.g. the
-        # built-in ``notion`` service alongside the separate ``notion-mcp``
-        # integration) by merging them into ``config.json``'s
-        # ``settings.hideBuiltinServices`` before the gateway reads it.
-        _ensure_hidden_builtin_services(self.latchkey_directory)
+        # Re-merge minds' state into ``config.json`` before the gateway reads it:
+        # the built-in services that would confuse agents stay hidden, and the
+        # additional (custom) services stay registered, so this gateway can
+        # inject their credentials.
+        _ensure_minds_latchkey_config(self.latchkey_directory)
 
         # Reuse the previously-bound port when respawning a dead gateway; otherwise
         # allocate a fresh free port for the first spawn.

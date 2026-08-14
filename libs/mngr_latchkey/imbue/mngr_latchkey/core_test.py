@@ -32,7 +32,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
-from imbue.mngr_latchkey.additional_services import load_additional_service_registrations
+from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
@@ -49,7 +49,7 @@ from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
 from imbue.mngr_latchkey.core import _log_gateway_output_line
-from imbue.mngr_latchkey.core import merge_hidden_builtin_services
+from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
@@ -140,12 +140,10 @@ def test_start_gateway_raises_when_binary_disappears_after_initialize(tmp_path: 
 
 
 def _make_version_binary(tmp_path: Path, version_output: str, exit_code: int = 0) -> Path:
-    """Build a stub ``latchkey`` that responds to ``--version`` (and the no-op ``services`` calls).
+    """Build a stub ``latchkey`` that responds to ``--version``.
 
-    Sufficient for the ``initialize`` version-gate tests. The version-failure
-    tests never drive the manager past the version check; the version-success
-    tests proceed to additional-service registration, so ``services list`` /
-    ``services register`` are handled as no-ops to keep those clean.
+    Sufficient for the ``initialize`` version-gate tests: nothing else
+    ``initialize`` does runs the binary.
     """
     script = tmp_path / "latchkey"
     script.write_text(
@@ -154,11 +152,6 @@ def _make_version_binary(tmp_path: Path, version_output: str, exit_code: int = 0
         'if sys.argv[1] == "--version":\n'
         f"    print({version_output!r})\n"
         f"    sys.exit({exit_code})\n"
-        'if sys.argv[1:3] == ["services", "list"]:\n'
-        "    print('[]')\n"
-        "    sys.exit(0)\n"
-        'if sys.argv[1:3] == ["services", "register"]:\n'
-        "    sys.exit(0)\n"
         'raise AssertionError(f"unexpected argv: {sys.argv[1:]!r}")\n'
     )
     script.chmod(0o755)
@@ -215,64 +208,46 @@ def test_initialize_raises_when_version_command_exits_nonzero(tmp_path: Path) ->
 # -- initialize() additional-service registration ----------------------------
 
 
-def _make_registration_recording_binary(
-    tmp_path: Path,
-    existing_services: tuple[str, ...],
-    register_log_path: Path,
-) -> Path:
-    """Build a stub ``latchkey`` that records ``services register`` invocations.
+def test_initialize_registers_additional_services_in_latchkey_config(tmp_path: Path) -> None:
+    """``initialize`` registers the bundled additional services in latchkey's own config.json.
 
-    ``--version`` reports the minimum version; ``services list`` returns
-    ``existing_services`` as JSON; each ``services register <name>
-    --base-api-url <url>`` appends ``<name> <url>`` to ``register_log_path``.
-    Enough to assert which additional services ``initialize`` registers.
+    The registration is what lets a gateway resolve a request to a custom
+    service and inject its credentials, so it must be in place before anything
+    runs the CLI against this directory.
     """
-    script = tmp_path / "latchkey"
-    script.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, sys\n"
-        'if sys.argv[1] == "--version":\n'
-        f"    print({LATCHKEY_MIN_VERSION!r})\n"
-        "    sys.exit(0)\n"
-        'if sys.argv[1:3] == ["services", "list"]:\n'
-        f"    print(json.dumps({list(existing_services)!r}))\n"
-        "    sys.exit(0)\n"
-        'if sys.argv[1:3] == ["services", "register"]:\n'
-        "    name = sys.argv[3]\n"
-        "    base_api_url = sys.argv[sys.argv.index('--base-api-url') + 1]\n"
-        f"    open({str(register_log_path)!r}, 'a').write(name + ' ' + base_api_url + '\\n')\n"
-        "    sys.exit(0)\n"
-        'raise AssertionError(f"unexpected argv: {sys.argv[1:]!r}")\n'
-    )
-    script.chmod(0o755)
-    return script
-
-
-def test_initialize_registers_additional_service_when_absent(tmp_path: Path) -> None:
-    """A bundled additional service not yet known to latchkey is registered at init."""
-    register_log = tmp_path / "register.log"
-    binary = _make_registration_recording_binary(tmp_path, existing_services=(), register_log_path=register_log)
+    binary = _make_version_binary(tmp_path, version_output=LATCHKEY_MIN_VERSION)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
     manager.initialize()
 
-    # ``claude-ai`` is the seed additional service; it must be registered with
-    # its bundled base API URL.
-    assert "claude-ai https://claude.ai/\n" in register_log.read_text()
+    config = json.loads((tmp_path / CONFIG_FILENAME).read_text())
+    assert config["registeredServices"] == additional_service_registration_entries()
+    # ``claude-ai`` is the seed additional service, registered with its bundled
+    # base API URL and its browser sign-in.
+    assert config["registeredServices"]["claude-ai"]["baseApiUrl"] == "https://claude.ai/"
+    assert config["registeredServices"]["claude-ai"]["loginFlow"]["name"] == "cookie-capture"
 
 
-def test_initialize_skips_registration_when_service_already_present(tmp_path: Path) -> None:
-    """Registration is skipped for services latchkey already knows (register is not idempotent)."""
-    register_log = tmp_path / "register.log"
-    already_registered = tuple(registration.name for registration in load_additional_service_registrations())
-    binary = _make_registration_recording_binary(
-        tmp_path, existing_services=already_registered, register_log_path=register_log
+def test_initialize_preserves_a_users_own_latchkey_config(tmp_path: Path) -> None:
+    """Registering minds' services leaves everything else latchkey wrote in place."""
+    config_path = tmp_path / CONFIG_FILENAME
+    config_path.write_text(
+        json.dumps(
+            {
+                "browser": {"executablePath": "/usr/bin/chrome"},
+                "registeredServices": {"my-gitlab": {"baseApiUrl": "https://gitlab.example.com/api/v4/"}},
+            }
+        )
     )
+    binary = _make_version_binary(tmp_path, version_output=LATCHKEY_MIN_VERSION)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
     manager.initialize()
 
-    assert not register_log.exists()
+    config = json.loads(config_path.read_text())
+    assert config["browser"] == {"executablePath": "/usr/bin/chrome"}
+    assert config["registeredServices"]["my-gitlab"] == {"baseApiUrl": "https://gitlab.example.com/api/v4/"}
+    assert "claude-ai" in config["registeredServices"]
 
 
 def test_initialize_materializes_shared_schemas_file(tmp_path: Path) -> None:
@@ -339,15 +314,6 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         'if sys.argv[1:3] == ["gateway", "create-jwt"]:\n'
         "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
         "    print(f'fake-jwt-for:{args[0]}' if args else 'fake-jwt')\n"
-        "    sys.exit(0)\n"
-        # ``services list`` / ``services register`` are what
-        # ``Latchkey.initialize`` runs to register the additional (custom)
-        # services. Report an empty service list and accept every
-        # registration so initialize() completes cleanly.
-        'if sys.argv[1:3] == ["services", "list"]:\n'
-        "    print('[]')\n"
-        "    sys.exit(0)\n"
-        'if sys.argv[1:3] == ["services", "register"]:\n'
         "    sys.exit(0)\n"
         # ``auth re-encrypt <destination> [service ...]`` writes a fake
         # filtered store as ``credentials.json.enc`` into the <destination>
@@ -506,58 +472,90 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         manager.stop_gateway()
 
 
-def test_merge_hidden_builtin_services_creates_config_when_absent() -> None:
-    merged = json.loads(merge_hidden_builtin_services(None))
-    assert merged == {"settings": {"hideBuiltinServices": list(HIDDEN_BUILTIN_SERVICES)}}
+def test_merge_minds_latchkey_config_creates_config_when_absent() -> None:
+    merged = json.loads(merge_minds_latchkey_config(None))
+    assert merged["settings"]["hideBuiltinServices"] == list(HIDDEN_BUILTIN_SERVICES)
     assert "notion" in merged["settings"]["hideBuiltinServices"]
+    # Every bundled additional service is registered with latchkey by this merge.
+    assert merged["registeredServices"] == additional_service_registration_entries()
 
 
-def test_merge_hidden_builtin_services_preserves_other_settings_and_keys() -> None:
+def test_merge_minds_latchkey_config_registers_claude_ai_with_its_browser_login() -> None:
+    """claude.ai is registered with the cookie-capture sign-in latchkey runs for it."""
+    merged = json.loads(merge_minds_latchkey_config(None))
+    claude = merged["registeredServices"]["claude-ai"]
+    assert claude["baseApiUrl"] == "https://claude.ai/"
+    assert claude["loginUrl"] == "https://claude.ai/login"
+    assert claude["loginFlow"] == {
+        "name": "cookie-capture",
+        "params": {"cookieKeys": ["sessionKey"], "cookieUrl": "https://claude.ai/"},
+    }
+
+
+def test_merge_minds_latchkey_config_preserves_other_settings_and_keys() -> None:
     existing = json.dumps(
         {
             "version": 3,
             "settings": {"someOtherSetting": True, "hideBuiltinServices": ["already-hidden"]},
+            "registeredServices": {"my-gitlab": {"baseApiUrl": "https://gitlab.example.com/api/v4/"}},
         }
     )
-    merged = json.loads(merge_hidden_builtin_services(existing))
+    merged = json.loads(merge_minds_latchkey_config(existing))
     # Unrelated top-level keys and unrelated settings are preserved verbatim.
     assert merged["version"] == 3
     assert merged["settings"]["someOtherSetting"] is True
     # Existing hidden entries are kept (in order) and the new ones appended.
     assert merged["settings"]["hideBuiltinServices"] == ["already-hidden", "notion"]
+    # A service the user registered themselves survives alongside minds' own.
+    assert merged["registeredServices"]["my-gitlab"] == {"baseApiUrl": "https://gitlab.example.com/api/v4/"}
+    assert "claude-ai" in merged["registeredServices"]
 
 
-def test_merge_hidden_builtin_services_is_idempotent() -> None:
-    once = merge_hidden_builtin_services(None)
-    twice = merge_hidden_builtin_services(once)
+def test_merge_minds_latchkey_config_rewrites_a_stale_registration() -> None:
+    """An install carrying an older definition of a minds service is updated, not left alone."""
+    existing = json.dumps({"registeredServices": {"claude-ai": {"baseApiUrl": "https://claude.ai/"}}})
+    merged = json.loads(merge_minds_latchkey_config(existing))
+    # The browser sign-in the older definition lacked is now present.
+    assert merged["registeredServices"]["claude-ai"]["loginFlow"]["name"] == "cookie-capture"
+
+
+def test_merge_minds_latchkey_config_is_idempotent() -> None:
+    once = merge_minds_latchkey_config(None)
+    twice = merge_minds_latchkey_config(once)
     assert json.loads(once) == json.loads(twice)
     # Applying it again does not duplicate the hidden entry.
     assert json.loads(twice)["settings"]["hideBuiltinServices"] == list(HIDDEN_BUILTIN_SERVICES)
 
 
-def test_merge_hidden_builtin_services_rejects_invalid_json() -> None:
+def test_merge_minds_latchkey_config_rejects_invalid_json() -> None:
     with pytest.raises(LatchkeyError, match="not valid JSON"):
-        merge_hidden_builtin_services("{not json")
+        merge_minds_latchkey_config("{not json")
 
 
-def test_merge_hidden_builtin_services_rejects_non_object_json() -> None:
+def test_merge_minds_latchkey_config_rejects_non_object_json() -> None:
     with pytest.raises(LatchkeyError, match="must be a JSON object"):
-        merge_hidden_builtin_services("[1, 2, 3]")
+        merge_minds_latchkey_config("[1, 2, 3]")
 
 
 def test_start_gateway_hides_builtin_services_in_config(tmp_path: Path) -> None:
-    """The gateway spawn step must merge the hidden built-in services into config.json."""
+    """The gateway spawn step must merge minds' config.json state in again.
+
+    ``initialize`` already wrote it; re-applying at spawn is what keeps a
+    directory current when the bundled definitions change under a long-lived
+    latchkey directory.
+    """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     config_path = tmp_path / CONFIG_FILENAME
-    assert not config_path.exists()
+    config_path.unlink()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
         port = manager.start_gateway(cg)
         assert _wait_for_listening("127.0.0.1", port)
         assert config_path.is_file()
         config = json.loads(config_path.read_text())
         assert "notion" in config["settings"]["hideBuiltinServices"]
+        assert "claude-ai" in config["registeredServices"]
         manager.stop_gateway()
 
 

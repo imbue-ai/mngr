@@ -47,7 +47,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
-from imbue.mngr_latchkey.core import merge_hidden_builtin_services
+from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
@@ -866,21 +866,25 @@ def _ensure_ram_backed_secrets_dir(host: OuterHostInterface, host_name: str) -> 
         )
 
 
-def _ensure_remote_hidden_builtin_services(host: OuterHostInterface, remote_dir: Path) -> None:
-    """Hide the confusing built-in latchkey services in the VPS gateway's ``config.json``.
+def _ensure_remote_latchkey_config(host: OuterHostInterface, remote_dir: Path) -> None:
+    """Write minds' hidden services and custom-service registrations into the VPS config.
 
-    Read-merges :data:`~imbue.mngr_latchkey.core.HIDDEN_BUILTIN_SERVICES` into
-    ``~/.latchkey/config.json``'s ``settings.hideBuiltinServices`` on the VPS
-    (mirroring the desktop-side ``_ensure_hidden_builtin_services``) so an agent
-    talking to the VPS-resident gateway sees the same hidden set as one talking
-    to the desktop gateway. Any other config latchkey wrote on the VPS is
+    Read-merges minds' state into ``~/.latchkey/config.json`` on the VPS via
+    :func:`~imbue.mngr_latchkey.core.merge_minds_latchkey_config` (the same merge
+    the desktop applies to its own config), so an agent talking to the
+    VPS-resident gateway sees the same hidden built-in services as one talking to
+    the desktop gateway, and the VPS gateway knows minds' additional (custom)
+    services. The registration is what makes a custom service's credentials
+    usable: :func:`sync_credentials` ships them here, but a gateway with no
+    matching registration cannot resolve a request to that service at all, so it
+    would never inject them. Any other config latchkey wrote on the VPS is
     preserved. Idempotent. Raises :class:`RemoteGatewayError` if the existing
     remote config is not a valid JSON object.
     """
     config_path = remote_dir / CONFIG_FILENAME
     existing = host.read_text_file(config_path) if host.path_exists(config_path) else None
     try:
-        content = merge_hidden_builtin_services(existing)
+        content = merge_minds_latchkey_config(existing)
     except LatchkeyError as e:
         raise RemoteGatewayError(
             f"Failed to update latchkey config at {config_path} on VPS {host.get_name()}: {e}"
@@ -1052,9 +1056,11 @@ def _ensure_latchkey_gateway_running(
     # never persist it to a disk filesystem if tmpfs is unexpectedly absent.
     _ensure_ram_backed_secrets_dir(host, host_name)
 
-    # Hide the confusing built-in services (e.g. ``notion``) in the VPS
-    # gateway's config.json so agents see the same set as on the desktop.
-    _ensure_remote_hidden_builtin_services(host, remote_dir)
+    # Write minds' config.json state before the gateway starts (it reads the
+    # file once, at startup): the confusing built-in services (e.g. ``notion``)
+    # stay hidden, and minds' custom services are registered so this gateway can
+    # inject the credentials ``sync_credentials`` ships for them.
+    _ensure_remote_latchkey_config(host, remote_dir)
 
     # Write the secrets (0600) into tmpfs and the wrapper that reads them.
     host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=_REMOTE_FILE_MODE)

@@ -1,19 +1,71 @@
 import json
 
+import pytest
+from pydantic import ValidationError
+
+from imbue.mngr_latchkey.additional_services import _ADDITIONAL_SERVICES_ADAPTER
+from imbue.mngr_latchkey.additional_services import _AdditionalServiceEntry
+from imbue.mngr_latchkey.additional_services import _registration_entry
+from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.additional_services import additional_service_shared_schemas
 from imbue.mngr_latchkey.additional_services import additional_services_catalog_payload
-from imbue.mngr_latchkey.additional_services import load_additional_service_registrations
 from imbue.mngr_latchkey.additional_services import shared_schemas_file_content
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 
-def test_load_additional_service_registrations_includes_claude_ai() -> None:
-    """The bundled file yields claude.ai with the base API URL used for registration."""
-    registration_by_name = {
-        registration.name: registration for registration in load_additional_service_registrations()
+def test_registration_entries_include_claude_ai() -> None:
+    """The bundled file yields claude.ai in latchkey's ``registeredServices`` shape."""
+    entries = additional_service_registration_entries()
+    assert entries["claude-ai"] == {
+        "baseApiUrl": "https://claude.ai/",
+        "loginUrl": "https://claude.ai/login",
+        "loginFlow": {
+            "name": "cookie-capture",
+            # claude.ai authenticates with a single session cookie, set on the
+            # API's own domain (sign-in may start elsewhere, hence ``cookieUrl``).
+            "params": {"cookieKeys": ["sessionKey"], "cookieUrl": "https://claude.ai/"},
+        },
     }
-    assert "claude-ai" in registration_by_name
-    assert registration_by_name["claude-ai"].base_api_url == "https://claude.ai/"
+
+
+def test_registration_entry_omits_the_login_keys_without_a_browser_sign_in() -> None:
+    """A service with no browser sign-in gets no ``loginUrl`` / ``loginFlow`` keys at all.
+
+    Latchkey's config schema types both as absent-or-a-value, so a ``null``
+    would make the whole entry unreadable to it -- costing the service its
+    registration. Every bundled service currently has a sign-in, so the
+    projection is exercised here against a service that does not.
+    """
+    entry = _AdditionalServiceEntry.model_validate(
+        {
+            "display_name": "Example",
+            "base_api_url": "https://example.com/api/",
+            "scope": {"name": "example", "schema": {}},
+        }
+    )
+    assert _registration_entry(entry) == {"baseApiUrl": "https://example.com/api/"}
+
+
+def test_a_service_name_latchkey_would_reject_is_refused_at_load() -> None:
+    """A key latchkey cannot canonicalize is caught here, not written into its config.
+
+    Registrations are written straight into latchkey's ``config.json`` instead of
+    going through ``latchkey services register``, so the CLI no longer vets the
+    name; the bundled file's keys are validated on load instead. The trap is
+    keying a service by its dotted domain (``claude.ai``) rather than its
+    canonical name (``claude-ai``), which would otherwise land in the config as a
+    registration latchkey can never match.
+    """
+    with pytest.raises(ValidationError):
+        _ADDITIONAL_SERVICES_ADAPTER.validate_python(
+            {
+                "claude.ai": {
+                    "display_name": "Claude",
+                    "base_api_url": "https://claude.ai/",
+                    "scope": {"name": "claude-ai", "schema": {}},
+                }
+            }
+        )
 
 
 def test_catalog_payload_projects_claude_ai_into_services_json_shape() -> None:

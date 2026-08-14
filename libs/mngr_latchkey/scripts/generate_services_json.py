@@ -29,8 +29,10 @@ Minds' own *additional* (custom) services -- ones detent has no schemas for, e.g
 ``claude.ai`` -- are appended from ``additional_services.json`` (see
 :mod:`imbue.mngr_latchkey.additional_services`). Folding them in here is what
 lets every reader of the catalog work from one file in one shape; that file
-remains the source of the extra data those services need beyond the catalog
-(their ``base_api_url`` and their inline detent schemas).
+remains the source of the extra data those services need beyond the catalog:
+their latchkey registration (the base API URL latchkey matches requests
+against, plus the browser sign-in it offers, if any) and their inline detent
+schemas.
 
 Conversely, services minds hides from agents entirely
 (:data:`imbue.mngr_latchkey.core.HIDDEN_BUILTIN_SERVICES`) are left out of the

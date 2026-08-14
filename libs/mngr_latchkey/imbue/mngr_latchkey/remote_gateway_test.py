@@ -13,6 +13,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
@@ -779,6 +780,23 @@ def test_ensure_latchkey_gateway_running_hides_builtin_services_in_config(tmp_pa
     # as the desktop gateway, so an agent sees the same set either way.
     config = json.loads(_remote_config_text(outer))
     assert "notion" in config["settings"]["hideBuiltinServices"]
+
+
+def test_ensure_latchkey_gateway_running_registers_custom_services_in_config(tmp_path: Path) -> None:
+    """The VPS gateway is given minds' custom-service registrations.
+
+    ``sync_credentials`` ships a granted custom service's credentials here, but a
+    gateway that does not know the service cannot resolve a request to it, so it
+    would never inject them.
+    """
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    config = json.loads(_remote_config_text(outer))
+    assert config["registeredServices"] == additional_service_registration_entries()
+    # Pinned concretely too: comparing the two projections alone would still pass
+    # if the bundled catalog degraded to nothing, which is the very failure
+    # (a VPS gateway that knows no custom service) this shipping is meant to rule out.
+    assert config["registeredServices"]["claude-ai"]["baseApiUrl"] == "https://claude.ai/"
 
 
 def test_ensure_latchkey_gateway_running_preserves_existing_remote_config(tmp_path: Path) -> None:
