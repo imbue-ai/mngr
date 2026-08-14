@@ -11,14 +11,14 @@ Deciding where a just-signed-in user lands is specified here (`post-login-destin
 
 ## How the routing works
 
-Once a session is authenticated, a background process discovers the user's workspaces; "initial workspace discovery" is its first complete pass.
+Once a session is authenticated, a background process discovers the user's machines; "initial machine discovery" is its first complete pass.
 Before anything else, the one-time "Help improve Minds" consent screen is shown once per installation, overriding the normal home content until it is answered.
 While initial discovery is still running, "/" shows a self-refreshing progress page.
-After it finishes, "/" lists the user's workspaces if they have any, or shows the new-workspace form if they have none -- optionally pre-filled from a deep link.
-The progress page names the unit by the corpus's workspace-vs-agent convention: its user-facing string reads "Discovering workspaces".
+After it finishes, "/" lists the user's machines if they have any, or shows the new-machine form if they have none -- optionally pre-filled from a deep link.
+The progress page names the unit by the corpus's machine-vs-agent convention: its user-facing string reads "Discovering machines".
 
 ## Out of scope
 
 - The authorization boundary at "/" (an unauthenticated visitor), and the access-control facts about "/post-login" (its session gate and the confinement of a return destination to the origin) -- specified in `browser-authorization/`.
-- The internals of the new-workspace form and the workspace-creation flow beyond "the form is shown or pre-filled".
-- The contents of the workspace rows beyond the fact that each workspace is listed.
+- The internals of the new-machine form and the machine-creation flow beyond "the form is shown or pre-filled".
+- The contents of the machine rows beyond the fact that each machine is listed.
