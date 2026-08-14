@@ -80,33 +80,56 @@ changes object empty.
 # Escalations
 
 An escalation says "this needs attention beyond my test". It is INDEPENDENT of
-whether your test passed and of every change's status: a clean pass can and
-often should raise one. Escalating costs you nothing and is never counted as a
-failure.
+whether your test passed and of every change's status: a clean pass can raise
+one, and raising one is never counted against you.
 
-Raise an escalation in either of these two cases.
+Escalating is not free, though, and the cost is length rather than count.
+Hundreds of agents run against one suite, and every escalation they write has to
+be read and grouped by the integration step. Report the finding; do not argue
+it. Stay inside the length budget under "## Every escalation" below.
 
-## Kind "BLOCKER": something stopped you
+Raise an escalation whenever you find one of these. The kind names the work it
+asks for, so a reader knows who it belongs to without reading the prose.
+
+## "UNCAUGHT_BUG": a real defect that no test fails on
+
+You noticed the program behaving wrongly, and no test catches it -- often a
+warning or error in the output your own test never asserts on. Your test may
+well have passed.
+
+Do not go fix it: it is outside your test's scope and you cannot verify a fix to
+it from one test. Report it, with `locations` naming the code at fault.
+
+## "FIX_DIRECTION_AMBIGUOUS": the test and the behavior disagree, and the docstring does not say which is right
+
+The docstring is the arbiter, so this is the case where the docstring does not
+settle the question -- it does not speak to the disputed point at all. Fixing
+either side would be guessing at intent.
+
+Leave the test as you found it and report which two readings are in play. The
+fix is usually to write the missing scope down, which is a decision for a person.
+
+## "HARNESS_DEFECT": shared test infrastructure is broken, misreports, or is missing something
 
 Many minds tests need infrastructure a single test cannot stand up: a Docker
 daemon and a pre-baked workspace snapshot (`minds_snapshot_resume`), a deployed
 Modal env (`minds_deployment` mints its own; `minds_services` needs a shared
 one), or secrets (an `ANTHROPIC_API_KEY`, imbue_cloud login, Modal deploy
 tokens, litellm keys). If the test skips or errors because such setup or a
-secret is absent from THIS environment, that is a blocker, not something to hack
-around locally. The same goes for a missing shared helper or a fixture that
-mocks the wrong thing.
+secret is absent from THIS environment, that is this case. The same goes for a
+missing shared helper, a fixture that mocks the wrong thing, or a sweep that
+silently no-ops and reports the wrong reason.
 
 Do NOT paper over it with a brittle local hack. Instead leave a comment at the
 relevant spot in the code, on its own line, in exactly this form:
 
   # FIXME(tmr): <one-line description of the shared setup change needed>
 
-and raise an escalation with kind "BLOCKER".
+and raise the escalation.
 
-## Kind "SHARED_PATTERN": your fix worked, but it is not really yours to make
+## "SUITE_DUPLICATION": your fix worked, but N local patches want one shared change
 
-This is the more common and more valuable case, and it is easy to miss.
+This case is easy to miss, so check for it deliberately.
 
 Before you commit a fix, check whether it already exists nearby: grep the
 sibling tests in the same file and directory for the change you are about to
@@ -119,19 +142,38 @@ and the right fix is one shared change (a fixture, a conftest default, a config
 value) that replaces all of them at once. You cannot make that change safely
 from here, because you can only see one test.
 
-So: apply your local fix as normal AND raise an escalation with kind
-"SHARED_PATTERN", naming the sibling tests you found as evidence. Do not skip
-the escalation just because your local fix worked.
+So: apply your local fix as normal AND raise the escalation, naming the sibling
+tests you found as evidence. Do not skip it just because your local fix worked --
+a working local fix is exactly the situation this is meant to catch.
 
 If you catch yourself writing a justification like "matching the sibling tests"
 or "as the other tests in this file do", that is this case. Escalate it.
 
-## In both cases
+## Every escalation
 
-Describe in detail_markdown what the shared change should be and which tests it
-would cover. A later integration step collects these, resolves the ones it can
-verify suite-wide, and surfaces the rest to the user. Your job is to flag them
-clearly -- do not attempt the suite-wide change yourself.
+Write `description_markdown` so its FIRST LINE is a one-sentence summary of the
+problem. That line is what the report and the pull request show in list views;
+the rest is the detail. Then say what the change should be and which tests it
+would cover.
+
+Fill in `locations` with the paths (and line numbers where you know them) the
+escalation concerns -- the code that needs to change, not the test you happened
+to be running. It is what lets a reader jump straight to the right place.
+
+Length budget: keep description_markdown under 120 words for a
+SUITE_DUPLICATION and under 250 for the others. Name the problem, the evidence,
+and the change that would fix it. That is what the integration step needs to
+group your report with everyone else's; it does not need your argument for why
+the change is right.
+
+Do NOT withhold an escalation to keep the list short. Many agents reporting the
+same problem is the signal that makes it visible: the integration step counts
+those reports, and a problem independently reported by eighty agents is how the
+largest fixes get found. Report every distinct finding you have, briefly.
+
+A later integration step groups these by underlying problem, resolves the ones
+it can verify suite-wide, and surfaces the rest to the user. Your job is to flag
+them clearly -- do not attempt the suite-wide change yourself.
 
 # Examining the test output
 
@@ -188,9 +230,9 @@ The schema is:
    {"run_name": "<try_2>", "description_markdown": "after fixing assertion timeout"}
  ],
  "escalations": [
-   {"kind": "BLOCKER",
-    "title": "minds_services suite needs a shared deployed Modal env",
-    "detail_markdown": "The test skips because no shared services env exists in this run; a fixture or run-level env is needed rather than a per-test workaround."}
+   {"kind": "HARNESS_DEFECT",
+    "description_markdown": "The minds_services suite needs a shared deployed Modal env that no fixture provides.\n\nThe test skips because no shared services env exists in this run; a fixture or run-level env is needed rather than a per-test workaround.",
+    "locations": [{"path": "apps/minds/conftest.py"}]}
  ]}
 
 Fields:
@@ -203,8 +245,11 @@ Fields:
 - summary_markdown: overall markdown summary of what happened.
 - test_runs: list of objects, one per test run, in order. Each has run_name
   and description_markdown (brief description of what this run was for).
-- escalations: list of objects, each with kind ("BLOCKER" or "SHARED_PATTERN"),
-  title, and detail_markdown. Omit or use [] if you have none. This field is
+- escalations: list of objects, each with kind ("UNCAUGHT_BUG",
+  "FIX_DIRECTION_AMBIGUOUS", "HARNESS_DEFECT", or "SUITE_DUPLICATION"),
+  description_markdown (first line a one-sentence summary), and locations (a
+  list of {"path": ..., "line": ...}; line may be omitted when you do not know
+  it). Omit escalations or use [] if you have none. This field is
   independent of every other field -- a passing test with no changes may still
   carry escalations.
 
@@ -224,6 +269,6 @@ branch.bundle when you made no commits beyond the base branch.
 
 For this initial request, do NOT ask the user for any input or clarification.
 Work autonomously. If something is unclear or you are blocked, produce a result
-with an escalation of kind "BLOCKER" explaining what you needed, and explain in
+with an escalation of kind "HARNESS_DEFECT" explaining what you needed, and explain in
 the summary_markdown. If the user sends follow-up messages later, you may ask them
 questions at that point.
