@@ -486,21 +486,6 @@ class ImbueCloudCli(MutableModel):
             return []
         return [LeasedHost.model_validate(entry) for entry in entries if isinstance(entry, dict)]
 
-    def enable_web_access(self, *, account: str, host_ref: str) -> dict[str, Any]:
-        """Bring sharing up server-side for a leased host (``hosts enable-sharing``).
-
-        The connector creates/rotates the share record and injects the share
-        materials (owner granted, web chrome origin included) into the
-        container with the pool key. Idempotent; returns the connector's
-        ``{host_id, workspace_domain, region}`` body.
-        """
-        result = self._run(
-            ["hosts", "enable-sharing", host_ref, "--account", account],
-            cg_name="imbue-cloud-hosts-enable-sharing",
-        )
-        body = self._expect_success(result, "hosts enable-sharing")
-        return body if isinstance(body, dict) else {}
-
     def release_host(self, account: str, host_db_id: str) -> bool:
         result = self._run(
             ["hosts", "release", host_db_id, "--account", account],

@@ -160,8 +160,11 @@ class WorkspaceSyncScheduler(MutableModel):
         is_pull_ok_by_user_id = self.record_store.reconcile(accounts, self.resolver)
         self._resolve_initial_syncs(tracked_user_ids, accounts, is_pull_ok_by_user_id)
         # Materialize synced secrets (backup envs + cloud-row SSH material)
-        # into their local consumers for every unlocked account. Compare-and-
-        # write, so this self-heals deleted/corrupt files every pass.
+        # into their local consumers for every unlocked account. The SSH
+        # application (key files + known_hosts pins, applied through the
+        # host-key store) is gated on the record revision, with missing-file
+        # escape hatches: a key pair or known_hosts file that has gone
+        # missing is re-applied even when the revision has not advanced.
         is_ssh_material_written = False
         for user_id, account_email in accounts.items():
             is_ssh_material_written = (

@@ -2,7 +2,9 @@ import fcntl
 import os
 import socket
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 import paramiko
 from cryptography.hazmat.primitives import serialization
@@ -13,6 +15,12 @@ from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import clear_endpoint_pins
+from imbue.mngr.providers.host_key_store import format_as_known_hosts_address
+from imbue.mngr.providers.host_key_store import has_host_key_store
+from imbue.mngr.providers.host_key_store import pin_host_key
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_until
 
@@ -147,15 +155,147 @@ def load_or_create_host_keypair(key_dir: Path, key_name: str = "host_key") -> tu
     return private_key_path, public_key_openssh
 
 
-def format_as_known_hosts_address(hostname: str, port: int) -> str:
-    """Format a host:port pair as the leading field of an OpenSSH known_hosts line.
+# Subdirectory of a provider instance's key dir holding per-host keys. Host
+# keys are unique per host -- a host key proves "you reached the host you
+# expected", so reusing one across hosts would let a party who holds it
+# impersonate any sibling host. Per-host *client* keys keep synced workspace
+# records free of provider-wide material: a record carries only a key that
+# opens its one host, never one that opens all of the user's hosts.
+_PER_HOST_KEY_SUBDIR: Final[str] = "host_keys"
 
-    OpenSSH expects a bare hostname for the default SSH port and a ``[host]:port``
-    bracketed form for any non-default port.
+
+def per_host_key_dir(base_key_dir: Path, host_id: HostId) -> Path:
+    """Directory holding ``host_id``'s unique keypairs under a provider key dir."""
+    return base_key_dir / _PER_HOST_KEY_SUBDIR / host_id.get_uuid().hex
+
+
+def load_or_create_per_host_host_keypair(base_key_dir: Path, host_id: HostId, key_name: str) -> tuple[Path, str]:
+    """Load-or-create ``host_id``'s unique sshd host keypair under ``base_key_dir``.
+
+    A fresh host always gets its own keypair, so a host key can never be reused
+    to impersonate a different host. Deliberately never falls back to a legacy
+    provider-global key -- read fallbacks belong to the resolution helpers used
+    on paths that serve hosts created before per-host keys existed.
     """
-    if port == 22:
-        return hostname
-    return f"[{hostname}]:{port}"
+    return load_or_create_host_keypair(per_host_key_dir(base_key_dir, host_id), key_name)
+
+
+def load_or_create_per_host_client_keypair(
+    base_key_dir: Path, host_id: HostId, key_name: str, known_hosts_file_name: str
+) -> tuple[Path, str]:
+    """Load-or-create ``host_id``'s unique SSH client keypair under ``base_key_dir``.
+
+    Used at host creation so every new host is opened by its own client key;
+    lock-serialized against concurrent creation like the shared-keypair path.
+    The key dir also gets a ``known_hosts`` symlink to the provider-wide
+    ``known_hosts_file_name`` (see ``ensure_per_host_known_hosts_link``) so
+    key-sibling consumers keep finding the pinned host keys.
+    """
+    keypair = load_or_create_ssh_keypair(per_host_key_dir(base_key_dir, host_id), key_name)
+    ensure_per_host_known_hosts_link(base_key_dir, host_id, known_hosts_file_name)
+    return keypair
+
+
+def resolve_keypair_with_fallback(
+    preferred_dir: Path,
+    fallback_dir: Path,
+    key_name: str,
+    create: Callable[[], tuple[Path, str]],
+) -> tuple[Path, str]:
+    """Shared resolution order: complete pair in ``preferred_dir``, then in ``fallback_dir``, then ``create()``.
+
+    The per-host/legacy resolution used by every provider: the preferred dir is
+    the host's own key dir, the fallback dir holds the legacy shared pair that
+    hosts created before per-host keys existed still authorize, and ``create``
+    mints a fresh preferred pair when neither is on disk.
+    """
+    preferred_private = preferred_dir / key_name
+    preferred_public = preferred_dir / f"{key_name}.pub"
+    if preferred_private.exists() and preferred_public.exists():
+        return preferred_private, preferred_public.read_text().strip()
+    fallback_private = fallback_dir / key_name
+    fallback_public = fallback_dir / f"{key_name}.pub"
+    if fallback_private.exists() and fallback_public.exists():
+        return fallback_private, fallback_public.read_text().strip()
+    return create()
+
+
+def resolve_per_host_client_keypair(
+    base_key_dir: Path, host_id: HostId, key_name: str, known_hosts_file_name: str
+) -> tuple[Path, str]:
+    """Resolve the client keypair that opens ``host_id``: per-host first, legacy shared as fallback.
+
+    Hosts created before per-host client keys existed only authorize the legacy
+    shared key, so it wins when no per-host pair is on disk. When neither
+    exists a fresh per-host pair is created (per-host is the canonical layout
+    going forward). Whenever the per-host pair wins, its key dir gets a
+    ``known_hosts`` symlink to the provider-wide ``known_hosts_file_name`` (see
+    ``ensure_per_host_known_hosts_link``) -- this also retrofits the link onto
+    per-host dirs minted before the link existed.
+    """
+    private_key_path, public_key = resolve_keypair_with_fallback(
+        per_host_key_dir(base_key_dir, host_id),
+        base_key_dir,
+        key_name,
+        lambda: load_or_create_per_host_client_keypair(base_key_dir, host_id, key_name, known_hosts_file_name),
+    )
+    if private_key_path.parent != base_key_dir:
+        ensure_per_host_known_hosts_link(base_key_dir, host_id, known_hosts_file_name)
+    return private_key_path, public_key
+
+
+def resolve_per_host_host_keypair(base_key_dir: Path, host_id: HostId, key_name: str) -> tuple[Path, str]:
+    """Resolve the sshd host keypair for ``host_id``: per-host first, legacy shared as fallback.
+
+    Used on re-injection paths (restart/restore) so a host created before
+    per-host host keys existed keeps serving the key already pinned for it,
+    instead of churning keys on every restart.
+    """
+    return resolve_keypair_with_fallback(
+        per_host_key_dir(base_key_dir, host_id),
+        base_key_dir,
+        key_name,
+        lambda: load_or_create_per_host_host_keypair(base_key_dir, host_id, key_name),
+    )
+
+
+def ensure_per_host_known_hosts_link(base_key_dir: Path, host_id: HostId, known_hosts_file_name: str) -> None:
+    """Ensure ``host_id``'s key dir has a ``known_hosts`` symlink to the provider-wide file.
+
+    Consumers that are handed only a private key path derive the pinned-host-keys
+    file as its sibling ``known_hosts`` (the forward SSH tunnel does this, per
+    the long-standing "mngr stores it next to the key" convention). A per-host
+    client key would otherwise sit in a dir with no known_hosts and fail strict
+    host-key checking. The symlink keeps the sibling convention true while the
+    provider-wide file remains the single rendered artifact (renders write
+    through symlinks, so the link never goes stale).
+    """
+    link_path = per_host_key_dir(base_key_dir, host_id) / "known_hosts"
+    if link_path.is_symlink() or link_path.exists():
+        return
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link_path.symlink_to(Path("..") / ".." / known_hosts_file_name)
+    except FileExistsError:
+        # A concurrent caller created it between the check and the symlink.
+        pass
+
+
+def read_host_public_key_with_legacy_fallback(base_key_dir: Path, host_id: HostId, key_name: str) -> str | None:
+    """Return ``host_id``'s public host key: per-host if present, else the legacy shared key.
+
+    Read-only (creates nothing). Used by read paths that must reproduce the key
+    the *running* host actually serves: the per-host key for hosts created
+    after per-host keys landed, or the provider-global key for older hosts.
+    Returns ``None`` when neither exists.
+    """
+    per_host_public_key_path = per_host_key_dir(base_key_dir, host_id) / f"{key_name}.pub"
+    if per_host_public_key_path.exists():
+        return per_host_public_key_path.read_text().strip()
+    legacy_public_key_path = base_key_dir / f"{key_name}.pub"
+    if legacy_public_key_path.exists():
+        return legacy_public_key_path.read_text().strip()
+    return None
 
 
 def clear_host_from_known_hosts(
@@ -165,11 +305,17 @@ def clear_host_from_known_hosts(
 ) -> None:
     """Remove all entries for a host:port from the known_hosts file.
 
-    If the file does not exist, returns without error. Otherwise, takes an
-    exclusive lock on the file, drops any line whose leading host pattern
-    matches the given host:port, and rewrites the file in place if any line
-    was removed.
+    When a host-key pin store exists for the file, the endpoint's pins are
+    dropped from the store and the file is re-rendered from it. Otherwise the
+    legacy behavior applies: if the file does not exist, returns without
+    error; else takes an exclusive lock, drops any line whose leading host
+    pattern matches the given host:port, and rewrites the file in place if any
+    line was removed.
     """
+    if has_host_key_store(known_hosts_path):
+        clear_endpoint_pins(known_hosts_path, hostname, port)
+        return
+
     if not known_hosts_path.exists():
         return
 
@@ -193,15 +339,38 @@ def add_host_to_known_hosts(
     hostname: str,
     port: int,
     public_key: str,
+    host_id: HostId | None = None,
+    origin: HostKeyOrigin = HostKeyOrigin.BOOTSTRAP,
+    is_add_if_absent: bool = False,
 ) -> None:
     """Add a host entry to the known_hosts file.
 
     The entry format is: [hostname]:port key_type base64_key
     This allows SSH to verify the host key without prompting.
 
-    Uses file locking to prevent race conditions when multiple processes
-    try to update the known_hosts file simultaneously.
+    When ``host_id`` is given -- or a host-key pin store already exists for
+    the file -- the pin is written through the store (attributed to that
+    host's record) and the known_hosts file is re-rendered from it, so the
+    file becomes a derived artifact governed by the store's origin-precedence
+    rules. Passing ``is_add_if_absent`` makes an existing same-endpoint+keytype
+    pin win outright (only meaningful on the store path).
+
+    Callers that pass neither get the legacy direct-write behavior (throwaway
+    known_hosts files stay sidecar-free): file locking to prevent races, and
+    replace-per-(host:port, keytype) line semantics.
     """
+    if host_id is not None or has_host_key_store(known_hosts_path):
+        pin_host_key(
+            known_hosts_path,
+            hostname,
+            port,
+            public_key,
+            host_id=host_id,
+            origin=origin,
+            is_add_if_absent=is_add_if_absent,
+        )
+        return
+
     known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
 
     host_pattern = format_as_known_hosts_address(hostname, port)
@@ -308,6 +477,17 @@ def _server_presents_host_key(hostname: str, port: int, expected_type: str, expe
                 pass
         else:
             sock.close()
+
+
+def is_server_presenting_host_key(hostname: str, port: int, public_key: str) -> bool:
+    """One-shot probe: whether the server at ``hostname:port`` currently serves exactly ``public_key``.
+
+    Unauthenticated (only a transport handshake), so it can decide "which key is
+    live" even when the caller's pins or credentials are stale. Any
+    connection/SSH error is a clean False.
+    """
+    expected_type, expected_blob = parse_openssh_public_key_blob(public_key)
+    return _server_presents_host_key(hostname, port, expected_type, expected_blob)
 
 
 def wait_for_expected_host_key(

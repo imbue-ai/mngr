@@ -735,18 +735,21 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
 
     Uses the known_hosts file from the same directory as the SSH key (this is
-    where mngr stores it for each provider). Falls back to AutoAddPolicy if
-    no known_hosts file is found.
+    where mngr stores it for each provider). A missing known_hosts file is an
+    error: falling back to trust-on-first-use would silently pin whatever key
+    an interposer presents, defeating strict host-key checking everywhere else.
+
+    Raises SSHTunnelError when no known_hosts file exists next to the key.
     """
     client = paramiko.SSHClient()
 
     known_hosts_path = ssh_info.key_path.parent / "known_hosts"
-    if known_hosts_path.exists():
-        client.load_host_keys(str(known_hosts_path))
-        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-    else:
-        logger.warning("No known_hosts file at {}, using AutoAddPolicy", known_hosts_path)
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if not known_hosts_path.exists():
+        raise SSHTunnelError(
+            f"No known_hosts file at {known_hosts_path}; refusing to connect without a pinned host key"
+        )
+    client.load_host_keys(str(known_hosts_path))
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     client.connect(
         hostname=ssh_info.host,

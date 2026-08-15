@@ -16,6 +16,7 @@ dependencies = [
     "pydantic>=2.0",
     "click",
     "click-option-group",
+    "cryptography>=42.0",
     "paramiko>=3.0",
     "psutil",
     "psycopg2-binary",

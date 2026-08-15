@@ -283,9 +283,8 @@ class CreateWorkspaceRequest(ApiRequestModel):
         default=None,
         description=(
             "Bring sharing up post-create so the workspace is reachable from the hosted web "
-            "client (default off). Requires an account: imbue_cloud rows use the connector's "
-            "server-side enable-sharing; local docker/lima rows use the desktop share flow "
-            "with the owner granted."
+            "client (default off). Requires an account: every row -- imbue_cloud and local "
+            "docker/lima alike -- runs the desktop share flow with the owner granted."
         ),
     )
 

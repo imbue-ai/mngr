@@ -8,6 +8,7 @@ from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import SucceedingCreateShareCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -213,11 +214,11 @@ def test_resolve_agent_for_host_raises_when_neither_discovery_nor_records_know_t
         resolve_agent_for_host(undiscovered, str(HostId.generate()), store)
 
 
-def test_enable_sharing_delegates_cloud_rows_to_the_connector_primitive() -> None:
-    # An unshared imbue_cloud row's full provisioning goes through the
-    # connector's server-side enable-sharing (pool-key materials injection),
-    # then the user's actual grants document replaces the owner-only seed.
-    cli = make_fake_imbue_cloud_cli()
+def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
+    # An unshared imbue_cloud row provisions exactly like a local one: connector
+    # ``shares create`` plus materials injection over the user's own SSH. (The
+    # connector's server-side enable-sharing primitive is web-create-only.)
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
     grants = {"emails": ["owner@example.com", "friend@example.com"], "email_domains": []}
@@ -226,17 +227,18 @@ def test_enable_sharing_delegates_cloud_rows_to_the_connector_primitive() -> Non
         host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=True
     )
 
-    assert cli.web_access_calls == [("owner@example.com", host_id)]
-    # Three execs go through the injection channel: the share-gateway capability
-    # probe, the grants write, and the owner-email file (the connector injects
-    # the relay materials server-side).
+    assert cli.create_share_calls == [("owner@example.com", host_id, None, None)]
+    # Four execs go through the injection channel: the share-gateway capability
+    # probe, the grants write, the share.env materials write, and the
+    # owner-email file.
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
-    assert len(exec_calls) == 3
+    assert len(exec_calls) == 4
     exec_commands = " ".join(part for call in exec_calls for part in call)
     assert "system/services/share_gateway" in exec_commands
     assert "share_grants.toml" in exec_commands
+    assert "data/.secrets/share.env" in exec_commands
     assert "data/.state/share/owner_email" in exec_commands
     assert document["enabled"] is True
     assert document["grants"]["workspace"] == grants
@@ -261,24 +263,11 @@ def test_enable_sharing_refuses_a_pre_share_gateway_workspace(is_cloud_row: bool
             host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=is_cloud_row
         )
 
-    # Nothing was provisioned: no connector call, no injection past the probe.
-    assert cli.web_access_calls == []
+    # Nothing was provisioned: no connector share, no injection past the probe.
+    assert cli.shares_by_account == {}
     assert [call for call in caller.calls if call and call[0] == "exec"] == [
         ["exec", str(agent_id), "test -d system/services/share_gateway", "--no-start"]
     ]
-
-
-def test_enable_sharing_cloud_row_surfaces_a_connector_refusal() -> None:
-    cli = make_fake_imbue_cloud_cli()
-    cli.web_access_error_to_raise = ImbueCloudCliError("quota exceeded")
-    agent_id = AgentId("agent-" + "c" * 32)
-    host_id = "host-" + "d" * 32
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
-
-    with pytest.raises(SharingError):
-        _enable_sharing_with_cli(
-            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=True
-        )
 
 
 class _PreferredRegionRecordingCli(FakeImbueCloudCli):
@@ -346,6 +335,26 @@ def test_enable_sharing_re_share_sends_no_preferred_region() -> None:
     with pytest.raises(SharingError):
         _enable_sharing_with_cli(
             host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+        )
+
+    assert cli.recorded_preferred_regions == [None]
+    assert cli.relay_list_call_count == 0
+
+
+def test_enable_sharing_cloud_row_skips_the_relay_latency_measurement() -> None:
+    # A cloud row's workspace runs on a pool host, so the desktop's own relay
+    # latency says nothing about it: no relays are probed and no preference is
+    # sent (the connector applies its default region). The raise from the
+    # recording create also proves a connector refusal surfaces as SharingError.
+    cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    cli.relays_to_return = {"us1": ("relay-us1.example:7000",), "us2": ("relay-us2.example:7000",)}
+    agent_id = AgentId("agent-" + "c" * 32)
+    host_id = "host-" + "d" * 32
+    grants = {"emails": ["owner@example.com"], "email_domains": []}
+
+    with pytest.raises(SharingError):
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=True
         )
 
     assert cli.recorded_preferred_regions == [None]

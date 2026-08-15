@@ -88,7 +88,6 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.ssh_key_migration import SshKeyMigrationScheduler
 from imbue.minds.desktop_client.startup_reconcile import PendingCreateAttemptDiscoverySweep
 from imbue.minds.desktop_client.startup_reconcile import StartupHostReconciler
 from imbue.minds.desktop_client.state import get_state
@@ -441,18 +440,6 @@ def run(
         backup_reaper=backup_reaper,
     )
     sync_scheduler.start(root_concurrency_group)
-    # One-off RSA -> Ed25519 client-key migration for per-host-keyed (cloud)
-    # workspaces created before the Ed25519 keygen switch: the workspace
-    # owner-exec channel only accepts Ed25519 signatures, so an RSA-keyed
-    # workspace cannot be driven from the hosted web chrome until its key is
-    # rotated. Runs against RUNNING hosts only, once per host (marker-gated).
-    ssh_key_migration_scheduler = SshKeyMigrationScheduler(
-        resolver=backend_resolver,
-        mngr_caller=mngr_caller,
-        mngr_host_dir=mngr_host_dir,
-        marker_dir=data_directory / "ssh_key_migrations",
-    )
-    ssh_key_migration_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)
     request_inbox = RequestInbox()
     for resp in response_events:
@@ -699,7 +686,6 @@ def run(
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
         sync_scheduler=sync_scheduler,
-        ssh_key_migration_scheduler=ssh_key_migration_scheduler,
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot

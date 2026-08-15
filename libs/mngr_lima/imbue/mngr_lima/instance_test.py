@@ -15,6 +15,7 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.errors import LimaHostCreationError
@@ -320,7 +321,9 @@ def test_effective_ssh_user_non_root_uses_lima_user(lima_provider: LimaProviderI
     ssh_config = LimaSshConfig(
         hostname="127.0.0.1", port=60022, user="josh", identity_file=Path("/home/josh/.lima/key")
     )
-    user, identity = lima_provider._effective_ssh_user_and_identity(ssh_config, is_run_as_root=False)
+    user, identity = lima_provider._effective_ssh_user_and_identity(
+        ssh_config, is_run_as_root=False, host_id=HostId.generate()
+    )
     assert user == "josh"
     assert identity == Path("/home/josh/.lima/key")
 
@@ -342,11 +345,41 @@ def test_effective_ssh_user_root_uses_root_key(temp_mngr_ctx: MngrContext) -> No
     ssh_config = LimaSshConfig(
         hostname="127.0.0.1", port=60022, user="josh", identity_file=Path("/home/josh/.lima/key")
     )
-    user, identity = provider._effective_ssh_user_and_identity(ssh_config, is_run_as_root=True)
+    user, identity = provider._effective_ssh_user_and_identity(
+        ssh_config, is_run_as_root=True, host_id=HostId.generate()
+    )
     assert user == "root"
-    # The injected root client key materializes under the provider's keys dir.
+    # The injected root client key materializes under the host's own keys dir.
     assert identity.name == "root_ssh_key"
     assert identity.exists()
+
+
+def test_root_ssh_keypair_falls_back_to_legacy_shared_pair(lima_provider: LimaProviderInstance) -> None:
+    """A VM from before per-host client keys only authorizes the legacy provider-wide key."""
+    host_id = HostId.generate()
+    legacy_path, legacy_public = load_or_create_ssh_keypair(lima_provider._ensure_keys_dir(), "root_ssh_key")
+
+    resolved_path, resolved_public = lima_provider._root_ssh_keypair(host_id)
+
+    assert resolved_path == legacy_path
+    assert resolved_public == legacy_public
+
+
+def test_root_ssh_keypair_prefers_per_host_pair_over_legacy(lima_provider: LimaProviderInstance) -> None:
+    host_id = HostId.generate()
+    load_or_create_ssh_keypair(lima_provider._ensure_keys_dir(), "root_ssh_key")
+    per_host_path, per_host_public = lima_provider._create_per_host_root_ssh_keypair(host_id)
+
+    resolved_path, resolved_public = lima_provider._root_ssh_keypair(host_id)
+
+    assert resolved_path == per_host_path
+    assert resolved_public == per_host_public
+
+
+def test_create_per_host_root_ssh_keypair_is_unique_per_host(lima_provider: LimaProviderInstance) -> None:
+    _, first_public = lima_provider._create_per_host_root_ssh_keypair(HostId.generate())
+    _, second_public = lima_provider._create_per_host_root_ssh_keypair(HostId.generate())
+    assert first_public != second_public
 
 
 def test_delete_host_removes_keypair_dir(lima_provider: LimaProviderInstance) -> None:

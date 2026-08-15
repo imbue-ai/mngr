@@ -1,5 +1,6 @@
 """Unit tests for the imbue_cloud provider instance helpers."""
 
+import json
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -36,6 +37,9 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import load_host_key_record
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
@@ -710,7 +714,8 @@ def test_discover_hosts_and_agents_carries_agent_labels_as_certified_data(temp_m
 
 def test_ensure_host_key_pinned_does_not_clobber_a_recorded_key(temp_mngr_ctx: MngrContext) -> None:
     """A slow-path rebuilt container key (authoritatively recorded) must survive a later
-    add-if-absent ensure from the connector's stale initial key."""
+    add-if-absent ensure from the connector's stale initial key (the protection is per
+    keytype, not per whole endpoint -- see the foreign-keytype test below)."""
     provider = ImbueCloudProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx
     )
@@ -755,6 +760,20 @@ def test_ensure_host_key_pinned_pins_outer_key_when_only_container_entry_exists(
     contents = known_hosts_path.read_text()
     assert "AAAAcontainerkey" in contents
     assert "AAAAouterkey" in contents
+
+
+def test_ensure_host_key_pinned_pins_when_only_a_foreign_keytype_entry_exists(temp_mngr_ctx: MngrContext) -> None:
+    """An entry of a different keytype for the same endpoint must not block the pin --
+    otherwise the endpoint is starved of the one key strict checking actually needs."""
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"), mngr_ctx=temp_mngr_ctx
+    )
+    host_id = HostId.generate()
+    provider._record_host_key(host_id, "203.0.113.11", 2222, "ssh-rsa AAAArsakey")
+    known_hosts_path = provider._ensure_host_key_pinned(host_id, "203.0.113.11", 2222, "ssh-ed25519 AAAAed25519key")
+    contents = known_hosts_path.read_text()
+    assert "AAAArsakey" in contents
+    assert "AAAAed25519key" in contents
 
 
 class _FastPathGuardProvider(_NoWorkspacesMixin, ImbueCloudProvider):
@@ -1306,3 +1325,144 @@ def test_workspace_host_state_mapping_shows_stopping_as_stopped() -> None:
     for status in WorkspaceStatus:
         if status != WorkspaceStatus.RUNNING:
             assert status in WORKSPACE_HOST_STATE_BY_STATUS
+
+
+_VM_USER_KEY = "ssh-ed25519 AAAAVMUSER rotated-vm-host-key"
+_CONTAINER_USER_KEY = "ssh-ed25519 AAAACONTUSER rotated-container-host-key"
+
+
+class _PinMoveProvider(_NoWorkspacesMixin, ImbueCloudProvider):
+    """Stub that roots the per-host state dir in a tmp path for pin-relocation tests."""
+
+    _state_dir: Path = Path("/nonexistent-pin-move-state")
+
+    def _host_state_dir(self, host_id: HostId) -> Path:
+        return self._state_dir
+
+
+def _make_pin_move_setup(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    host_id: HostId,
+    old_address: str,
+    old_vm_port: int,
+    old_container_port: int,
+) -> tuple[_PinMoveProvider, Path]:
+    """Provider + known_hosts with user-origin pins at the old endpoints and a matching lease.json."""
+    provider = _PinMoveProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _state_dir=tmp_path,
+    )
+    known_hosts = provider._host_known_hosts_path(host_id)
+    add_host_to_known_hosts(
+        known_hosts, old_address, old_vm_port, _VM_USER_KEY, host_id=host_id, origin=HostKeyOrigin.USER
+    )
+    add_host_to_known_hosts(
+        known_hosts, old_address, old_container_port, _CONTAINER_USER_KEY, host_id=host_id, origin=HostKeyOrigin.USER
+    )
+    (tmp_path / "lease.json").write_text(
+        json.dumps({"vps_address": old_address, "ssh_port": old_vm_port, "container_ssh_port": old_container_port})
+    )
+    return provider, known_hosts
+
+
+def _make_started_lease(host_id: HostId, address: str, vm_port: int, container_port: int) -> LeasedHostInfo:
+    return LeasedHostInfo(
+        host_db_id=LeaseDbId("lease-db-id"),
+        vps_address=address,
+        ssh_port=vm_port,
+        ssh_user="root",
+        container_ssh_port=container_port,
+        agent_id=str(AgentId.generate()),
+        host_id=str(host_id),
+        host_name="moved-host",
+        attributes={},
+        leased_at="2025-01-01T00:00:00Z",
+    )
+
+
+def test_move_host_pins_relocates_user_pins_and_updates_lease_meta(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """After a stop/start relocation, the host's pins (an adopted host's are user-origin)
+    must follow the endpoints so the restarted workspace never regresses to bake keys."""
+    host_id = HostId.generate()
+    provider, known_hosts = _make_pin_move_setup(tmp_path, temp_mngr_ctx, host_id, "198.51.100.9", 22010, 22011)
+    started = _make_started_lease(host_id, "203.0.113.99", 23010, 23011)
+
+    provider._move_host_pins_to_new_endpoints(host_id, started)
+
+    record = load_host_key_record(known_hosts, host_id)
+    assert record is not None
+    pins_by_endpoint = {(pin.address, pin.port): (pin.public_key, pin.origin) for pin in record.pins}
+    assert pins_by_endpoint == {
+        ("203.0.113.99", 23010): (_VM_USER_KEY, HostKeyOrigin.USER),
+        ("203.0.113.99", 23011): (_CONTAINER_USER_KEY, HostKeyOrigin.USER),
+    }
+    updated_meta = json.loads((tmp_path / "lease.json").read_text())
+    assert (updated_meta["vps_address"], updated_meta["ssh_port"], updated_meta["container_ssh_port"]) == (
+        "203.0.113.99",
+        23010,
+        23011,
+    )
+
+
+def test_move_host_pins_survives_new_vm_port_reusing_the_old_container_port(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A same-box restore can hand the host a new VM port equal to its old container port
+    (both pairs come from the box's first-free-port picker). The moves must be ordered so
+    the VM move does not evict the not-yet-moved container pin (a move clears whatever
+    sits at its destination) and the container move does not then relocate the
+    freshly-moved VM pin -- either would strand an adopted host on wrong pins."""
+    host_id = HostId.generate()
+    provider, known_hosts = _make_pin_move_setup(tmp_path, temp_mngr_ctx, host_id, "198.51.100.9", 22010, 22011)
+    started = _make_started_lease(host_id, "198.51.100.9", 22011, 22012)
+
+    provider._move_host_pins_to_new_endpoints(host_id, started)
+
+    record = load_host_key_record(known_hosts, host_id)
+    assert record is not None
+    pins_by_endpoint = {(pin.address, pin.port): (pin.public_key, pin.origin) for pin in record.pins}
+    assert pins_by_endpoint == {
+        ("198.51.100.9", 22011): (_VM_USER_KEY, HostKeyOrigin.USER),
+        ("198.51.100.9", 22012): (_CONTAINER_USER_KEY, HostKeyOrigin.USER),
+    }
+
+
+def test_move_host_pins_survives_new_container_port_reusing_the_old_vm_port(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The mirror-image collision: the new container port equals the old VM port."""
+    host_id = HostId.generate()
+    provider, known_hosts = _make_pin_move_setup(tmp_path, temp_mngr_ctx, host_id, "198.51.100.9", 22011, 22012)
+    started = _make_started_lease(host_id, "198.51.100.9", 22010, 22011)
+
+    provider._move_host_pins_to_new_endpoints(host_id, started)
+
+    record = load_host_key_record(known_hosts, host_id)
+    assert record is not None
+    pins_by_endpoint = {(pin.address, pin.port): (pin.public_key, pin.origin) for pin in record.pins}
+    assert pins_by_endpoint == {
+        ("198.51.100.9", 22010): (_VM_USER_KEY, HostKeyOrigin.USER),
+        ("198.51.100.9", 22011): (_CONTAINER_USER_KEY, HostKeyOrigin.USER),
+    }
+
+
+def test_move_host_pins_is_a_noop_without_persisted_lease_meta(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    host_id = HostId.generate()
+    provider = _PinMoveProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _state_dir=tmp_path,
+    )
+    known_hosts = provider._host_known_hosts_path(host_id)
+    add_host_to_known_hosts(
+        known_hosts, "198.51.100.9", 22010, _VM_USER_KEY, host_id=host_id, origin=HostKeyOrigin.USER
+    )
+    started = _make_lease(host_id)
+
+    provider._move_host_pins_to_new_endpoints(host_id, started)
+
+    record = load_host_key_record(known_hosts, host_id)
+    assert record is not None
+    assert [(pin.address, pin.port) for pin in record.pins] == [("198.51.100.9", 22010)]

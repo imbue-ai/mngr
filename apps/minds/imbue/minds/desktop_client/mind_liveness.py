@@ -19,10 +19,8 @@ scopes it to shutdown-capable minds:
   RUNNING / STOPPED / UNKNOWN the UI shows.
 - ``get_shutdown_capable_workspace_agent_ids`` -- which active workspaces sit on
   a shutdown-capable provider.
-- ``compute_mind_shutdown_traits_by_agent_id`` -- the per-mind liveness +
-  slow-start map the workspace list reads (one resolver walk for both).
-- ``compute_mind_liveness_by_agent_id`` -- the liveness-only view of the same
-  walk, read by the quit prompt.
+- ``compute_mind_liveness_by_agent_id`` -- the per-mind liveness map the
+  workspace list and quit prompt read (one resolver walk).
 
 ``--discovery-only`` drops only the per-*agent* lifecycle/activity streams (the
 agent process's own state); it keeps host/container state, which is exactly what
@@ -61,15 +59,6 @@ _SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset(
     {"docker", "lima", "aws", "gcp", "azure", "imbue_cloud"}
 )
 
-# Shutdown-capable backends whose stopped -> running transition is a slow,
-# multi-minute operation rather than a quick local bounce. An imbue_cloud
-# start may restore the workspace from object storage onto a fresh box
-# (download + boot + container relaunch), so clicking its stopped tile must
-# not auto-dispatch a start through the recovery flow (whose mngr-command
-# ceiling is sized for container bounces) -- the UI tells the user to press
-# Start instead.
-_SLOW_START_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"imbue_cloud"})
-
 # Discovery ``HostState`` values that mean the container exists but is not
 # running. Mirrors the offline set the recovery-diagnostics probe uses.
 _OFFLINE_HOST_STATES: Final[frozenset[HostState]] = frozenset(
@@ -93,16 +82,6 @@ def provider_backend_supports_shutdown(backend: str) -> bool:
     backends qualify; widen this when other providers gain host shutdown support.
     """
     return backend in _SHUTDOWN_CAPABLE_PROVIDER_BACKENDS
-
-
-def provider_backend_start_is_slow(backend: str) -> bool:
-    """Whether starting a stopped host on ``backend`` is a slow (multi-minute) restore.
-
-    Gates the landing page's click-through on a stopped tile: slow-start
-    workspaces get a "press Start" message instead of the recovery flow's
-    auto-dispatched start.
-    """
-    return backend in _SLOW_START_PROVIDER_BACKENDS
 
 
 def classify_host_state(host_state: HostState | None) -> MindLiveness:
@@ -131,7 +110,6 @@ class _ShutdownCapableWorkspace(FrozenModel):
     """One active workspace on a shutdown-capable provider, from a resolver walk."""
 
     agent_id: AgentId = Field(description="Workspace agent id")
-    backend: str = Field(description="Provider backend name (e.g. 'docker', 'imbue_cloud')")
     host_id: HostId = Field(description="Host currently running the workspace")
 
 
@@ -150,9 +128,7 @@ def _walk_shutdown_capable_workspaces(backend_resolver: BackendResolverInterface
             continue
         backend = backend_by_provider_name.get(info.provider_name)
         if backend is not None and provider_backend_supports_shutdown(backend):
-            workspaces.append(
-                _ShutdownCapableWorkspace(agent_id=agent_id, backend=backend, host_id=HostId(info.host_id))
-            )
+            workspaces.append(_ShutdownCapableWorkspace(agent_id=agent_id, host_id=HostId(info.host_id)))
     return workspaces
 
 
@@ -161,37 +137,16 @@ def get_shutdown_capable_workspace_agent_ids(backend_resolver: BackendResolverIn
     return tuple(workspace.agent_id for workspace in _walk_shutdown_capable_workspaces(backend_resolver))
 
 
-class MindShutdownTraits(FrozenModel):
-    """The shutdown-related traits of one shutdown-capable mind, for the workspace list."""
-
-    liveness: MindLiveness = Field(description="Coarse container liveness the UI shows")
-    is_slow_start: bool = Field(description="Whether starting the stopped host is a slow (multi-minute) restore")
-
-
-def compute_mind_shutdown_traits_by_agent_id(
-    backend_resolver: BackendResolverInterface,
-) -> dict[str, MindShutdownTraits]:
-    """Return ``{agent_id_str: MindShutdownTraits}`` for every active shutdown-capable mind.
-
-    One resolver walk yields both traits the workspace list needs, so callers
-    never walk the active workspaces twice per rebuild. Liveness reads each
-    mind's host state via ``get_host_state``, which already layers any
-    short-lived optimistic override (set by a Start/Stop action) over the
-    discovery snapshot -- so a just-issued action shows up here immediately
-    and reconciles back to discovery on its own.
-    """
-    result: dict[str, MindShutdownTraits] = {}
-    for workspace in _walk_shutdown_capable_workspaces(backend_resolver):
-        result[str(workspace.agent_id)] = MindShutdownTraits(
-            liveness=classify_host_state(backend_resolver.get_host_state(workspace.host_id)),
-            is_slow_start=provider_backend_start_is_slow(workspace.backend),
-        )
-    return result
-
-
 def compute_mind_liveness_by_agent_id(backend_resolver: BackendResolverInterface) -> dict[str, MindLiveness]:
-    """Return ``{agent_id_str: MindLiveness}`` for every active shutdown-capable mind."""
-    return {
-        agent_id: traits.liveness
-        for agent_id, traits in compute_mind_shutdown_traits_by_agent_id(backend_resolver).items()
-    }
+    """Return ``{agent_id_str: MindLiveness}`` for every active shutdown-capable mind.
+
+    One resolver walk. Liveness reads each mind's host state via
+    ``get_host_state``, which already layers any short-lived optimistic
+    override (set by a Start/Stop action) over the discovery snapshot -- so a
+    just-issued action shows up here immediately and reconciles back to
+    discovery on its own.
+    """
+    result: dict[str, MindLiveness] = {}
+    for workspace in _walk_shutdown_capable_workspaces(backend_resolver):
+        result[str(workspace.agent_id)] = classify_host_state(backend_resolver.get_host_state(workspace.host_id))
+    return result

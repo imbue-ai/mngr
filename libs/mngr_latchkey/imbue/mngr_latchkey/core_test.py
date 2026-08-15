@@ -1661,6 +1661,71 @@ def test_stopped_host_skips_provisioning_and_clears_provisioned_marker(
         manager.stop_gateway()
 
 
+def test_unauthenticated_host_warns_once_instead_of_skipping_silently(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """An UNAUTHENTICATED host skips provisioning *loudly*, and only once per episode.
+
+    UNAUTHENTICATED means the machine is up and its container is very likely
+    serving the workspace normally -- only the outer sshd rejected our key. So the
+    skip is correct, but it used to be silent, and nothing else reports it: the
+    workspace kept loading while every latchkey call from that host's agents failed
+    with connection-refused, with no log line anywhere tying the two together.
+    Repeating the warning on every discovery cycle would flood the log, so later
+    cycles drop to debug -- but a host that authenticates again and is then
+    rejected again is a fresh outage and warns afresh (e.g. a repair restored the
+    key and a slice VM carved before the lima fix wiped it again on its next
+    restart).
+    """
+    captured: list[tuple[str, str]] = []
+
+    def _sink(message: object) -> None:
+        record = message.record  # ty: ignore[unresolved-attribute]
+        captured.append((record["level"].name, record["message"]))
+
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # Provisioned earlier this session, back when the key still worked.
+        with handler._remote_hosts_lock:
+            handler._provisioned_hosts.add(str(host_id))
+
+        handler_id = logger.add(_sink, level="DEBUG", format="{message}")
+        try:
+            handler(AgentId(), host_id, ssh_info, "imbue_cloud", HostState.UNAUTHENTICATED)
+            handler(AgentId(), host_id, ssh_info, "imbue_cloud", HostState.UNAUTHENTICATED)
+            repeat_warnings = [
+                message for level, message in captured if level == "WARNING" and str(host_id) in message
+            ]
+            # The key is repaired (RUNNING is only reachable over outer SSH for
+            # imbue_cloud), then the next VM restart wipes it again.
+            handler(AgentId(), host_id, None, "imbue_cloud", HostState.RUNNING)
+            handler(AgentId(), host_id, ssh_info, "imbue_cloud", HostState.UNAUTHENTICATED)
+        finally:
+            logger.remove(handler_id)
+
+        assert len(repeat_warnings) == 1, f"expected exactly one warning for {host_id}, got {repeat_warnings}"
+        assert "UNAUTHENTICATED" in repeat_warnings[0]
+        warnings = [message for level, message in captured if level == "WARNING" and str(host_id) in message]
+        assert len(warnings) == 2, f"expected the second episode to warn again for {host_id}, got {warnings}"
+        # Nothing is wired against a host we cannot reach over its outer sshd, and
+        # the marker is cleared so a repaired key re-provisions on a later cycle.
+        assert handler._provisioned == []
+        with handler._remote_hosts_lock:
+            assert str(host_id) not in handler._provisioned_hosts
+        manager.stop_gateway()
+
+
 def test_provisioning_coalesces_when_host_pass_already_in_flight(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A second agent on a host whose provisioning is already in flight is coalesced.
 

@@ -6,6 +6,6 @@ Plans gain `max_total_workspaces` (running + stopped; explorer 10 / ally 50) alo
 
 New end-to-end deployment test `deployment_tests/test_workspace_stop_start.py` exercises the full lease -> stop -> start -> release cycle against a real env (skips cleanly without a baked slice or storage config).
 
-Clicking a stopped imbue_cloud workspace no longer auto-dispatches a start through the recovery flow (whose command ceiling is sized for local container bounces): the tile shows a message telling the user to press Start, since a cloud restore can take several minutes. Local docker/lima workspaces keep the existing click-to-start behavior.
+Clicking a stopped workspace tile starts it through the recovery flow (with progress and logs) for every shutdown-capable backend, including imbue_cloud: the recovery restart's host stop/start steps now share the Start/Stop buttons' generous budgets, so a cloud restore taking minutes no longer times out into a spurious failure.
 
 `minds env destroy` now deletes the env's workspace stop/start artifacts from the tier's storage bucket (the env's stamped key prefix for dev/ci envs, the whole keyspace for shared tiers), so destroyed envs no longer orphan paid storage. Skipped when the tier's `storage` Vault entry is unpopulated.

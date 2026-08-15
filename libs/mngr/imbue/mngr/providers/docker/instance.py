@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime
@@ -89,6 +90,8 @@ from imbue.mngr.providers.docker.volume import ensure_state_container
 from imbue.mngr.providers.docker.volume import host_container_name
 from imbue.mngr.providers.docker.volume import state_container_name
 from imbue.mngr.providers.docker.volume import state_volume_name
+from imbue.mngr.providers.host_key_store import has_host_key_store
+from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
@@ -101,8 +104,11 @@ from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
-from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
-from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
+from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
+from imbue.mngr.providers.ssh_utils import load_or_create_per_host_host_keypair
+from imbue.mngr.providers.ssh_utils import per_host_key_dir
+from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
+from imbue.mngr.providers.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 
 # PID-1 entrypoint for host containers. Unlike the idle state-container
@@ -570,13 +576,25 @@ class DockerProviderInstance(BaseProviderInstance):
         verify_engine_version_supports_volume_subpath(engine_version)
         self._is_isolation_check_passed = True
 
-    def _get_ssh_keypair(self) -> tuple[Path, str]:
-        """Get or create the SSH keypair for this provider instance."""
-        return load_or_create_ssh_keypair(self._keys_dir, key_name="docker_ssh_key")
+    def _get_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Resolve the client keypair that opens this host: per-host first, legacy shared as fallback.
 
-    def _get_host_keypair(self) -> tuple[Path, str]:
-        """Get or create the SSH host keypair for Docker containers."""
-        return load_or_create_host_keypair(self._keys_dir)
+        Hosts created before per-host client keys existed only authorize the
+        legacy shared ``docker_ssh_key``, so it wins for them; new hosts get a
+        per-host pair minted at create time. A per-host key dir carries a
+        ``known_hosts`` symlink so key-sibling consumers (the forward SSH
+        tunnel) keep finding the pinned host keys.
+        """
+        return resolve_per_host_client_keypair(self._keys_dir, host_id, "docker_ssh_key", "known_hosts")
+
+    def _get_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Resolve the sshd host keypair for this host's container: per-host first, legacy fallback.
+
+        Restart/restore paths re-inject whatever this resolves, so a legacy
+        host keeps serving the shared key already pinned for it while new
+        hosts serve their own per-host key.
+        """
+        return resolve_per_host_host_keypair(self._keys_dir, host_id, "host_key")
 
     def _get_ssh_host(self) -> str:
         """Get the SSH-reachable hostname for containers."""
@@ -721,8 +739,8 @@ class DockerProviderInstance(BaseProviderInstance):
 
         Returns (Host, ssh_host, ssh_port, host_public_key).
         """
-        private_key_path, client_public_key = self._get_ssh_keypair()
-        host_key_path, host_public_key = self._get_host_keypair()
+        private_key_path, client_public_key = self._get_ssh_keypair(host_id)
+        host_key_path, host_public_key = self._get_host_keypair(host_id)
         host_private_key = host_key_path.read_text()
 
         # Provision against the host_dir this host was created with (recorded in
@@ -748,7 +766,7 @@ class DockerProviderInstance(BaseProviderInstance):
         logger.trace("Found SSH endpoint available", ssh_host=ssh_host, ssh_port=ssh_port)
 
         with log_span("Adding host to known_hosts", ssh_host=ssh_host, ssh_port=ssh_port):
-            add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key)
+            add_host_to_known_hosts(self._known_hosts_path, ssh_host, ssh_port, host_public_key, host_id=host_id)
 
         with log_span("Waiting for sshd to be ready..."):
             self._wait_for_sshd(ssh_host, ssh_port)
@@ -1322,9 +1340,10 @@ kill -TERM 1
             ssh_host,
             ssh_port,
             ssh_host_public_key,
+            host_id=host_id,
         )
 
-        private_key_path, _ = self._get_ssh_keypair()
+        private_key_path, _ = self._get_ssh_keypair(host_id)
         pyinfra_host = self._create_pyinfra_host(
             ssh_host,
             ssh_port,
@@ -1511,6 +1530,12 @@ kill -TERM 1
             created_at=now,
             updated_at=now,
         )
+
+        # Mint this host's own client + host keypairs up front so the setup
+        # helper's per-host resolution uses them for the new container instead
+        # of falling back to a legacy shared pair from older hosts.
+        load_or_create_per_host_client_keypair(self._keys_dir, host_id, "docker_ssh_key", "known_hosts")
+        load_or_create_per_host_host_keypair(self._keys_dir, host_id, "host_key")
 
         try:
             host, ssh_host, ssh_port, host_public_key = self._setup_container_ssh_and_create_host(
@@ -1926,6 +1951,16 @@ kill -TERM 1
         # Reached only if the cleanup above had no failures (the `with` raises
         # otherwise), so a failed cleanup keeps the host record for retry.
         self._host_store.delete_host_record(host_id)
+        # Forget the host's pins (dead-endpoint GC) and its per-host keypairs;
+        # both are useless once the host is permanently deleted. Benign local
+        # cleanup past the point of no return (the record is gone), so an OS
+        # error must not fail the deletion.
+        if has_host_key_store(self._known_hosts_path):
+            try:
+                remove_host_key_record(self._known_hosts_path, host_id)
+            except OSError as e:
+                logger.trace("Failed to clean up host-key store for {}: {}", self._known_hosts_path, e)
+        shutil.rmtree(per_host_key_dir(self._keys_dir, host_id), ignore_errors=True)
         self._container_cache_by_id.pop(host_id, None)
         self._evict_cached_host(host_id)
 
@@ -2451,9 +2486,10 @@ kill -TERM 1
             host_record.ssh_host,
             host_record.last_discovered_ssh_port,
             host_record.ssh_host_public_key,
+            host_id=host_id,
         )
 
-        private_key_path, _ = self._get_ssh_keypair()
+        private_key_path, _ = self._get_ssh_keypair(host_id)
         return self._create_pyinfra_host(
             host_record.ssh_host,
             host_record.last_discovered_ssh_port,

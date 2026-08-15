@@ -149,10 +149,6 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # mid-pass call race its teardown and crash the loop's thread.
     if state.sync_scheduler is not None:
         state.sync_scheduler.stop()
-    # Same ordering constraint as the sync scheduler: the key-migration loop
-    # runs ``mngr`` through the shared caller, so it must be stopped first.
-    if state.ssh_key_migration_scheduler is not None:
-        state.ssh_key_migration_scheduler.stop()
     # Terminate the idle pre-warmed mngr process so it doesn't wait out the
     # full shutdown timeout blocked reading its socket for the next request.
     get_default_mngr_caller().stop()

@@ -137,7 +137,9 @@ def test_slice_yaml_authorizes_extra_root_keys_without_dropping_bake_key() -> No
 def test_slice_yaml_omits_extra_key_script_when_none_given() -> None:
     config = _build()
     joined = "\n".join(step["script"] for step in config["provision"])
-    assert "grep -qxF" not in joined
+    # The extra-key append step (which works on a bare $AK variable, unlike the
+    # base root-key block's $MNGR_LIMA_AK) is absent when no extra keys were given.
+    assert "\nAK=/root/.ssh/authorized_keys" not in joined
 
 
 def test_build_slice_reserve_script_is_valid_bash_and_holds_the_box_lock() -> None:

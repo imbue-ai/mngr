@@ -57,6 +57,9 @@ from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
 from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.docker.volume import state_container_name
 from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
+from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.utils.testing import capture_loguru
 
 HOST_ID_A = "host-00000000000000000000000000000001"
@@ -1616,3 +1619,29 @@ def test_port_reconciliation_keeps_recorded_port_when_live_mapping_unreadable(
     assert stored_record.last_discovered_ssh_port == _RECORDED_STALE_SSH_PORT
 
     assert "Could not read live SSH port" in log_output.getvalue()
+
+
+def test_get_ssh_keypair_links_known_hosts_next_to_a_per_host_key(temp_mngr_ctx: MngrContext) -> None:
+    """The forward tunnel derives the pinned-keys file as the key's sibling; a per-host key dir must have one."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    load_or_create_per_host_client_keypair(provider._keys_dir, host_id, "docker_ssh_key", "known_hosts")
+    add_host_to_known_hosts(
+        provider._known_hosts_path, "127.0.0.1", 4242, "ssh-ed25519 AAAAC3Nza key", host_id=host_id
+    )
+
+    private_key_path, _ = provider._get_ssh_keypair(host_id)
+
+    sibling_known_hosts = private_key_path.parent / "known_hosts"
+    assert sibling_known_hosts.read_text() == "[127.0.0.1]:4242 ssh-ed25519 AAAAC3Nza key\n"
+
+
+def test_get_ssh_keypair_legacy_fallback_needs_no_link(temp_mngr_ctx: MngrContext) -> None:
+    """A legacy host resolves the shared key, whose sibling is the provider-wide known_hosts itself."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    save_ssh_keypair(provider._keys_dir, "docker_ssh_key")
+
+    private_key_path, _ = provider._get_ssh_keypair(HostId.generate())
+
+    assert private_key_path.parent == provider._keys_dir
+    assert private_key_path.parent / "known_hosts" == provider._known_hosts_path

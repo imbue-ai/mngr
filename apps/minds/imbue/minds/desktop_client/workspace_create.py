@@ -201,7 +201,11 @@ class WebAccessEnabler(MutableModel):
         frozen=True, description="Session store resolving the workspace's owning account"
     )
     is_cloud_row: bool = Field(
-        frozen=True, description="True for imbue_cloud compute (connector-side enable-sharing primitive)"
+        frozen=True,
+        description=(
+            "True for imbue_cloud compute: the share bring-up is client-side either way, "
+            "but a cloud row skips the desktop-latency relay-region measurement."
+        ),
     )
     backend_resolver: BackendResolverInterface = Field(
         frozen=True,

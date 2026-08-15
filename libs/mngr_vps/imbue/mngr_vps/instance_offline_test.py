@@ -309,7 +309,7 @@ def test_realizer_for_vps_ip_picks_bare_from_isolation_none_marker(temp_mngr_ctx
     assert isinstance(provider._realizer, DockerRealizer)
     realizer = provider._realizer_for_vps_ip("10.0.0.5")
     assert isinstance(realizer, BareRealizer)
-    assert realizer.agent_endpoint("10.0.0.5").port == 22
+    assert realizer.agent_endpoint("10.0.0.5", HostId.generate()).port == 22
 
 
 def test_realizer_for_vps_ip_picks_container_from_isolation_container_marker(temp_mngr_ctx: MngrContext) -> None:
@@ -611,7 +611,10 @@ def test_add_known_hosts_for_ip_adds_both_endpoints(temp_mngr_ctx: MngrContext) 
     """Both keys present: the VPS (port 22) and container (config port) endpoints are added."""
     provider = _marker_provider(temp_mngr_ctx, instances=[])
     provider._add_known_hosts_for_ip(
-        "10.0.0.5", vps_public_key="ssh-ed25519 AAAAVPS", container_public_key="ssh-ed25519 AAAACTR"
+        "10.0.0.5",
+        host_id=HostId.generate(),
+        vps_public_key="ssh-ed25519 AAAAVPS",
+        container_public_key="ssh-ed25519 AAAACTR",
     )
     vps_lines = provider._vps_known_hosts_path().read_text()
     container_lines = provider._container_known_hosts_path().read_text()
@@ -622,7 +625,9 @@ def test_add_known_hosts_for_ip_adds_both_endpoints(temp_mngr_ctx: MngrContext) 
 def test_add_known_hosts_for_ip_skips_endpoint_with_absent_key(temp_mngr_ctx: MngrContext) -> None:
     """An absent (None) key skips that endpoint and leaves its known_hosts file untouched."""
     provider = _marker_provider(temp_mngr_ctx, instances=[])
-    provider._add_known_hosts_for_ip("10.0.0.6", vps_public_key="ssh-ed25519 AAAAVPS", container_public_key=None)
+    provider._add_known_hosts_for_ip(
+        "10.0.0.6", host_id=HostId.generate(), vps_public_key="ssh-ed25519 AAAAVPS", container_public_key=None
+    )
     assert "10.0.0.6 ssh-ed25519 AAAAVPS" in provider._vps_known_hosts_path().read_text()
     assert not provider._container_known_hosts_path().exists()
 

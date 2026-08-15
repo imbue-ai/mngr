@@ -60,23 +60,14 @@ describe("rowClickActionFor", () => {
     expect(rowClickActionFor({ supports_shutdown: false }, "RUNNING", false)).toBe("recover");
   });
 
-  it("auto-starts a stopped quick-start machine through recovery", () => {
+  it("auto-starts any stopped shutdown-capable machine through recovery", () => {
+    // Cloud machines included: recovery's start step shares the Start/Stop
+    // buttons' generous budget, so even a minutes-long restore is handled.
     expect(rowClickActionFor({ supports_shutdown: true }, "STOPPED", true)).toBe("recover-start");
-    expect(rowClickActionFor({ supports_shutdown: true, is_slow_start: false }, "STOPPED", true)).toBe(
-      "recover-start",
-    );
-  });
-
-  it("prompts for an explicit Start on a stopped slow-start (cloud) machine", () => {
-    // A cloud restore takes minutes; recovery's auto-dispatched start is
-    // sized for local bounces, so the click must not silently kick one off.
-    expect(rowClickActionFor({ supports_shutdown: true, is_slow_start: true }, "STOPPED", true)).toBe(
-      "prompt-start",
-    );
   });
 
   it("enters a running or non-shutdown-capable machine directly", () => {
-    expect(rowClickActionFor({ supports_shutdown: true, is_slow_start: true }, "RUNNING", true)).toBe("enter");
+    expect(rowClickActionFor({ supports_shutdown: true }, "RUNNING", true)).toBe("enter");
     expect(rowClickActionFor({ supports_shutdown: false }, "STOPPED", true)).toBe("enter");
     expect(rowClickActionFor({}, "UNKNOWN", true)).toBe("enter");
   });

@@ -23,7 +23,8 @@ from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_li
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
-from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
+from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
+from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr_vps.container_setup import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps.container_setup import HOME_SUBPATH
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
@@ -190,8 +191,19 @@ class DockerRealizer(SnapshotCapableRealizer):
 
     # --- container identity (keys + known_hosts) ---------------------------
 
-    def _container_ssh_keypair(self) -> tuple[Path, str]:
-        return load_or_create_ssh_keypair(self.key_dir, CONTAINER_SSH_KEY_NAME)
+    def _container_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        # Per host for containers created after per-host client keys landed;
+        # older containers only authorize the legacy provider-wide pair, which
+        # remains the read fallback for them.
+        return resolve_per_host_client_keypair(
+            self.key_dir, host_id, CONTAINER_SSH_KEY_NAME, CONTAINER_KNOWN_HOSTS_NAME
+        )
+
+    def _create_per_host_container_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Mint (or load) this host's own container client keypair (creation paths only)."""
+        return load_or_create_per_host_client_keypair(
+            self.key_dir, host_id, CONTAINER_SSH_KEY_NAME, CONTAINER_KNOWN_HOSTS_NAME
+        )
 
     def _container_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
         # Per host: each container gets its own sshd host key so one host's key can
@@ -203,8 +215,8 @@ class DockerRealizer(SnapshotCapableRealizer):
     def _container_known_hosts_path(self) -> Path:
         return self.key_dir / CONTAINER_KNOWN_HOSTS_NAME
 
-    def agent_endpoint(self, vps_ip: str) -> AgentEndpoint:
-        container_key_path, _container_pub = self._container_ssh_keypair()
+    def agent_endpoint(self, vps_ip: str, host_id: HostId) -> AgentEndpoint:
+        container_key_path, _container_pub = self._container_ssh_keypair(host_id)
         return AgentEndpoint(
             hostname=vps_ip,
             port=self.config.container_ssh_port,
@@ -261,7 +273,9 @@ class DockerRealizer(SnapshotCapableRealizer):
         home_volume_symlink: tuple[str, str] | None,
     ) -> None:
         """Set up SSH inside the container via docker exec."""
-        _container_key_path, container_public_key = self._container_ssh_keypair()
+        # Creation path: mint this host's own container client key so the new
+        # container authorizes per-host material (never the provider-wide pair).
+        _container_key_path, container_public_key = self._create_per_host_container_ssh_keypair(host_id)
         container_host_key_path, container_host_public_key = self._container_host_keypair(host_id)
         setup_container_ssh(
             outer,
@@ -398,6 +412,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             hostname=ctx.vps_ip,
             port=self.config.container_ssh_port,
             public_key=container_host_public_key,
+            host_id=ctx.host_id,
         )
         return RealizedPlacement(
             handle=PlacementHandle(

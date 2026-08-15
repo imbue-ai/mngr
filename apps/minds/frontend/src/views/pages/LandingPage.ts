@@ -18,7 +18,7 @@ import { Icon16 } from "../components/Icon";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
 import { routeLinkAttrs } from "../components/route-link";
-import { isMachineStateKnown, mindControlsFor, rowClickActionFor, slowStartPromptMessage } from "./landing-controls";
+import { isMachineStateKnown, mindControlsFor, rowClickActionFor } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
 
@@ -177,8 +177,6 @@ export const LandingPage: m.ClosureComponent = () => {
       // the loader, so go straight to Recovery, which dispatches the start.
       // A start, not a bounce -- there is nothing running to stop first.
       m.route.set(recoveryRoute(entry.id, returnTo, "start"));
-    } else if (action === "prompt-start") {
-      window.alert(slowStartPromptMessage(entry.name));
     } else {
       shell.enterWorkspace(entry.id);
     }

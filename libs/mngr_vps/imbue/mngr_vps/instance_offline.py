@@ -414,7 +414,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         ...
 
     def _add_known_hosts_for_ip(
-        self, ip: str, *, vps_public_key: str | None, container_public_key: str | None
+        self, ip: str, *, host_id: HostId, vps_public_key: str | None, container_public_key: str | None
     ) -> None:
         """Add ``ip`` to the VPS (port 22) and container known_hosts with the given host keys.
 
@@ -422,7 +422,8 @@ class OfflineCapableVpsProvider(VpsProvider):
         only when its public key is present, so a caller with a key from one side
         only (e.g. a record missing the container key) skips the absent one. Both
         rebind paths -- ``_rebind_known_hosts`` (record-sourced keys) and
-        ``_rebind_known_hosts_pre_connect`` (locally-held keys) -- go through here.
+        ``_rebind_known_hosts_pre_connect`` (locally-held keys) -- go through here,
+        attributing the pins to ``host_id``'s store record.
         """
         if vps_public_key is not None:
             add_host_to_known_hosts(
@@ -430,6 +431,7 @@ class OfflineCapableVpsProvider(VpsProvider):
                 hostname=ip,
                 port=22,
                 public_key=vps_public_key,
+                host_id=host_id,
             )
         if container_public_key is not None:
             add_host_to_known_hosts(
@@ -437,6 +439,7 @@ class OfflineCapableVpsProvider(VpsProvider):
                 hostname=ip,
                 port=self.config.container_ssh_port,
                 public_key=container_public_key,
+                host_id=host_id,
             )
 
     def _rebind_known_hosts(self, record: VpsHostRecord, new_ip: str) -> None:
@@ -453,6 +456,7 @@ class OfflineCapableVpsProvider(VpsProvider):
             remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
         self._add_known_hosts_for_ip(
             new_ip,
+            host_id=HostId(record.certified_host_data.host_id),
             vps_public_key=record.ssh_host_public_key,
             container_public_key=record.container_ssh_host_public_key,
         )
@@ -473,6 +477,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         """
         self._add_known_hosts_for_ip(
             new_ip,
+            host_id=host_id,
             vps_public_key=read_host_public_key_with_legacy_fallback(self._key_dir(), host_id, VPS_HOST_KEY_NAME),
             container_public_key=read_host_public_key_with_legacy_fallback(
                 self._key_dir(), host_id, CONTAINER_HOST_KEY_NAME

@@ -311,6 +311,22 @@ mngr imbue_cloud hosts release [OPTIONS] HOST_DB_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud hosts rotate
+
+**Usage:**
+
+```text
+mngr imbue_cloud hosts rotate [OPTIONS] HOST_REF
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud hosts enable-sharing
 
 **Usage:**
@@ -1393,3 +1409,21 @@ mngr imbue_cloud admin server setup [OPTIONS]
 | `--os-template` | text | OVH OS template to reinstall onto the box. | `debian12_64` |
 | `--ssh-ready-timeout` | float | Seconds to wait for SSH. | `900.0` |
 | `--database-url` | text |  | None |
+
+## mngr imbue_cloud admin repair-keys
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin repair-keys [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
+| `--server-id` | text | Restrict the sweep to these bare_metal_servers row ids (repeatable; default: every box). | None |
+| `--vm-name` | text | Restrict the sweep to these lima instance names (repeatable; the single-VM break-glass mode). | None |
+| `--dry-run` | boolean | List the slice VMs that would be repaired (and whether their lima.yaml needs the patch). | `False` |

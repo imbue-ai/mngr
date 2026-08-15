@@ -14,15 +14,26 @@ from cryptography.hazmat.primitives.serialization import load_ssh_private_key
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import has_host_key_store
+from imbue.mngr.providers.host_key_store import load_host_key_record
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
+from imbue.mngr.providers.ssh_utils import ensure_per_host_known_hosts_link
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import generate_ed25519_host_keypair
 from imbue.mngr.providers.ssh_utils import generate_ssh_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
+from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
+from imbue.mngr.providers.ssh_utils import load_or_create_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import parse_openssh_public_key_blob
+from imbue.mngr.providers.ssh_utils import per_host_key_dir
+from imbue.mngr.providers.ssh_utils import read_host_public_key_with_legacy_fallback
+from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
+from imbue.mngr.providers.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
@@ -414,6 +425,190 @@ def test_add_host_to_known_hosts_preserves_different_key_types(tmp_path: Path) -
     content = known_hosts.read_text()
     assert "ssh-rsa" in content
     assert "ssh-ed25519" in content
+
+
+# =============================================================================
+# store-backed shim behavior
+# =============================================================================
+
+
+def test_add_host_to_known_hosts_without_host_id_creates_no_pin_store(tmp_path: Path) -> None:
+    """Legacy callers (throwaway known_hosts files) must stay sidecar-free."""
+    known_hosts = tmp_path / "known_hosts"
+    add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza hostkey")
+    assert not has_host_key_store(known_hosts)
+
+
+def test_add_host_to_known_hosts_with_host_id_writes_through_the_store(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    host_id = HostId.generate()
+
+    add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza hostkey", host_id=host_id)
+
+    assert has_host_key_store(known_hosts)
+    assert known_hosts.read_text() == "example.com ssh-ed25519 AAAAC3Nza hostkey\n"
+    record = load_host_key_record(known_hosts, host_id)
+    assert record is not None
+    assert [pin.public_key for pin in record.pins] == ["ssh-ed25519 AAAAC3Nza hostkey"]
+
+
+def test_add_host_to_known_hosts_first_store_write_imports_existing_lines(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    add_host_to_known_hosts(known_hosts, "legacy.com", 22, "ssh-ed25519 AAAAC3Nza legacykey")
+
+    add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza newkey", host_id=HostId.generate())
+
+    content = known_hosts.read_text()
+    assert "legacy.com ssh-ed25519 AAAAC3Nza legacykey" in content
+    assert "example.com ssh-ed25519 AAAAC3Nza newkey" in content
+
+
+def test_add_host_to_known_hosts_routes_through_existing_store_without_host_id(tmp_path: Path) -> None:
+    """Once a file has a store, a host_id-less bootstrap add cannot displace a USER pin."""
+    known_hosts = tmp_path / "known_hosts"
+    host_id = HostId.generate()
+    add_host_to_known_hosts(
+        known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza userkey", host_id=host_id, origin=HostKeyOrigin.USER
+    )
+
+    add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza bootkey")
+
+    assert known_hosts.read_text() == "example.com ssh-ed25519 AAAAC3Nza userkey\n"
+
+
+def test_clear_host_from_known_hosts_drops_endpoint_pins_from_the_store(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    host_id = HostId.generate()
+    add_host_to_known_hosts(known_hosts, "example.com", 22, "ssh-ed25519 AAAAC3Nza hostkey", host_id=host_id)
+    add_host_to_known_hosts(known_hosts, "other.com", 22, "ssh-ed25519 AAAAC3Nza otherkey", host_id=host_id)
+
+    clear_host_from_known_hosts(known_hosts, "example.com", 22)
+
+    assert known_hosts.read_text() == "other.com ssh-ed25519 AAAAC3Nza otherkey\n"
+    record = load_host_key_record(known_hosts, host_id)
+    assert record is not None
+    assert [pin.address for pin in record.pins] == ["other.com"]
+
+
+# =============================================================================
+# per-host keypair helpers
+# =============================================================================
+
+
+def test_load_or_create_per_host_client_keypair_is_unique_per_host(tmp_path: Path) -> None:
+    first_host = HostId.generate()
+    second_host = HostId.generate()
+
+    first_path, first_public = load_or_create_per_host_client_keypair(
+        tmp_path, first_host, "docker_ssh_key", "known_hosts"
+    )
+    second_path, second_public = load_or_create_per_host_client_keypair(
+        tmp_path, second_host, "docker_ssh_key", "known_hosts"
+    )
+
+    assert first_path != second_path
+    assert first_public != second_public
+    assert first_path == per_host_key_dir(tmp_path, first_host) / "docker_ssh_key"
+
+
+def test_resolve_per_host_client_keypair_prefers_per_host_pair(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    save_ssh_keypair(tmp_path, "docker_ssh_key")
+    per_host_path, per_host_public = load_or_create_per_host_client_keypair(
+        tmp_path, host_id, "docker_ssh_key", "known_hosts"
+    )
+
+    resolved_path, resolved_public = resolve_per_host_client_keypair(
+        tmp_path, host_id, "docker_ssh_key", "known_hosts"
+    )
+
+    assert resolved_path == per_host_path
+    assert resolved_public == per_host_public
+
+
+def test_resolve_per_host_client_keypair_falls_back_to_legacy_shared_pair(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    legacy_path, legacy_public_path = save_ssh_keypair(tmp_path, "docker_ssh_key")
+
+    resolved_path, resolved_public = resolve_per_host_client_keypair(
+        tmp_path, host_id, "docker_ssh_key", "known_hosts"
+    )
+
+    assert resolved_path == legacy_path
+    assert resolved_public == legacy_public_path.read_text().strip()
+
+
+def test_resolve_per_host_client_keypair_creates_per_host_pair_when_neither_exists(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+
+    resolved_path, resolved_public = resolve_per_host_client_keypair(
+        tmp_path, host_id, "docker_ssh_key", "known_hosts"
+    )
+
+    assert resolved_path == per_host_key_dir(tmp_path, host_id) / "docker_ssh_key"
+    assert resolved_public.startswith("ssh-ed25519 ")
+
+
+def test_resolve_per_host_client_keypair_links_known_hosts_for_preexisting_per_host_pair(tmp_path: Path) -> None:
+    """A per-host pair minted before the sibling link existed gains the link on resolution."""
+    host_id = HostId.generate()
+    save_ssh_keypair(per_host_key_dir(tmp_path, host_id), "docker_ssh_key")
+
+    resolve_per_host_client_keypair(tmp_path, host_id, "docker_ssh_key", "known_hosts")
+
+    assert (per_host_key_dir(tmp_path, host_id) / "known_hosts").is_symlink()
+
+
+def test_resolve_per_host_host_keypair_falls_back_to_legacy_shared_pair(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    legacy_path, legacy_public = load_or_create_host_keypair(tmp_path, "host_key")
+
+    resolved_path, resolved_public = resolve_per_host_host_keypair(tmp_path, host_id, "host_key")
+
+    assert resolved_path == legacy_path
+    assert resolved_public == legacy_public
+
+
+def test_read_host_public_key_with_legacy_fallback_prefers_per_host_key(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    load_or_create_host_keypair(tmp_path, "host_key")
+    _, per_host_public = load_or_create_per_host_host_keypair(tmp_path, host_id, "host_key")
+
+    assert read_host_public_key_with_legacy_fallback(tmp_path, host_id, "host_key") == per_host_public
+
+
+def test_read_host_public_key_with_legacy_fallback_returns_none_when_neither_exists(tmp_path: Path) -> None:
+    assert read_host_public_key_with_legacy_fallback(tmp_path, HostId.generate(), "host_key") is None
+
+
+def test_ensure_per_host_known_hosts_link_reads_through_to_the_provider_file(tmp_path: Path) -> None:
+    """Key-sibling consumers (the forward tunnel) find the provider-wide pins next to a per-host key."""
+    host_id = HostId.generate()
+    add_host_to_known_hosts(tmp_path / "known_hosts", "example.com", 22, "ssh-ed25519 AAAAC3Nza hostkey")
+
+    ensure_per_host_known_hosts_link(tmp_path, host_id, "known_hosts")
+
+    sibling = per_host_key_dir(tmp_path, host_id) / "known_hosts"
+    assert sibling.is_symlink()
+    assert sibling.read_text() == "example.com ssh-ed25519 AAAAC3Nza hostkey\n"
+
+
+def test_ensure_per_host_known_hosts_link_sees_later_pins(tmp_path: Path) -> None:
+    """The link never goes stale: pins added after linking are visible through it."""
+    host_id = HostId.generate()
+    ensure_per_host_known_hosts_link(tmp_path, host_id, "known_hosts")
+
+    add_host_to_known_hosts(tmp_path / "known_hosts", "example.com", 22, "ssh-ed25519 AAAAC3Nza hostkey")
+
+    sibling = per_host_key_dir(tmp_path, host_id) / "known_hosts"
+    assert sibling.read_text() == "example.com ssh-ed25519 AAAAC3Nza hostkey\n"
+
+
+def test_ensure_per_host_known_hosts_link_is_idempotent(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    ensure_per_host_known_hosts_link(tmp_path, host_id, "known_hosts")
+    ensure_per_host_known_hosts_link(tmp_path, host_id, "known_hosts")
+    assert (per_host_key_dir(tmp_path, host_id) / "known_hosts").is_symlink()
 
 
 # =============================================================================

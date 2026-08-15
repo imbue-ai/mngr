@@ -38,6 +38,10 @@ from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import host_key_store_path
+from imbue.mngr.providers.host_key_store import load_host_key_record
+from imbue.mngr.providers.host_key_store import pin_host_key
 
 _USER_ID = "11111111-2222-3333-4444-555555555555"
 _EMAIL = "sync-user@example.com"
@@ -287,10 +291,11 @@ def _cloud_resolver_with_workspace(agent_id: AgentId, host_id: HostId, name: str
     return make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
 
 
-def _provision_cloud_workspace_on_device_a(tmp_path: Path, cli: FakeImbueCloudCli) -> tuple[AgentId, HostId, str, str]:
-    """Device A leases a cloud machine: per-host key on disk, record pushed with full secrets."""
-    paths_a, _, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
-    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+def _provision_cloud_workspace(
+    paths: WorkspacePaths, session: MultiAccountSessionStore, profile_dir: Path, cli: FakeImbueCloudCli
+) -> tuple[AgentId, HostId, str, str]:
+    """Lease a cloud machine on the given device: per-host key on disk, record pushed with full secrets."""
+    bundle = set_master_password_for_account(paths, _USER_ID, SecretStr(_PASSWORD))
     assert bundle is not None
     cli.sync_bundle_push(_EMAIL, bundle)
 
@@ -298,17 +303,23 @@ def _provision_cloud_workspace_on_device_a(tmp_path: Path, cli: FakeImbueCloudCl
     host_id = HostId.generate()
     private_key = _generate_test_ssh_private_key()
     known_hosts_line = f"[198.51.100.7]:22001 ssh-ed25519 AAAATESTPIN{uuid4().hex}"
-    key_dir = _cloud_host_key_dir(profile_a, host_id)
+    key_dir = _cloud_host_key_dir(profile_dir, host_id)
     key_dir.mkdir(parents=True)
     (key_dir / "ssh_key").write_text(private_key)
     (key_dir / "known_hosts").write_text(known_hosts_line + "\n")
 
-    resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
-    session_a.associate_workspace(_USER_ID, str(agent_id), resolver_a)
+    resolver = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
+    session.associate_workspace(_USER_ID, str(agent_id), resolver)
     pushed = cli.sync_records_by_email[_EMAIL][str(host_id)]
     assert pushed["encrypted_secrets"] is not None
     assert pushed["hosting_device_id"] is None
     return agent_id, host_id, private_key, known_hosts_line
+
+
+def _provision_cloud_workspace_on_device_a(tmp_path: Path, cli: FakeImbueCloudCli) -> tuple[AgentId, HostId, str, str]:
+    """Device A leases a cloud machine: per-host key on disk, record pushed with full secrets."""
+    paths_a, _, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    return _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
 
 
 def test_unlock_materializes_cloud_row_ssh_material_on_a_fresh_install(tmp_path: Path) -> None:
@@ -515,3 +526,292 @@ def test_desktop_push_in_a_cas_window_rebases_once_and_converges(tmp_path: Path)
     converged = next(record for record in store_a.list_records(_USER_ID) if record.host_id == str(host_id))
     assert converged.revision == 3
     assert converged.is_dirty is False
+
+
+def test_import_applies_synced_pins_as_user_origin_through_the_store(tmp_path: Path) -> None:
+    """Materialized pins are store-backed user-origin material: a later local
+    bootstrap write (e.g. a connector-fed lease-time pin) can never displace them."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    _, host_id, _, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+
+    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    known_hosts_path = _cloud_host_key_dir(profile_b, host_id) / "known_hosts"
+    assert known_hosts_line in known_hosts_path.read_text()
+    record = load_host_key_record(known_hosts_path, host_id)
+    assert record is not None
+    assert [pin.origin for pin in record.pins] == [HostKeyOrigin.USER]
+
+    # A bootstrap-origin write for the same endpoint bounces off the user pin.
+    pin_host_key(known_hosts_path, "198.51.100.7", 22001, "ssh-ed25519 AAAABAKEKEY", host_id, HostKeyOrigin.BOOTSTRAP)
+    assert known_hosts_line in known_hosts_path.read_text()
+    assert "AAAABAKEKEY" not in known_hosts_path.read_text()
+
+
+def test_import_is_revision_gated_so_an_unchanged_record_never_clobbers_newer_local_pins(tmp_path: Path) -> None:
+    """After a record's pins are applied once, re-materializing the same revision is a
+    no-op -- so a locally-rotated (newer user-origin) pin survives every later pass
+    until the record actually advances."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    _, host_id, _, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+
+    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    # B rotates the endpoint's key locally (newer user-origin material).
+    known_hosts_path = _cloud_host_key_dir(profile_b, host_id) / "known_hosts"
+    rotated_key = f"ssh-ed25519 AAAAROTATED{uuid4().hex}"
+    pin_host_key(known_hosts_path, "198.51.100.7", 22001, rotated_key, host_id, HostKeyOrigin.USER)
+
+    # The record has not advanced: another pass must not re-apply its old pin.
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
+    content = known_hosts_path.read_text()
+    assert rotated_key in content
+    assert known_hosts_line not in content
+
+
+def test_a_metadata_only_revision_advance_does_not_clobber_a_local_rotation(tmp_path: Path) -> None:
+    """A rename pushed from another device advances the revision while carrying the
+    unchanged secrets blob -- re-applying that payload must not displace a rotation
+    this device ran that the record has not caught up to (the old key would brick
+    access: the host already serves the rotated one)."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    _, host_id, _, old_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+
+    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    # B rotates locally: new client key on disk, new user-origin endpoint pin.
+    key_dir_b = _cloud_host_key_dir(profile_b, host_id)
+    rotated_private_key = _generate_test_ssh_private_key()
+    (key_dir_b / "ssh_key").write_text(rotated_private_key)
+    rotated_pin = f"ssh-ed25519 AAAAROTATED{uuid4().hex}"
+    pin_host_key(key_dir_b / "known_hosts", "198.51.100.7", 22001, rotated_pin, host_id, HostKeyOrigin.USER)
+
+    # Another device pushes a rename: the revision advances, the secrets do not.
+    wire = cli.sync_records_by_email[_EMAIL][str(host_id)]
+    wire["display_name"] = "renamed-elsewhere"
+    wire["revision"] = int(str(wire["revision"])) + 1
+
+    # B's next pull + materialize must skip the unchanged payload outright.
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
+    assert (key_dir_b / "ssh_key").read_text() == rotated_private_key
+    content = (key_dir_b / "known_hosts").read_text()
+    assert rotated_pin in content
+    assert old_line not in content
+
+
+def test_a_drifted_local_env_is_converged_to_the_record_and_never_pushed(tmp_path: Path) -> None:
+    """A device holding an env that differs from the record's converges to the
+    record on its first gated apply (record-wins for material this device did
+    not produce), and its reconcile pushes nothing -- the stale view can
+    neither linger locally nor clobber the record."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+
+    # Device A provisions the cloud workspace, then adds a backup env to the record.
+    paths_a, store_a, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    agent_id, host_id, _, _ = _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
+    resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
+    record_env = "RESTIC_REPOSITORY=s3:https://r2.example/bucket\nRESTIC_PASSWORD=record-pass\n"
+    write_canonical_env(paths_a, agent_id, record_env)
+    store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
+
+    # Device B already holds a different local env for this workspace.
+    paths_b, store_b, _, _ = _make_profiled_device(tmp_path, "desktop", cli)
+    resolver_b = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
+    store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    write_canonical_env(paths_b, agent_id, "RESTIC_REPOSITORY=s3:elsewhere\nRESTIC_PASSWORD=drifted\n")
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    # B's drifted env was replaced by the record's.
+    assert read_canonical_env(paths_b, agent_id) == record_env
+
+    # And B's reconcile pushes nothing: local now equals the record.
+    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"]))
+    store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) == revision_before
+    synced = next(record for record in store_b.list_records(_USER_ID) if record.host_id == str(host_id))
+    payload = store_b.decrypt_record_secrets(_USER_ID, synced)
+    assert payload is not None
+    assert payload.restic_env == record_env
+
+
+def test_a_locally_newer_env_is_never_clobbered_and_propagates_outward(tmp_path: Path) -> None:
+    """The env producer's protection: after a device re-provisions backups
+    locally, the (older) record payload matches its parity stamp, so the gate
+    stays closed and materialization cannot overwrite the fresh env -- and the
+    device's next reconcile pushes it, converging the OTHER devices instead."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+
+    # Device A provisions the workspace with env v1; device B reaches parity.
+    paths_a, store_a, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    agent_id, host_id, _, _ = _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
+    resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
+    write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:v1\nRESTIC_PASSWORD=one\n")
+    store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
+    paths_b, store_b, _, _ = _make_profiled_device(tmp_path, "desktop", cli)
+    resolver_b = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
+    store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    # B re-provisions backups locally (env v2). A materialize pass running
+    # before any reconcile must not clobber it with the record's v1.
+    new_env = "RESTIC_REPOSITORY=s3:v2-reprovisioned\nRESTIC_PASSWORD=two\n"
+    write_canonical_env(paths_b, agent_id, new_env)
+    store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+    assert read_canonical_env(paths_b, agent_id) == new_env
+
+    # B's reconcile re-pushes the record; A converges on its next pass.
+    store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
+    store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
+    store_a.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+    assert read_canonical_env(paths_a, agent_id) == new_env
+
+
+def test_env_convergence_covers_rows_hosted_on_another_device(tmp_path: Path) -> None:
+    """Env convergence is not cloud-only: a device that materialized a
+    locally-hosted (e.g. lima) row's env for backup access picks up a rotated
+    env from the record, even though the row has no SSH half here."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+
+    # Device A hosts a local-provider workspace with a backup env and syncs it.
+    paths_a, store_a, session_a = _make_device(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:v1\nRESTIC_PASSWORD=one\n")
+    resolver_a = _resolver_with_workspace(agent_id, host_id, "lima-ws")
+    session_a.associate_workspace(_USER_ID, str(agent_id), resolver_a)
+
+    # Device B pulls, unlocks, and materializes the env (write-if-missing path).
+    paths_b, store_b, _ = _make_device(tmp_path, "desktop", cli)
+    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    store_b.reconcile({_USER_ID: _EMAIL}, empty_resolver)
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+    assert read_canonical_env(paths_b, agent_id) is not None
+
+    # A rotates the backup env and re-pushes; B converges on its next pass.
+    rotated_env = "RESTIC_REPOSITORY=s3:v2-rotated\nRESTIC_PASSWORD=two\n"
+    write_canonical_env(paths_a, agent_id, rotated_env)
+    store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
+    store_b.reconcile({_USER_ID: _EMAIL}, empty_resolver)
+    store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL)
+    assert read_canonical_env(paths_b, agent_id) == rotated_env
+
+
+def test_import_reapplies_pins_when_the_rendered_known_hosts_file_went_missing(tmp_path: Path) -> None:
+    """The revision gate has a missing-file escape hatch: a wiped known_hosts file is
+    restored from the record even though the revision has not advanced."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    _, host_id, _, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+
+    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+
+    known_hosts_path = _cloud_host_key_dir(profile_b, host_id) / "known_hosts"
+    known_hosts_path.unlink()
+    host_key_store_path(known_hosts_path).unlink()
+
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    assert known_hosts_line in known_hosts_path.read_text()
+
+
+def test_hosting_device_pin_rotation_replaces_pins_on_other_devices_on_the_next_pull(tmp_path: Path) -> None:
+    """The whole cross-device rotation story: the hosting device re-pins an endpoint
+    (user-origin), its reconcile re-pushes the record (revision advances), and the
+    other device's next materialize pass replaces its same-endpoint pin."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+
+    # Device A provisions the cloud workspace (device made here so its store stays in hand).
+    paths_a, store_a, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    agent_id, host_id, _, old_line = _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
+    key_dir_a = _cloud_host_key_dir(profile_a, host_id)
+    resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
+
+    # Device B pulls, unlocks, and materializes the original pin.
+    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    known_hosts_path_b = _cloud_host_key_dir(profile_b, host_id) / "known_hosts"
+    assert old_line in known_hosts_path_b.read_text()
+
+    # A rotates the endpoint's pin; its reconcile re-pushes the changed material.
+    new_key = f"ssh-ed25519 AAAANEWKEY{uuid4().hex}"
+    pin_host_key(key_dir_a / "known_hosts", "198.51.100.7", 22001, new_key, host_id, HostKeyOrigin.USER)
+    store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
+
+    # B's next pull + materialize converges on the rotated pin.
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    content_b = known_hosts_path_b.read_text()
+    assert new_key in content_b
+    assert old_line not in content_b
+
+
+def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_path: Path) -> None:
+    """The lost-device healing path: a healthy device that only ever *materialized* a
+    cloud workspace's material rotates its keys locally (what `mngr imbue_cloud hosts
+    rotate` leaves on disk) and its next reconcile re-pushes the record -- the
+    materialization parity stamp is what makes that device eligible to push. A third
+    fresh device then converges on the rotated material."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    agent_id, host_id, _, old_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+
+    # Device B materializes the full material (and with it the parity stamp).
+    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    resolver_b = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
+    store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"]))
+
+    # A stable pass first: parity means nothing to push.
+    store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) == revision_before
+
+    # B rotates locally: new client key on disk, new user-origin endpoint pin.
+    key_dir_b = _cloud_host_key_dir(profile_b, host_id)
+    rotated_private_key = _generate_test_ssh_private_key()
+    (key_dir_b / "ssh_key").write_text(rotated_private_key)
+    rotated_pin = f"ssh-ed25519 AAAAROTATEDHOSTKEY{uuid4().hex}"
+    pin_host_key(key_dir_b / "known_hosts", "198.51.100.7", 22001, rotated_pin, host_id, HostKeyOrigin.USER)
+
+    # B's next reconcile detects the drift from its parity stamp and re-pushes.
+    store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) > revision_before
+
+    # A fresh third device materializes the rotated material, not the original.
+    _, store_c, _, profile_c = _make_profiled_device(tmp_path, "tablet", cli)
+    store_c.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_c.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    assert store_c.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    key_dir_c = _cloud_host_key_dir(profile_c, host_id)
+    assert (key_dir_c / "ssh_key").read_text() == rotated_private_key
+    content_c = (key_dir_c / "known_hosts").read_text()
+    assert rotated_pin in content_c
+    assert old_line not in content_c

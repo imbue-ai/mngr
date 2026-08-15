@@ -5,13 +5,12 @@ from pathlib import Path
 
 import pytest
 from pydantic import Field
-from pydantic import SecretStr
 
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
-from imbue.minds.desktop_client.conftest import TEST_RELAY_ENDPOINTS
+from imbue.minds.desktop_client.conftest import SucceedingCreateShareCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -50,10 +49,9 @@ class _LabelledResolver(StaticBackendResolver):
 class _RecordingCreateShareCli(FakeImbueCloudCli):
     """Records ``create_share`` calls, then fails so the flow stops before materials injection.
 
-    The local-row bring-up continues past ``create_share`` into share-env
-    rendering, which reads app state this unit test does not assemble; the
-    raise keeps the test at the seam under test (what the connector create
-    was asked to record).
+    The raise keeps each test at the seam under test -- what the connector
+    create was asked -- instead of continuing into share-env rendering and
+    injection, which the ``SucceedingCreateShareCli`` tests cover.
     """
 
     create_share_calls: list[tuple[str, str, str | None]] = Field(
@@ -89,20 +87,28 @@ def _store_with_associated_workspace(
     return store, effective_cli
 
 
-def test_enable_web_access_delegates_cloud_rows_to_the_connector_primitive(tmp_path: Path) -> None:
-    store, cli = _store_with_associated_workspace(tmp_path)
+def test_enable_web_access_cloud_rows_use_the_client_side_share_create(tmp_path: Path) -> None:
+    # Cloud rows take the same client-side path as local ones: connector
+    # ``shares create`` with the owner as sole grantee, no server-side
+    # primitive, and no relay preference (the desktop's latency says nothing
+    # about the pool host's). The raise from the recording create also proves
+    # a connector failure surfaces as SharingError.
+    recording_cli = _RecordingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    store, cli = _store_with_associated_workspace(tmp_path, cli=recording_cli, is_cloud_row=True)
+    assert isinstance(cli, _RecordingCreateShareCli)
 
-    enable_web_access_for_workspace(
-        agent_id=_AGENT_ID,
-        host_id=_HOST_ID,
-        is_cloud_row=True,
-        cli=cli,
-        session_store=store,
-        backend_resolver=_empty_resolver(),
-        client_env_config=_client_env_config(),
-    )
+    with pytest.raises(SharingError):
+        enable_web_access_for_workspace(
+            agent_id=_AGENT_ID,
+            host_id=_HOST_ID,
+            is_cloud_row=True,
+            cli=cli,
+            session_store=store,
+            backend_resolver=_empty_resolver(),
+            client_env_config=_client_env_config(),
+        )
 
-    assert cli.web_access_calls == [("owner@example.com", _HOST_ID)]
+    assert cli.create_share_calls == [("owner@example.com", _HOST_ID, None)]
 
 
 def test_enable_web_access_raises_for_a_workspace_with_no_account(tmp_path: Path) -> None:
@@ -119,23 +125,7 @@ def test_enable_web_access_raises_for_a_workspace_with_no_account(tmp_path: Path
             backend_resolver=_empty_resolver(),
             client_env_config=_client_env_config(),
         )
-    assert cli.web_access_calls == []
-
-
-def test_enable_web_access_wraps_connector_failures_as_sharing_errors(tmp_path: Path) -> None:
-    store, cli = _store_with_associated_workspace(tmp_path)
-    cli.web_access_error_to_raise = ImbueCloudCliError("connector down")
-
-    with pytest.raises(SharingError):
-        enable_web_access_for_workspace(
-            agent_id=_AGENT_ID,
-            host_id=_HOST_ID,
-            is_cloud_row=True,
-            cli=cli,
-            session_store=store,
-            backend_resolver=_empty_resolver(),
-            client_env_config=_client_env_config(),
-        )
+    assert cli.shares_by_account == {}
 
 
 def test_enable_web_access_local_rows_record_the_shell_label(tmp_path: Path) -> None:
@@ -163,33 +153,6 @@ def test_enable_web_access_local_rows_record_the_shell_label(tmp_path: Path) -> 
         )
 
     assert cli.create_share_calls == [("owner@example.com", _HOST_ID, "system_interface-abc123")]
-    assert cli.web_access_calls == []
-
-
-class _SucceedingCreateShareCli(FakeImbueCloudCli):
-    """A local-row share create that returns real relay coordinates.
-
-    Lets the local bring-up run all the way through share-env rendering and
-    materials injection (the default ``RecordingMngrCaller`` records the exec
-    writes), so a test can assert the whole off-request-context path.
-    """
-
-    def create_share(
-        self,
-        *,
-        account: str,
-        host_id: str,
-        entry_label: str | None = None,
-        preferred_region: str | None = None,
-    ) -> ShareCliInfo:
-        return ShareCliInfo(
-            host_id=host_id,
-            workspace_domain=f"{host_id}.owner1234.us1.shares.example",
-            region="us1",
-            state="active",
-            relay_endpoints=TEST_RELAY_ENDPOINTS,
-            relay_token=SecretStr("relay-token-xyz"),
-        )
 
 
 def _injected_share_env_text(cli: FakeImbueCloudCli) -> str:
@@ -211,7 +174,7 @@ def test_enable_web_access_local_row_resolves_urls_without_an_app_context(tmp_pa
     # bring-up to completion with no app context pushed; before the fix it
     # raised "RuntimeError: Working outside of application context" at the
     # share-env rendering step (so the container never got share.env at all).
-    cli = _SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
     store, cli = _store_with_associated_workspace(tmp_path, cli=cli, is_cloud_row=False)
     resolver = _LabelledResolver(
         url_by_agent_and_service={},
@@ -239,8 +202,9 @@ def test_enable_web_access_local_row_resolves_urls_without_an_app_context(tmp_pa
 def test_web_access_enabler_swallows_sharing_failures(tmp_path: Path) -> None:
     # A share bring-up hiccup must never flip an already-successful create:
     # the agent creator marks the whole create FAILED on any raised exception.
-    store, cli = _store_with_associated_workspace(tmp_path)
-    cli.web_access_error_to_raise = ImbueCloudCliError("connector down")
+    recording_cli = _RecordingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    store, cli = _store_with_associated_workspace(tmp_path, cli=recording_cli, is_cloud_row=True)
+    assert isinstance(cli, _RecordingCreateShareCli)
     enabler = WebAccessEnabler(
         cli=cli,
         session_store=store,
@@ -251,11 +215,17 @@ def test_web_access_enabler_swallows_sharing_failures(tmp_path: Path) -> None:
 
     enabler(_AGENT_ID, HostId(_HOST_ID))
 
-    assert cli.web_access_calls == []
+    # The bring-up was attempted (and failed inside create_share) without the
+    # failure escaping the enabler.
+    assert cli.create_share_calls == [("owner@example.com", _HOST_ID, None)]
+    assert cli.shares_by_account == {}
 
 
 def test_web_access_enabler_enables_sharing_for_cloud_rows(tmp_path: Path) -> None:
-    store, cli = _store_with_associated_workspace(tmp_path)
+    # The full cloud-row bring-up runs client-side: the connector share is
+    # created and the share.env materials land in the agent via mngr exec.
+    succeeding_cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    store, cli = _store_with_associated_workspace(tmp_path, cli=succeeding_cli, is_cloud_row=True)
     enabler = WebAccessEnabler(
         cli=cli,
         session_store=store,
@@ -266,4 +236,7 @@ def test_web_access_enabler_enables_sharing_for_cloud_rows(tmp_path: Path) -> No
 
     enabler(_AGENT_ID, HostId(_HOST_ID))
 
-    assert cli.web_access_calls == [("owner@example.com", _HOST_ID)]
+    assert cli.shares_by_account.get("owner@example.com", {}).get(_HOST_ID) == "active"
+    share_env_text = _injected_share_env_text(cli)
+    connector_url = str(FAKE_CONNECTOR_URL).rstrip("/")
+    assert f"SHARE_CONNECTOR_URL={connector_url}" in share_env_text

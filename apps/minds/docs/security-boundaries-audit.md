@@ -146,3 +146,16 @@ The implemented approach combines Option A with a variant of Option C -- cookie 
 ## What was implemented
 
 **Option A (cookie stripping) and a variant of Option C (shared content partition) are both implemented.** Option A directly prevents the session cookie from reaching system interfaces. The content partition provides defense-in-depth by separating content and chrome cookie jars at the Electron level.
+
+## Addendum (2026-08): user-controlled SSH keys change the cloud trust model
+
+The user-controlled-keys work (`blueprint/user-controlled-keys/plan-user-controlled-keys.md`) changes who is the authority over a cloud workspace's SSH trust material. Previously, the connector's bake-time host keys and the carve's cloud-init scripts owned a slice's trust material for its whole life; the service could (and, via cidata replay, accidentally did) rewrite the owner's `authorized_keys` at any VM restart.
+
+Now the connector is trusted **exactly once per workspace, at lease handoff** (its recorded host keys become bootstrap-origin pins). *Adoption* then flips ownership to the user: the client rotates both sshd host keys to user-generated material (pinned user-origin, which bootstrap writes can never displace) and installs an in-VM reconciler that re-asserts the owner's `authorized_keys` and host key on every boot. From there, only the user's devices can update the pinning authority: the DEK-encrypted workspace record is the sole channel between devices, importers apply synced pins as user-origin material gated on the record's revision, and a served host key matching neither the pins nor an in-flight rotation is refused rather than re-trusted -- an operator re-key of a slice is correctly rejected by every device until the user explicitly re-adopts.
+
+Two deliberate caveats bound what this guarantees:
+
+- **Pre-strip operator access remains.** The pool management key stays in the VM root's `authorized_keys` until the later strip phase (see `blueprint/user-controlled-keys/strip-readiness-checklist.md`), and operators keep box-level `limactl` access to slices regardless. A running slice's contents are therefore not private from the operator; what adoption guarantees is that the *service can never silently re-establish itself as the pinning authority* over the user's connections.
+- **Stopped-workspace artifacts are operator-decryptable.** `mngr stop` uploads the slice VM's disks encrypted to a per-stop age identity, but that identity is wrapped by the **tier KEK** -- an operator-held key -- and stored on the workspace's connector row (see `docs/workspace-stop-start.md`). Stopping a workspace parks its data in operator-decryptable storage; only the restic backups are encrypted under material the user alone holds (synced inside the DEK-encrypted record).
+
+For recovering from a lost or stolen device, see [the lost-device runbook](./lost-device-runbook.md).

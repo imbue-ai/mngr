@@ -33,11 +33,13 @@ from pathlib import Path
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
@@ -53,12 +55,18 @@ from imbue.minds.desktop_client.destroying import has_destroying_marker
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
+from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import load_current_host_key_pins
+from imbue.mngr.providers.host_key_store import pin_known_hosts_text
+from imbue.mngr.providers.host_key_store import render_pins_as_known_hosts_text
 
 _RECORDS_DIRNAME = "workspace_records"
 _LEGACY_ASSOCIATIONS_FILENAME = "workspace_associations.json"
@@ -96,6 +104,12 @@ _ORPHAN_SWEEP_GRACE_SECONDS = 3600.0
 
 class WorkspaceSecretsPayload(FrozenModel):
     """Decrypted contents of a record's encrypted_secrets blob."""
+
+    # Unknown fields are tolerated (unlike FrozenModel's extra="forbid") so a
+    # future minds version can add payload fields without making THIS version
+    # reject the whole blob -- which would cost an old install not just the new
+    # fields but everything, including the DR-critical restic env.
+    model_config = ConfigDict(extra="ignore")
 
     restic_env: str | None = Field(default=None, description="Canonical restic.env text (when backups configured)")
     ssh_private_key: str | None = Field(default=None, description="Private key that grants SSH access to the host")
@@ -147,6 +161,14 @@ class ReplicaRecord(FrozenModel):
         description=(
             "Local-only: digest of the plaintext secrets this device last contributed "
             "(never synced; drives the producer's changed-material re-push)"
+        ),
+    )
+    last_applied_secrets_revision: int | None = Field(
+        default=None,
+        description=(
+            "Local-only: the record revision whose synced SSH pins this device last applied "
+            "to its host-key store (never synced; gates the importer so a record that has "
+            "not advanced can never clobber or re-stamp newer local material)"
         ),
     )
 
@@ -223,14 +245,19 @@ def _read_optional_text(path: Path) -> str | None:
         return None
 
 
-def collect_ssh_key_material(mngr_host_dir: Path, provider_kind: str, host_id: str) -> tuple[str | None, str | None]:
-    """Best-effort collection of the (private key, known_hosts) that grant access to a host.
+def collect_ssh_key_material(mngr_host_dir: Path, host_id: str) -> tuple[str | None, str | None]:
+    """Best-effort collection of the (private key, known_hosts pins) that grant access to a host.
 
     Looks for a per-host keypair under any provider instance's state dir
-    (``providers/*/*/hosts/<host_id>/ssh_key``, the imbue_cloud layout), then
-    falls back to the lima provider-wide root key for lima hosts. Providers
-    without a recognizable key layout sync without SSH material -- the record
-    still carries the backup env, which is the DR-critical part.
+    (``providers/*/*/hosts/<host_id>/ssh_key``, the imbue_cloud layout). The
+    known_hosts half is rendered from the host-key pin store next to the key --
+    the store's clean current pins, one per (endpoint, keytype) -- never
+    slurped from the file, so stale or duplicated lines an old append-only
+    writer left behind cannot enter the record. Only per-host material is ever
+    collected (a synced record must never carry a provider-wide key that opens
+    all of the user's hosts); hosts without a per-host key layout sync without
+    SSH material -- the record still carries the backup env, which is the
+    DR-critical part.
     """
     profile_dir = resolve_mngr_profile_dir(mngr_host_dir)
     if profile_dir is None:
@@ -239,15 +266,12 @@ def collect_ssh_key_material(mngr_host_dir: Path, provider_kind: str, host_id: s
     if not providers_dir.is_dir():
         return None, None
     for key_path in sorted(providers_dir.glob(f"*/*/hosts/{host_id}/ssh_key")):
-        known_hosts = _read_optional_text(key_path.parent / "known_hosts")
         private_key = _read_optional_text(key_path)
-        if private_key is not None:
-            return private_key, known_hosts
-    if provider_kind.startswith("lima"):
-        private_key = _read_optional_text(providers_dir / "lima" / "lima" / "keys" / "root_ssh_key")
-        known_hosts = _read_optional_text(providers_dir / "lima" / "lima" / "keys" / "hosts")
-        if private_key is not None:
-            return private_key, known_hosts
+        if private_key is None:
+            continue
+        pins = load_current_host_key_pins(key_path.parent / _KNOWN_HOSTS_FILENAME)
+        known_hosts = render_pins_as_known_hosts_text(pins) if pins else None
+        return private_key, known_hosts
     return None, None
 
 
@@ -280,28 +304,6 @@ def derive_openssh_public_key_line(private_key_text: str) -> str | None:
     return None
 
 
-def merge_known_hosts_text(existing_text: str | None, synced_text: str | None) -> str | None:
-    """Merge synced known_hosts lines into the existing text, add-if-absent per line.
-
-    Synced entries are only ever appended -- the connector-fed pins that
-    discovery records stay authoritative (a synced copy can be stale after a
-    legitimate host rebuild). Returns the merged text, or None when there is
-    nothing new to write.
-    """
-    if not synced_text:
-        return None
-    existing_lines: list[str] = [line for line in (existing_text or "").splitlines() if line.strip()]
-    known_lines: set[str] = set(existing_lines)
-    added_lines: list[str] = []
-    for line in synced_text.splitlines():
-        if line.strip() and line not in known_lines:
-            known_lines.add(line)
-            added_lines.append(line)
-    if not added_lines:
-        return None
-    return "\n".join(existing_lines + added_lines) + "\n"
-
-
 def _write_private_text_file(path: Path, content: str) -> None:
     """Write a secret file atomically (tmp + rename) with owner-only permissions."""
     tmp_path = path.with_name(path.name + ".tmp")
@@ -310,8 +312,8 @@ def _write_private_text_file(path: Path, content: str) -> None:
     tmp_path.rename(path)
 
 
-def _materialize_ssh_files(host_dir: Path, payload: WorkspaceSecretsPayload, public_key_line: str) -> bool:
-    """Write the synced private key (+ derived .pub) and merge known_hosts into ``host_dir``.
+def _materialize_ssh_key_files(host_dir: Path, payload: WorkspaceSecretsPayload, public_key_line: str) -> bool:
+    """Write the synced private key (+ derived .pub) into ``host_dir``.
 
     Idempotent compare-and-write: unchanged material touches nothing, so the
     caller can use the return value to decide whether discovery needs a
@@ -319,7 +321,6 @@ def _materialize_ssh_files(host_dir: Path, payload: WorkspaceSecretsPayload, pub
     """
     assert payload.ssh_private_key is not None, "caller guarantees SSH material is present"
     host_dir.mkdir(parents=True, exist_ok=True)
-    is_changed = False
 
     # The private key (and its derived public half -- mngr regenerates the
     # whole pair when either file is missing, so both must exist together).
@@ -328,21 +329,24 @@ def _materialize_ssh_files(host_dir: Path, payload: WorkspaceSecretsPayload, pub
     if _read_optional_text(key_path) != payload.ssh_private_key:
         _write_private_text_file(key_path, payload.ssh_private_key)
         _write_private_text_file(public_key_path, public_key_line)
-        is_changed = True
+        return True
     elif _read_optional_text(public_key_path) != public_key_line:
         _write_private_text_file(public_key_path, public_key_line)
-        is_changed = True
+        return True
     else:
         # Both halves already match the synced material.
-        pass
+        return False
 
-    # known_hosts entries merge add-if-absent (connector-fed pins stay).
-    known_hosts_path = host_dir / _KNOWN_HOSTS_FILENAME
-    merged_known_hosts = merge_known_hosts_text(_read_optional_text(known_hosts_path), payload.ssh_known_hosts)
-    if merged_known_hosts is not None:
-        _write_private_text_file(known_hosts_path, merged_known_hosts)
-        is_changed = True
-    return is_changed
+
+def _record_host_id_or_none(record_host_id: str) -> HostId | None:
+    """The record's host id as a typed HostId, or None (unattributed) when it does not parse."""
+    try:
+        return HostId(record_host_id)
+    except InvalidRandomIdError:
+        logger.warning(
+            "Synced record host id {!r} is not a valid mngr host id; applying its pins unattributed", record_host_id
+        )
+        return None
 
 
 class WorkspaceRecordStore(MutableModel):
@@ -473,23 +477,17 @@ class WorkspaceRecordStore(MutableModel):
 
     # -- Secrets --------------------------------------------------------------
 
-    def _collect_secrets_payload(
-        self, user_id: str, agent_id: str, provider_kind: str, host_id: str
-    ) -> WorkspaceSecretsPayload | None:
+    def _collect_secrets_payload(self, user_id: str, agent_id: str, host_id: str) -> WorkspaceSecretsPayload | None:
         """Assemble the workspace's plaintext secrets from their local sources, or None when empty."""
         restic_env = read_canonical_env(self.paths, AgentId(agent_id))
-        ssh_private_key, ssh_known_hosts = collect_ssh_key_material(
-            self._effective_mngr_host_dir(), provider_kind, host_id
-        )
+        ssh_private_key, ssh_known_hosts = collect_ssh_key_material(self._effective_mngr_host_dir(), host_id)
         if restic_env is None and ssh_private_key is None:
             return None
         return WorkspaceSecretsPayload(
             restic_env=restic_env, ssh_private_key=ssh_private_key, ssh_known_hosts=ssh_known_hosts
         )
 
-    def build_encrypted_secrets(
-        self, user_id: str, agent_id: str, provider_kind: str, host_id: str
-    ) -> BuiltRecordSecrets | None:
+    def build_encrypted_secrets(self, user_id: str, agent_id: str, host_id: str) -> BuiltRecordSecrets | None:
         """Assemble and encrypt the workspace's secret payload under the account's DEK.
 
         Returns None when the account is locked on this device (no DEK) or
@@ -500,7 +498,7 @@ class WorkspaceRecordStore(MutableModel):
         dek = dek_store.load_dek(self.paths, user_id)
         if dek is None:
             return None
-        payload = self._collect_secrets_payload(user_id, agent_id, provider_kind, host_id)
+        payload = self._collect_secrets_payload(user_id, agent_id, host_id)
         if payload is None:
             return None
         blob = encrypt_secrets(dek, payload.model_dump_json().encode("utf-8"))
@@ -544,7 +542,7 @@ class WorkspaceRecordStore(MutableModel):
         display_name = resolver.get_workspace_name(AgentId(agent_id)) or info.agent_name
         color = resolver.get_workspace_color(AgentId(agent_id))
         is_cloud_row = provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
-        built_secrets = self.build_encrypted_secrets(user_id, agent_id, provider_kind, info.host_id)
+        built_secrets = self.build_encrypted_secrets(user_id, agent_id, info.host_id)
         return ReplicaRecord(
             host_id=info.host_id,
             agent_id=str(agent_id),
@@ -725,13 +723,21 @@ class WorkspaceRecordStore(MutableModel):
                 local = by_host.get(record.host_id)
                 if local is not None and local.is_dirty:
                     continue
-                # secrets_content_hash is local-only state ("the plaintext this
-                # device last contributed"), so it must survive server rows
-                # replacing local ones -- otherwise every pull would reset the
-                # producer's change tracking.
+                # secrets_content_hash and last_applied_secrets_revision are
+                # local-only state ("the plaintext this device last
+                # contributed" / "the revision whose pins it last applied"),
+                # so they must survive server rows replacing local ones --
+                # otherwise every pull would reset the producer's change
+                # tracking and re-open the importer's revision gate.
                 if local is not None and local.secrets_content_hash is not None:
                     record = record.model_copy_update(
                         to_update(record.field_ref().secrets_content_hash, local.secrets_content_hash),
+                    )
+                if local is not None and local.last_applied_secrets_revision is not None:
+                    record = record.model_copy_update(
+                        to_update(
+                            record.field_ref().last_applied_secrets_revision, local.last_applied_secrets_revision
+                        ),
                     )
                 by_host[record.host_id] = record
             # A row the server no longer has (deleted elsewhere) drops out of
@@ -769,9 +775,7 @@ class WorkspaceRecordStore(MutableModel):
                 continue
             if record.encrypted_secrets is not None:
                 continue
-            built_secrets = self.build_encrypted_secrets(
-                user_id, record.agent_id, record.provider_kind, record.host_id
-            )
+            built_secrets = self.build_encrypted_secrets(user_id, record.agent_id, record.host_id)
             if built_secrets is None:
                 continue
             updated = record.model_copy_update(
@@ -841,12 +845,15 @@ class WorkspaceRecordStore(MutableModel):
     def materialize_account_synced_secrets(self, user_id: str, account_email: str) -> bool:
         """Materialize the account's synced secrets into their local consumers.
 
-        For every ACTIVE record: eagerly materialize the backup env, and (for
-        cloud rows) write the synced SSH key material into the imbue_cloud
-        provider's per-host state dir so discovery can reach hosts leased on
-        another install. Also sweeps orphaned per-host key dirs. No-op while
-        the account is locked. Returns True when SSH material was created or
-        changed, so the caller can bounce discovery.
+        For every ACTIVE record: eagerly materialize a missing backup env, then
+        apply the record's payload when it is new to this device (see
+        :meth:`_materialize_record_secrets`) -- converging a drifted backup env
+        for any provider kind, and (for cloud rows) writing the synced SSH key
+        material into the imbue_cloud provider's per-host state dir so
+        discovery can reach hosts leased on another install. Also sweeps
+        orphaned per-host key dirs. No-op while the account is locked. Returns
+        True when SSH material was created or changed, so the caller can
+        bounce discovery.
         """
         if not dek_store.is_account_unlocked(self.paths, user_id):
             return False
@@ -856,46 +863,154 @@ class WorkspaceRecordStore(MutableModel):
                 continue
             if record.encrypted_secrets is not None:
                 self.materialize_env_from_record(record.agent_id)
-            if record.provider_kind.startswith(_CLOUD_PROVIDER_PREFIX):
-                is_ssh_material_changed = (
-                    self._materialize_record_ssh_material(user_id, account_email, record) or is_ssh_material_changed
-                )
+            is_ssh_material_changed = (
+                self._materialize_record_secrets(user_id, account_email, record) or is_ssh_material_changed
+            )
         self._sweep_orphaned_ssh_key_dirs(user_id, account_email)
         return is_ssh_material_changed
 
-    def _materialize_record_ssh_material(self, user_id: str, account_email: str, record: ReplicaRecord) -> bool:
-        """Write one cloud record's synced SSH material; returns True when files changed."""
-        host_dir = self.imbue_cloud_host_state_dir(account_email, record.host_id)
-        if host_dir is None:
-            return False
-        if (host_dir / _LEASE_META_FILENAME).is_file():
-            # This install leased the host itself: its own keypair (and the
-            # connector-fed known_hosts pins) are authoritative.
-            self._clear_ssh_material_error(record.agent_id)
-            return False
+    def _materialize_record_secrets(self, user_id: str, account_email: str, record: ReplicaRecord) -> bool:
+        """Apply one record's synced secrets to their local consumers; returns True when SSH files changed.
+
+        The whole application is gated on the record's revision (the local-only
+        ``last_applied_secrets_revision`` stamp): a record this device already
+        applied -- or an older one -- is skipped outright, so it can neither
+        clobber nor re-stamp newer local material (e.g. a key rotation or a
+        backup re-provision run on this machine that the record has not caught
+        up to). Only a pushed change whose payload actually differs from what
+        this device last held re-opens the gate: an advanced revision alone is
+        not enough, because a metadata-only push from another device (e.g. a
+        rename) carries the unchanged secrets blob, and re-applying it would
+        clobber the local material all the same.
+
+        When the gate opens, the full payload is applied:
+
+        - the canonical backup env is replaced when the payload carries one
+          that differs (never deleted -- a payload without an env leaves the
+          local copy, the only surviving restic credentials, alone). This is
+          the convergence path for every provider kind: a device holding a
+          stale env picks up the record's rotated one here.
+        - for cloud rows without a local lease, the SSH key files and
+          known_hosts pins are applied as before: pins go through the host-key
+          store as user-origin material with replace-by-(endpoint, keytype)
+          semantics, so a stale first-ordered pin can never shadow the live
+          key and later local bootstrap writes can never displace what the
+          record established. Missing key or known_hosts files (a swept and
+          re-created host dir) re-open the gate regardless of the revision.
+          The lease.json skip covers only this SSH half: the leasing install's
+          keypair is authoritative because it minted it, but its env is no
+          more authoritative than any other device's.
+
+        A successful application also stamps ``secrets_content_hash`` with the
+        applied payload's digest: local material now mirrors the record, so a
+        later local change (e.g. ``mngr imbue_cloud hosts rotate`` run here)
+        is detected by the metadata refresh and re-pushed -- without this, only
+        the original contributor could ever propagate rotated material. The
+        parity digest is only stamped when the locally collected payload truly
+        matches the applied one, so a device holding partial material stays
+        ineligible to push its view over the record's.
+        """
         if record.encrypted_secrets is None:
             self._clear_ssh_material_error(record.agent_id)
             return False
+        is_cloud_row = record.provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
         payload = self.decrypt_record_secrets(user_id, record)
         if payload is None:
-            self._set_ssh_material_error(record.agent_id, "Could not decrypt the synced secrets for this machine.")
+            if is_cloud_row:
+                self._set_ssh_material_error(record.agent_id, "Could not decrypt the synced secrets for this machine.")
             return False
-        if payload.ssh_private_key is None:
+
+        # The SSH half applies only to cloud rows this install did not lease.
+        host_dir = self.imbue_cloud_host_state_dir(account_email, record.host_id) if is_cloud_row else None
+        is_lease_held = host_dir is not None and (host_dir / _LEASE_META_FILENAME).is_file()
+        if is_lease_held:
+            # This install leased the host itself: its own keypair (and the
+            # connector-fed known_hosts pins) are authoritative.
+            self._clear_ssh_material_error(record.agent_id)
+        is_ssh_applicable = host_dir is not None and not is_lease_held and payload.ssh_private_key is not None
+
+        # The revision gate (with the SSH missing-file escape hatches).
+        payload_content_hash = secrets_payload_content_hash(payload)
+        is_payload_new_here = payload_content_hash != record.secrets_content_hash
+        is_due = record.revision > (record.last_applied_secrets_revision or 0) and is_payload_new_here
+        if is_ssh_applicable:
+            assert host_dir is not None
+            known_hosts_path = host_dir / _KNOWN_HOSTS_FILENAME
+            is_key_pair_present = (host_dir / _SSH_KEY_FILENAME).is_file() and (
+                host_dir / _SSH_PUBLIC_KEY_FILENAME
+            ).is_file()
+            is_due = (
+                is_due
+                or not is_key_pair_present
+                or (payload.ssh_known_hosts is not None and not known_hosts_path.exists())
+            )
+        if not is_due:
             self._clear_ssh_material_error(record.agent_id)
             return False
-        public_key_line = derive_openssh_public_key_line(payload.ssh_private_key)
-        if public_key_line is None:
-            self._set_ssh_material_error(record.agent_id, "The synced SSH key for this machine could not be parsed.")
-            return False
-        try:
-            is_changed = _materialize_ssh_files(host_dir, payload, public_key_line)
-        except OSError as e:
-            logger.warning("Could not materialize SSH material for machine {}: {}", record.agent_id, e)
-            self._set_ssh_material_error(record.agent_id, f"Could not write the SSH key material: {e}")
-            return False
+
+        # The env half: replace-on-difference, never delete.
+        if payload.restic_env is not None:
+            try:
+                if read_canonical_env(self.paths, AgentId(record.agent_id)) != payload.restic_env:
+                    write_canonical_env(self.paths, AgentId(record.agent_id), payload.restic_env)
+                    logger.info("Converged the backup env for machine {} to its synced record", record.agent_id)
+            except BackupProvisioningError as e:
+                # No stamp: the gate stays open so the next pass retries.
+                logger.warning("Could not converge the backup env for machine {}: {}", record.agent_id, e)
+                return False
+
+        # The SSH half: key files, then known_hosts pins through the store.
+        is_changed = False
+        if is_ssh_applicable:
+            assert host_dir is not None and payload.ssh_private_key is not None
+            public_key_line = derive_openssh_public_key_line(payload.ssh_private_key)
+            if public_key_line is None:
+                self._set_ssh_material_error(
+                    record.agent_id, "The synced SSH key for this machine could not be parsed."
+                )
+                return False
+            try:
+                is_changed = _materialize_ssh_key_files(host_dir, payload, public_key_line)
+            except OSError as e:
+                logger.warning("Could not materialize SSH material for machine {}: {}", record.agent_id, e)
+                self._set_ssh_material_error(record.agent_id, f"Could not write the SSH key material: {e}")
+                return False
+            if payload.ssh_known_hosts is not None:
+                known_hosts_path = host_dir / _KNOWN_HOSTS_FILENAME
+                content_before = _read_optional_text(known_hosts_path)
+                try:
+                    pin_known_hosts_text(
+                        known_hosts_path,
+                        payload.ssh_known_hosts,
+                        host_id=_record_host_id_or_none(record.host_id),
+                        origin=HostKeyOrigin.USER,
+                    )
+                except (MngrError, OSError) as e:
+                    logger.warning("Could not apply synced known_hosts pins for machine {}: {}", record.agent_id, e)
+                    self._set_ssh_material_error(record.agent_id, f"Could not write the synced host-key pins: {e}")
+                    return is_changed
+                is_changed = _read_optional_text(known_hosts_path) != content_before or is_changed
+
+        # Stamp the local-only tracking fields: the gate closes at this
+        # revision, and -- only when the locally collected payload truly
+        # matches the applied one -- the parity digest records that local
+        # material now mirrors it. Without parity (e.g. a leased row whose
+        # keypair this pass deliberately does not touch), the previous hash
+        # state is kept, so a device holding partial material stays
+        # ineligible to push its view.
+        local_payload = self._collect_secrets_payload(user_id, record.agent_id, record.host_id)
+        is_parity = local_payload is not None and secrets_payload_content_hash(local_payload) == payload_content_hash
+        stamped = record.model_copy_update(
+            to_update(record.field_ref().last_applied_secrets_revision, record.revision),
+            *([to_update(record.field_ref().secrets_content_hash, payload_content_hash)] if is_parity else []),
+        )
+        if stamped != record:
+            with self._lock:
+                self._set_record_unlocked(user_id, stamped)
         if is_changed:
             logger.info("Materialized synced SSH material for machine {} at {}", record.agent_id, host_dir)
-        self._clear_ssh_material_error(record.agent_id)
+        if is_ssh_applicable:
+            self._clear_ssh_material_error(record.agent_id)
         return is_changed
 
     def _sweep_orphaned_ssh_key_dirs(self, user_id: str, account_email: str) -> None:
@@ -1173,11 +1288,15 @@ class WorkspaceRecordStore(MutableModel):
             if rebuilt is None:
                 continue
             # A secrets update is warranted when this device is (re-)adding
-            # material the record lacks, OR when this device contributed the
-            # record's current secrets (its hash is known here) and the local
-            # material has since changed. A device that never contributed
-            # (hash unknown) must not replace another device's secrets with
-            # its own -- possibly partial -- view of the material.
+            # material the record lacks, OR when this device holds the
+            # record's current secrets (its hash is known here -- because it
+            # contributed them, or because it fully materialized them, which
+            # stamps the parity digest) and the local material has since
+            # changed. A device whose hash is unknown must not replace
+            # another device's secrets with its own -- possibly partial --
+            # view of the material. The materialization parity stamp is what
+            # lets a non-leasing device propagate a key rotation it ran
+            # locally (the lost-device runbook's healing path).
             is_secrets_changed = (
                 is_secrets_sync_enabled
                 and rebuilt.encrypted_secrets is not None

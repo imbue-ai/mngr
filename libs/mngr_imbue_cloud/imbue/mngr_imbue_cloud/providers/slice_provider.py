@@ -347,6 +347,7 @@ class SliceVpsDockerProvider(VpsProvider):
                 hostname=box,
                 port=vm_ssh_port,
                 public_key=vps_host_public_key,
+                host_id=host_id,
             )
             wait_for_sshd(hostname=box, port=vm_ssh_port, timeout_seconds=self.config.ssh_connect_timeout)
 
@@ -627,10 +628,11 @@ class SliceVpsDockerProvider(VpsProvider):
         finally:
             outer.disconnect()
 
-    def _wait_for_container_sshd(self, vps_ip: str, realizer: HostRealizer | None = None) -> None:
+    def _wait_for_container_sshd(self, vps_ip: str, host_id: HostId, realizer: HostRealizer | None = None) -> None:
         # imbue_cloud is container-only (it rejects bare), and the agent sshd is
-        # reached on a dynamically forwarded port, so the realizer is unused here.
-        del realizer
+        # reached on a dynamically forwarded port, so the realizer (and the
+        # host_id it would resolve a key for) is unused here.
+        del host_id, realizer
         port = (
             self._current_container_port
             if self._current_container_port is not None
@@ -639,7 +641,7 @@ class SliceVpsDockerProvider(VpsProvider):
         wait_for_sshd(hostname=vps_ip, port=port, timeout_seconds=self.config.ssh_connect_timeout)
 
     def _create_host_object(self, host_id: HostId, host_name: HostName, vps_ip: str, realizer: HostRealizer) -> Host:
-        container_key_path, _container_pub = self._get_container_ssh_keypair()
+        container_key_path, _container_pub = self._get_container_ssh_keypair(host_id)
         _container_host_key_path, container_host_public_key = self._get_container_host_keypair(host_id)
         port = (
             self._current_container_port
@@ -652,6 +654,7 @@ class SliceVpsDockerProvider(VpsProvider):
             hostname=vps_ip,
             port=port,
             public_key=container_host_public_key,
+            host_id=host_id,
         )
         pyinfra_host = create_pyinfra_host(
             hostname=vps_ip,

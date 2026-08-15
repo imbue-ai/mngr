@@ -187,6 +187,19 @@ class ClaudeConfigPatchError(ImbueCloudError, RuntimeError):
     """Raised when patching the claude config on a leased imbue_cloud host fails."""
 
 
+class AdoptionError(ImbueCloudError):
+    """Raised when adopting a leased slice (reconciler install / key rotation / verification) fails."""
+
+
+class HostKeyDriftError(AdoptionError):
+    """Raised when an adopted endpoint serves a key that matches neither its pin nor a pending rotation.
+
+    Somebody other than this user's devices re-keyed the host (e.g. an operator
+    re-key, or a rebuild this device has not recorded). The device correctly
+    refuses to trust the new key; the user re-adopts (or re-syncs) to recover.
+    """
+
+
 class WorkspacesEndpointUnavailableError(ImbueCloudConnectorError):
     """Raised when the connector predates the /workspaces lifecycle endpoints."""
 

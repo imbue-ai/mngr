@@ -17,6 +17,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.providers.ssh_utils import per_host_key_dir
+from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.docker_realizer import CONTAINER_KNOWN_HOSTS_NAME
@@ -83,19 +85,32 @@ def test_host_dir_path_on_outer_with_volume_home_path_is_inside_the_home_subtree
     assert realizer.host_dir_path_on_outer(host_id) == expected
 
 
-def test_agent_endpoint_targets_container_port_with_container_key(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """The agent endpoint is the VPS IP at the container sshd port, with the container keypair."""
+def test_agent_endpoint_targets_container_port_with_per_host_container_key(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """The agent endpoint is the VPS IP at the container sshd port, with the host's own keypair."""
     realizer = _realizer(temp_mngr_ctx, tmp_path, container_ssh_port=2244)
-    endpoint = realizer.agent_endpoint("203.0.113.5")
+    host_id = HostId.generate()
+    endpoint = realizer.agent_endpoint("203.0.113.5", host_id)
 
     assert endpoint.hostname == "203.0.113.5"
     assert endpoint.port == 2244
     assert endpoint.known_hosts_path == tmp_path / CONTAINER_KNOWN_HOSTS_NAME
-    # The container client key is materialized under key_dir on first use.
-    assert endpoint.private_key_path == tmp_path / CONTAINER_SSH_KEY_NAME
+    # The per-host container client key is materialized under key_dir on first use.
+    assert endpoint.private_key_path == per_host_key_dir(tmp_path, host_id) / CONTAINER_SSH_KEY_NAME
     assert endpoint.private_key_path.exists()
     # The container realizer connects as the connector default (root), not an explicit user.
     assert endpoint.ssh_user is None
+
+
+def test_agent_endpoint_falls_back_to_legacy_container_key_for_old_hosts(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A container created before per-host client keys only authorizes the provider-wide key."""
+    save_ssh_keypair(tmp_path, CONTAINER_SSH_KEY_NAME)
+    realizer = _realizer(temp_mngr_ctx, tmp_path, container_ssh_port=2244)
+    endpoint = realizer.agent_endpoint("203.0.113.5", HostId.generate())
+    assert endpoint.private_key_path == tmp_path / CONTAINER_SSH_KEY_NAME
 
 
 class _AllFailOuter(MutableModel):

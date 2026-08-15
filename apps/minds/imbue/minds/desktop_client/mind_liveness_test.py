@@ -6,12 +6,9 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
-from imbue.minds.desktop_client.mind_liveness import MindShutdownTraits
 from imbue.minds.desktop_client.mind_liveness import classify_host_state
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
-from imbue.minds.desktop_client.mind_liveness import compute_mind_shutdown_traits_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
-from imbue.minds.desktop_client.mind_liveness import provider_backend_start_is_slow
 from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_shutdown
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
@@ -86,16 +83,7 @@ def test_provider_backend_supports_shutdown_gates_on_capable_backends() -> None:
     assert provider_backend_supports_shutdown("ovh") is False
 
 
-def test_provider_backend_start_is_slow_marks_only_cloud_restore_backends() -> None:
-    # imbue_cloud starts restore the workspace from object storage (minutes);
-    # every other shutdown-capable backend starts with a quick local/VM bounce.
-    assert provider_backend_start_is_slow("imbue_cloud") is True
-    assert provider_backend_start_is_slow("docker") is False
-    assert provider_backend_start_is_slow("lima") is False
-    assert provider_backend_start_is_slow("aws") is False
-
-
-def test_compute_shutdown_traits_marks_only_cloud_minds_slow_start() -> None:
+def test_compute_covers_cloud_and_local_minds_alike() -> None:
     resolver = MngrCliBackendResolver()
     cloud_agent = AgentId.generate()
     local_agent = AgentId.generate()
@@ -116,11 +104,11 @@ def test_compute_shutdown_traits_marks_only_cloud_minds_slow_start() -> None:
         )
     )
 
-    traits = compute_mind_shutdown_traits_by_agent_id(resolver)
+    liveness = compute_mind_liveness_by_agent_id(resolver)
 
-    assert traits == {
-        str(cloud_agent): MindShutdownTraits(liveness=MindLiveness.STOPPED, is_slow_start=True),
-        str(local_agent): MindShutdownTraits(liveness=MindLiveness.RUNNING, is_slow_start=False),
+    assert liveness == {
+        str(cloud_agent): MindLiveness.STOPPED,
+        str(local_agent): MindLiveness.RUNNING,
     }
 
 

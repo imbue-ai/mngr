@@ -83,11 +83,14 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.host_key_store import has_host_key_store
+from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
+from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_vps.bare_realizer import BareRealizer
@@ -481,17 +484,25 @@ class VpsProvider(BaseProviderInstance):
         return key_dir
 
     def _get_vps_ssh_keypair(self) -> tuple[Path, str]:
-        """Load or create the SSH keypair for authenticating to the VPS."""
+        """Load or create the provider-wide management keypair for authenticating to VPS roots.
+
+        This key opens every VPS this provider instance ordered (discovery must
+        reach a VPS before knowing which host lives on it). It never enters a
+        synced workspace record -- the agent connection uses per-host client
+        keys resolved by the realizers.
+        """
         return load_or_create_ssh_keypair(self._key_dir(), VPS_SSH_KEY_NAME)
 
-    def _get_container_ssh_keypair(self) -> tuple[Path, str]:
-        """Load or create the SSH keypair for authenticating to the container.
+    def _get_container_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Resolve the client keypair that opens this host's container: per-host, then legacy.
 
-        Kept on the provider (delegating to the same key-file name the
+        Kept on the provider (delegating to the same key-file names the
         ``DockerRealizer`` uses) so the imbue_cloud slice provider's
         ``_create_host_object`` override keeps reaching the container keypair.
         """
-        return load_or_create_ssh_keypair(self._key_dir(), CONTAINER_SSH_KEY_NAME)
+        return resolve_per_host_client_keypair(
+            self._key_dir(), host_id, CONTAINER_SSH_KEY_NAME, CONTAINER_KNOWN_HOSTS_NAME
+        )
 
     def _get_vps_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
         """Load or create this host's unique Ed25519 host keypair (injected into the VPS via cloud-init)."""
@@ -515,19 +526,21 @@ class VpsProvider(BaseProviderInstance):
     def _vps_known_hosts_path(self) -> Path:
         return self._key_dir() / VPS_KNOWN_HOSTS_NAME
 
-    def record_outer_host_key(self, host: str, port: int, public_key: str) -> None:
+    def record_outer_host_key(self, host: str, port: int, public_key: str, host_id: HostId | None = None) -> None:
         """Pin an outer (VPS-root) sshd host key in this provider's known_hosts.
 
         Callers operating on a VPS this provider did not itself order (e.g. the
         imbue_cloud rebuild on a leased host) use this so the provider's own outer
         connections -- including the certified-data sync callback -- pass strict
-        host-key checking instead of failing on a missing entry.
+        host-key checking instead of failing on a missing entry. ``host_id``,
+        when known, attributes the pin to that host's store record.
         """
         add_host_to_known_hosts(
             known_hosts_path=self._vps_known_hosts_path(),
             hostname=host,
             port=port,
             public_key=public_key,
+            host_id=host_id,
         )
 
     def _container_known_hosts_path(self) -> Path:
@@ -590,7 +603,7 @@ class VpsProvider(BaseProviderInstance):
         ``vps_ip:container_ssh_port`` with the container keypair; bare realizer:
         the VM's own port-22 sshd).
         """
-        endpoint = realizer.agent_endpoint(vps_ip)
+        endpoint = realizer.agent_endpoint(vps_ip, host_id)
         pyinfra_host = create_pyinfra_host(
             hostname=endpoint.hostname,
             port=endpoint.port,
@@ -869,7 +882,7 @@ class VpsProvider(BaseProviderInstance):
         # forwarded port (the imbue_cloud slice provider does this).
         logger.log(LogLevel.BUILD.value, "Waiting for agent SSH to be ready...", source="vps")
         with log_span("Waiting for agent SSH"):
-            self._wait_for_container_sshd(vps_ip)
+            self._wait_for_container_sshd(vps_ip, host_id)
         logger.log(LogLevel.BUILD.value, "Agent SSH ready", source="vps")
 
         return self._finalize_host_creation(
@@ -1072,6 +1085,7 @@ class VpsProvider(BaseProviderInstance):
             hostname=vps_ip,
             port=22,
             public_key=vps_host_public_key,
+            host_id=host_id,
         )
 
         logger.log(LogLevel.BUILD.value, "Waiting for SSH to be ready on VPS...", source="vps")
@@ -1224,7 +1238,7 @@ class VpsProvider(BaseProviderInstance):
         external store. Default no-op.
         """
 
-    def _wait_for_container_sshd(self, vps_ip: str, realizer: HostRealizer | None = None) -> None:
+    def _wait_for_container_sshd(self, vps_ip: str, host_id: HostId, realizer: HostRealizer | None = None) -> None:
         """Wait for the agent's sshd to be reachable at the realizer's endpoint port.
 
         Container realizer: the exposed container port; bare realizer: the VM's
@@ -1237,7 +1251,7 @@ class VpsProvider(BaseProviderInstance):
         effective_realizer = realizer if realizer is not None else self._realizer
         wait_for_sshd(
             hostname=vps_ip,
-            port=effective_realizer.agent_endpoint(vps_ip).port,
+            port=effective_realizer.agent_endpoint(vps_ip, host_id).port,
             timeout_seconds=self.config.ssh_connect_timeout,
         )
 
@@ -1383,7 +1397,7 @@ class VpsProvider(BaseProviderInstance):
             realizer.start_placement(outer, handle)
 
             with log_span("Waiting for container SSH"):
-                self._wait_for_container_sshd(host_record.vps_ip, realizer)
+                self._wait_for_container_sshd(host_record.vps_ip, host_id, realizer)
 
             host_obj = self._create_host_object(
                 host_id, HostName(host_record.certified_host_data.host_name), host_record.vps_ip, realizer
@@ -1492,13 +1506,20 @@ class VpsProvider(BaseProviderInstance):
                 except (OSError, UnicodeDecodeError) as e:
                     logger.trace("Failed to clean up container known_hosts: {}", e)
 
-            # Remove this host's unique on-disk host keypairs. Benign local cleanup
-            # (the keys are useless once the host is gone); a missing dir or OS error
-            # leaves no infrastructure behind, so it is never recorded as a failure.
+            # Remove this host's unique on-disk keypairs and forget its pins in the
+            # host-key stores (dead-endpoint GC). Benign local cleanup (the keys are
+            # useless once the host is gone); a missing dir or OS error leaves no
+            # infrastructure behind, so it is never recorded as a failure.
             try:
                 shutil.rmtree(per_host_key_dir(self._key_dir(), host_id), ignore_errors=True)
             except OSError as e:
                 logger.trace("Failed to clean up per-host key dir: {}", e)
+            for known_hosts_path in (self._vps_known_hosts_path(), self._container_known_hosts_path()):
+                if has_host_key_store(known_hosts_path):
+                    try:
+                        remove_host_key_record(known_hosts_path, host_id)
+                    except OSError as e:
+                        logger.trace("Failed to clean up host-key store for {}: {}", known_hosts_path, e)
 
             self._delete_host_record_externally(host_id)
             logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)

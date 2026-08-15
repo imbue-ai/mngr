@@ -17,6 +17,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.ssh_utils import per_host_key_dir
+from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr_vps.bare_realizer import BARE_HOST_STORE_DIR
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.config import VpsProviderConfig
@@ -100,15 +102,23 @@ def test_host_dir_path_on_outer_is_under_the_fixed_store_dir(temp_mngr_ctx: Mngr
     assert realizer.host_dir_path_on_outer(HostId.generate()) == BARE_HOST_STORE_DIR / "host_dir"
 
 
-def test_agent_endpoint_is_vps_port_22_with_vps_key(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """The agent IS the VM root account: the endpoint reuses the VPS keypair on port 22."""
-    endpoint = _bare_realizer(temp_mngr_ctx, tmp_path).agent_endpoint("203.0.113.7")
+def test_agent_endpoint_is_vps_port_22_with_per_host_key(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """The agent IS the VM root account: the endpoint targets port 22 with the host's own key."""
+    host_id = HostId.generate()
+    endpoint = _bare_realizer(temp_mngr_ctx, tmp_path).agent_endpoint("203.0.113.7", host_id)
     assert endpoint.hostname == "203.0.113.7"
     assert endpoint.port == 22
     assert endpoint.ssh_user == "root"
-    assert endpoint.private_key_path == tmp_path / VPS_SSH_KEY_NAME
+    assert endpoint.private_key_path == per_host_key_dir(tmp_path, host_id) / VPS_SSH_KEY_NAME
     assert endpoint.known_hosts_path == tmp_path / VPS_KNOWN_HOSTS_NAME
     assert endpoint.private_key_path.exists()
+
+
+def test_agent_endpoint_falls_back_to_legacy_vps_key_for_old_hosts(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """A VM created before per-host client keys only authorizes the provider-wide vps key."""
+    save_ssh_keypair(tmp_path, VPS_SSH_KEY_NAME)
+    endpoint = _bare_realizer(temp_mngr_ctx, tmp_path).agent_endpoint("203.0.113.7", HostId.generate())
+    assert endpoint.private_key_path == tmp_path / VPS_SSH_KEY_NAME
 
 
 def test_realize_placement_installs_packages_and_seeds_store_without_container(

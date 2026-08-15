@@ -584,7 +584,7 @@ def test_realizer_for_record_picks_bare_for_a_bare_record_under_default_containe
     realizer = provider._realizer_for_record(bare_record)
     assert isinstance(realizer, BareRealizer)
     # The bare agent endpoint is the VM's own port 22 -- not the container port 2222.
-    assert realizer.agent_endpoint("10.0.0.1").port == 22
+    assert realizer.agent_endpoint("10.0.0.1", HostId.generate()).port == 22
 
 
 def test_realizer_for_record_picks_container_for_a_container_record(temp_mngr_ctx: MngrContext) -> None:
@@ -593,7 +593,7 @@ def test_realizer_for_record_picks_container_for_a_container_record(temp_mngr_ct
     container_record = _record_for(HostId.generate(), container_name="mngr-agent-abc")
     realizer = provider._realizer_for_record(container_record)
     assert isinstance(realizer, DockerRealizer)
-    assert realizer.agent_endpoint("10.0.0.1").port == provider.config.container_ssh_port
+    assert realizer.agent_endpoint("10.0.0.1", HostId.generate()).port == provider.config.container_ssh_port
 
 
 def test_isolation_from_marker_defaults_absent_to_container() -> None:

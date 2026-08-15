@@ -46,8 +46,13 @@ class HostRealizer(MutableModel, ABC):
     provider_name: ProviderInstanceName = Field(frozen=True, description="Name of the owning provider instance")
 
     @abstractmethod
-    def agent_endpoint(self, vps_ip: str) -> AgentEndpoint:
-        """Where (and how) to SSH to the agent placed on ``vps_ip``."""
+    def agent_endpoint(self, vps_ip: str, host_id: HostId) -> AgentEndpoint:
+        """Where (and how) to SSH to the agent placed on ``vps_ip``.
+
+        ``host_id`` selects the host's own client key (per-host for hosts
+        created after per-host client keys landed, the legacy provider-wide
+        pair for older ones).
+        """
 
     @abstractmethod
     def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> VpsHostStore:

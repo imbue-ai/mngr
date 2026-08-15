@@ -1,7 +1,10 @@
 import os
 import platform
+import re
+import shlex
 import tempfile
 from pathlib import Path
+from typing import Final
 
 import yaml
 from loguru import logger
@@ -181,7 +184,7 @@ def _build_provisioning_script(
     """
     host_key_block = _build_host_key_block(host_private_key_pem, host_public_key_openssh)
     host_data_disk_block = _build_host_data_disk_block(host_data_disk_name, host_dir, volume_home_path)
-    root_authorized_keys_block = _build_root_authorized_keys_block(root_authorized_public_key)
+    root_authorized_keys_block = build_root_authorized_keys_block(root_authorized_public_key)
     # Permit key-based root login only when the agent runs as root; the default
     # (non-root) path leaves sshd's PermitRootLogin untouched.
     permit_root_login_line = "\nPermitRootLogin prohibit-password" if root_authorized_public_key is not None else ""
@@ -292,18 +295,87 @@ fi
 """
 
 
-def _build_root_authorized_keys_block(root_authorized_public_key: str | None) -> str:
-    """Return a bash block that authorizes ``root_authorized_public_key`` for the VM's root user, or an inert comment."""
+def build_root_authorized_keys_block(root_authorized_public_key: str | None) -> str:
+    """Return a bash block that authorizes ``root_authorized_public_key`` for the VM's root user, or an inert comment.
+
+    Appends if absent rather than writing the file, because this block does not
+    own ``authorized_keys`` -- it only owns its own line in it. Other writers add
+    keys after the carve (the imbue_cloud connector injects the leasing user's
+    key at lease time), and lima re-runs provisioning on *every* start: a start
+    regenerates cidata with a fresh cloud-init instance-id, so cloud-init treats
+    the VM as new and replays every per-instance module. A truncating write here
+    therefore silently dropped the owner's key on the first restart after their
+    lease, leaving the VM reachable but rejecting them -- with no way back except
+    recreating the machine (see apps/minds/docs/slice-restart-wipes-owner-ssh-key.md).
+
+    Public (not ``_``-prefixed) because the imbue_cloud ``admin repair-keys``
+    sweep renders this same block when patching existing slices' lima.yaml.
+    """
     if root_authorized_public_key is None:
         return "# (no client key to authorize for root)"
+    quoted_key = shlex.quote(root_authorized_public_key.strip())
     return f"""\
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
-cat > /root/.ssh/authorized_keys <<'MNGR_LIMA_ROOT_KEY'
-{root_authorized_public_key.strip()}
-MNGR_LIMA_ROOT_KEY
-chmod 600 /root/.ssh/authorized_keys
+MNGR_LIMA_AK=/root/.ssh/authorized_keys
+touch "$MNGR_LIMA_AK"
+# A file not ending in a newline would otherwise absorb our key onto its last
+# line, corrupting both. Command substitution strips trailing newlines, so this
+# is non-empty only when the final byte is not one.
+if [ -n "$(tail -c1 "$MNGR_LIMA_AK")" ]; then printf '\\n' >> "$MNGR_LIMA_AK"; fi
+grep -qxF {quoted_key} "$MNGR_LIMA_AK" || printf '%s\\n' {quoted_key} >> "$MNGR_LIMA_AK"
+chmod 600 "$MNGR_LIMA_AK"
 chown -R root:root /root/.ssh"""
+
+
+# The truncating root-key step the pre-fix generator wrote into every VM's
+# provision script (see build_root_authorized_keys_block's docstring for the
+# incident it caused). The key line is captured so the patched block
+# re-asserts exactly the same key.
+_TRUNCATING_ROOT_KEY_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
+    r"mkdir -p /root/\.ssh\n"
+    r"chmod 700 /root/\.ssh\n"
+    r"cat > /root/\.ssh/authorized_keys <<'MNGR_LIMA_ROOT_KEY'\n"
+    r"(?P<key>[^\n]+)\n"
+    r"MNGR_LIMA_ROOT_KEY\n"
+    r"chmod 600 /root/\.ssh/authorized_keys\n"
+    r"chown -R root:root /root/\.ssh"
+)
+
+
+def patch_root_authorized_keys_block_in_lima_yaml(lima_yaml_text: str) -> str | None:
+    """Rewrite a stored lima.yaml's truncating root-key step to the current append-if-absent form.
+
+    Returns the patched YAML text, or None when nothing needed patching (the VM
+    was created after the generator fix, or a previous patch already ran). The
+    provision scripts are edited inside the parsed config and re-dumped with the
+    same settings :func:`write_lima_yaml` uses, so ``limactl`` keeps reading a
+    well-formed file. Used by the imbue_cloud ``admin repair-keys`` sweep to fix
+    existing slices' stored configs in place.
+    """
+    parsed = yaml.safe_load(lima_yaml_text)
+    if not isinstance(parsed, dict):
+        return None
+    provision_entries = parsed.get("provision")
+    if not isinstance(provision_entries, list):
+        return None
+    is_changed = False
+    updated_entries = []
+    for entry in provision_entries:
+        script = entry.get("script") if isinstance(entry, dict) else None
+        if isinstance(script, str) and _TRUNCATING_ROOT_KEY_BLOCK_RE.search(script):
+            patched_script = _TRUNCATING_ROOT_KEY_BLOCK_RE.sub(
+                lambda match: build_root_authorized_keys_block(match.group("key")),
+                script,
+            )
+            updated_entries.append({**entry, "script": patched_script})
+            is_changed = True
+        else:
+            updated_entries.append(entry)
+    if not is_changed:
+        return None
+    patched_config = {**parsed, "provision": updated_entries}
+    return yaml.dump(patched_config, default_flow_style=False, sort_keys=False)
 
 
 def _build_host_data_disk_block(

@@ -179,6 +179,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
     restarts; the shared desktop gateway is still ensured up (it is shared
     across all agents). A ``None`` host state is treated as unknown and stays
     on the normal path.
+
+    ``UNAUTHENTICATED`` is handled separately: the host is up and its container
+    is probably serving the workspace fine, but the outer sshd rejected our key,
+    so provisioning has no usable door. That is also skipped, but with a warning
+    (once per host) -- otherwise the only symptom is every latchkey call from
+    that host's agents failing while the workspace looks perfectly healthy.
     """
 
     latchkey: Latchkey = Field(description="Latchkey wrapper that owns the shared gateway subprocess")
@@ -217,6 +223,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # host_ids already warned about an unresolvable gateway route, so the warning
     # is emitted once per host rather than on every discovery cycle.
     _unresolved_route_hosts: set[str] = PrivateAttr(default_factory=set)
+    # Same, for hosts whose outer sshd rejected this machine's key.
+    _unauthenticated_hosts: set[str] = PrivateAttr(default_factory=set)
 
     def __call__(
         self,
@@ -232,6 +240,18 @@ class LatchkeyDiscoveryHandler(MutableModel):
             logger.opt(exception=e).error("Failed to start shared Latchkey gateway for agent {}: {}", agent_id, e)
             return
 
+        # UNAUTHENTICATED is not "the machine is down" -- the host is reachable
+        # and its container is very likely serving the workspace normally; what
+        # failed is our key on the *outer* sshd, which is the only door
+        # provisioning can use. So the skip below is right, but it must not be
+        # silent: nothing else reports it, and the user just sees every latchkey
+        # call from their agents fail with connection-refused while the
+        # workspace itself looks healthy.
+        if host_state is HostState.UNAUTHENTICATED:
+            self._warn_unauthenticated_host(host_id)
+            self._tear_down_stopped_agent(agent_id, host_id)
+            return
+
         # A host that discovery reports as explicitly not-running (stopped,
         # paused, crashed, ...) has no live container sshd or docker daemon
         # target to act on, so tear down any reverse tunnel we opened while it
@@ -245,6 +265,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         if host_state is not None and host_state is not HostState.RUNNING:
             self._tear_down_stopped_agent(agent_id, host_id)
             return
+
+        if host_state is HostState.RUNNING:
+            # Outer auth demonstrably works again (for imbue_cloud, RUNNING is
+            # only reachable by running the listing script over outer SSH), so
+            # the next rejection is a new episode and warns afresh rather than
+            # being deduplicated against the last one.
+            with self._remote_hosts_lock:
+                self._unauthenticated_hosts.discard(str(host_id))
 
         if ssh_info is None:
             # No SSH info for this agent (e.g. local-provider agent in tests,
@@ -581,6 +609,37 @@ class LatchkeyDiscoveryHandler(MutableModel):
             )
             return None
         return dict(reloaded.config.providers)
+
+    def _warn_unauthenticated_host(self, host_id: HostId) -> None:
+        """Surface a host whose outer sshd rejected our key, once per host, loudly.
+
+        Provisioning reaches the workspace's gateway over the outer host, so an
+        outer key rejection means nothing can be wired: the in-container gateway
+        port stays unbound and every latchkey call from that host's agents fails
+        with connection-refused. Falling back to the desktop gateway is not an
+        option for the same reasons spelled out in
+        ``_warn_unresolved_gateway_route``.
+
+        This is worth its own warning because the failure is otherwise invisible:
+        the container's sshd is untouched, so the workspace keeps loading and
+        chatting normally and nothing connects the dead latchkey calls to the
+        host's SSH state.
+        """
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            is_first = host_id_str not in self._unauthenticated_hosts
+            self._unauthenticated_hosts.add(host_id_str)
+        message = (
+            "Host {} rejected this machine's SSH key (host state UNAUTHENTICATED), so its latchkey "
+            "gateway cannot be provisioned: its in-container gateway port stays closed and latchkey "
+            "calls from its agents will fail with connection-refused. The workspace itself is "
+            "unaffected (it reaches the container over a different sshd), so nothing else will report "
+            "this. The host's outer authorized_keys has most likely lost this machine's key."
+        )
+        if is_first:
+            logger.warning(message, host_id)
+        else:
+            logger.debug(message, host_id)
 
     def _warn_unresolved_gateway_route(self, host_id: HostId, provider_name: str) -> None:
         """Surface an unresolvable gateway route once per host, loudly.

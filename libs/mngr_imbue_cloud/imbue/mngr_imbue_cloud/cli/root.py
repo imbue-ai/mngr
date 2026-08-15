@@ -11,6 +11,7 @@ from imbue.mngr_imbue_cloud.cli.hosts import hosts
 from imbue.mngr_imbue_cloud.cli.keys import keys
 from imbue.mngr_imbue_cloud.cli.paid import paid
 from imbue.mngr_imbue_cloud.cli.relays_admin import relays_admin
+from imbue.mngr_imbue_cloud.cli.repair_keys_admin import repair_keys
 from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.shares import shares
 from imbue.mngr_imbue_cloud.cli.sweep_admin import sweep_admin
@@ -25,6 +26,7 @@ admin.add_command(workspaces_admin)
 admin.add_command(sweep_admin)
 admin.add_command(relays_admin)
 admin.add_command(server)
+admin.add_command(repair_keys)
 
 
 @click.group(name="imbue_cloud")

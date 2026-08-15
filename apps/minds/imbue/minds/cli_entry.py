@@ -3,7 +3,6 @@ from pathlib import Path
 import click
 
 from imbue.minds.cli.env import env
-from imbue.minds.cli.migrate_ssh_keys import migrate_ssh_keys
 from imbue.minds.cli.paid import paid
 from imbue.minds.cli.pool import pool
 from imbue.minds.cli.run import run
@@ -46,4 +45,3 @@ cli.add_command(pool)
 cli.add_command(server)
 cli.add_command(env)
 cli.add_command(paid)
-cli.add_command(migrate_ssh_keys)

@@ -42,6 +42,7 @@ from imbue.mngr_forward.ssh_tunnel import _ForwardedTunnelHandler
 from imbue.mngr_forward.ssh_tunnel import _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
 from imbue.mngr_forward.ssh_tunnel import _TransportFailureHandler
 from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
+from imbue.mngr_forward.ssh_tunnel import _create_ssh_client
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
 from imbue.mngr_forward.ssh_tunnel import _is_transport_unusable
 from imbue.mngr_forward.ssh_tunnel import _open_and_relay
@@ -205,6 +206,16 @@ def test_parse_url_host_port_localhost_normalization() -> None:
 
 
 # -- RemoteSSHInfo ---------------------------------------------------------
+
+
+def test_create_ssh_client_refuses_to_connect_without_a_known_hosts_file(tmp_path: Path) -> None:
+    """A missing known_hosts file must be a hard error, never trust-on-first-use."""
+    key_path = tmp_path / "ssh_key"
+    key_path.write_text("irrelevant-key-material")
+    ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
+
+    with pytest.raises(SSHTunnelError, match="known_hosts"):
+        _create_ssh_client(ssh_info)
 
 
 def test_remote_ssh_info_round_trip() -> None:

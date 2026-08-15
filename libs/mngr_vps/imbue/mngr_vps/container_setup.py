@@ -31,6 +31,7 @@ from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
 from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
+from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_vps.errors import ContainerSetupError
 from imbue.mngr_vps.errors import VpsProvisioningError
@@ -164,13 +165,8 @@ _RETRYABLE_RSYNC_PATTERNS: Final[tuple[str, ...]] = (
 
 
 def remove_host_from_known_hosts(known_hosts_path: Path, hostname: str, port: int) -> None:
-    """Remove a host entry from the known_hosts file."""
-    if not known_hosts_path.exists():
-        return
-    host_pattern = hostname if port == 22 else f"[{hostname}]:{port}"
-    lines = known_hosts_path.read_text().splitlines(keepends=True)
-    filtered = [line for line in lines if not line.startswith(f"{host_pattern} ")]
-    known_hosts_path.write_text("".join(filtered))
+    """Remove a host entry from the known_hosts file (store-aware; see the shared shim)."""
+    clear_host_from_known_hosts(known_hosts_path, hostname, port)
 
 
 def redact_secret_env(remote_command: str) -> str:

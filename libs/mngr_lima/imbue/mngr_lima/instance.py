@@ -57,17 +57,18 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import pin_sole_endpoint_host_key
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
-from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
+from imbue.mngr.providers.ssh_utils import resolve_keypair_with_fallback
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
-from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.constants import lima_host_data_disk_name
@@ -108,6 +109,11 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
 
 # Filename of the pre-injected ed25519 sshd host key stored per host on disk.
 _HOST_KEY_NAME = "ssh_host_ed25519_key"
+
+# Filename of the root client key mngr uses to reach the VM when is_run_as_root
+# is set. Per-host under the host's keys dir for new VMs; the same name directly
+# under the provider keys dir is the legacy provider-wide pair older VMs authorize.
+_ROOT_SSH_KEY_NAME = "root_ssh_key"
 
 # Substrings that, when present in a LimaCommandError message, indicate the
 # targeted VM or disk is already gone (so the cleanup failure is benign rather
@@ -363,7 +369,7 @@ class LimaProviderInstance(BaseProviderInstance):
         # because Lima reassigns the forwarded port across restarts.
         self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
 
-        ssh_user, identity_file = self._effective_ssh_user_and_identity(ssh_config, is_run_as_root)
+        ssh_user, identity_file = self._effective_ssh_user_and_identity(ssh_config, is_run_as_root, host_id)
         pyinfra_host = create_pyinfra_host(
             hostname=ssh_config.hostname,
             port=ssh_config.port,
@@ -386,14 +392,22 @@ class LimaProviderInstance(BaseProviderInstance):
         )
 
     def _record_pre_injected_host_key(self, host_id: HostId, hostname: str, port: int) -> None:
-        """Write this host's known_hosts file from its pre-injected public key.
+        """Pin this host's pre-injected public key for the current endpoint through the pin store.
 
-        Uses atomic_write so a concurrent reader never sees a partial file.
+        The per-host known_hosts file is rendered from the store. Lima
+        reassigns the forwarded port across restarts, so the sole-endpoint pin
+        drops prior ports' entries and the file reflects only the current one.
         """
         _, public_key_path = self._host_keypair_paths(host_id)
         public_key = public_key_path.read_text().strip()
-        host_pattern = format_as_known_hosts_address(hostname, port)
-        atomic_write(self._host_known_hosts_path(host_id), f"{host_pattern} {public_key}\n")
+        pin_sole_endpoint_host_key(
+            self._host_known_hosts_path(host_id),
+            hostname,
+            port,
+            public_key,
+            host_id=host_id,
+            origin=HostKeyOrigin.BOOTSTRAP,
+        )
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
         """Update the certified host data in the host record."""
@@ -640,11 +654,27 @@ sudo poweroff
         self._keys_dir.mkdir(parents=True, exist_ok=True)
         return self._keys_dir
 
-    def _root_ssh_keypair(self) -> tuple[Path, str]:
-        """Client keypair mngr uses to reach the VM as root when is_run_as_root is set."""
-        return load_or_create_ssh_keypair(self._ensure_keys_dir(), "root_ssh_key")
+    def _create_per_host_root_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Mint (or load) this host's own root client keypair, under its per-host keys dir."""
+        return load_or_create_ssh_keypair(self._host_keys_dir(host_id), _ROOT_SSH_KEY_NAME)
 
-    def _effective_ssh_user_and_identity(self, ssh_config: LimaSshConfig, is_run_as_root: bool) -> tuple[str, Path]:
+    def _root_ssh_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Client keypair mngr uses to reach the VM as root when is_run_as_root is set.
+
+        Per-host for VMs created after per-host client keys landed; VMs from
+        before that only authorize the legacy provider-wide ``root_ssh_key``,
+        so it wins when no per-host pair is on disk.
+        """
+        return resolve_keypair_with_fallback(
+            self._host_keys_dir(host_id),
+            self._keys_dir,
+            _ROOT_SSH_KEY_NAME,
+            lambda: self._create_per_host_root_ssh_keypair(host_id),
+        )
+
+    def _effective_ssh_user_and_identity(
+        self, ssh_config: LimaSshConfig, is_run_as_root: bool, host_id: HostId
+    ) -> tuple[str, Path]:
         """Resolve the SSH user and identity file for connecting to the agent host.
 
         When is_run_as_root is set, mngr connects as root using its injected root
@@ -653,7 +683,7 @@ sudo poweroff
         config) so lifecycle operations replay the choice made at create time.
         """
         if is_run_as_root:
-            root_key_path, _root_public_key = self._root_ssh_keypair()
+            root_key_path, _root_public_key = self._root_ssh_keypair(host_id)
             return "root", root_key_path
         return ssh_config.user, ssh_config.identity_file
 
@@ -731,10 +761,12 @@ sudo poweroff
             # Generate the sshd host keypair to inject into the VM and record in known_hosts.
             host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
 
-            # When running the agent as root, materialize the client keypair and pass
-            # its public key into the provisioning script so mngr can ssh in as root.
+            # When running the agent as root, mint this host's own client keypair and
+            # pass its public key into the provisioning script so mngr can ssh in as
+            # root (per-host, so no provider-wide key ever needs to enter a synced
+            # workspace record).
             if self.config.is_run_as_root:
-                _root_key_path, root_authorized_public_key = self._root_ssh_keypair()
+                _root_key_path, root_authorized_public_key = self._create_per_host_root_ssh_keypair(host_id)
             else:
                 root_authorized_public_key = None
 
@@ -852,7 +884,7 @@ sudo poweroff
 
         # Resolve the effective SSH login (root when is_run_as_root, else Lima's user).
         effective_ssh_user, effective_ssh_identity = self._effective_ssh_user_and_identity(
-            ssh_config, self.config.is_run_as_root
+            ssh_config, self.config.is_run_as_root, host_id
         )
 
         # Read configured resources from Lima config
@@ -1002,7 +1034,9 @@ sudo poweroff
 
         # Update SSH info in host record (port may change after restart). The user
         # and identity follow the locked-in run-as-root choice, not Lima's own user.
-        effective_ssh_user, effective_ssh_identity = self._effective_ssh_user_and_identity(ssh_config, is_run_as_root)
+        effective_ssh_user, effective_ssh_identity = self._effective_ssh_user_and_identity(
+            ssh_config, is_run_as_root, host_id
+        )
         updated_record = host_record.model_copy_update(
             to_update(host_record.field_ref().ssh_hostname, ssh_config.hostname),
             to_update(host_record.field_ref().ssh_port, ssh_config.port),

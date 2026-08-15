@@ -73,7 +73,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
-from imbue.minds.desktop_client.mind_liveness import compute_mind_shutdown_traits_by_agent_id
+from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
@@ -89,7 +89,6 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
-from imbue.minds.desktop_client.ssh_key_migration import SshKeyMigrationScheduler
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -1093,13 +1092,10 @@ def _build_workspace_list(
     ``supports_shutdown="true"`` and a ``liveness`` of RUNNING / STOPPED /
     UNKNOWN. Container liveness rides here rather than on a separate SSE channel:
     a liveness change makes the entry differ, so the existing ``workspaces``
-    diff pushes it. Non-capable minds carry neither field. Minds whose stopped
-    host starts via a slow restore (imbue_cloud) additionally carry
-    ``is_slow_start="true"`` so a click on their stopped tile prompts for an
-    explicit Start instead of auto-starting through recovery.
+    diff pushes it. Non-capable minds carry neither field.
     """
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
-    shutdown_traits_by_agent_id = compute_mind_shutdown_traits_by_agent_id(backend_resolver)
+    liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
     agent_ids = backend_resolver.list_active_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
@@ -1123,12 +1119,10 @@ def _build_workspace_list(
         # unverified rather than confirmed healthy.
         if _is_workspace_provider_errored(info, errored_provider_names):
             entry["is_stale"] = "true"
-        shutdown_traits = shutdown_traits_by_agent_id.get(str(aid))
-        if shutdown_traits is not None:
+        liveness = liveness_by_agent_id.get(str(aid))
+        if liveness is not None:
             entry["supports_shutdown"] = "true"
-            entry["liveness"] = shutdown_traits.liveness.value
-            if shutdown_traits.is_slow_start:
-                entry["is_slow_start"] = "true"
+            entry["liveness"] = liveness.value
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
@@ -1826,7 +1820,6 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         is_stale=entry.get("is_stale") == "true",
         supports_shutdown=entry.get("supports_shutdown") == "true",
         liveness=entry.get("liveness", ""),
-        is_slow_start=entry.get("is_slow_start") == "true",
         account=entry.get("account", ""),
         create_attempt_state=entry.get("create_attempt_state", ""),
         is_remote=entry.get("is_remote") == "true",
@@ -2035,7 +2028,6 @@ def create_desktop_client(
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
     mngr_caller: MngrCaller | None = None,
     sync_scheduler: WorkspaceSyncScheduler | None = None,
-    ssh_key_migration_scheduler: SshKeyMigrationScheduler | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2139,7 +2131,6 @@ def create_desktop_client(
         discovery_health_watchdog=discovery_health_watchdog,
         mngr_caller=mngr_caller,
         sync_scheduler=sync_scheduler,
-        ssh_key_migration_scheduler=ssh_key_migration_scheduler,
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
     )

@@ -362,6 +362,12 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
 
 @pytest.mark.acceptance
 @pytest.mark.rsync
+# Flaky for the same Modal-service reasons as its already-marked siblings in
+# this file: transient function-deploy API failures and SSH transport EOFs
+# while the sandbox snapshot is taken (observed failing with both modes in one
+# CI run while byte-identical modal code passed acceptance on the two prior
+# runs of the same branch).
+@pytest.mark.flaky
 @pytest.mark.timeout(300)
 def test_mngr_create_transfers_git_repo_with_untracked_files(
     temp_git_repo: Path,

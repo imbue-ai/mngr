@@ -277,12 +277,13 @@ def enable_sharing(
 
     When the machine is already actively shared, only the grants file is
     rewritten (no token rotation, no tunnel restart -- the gateway re-reads
-    grants per request). Otherwise the full provisioning flow runs: for
-    imbue_cloud rows the connector's server-side enable-sharing primitive
-    (share record + pool-key materials injection, the same path web creates
-    use), for local rows the client-side connector share + materials
-    injection. Returns the sharing-status document, which reports ``enabled``
-    true as soon as the connector share exists; the UI separately polls the
+    grants per request). Otherwise the full provisioning flow runs
+    client-side for every row -- connector ``shares create`` + materials
+    injection over the user's own SSH -- regardless of provider; the
+    connector's server-side enable-sharing primitive is used only for
+    web-created workspaces, which have no desktop client to inject from.
+    Returns the sharing-status document, which reports ``enabled`` true as
+    soon as the connector share exists; the UI separately polls the
     readiness endpoint for end-to-end liveness of the shared hostname.
     """
     if not _grants_have_any_grantee(workspace_grants, service_grants):
@@ -327,6 +328,10 @@ def _enable_sharing_with_cli(
     # request context -- the post-create web-access enabler runs in a worker
     # thread where ``current_app`` is unbound.
     client_env_config: ClientEnvConfig,
+    # True for imbue_cloud (leased pool host) rows. The bring-up path is the
+    # same client-side one for every row; this only disables the relay-region
+    # latency measurement, whose desktop-proximity signal is only meaningful
+    # for a workspace that runs on this machine.
     is_cloud_row: bool,
     entry_label: str | None = None,
 ) -> dict[str, Any]:
@@ -384,34 +389,13 @@ def _enable_sharing_with_cli(
         inject_share_owner_email_into_agent(agent_id, account_email, cli.mngr_caller)
         return _share_status_document(host_id, existing, workspace_grants, service_grants)
 
-    if is_cloud_row:
-        # Leased pool hosts delegate the whole bring-up to the connector's
-        # server-side primitive (share record + pool-key materials injection --
-        # the same path web creates use), then overwrite its owner-only grants
-        # seed with the user's actual grants document.
-        try:
-            cli.enable_web_access(account=account_email, host_ref=host_id)
-        except ImbueCloudCliError as exc:
-            raise SharingError(f"Could not enable sharing: {describe_connector_failure(exc)}") from exc
-        try:
-            inject_share_grants_into_agent(agent_id, grants_toml, cli.mngr_caller)
-        except ShareInjectionError as exc:
-            raise SharingError(str(exc)) from exc
-        inject_share_owner_email_into_agent(agent_id, account_email, cli.mngr_caller)
-        try:
-            enabled_share = cli.get_share_status(account=account_email, host_id=host_id)
-        except ImbueCloudCliError as exc:
-            raise SharingError(
-                f"Sharing was enabled but its status could not be read: {describe_connector_failure(exc)}"
-            ) from exc
-        if enabled_share is None:
-            raise SharingError("Sharing was enabled but the connector reports no share record for the machine.")
-        return _share_status_document(host_id, enabled_share, workspace_grants, service_grants)
-
-    # First-time local shares pick the relay by measured latency from this
-    # machine (the workspace runs here). A re-share keeps its region
-    # server-side, so the measurement is skipped then.
-    preferred_region = _pick_preferred_relay_region(cli, account_email) if existing is None else None
+    # First-time shares of a workspace running on this machine pick the relay
+    # by measured latency from here. A re-share keeps its region server-side,
+    # and a cloud row runs elsewhere (the desktop's latency says nothing about
+    # the pool host's), so both skip the measurement -- the connector then
+    # applies its default region.
+    is_relay_region_measured = existing is None and not is_cloud_row
+    preferred_region = _pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None
     try:
         share = cli.create_share(
             account=account_email, host_id=host_id, entry_label=entry_label, preferred_region=preferred_region
@@ -450,25 +434,19 @@ def enable_web_access_for_workspace(
     backend_resolver: BackendResolverInterface,
     # Captured by the caller in a request context and threaded in: this runs
     # in the post-create worker thread, where ``get_state()`` cannot resolve
-    # ``current_app``. Only the local-row branch below actually needs it.
+    # ``current_app``.
     client_env_config: ClientEnvConfig,
 ) -> None:
     """Bring sharing up for a just-created workspace so it is reachable from /web.
 
-    The create form's "enable web access" toggle: imbue_cloud rows delegate to
-    the connector's server-side enable-sharing primitive (pool-key materials
-    injection, owner granted, chrome origin included); local docker/lima rows
-    run the desktop share flow with the owning account as the sole grantee.
+    The create form's "enable web access" toggle: every row -- cloud and local
+    alike -- runs the desktop share flow with the owning account as the sole
+    grantee. (The connector's server-side enable-sharing primitive is used
+    only for web-created workspaces, which have no desktop to inject from.)
     Raises :class:`SharingError` when the workspace has no associated account
     or the share bring-up fails.
     """
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
-    if is_cloud_row:
-        try:
-            cli.enable_web_access(account=account_email, host_ref=host_id)
-        except ImbueCloudCliError as exc:
-            raise SharingError(f"Could not enable web access: {describe_connector_failure(exc)}") from exc
-        return
     owner_grants = {"emails": [account_email], "email_domains": []}
     _enable_sharing_with_cli(
         host_id,
@@ -478,7 +456,7 @@ def enable_web_access_for_workspace(
         cli,
         account_email,
         client_env_config,
-        is_cloud_row=False,
+        is_cloud_row=is_cloud_row,
         # The chrome can only enter the workspace at <label>.<domain> (the
         # bare domain is unrouted on the relay), so record the shell label
         # like the settings-page enable does; None when not registered yet.

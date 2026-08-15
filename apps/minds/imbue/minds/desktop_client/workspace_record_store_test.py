@@ -24,13 +24,16 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIV
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
+from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import collect_ssh_key_material
 from imbue.minds.desktop_client.workspace_record_store import derive_openssh_public_key_line
-from imbue.minds.desktop_client.workspace_record_store import merge_known_hosts_text
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import pin_host_key
 
 _EMAIL = "alice@example.com"
 
@@ -577,48 +580,77 @@ def test_reconcile_does_not_tombstone_other_device_rows(paths: WorkspacePaths) -
     assert records[0].state == RECORD_STATE_ACTIVE
 
 
-def test_collect_ssh_key_material_finds_per_host_keys(tmp_path: Path) -> None:
+def _make_mngr_profile_dir(tmp_path: Path) -> tuple[Path, Path]:
+    """A minimal mngr host dir with one active profile; returns (mngr_host_dir, profile_dir)."""
     mngr_dir = tmp_path / "mngr"
     profile_dir = mngr_dir / "profiles" / "profile1"
-    (mngr_dir / "config.toml").parent.mkdir(parents=True, exist_ok=True)
+    profile_dir.mkdir(parents=True)
     (mngr_dir / "config.toml").write_text('profile = "profile1"\n')
-    host_dir = profile_dir / "providers" / "imbue_cloud_alice" / "imbue_cloud_alice" / "hosts" / "host-abc"
+    return mngr_dir, profile_dir
+
+
+def _make_per_host_key_dir(profile_dir: Path, host_id: str) -> Path:
+    host_dir = profile_dir / "providers" / "imbue_cloud_alice" / "imbue_cloud_alice" / "hosts" / host_id
     host_dir.mkdir(parents=True)
+    return host_dir
+
+
+def test_collect_ssh_key_material_finds_per_host_keys(tmp_path: Path) -> None:
+    mngr_dir, profile_dir = _make_mngr_profile_dir(tmp_path)
+    host_dir = _make_per_host_key_dir(profile_dir, "host-abc")
     (host_dir / "ssh_key").write_text("PRIVATE-KEY-BYTES")
     (host_dir / "known_hosts").write_text("[1.2.3.4]:2222 ssh-ed25519 AAAA")
 
-    private_key, known_hosts = collect_ssh_key_material(mngr_dir, "imbue_cloud_alice", "host-abc")
+    private_key, known_hosts = collect_ssh_key_material(mngr_dir, "host-abc")
 
     assert private_key == "PRIVATE-KEY-BYTES"
-    assert known_hosts is not None and "ssh-ed25519" in known_hosts
+    assert known_hosts == "[1.2.3.4]:2222 ssh-ed25519 AAAA\n"
+
+
+def test_collect_ssh_key_material_renders_clean_pins_from_the_store(tmp_path: Path) -> None:
+    """The record carries the store's current pins -- one per (endpoint, keytype) --
+    not the file's raw lines: a stale duplicate an old append-only writer left in
+    the file collapses to the live pin instead of entering the record."""
+    mngr_dir, profile_dir = _make_mngr_profile_dir(tmp_path)
+    host_id = HostId.generate()
+    host_dir = _make_per_host_key_dir(profile_dir, str(host_id))
+    (host_dir / "ssh_key").write_text("PRIVATE-KEY-BYTES")
+    (host_dir / "known_hosts").write_text(
+        "[1.2.3.4]:22001 ssh-ed25519 AAAA-stale\n[1.2.3.4]:22001 ssh-ed25519 AAAA-live\n"
+    )
+    pin_host_key(host_dir / "known_hosts", "1.2.3.4", 23001, "ssh-ed25519 AAAA-vm", host_id, HostKeyOrigin.USER)
+
+    _, known_hosts = collect_ssh_key_material(mngr_dir, str(host_id))
+
+    assert known_hosts == "[1.2.3.4]:22001 ssh-ed25519 AAAA-live\n[1.2.3.4]:23001 ssh-ed25519 AAAA-vm\n"
+
+
+def test_collect_ssh_key_material_never_collects_provider_wide_keys(tmp_path: Path) -> None:
+    """A synced record may only ever carry a key that opens its one host -- the lima
+    provider-wide root key (which opens ALL of the user's lima VMs) must not be
+    collected even for lima-hosted workspaces."""
+    mngr_dir, profile_dir = _make_mngr_profile_dir(tmp_path)
+    lima_keys_dir = profile_dir / "providers" / "lima" / "lima" / "keys"
+    lima_keys_dir.mkdir(parents=True)
+    (lima_keys_dir / "root_ssh_key").write_text("PROVIDER-WIDE-KEY")
+    (lima_keys_dir / "hosts").write_text("[127.0.0.1]:60022 ssh-ed25519 AAAA")
+
+    assert collect_ssh_key_material(mngr_dir, "host-lima-1") == (None, None)
 
 
 def test_collect_ssh_key_material_returns_none_when_uninitialized(tmp_path: Path) -> None:
-    assert collect_ssh_key_material(tmp_path / "missing", "lima", "host-x") == (None, None)
+    assert collect_ssh_key_material(tmp_path / "missing", "host-x") == (None, None)
 
 
-def test_merge_known_hosts_text_appends_only_missing_lines() -> None:
-    existing = "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n"
-    synced = "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n[1.2.3.4]:2222 ssh-ed25519 AAAA-outer\n"
+def test_workspace_secrets_payload_tolerates_unknown_fields() -> None:
+    """A payload written by a future minds version must still parse here -- rejecting
+    the whole blob would cost this install everything in it, including restic_env."""
+    payload = WorkspaceSecretsPayload.model_validate_json(
+        '{"restic_env": "RESTIC_REPOSITORY=s3:bucket", "future_field": {"nested": 1}}'
+    )
 
-    merged = merge_known_hosts_text(existing, synced)
-
-    assert merged == "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n[1.2.3.4]:2222 ssh-ed25519 AAAA-outer\n"
-
-
-def test_merge_known_hosts_text_returns_none_when_nothing_new() -> None:
-    existing = "[1.2.3.4]:22 ssh-ed25519 AAAA-pinned\n"
-
-    assert merge_known_hosts_text(existing, existing) is None
-    assert merge_known_hosts_text(existing, None) is None
-    assert merge_known_hosts_text(existing, "\n   \n") is None
-
-
-def test_merge_known_hosts_text_writes_synced_entries_into_an_empty_file() -> None:
-    synced = "[9.9.9.9]:22 ssh-ed25519 AAAA-new\n"
-
-    assert merge_known_hosts_text(None, synced) == synced
-    assert merge_known_hosts_text("", synced) == synced
+    assert payload.restic_env == "RESTIC_REPOSITORY=s3:bucket"
+    assert payload.ssh_private_key is None
 
 
 def test_derive_openssh_public_key_line_roundtrips_an_openssh_format_key() -> None:

@@ -44,6 +44,8 @@ from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_lifecycle import HOST_START_TIMEOUT_SECONDS
+from imbue.minds.desktop_client.workspace_lifecycle import HOST_STOP_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.errors import MngrCommandError
@@ -59,10 +61,12 @@ from imbue.mngr.primitives import ProviderInstanceName
 # How long a single workspace probe through the plugin is allowed to hang.
 # Short and snappy so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
-# Default hard timeout for an ``mngr`` subprocess run via ``_run_mngr``. Generous
-# because it is sized for the slowest legitimate case -- a host stop/start, which
-# bounces a container and can take tens of seconds -- so it is a "definitely
-# wedged" ceiling, not an estimate.
+# Default hard timeout for an ``mngr`` subprocess run via ``_run_mngr``. A
+# "definitely wedged" ceiling, not an estimate -- generous for quick calls like
+# a container bounce. The restart sequence's host stop/start steps do NOT use
+# it: a host stop can mirror state for minutes (BYO cloud) and a host start can
+# restore a workspace from object storage (imbue_cloud), so those steps pass
+# the shared ``workspace_lifecycle`` budgets explicitly.
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 # Hard timeout for the recovery host-health probe's in-container ``mngr exec``.
 # Far shorter than the default ceiling: this is a *diagnostic* that gates the
@@ -513,7 +517,12 @@ def run_restart_sequence(
     else:
         registry.append_log(workspace_agent_id, "Stopping the system-services agent.")
         try:
-            _run_mngr(concurrency_group, _build_mngr_stop_argv(mngr_binary, services_agent_id), env)
+            _run_mngr(
+                concurrency_group,
+                _build_mngr_stop_argv(mngr_binary, services_agent_id),
+                env,
+                timeout_seconds=HOST_STOP_TIMEOUT_SECONDS,
+            )
         except MngrCommandError as exc:
             # ``mngr stop --stop-host`` raises HostShutdownNotSupportedError when a provider's
             # ``supports_shutdown_hosts`` is False (e.g. Modal). minds runs mngr as a subprocess,
@@ -541,7 +550,12 @@ def run_restart_sequence(
 
     registry.append_log(workspace_agent_id, "Starting the system-services agent.")
     try:
-        _run_mngr(concurrency_group, _build_mngr_start_argv(mngr_binary, services_agent_id), env)
+        _run_mngr(
+            concurrency_group,
+            _build_mngr_start_argv(mngr_binary, services_agent_id),
+            env,
+            timeout_seconds=HOST_START_TIMEOUT_SECONDS,
+        )
     except MngrCommandError as exc:
         logger.error("Start step of host restart for {} failed: {}", workspace_agent_id, exc)
         message = f"Start step of host restart failed: {exc}"

@@ -450,7 +450,7 @@ def test_realizer_for_vps_ip_reads_bare_marker_from_gce_metadata(temp_mngr_ctx: 
     ]
     realizer = provider._realizer_for_vps_ip("10.0.0.42")
     assert isinstance(realizer, BareRealizer)
-    assert realizer.agent_endpoint("10.0.0.42").port == 22
+    assert realizer.agent_endpoint("10.0.0.42", HostId.generate()).port == 22
 
 
 def test_find_instance_for_host_returns_none_when_no_metadata_match(temp_mngr_ctx: MngrContext) -> None:

@@ -1,0 +1,1 @@
+Test-only update for Phase 2 of the user-controlled-keys plan: the bare realizer's `agent_endpoint` now takes a host_id (per-host agent client keys in mngr_vps), so the GCP backend test calling it passes one.
