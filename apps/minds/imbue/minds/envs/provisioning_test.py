@@ -35,14 +35,17 @@ from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.neon_db import NeonProviderError
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensProviderError
+from imbue.minds.envs.providers.workspace_storage import WorkspaceStorageProviderError
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import _assert_deploy_url_matches
+from imbue.minds.envs.provisioning import _compute_secret_overrides
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
 from imbue.minds.envs.provisioning import resolve_web_template_pin
 from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
+from imbue.minds.envs.testing import make_workspace_storage_vault_values
 from imbue.minds.errors import MindError
 from imbue.minds.primitives import ServiceName
 
@@ -314,6 +317,12 @@ def _build_fake_providers(
         if fail_step == "cleanup_state_container":
             raise DockerCleanupError("docker cleanup boom")
 
+    def delete_workspace_storage_prefix(storage_values, prefix):
+        call_log["calls"].append(("delete_workspace_storage_prefix", prefix))
+        if fail_step == "delete_workspace_storage_prefix":
+            raise WorkspaceStorageProviderError("storage delete boom")
+        return 0
+
     def wipe_supertokens_app_data(app_id, core_base_url, api_key):
         call_log["calls"].append(("wipe_supertokens_app_data", app_id, core_base_url))
         if fail_step == "wipe_supertokens":
@@ -356,6 +365,7 @@ def _build_fake_providers(
         verify_neon_token_has_restore_scope=verify_neon_token_has_restore_scope,
         await_apps_healthy=await_apps_healthy,
         destroy_mngr_agents=destroy_mngr_agents,
+        delete_workspace_storage_prefix=delete_workspace_storage_prefix,
         cleanup_state_container=cleanup_state_container,
         wipe_supertokens_app_data=wipe_supertokens_app_data,
         wipe_neon_db_schema=wipe_neon_db_schema,
@@ -554,7 +564,11 @@ def test_destroy_env_dev_walks_providers_in_order_and_removes_root(
         "delete_neon_project",
         # Step 4: Modal env (cascade-deletes apps/secrets/volumes inside).
         "delete_modal_env",
-        # Step 5: env root removal happens after all provider calls succeed.
+        # Step 5: workspace-storage cleanup reads the tier's storage Vault
+        # entry; the canned Vault has no storage entry, so the deletion
+        # itself is skipped.
+        "read_per_env_secret_values",
+        # Step 7: env root removal happens after all provider calls succeed.
     ]
     # Env root removed so subsequent commands fail fast on a dangling
     # activation rather than silently re-creating partial state.
@@ -631,6 +645,108 @@ def test_destroy_env_dev_keep_agents_skips_mngr_destroy(_isolated_home: Path, _r
     # keep_agents must also skip the state-container cleanup: kept agents
     # still rely on the singleton state container.
     assert "cleanup_state_container" not in step_names
+
+
+_STORAGE_VAULT_VALUES = make_workspace_storage_vault_values()
+
+
+def test_destroy_env_dev_deletes_workspace_storage_prefix_when_configured(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """A dev destroy with populated storage Vault deletes exactly the env's key prefix."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(
+        call_log,
+        vault_responses={"storage": dict(_STORAGE_VAULT_VALUES)},
+    )
+    deploy_env(
+        DevEnvName("dev-nia"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    call_log["calls"].clear()
+
+    destroy_env(
+        DevEnvName("dev-nia"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    storage_calls = [c for c in call_log["calls"] if c[0] == "delete_workspace_storage_prefix"]
+    assert storage_calls == [("delete_workspace_storage_prefix", "dev-nia/")]
+    assert not env_root_exists(DevEnvName("dev-nia"))
+
+
+def test_destroy_env_tier_deletes_whole_storage_keyspace_when_configured(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """A shared-tier destroy deletes the whole bucket keyspace (its stamped prefix is empty)."""
+    call_log = _make_call_log()
+    vault_responses = {
+        "supertokens": {
+            "SUPERTOKENS_CONNECTION_URI": "https://st.example.com/appid-staging",
+            "SUPERTOKENS_API_KEY": "fake-api-key",
+        },
+        "neon": {"DATABASE_URL": "postgres://user:pass@host/db"},
+        "storage": dict(_STORAGE_VAULT_VALUES),
+    }
+    providers = _build_fake_providers(call_log, vault_responses=vault_responses)
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    call_log["calls"].clear()
+
+    destroy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", modal_env="main"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    storage_calls = [c for c in call_log["calls"] if c[0] == "delete_workspace_storage_prefix"]
+    assert storage_calls == [("delete_workspace_storage_prefix", "")]
+
+
+def test_destroy_env_dev_leaves_env_root_when_storage_delete_fails(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """A failed artifact deletion keeps the env root so the destroy is retryable."""
+    providers_ok = _build_fake_providers(_make_call_log(), vault_responses={"storage": dict(_STORAGE_VAULT_VALUES)})
+    deploy_env(
+        DevEnvName("dev-omar"),
+        tier="dev",
+        deploy_config=_deploy_config(),
+        credentials=_credentials(),
+        providers=providers_ok,
+        parent_concurrency_group=_root_cg,
+    )
+
+    failing_providers = _build_fake_providers(
+        _make_call_log(),
+        fail_step="delete_workspace_storage_prefix",
+        vault_responses={"storage": dict(_STORAGE_VAULT_VALUES)},
+    )
+    with pytest.raises(WorkspaceStorageProviderError, match="storage delete boom"):
+        destroy_env(
+            DevEnvName("dev-omar"),
+            tier="dev",
+            deploy_config=_deploy_config(),
+            credentials=_credentials(),
+            providers=failing_providers,
+            parent_concurrency_group=_root_cg,
+        )
+    assert env_root_exists(DevEnvName("dev-omar"))
 
 
 def test_destroy_env_dev_leaves_env_root_when_step_fails(_isolated_home: Path, _root_cg: ConcurrencyGroup) -> None:
@@ -790,15 +906,14 @@ def test_deploy_env_shared_tier_pushes_secrets_into_named_modal_env(
     assert all(c[2] == "main" for c in pushes)
 
 
-def test_deploy_dev_env_overrides_sharing_with_a_per_env_relay_region(
+def test_deploy_dev_env_adds_no_relay_overrides_to_the_sharing_secret(
     _isolated_home: Path, _root_cg: ConcurrencyGroup
 ) -> None:
-    """Per-env-Modal tiers pin the sharing secret to the env's own relay.
+    """The relay fleet is table-driven, so no tier overrides the sharing secret with relay env vars.
 
-    The region label is the env name (underscores mapped to hyphens for DNS)
-    and the endpoint hostname is the deterministic ``relay.<region>.<domain>``,
-    so every dev env expects its own relay instead of competing for one shared
-    dev relay whose plugin-auth URL can only serve a single env's connector.
+    Dev relays are registered against the connector's relays table by
+    ``just provision-dev-relay`` (the env name is the region label); the
+    sharing secret carries no per-env relay endpoints.
     """
     call_log = _make_call_log()
     providers = _build_fake_providers(call_log)
@@ -813,8 +928,8 @@ def test_deploy_dev_env_overrides_sharing_with_a_per_env_relay_region(
     sharing_reads = [c for c in call_log["calls"] if c[0] == "read_per_env_secret_values" and c[1] == "sharing"]
     assert len(sharing_reads) == 1
     overrides = sharing_reads[0][2]
-    assert overrides["SHARE_DEFAULT_REGION"] == "dev-jo-sh"
-    assert overrides["SHARE_RELAY_ENDPOINTS"] == "dev-jo-sh=relay.dev-jo-sh.dev.example.com:7000"
+    assert "SHARE_DEFAULT_REGION" not in overrides
+    assert "SHARE_RELAY_ENDPOINTS" not in overrides
 
 
 def test_deploy_env_shared_tier_keeps_the_vault_configured_relay_fleet(
@@ -964,6 +1079,7 @@ def _explorer_plan_quotas() -> PlanQuotasConfig:
     """The committed explorer-plan values (mirrors the deploy.toml [plans.explorer] block)."""
     return PlanQuotasConfig(
         max_remote_workspaces=NonNegativeInt(2),
+        max_total_workspaces=NonNegativeInt(10),
         max_buckets=NonNegativeInt(5),
         max_total_bucket_gb=NonNegativeInt(50),
         monthly_llm_spend_usd=NonNegativeFloat(0.0),
@@ -1266,7 +1382,10 @@ def test_destroy_env_tier_full_step_order(_isolated_home: Path, _root_cg: Concur
         "list_modal_secrets",
         "delete_modal_secret",
         "delete_modal_secret",
-        # 5: generation id (tier-only).
+        # 5: workspace-storage cleanup reads the tier's storage Vault entry;
+        # the canned Vault has no storage entry, so the deletion is skipped.
+        "read_per_env_secret_values",
+        # 6: generation id (tier-only).
         "delete_generation_id",
     ]
     # And env root is gone after the full flow succeeds.
@@ -1558,6 +1677,46 @@ def test_assert_deploy_url_matches_non_workspace_mismatch_keeps_formula_hint() -
     assert "workspace prefix matches" in message
     assert "hostname scheme" in message
     assert "bound to workspace" not in message
+
+
+def test_compute_secret_overrides_stamps_storage_prefix_only_for_per_env_tiers() -> None:
+    """Per-env-Modal-env tiers (dev / ci) share their tier's workspace-storage
+    bucket, so the deploy must stamp each env's key prefix into the storage
+    secret; shared tiers (staging / production) have a dedicated bucket and
+    must not get a prefix override."""
+    per_env_overrides = _compute_secret_overrides(
+        name=DevEnvName("dev-josh"),
+        lifecycle=_DEV_LIFECYCLE,
+        cloudflare_domain="dev.example.com",
+        neon_record=NeonProjectRecord(
+            project_id="proj-fake-123",
+            project_name="minds-dev-josh",
+            branch_id="branch-1",
+            host_pool_dsn=SecretStr("postgresql://owner:pw@pooler/host_pool"),
+            litellm_cost_dsn=SecretStr("postgresql://owner:pw@pooler/litellm_cost"),
+        ),
+        supertokens_record=SuperTokensAppRecord(
+            app_id="dev-josh",
+            connection_uri="https://core.example.com/appid-dev-josh",
+            api_key=SecretStr("st-api-key"),
+        ),
+        expected_connector_url=AnyUrl("https://test-ws-dev-josh--rsc-dev-api.modal.run"),
+        expected_litellm_proxy_url=AnyUrl("https://test-ws-dev-josh--llm-dev-proxy.modal.run"),
+    )
+    # Only the per-env key prefix is overridden; the bucket + credentials stay
+    # tier-shared from Vault.
+    assert per_env_overrides["storage"] == {"WORKSPACE_STORAGE_KEY_PREFIX": "dev-josh/"}
+
+    shared_overrides = _compute_secret_overrides(
+        name=DevEnvName("staging"),
+        lifecycle=_SHARED_TIER_LIFECYCLE,
+        cloudflare_domain="staging.example.com",
+        neon_record=None,
+        supertokens_record=None,
+        expected_connector_url=AnyUrl("https://test-ws--rsc-staging-api.modal.run"),
+        expected_litellm_proxy_url=AnyUrl("https://test-ws--llm-staging-proxy.modal.run"),
+    )
+    assert "storage" not in shared_overrides
 
 
 def test_resolve_web_template_pin_defaults_to_the_release_tag(monkeypatch: pytest.MonkeyPatch) -> None:

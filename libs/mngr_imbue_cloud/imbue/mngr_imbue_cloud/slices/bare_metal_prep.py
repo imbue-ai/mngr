@@ -22,6 +22,12 @@ DEFAULT_LIMA_VERSION: Final[str] = "2.2.0"
 _SWAPFILE_SIZE_GIB: Final[int] = 32
 _SWAPFILE_PATH: Final[str] = "/swapfile"
 
+# Pinned transfer-tool releases installed on every box for workspace
+# stop/start: age encrypts/decrypts the artifact streams, s5cmd moves them
+# to/from the tier's S3 bucket with parallel multipart transfers.
+_AGE_VERSION: Final[str] = "1.2.1"
+_S5CMD_VERSION: Final[str] = "2.3.0"
+
 # How many slice VMs the boot autostart brings up concurrently. A full box
 # cold-booting 14 QEMU VMs at once is a boot storm (each start waits on guest
 # boot + lima requirement checks); fully serial keeps users down for ~10 minutes.
@@ -76,6 +82,8 @@ def build_box_prep_script(
     swapfile_path = _SWAPFILE_PATH
     swapfile_size_gib = _SWAPFILE_SIZE_GIB
     slice_autostart_parallelism = _SLICE_AUTOSTART_PARALLELISM
+    age_version = _AGE_VERSION
+    s5cmd_version = _S5CMD_VERSION
     return f"""\
 #!/bin/bash
 set -euo pipefail
@@ -97,6 +105,23 @@ if [ "$(cat "$lima_version_marker" 2>/dev/null)" != "{lima_version}" ]; then
     rm -f /tmp/{lima_tarball}
     mkdir -p /usr/local/share/lima
     printf '%s\\n' "{lima_version}" > "$lima_version_marker"
+fi
+
+# 2b. Transfer tooling for workspace stop/start: age (encryption) and s5cmd
+#     (parallel S3 client), both pinned static binaries installed like limactl.
+transfer_tools_marker=/usr/local/share/lima/.mngr-installed-transfer-tools
+if [ "$(cat "$transfer_tools_marker" 2>/dev/null)" != "{age_version}-{s5cmd_version}" ]; then
+    curl -fsSL -o /tmp/age.tar.gz https://github.com/FiloSottile/age/releases/download/v{age_version}/age-v{age_version}-linux-amd64.tar.gz
+    tar -C /tmp -xzf /tmp/age.tar.gz
+    install -m 755 /tmp/age/age /usr/local/bin/age
+    install -m 755 /tmp/age/age-keygen /usr/local/bin/age-keygen
+    rm -rf /tmp/age /tmp/age.tar.gz
+    curl -fsSL -o /tmp/s5cmd.tar.gz https://github.com/peak/s5cmd/releases/download/v{s5cmd_version}/s5cmd_{s5cmd_version}_Linux-64bit.tar.gz
+    tar -C /tmp -xzf /tmp/s5cmd.tar.gz s5cmd
+    install -m 755 /tmp/s5cmd /usr/local/bin/s5cmd
+    rm -f /tmp/s5cmd /tmp/s5cmd.tar.gz
+    mkdir -p /usr/local/share/lima
+    printf '%s\\n' "{age_version}-{s5cmd_version}" > "$transfer_tools_marker"
 fi
 
 # 3. Dedicated non-root service user that owns the lima VMs (kvm group for /dev/kvm).
@@ -238,8 +263,14 @@ export -f start_one_slice
 
 # No stderr suppression and pipefail above: a failing listing must fail the
 # unit (visible in systemd), not read as "no VMs to start".
+# Skip VMs carrying the stop-requested marker: they were deliberately halted
+# by a workspace stop (mid-upload) or are mid-restore, and must only ever be
+# started by the connector's transition supervisor.
 stopped_instances=$(limactl list --format '{{{{.Name}}}} {{{{.Status}}}}' \\
-    | awk -v prefix="{SLICE_LIMA_INSTANCE_PREFIX}" 'index($1, prefix) == 1 && $2 == "Stopped" {{print $1}}')
+    | awk -v prefix="{SLICE_LIMA_INSTANCE_PREFIX}" 'index($1, prefix) == 1 && $2 == "Stopped" {{print $1}}' \\
+    | while read -r name; do
+        [ -e "$HOME/.lima/$name/mngr-stop-requested" ] || echo "$name"
+    done)
 if [ -z "$stopped_instances" ]; then
     echo "no stopped slice VMs to start"
     exit 0

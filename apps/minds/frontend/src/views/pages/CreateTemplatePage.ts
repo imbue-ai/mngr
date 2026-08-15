@@ -26,6 +26,7 @@ import { FormLabel, Select } from "../components/FormControls";
 import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
+import { rowClickActionFor, slowStartPromptMessage } from "./landing-controls";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
@@ -288,7 +289,12 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
         extra: "accent-spine relative overflow-hidden cursor-pointer",
         style: `--workspace-accent: ${entry.accent};`,
         onclick: () => {
-          if (isStopped) {
+          // This page has no health tracker, so the row is treated as healthy
+          // (the pre-existing behavior: it never routes to plain recovery).
+          const action = rowClickActionFor(entry, entry.liveness ?? "", true);
+          if (action === "prompt-start") {
+            window.alert(slowStartPromptMessage(entry.name));
+          } else if (action === "recover-start") {
             const returnTo = `/goto/${stores.workspaces.toHostScopedId(entry.id)}/`;
             m.route.set(recoveryRoute(entry.id, returnTo, "start"));
           } else {

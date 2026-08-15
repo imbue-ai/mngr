@@ -51,6 +51,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -110,6 +111,7 @@ from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.file_utils import read_json_dict
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
@@ -118,15 +120,20 @@ from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStor
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.data_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
+from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
+from imbue.mngr_imbue_cloud.errors import WorkspaceStartTimeoutError
+from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FAST_PATH_ADOPTABLE_START_ARGS
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
+from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
 from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
 from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_raw
 from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provider
@@ -140,6 +147,10 @@ from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.primitives import VpsInstanceId
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
+# A workspace start may restore the VM from object storage onto a fresh box
+# (download + boot + container relaunch), so the poll window is generous.
+_WORKSPACE_START_TIMEOUT_SECONDS: Final[float] = 1200.0
+_WORKSPACE_START_POLL_SECONDS: Final[float] = 5.0
 
 
 def _resolve_fast_path_attributes(attributes: LeaseAttributes) -> LeaseAttributes:
@@ -280,6 +291,59 @@ def _rewrite_container_host_name(
             pass
 
 
+# How each non-running wire status surfaces as an mngr host state. Stopping
+# deliberately reads as STOPPED: the VM is already down seconds after the stop
+# request, and the in-flight upload is invisible plumbing (Q21 in the plan).
+WORKSPACE_HOST_STATE_BY_STATUS: Final[dict[WorkspaceStatus, HostState]] = {
+    WorkspaceStatus.STOPPING: HostState.STOPPED,
+    WorkspaceStatus.STOPPED: HostState.STOPPED,
+    WorkspaceStatus.STARTING: HostState.STARTING,
+    WorkspaceStatus.CRASHED: HostState.CRASHED,
+}
+
+
+@pure
+def leased_info_from_workspace(workspace: WorkspaceInfo) -> LeasedHostInfo:
+    """Project a running workspace into the LeasedHostInfo shape the lease paths use."""
+    if workspace.vps_address is None or workspace.ssh_port is None or workspace.container_ssh_port is None:
+        raise ImbueCloudConnectorError(f"running workspace {workspace.host_db_id} is missing placement coordinates")
+    return LeasedHostInfo(
+        host_db_id=workspace.host_db_id,
+        vps_address=workspace.vps_address,
+        ssh_port=workspace.ssh_port,
+        ssh_user=workspace.ssh_user,
+        container_ssh_port=workspace.container_ssh_port,
+        agent_id=workspace.agent_id,
+        host_id=workspace.host_id,
+        host_name=workspace.host_name,
+        attributes=workspace.attributes,
+        leased_at=workspace.leased_at,
+        outer_host_public_key=workspace.outer_host_public_key,
+        container_host_public_key=workspace.container_host_public_key,
+    )
+
+
+def _read_workspace_start_outcome(
+    client: "ImbueCloudConnectorClient", token: SecretStr, host_db_id: str, host_id: HostId
+) -> WorkspaceInfo | Exception | None:
+    """One start-poll probe: the running workspace, a terminal failure, or None (keep polling)."""
+    current = client.get_workspace(token, host_db_id)
+    if current.status == WorkspaceStatus.RUNNING:
+        return current
+    if current.status == WorkspaceStatus.STOPPED:
+        return WorkspaceStartFailedError(
+            f"workspace {host_id} failed to start: {current.transition_error or 'unknown error'}"
+        )
+    if current.status == WorkspaceStatus.CRASHED:
+        # An operator abandoned the workspace mid-start; it can never reach
+        # running, so waiting out the poll window would only bury the reason.
+        return WorkspaceStartFailedError(
+            f"workspace {host_id} was abandoned ({current.transition_error or 'no reason recorded'}); "
+            "restore it from its backup into a fresh workspace"
+        )
+    return None
+
+
 class ImbueCloudProvider(BaseProviderInstance):
     """Provider that surfaces a single account's imbue-cloud leases as mngr hosts."""
 
@@ -290,6 +354,11 @@ class ImbueCloudProvider(BaseProviderInstance):
     session_store: ImbueCloudSessionStore = Field(frozen=True, description="Shared session store keyed by user_id")
 
     _leased_hosts_cache: list[LeasedHostInfo] | None = PrivateAttr(default=None)
+    # Full-lifecycle workspace listing (GET /workspaces). ``None`` after a load
+    # means the connector predates the endpoint (fall back to /hosts);
+    # ``_is_workspaces_cache_loaded`` distinguishes "not fetched yet".
+    _workspaces_cache: list[WorkspaceInfo] | None = PrivateAttr(default=None)
+    _is_workspaces_cache_loaded: bool = PrivateAttr(default=False)
     # Parsed listing output keyed by host_id; populated by
     # ``discover_hosts_and_agents`` via outer SSH + ``docker exec`` (running)
     # or ``docker cp`` (stopped), and consumed by ``get_host_and_agent_details``
@@ -319,6 +388,8 @@ class ImbueCloudProvider(BaseProviderInstance):
     def reset_caches(self) -> None:
         super().reset_caches()
         self._leased_hosts_cache = None
+        self._workspaces_cache = None
+        self._is_workspaces_cache_loaded = False
         self._listing_raw_cache.clear()
 
     # ------------------------------------------------------------------
@@ -528,6 +599,41 @@ class ImbueCloudProvider(BaseProviderInstance):
     # Discovery
     # ------------------------------------------------------------------
 
+    def _list_workspaces_cached(self) -> list[WorkspaceInfo] | None:
+        """List the account's workspaces in every lifecycle state, or None.
+
+        ``None`` means the connector predates ``GET /workspaces`` -- callers
+        fall back to the deprecated leased-only ``/hosts`` listing, which
+        cannot see stopped workspaces. Transport failures map to
+        ``ProviderUnavailableError`` exactly like the leased listing.
+        """
+        if self._is_workspaces_cache_loaded:
+            return self._workspaces_cache
+        account = self._require_account()
+        try:
+            token = self._get_access_token(account)
+            self._workspaces_cache = self.client.list_workspaces(token)
+        except WorkspacesEndpointUnavailableError:
+            logger.debug("imbue_cloud[{}]: connector has no /workspaces; using leased-only listing", self.name)
+            self._workspaces_cache = None
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailableError(
+                self.name,
+                f"could not reach Imbue Cloud: {exc}",
+                user_help_text=(
+                    "Check your internet connection and try again. If the problem persists, "
+                    "Imbue Cloud may be temporarily unavailable."
+                ),
+            ) from exc
+        self._is_workspaces_cache_loaded = True
+        return self._workspaces_cache
+
+    def _find_workspace(self, host_id: HostId) -> WorkspaceInfo | None:
+        for workspace in self._list_workspaces_cached() or ():
+            if workspace.host_id == str(host_id):
+                return workspace
+        return None
+
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
         """List leased hosts for this provider's resolved account.
 
@@ -536,6 +642,28 @@ class ImbueCloudProvider(BaseProviderInstance):
         config if you don't want this to participate in ``mngr list``.
         """
         if self._leased_hosts_cache is not None:
+            return self._leased_hosts_cache
+        # Prefer deriving the running set from the full-lifecycle listing (one
+        # round-trip covers both); fall back to /hosts on an old connector.
+        workspaces = self._list_workspaces_cached()
+        if workspaces is not None:
+            leased_from_workspaces: list[LeasedHostInfo] = []
+            for workspace in workspaces:
+                if workspace.status != WorkspaceStatus.RUNNING:
+                    continue
+                if workspace.vps_address is None or workspace.ssh_port is None or workspace.container_ssh_port is None:
+                    # Connector invariant violation: a running workspace always
+                    # has placement. Skip it so one bad row cannot take down
+                    # the whole listing, but say so -- silently dropping it
+                    # would make the host vanish from every listing untraced.
+                    logger.warning(
+                        "imbue_cloud[{}]: running workspace {} is missing placement coordinates; skipping it",
+                        self.name,
+                        workspace.host_id,
+                    )
+                    continue
+                leased_from_workspaces.append(leased_info_from_workspace(workspace))
+            self._leased_hosts_cache = leased_from_workspaces
             return self._leased_hosts_cache
         account = self._require_account()
         # Do NOT swallow a discovery failure to an empty list: a transient
@@ -575,7 +703,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         include_destroyed: bool = False,
     ) -> list[DiscoveredHost]:
         leased = self._list_leased_hosts_cached()
-        return [
+        discovered = [
             DiscoveredHost(
                 host_id=HostId(entry.host_id),
                 host_name=HostName(entry.host_name),
@@ -584,6 +712,17 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
             for entry in leased
         ]
+        discovered.extend(
+            DiscoveredHost(
+                host_id=HostId(workspace.host_id),
+                host_name=HostName(workspace.host_name),
+                provider_name=self.name,
+                host_state=WORKSPACE_HOST_STATE_BY_STATUS[workspace.status],
+            )
+            for workspace in self._list_workspaces_cached() or ()
+            if workspace.status != WorkspaceStatus.RUNNING
+        )
+        return discovered
 
     # ------------------------------------------------------------------
     # Listing
@@ -760,6 +899,27 @@ class ImbueCloudProvider(BaseProviderInstance):
                     )
                 ]
             result[host_ref] = agent_refs
+        # Non-running workspaces have no box to SSH: surface them from the
+        # lifecycle listing alone, re-attaching the last-known agents so the
+        # workspace keeps its labels (and its is_primary guard) while stopped.
+        for workspace in self._list_workspaces_cached() or ():
+            if workspace.status == WorkspaceStatus.RUNNING:
+                continue
+            host_id = HostId(workspace.host_id)
+            host_ref = DiscoveredHost(
+                host_id=host_id,
+                host_name=HostName(workspace.host_name),
+                provider_name=self.name,
+                host_state=WORKSPACE_HOST_STATE_BY_STATUS[workspace.status],
+            )
+            result[host_ref] = self._load_last_known_agents(host_id) or [
+                DiscoveredAgent(
+                    agent_id=AgentId(workspace.agent_id),
+                    agent_name=AgentName(workspace.agent_id),
+                    host_id=host_id,
+                    provider_name=self.name,
+                )
+            ]
         return result
 
     def _collect_listing_raw_via_outer(
@@ -840,6 +1000,11 @@ class ImbueCloudProvider(BaseProviderInstance):
         original error).
         """
         host_id = host_ref.host_id
+        workspace = self._find_workspace(host_id)
+        if workspace is not None and workspace.status != WorkspaceStatus.RUNNING:
+            return self._build_offline_details_from_workspace(
+                host_ref, agent_refs, workspace, offline_field_generators or {}
+            )
         lease = self._find_leased(host_id)
         if lease is None:
             return super().get_host_and_agent_details(
@@ -954,6 +1119,32 @@ class ImbueCloudProvider(BaseProviderInstance):
             key_path=private_key_path,
             command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_address}",
         )
+
+    def _build_offline_details_from_workspace(
+        self,
+        host_ref: DiscoveredHost,
+        agent_refs: Sequence[DiscoveredAgent],
+        workspace: WorkspaceInfo,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]],
+    ) -> tuple[HostDetails, list[AgentDetails]]:
+        """Build details for a non-running workspace (no box, so no SSH info).
+
+        The state comes from the lifecycle listing; ``transition_error``
+        (a failed start, e.g. no capacity) surfaces as ``failure_reason``
+        so ``mngr list`` and minds can show it with a retry affordance.
+        """
+        host_details = HostDetails(
+            id=host_ref.host_id,
+            name=workspace.host_name,
+            provider_name=self.name,
+            state=WORKSPACE_HOST_STATE_BY_STATUS[workspace.status],
+            failure_reason=workspace.transition_error,
+        )
+        agent_details_list = [
+            build_agent_details_from_offline_ref(agent_ref, host_details, offline_field_generators)
+            for agent_ref in agent_refs
+        ]
+        return host_details, agent_details_list
 
     def _build_offline_details_from_lease(
         self,
@@ -1214,6 +1405,14 @@ class ImbueCloudProvider(BaseProviderInstance):
                 if self._is_container_running(host_id):
                     return self._build_host_object(entry)
                 return self.to_offline_host(host_id)
+        # A stopped/stopping/starting workspace has no lease entry but must
+        # still resolve (as an offline host) so `mngr start` reaches start_host.
+        for workspace in self._list_workspaces_cached() or ():
+            is_match = (isinstance(host, HostId) and workspace.host_id == str(host)) or (
+                isinstance(host, HostName) and workspace.host_name == str(host)
+            )
+            if is_match and workspace.status != WorkspaceStatus.RUNNING:
+                return self.to_offline_host(HostId(workspace.host_id))
         raise HostNotFoundError(self.name, host)
 
     def _is_container_running(self, host_id: HostId) -> bool:
@@ -1245,12 +1444,14 @@ class ImbueCloudProvider(BaseProviderInstance):
         the lease so the listing layer can still produce a row.
         """
         lease = self._find_leased(host_id)
-        if lease is None:
+        workspace = self._find_workspace(host_id) if lease is None else None
+        if lease is None and workspace is None:
             raise HostNotFoundError(self.name, host_id)
+        host_name = lease.host_name if lease is not None else workspace.host_name if workspace is not None else ""
         now = datetime.now(timezone.utc)
         certified_host_data = CertifiedHostData(
             host_id=str(host_id),
-            host_name=lease.host_name,
+            host_name=host_name,
             created_at=now,
             updated_at=now,
         )
@@ -1903,24 +2104,51 @@ class ImbueCloudProvider(BaseProviderInstance):
     ) -> None:
         """Stop the docker container on the leased VPS via the outer host.
 
-        The lease step authorized this provider's per-host SSH key on the VPS
-        root account at port 22, so the outer host can ``docker stop`` the
-        container labeled with this host_id. The lease and on-disk volume
-        are preserved; ``start_host`` brings the container back later.
+        Stops the *whole workspace*: the container is stopped gracefully
+        first (so agents shut down cleanly), then the connector halts the
+        slice VM, uploads its disks to the tier's storage bucket in the
+        background, and frees the bare-metal slot once the upload verifies
+        (after the local-retention window). ``mngr start`` brings the same
+        workspace back -- near-instantly inside the window, via a restore
+        onto any same-region box after it. Returns once the stop is accepted
+        (the VM halts seconds later; the upload is invisible plumbing).
+
+        Against a connector that predates /workspaces, this falls back to
+        the old container-only stop (the VM keeps running and billing).
         """
         host_id = host.id if isinstance(host, HostInterface) else host
-        # outer_host_for raises HostNotFoundError if the lease/key isn't found,
-        # so the yielded outer is always non-None for this provider.
-        with self.outer_host_for(host_id) as outer:
-            assert outer is not None
-            container_id = self._resolve_container_id_on_outer(outer, host_id)
-            if container_id is None:
-                logger.debug("stop_host: no container for host {}; nothing to do", host_id)
-                return
-            self._run_outer_docker_command(
-                outer, f"stop {shlex.quote(container_id)}", host_id=host_id, label="docker-stop"
+        # Graceful container stop first, so in-container agents exit cleanly
+        # before the VM is halted. Best-effort: an unreachable container must
+        # not block the VM stop (the halt supersedes it anyway).
+        try:
+            with self.outer_host_for(host_id) as outer:
+                assert outer is not None
+                container_id = self._resolve_container_id_on_outer(outer, host_id)
+                if container_id is not None:
+                    self._run_outer_docker_command(
+                        outer, f"stop {shlex.quote(container_id)}", host_id=host_id, label="docker-stop"
+                    )
+                    logger.debug("Stopped container {} for host {}", container_id, host_id)
+        except MngrError as exc:
+            logger.warning("stop_host: container stop for {} failed ({}); proceeding with VM stop", host_id, exc)
+
+        leased = self._find_leased(host_id)
+        if leased is None:
+            logger.debug("stop_host: no lease entry for {}; nothing further to stop", host_id)
+            return
+        account = self._require_account()
+        token = self._get_access_token(account)
+        try:
+            status = self.client.stop_workspace(token, str(leased.host_db_id))
+        except WorkspacesEndpointUnavailableError:
+            logger.warning(
+                "stop_host: connector has no /workspaces; container stopped but the VM for {} keeps running "
+                "(redeploy the connector to enable full workspace stop)",
+                host_id,
             )
-            logger.debug("Stopped container {} for host {}", container_id, host_id)
+            return
+        self.reset_caches()
+        logger.debug("Workspace stop accepted for host {} (status={})", host_id, status)
 
     def start_host(
         self,
@@ -1941,11 +2169,19 @@ class ImbueCloudProvider(BaseProviderInstance):
         to accept connections.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
+        if snapshot_id is not None:
+            raise SnapshotsNotSupportedError(self.name)
+        # A stopped (or still-stopping/starting) workspace has no running VM:
+        # ask the connector to start it and poll until it is running again,
+        # then fall through to the container relaunch against the (possibly
+        # new) coordinates. A running workspace skips straight to the
+        # container relaunch, exactly as before.
+        workspace = self._find_workspace(host_id)
+        if workspace is not None and workspace.status != WorkspaceStatus.RUNNING:
+            self._start_workspace_and_wait(host_id, workspace)
         leased = self._find_leased(host_id)
         if leased is None:
             raise HostNotFoundError(self.name, host_id)
-        if snapshot_id is not None:
-            raise SnapshotsNotSupportedError(self.name)
         with self.outer_host_for(host_id) as outer:
             assert outer is not None
             container_id = self._resolve_container_id_on_outer(outer, host_id)
@@ -1965,6 +2201,57 @@ class ImbueCloudProvider(BaseProviderInstance):
             start_container_sshd(outer, container_id)
             self._wait_for_container_sshd(leased)
         return self._build_host_object(leased)
+
+    def _start_workspace_and_wait(self, host_id: HostId, workspace: WorkspaceInfo) -> None:
+        """Ask the connector to start a stopped workspace and wait until it is running.
+
+        The start is asynchronous server-side (restore may download the
+        workspace onto a different box), so this polls the workspace until
+        it reports ``running`` -- then refreshes caches and re-pins the host
+        keys under the (possibly new) address/ports. A start that lands back
+        on ``stopped`` with a recorded error raises ``WorkspaceStartFailedError``
+        (e.g. "no capacity available right now, try again later"); the
+        artifact is untouched and the start can simply be retried.
+        """
+        account = self._require_account()
+        token = self._get_access_token(account)
+        host_db_id = str(workspace.host_db_id)
+        if workspace.status in (WorkspaceStatus.STOPPED, WorkspaceStatus.STOPPING):
+            self.client.start_workspace(token, host_db_id)
+        elif workspace.status == WorkspaceStatus.CRASHED:
+            raise WorkspaceStartFailedError(
+                f"workspace {host_id} was abandoned ({workspace.transition_error or 'no reason recorded'}); "
+                "restore it from its backup into a fresh workspace"
+            )
+        else:
+            # Already starting (e.g. a concurrent request); just wait for it.
+            pass
+
+        outcome, _poll_count, _elapsed = poll_for_value(
+            lambda: _read_workspace_start_outcome(self.client, token, host_db_id, host_id),
+            timeout=_WORKSPACE_START_TIMEOUT_SECONDS,
+            poll_interval=_WORKSPACE_START_POLL_SECONDS,
+        )
+        if outcome is None:
+            raise WorkspaceStartTimeoutError(
+                f"workspace {host_id} did not reach running within {_WORKSPACE_START_TIMEOUT_SECONDS:.0f}s"
+            )
+        if isinstance(outcome, Exception):
+            raise outcome
+        # Fresh coordinates: refresh every cache, persist the lease meta, and
+        # pin the (unchanged, but possibly re-addressed) host keys.
+        self.reset_caches()
+        started = leased_info_from_workspace(outcome)
+        self._ensure_outer_host_key_known(started)
+        self._ensure_container_host_key_known(started)
+        wait_for_sshd(started.vps_address, started.ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
+        logger.debug(
+            "Workspace {} is running again on {} (ports vm={}/container={})",
+            host_id,
+            started.vps_address,
+            started.ssh_port,
+            started.container_ssh_port,
+        )
 
     def _wait_for_container_sshd(self, leased: LeasedHostInfo) -> None:
         """Wait for the container's sshd to accept connections on the leased VPS's port."""

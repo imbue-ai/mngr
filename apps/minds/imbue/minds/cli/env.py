@@ -97,6 +97,9 @@ from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import create_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import delete_supertokens_app
 from imbue.minds.envs.providers.supertokens_app import wipe_supertokens_app_data as real_wipe_supertokens_app_data
+from imbue.minds.envs.providers.workspace_storage import (
+    delete_workspace_storage_prefix as real_delete_workspace_storage_prefix,
+)
 from imbue.minds.envs.provisioning import DeployedEnv
 from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
@@ -355,6 +358,7 @@ def _build_real_providers() -> Providers:
         verify_neon_token_has_restore_scope=_verify_neon_token_has_restore_scope_for_provider,
         await_apps_healthy=_await_apps_healthy_for_provider,
         destroy_mngr_agents=real_destroy_mngr_agents,
+        delete_workspace_storage_prefix=real_delete_workspace_storage_prefix,
         cleanup_state_container=_cleanup_state_container_for_provider,
         wipe_supertokens_app_data=_wipe_supertokens_for_provider,
         wipe_neon_db_schema=_wipe_neon_db_schema_for_provider,

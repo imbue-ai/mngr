@@ -53,11 +53,15 @@ Everything here can be done and verified BEFORE any change that could affect
 existing staging or production users, and should be. Verify each item against
 a dev/ci env first where possible.
 
-- [ ] **Relays.** Provision + deploy + DNS the staging and production relay
-  fleets (`us1`/`us2`-style regions) with `share-relay`; confirm each tier's
-  `SHARE_RELAY_ENDPOINTS` Vault entry matches the relays actually deployed.
+- [ ] **Relays.** Provision + register + deploy the staging and production
+  relay fleets (two relays per `us1`/`us2` region; blueprint/multi-relay) with
+  `share-relay`; confirm `mngr imbue_cloud admin relays list` matches the
+  instances actually deployed (the relays table replaced the old
+  `SHARE_RELAY_ENDPOINTS` / `SHARE_DEFAULT_REGION` Vault keys -- remove them
+  from the tier `sharing` entries) and that the health sweep is maintaining
+  the region DNS record sets.
   Confirm the content domains' Public-Suffix-List situation (each region is
-  one wildcard DNS record and one PSL entry; PSL propagation is slow and
+  one wildcard DNS record set and one PSL entry; PSL propagation is slow and
   affects cross-user cookie isolation between shared workspaces).
 - [ ] **Vault entries per tier.** Confirm before deploying: the new
   `relay-ssh` operator-only entry; `OVH_CLOUD_PROJECT_ID`;

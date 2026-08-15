@@ -31,6 +31,7 @@ from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
 from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
 from imbue.minds.cli._activated_env import tier_for_env_name
+from imbue.minds.cli.paid import admin_key_from_supertokens_secret
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.paths import client_config_file
@@ -74,6 +75,16 @@ SHARED_ENV_SECRET_KEYS: Final[tuple[str, ...]] = (
 CI_PAID_ACCOUNTS_VAULT_PATH: Final[VaultPath] = VaultPath("secrets/minds/ci/paid-accounts")
 CI_TEST_USER_EMAIL_KEY: Final[str] = "CI_TEST_USER_EMAIL"
 CI_TEST_USER_PASSWORD_KEY: Final[str] = "CI_TEST_USER_PASSWORD"
+
+# The ci tier's Vault prefix; ``<prefix>/supertokens`` carries the
+# MINDS_ADMIN_KEY that authenticates connector admin endpoints.
+_CI_VAULT_PREFIX: Final[str] = "secrets/minds/ci"
+
+
+def ci_admin_auth_header() -> dict[str, str]:
+    """Bearer header for the connector's admin endpoints, from the ci tier's supertokens Vault entry."""
+    secret = read_vault_kv(VaultPath(f"{_CI_VAULT_PREFIX}/supertokens"))
+    return {"Authorization": f"Bearer {admin_key_from_supertokens_secret(secret, _CI_VAULT_PREFIX)}"}
 
 
 def env_secrets_vault_path(*, env_name: DevEnvName, role: SharedEnvRole) -> VaultPath:

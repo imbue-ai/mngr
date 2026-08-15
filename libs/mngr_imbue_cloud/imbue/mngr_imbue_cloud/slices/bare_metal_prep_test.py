@@ -237,3 +237,19 @@ def test_prep_script_customizes_before_atomic_publish() -> None:
     assert customize_idx < publish_idx
     # The finished image is chowned to the lima user that limactl reads it as.
     assert 'chown limahost:limahost "$img.tmp"' in script
+
+
+def test_box_prep_installs_transfer_tooling_and_skips_stop_marked_vms() -> None:
+    script = build_box_prep_script(
+        lima_service_user="limahost",
+        lima_version="2.2.0",
+        pool_public_key="ssh-ed25519 AAAA poolkey",
+        slice_base_image_url="https://example.com/debian.qcow2",
+    )
+    # age + s5cmd land in /usr/local/bin, version-marker-guarded like limactl.
+    assert "/usr/local/bin/age" in script
+    assert "/usr/local/bin/age-keygen" in script
+    assert "/usr/local/bin/s5cmd" in script
+    assert ".mngr-installed-transfer-tools" in script
+    # The boot autostart must never resurrect a VM a workspace stop halted.
+    assert "mngr-stop-requested" in script

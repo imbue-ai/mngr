@@ -185,3 +185,15 @@ class FixedAgentIdError(ImbueCloudError, ValueError):
 
 class ClaudeConfigPatchError(ImbueCloudError, RuntimeError):
     """Raised when patching the claude config on a leased imbue_cloud host fails."""
+
+
+class WorkspacesEndpointUnavailableError(ImbueCloudConnectorError):
+    """Raised when the connector predates the /workspaces lifecycle endpoints."""
+
+
+class WorkspaceStartFailedError(ImbueCloudError):
+    """Raised when a workspace start ended in failure server-side (row back on stopped)."""
+
+
+class WorkspaceStartTimeoutError(ImbueCloudError):
+    """Raised when a workspace start did not reach running within the client's poll window."""

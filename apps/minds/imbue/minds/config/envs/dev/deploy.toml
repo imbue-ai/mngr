@@ -30,6 +30,7 @@ services = [
     "pool-ssh",
     "supertokens",
     "sharing",
+    "storage",
 ]
 
 # Dev envs keep no warm containers (min_containers defaults to 0), so without
@@ -64,6 +65,7 @@ domains = ["imbue.com"]
 # via the admin API.
 [plans.explorer]
 max_remote_workspaces = 2
+max_total_workspaces = 10
 max_buckets = 5
 max_total_bucket_gb = 50
 monthly_llm_spend_usd = 0
@@ -71,6 +73,7 @@ max_active_synced_workspaces = 200
 
 [plans.ally]
 max_remote_workspaces = 10
+max_total_workspaces = 50
 max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000

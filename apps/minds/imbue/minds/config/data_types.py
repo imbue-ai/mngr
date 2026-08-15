@@ -311,7 +311,8 @@ class PlanQuotasConfig(FrozenModel):
     readability; the writer converts to bytes for the BIGINT column.
     """
 
-    max_remote_workspaces: NonNegativeInt = Field(description="Max concurrent pool-host leases (running or stopped)")
+    max_remote_workspaces: NonNegativeInt = Field(description="Max running remote workspaces")
+    max_total_workspaces: NonNegativeInt = Field(description="Max total remote workspaces, running + stopped")
     max_buckets: NonNegativeInt = Field(description="Max R2 buckets")
     max_total_bucket_gb: NonNegativeInt = Field(description="Max total GB across all the account's buckets")
     monthly_llm_spend_usd: NonNegativeFloat = Field(
@@ -323,6 +324,7 @@ class PlanQuotasConfig(FrozenModel):
         """The connector-table column values for this plan (storage converted to bytes)."""
         return {
             "max_remote_workspaces": int(self.max_remote_workspaces),
+            "max_total_workspaces": int(self.max_total_workspaces),
             "max_buckets": int(self.max_buckets),
             "max_total_bucket_bytes": int(self.max_total_bucket_gb) * 1024**3,
             "monthly_llm_spend_usd": float(self.monthly_llm_spend_usd),

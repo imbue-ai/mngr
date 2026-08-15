@@ -11,6 +11,7 @@ from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import TEST_RELAY_ENDPOINTS
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -186,7 +187,7 @@ class _SucceedingCreateShareCli(FakeImbueCloudCli):
             workspace_domain=f"{host_id}.owner1234.us1.shares.example",
             region="us1",
             state="active",
-            relay_endpoint="relay-us1.shares.example:7000",
+            relay_endpoints=TEST_RELAY_ENDPOINTS,
             relay_token=SecretStr("relay-token-xyz"),
         )
 

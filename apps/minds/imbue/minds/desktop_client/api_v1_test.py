@@ -47,6 +47,7 @@ from imbue.minds.desktop_client.backup_verification_store import is_backup_verif
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import TEST_RELAY_ENDPOINTS
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
@@ -1515,7 +1516,7 @@ class FakeSharingCli(FakeImbueCloudCli):
             workspace_domain=self.share.workspace_domain,
             region=self.share.region,
             state=self.share.state,
-            relay_endpoint=self.share.relay_endpoint,
+            relay_endpoints=self.share.relay_endpoints,
             relay_token=None,
             last_tunnel_login_at=self.share.last_tunnel_login_at,
             cert_not_after=self.share.cert_not_after,
@@ -1537,7 +1538,7 @@ class FakeSharingCli(FakeImbueCloudCli):
             workspace_domain=f"{host_id}.owner1234.us1.shares.example",
             region="us1",
             state="active",
-            relay_endpoint="relay-us1.shares.example:7000",
+            relay_endpoints=TEST_RELAY_ENDPOINTS,
             relay_token=SecretStr("relay-token-abc"),
         )
         return self.share
@@ -1550,7 +1551,7 @@ class FakeSharingCli(FakeImbueCloudCli):
                 workspace_domain=self.share.workspace_domain,
                 region=self.share.region,
                 state="inactive",
-                relay_endpoint=self.share.relay_endpoint,
+                relay_endpoints=self.share.relay_endpoints,
                 relay_token=self.share.relay_token,
                 last_tunnel_login_at=self.share.last_tunnel_login_at,
                 cert_not_after=self.share.cert_not_after,
@@ -1961,7 +1962,7 @@ def _active_share(host_id: str = _TEST_HOST_ID) -> ShareCliInfo:
         workspace_domain=f"{host_id}.owner1234.us1.shares.example",
         region="us1",
         state="active",
-        relay_endpoint="relay-us1.shares.example:7000",
+        relay_endpoints=TEST_RELAY_ENDPOINTS,
     )
 
 

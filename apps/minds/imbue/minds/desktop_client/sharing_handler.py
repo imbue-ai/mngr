@@ -175,23 +175,27 @@ def _measure_tcp_connect_seconds(endpoint: str, timeout_seconds: float) -> float
 
 
 def pick_lowest_latency_relay_region(
-    relay_endpoint_by_region: Mapping[str, str],
+    relay_endpoints_by_region: Mapping[str, tuple[str, ...]],
     # Injected for tests: measures one endpoint's connect time in seconds
     # (None = unreachable). Production callers pass _measure_tcp_connect_seconds.
     measure_connect_seconds: Callable[[str], float | None],
 ) -> str | None:
-    """The region whose relay answered a TCP connect fastest, or None when none did.
+    """The region whose fastest relay answered a TCP connect quickest, or None when none did.
 
-    With a single region (dev tiers) the measurement is skipped entirely --
-    there is nothing to choose between.
+    A region is scored by its best endpoint (every relay in a region shares a
+    datacenter, so any reachable one represents its proximity). With a single
+    region (dev tiers) the measurement is skipped entirely -- there is nothing
+    to choose between.
     """
-    if len(relay_endpoint_by_region) <= 1:
-        return next(iter(relay_endpoint_by_region), None)
-    seconds_by_region = {
-        region: seconds
-        for region, endpoint in relay_endpoint_by_region.items()
-        if (seconds := measure_connect_seconds(endpoint)) is not None
-    }
+    if len(relay_endpoints_by_region) <= 1:
+        return next(iter(relay_endpoints_by_region), None)
+    seconds_by_region: dict[str, float] = {}
+    for region, endpoints in relay_endpoints_by_region.items():
+        endpoint_seconds = [
+            seconds for endpoint in endpoints if (seconds := measure_connect_seconds(endpoint)) is not None
+        ]
+        if endpoint_seconds:
+            seconds_by_region[region] = min(endpoint_seconds)
     if not seconds_by_region:
         return None
     return min(seconds_by_region, key=lambda region: seconds_by_region[region])
@@ -206,12 +210,12 @@ def _pick_preferred_relay_region(cli: ImbueCloudCli, account_email: str) -> str 
     its default region.
     """
     try:
-        relay_endpoint_by_region = cli.list_share_relays(account=account_email)
+        relay_endpoints_by_region = cli.list_share_relays(account=account_email)
     except ImbueCloudCliError as exc:
         logger.debug("Could not list share relays for region picking: {}", exc)
         return None
     region = pick_lowest_latency_relay_region(
-        relay_endpoint_by_region,
+        relay_endpoints_by_region,
         lambda endpoint: _measure_tcp_connect_seconds(endpoint, RELAY_LATENCY_PROBE_TIMEOUT_SECONDS),
     )
     if region is not None:
@@ -414,12 +418,11 @@ def _enable_sharing_with_cli(
         )
     except ImbueCloudCliError as exc:
         raise SharingError(f"Could not enable sharing: {describe_connector_failure(exc)}") from exc
-    if share.relay_token is None or not share.relay_endpoint:
-        raise SharingError("Sharing enabled but the connector did not return the relay coordinates.")
+    if share.relay_token is None:
+        raise SharingError("Sharing enabled but the connector did not return a relay token.")
 
     share_env_text = build_share_env_text(
         workspace_domain=share.workspace_domain,
-        relay_endpoint=share.relay_endpoint,
         relay_token=share.relay_token.get_secret_value(),
         connector_url=_connector_base_url(client_env_config),
         broker_url=_broker_base_url(client_env_config),

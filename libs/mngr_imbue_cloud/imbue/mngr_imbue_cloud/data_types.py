@@ -22,6 +22,7 @@ from imbue.mngr_imbue_cloud.primitives import R2AccessKeyId
 from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
+from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
 from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 
 
@@ -330,6 +331,33 @@ class LeaseResult(FrozenModel):
     )
 
 
+class WorkspaceInfo(FrozenModel):
+    """One entry from GET /workspaces: a workspace in any lifecycle state.
+
+    Placement fields (``vps_address`` and the two ports) are None while the
+    workspace is stopped -- its VM then exists only as encrypted objects in
+    the tier's storage bucket. ``status`` uses the wire lifecycle vocabulary
+    (:class:`~imbue.mngr_imbue_cloud.primitives.WorkspaceStatus`).
+    """
+
+    host_db_id: LeaseDbId = Field(description="Durable workspace identity (the connector row id)")
+    status: WorkspaceStatus = Field(description="Lifecycle status: running/stopping/stopped/starting/crashed")
+    vps_address: str | None = Field(default=None, description="Box address (None while stopped)")
+    ssh_port: int | None = Field(default=None, description="VM-root forwarded port (None while stopped)")
+    ssh_user: str = Field(default="root", description="SSH user on the VM")
+    container_ssh_port: int | None = Field(default=None, description="Container forwarded port (None while stopped)")
+    agent_id: str = Field(description="Pre-baked mngr agent id")
+    host_id: str = Field(description="mngr host id")
+    host_name: str = Field(description="User-chosen friendly name")
+    attributes: dict[str, Any] = Field(default_factory=dict, description="Lease attributes")
+    leased_at: str = Field(default="", description="ISO-8601 lease timestamp")
+    stop_requested_at: str | None = Field(default=None, description="When the current/last stop was requested")
+    stopped_at: str | None = Field(default=None, description="When the workspace reached stopped")
+    transition_error: str | None = Field(default=None, description="Last stop/start failure, if any")
+    outer_host_public_key: str | None = Field(default=None, description="Pinned VM-root sshd host key")
+    container_host_public_key: str | None = Field(default=None, description="Pinned container sshd host key")
+
+
 class LeasedHostInfo(FrozenModel):
     """One entry from GET /hosts."""
 
@@ -402,6 +430,20 @@ class LiteLLMKeyInfo(FrozenModel):
     user_id: str | None = None
 
 
+class ShareRelayEndpoint(FrozenModel):
+    """One relay a shared workspace tunnels to: its registered id and tunnel-control endpoint."""
+
+    relay_id: str = Field(description="The relay's registered id (relay-<hex>)")
+    endpoint: str = Field(description="host:port the workspace's frpc dials")
+
+
+class ShareRelayLogin(FrozenModel):
+    """One relay's last tunnel Login stamp for a share (from the status document)."""
+
+    relay_id: str = Field(description="The relay's registered id (relay-<hex>)")
+    last_login_at: str | None = Field(default=None, description="When the share's tunnel last logged into this relay")
+
+
 class ShareInfo(FrozenModel):
     """One workspace's self-hosted share record (the relay-based sharing model)."""
 
@@ -409,21 +451,38 @@ class ShareInfo(FrozenModel):
     workspace_domain: str = Field(description="The share's registrable base, host-<hex>.<user>.<region>.<domain>")
     region: str = Field(description="Relay region code the share is served from")
     state: str = Field(description="'active' while shared; 'inactive' after unshare")
-    relay_endpoint: str | None = Field(default=None, description="host:port the workspace's frpc dials")
+    relay_endpoints: tuple[ShareRelayEndpoint, ...] = Field(
+        default=(), description="Every relay of the share's region the workspace tunnels to"
+    )
+    relays: tuple[ShareRelayLogin, ...] = Field(
+        default=(), description="Per-relay tunnel login stamps (status documents only; empty elsewhere)"
+    )
     relay_token: SecretStr | None = Field(
         default=None, description="Opaque per-share relay token; returned once at share-enable"
     )
-    last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel Login stamp")
+    last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel Login stamp (any relay)")
     cert_not_after: str | None = Field(default=None, description="Expiry of the newest issued certificate")
 
 
 class ShareRelayMap(FrozenModel):
-    """The relay fleet as reported by the connector: region -> tunnel-control endpoint."""
+    """The relay fleet as reported by the connector: region -> tunnel-control endpoints."""
 
-    relay_endpoint_by_region: dict[str, str] = Field(
-        description="Relay tunnel-control endpoint (host:port) per region code"
+    relay_endpoints_by_region: dict[str, tuple[str, ...]] = Field(
+        description="Relay tunnel-control endpoints (host:port) per region code"
     )
-    default_region: str = Field(description="Region used when no datacenter mapping or preference applies")
+
+
+class RelayAdminInfo(FrozenModel):
+    """One relay row from the connector's fleet inventory (admin API)."""
+
+    relay_id: str = Field(description="The relay's registered id (relay-<hex>)")
+    region: str = Field(description="Region code the relay serves")
+    tunnel_endpoint: str = Field(description="host:port the workspaces' frpc dials")
+    ip_address: str = Field(description="Public IPv4 (DNS answer + healthz probe target)")
+    instance_name: str = Field(description="Human-readable OVH instance name")
+    is_active: bool = Field(description="False once retired")
+    health: str = Field(description="'healthy' / 'unhealthy' per the connector's sweep")
+    consecutive_probe_failures: int = Field(description="Failed healthz probes since the last success")
 
 
 class R2BucketInfo(FrozenModel):

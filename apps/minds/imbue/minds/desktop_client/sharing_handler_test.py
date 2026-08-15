@@ -74,7 +74,7 @@ def test_split_relay_endpoint_handles_hostnames_and_ipv6_literals() -> None:
 
 
 def test_pick_lowest_latency_relay_region_prefers_the_fastest_reachable_relay() -> None:
-    relays = {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}
+    relays = {"us1": ("relay-us1.example:7000",), "us2": ("relay-us2.example:7000",)}
     seconds_by_endpoint = {"relay-us1.example:7000": 0.120, "relay-us2.example:7000": 0.030}
 
     picked = pick_lowest_latency_relay_region(relays, lambda endpoint: seconds_by_endpoint[endpoint])
@@ -83,7 +83,7 @@ def test_pick_lowest_latency_relay_region_prefers_the_fastest_reachable_relay() 
 
 
 def test_pick_lowest_latency_relay_region_skips_unreachable_relays() -> None:
-    relays = {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}
+    relays = {"us1": ("relay-us1.example:7000",), "us2": ("relay-us2.example:7000",)}
     seconds_by_endpoint: dict[str, float | None] = {
         "relay-us1.example:7000": None,
         "relay-us2.example:7000": 0.500,
@@ -94,8 +94,27 @@ def test_pick_lowest_latency_relay_region_skips_unreachable_relays() -> None:
     assert picked == "us2"
 
 
+def test_pick_lowest_latency_relay_region_scores_a_region_by_its_best_endpoint() -> None:
+    # us1's second relay is unreachable, but its first answers fastest: the
+    # region is scored by its best endpoint, so one dead relay never costs a
+    # region the pick.
+    relays = {
+        "us1": ("relay-us1a.example:7000", "relay-us1b.example:7000"),
+        "us2": ("relay-us2.example:7000",),
+    }
+    seconds_by_endpoint: dict[str, float | None] = {
+        "relay-us1a.example:7000": 0.020,
+        "relay-us1b.example:7000": None,
+        "relay-us2.example:7000": 0.100,
+    }
+
+    picked = pick_lowest_latency_relay_region(relays, lambda endpoint: seconds_by_endpoint[endpoint])
+
+    assert picked == "us1"
+
+
 def test_pick_lowest_latency_relay_region_returns_none_when_nothing_answers() -> None:
-    relays = {"us1": "relay-us1.example:7000", "us2": "relay-us2.example:7000"}
+    relays = {"us1": ("relay-us1.example:7000",), "us2": ("relay-us2.example:7000",)}
 
     assert pick_lowest_latency_relay_region(relays, lambda endpoint: None) is None
 
@@ -104,7 +123,7 @@ def test_pick_lowest_latency_relay_region_skips_measurement_for_a_single_region(
     def _must_not_measure(endpoint: str) -> float | None:
         raise AssertionError(f"unexpected measurement of {endpoint}")
 
-    assert pick_lowest_latency_relay_region({"us1": "relay-us1.example:7000"}, _must_not_measure) == "us1"
+    assert pick_lowest_latency_relay_region({"us1": ("relay-us1.example:7000",)}, _must_not_measure) == "us1"
     assert pick_lowest_latency_relay_region({}, _must_not_measure) is None
 
 
@@ -275,7 +294,7 @@ class _PreferredRegionRecordingCli(FakeImbueCloudCli):
     )
     relay_list_call_count: int = Field(default=0, description="How many times list_share_relays was consulted")
 
-    def list_share_relays(self, *, account: str) -> dict[str, str]:
+    def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         self.relay_list_call_count += 1
         return super().list_share_relays(account=account)
 
@@ -297,7 +316,7 @@ def test_enable_sharing_first_time_local_share_passes_the_measured_preferred_reg
     # measurement (no sockets are opened), but the picked region must still be
     # forwarded to the connector's create.
     cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
-    cli.relays_to_return = {"us9": "relay-us9.example:7000"}
+    cli.relays_to_return = {"us9": ("relay-us9.example:7000",)}
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
     grants = {"emails": ["owner@example.com"], "email_domains": []}
@@ -316,7 +335,7 @@ def test_enable_sharing_re_share_sends_no_preferred_region() -> None:
     # (the region is baked into the workspace domain), so a re-share must not
     # measure latency and must not send any preference.
     cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
-    cli.relays_to_return = {"us9": "relay-us9.example:7000"}
+    cli.relays_to_return = {"us9": ("relay-us9.example:7000",)}
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
     # An inactive record routes past the grants-only fast path into the full

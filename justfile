@@ -95,37 +95,59 @@ test-apt-mirror-worker:
   cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
 
 
-# Render a sharing-relay region's on-disk config (frps.toml, nftables.conf, the
-# :80 redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see
-# apps/share_relay/README.md. CONTENT_DOMAIN is the env's content apex
-# (imbueminds.com / minds-staging.com / minds-dev.com); PLUGIN_AUTH_URL is the
-# connector's /frps/auth endpoint for that env.
+# Render one relay's on-disk config (frps.toml, nftables.conf, the :80
+# redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see
+# apps/share_relay/README.md. RELAY_ID comes from `just register-share-relay`
+# (or `mngr imbue_cloud admin relays list`); CONTENT_DOMAIN is the env's content
+# apex (imbueminds.com / minds-staging.com / minds-dev.com); PLUGIN_AUTH_URL is
+# the connector's /frps/auth endpoint for that env.
 [group("share-relay ops")]
-render-share-relay region content_domain plugin_auth_url out_dir:
-  uv run share-relay render --region {{region}} --content-domain {{content_domain}} \
-    --plugin-auth-url {{plugin_auth_url}} --out-dir {{out_dir}}
+render-share-relay relay_id region content_domain plugin_auth_url out_dir:
+  uv run share-relay render --relay-id {{relay_id}} --region {{region}} \
+    --content-domain {{content_domain}} --plugin-auth-url {{plugin_auth_url}} --out-dir {{out_dir}}
 
 # Create one relay instance on OVH Public Cloud (reads OVH_* + OVH_CLOUD_PROJECT_ID
-# from the env; values live in Vault under secrets/minds/<tier>/ovh).
+# from the env; values live in Vault under secrets/minds/<tier>/ovh). Regions
+# run several relays; ordinal picks which one this is (names the instance
+# share-relay-<env>-<region>-<n>).
 [group("share-relay ops")]
-provision-share-relay env_name region ovh_region ssh_public_key_file:
+provision-share-relay env_name region ordinal ovh_region ssh_public_key_file:
   uv run share-relay provision --env-name {{env_name}} --region {{region}} \
-    --ovh-region {{ovh_region}} --ssh-public-key-file {{ssh_public_key_file}}
+    --ordinal {{ordinal}} --ovh-region {{ovh_region}} --ssh-public-key-file {{ssh_public_key_file}}
+
+# Register a relay in the connector's fleet inventory (the final provisioning
+# step; reads MINDS_ADMIN_KEY from the env). Prints the relay record with its
+# minted relay_id -- deploy-share-relay needs that id.
+[group("share-relay ops")]
+register-share-relay connector_url region tunnel_endpoint ip instance_name="":
+  uv run share-relay register --connector-url {{connector_url}} --region {{region}} \
+    --tunnel-endpoint {{tunnel_endpoint}} --ip {{ip}} --instance-name "{{instance_name}}"
+
+# Retire a relay from the connector's fleet inventory (reads MINDS_ADMIN_KEY).
+[group("share-relay ops")]
+deregister-share-relay connector_url relay_id:
+  uv run share-relay deregister --connector-url {{connector_url}} --relay-id {{relay_id}}
 
 # Install/refresh a relay host's software + config (pinned frps, nftables,
-# :80 redirector, healthcheck) and restart its services. plugin_auth_url must
-# include the shared-secret path segment: https://<connector>/frps/auth/<secret>
+# :80 redirector, healthcheck) and restart its services. relay_id comes from
+# `just register-share-relay` (or `mngr imbue_cloud admin relays list`);
+# plugin_auth_url must include the shared-secret path segment:
+# https://<connector>/frps/auth/<secret>
 # (the secret lives in Vault under secrets/minds/<tier>/sharing/FRPS_AUTH_SECRET).
 [group("share-relay ops")]
-deploy-share-relay host region content_domain plugin_auth_url:
-  uv run share-relay deploy --host {{host}} --region {{region}} \
+deploy-share-relay host relay_id region content_domain plugin_auth_url:
+  uv run share-relay deploy --host {{host}} --relay-id {{relay_id}} --region {{region}} \
     --content-domain {{content_domain}} --plugin-auth-url {{plugin_auth_url}}
 
-# Point the region's DNS at a relay IP: relay.<region>.<domain> + *.<region>.<domain>
-# gray-cloud A records (reads CLOUDFLARE_API_TOKEN + CLOUDFLARE_ZONE_ID from the env).
+# Reconcile the region's DNS record set: relay.<region>.<domain> + *.<region>.<domain>
+# gray-cloud A records covering EVERY relay IP in the region (pass --ip per relay via
+# ips="ip1 ip2"). Bring-up / disaster-recovery path; the connector's health sweep
+# maintains the same records in steady state. Reads CLOUDFLARE_API_TOKEN +
+# CLOUDFLARE_ZONE_ID from the env.
 [group("share-relay ops")]
-dns-share-relay region content_domain ip:
-  uv run share-relay dns --region {{region}} --content-domain {{content_domain}} --ip {{ip}}
+dns-share-relay region content_domain +ips:
+  uv run share-relay dns --region {{region}} --content-domain {{content_domain}} \
+    $(for ip in {{ips}}; do printf -- "--ip %s " "$ip"; done)
 
 # List / destroy relay instances in the OVH Public Cloud project.
 [group("share-relay ops")]

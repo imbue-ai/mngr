@@ -73,6 +73,7 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "neon",
     "pool-ssh",
     "sharing",
+    "storage",
 )
 
 # Placeholder key written when a Vault entry isn't populated yet. Modal

@@ -93,6 +93,7 @@ from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 from imbue.minds.envs.providers.supertokens_app import app_id_from_connection_uri
+from imbue.minds.envs.providers.workspace_storage import is_workspace_storage_configured
 from imbue.minds.envs.recover import RecoverTarget
 from imbue.minds.envs.recover import delete_recover_target
 from imbue.minds.envs.recover import find_monorepo_root
@@ -144,11 +145,6 @@ MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
 # so the deployed container sees it. This is the injection point
 # `test_deploy_rollback` uses to drive the auto-rollback path.
 INJECT_BROKEN_HEALTHCHECK_ENV_VAR: Final[str] = "MINDS_INJECT_BROKEN_HEALTHCHECK"
-
-# The frps tunnel-control port every relay listens on. Mirrors
-# ``DEFAULT_TUNNEL_CONTROL_PORT`` in ``apps/share_relay`` (not imported:
-# minds does not depend on the share_relay package); keep the two in sync.
-_RELAY_TUNNEL_CONTROL_PORT: Final[int] = 7000
 
 
 class ProviderCredentials(FrozenModel):
@@ -327,6 +323,11 @@ ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup]
 # backing volume, targeting the one exact container by name. No-op when
 # there is no Docker daemon. Real impl lives in ``envs.docker_cleanup``.
 CleanupStateContainerFn = Callable[[DevEnvName, ConcurrencyGroup], None]
+# (storage_vault_values, prefix) -> deleted object count. Deletes every
+# workspace stop/start artifact under the env's key prefix in the tier's
+# storage bucket. Used by tier destroys; real impl lives in
+# ``envs.providers.workspace_storage``.
+DeleteWorkspaceStoragePrefixFn = Callable[[dict[str, str], str], int]
 
 
 class Providers(FrozenModel):
@@ -424,6 +425,12 @@ class Providers(FrozenModel):
             "(agent_ids, mngr_host_dir, mngr_prefix, cg) -> single `mngr destroy -f <ids...>` "
             "with the env's MNGR_* vars exported. Used before cloud teardown so the env's "
             "agents stop cleanly before their resources go away."
+        ),
+    )
+    delete_workspace_storage_prefix: DeleteWorkspaceStoragePrefixFn = Field(
+        description=(
+            "(storage_vault_values, prefix) -> deleted object count. Deletes the env's "
+            "workspace stop/start artifacts from the tier's storage bucket at destroy."
         ),
     )
     cleanup_state_container: CleanupStateContainerFn = Field(
@@ -1153,6 +1160,17 @@ def _expected_litellm_proxy_url(
             assert_never(unreachable)
 
 
+def _workspace_storage_key_prefix(name: DevEnvName, lifecycle: DeployLifecycleConfig) -> str:
+    """The env's keyspace inside its tier's workspace-storage bucket.
+
+    Per-env-Modal-env tiers (dev / ci) share their tier's bucket, so each env
+    owns the ``<env>/`` key prefix -- stamped into the ``storage`` secret at
+    deploy and reclaimed at destroy. Shared tiers (staging / production) have
+    a dedicated bucket and own the whole keyspace (empty prefix).
+    """
+    return f"{name}/" if lifecycle.modal_env_strategy == ModalEnvStrategy.PER_ENV else ""
+
+
 def relay_region_for_env(name: DevEnvName) -> str:
     """The per-env relay region label: the env name as a DNS label.
 
@@ -1185,20 +1203,14 @@ def _compute_secret_overrides(
         "supertokens": {"AUTH_WEBSITE_DOMAIN": str(expected_connector_url)},
         "litellm-connector": {"LITELLM_PROXY_URL": str(expected_litellm_proxy_url)},
     }
-    # Per-env Modal-env tiers (dev / ci) get a per-env relay region: the
-    # region label is the env name and the relay endpoint hostname is
-    # deterministic (``relay.<env>.<domain>``), so every dev env expects its
-    # OWN relay instead of competing for one shared dev relay whose
-    # plugin-auth URL can only point at a single env's connector. Stand the
-    # relay itself up with ``just provision-dev-relay`` (see
-    # docs/environments.md). Shared tiers (staging / production) keep their
-    # Vault-configured multi-region relay fleet untouched.
+    # The relay fleet is not env config: relays live in the connector's
+    # relays table, registered by `just provision-dev-relay` (dev/ci; the env
+    # name is the region label) or the staging/production runbook. Per-env
+    # Modal-env tiers still stamp the storage key prefix that keeps their
+    # stop/start artifacts (and their cleanup) disjoint within the shared
+    # tier bucket.
     if lifecycle.modal_env_strategy == ModalEnvStrategy.PER_ENV:
-        region = relay_region_for_env(name)
-        overrides["sharing"] = {
-            "SHARE_DEFAULT_REGION": region,
-            "SHARE_RELAY_ENDPOINTS": f"{region}=relay.{region}.{cloudflare_domain}:{_RELAY_TUNNEL_CONTROL_PORT}",
-        }
+        overrides["storage"] = {"WORKSPACE_STORAGE_KEY_PREFIX": _workspace_storage_key_prefix(name, lifecycle)}
     if lifecycle.creates_resources:
         assert neon_record is not None
         assert supertokens_record is not None
@@ -1251,10 +1263,14 @@ def destroy_env(
        dev / DROP SCHEMA for shared tiers).
     4. Clear Modal infra (tier-dependent: delete the Modal env outright
        for dev / stop apps + delete secrets for shared tiers).
-    5. For shared tiers only: delete the tier generation id from Vault
+    5. Delete the env's workspace stop/start artifacts from the tier's
+       storage bucket (the env's stamped key prefix for per-env tiers,
+       the whole bucket keyspace for shared tiers). Skipped when the
+       tier's ``storage`` Vault entry is not populated.
+    6. For shared tiers only: delete the tier generation id from Vault
        so the next deploy mints a fresh one + every dev's next
        ``activate`` sees a mismatch and auto-wipes their local state.
-    6. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
+    7. Finally, remove ``~/.minds-<name>/`` -- ONLY if every prior step
        succeeded. On any failure, the env root stays so the operator
        can re-run ``destroy`` to pick up where things broke (rather
        than silently leaking expensive cloud resources because the
@@ -1370,7 +1386,29 @@ def destroy_env(
                 parent_cg=parent_concurrency_group,
             )
 
-    # Step 5: generation id removal -- ONLY for tiers that use generation
+    # Step 5: workspace stop/start artifacts. The env's connector writes
+    # stopped-workspace disks into the tier's storage bucket under exactly
+    # the key prefix the deploy stamped (``<env>/`` for per-env-Modal-env
+    # tiers, the bucket root for shared tiers), so delete that keyspace.
+    # Normally the agent teardown in step 1 already released every pool
+    # host (which deletes its own artifacts); this is the catch-all for
+    # leases that never had a local agent. Skipped -- storage is an
+    # optional feature -- when the tier's ``storage`` Vault entry is not
+    # populated (the placeholder-secret tiers).
+    storage_values = providers.read_per_env_secret_values(
+        "storage",
+        tier_vault_prefix,
+        {},
+        parent_concurrency_group,
+    )
+    if is_workspace_storage_configured(storage_values):
+        storage_prefix = _workspace_storage_key_prefix(name, lifecycle)
+        with info_span("Deleting workspace-storage artifacts for env {!r}", str(name)):
+            providers.delete_workspace_storage_prefix(storage_values, storage_prefix)
+    else:
+        logger.debug("Skipping workspace-storage cleanup for env {!r}: storage is not configured", str(name))
+
+    # Step 6: generation id removal -- ONLY for tiers that use generation
     # tracking (driven by ``deploy_config.lifecycle.tracks_generation``).
     # For dev, there is no generation Vault entry to remove. Production
     # destroy is hard-refused at the CLI today, so this path is only
@@ -1379,7 +1417,7 @@ def destroy_env(
         with info_span("Deleting tier {!r} generation id from Vault", tier):
             providers.delete_generation_id(tier_vault_prefix, parent_concurrency_group)
 
-    # Step 6: env root removal LAST, only on full success.
+    # Step 7: env root removal LAST, only on full success.
     delete_env_root(name)
 
 

@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
 from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -53,6 +54,12 @@ from imbue.mngr.primitives import ProviderInstanceName
 DEFAULT_SERVICE_NAME: ServiceName = ServiceName("web")
 
 FAKE_CONNECTOR_URL: AnyUrl = AnyUrl("https://test--rsc-api.modal.run")
+
+# The relay set the fake CLIs hand out for a share (one us1 relay, matching
+# the workspace domains the fakes build).
+TEST_RELAY_ENDPOINTS: tuple[ShareCliRelayEndpoint, ...] = (
+    ShareCliRelayEndpoint(relay_id="relay-" + "1" * 16, endpoint="relay-us1.shares.example:7000"),
+)
 
 
 class FakeImbueCloudCli(ImbueCloudCli):
@@ -97,7 +104,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
         default=False,
         description="When True, get_share_status raises ImbueCloudCliError (simulates a connector hiccup)",
     )
-    relays_to_return: dict[str, str] = Field(
+    relays_to_return: dict[str, tuple[str, ...]] = Field(
         default_factory=dict,
         description=(
             "Relay map list_share_relays returns. Empty (the default) makes the "
@@ -202,15 +209,15 @@ class FakeImbueCloudCli(ImbueCloudCli):
             workspace_domain=f"{host_id}.owner1234.us1.shares.example",
             region="us1",
             state=state,
-            relay_endpoint="relay-us1.shares.example:7000",
+            relay_endpoints=TEST_RELAY_ENDPOINTS,
         )
 
     def delete_share(self, *, account: str, host_id: str) -> None:
         self.deleted_share_host_ids.append(host_id)
         self.shares_by_account.get(account, {}).pop(host_id, None)
 
-    def list_share_relays(self, *, account: str) -> dict[str, str]:
-        return dict(self.relays_to_return)
+    def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
+        return {region: tuple(endpoints) for region, endpoints in self.relays_to_return.items()}
 
     # -- In-memory storage-cleanup backend (drives the backup-trim tests) --
 

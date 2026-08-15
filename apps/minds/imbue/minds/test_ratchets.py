@@ -31,7 +31,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Six matches: ``destroying_test.py`` (a real test poll loop),
+    # Justified matches: ``destroying_test.py`` (a real test poll loop),
     # ``cli/env.py::_exec_into_recover`` (the 5-second auto-rollback
     # countdown -- a deliberate user-facing pause so the operator can
     # Ctrl-C if they want to intervene before recover fires),
@@ -50,8 +50,11 @@ def test_prevent_time_sleep() -> None:
     # serving traffic; same Modal swap-window justification), and
     # ``deployment_tests/test_litellm_via_workspace.py::_await_key_spend``
     # (polling the env's litellm Postgres spend table until the proxy's
-    # asynchronous spend flush lands -- no event-driven alternative).
-    rc.check_time_sleep(_DIR, snapshot(10))
+    # asynchronous spend flush lands -- no event-driven alternative), and
+    # ``deployment_tests/test_relay_fleet.py`` (deadline-bounded healthz
+    # poll after restarting a stopped relay's frps -- pacing probes of a
+    # real remote service; no event-driven alternative).
+    rc.check_time_sleep(_DIR, snapshot(11))
 
 
 def test_prevent_global_keyword() -> None:

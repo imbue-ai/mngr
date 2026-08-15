@@ -68,6 +68,13 @@ class UiWorkspaceEntry(FrozenModel):
     )
     supports_shutdown: bool = Field(default=False, description="Whether minds can stop/start this workspace's host")
     liveness: str = Field(default="", description="RUNNING / STOPPED / UNKNOWN when supports_shutdown, else empty")
+    is_slow_start: bool = Field(
+        default=False,
+        description=(
+            "Starting this workspace's stopped host is a slow (multi-minute) restore, so clicking "
+            "its stopped tile prompts for an explicit Start instead of auto-starting"
+        ),
+    )
     account: str = Field(default="", description="Owning account email, when known")
     create_attempt_state: str = Field(
         default="", description="creating / interrupted / failed for create-attempt rows; empty for real workspaces"

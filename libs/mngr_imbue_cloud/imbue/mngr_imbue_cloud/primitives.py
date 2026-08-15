@@ -138,6 +138,23 @@ class BareMetalServerStatus(NonEmptyStr):
         return super().__new__(cls, normalized)
 
 
+class WorkspaceStatus(LowerCaseStrEnum):
+    """Wire lifecycle status of a remote workspace (GET /workspaces).
+
+    ``running`` maps from the connector-internal ``leased``. ``stopping``
+    means the VM is halted and its upload is in flight (still restartable in
+    place); ``stopped`` means the artifact is in object storage and the
+    bare-metal slot is freed; ``starting`` means a supervisor is restoring
+    it; ``crashed`` means an operator abandoned it (recover from backup).
+    """
+
+    RUNNING = auto()
+    STOPPING = auto()
+    STOPPED = auto()
+    STARTING = auto()
+    CRASHED = auto()
+
+
 class ImbueCloudKeyType(UpperCaseStrEnum):
     """The class of secret being requested."""
 

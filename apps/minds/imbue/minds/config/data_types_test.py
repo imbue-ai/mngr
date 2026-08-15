@@ -97,6 +97,7 @@ def test_parse_agents_from_mngr_output_raises_on_missing_agents_key() -> None:
 def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
     config = PlanQuotasConfig(
         max_remote_workspaces=NonNegativeInt(2),
+        max_total_workspaces=NonNegativeInt(10),
         max_buckets=NonNegativeInt(5),
         max_total_bucket_gb=NonNegativeInt(50),
         monthly_llm_spend_usd=NonNegativeFloat(0),
@@ -107,11 +108,13 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
     assert row["monthly_llm_spend_usd"] == 0.0
     assert row["max_remote_workspaces"] == 2
     # Every quota column the connector's plans table carries is present.
+    assert row["max_total_workspaces"] == 10
     assert sorted(row) == [
         "max_active_synced_workspaces",
         "max_buckets",
         "max_remote_workspaces",
         "max_total_bucket_bytes",
+        "max_total_workspaces",
         "monthly_llm_spend_usd",
     ]
 

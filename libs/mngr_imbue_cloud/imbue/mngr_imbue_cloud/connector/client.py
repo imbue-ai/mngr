@@ -38,12 +38,16 @@ from imbue.mngr_imbue_cloud.data_types import R2BucketCreateResult
 from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
 from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
+from imbue.mngr_imbue_cloud.data_types import RelayAdminInfo
 from imbue.mngr_imbue_cloud.data_types import ShareInfo
+from imbue.mngr_imbue_cloud.data_types import ShareRelayEndpoint
+from imbue.mngr_imbue_cloud.data_types import ShareRelayLogin
 from imbue.mngr_imbue_cloud.data_types import ShareRelayMap
 from imbue.mngr_imbue_cloud.data_types import StorageCleanupGrant
 from imbue.mngr_imbue_cloud.data_types import StorageRecheckResult
 from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
+from imbue.mngr_imbue_cloud.data_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
@@ -61,6 +65,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
+from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
+from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
@@ -193,7 +199,7 @@ class ImbueCloudConnectorClient(MutableModel):
         self._raise_if_email_not_verified(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
-        if response.status_code in (200, 201, 204):
+        if response.status_code in (200, 201, 202, 204):
             if not response.content:
                 return {}
             try:
@@ -582,6 +588,118 @@ class ImbueCloudConnectorClient(MutableModel):
         return result
 
     # ------------------------------------------------------------------
+    # Workspaces (full-lifecycle listing + stop/start)
+    # ------------------------------------------------------------------
+
+    def _check_workspaces_supported(self, response: httpx.Response) -> None:
+        # An old connector has no /workspaces routes; FastAPI answers its
+        # fixed 404 "Not Found" (or 405 "Method Not Allowed" for a method
+        # mismatch). Surface that as its own type so callers can fall back to
+        # the deprecated leased-only /hosts listing. A modern connector's own
+        # 404 carries a specific detail (e.g. "No such workspace" when the
+        # row was released concurrently) and must fall through to the normal
+        # error mapping instead of masquerading as a missing endpoint.
+        if response.status_code not in (404, 405):
+            return
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if detail is None or detail in ("Not Found", "Method Not Allowed"):
+            raise WorkspacesEndpointUnavailableError(
+                "This connector does not serve /workspaces yet; redeploy it (minds env deploy) "
+                "or fall back to the leased-only listing."
+            )
+
+    def list_workspaces(self, access_token: SecretStr) -> list[WorkspaceInfo]:
+        """List the account's workspaces in every lifecycle state.
+
+        Raises ``WorkspacesEndpointUnavailableError`` against a connector that
+        predates the endpoint (callers fall back to ``list_hosts``).
+        """
+        response = httpx.get(
+            self._url("/workspaces"),
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check_workspaces_supported(response)
+        body = self._check(response, ImbueCloudConnectorError)
+        if not isinstance(body, list):
+            return []
+        result: list[WorkspaceInfo] = []
+        for entry in body:
+            try:
+                result.append(WorkspaceInfo.model_validate(entry))
+            except ValueError:
+                logger.debug("Skipped unparseable workspace entry: {}", entry)
+        return result
+
+    def get_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceInfo:
+        """One workspace's lifecycle view (the poll target during stop/start).
+
+        Routed through ``_send`` so a transient transport blip during the
+        minutes-long start poll is retried instead of aborting the wait.
+        """
+        response = self._send(
+            "GET",
+            self._url(f"/workspaces/{host_db_id}"),
+            exc_cls=ImbueCloudConnectorError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudConnectorError)
+        return WorkspaceInfo.model_validate(body)
+
+    def stop_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceStatus:
+        """Begin stopping a workspace (VM halt + upload + slot free); returns its status.
+
+        Asynchronous and idempotent server-side (a retried POST joins the
+        in-flight stop): the returned status is ``stopping`` when the request
+        initiated (or joined) a stop, or the workspace's current status when
+        it was already past ``running``.
+        """
+        response = self._send(
+            "POST",
+            self._url(f"/workspaces/{host_db_id}/stop"),
+            exc_cls=ImbueCloudConnectorError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check_workspaces_supported(response)
+        body = self._check(response, ImbueCloudConnectorError)
+        return WorkspaceStatus(str(body.get("status", "")))
+
+    def start_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceStatus:
+        """Begin starting a stopped workspace; returns its status (poll ``get_workspace``).
+
+        Idempotent server-side (a retried POST joins the in-flight start).
+        """
+        response = self._send(
+            "POST",
+            self._url(f"/workspaces/{host_db_id}/start"),
+            exc_cls=ImbueCloudConnectorError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check_workspaces_supported(response)
+        self._raise_if_quota_exceeded(response)
+        body = self._check(response, ImbueCloudConnectorError)
+        return WorkspaceStatus(str(body.get("status", "")))
+
+    def admin_abandon_workspace(self, admin_key: SecretStr, host_db_id: str, reason: str) -> None:
+        """Operator escape hatch: mark a workspace crashed (admin-key authenticated, idempotent)."""
+        response = self._send(
+            "POST",
+            self._url(f"/admin/workspaces/{host_db_id}/abandon"),
+            exc_cls=ImbueCloudConnectorError,
+            headers={"Authorization": f"Bearer {admin_key.get_secret_value()}"},
+            json={"reason": reason},
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudConnectorError)
+
+    # ------------------------------------------------------------------
     # Keys (LiteLLM)
     # ------------------------------------------------------------------
 
@@ -743,7 +861,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return [_parse_share_info(entry, state=str(entry.get("state", ""))) for entry in body.get("shares", [])]
 
     def list_share_relays(self, access_token: SecretStr) -> ShareRelayMap:
-        """The relay fleet (region -> tunnel-control endpoint) plus the default region."""
+        """The relay fleet: every active relay's tunnel-control endpoint per region."""
         response = self._send(
             "GET",
             self._url("/shares/relays"),
@@ -753,15 +871,15 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         body = self._check(response, ImbueCloudShareError)
         relays = body.get("relays")
-        default_region = body.get("default_region")
-        # Strict: a malformed body must not degrade to an empty relay map --
-        # the desktop's region picker would silently fall back to the default
-        # region and the misbehaving connector would go unnoticed.
-        if not isinstance(relays, dict) or not isinstance(default_region, str):
+        # Strict: a malformed body must not degrade to an empty (or partial)
+        # relay map -- the desktop's region picker would silently skip its
+        # latency measurement and the misbehaving connector would go unnoticed.
+        if not isinstance(relays, dict) or not all(isinstance(endpoints, list) for endpoints in relays.values()):
             raise ImbueCloudShareError(f"Connector returned a malformed relays response: {str(body)[:200]}")
         return ShareRelayMap(
-            relay_endpoint_by_region={str(region): str(endpoint) for region, endpoint in relays.items()},
-            default_region=default_region,
+            relay_endpoints_by_region={
+                str(region): tuple(str(endpoint) for endpoint in endpoints) for region, endpoints in relays.items()
+            },
         )
 
     def _check_bucket(self, response: httpx.Response) -> Any:
@@ -928,6 +1046,62 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return StorageRecheckResult.model_validate(self._check(response, ImbueCloudAccountError))
+
+    # ------------------------------------------------------------------
+    # Relay fleet admin (MINDS_ADMIN_KEY authenticated)
+    # ------------------------------------------------------------------
+
+    def admin_list_relays(self, admin_api_key: SecretStr) -> list[RelayAdminInfo]:
+        response = self._send(
+            "GET",
+            self._url("/admin/relays"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(admin_api_key),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudShareError)
+        return [RelayAdminInfo.model_validate(entry) for entry in body.get("relays", [])]
+
+    def admin_register_relay(
+        self,
+        admin_api_key: SecretStr,
+        # None registers a fresh relay (the connector mints the id); a value
+        # re-registers / revives that relay in place.
+        relay_id: str | None,
+        region: str,
+        tunnel_endpoint: str,
+        ip_address: str,
+        instance_name: str,
+    ) -> RelayAdminInfo:
+        """Register (or update) one relay row; an idempotent upsert, safe to retry."""
+        body_json: dict[str, str] = {
+            "region": region,
+            "tunnel_endpoint": tunnel_endpoint,
+            "ip_address": ip_address,
+            "instance_name": instance_name,
+        }
+        if relay_id:
+            body_json["relay_id"] = relay_id
+        response = self._send(
+            "POST",
+            self._url("/admin/relays"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(admin_api_key),
+            json=body_json,
+            timeout=self.timeout_seconds,
+        )
+        return RelayAdminInfo.model_validate(self._check(response, ImbueCloudShareError))
+
+    def admin_retire_relay(self, admin_api_key: SecretStr, relay_id: str) -> dict[str, Any]:
+        """Retire one relay (it leaves assignment, DNS, and frps auth); idempotent."""
+        response = self._send(
+            "DELETE",
+            self._url(f"/admin/relays/{relay_id}"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(admin_api_key),
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudShareError)
 
     # ------------------------------------------------------------------
     # Account admin (email-addressed, MINDS_ADMIN_KEY authenticated)
@@ -1240,12 +1414,26 @@ def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry
 def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
     """Build a ShareInfo from a connector share payload (create/status/list shapes)."""
     relay_token = body.get("relay_token")
+    raw_endpoints = body.get("relay_endpoints")
+    relay_endpoints = tuple(
+        ShareRelayEndpoint(relay_id=str(entry.get("relay_id", "")), endpoint=str(entry.get("endpoint", "")))
+        for entry in (raw_endpoints if isinstance(raw_endpoints, list) else [])
+        if isinstance(entry, dict)
+    )
+    # Per-relay tunnel login stamps; only the status document carries them.
+    raw_relay_logins = body.get("relays")
+    relay_logins = tuple(
+        ShareRelayLogin(relay_id=str(entry.get("relay_id", "")), last_login_at=entry.get("last_login_at"))
+        for entry in (raw_relay_logins if isinstance(raw_relay_logins, list) else [])
+        if isinstance(entry, dict)
+    )
     return ShareInfo(
         host_id=str(body.get("host_id", "")),
         workspace_domain=str(body.get("workspace_domain", "")),
         region=str(body.get("region", "")),
         state=state or "active",
-        relay_endpoint=body.get("relay_endpoint"),
+        relay_endpoints=relay_endpoints,
+        relays=relay_logins,
         relay_token=SecretStr(relay_token) if relay_token else None,
         last_tunnel_login_at=body.get("last_tunnel_login_at"),
         cert_not_after=body.get("cert_not_after"),

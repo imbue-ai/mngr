@@ -1087,6 +1087,33 @@ mngr imbue_cloud admin account set-quota [OPTIONS] EMAIL ENTITLEMENT VALUE
 | `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 
+## mngr imbue_cloud admin workspaces
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin workspaces [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin workspaces abandon
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin workspaces abandon [OPTIONS] HOST_DB_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--reason` | text | Why the workspace is being abandoned (recorded on the row) | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
 ## mngr imbue_cloud admin sweep
 
 **Usage:**
@@ -1111,6 +1138,69 @@ mngr imbue_cloud admin sweep r2 [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--email` | text | Scope the pass to one account (full pass when omitted) | None |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin relays
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin relays [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin relays list
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin relays list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin relays add
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin relays add [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--relay-id` | text | Existing relay id to update/revive; omit to mint a fresh one | None |
+| `--region` | text | Region code the relay serves (e.g. us1) | None |
+| `--tunnel-endpoint` | text | host:port the workspaces' frpc dials (typically <ip>:7000) | None |
+| `--ip` | text | Public IPv4 (DNS answer + healthz probe target) | None |
+| `--instance-name` | text | Human-readable OVH instance name | `` |
+| `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin relays remove
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin relays remove [OPTIONS] RELAY_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
 | `--api-key` | text | Admin API key. Defaults to $MINDS_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
 

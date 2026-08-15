@@ -376,12 +376,14 @@ vault login):
 just provision-dev-relay            # OVH region defaults to US-EAST-VA-1
 ```
 
-This provisions a small OVH instance, installs frps pointed at the
-activated env's connector, and upserts the `relay.<env>` +
-`*.<env>` DNS records. Skip it if you never enable sharing from this
-env. Tear the instance down with `just list-share-relays` +
-`just destroy-share-relay <instance-id>` when destroying the env
-(relays are not part of `minds env destroy`).
+This provisions a small OVH instance, registers it in the env
+connector's relay fleet inventory (the `relays` table), installs frps
+pointed at the activated env's connector, and reconciles the
+`relay.<env>` + `*.<env>` DNS record sets. Skip it if you never enable
+sharing from this env. Tear the instance down with
+`just list-share-relays` + `just destroy-share-relay <instance-id>` and
+`just deregister-share-relay <connector-url> <relay-id>` when
+destroying the env (relays are not part of `minds env destroy`).
 
 Re-deploy in place (idempotent -- picks up any new tier-shared Vault
 values and re-deploys both Modal apps):

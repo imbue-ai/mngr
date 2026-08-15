@@ -68,7 +68,6 @@ class MachineSharingLockRegistry(MutableModel):
 
 def build_share_env_text(
     workspace_domain: str,
-    relay_endpoint: str,
     relay_token: str,
     connector_url: str,
     broker_url: str,
@@ -76,10 +75,14 @@ def build_share_env_text(
     # its gateway /_health; empty leaves the chrome locked out (pre-web shape).
     chrome_origin: str,
 ) -> str:
-    """Render share.env in the shape the workspace's share-gateway parses."""
+    """Render share.env in the shape the workspace's share-gateway parses.
+
+    Deliberately carries NO relay endpoint: the gateway fetches its current
+    relay set from the connector's assignment endpoint (relay-token auth) and
+    re-polls, so fleet changes never require re-injecting materials.
+    """
     lines = [
         f"export SHARE_WORKSPACE_DOMAIN={workspace_domain}",
-        f"export SHARE_RELAY_ENDPOINT={relay_endpoint}",
         f"export SHARE_RELAY_TOKEN={relay_token}",
         f"export SHARE_CONNECTOR_URL={connector_url}",
         f"export SHARE_BROKER_URL={broker_url}",

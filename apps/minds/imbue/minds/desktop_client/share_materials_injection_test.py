@@ -81,14 +81,13 @@ _DOMAIN = "host-" + "a" * 32 + "." + "b" * 32 + ".us1.shares.example"
 def test_build_share_env_text_matches_the_gateway_contract() -> None:
     text = build_share_env_text(
         workspace_domain=_DOMAIN,
-        relay_endpoint="relay-us1.infra.example:7000",
         relay_token="tok-123",
         connector_url="https://connector.example",
         broker_url="https://accounts.example",
         chrome_origin="https://connector.example",
     )
     assert f"export SHARE_WORKSPACE_DOMAIN={_DOMAIN}\n" in text
-    assert "export SHARE_RELAY_ENDPOINT=relay-us1.infra.example:7000\n" in text
+    assert "SHARE_RELAY_ENDPOINT" not in text
     assert "export SHARE_RELAY_TOKEN=tok-123\n" in text
     assert "export SHARE_CONNECTOR_URL=https://connector.example\n" in text
     assert "export SHARE_BROKER_URL=https://accounts.example\n" in text
@@ -98,7 +97,6 @@ def test_build_share_env_text_matches_the_gateway_contract() -> None:
 def test_build_share_env_text_omits_the_chrome_origin_line_when_empty() -> None:
     text = build_share_env_text(
         workspace_domain=_DOMAIN,
-        relay_endpoint="relay-us1.infra.example:7000",
         relay_token="tok-123",
         connector_url="https://connector.example",
         broker_url="https://accounts.example",

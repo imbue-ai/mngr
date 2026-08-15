@@ -207,8 +207,7 @@ Modal-pushed entries (consumed by the deployed apps at runtime):
 
 - [ ] **`secrets/minds/staging/sharing`** -- the self-hosted sharing
   config (see `.minds/template/sharing.sh` for the canonical key list
-  and per-key docs): `SHARE_CONTENT_DOMAIN`, `SHARE_DEFAULT_REGION`,
-  `SHARE_RELAY_ENDPOINTS`, `FRPS_AUTH_SECRET`, `ACME_CA_LIST`,
+  and per-key docs): `SHARE_CONTENT_DOMAIN`, `FRPS_AUTH_SECRET`, `ACME_CA_LIST`,
   `ACME_EAB_KID_ZEROSSL` / `ACME_EAB_HMAC_ZEROSSL`,
   `BROKER_JWT_SIGNING_KEY_PEM`, `ACCOUNTS_BASE_URL`.
 
@@ -326,10 +325,12 @@ state.
 
 ## 6b. Stand up the staging share relays
 
-Workspace sharing needs at least one relay per region named in the tier's
-`SHARE_RELAY_ENDPOINTS` (Vault `secrets/minds/staging/sharing`). Each relay is
-one OVH Public Cloud instance; see `apps/share_relay/README.md` for what runs
-on it.
+Workspace sharing needs the relay fleet registered in the connector's
+`relays` table -- **two relays per region** (`us1`, `us2`) in the multi-relay
+design (blueprint/multi-relay): every shared workspace tunnels to all of its
+region's relays, and the region wildcard DNS carries every relay IP. Each
+relay is one OVH Public Cloud instance; see `apps/share_relay/README.md` for
+what runs on it.
 
 - [ ] Mint the tier's relay SSH keypair and push it to Vault (schema:
   `.minds/template/relay-ssh.sh`) so any operator can redeploy later:
@@ -338,22 +339,31 @@ on it.
   vault kv put -mount=secrets minds/staging/relay-ssh/RELAY_SSH_PRIVATE_KEY value=@/tmp/relay_key
   vault kv put -mount=secrets minds/staging/relay-ssh/RELAY_SSH_PUBLIC_KEY value=@/tmp/relay_key.pub
   ```
-- [ ] For each region (e.g. `us1`, `us2`), with the tier's OVH creds +
-  `OVH_CLOUD_PROJECT_ID` (Vault `secrets/minds/staging/ovh`) exported:
+- [ ] For each region (`us1`, `us2`) and each ordinal (`1`, `2`), with the
+  tier's OVH creds + `OVH_CLOUD_PROJECT_ID` (Vault `secrets/minds/staging/ovh`)
+  and `MINDS_ADMIN_KEY` (Vault `secrets/minds/staging/supertokens`) exported:
   ```bash
-  just provision-share-relay staging <region> <ovh-region> /tmp/relay_key.pub
+  just provision-share-relay staging <region> <ordinal> <ovh-region> /tmp/relay_key.pub
   # wait for cloud-init: ssh debian@<ip> cloud-init status --wait
-  just deploy-share-relay <ip> <region> <SHARE_CONTENT_DOMAIN> \
+  just register-share-relay https://<connector> <region> <ip>:7000 <ip> share-relay-staging-<region>-<ordinal>
+  # note the relay_id the registration prints
+  just deploy-share-relay <ip> <relay_id> <region> <SHARE_CONTENT_DOMAIN> \
       "https://<connector>/frps/auth/<FRPS_AUTH_SECRET>"
-  just dns-share-relay <region> <SHARE_CONTENT_DOMAIN> <ip>
   ```
   (`FRPS_AUTH_SECRET` and `SHARE_CONTENT_DOMAIN` come from the tier's
   `sharing` Vault entry pushed in step 4; the connector must already be
-  deployed -- step 6 -- because the relay's plugin-auth URL points at it.)
+  deployed -- step 6 -- because the relay's plugin-auth URL points at it and
+  registration writes its `relays` table.)
+- [ ] Seed the region DNS record sets once per region (the connector's
+  per-minute health sweep maintains them from then on):
+  ```bash
+  just dns-share-relay <region> <SHARE_CONTENT_DOMAIN> "<ip-1> <ip-2>"
+  ```
 - [ ] `rm /tmp/relay_key /tmp/relay_key.pub` once provisioned.
-- [ ] Verify: `relay.<region>.<domain>` + a wildcard name resolve to the
-  instance; `curl http://relay.<region>.<domain>:8080/healthz` returns `ok`;
-  `curl -sI http://relay.<region>.<domain>/` is a 301 to https.
+- [ ] Verify: `relay.<region>.<domain>` + a wildcard name resolve to BOTH
+  instances; `curl http://<each-ip>:8080/healthz` returns `ok`;
+  `curl -sI http://relay.<region>.<domain>/` is a 301 to https;
+  `mngr imbue_cloud admin relays list` shows every relay healthy.
 
 ---
 

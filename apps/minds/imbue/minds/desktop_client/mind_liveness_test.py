@@ -6,9 +6,12 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
+from imbue.minds.desktop_client.mind_liveness import MindShutdownTraits
 from imbue.minds.desktop_client.mind_liveness import classify_host_state
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
+from imbue.minds.desktop_client.mind_liveness import compute_mind_shutdown_traits_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
+from imbue.minds.desktop_client.mind_liveness import provider_backend_start_is_slow
 from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_shutdown
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import make_discovered_provider
@@ -69,12 +72,56 @@ def _resolver_with_capable_agent(
 # -- the single shutdown-capability gate --
 
 
-def test_provider_backend_supports_shutdown_gates_on_local_backends() -> None:
-    # Only the local backends currently expose host shutdown to minds.
+def test_provider_backend_supports_shutdown_gates_on_capable_backends() -> None:
+    # Local backends, the cloud-VM backends, and imbue_cloud workspaces
+    # expose host shutdown to minds; remote backends without a real
+    # host-stop (modal, ovh leases) stay out.
     assert provider_backend_supports_shutdown("docker") is True
     assert provider_backend_supports_shutdown("lima") is True
+    assert provider_backend_supports_shutdown("aws") is True
+    assert provider_backend_supports_shutdown("gcp") is True
+    assert provider_backend_supports_shutdown("azure") is True
+    assert provider_backend_supports_shutdown("imbue_cloud") is True
     assert provider_backend_supports_shutdown("modal") is False
     assert provider_backend_supports_shutdown("ovh") is False
+
+
+def test_provider_backend_start_is_slow_marks_only_cloud_restore_backends() -> None:
+    # imbue_cloud starts restore the workspace from object storage (minutes);
+    # every other shutdown-capable backend starts with a quick local/VM bounce.
+    assert provider_backend_start_is_slow("imbue_cloud") is True
+    assert provider_backend_start_is_slow("docker") is False
+    assert provider_backend_start_is_slow("lima") is False
+    assert provider_backend_start_is_slow("aws") is False
+
+
+def test_compute_shutdown_traits_marks_only_cloud_minds_slow_start() -> None:
+    resolver = MngrCliBackendResolver()
+    cloud_agent = AgentId.generate()
+    local_agent = AgentId.generate()
+    seed_provider_snapshots(
+        resolver,
+        providers=(_provider("imbue_cloud_alice", "imbue_cloud"), _provider("docker", "docker")),
+        error_by_provider_name={},
+        last_snapshot_at=datetime.now(timezone.utc),
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(cloud_agent, local_agent),
+            discovered_agents=(
+                _workspace_agent(cloud_agent, "imbue_cloud_alice"),
+                _workspace_agent(local_agent, "docker", host=_HOST_B),
+            ),
+            host_state_by_host_id={str(_HOST_A): HostState.STOPPED, str(_HOST_B): HostState.RUNNING},
+        )
+    )
+
+    traits = compute_mind_shutdown_traits_by_agent_id(resolver)
+
+    assert traits == {
+        str(cloud_agent): MindShutdownTraits(liveness=MindLiveness.STOPPED, is_slow_start=True),
+        str(local_agent): MindShutdownTraits(liveness=MindLiveness.RUNNING, is_slow_start=False),
+    }
 
 
 # -- host-state classification --

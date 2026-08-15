@@ -22,7 +22,9 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
         "workspace_domain": info.workspace_domain,
         "region": info.region,
         "state": info.state,
-        "relay_endpoint": info.relay_endpoint,
+        "relay_endpoints": [entry.model_dump() for entry in info.relay_endpoints],
+        # Per-relay tunnel login stamps (populated by status documents only).
+        "relays": [entry.model_dump() for entry in info.relays],
         "last_tunnel_login_at": info.last_tunnel_login_at,
         "cert_not_after": info.cert_not_after,
     }
@@ -90,7 +92,7 @@ def delete_share(host_id: str, account: str | None, connector_url: str | None) -
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def share_status(host_id: str, account: str | None, connector_url: str | None) -> None:
-    """Show one share's status (state, relay endpoint, tunnel liveness stamp, cert expiry)."""
+    """Show one share's status (state, relay endpoints, per-relay tunnel login stamps, cert expiry)."""
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
@@ -121,15 +123,12 @@ def list_shares(account: str | None, connector_url: str | None) -> None:
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def list_share_relays(account: str | None, connector_url: str | None) -> None:
-    """Show the relay fleet (region -> tunnel-control endpoint) and the default region."""
+    """Show the relay fleet (region -> tunnel-control endpoints)."""
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
     relay_map = client.list_share_relays(token)
     emit_json(
-        {
-            "relays": relay_map.relay_endpoint_by_region,
-            "default_region": relay_map.default_region,
-        }
+        {"relays": {region: list(endpoints) for region, endpoints in relay_map.relay_endpoints_by_region.items()}}
     )

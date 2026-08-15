@@ -69,11 +69,15 @@ materials the share-gateway service watches for (alongside
 
 ```bash
 export SHARE_WORKSPACE_DOMAIN=host-<hex>.<user>.us1.example.com
-export SHARE_RELAY_ENDPOINT=relay-us1.example.com:7000
 export SHARE_RELAY_TOKEN=...
 export SHARE_CONNECTOR_URL=https://...
 export SHARE_BROKER_URL=https://...
 ```
+
+Note that share.env carries no relay endpoint: the share-gateway fetches
+its current relay set from the connector's `GET /shares/assignment`
+endpoint (authenticated by the relay token) and re-polls it, so relay
+fleet changes never require re-injecting materials.
 
 ## How apps register ports
 
