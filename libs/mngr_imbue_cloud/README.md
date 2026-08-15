@@ -29,7 +29,9 @@ mngr imbue_cloud auth signin --account alice@imbue.com
 
 `auth login` requires a connector that serves the hosted accounts pages. Against an older connector (e.g. a stale dev/CI env) it fails immediately with an actionable error -- redeploy the env with `minds env deploy`, or fall back to `auth signin`.
 
-Email verification is non-blocking: a fresh signup counts as signed in immediately, and no verification email is sent at signup. Only a few actions require a verified email (opening a workspace that was shared with you, and switching to the ally plan); hitting one of those triggers a contextual verification email. `mngr imbue_cloud auth is-verified` reports the current verification state, and `mngr imbue_cloud auth resend-verification` sends the link on demand (rate-limited server-side).
+Account **creation** from the CLI (`mngr imbue_cloud auth signup`) works only on dev/CI tiers: production and staging refuse it (status `SIGNUP_DISABLED`) so every new account goes through the browser flow (`auth login`), which carries the bot-mitigation gate. Signing in headlessly to an existing account works on every tier.
+
+Email verification is non-blocking: a fresh signup counts as signed in immediately, and no verification email is sent at signup. A few actions require a verified email (creating a remote workspace, opening a workspace that was shared with you, and switching to the ally plan); hitting one of those triggers a contextual verification email -- check the inbox (and spam folder), click the link, and retry. `mngr imbue_cloud auth is-verified` reports the current verification state, and `mngr imbue_cloud auth resend-verification` sends the link on demand (rate-limited server-side).
 
 `mngr imbue_cloud auth signout` revokes only this machine's session; pass `--all-devices` to revoke every session for the account (other machines and the browser).
 

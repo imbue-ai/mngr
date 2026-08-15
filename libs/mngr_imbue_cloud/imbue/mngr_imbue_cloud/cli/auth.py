@@ -179,9 +179,10 @@ def _prompt_password_with_confirmation(parsed_account: ImbueCloudAccount) -> str
 def signup(account: str, password: str | None, connector_url: str | None) -> None:
     """Sign up with email + password (returns the new session).
 
-    The headless path (tests, dev/CI tiers). Interactive users normally use
-    ``auth login``, which drives the hosted browser page (production signups
-    will eventually require it).
+    The headless path for tests on dev/CI tiers only: production and staging
+    refuse account creation through this API (status ``SIGNUP_DISABLED``) --
+    create the account with ``auth login`` instead, which drives the hosted
+    browser page.
     """
     parsed_account = parse_account(account)
     if password is None:
