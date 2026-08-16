@@ -4,12 +4,16 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from pydantic import AnyUrl
 
+from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.config.data_types import OriginsConfig
 from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
+from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.mngr.primitives import AgentId
 
@@ -145,3 +149,49 @@ def test_committed_deploy_tomls_all_define_the_launch_plans() -> None:
         assert plans == plan_blocks_by_tier["dev"], f"tier {tier} diverges from the shared [plans] values"
     assert plan_blocks_by_tier["dev"]["explorer"].monthly_llm_spend_usd == 0.0
     assert plan_blocks_by_tier["dev"]["ally"].monthly_llm_spend_usd == 1000.0
+
+
+def test_origins_config_accepts_https_subdomains_of_the_cookie_domain() -> None:
+    origins = OriginsConfig(
+        accounts_origin=AnyUrl("https://accounts.imbue-staging.com"),
+        chrome_origin=AnyUrl("https://minds.imbue-staging.com"),
+        cookie_domain=NonEmptyStr("imbue-staging.com"),
+    )
+    assert origins.accounts_origin.host == "accounts.imbue-staging.com"
+    assert origins.chrome_origin.host == "minds.imbue-staging.com"
+
+
+def test_origins_config_rejects_non_https_origins() -> None:
+    with pytest.raises(ValueError, match="must be https"):
+        OriginsConfig(
+            accounts_origin=AnyUrl("http://accounts.imbue-staging.com"),
+            chrome_origin=AnyUrl("https://minds.imbue-staging.com"),
+            cookie_domain=NonEmptyStr("imbue-staging.com"),
+        )
+
+
+def test_origins_config_rejects_a_host_outside_the_cookie_domain() -> None:
+    with pytest.raises(ValueError, match="not a subdomain"):
+        OriginsConfig(
+            accounts_origin=AnyUrl("https://accounts.imbue-staging.com"),
+            chrome_origin=AnyUrl("https://minds.somewhere-else.com"),
+            cookie_domain=NonEmptyStr("imbue-staging.com"),
+        )
+
+
+def test_origins_config_rejects_an_origin_with_a_path() -> None:
+    with pytest.raises(ValueError, match="bare origin"):
+        OriginsConfig(
+            accounts_origin=AnyUrl("https://accounts.imbue-staging.com/login"),
+            chrome_origin=AnyUrl("https://minds.imbue-staging.com"),
+            cookie_domain=NonEmptyStr("imbue-staging.com"),
+        )
+
+
+def test_committed_tier_deploy_tomls_parse_with_their_origins_blocks() -> None:
+    """The committed staging/production deploy.toml [origins] blocks must load
+    (and their hosts must sit under each tier's own cookie apex)."""
+    for tier, apex in (("staging", "imbue-staging.com"), ("production", "imbue.com")):
+        config = load_deploy_config(tier)
+        assert config.origins is not None
+        assert str(config.origins.cookie_domain) == apex

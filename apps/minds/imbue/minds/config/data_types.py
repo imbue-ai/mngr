@@ -15,6 +15,7 @@ from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.errors import DeployLifecycleConfigError
 from imbue.minds.errors import MalformedMngrOutputError
+from imbue.minds.errors import OriginsConfigError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
@@ -378,6 +379,59 @@ class WebWorkspacesConfig(FrozenModel):
     )
 
 
+class OriginsConfig(FrozenModel):
+    """The ``[origins]`` block of a ``deploy.toml`` -- the tier's user-facing custom domains.
+
+    Declares the browser-facing origin layout the sharing redesign specifies:
+    the hosted accounts surface (``accounts_origin``) and the web chrome
+    (``chrome_origin``) are Modal custom domains on the connector app, and one
+    SuperTokens browser session crosses the two hosts via a cookie scoped to
+    ``cookie_domain`` (their shared registrable apex). The apex must be
+    first-party only -- untrusted workspace content lives on the tier's
+    separate content domain -- and each tier uses its own apex so sessions can
+    never cross tiers. Tiers without the block (dev/ci) stay on the bare
+    connector URL with host-only cookies.
+    """
+
+    accounts_origin: AnyUrl = Field(
+        description=(
+            "Origin of the hosted accounts surface (sign-in/sign-up, the share broker), "
+            "e.g. ``https://accounts.imbue.com``. Drives AUTH_WEBSITE_DOMAIN and "
+            "ACCOUNTS_BASE_URL at deploy time, and is attached to the connector as a "
+            "Modal custom domain."
+        ),
+    )
+    chrome_origin: AnyUrl = Field(
+        description=(
+            "Origin of the hosted web chrome (served at ``/web``), e.g. "
+            "``https://minds.imbue.com``. Drives SHARE_CHROME_ORIGIN at deploy time, and "
+            "is attached to the connector as a Modal custom domain."
+        ),
+    )
+    cookie_domain: NonEmptyStr = Field(
+        description=(
+            "Registrable apex both origins live under (e.g. ``imbue.com``); the accounts "
+            "session cookie is scoped to it so the session crosses the two hosts."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_origins_are_https_hosts_under_the_cookie_domain(self) -> "OriginsConfig":
+        for label, origin in (("accounts_origin", self.accounts_origin), ("chrome_origin", self.chrome_origin)):
+            if origin.scheme != "https":
+                raise OriginsConfigError(f"[origins] {label} must be https, got {origin}")
+            if origin.path not in (None, "", "/") or origin.query is not None or origin.fragment is not None:
+                raise OriginsConfigError(
+                    f"[origins] {label} must be a bare origin (no path/query/fragment), got {origin}"
+                )
+            host = origin.host or ""
+            if not host.endswith("." + str(self.cookie_domain)):
+                raise OriginsConfigError(
+                    f"[origins] {label} host {host!r} is not a subdomain of cookie_domain {self.cookie_domain!r}"
+                )
+        return self
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds env create`.
 
@@ -450,6 +504,14 @@ class DeployEnvConfig(FrozenModel):
         description=(
             "Pinned template + blessed compute shape for browser-driven workspace creation "
             "(the connector's POST /hosts/claim). None (the default) disables web creates on the tier."
+        ),
+    )
+    origins: OriginsConfig | None = Field(
+        default=None,
+        description=(
+            "User-facing custom-domain origin layout (accounts surface + web chrome + shared "
+            "cookie apex). None (the default) keeps the tier on the bare connector URL with "
+            "host-only cookies (dev/ci)."
         ),
     )
 

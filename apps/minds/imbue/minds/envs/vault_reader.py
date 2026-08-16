@@ -26,6 +26,8 @@ from collections.abc import Iterator
 from collections.abc import Mapping
 from typing import Final
 
+from loguru import logger
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.minds.envs.primitives import VaultReadError
@@ -75,6 +77,12 @@ def read_vault_kv(
     or test fixture), we synthesize a fresh CG for the duration of the
     call.
 
+    Soft-deleted leaves (``vault kv delete`` keeps the key in LIST but its
+    GET returns no data) are treated as absent and skipped with a warning:
+    a deleted key means "deliberately removed", and one lingering tombstone
+    must not fail the read of every healthy sibling leaf. Use
+    ``vault kv metadata delete`` to also drop the tombstone from LIST.
+
     Raises :class:`VaultSecretNotFoundError` when the directory itself is
     absent, and :class:`VaultReadError` for any other failure (CLI missing,
     command failed, output not parseable, a leaf missing its ``value``
@@ -87,9 +95,18 @@ def read_vault_kv(
     )
     result_map: dict[str, str] = {}
     for key in keys:
-        result_map[key] = _read_leaf_value(
+        leaf_value = _read_leaf_value(
             relative, key, path=path, parent=parent_concurrency_group, vault_binary=vault_binary
         )
+        if leaf_value is None:
+            logger.warning(
+                "Skipped soft-deleted Vault leaf {}/{} (still listed but has no data; "
+                "run `vault kv metadata delete` to remove the tombstone).",
+                path,
+                key,
+            )
+            continue
+        result_map[key] = leaf_value
     return result_map
 
 
@@ -290,7 +307,8 @@ def _read_leaf_value(
     path: VaultPath,
     parent: ConcurrencyGroup | None,
     vault_binary: str,
-) -> str:
+    # the leaf's ``value`` field, or None when the leaf is soft-deleted (listed but dataless)
+) -> str | None:
     """Read the single ``value`` field of the leaf secret at ``relative/key``."""
     leaf_relative = f"{relative}/{key}"
     command = [vault_binary, "kv", "get", "-format=json", f"-mount={_DEFAULT_MOUNT}", leaf_relative]
@@ -309,6 +327,11 @@ def _read_leaf_value(
     data = parsed.get("data") if isinstance(parsed, dict) else None
     inner = data.get("data") if isinstance(data, dict) else None
     if not isinstance(inner, dict):
+        # A soft-deleted leaf returns data.data = null alongside a metadata
+        # block (deletion_time set). That is a deliberate removal, not
+        # corruption -- report it as absent so the caller can skip it.
+        if isinstance(data, dict) and inner is None and isinstance(data.get("metadata"), dict):
+            return None
         raise VaultReadError(
             f"`{vault_binary} kv get {leaf_relative}` returned no data.data dict; payload shape: {type(parsed).__name__}"
         )

@@ -18,6 +18,7 @@ from imbue.minds.config.data_types import DeployLifecycleConfig
 from imbue.minds.config.data_types import DeploySecretsConfig
 from imbue.minds.config.data_types import MinContainersConfig
 from imbue.minds.config.data_types import ModalEnvStrategy
+from imbue.minds.config.data_types import OriginsConfig
 from imbue.minds.config.data_types import PaidDefaultsConfig
 from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import ScaledownWindowConfig
@@ -40,6 +41,7 @@ from imbue.minds.envs.provisioning import ProviderCredentials
 from imbue.minds.envs.provisioning import Providers
 from imbue.minds.envs.provisioning import _assert_deploy_url_matches
 from imbue.minds.envs.provisioning import _compute_secret_overrides
+from imbue.minds.envs.provisioning import custom_domain_hosts_for_origins
 from imbue.minds.envs.provisioning import deploy_env
 from imbue.minds.envs.provisioning import destroy_env
 from imbue.minds.envs.provisioning import list_dev_envs
@@ -96,6 +98,12 @@ _SHARED_TIER_LIFECYCLE: Final[DeployLifecycleConfig] = DeployLifecycleConfig(
     tracks_generation=True,
 )
 
+_STAGING_ORIGINS: Final[OriginsConfig] = OriginsConfig(
+    accounts_origin=AnyUrl("https://accounts.imbue-staging.com"),
+    chrome_origin=AnyUrl("https://minds.imbue-staging.com"),
+    cookie_domain=NonEmptyStr("imbue-staging.com"),
+)
+
 
 def _deploy_config(
     *,
@@ -107,6 +115,7 @@ def _deploy_config(
     plans: dict[str, PlanQuotasConfig] | None = None,
     lifecycle: DeployLifecycleConfig | None = None,
     services: tuple[str, ...] = ("cloudflare",),
+    origins: OriginsConfig | None = None,
 ) -> DeployEnvConfig:
     if lifecycle is None:
         lifecycle = _DEV_LIFECYCLE if tier == "dev" else _SHARED_TIER_LIFECYCLE
@@ -121,6 +130,7 @@ def _deploy_config(
         scaledown_window=scaledown_window if scaledown_window is not None else ScaledownWindowConfig(),
         paid=paid if paid is not None else PaidDefaultsConfig(),
         plans=plans if plans is not None else {},
+        origins=origins,
     )
 
 
@@ -203,8 +213,8 @@ def _build_fake_providers(
         if "supertokens_app" in fail_delete:
             raise SuperTokensProviderError("supertokens delete boom")
 
-    def read_per_env_secret_values(service, tier_vault_prefix, overrides, cg):
-        call_log["calls"].append(("read_per_env_secret_values", service, dict(overrides)))
+    def read_per_env_secret_values(service, tier_vault_prefix, overrides, is_required, cg):
+        call_log["calls"].append(("read_per_env_secret_values", service, dict(overrides), is_required))
         # Merge canned Vault baseline + caller overrides, mirroring the
         # real ``build_per_env_secret_values`` behaviour. Empty for
         # services the test setup didn't pre-populate.
@@ -240,9 +250,20 @@ def _build_fake_providers(
             return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}-{modal_env}--llm-dev-proxy.modal.run")
         return AnyUrl(f"https://{_TEST_MODAL_WORKSPACE}--llm-{tier}-proxy.modal.run")
 
-    def deploy_remote_service_connector(modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg):
+    def deploy_remote_service_connector(
+        modal_env, tier, min_containers, scaledown_window, deploy_id, custom_domains, strategy, cg
+    ):
         call_log["calls"].append(
-            ("deploy_remote_service_connector", modal_env, tier, min_containers, scaledown_window, deploy_id, strategy)
+            (
+                "deploy_remote_service_connector",
+                modal_env,
+                tier,
+                min_containers,
+                scaledown_window,
+                deploy_id,
+                custom_domains,
+                strategy,
+            )
         )
         if fail_step == "deploy_connector":
             raise ModalDeployError("connector deploy boom")
@@ -1702,6 +1723,7 @@ def test_compute_secret_overrides_stamps_storage_prefix_only_for_per_env_tiers()
         ),
         expected_connector_url=AnyUrl("https://test-ws-dev-josh--rsc-dev-api.modal.run"),
         expected_litellm_proxy_url=AnyUrl("https://test-ws-dev-josh--llm-dev-proxy.modal.run"),
+        origins=None,
     )
     # Only the per-env key prefix is overridden; the bucket + credentials stay
     # tier-shared from Vault.
@@ -1715,6 +1737,7 @@ def test_compute_secret_overrides_stamps_storage_prefix_only_for_per_env_tiers()
         supertokens_record=None,
         expected_connector_url=AnyUrl("https://test-ws--rsc-staging-api.modal.run"),
         expected_litellm_proxy_url=AnyUrl("https://test-ws--llm-staging-proxy.modal.run"),
+        origins=None,
     )
     assert "storage" not in shared_overrides
 
@@ -1747,3 +1770,116 @@ def test_resolve_web_template_pin_env_override_wins_over_everything(monkeypatch:
         template_ref=NonEmptyStr("my/branch"),
     )
     assert resolve_web_template_pin(config) == ("github.com/example/override-template", "override/branch")
+
+
+def test_compute_secret_overrides_stamps_the_origin_layout_when_origins_configured() -> None:
+    """A tier with an [origins] block gets its whole browser-facing origin
+    layout from git: accounts surface, cookie apex, and chrome embed origin."""
+    overrides = _compute_secret_overrides(
+        name=DevEnvName("staging"),
+        lifecycle=_SHARED_TIER_LIFECYCLE,
+        cloudflare_domain="staging.example.com",
+        neon_record=None,
+        supertokens_record=None,
+        expected_connector_url=AnyUrl("https://test-ws--rsc-staging-api.modal.run"),
+        expected_litellm_proxy_url=AnyUrl("https://test-ws--llm-staging-proxy.modal.run"),
+        origins=_STAGING_ORIGINS,
+    )
+    # No trailing slashes anywhere: origins are compared byte-exactly by the
+    # connector (embed allowlist) and appended to (OAuth callback paths).
+    assert overrides["supertokens"]["AUTH_WEBSITE_DOMAIN"] == "https://accounts.imbue-staging.com"
+    assert overrides["sharing"] == {
+        "ACCOUNTS_BASE_URL": "https://accounts.imbue-staging.com",
+        "ACCOUNTS_COOKIE_DOMAIN": "imbue-staging.com",
+    }
+    assert overrides["litellm-connector"]["SHARE_CHROME_ORIGIN"] == "https://minds.imbue-staging.com"
+
+
+def test_compute_secret_overrides_keeps_the_connector_url_when_origins_absent() -> None:
+    overrides = _compute_secret_overrides(
+        name=DevEnvName("staging"),
+        lifecycle=_SHARED_TIER_LIFECYCLE,
+        cloudflare_domain="staging.example.com",
+        neon_record=None,
+        supertokens_record=None,
+        expected_connector_url=AnyUrl("https://test-ws--rsc-staging-api.modal.run"),
+        expected_litellm_proxy_url=AnyUrl("https://test-ws--llm-staging-proxy.modal.run"),
+        origins=None,
+    )
+    assert overrides["supertokens"]["AUTH_WEBSITE_DOMAIN"] == "https://test-ws--rsc-staging-api.modal.run/"
+    assert "sharing" not in overrides
+    assert "SHARE_CHROME_ORIGIN" not in overrides["litellm-connector"]
+
+
+def test_custom_domain_hosts_for_origins_lists_both_hosts_in_order() -> None:
+    assert custom_domain_hosts_for_origins(_STAGING_ORIGINS) == (
+        "accounts.imbue-staging.com",
+        "minds.imbue-staging.com",
+    )
+    assert custom_domain_hosts_for_origins(None) == ()
+
+
+def test_deploy_env_threads_custom_domains_from_the_origins_block(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """The [origins] hosts reach the connector deploy call (and only it)."""
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", origins=_STAGING_ORIGINS),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    connector_deploys = [c for c in call_log["calls"] if c[0] == "deploy_remote_service_connector"]
+    # Tuple shape: (name, modal_env, tier, min_containers, scaledown_window, deploy_id, custom_domains, strategy).
+    assert [c[6] for c in connector_deploys] == [("accounts.imbue-staging.com", "minds.imbue-staging.com")]
+
+
+def test_deploy_env_passes_no_custom_domains_without_an_origins_block(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging"),
+        credentials=_credentials(),
+        providers=providers,
+        parent_concurrency_group=_root_cg,
+    )
+    connector_deploys = [c for c in call_log["calls"] if c[0] == "deploy_remote_service_connector"]
+    assert [c[6] for c in connector_deploys] == [()]
+
+
+def test_deploy_env_marks_declared_services_required_only_on_shared_tiers(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    """Shared tiers must hard-fail on a bad declared-service read; dev tiers keep the bootstrap placeholder path."""
+    staging_log = _make_call_log()
+    deploy_env(
+        DevEnvName("staging"),
+        tier="staging",
+        deploy_config=_deploy_config(tier="staging", services=("cloudflare", "sharing")),
+        credentials=_credentials(),
+        providers=_build_fake_providers(staging_log),
+        parent_concurrency_group=_root_cg,
+    )
+    staging_reads = {c[1]: c[3] for c in staging_log["calls"] if c[0] == "read_per_env_secret_values"}
+    assert staging_reads["cloudflare"] is True
+    assert staging_reads["sharing"] is True
+
+    dev_log = _make_call_log()
+    deploy_env(
+        DevEnvName("dev-frank"),
+        tier="dev",
+        deploy_config=_deploy_config(tier="dev", services=("cloudflare",)),
+        credentials=_credentials(),
+        providers=_build_fake_providers(dev_log),
+        parent_concurrency_group=_root_cg,
+    )
+    dev_reads = {c[1]: c[3] for c in dev_log["calls"] if c[0] == "read_per_env_secret_values"}
+    assert dev_reads["cloudflare"] is False

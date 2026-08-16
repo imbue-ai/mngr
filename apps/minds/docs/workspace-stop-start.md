@@ -74,11 +74,14 @@ uv run minds env deploy --yes-i-mean-<tier>
 ```
 
 `storage` is in every tier's `deploy.toml` services list, so the deploy
-pushes it as the `storage-<env>` Modal secret the connector reads. A tier
-without the Vault entry populated still deploys (the deploy logs a
-warning and pushes a placeholder secret); the deployed connector then
+pushes it as the `storage-<env>` Modal secret the connector reads. A dev
+env without the Vault entry populated still deploys (the deploy logs an
+error and pushes a placeholder secret); the deployed connector then
 cleanly refuses stop/start with a 503 until the entry is populated and
-the env redeployed. The dev tier's entry is populated (bucket
+the env redeployed. Staging / production deploys hard-fail when the
+entry is missing or misses template-declared keys -- push the entry
+first (empty values are allowed to deliberately leave the feature
+disabled). The dev tier's entry is populated (bucket
 `mngr-workspaces-dev`).
 
 ## Operations

@@ -58,26 +58,46 @@ Everything here can be done and verified BEFORE any change that could affect
 existing staging or production users, and should be. Verify each item against
 a dev/ci env first where possible.
 
-- [ ] **Relays.** Provision + register + deploy the staging and production
-  relay fleets (two relays per `us1`/`us2` region; blueprint/multi-relay) with
-  `share-relay`; confirm `mngr imbue_cloud admin relays list` matches the
-  instances actually deployed (the relays table replaced the old
+- [ ] **Relays.** Phase 0 can only *provision* the relay instances (two
+  relays per `us1`/`us2` region; blueprint/multi-relay): registration and
+  frps deploy require the NEW connector -- the `relays` table and its admin
+  endpoints only exist once migration `025_relays` has run, and today's
+  pre-deploy connectors 404 on `/admin/relays`. So the sequencing per tier
+  is: provision the OVH instances (needs `OVH_CLOUD_PROJECT_ID` + the
+  `relay-ssh` Vault entry) in Phase 0, then IMMEDIATELY after that tier's
+  connector deploy run `register-share-relay` + `deploy-share-relay` +
+  `dns-share-relay` and confirm `mngr imbue_cloud admin relays list` matches
+  the instances actually deployed and that the health sweep is maintaining
+  the region DNS record sets. Between the connector deploy and relay
+  bring-up, NEW shares cannot be created (accepted, minutes-long if the
+  instances are pre-provisioned and the commands pre-written); existing
+  cloudflared-era shares are unaffected. The relays table replaced the old
   `SHARE_RELAY_ENDPOINTS` / `SHARE_DEFAULT_REGION` Vault keys -- remove them
-  from the tier `sharing` entries) and that the health sweep is maintaining
-  the region DNS record sets.
-  Confirm the content domains' Public-Suffix-List situation (each region is
-  one wildcard DNS record set and one PSL entry; PSL propagation is slow and
-  affects cross-user cookie isolation between shared workspaces).
+  from the tier `sharing` entries.
+  PSL entries for the content domains are DEFERRED (decided 2026-08-15: not
+  worth it until we have more users) -- each region runs on its wildcard DNS
+  record set alone for now, so cross-user cookie isolation between shared
+  workspaces is weaker until the PSL entries are eventually submitted (PSL
+  propagation is slow; revisit when user volume justifies it).
 - [ ] **Vault entries per tier.** Confirm before deploying: the new
   `relay-ssh` operator-only entry; `OVH_CLOUD_PROJECT_ID`;
   `AUTH_WEBSITE_DOMAIN` (required -- the connector refuses to start without
-  it); `ACCOUNTS_COOKIE_DOMAIN`; Turnstile keys for hosted signup;
-  `BROKER_GOOGLE_CLIENT_ID`/`SECRET` (share-broker Google sign-in; button is
-  hidden when unset); `MINDS_ADMIN_KEY` (the `MINDS_PAID_ADMIN_KEY` spelling
-  is deprecated); `OAUTH_REDIRECTOR_URL` where applicable.
-- [ ] **OAuth redirector.** Deploy the `oauth_redirector` app for the tiers
-  that use it and register its URL as the redirect URI on the Google OAuth
-  client.
+  it; note that on tiers with a deploy.toml `[origins]` block the deploy
+  OVERRIDES it, plus `ACCOUNTS_BASE_URL`, `ACCOUNTS_COOKIE_DOMAIN`, and
+  `SHARE_CHROME_ORIGIN`, from that block -- git is the source of truth for
+  the origin layout; see "User-facing domains" below); Turnstile keys for
+  hosted signup (allowlist the tier's accounts host); `BROKER_GOOGLE_CLIENT_ID`/
+  `SECRET` (share-broker Google sign-in; button is hidden when unset; the
+  registered redirect URI lives on the accounts host); `MINDS_ADMIN_KEY`
+  (the `MINDS_PAID_ADMIN_KEY` spelling is deprecated); and the whole
+  `storage` entry (`WORKSPACE_STORAGE_*` -- migration
+  `024_workspace_stop_start` ships in this deploy, and without the entry the
+  connector 503s stop/start; see workspace-stop-start.md for the bucket +
+  S3-user provisioning).
+- [ ] **OAuth redirector.** Dev/CI tiers only (staging and production
+  register their stable accounts domain directly on the Google client and
+  leave `OAUTH_REDIRECTOR_URL` empty; `just deploy-oauth-redirector` refuses
+  non-dev/ci tiers). Nothing to do for a tier deploy.
 - [ ] **Pinned Modal images.** Run the image-requirements freshness preflight
   cleanly (`just export-image-requirements` committed and matching
   `uv.lock`); confirm `pnpm` is available on the deploy machine (`minds env
@@ -104,9 +124,11 @@ a dev/ci env first where possible.
 ## Phase 1: staging
 
 - [ ] Deploy connector + LiteLLM proxy to staging (`minds env deploy
-  --yes-i-mean-staging`). Migrations 018-023 run here; `020` drops the tunnel
+  --yes-i-mean-staging`). Migrations 018-025 run here; `020` drops the tunnel
   entitlement columns, so the `/account` compat shim above must be deployed
-  with (not after) it.
+  with (not after) it; `024` adds workspace stop/start (needs the `storage`
+  Vault entry); `025` creates the relays table (register the pre-provisioned
+  relay fleet immediately after this deploy -- see the Phase 0 relays item).
 - [ ] Verify on staging: sign-in (browser flow and the deprecated JSON path a
   v0.3.11 client uses), account page from a v0.3.11 client build, create,
   share + revoke, backups, deployment tests.
@@ -167,15 +189,55 @@ a dev/ci env first where possible.
   `SameSite=None; Secure; Partitioned`, and only a fresh login sets the new
   attributes. Fold into the release notes / announcement.
 
-## Production chrome domain
+## User-facing domains (accounts + web chrome, both tiers)
 
-- [ ] Provision `minds.imbue.com` as a second Modal custom domain on the
-  production connector app (a Modal dashboard custom-domain entry pointing at
-  the connector function, plus the DNS record) as part of this deployment.
-  The hosted web chrome is path-served under `/web` on the connector origin,
-  so the domain change is routing only; confirm `AUTH_WEBSITE_DOMAIN` /
-  `ACCOUNTS_COOKIE_DOMAIN` / `SHARE_CHROME_ORIGIN` agree with whichever
-  origin users are sent to. (Phase 0: safe to set up before any deploy.)
+This deployment IS the cutover to the sharing-redesign origin layout, on both
+staging and production (staging exists to rehearse exactly this). Two hosts
+per tier, both Modal custom domains on the connector app, sharing one browser
+session via a cookie scoped to their apex; each tier has its OWN apex so
+sessions can never cross tiers, and untrusted workspace content stays on the
+separate content domain:
+
+| | production | staging |
+|---|---|---|
+| accounts surface | `accounts.imbue.com` | `accounts.imbue-staging.com` |
+| web chrome | `https://minds.imbue.com/web` | `https://minds.imbue-staging.com/web` |
+| session cookie | `Domain=imbue.com` | `Domain=imbue-staging.com` |
+| untrusted content | `imbueminds.com` | `minds-staging.com` |
+| desktop client API | modal.run URL (unchanged) | modal.run URL (unchanged) |
+
+The layout is committed as the `[origins]` block in each tier's `deploy.toml`
+and stamped at deploy time: the deploy attaches both hosts as Modal custom
+domains (`MINDS_CONNECTOR_CUSTOM_DOMAINS` -> `modal.asgi_app(custom_domains=...)`)
+and overrides `AUTH_WEBSITE_DOMAIN`, `ACCOUNTS_BASE_URL`,
+`ACCOUNTS_COOKIE_DOMAIN`, and `SHARE_CHROME_ORIGIN` from the block (Vault
+values for those keys are dead on origin-configured tiers). An earlier
+revision of this item assumed the custom domain was a dashboard-only change;
+attaching a domain to the function requires the `custom_domains` deploy
+plumbing, which now exists.
+
+Operator steps (Phase 0: everything here is inert until the tier deploy):
+
+- [ ] Modal dashboard -> Domains: register `accounts.imbue-staging.com` +
+  `minds.imbue-staging.com` in the `minds-staging` workspace and
+  `accounts.imbue.com` + `minds.imbue.com` in `minds-production`. Each
+  registration must be verified (DNS records below) BEFORE the tier deploy,
+  or `modal deploy` fails on the unattached domain.
+- [ ] DNS: staging's two records go in the `imbue-staging.com` zone (in the
+  staging Cloudflare account -- automatable with the tier token); production's
+  two go in the corporate `imbue.com` zone (manual; not reachable by any tier
+  token).
+- [ ] Google broker client per tier: register the accounts-host callback
+  (`https://accounts.<apex>/share/oauth/google/callback`) alongside the
+  modal.run one (the runtime uses whichever `ACCOUNTS_BASE_URL` names; keeping
+  both registered keeps both origins functional).
+- [ ] After the tier deploy, verify the cross-host session explicitly: sign in
+  from the chrome (bounced to the accounts host, returned with the session),
+  owner silent-entry through `/share/authorize` inside the chrome iframe, and
+  email verification links landing on the accounts host. The
+  `SameSite=None; Partitioned` + `Domain=<apex>` combination across two hosts
+  was only ever live-verified single-origin on dev -- the staging rehearsal is
+  its first real two-host exercise.
 
 ## mngr
 

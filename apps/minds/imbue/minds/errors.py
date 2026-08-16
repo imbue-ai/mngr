@@ -104,6 +104,16 @@ class DeployLifecycleConfigError(MindError, ValueError):
     ...
 
 
+class OriginsConfigError(MindError, ValueError):
+    """Raised when a deploy.toml ``[origins]`` block is invalid.
+
+    Subclasses ``ValueError`` so pydantic treats it as a validation failure
+    when raised inside a model validator.
+    """
+
+    ...
+
+
 class EnvelopeStreamConsumerError(MindError, RuntimeError):
     """Raised when the envelope stream consumer is used out of lifecycle order."""
 

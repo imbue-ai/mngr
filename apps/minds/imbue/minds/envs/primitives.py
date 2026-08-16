@@ -134,6 +134,10 @@ class VaultReadError(MindError):
     """Raised when a Vault read fails (no auth, missing path, bad data)."""
 
 
+class SecretTemplateValidationError(MindError):
+    """Raised when a required service's Vault entry is missing keys its `.minds/template/<service>.sh` schema declares."""
+
+
 class VaultSecretNotFoundError(VaultReadError):
     """Raised specifically when the Vault path has no secret (CLI exit code 2).
 

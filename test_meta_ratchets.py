@@ -482,13 +482,13 @@ def _has_test_files(project_dir: Path) -> bool:
     return False
 
 
-def _find_tracked_gitignored_files() -> list[str]:
-    """Return tracked files that match .gitignore patterns.
+def _tracked_present_files() -> list[str]:
+    """Return git-tracked paths that exist in the working tree.
 
     Files that are deleted in the working tree are excluded: they are on their
     way out of the repo, and offload sandboxes reconstruct branch state as a
-    base commit plus an unstaged diff, which would otherwise flag files that a
-    commit deletes at the same time as gitignoring their path.
+    base commit plus an unstaged diff, which leaves files that a commit deletes
+    in `git ls-files` output even though they are absent.
     """
     tracked = subprocess.run(
         ["git", "ls-files"],
@@ -497,7 +497,12 @@ def _find_tracked_gitignored_files() -> list[str]:
         check=True,
         cwd=_REPO_ROOT,
     )
-    present = [line for line in tracked.stdout.splitlines() if line.strip() and (_REPO_ROOT / line).exists()]
+    return [line for line in tracked.stdout.splitlines() if line.strip() and (_REPO_ROOT / line).exists()]
+
+
+def _find_tracked_gitignored_files() -> list[str]:
+    """Return tracked, working-tree-present files that match .gitignore patterns."""
+    present = _tracked_present_files()
     ignored = subprocess.run(
         ["git", "check-ignore", "--no-index", "--stdin"],
         input="\n".join(present) + "\n",
@@ -531,7 +536,9 @@ def test_gitignore_patterns_use_double_star() -> None:
     .dockerignore is generated from .gitignore by the _generate-dockerignore
     justfile recipe before each offload run, so the two files must use patterns
     valid in both syntaxes. Enforcing **/ on the .gitignore side keeps the
-    generator a trivial passthrough.
+    generator close to a plain passthrough -- its only semantic patch-up is
+    re-appending the .minds/template negations in the docker-honored form
+    (see test_generated_dockerignore_ships_all_committed_files).
     """
     gitignore = (_REPO_ROOT / ".gitignore").read_text()
     violations: list[str] = []
@@ -550,6 +557,61 @@ def test_gitignore_patterns_use_double_star() -> None:
     assert len(violations) == 0, (
         "The following .gitignore patterns need a **/ prefix.\n"
         "This keeps .gitignore directly compatible with .dockerignore:\n" + "\n".join(violations)
+    )
+
+
+_GENERATE_DOCKERIGNORE_SCRIPT = "scripts/generate_dockerignore.sh"
+
+
+def _generated_dockerignore_patterns(tmp_path: Path) -> list[str]:
+    """Run the real generation script into ``tmp_path`` and return its patterns.
+
+    Also asserts the _generate-dockerignore recipe (private.just) still routes
+    through the script, so what this test evaluates is what offload uses.
+    """
+    recipe_text = (_REPO_ROOT / "private.just").read_text()
+    assert f"bash {_GENERATE_DOCKERIGNORE_SCRIPT}" in recipe_text, (
+        f"private.just's _generate-dockerignore recipe no longer invokes {_GENERATE_DOCKERIGNORE_SCRIPT}; "
+        "update test_generated_dockerignore_ships_all_committed_files to exercise whatever replaced it."
+    )
+    output_path = tmp_path / "dockerignore.generated"
+    # Streams are inherited (not captured) so that if the script fails, its
+    # stderr lands in pytest's captured output next to the CalledProcessError.
+    subprocess.run(
+        ["bash", _GENERATE_DOCKERIGNORE_SCRIPT, str(output_path)],
+        cwd=_REPO_ROOT,
+        check=True,
+    )
+    return output_path.read_text().splitlines()
+
+
+@pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="the _generate-dockerignore recipe is absent on the public mirror")
+def test_generated_dockerignore_ships_all_committed_files(tmp_path: Path) -> None:
+    """No git-committed file may be excluded by the generated .dockerignore.
+
+    Offload builds its sandbox images from the .dockerignore that
+    scripts/generate_dockerignore.sh derives from .gitignore, and Modal
+    evaluates it with its docker-style matcher. That matcher does not
+    honor .gitignore's anchored `!/...` negation form, so a committed file can
+    silently vanish from sandbox images even though git tracks it (this
+    happened to the committed .minds/template schemas). Run the real script
+    and evaluate its output with Modal's real matcher against every committed
+    path to catch any such exclusion at test time instead of as a missing
+    file in CI.
+    """
+    file_pattern_matcher = pytest.importorskip("modal.file_pattern_matcher")
+    # Blank and `#`-comment lines carry no patterns in dockerignore syntax.
+    patterns = [
+        pattern.strip()
+        for pattern in _generated_dockerignore_patterns(tmp_path)
+        if pattern.strip() and not pattern.strip().startswith("#")
+    ]
+    matcher = file_pattern_matcher.FilePatternMatcher(*patterns)
+    excluded = [path for path in _tracked_present_files() if matcher(Path(path))]
+    assert len(excluded) == 0, (
+        "The following committed files would be excluded from offload sandbox images by the\n"
+        "generated .dockerignore (see scripts/generate_dockerignore.sh):\n"
+        + "\n".join(f"  - {path}" for path in excluded)
     )
 
 

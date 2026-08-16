@@ -1,5 +1,6 @@
 """Unit tests for deploy_utils shared utilities."""
 
+import tempfile
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +13,7 @@ from imbue.mngr.providers.deploy_utils import collect_deploy_files
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
 from imbue.mngr.providers.deploy_utils import detect_mngr_install_mode
 from imbue.mngr.providers.deploy_utils import resolve_mngr_install_mode
+from imbue.mngr.utils.testing import allow_warnings
 
 
 class _MockHook:
@@ -232,3 +234,61 @@ def test_collect_provider_profile_files_excludes_specified_files(
     # The single remaining file should be config.toml
     dest_paths = list(result.keys())
     assert any("config.toml" in str(p) for p in dest_paths)
+
+
+def test_collect_provider_profile_files_skips_lock_files(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Transient flock artifacts (e.g. .modal_ssh_key.lock) must never be collected.
+
+    load_or_create_ssh_keypair leaves its lock file behind in the provider
+    dir; collecting it raced host creation in CI (the file exists only once
+    key generation has run in the profile) and is meaningless on the
+    deployed host.
+    """
+    provider_dir = temp_mngr_ctx.profile_dir / "providers" / "test-provider"
+    provider_dir.mkdir(parents=True, exist_ok=True)
+    (provider_dir / "config.toml").write_text("test config")
+    (provider_dir / ".modal_ssh_key.lock").write_text("")
+
+    result = collect_provider_profile_files(
+        mngr_ctx=temp_mngr_ctx,
+        provider_name="test-provider",
+        excluded_file_names=frozenset(),
+    )
+
+    assert len(result) == 1
+    assert any("config.toml" in str(p) for p in result)
+
+
+class _MockProfileDirCtx:
+    """Concrete mock for MngrContext exposing only profile_dir."""
+
+    def __init__(self, profile_dir: Path) -> None:
+        self.profile_dir = profile_dir
+
+
+def test_collect_provider_profile_files_skips_files_outside_home() -> None:
+    """A profile outside the home directory must not fail the collection.
+
+    Such files cannot be expressed as "~/" destinations; they are skipped
+    (with a warning) instead of raising and failing the whole host creation,
+    which is how a stray provider-profile file broke modal creates in CI.
+    Uses a system temp dir rather than tmp_path because the test fixtures
+    place tmp_path under the overridden HOME.
+    """
+    with tempfile.TemporaryDirectory(prefix="mngr-outside-home-73194-") as temp_dir:
+        outside_home_profile = Path(temp_dir) / "profile"
+        provider_dir = outside_home_profile / "providers" / "test-provider"
+        provider_dir.mkdir(parents=True)
+        (provider_dir / "config.toml").write_text("test config")
+        assert not provider_dir.is_relative_to(Path.home())
+
+        with allow_warnings(match=r"^Skipped provider profile file "):
+            result = collect_provider_profile_files(
+                mngr_ctx=cast(MngrContext, _MockProfileDirCtx(outside_home_profile)),
+                provider_name="test-provider",
+                excluded_file_names=frozenset(),
+            )
+
+    assert result == {}

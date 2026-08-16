@@ -184,12 +184,14 @@ def _read_per_env_secret_values_for_provider(
     service: str,
     tier_vault_prefix: str,
     overrides: dict[str, str],
+    is_required: bool,
     cg: ConcurrencyGroup,
 ) -> dict[str, str]:
     return build_per_env_secret_values(
         service,
         tier_vault_prefix=tier_vault_prefix,
         overrides=overrides,
+        is_required=is_required,
         parent_cg=cg,
     )
 
@@ -229,6 +231,7 @@ def _deploy_connector_for_provider(
     min_containers: int,
     scaledown_window: int,
     deploy_id: str,
+    custom_domains: tuple[str, ...],
     strategy: DeployStrategy,
     cg: ConcurrencyGroup,
 ) -> AnyUrl:
@@ -238,6 +241,7 @@ def _deploy_connector_for_provider(
         min_containers=min_containers,
         scaledown_window=scaledown_window,
         deploy_id=deploy_id,
+        custom_domains=custom_domains,
         strategy=strategy,
         parent_cg=cg,
     )

@@ -28,7 +28,9 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Mapping
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Final
 
@@ -42,6 +44,7 @@ from imbue.imbue_common.modal_image_requirements import image_requirements_path
 from imbue.imbue_common.pure import pure
 from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
+from imbue.minds.envs.primitives import SecretTemplateValidationError
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
@@ -101,6 +104,11 @@ LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONT
 # own default scaledown window".
 CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_CONNECTOR_SCALEDOWN_WINDOW"
 LITELLM_PROXY_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW"
+
+# Env-var name the deployed connector app reads at module load to attach its
+# Modal custom domains (comma-separated hosts from the tier's ``[origins]``
+# deploy.toml block; unset means none). Same lockstep contract as above.
+CONNECTOR_CUSTOM_DOMAINS_ENV_VAR: Final[str] = "MINDS_CONNECTOR_CUSTOM_DOMAINS"
 
 # Env-var name the deployed modal apps read at module load to pick
 # which timestamped Modal Secret bundle to attach. Mirrors the same
@@ -303,19 +311,68 @@ def tier_litellm_proxy_url(tier: str, modal_workspace: str) -> AnyUrl:
     return AnyUrl(f"https://{modal_workspace}--llm-{tier}-proxy.modal.run")
 
 
+@pure
+def parse_template_declared_keys(template_text: str) -> tuple[str, ...]:
+    """Extract the key names a `.minds/template/<service>.sh` schema declares (its ``export KEY=`` lines)."""
+    return tuple(match.group(1) for match in re.finditer(r"^export ([A-Z0-9_]+)=", template_text, re.MULTILINE))
+
+
+def _service_template_path(service: str) -> Path:
+    return _repo_root() / ".minds" / "template" / f"{service}.sh"
+
+
+@pure
+def find_missing_template_keys(declared_keys: Sequence[str], present_keys: AbstractSet[str]) -> tuple[str, ...]:
+    return tuple(key for key in declared_keys if key not in present_keys)
+
+
+def _validate_required_service_values(service: str, merged_values: Mapping[str, str]) -> None:
+    """Raises :class:`SecretTemplateValidationError` when ``merged_values`` misses a template-declared key.
+
+    Empty values are fine (declared-but-unset; filtered out before the Modal
+    push, so the variable ends up unset in the container) -- only a key that
+    is absent entirely fails, since that means the tier's Vault entry has
+    drifted from the schema the connector is coded against.
+    """
+    template_path = _service_template_path(service)
+    if not template_path.is_file():
+        raise SecretTemplateValidationError(
+            f"No template schema at {template_path} for required service {service!r}; "
+            "every service in [secrets].services must have a `.minds/template/<service>.sh` schema."
+        )
+    declared_keys = parse_template_declared_keys(template_path.read_text())
+    missing_keys = find_missing_template_keys(declared_keys, set(merged_values))
+    if missing_keys:
+        raise SecretTemplateValidationError(
+            f"Vault entry for required service {service!r} is missing template-declared key(s) "
+            f"{list(missing_keys)}. Populate them (empty values are allowed) with "
+            f"`scripts/push_vault_from_file.py` from {template_path.name} before deploying."
+        )
+
+
 def build_per_env_secret_values(
     service: str,
     *,
     tier_vault_prefix: str,
     overrides: dict[str, str],
+    # True for services a shared tier's [secrets].services declares: a failed
+    # Vault read or a schema-incomplete entry aborts the deploy instead of
+    # degrading to a placeholder secret.
+    is_required: bool,
     parent_cg: ConcurrencyGroup,
 ) -> dict[str, str]:
     """Read tier-shared values for one service from Vault and layer overrides.
 
-    Missing Vault entries return an empty dict and emit a warning so
-    the operator can populate them later; the caller is expected to
-    fall back to a placeholder when both the tier-shared values and
-    overrides come up empty.
+    For required services (shared tiers, ``creates_resources=false``) a read
+    failure propagates and the merged values must cover every key the
+    service's ``.minds/template/<service>.sh`` schema declares -- shipping a
+    placeholder or partial secret for a declared service is a silent outage
+    (a connector that comes up "healthy" with no sharing config, say).
+
+    For non-required reads (dev/ci bootstrap, teardown lookups) missing Vault
+    entries return an empty dict and emit an error-level log so the operator
+    can populate them later; the caller falls back to a placeholder when both
+    the tier-shared values and overrides come up empty.
 
     This helper is only for genuinely Vault-backed services (every
     entry in ``_PER_ENV_SECRET_SERVICES``). Code-driven secrets like
@@ -330,9 +387,13 @@ def build_per_env_secret_values(
             parent_concurrency_group=parent_cg,
         )
     except VaultReadError as exc:
-        logger.warning("Vault read for {} failed ({}); will push placeholder.", service, exc)
+        if is_required:
+            raise
+        logger.error("Failed to read Vault for {} ({}); will push placeholder.", service, exc)
     merged = dict(base)
     merged.update(overrides)
+    if is_required:
+        _validate_required_service_values(service, merged)
     return {k: v for k, v in merged.items() if v}
 
 
@@ -352,7 +413,7 @@ def push_per_env_modal_secret(
     services are unpopulated.
     """
     if not values:
-        logger.warning("{!r}: no Vault values; pushing placeholder Modal Secret.", secret_name)
+        logger.error("Detected no Vault values for {!r}; pushing placeholder Modal Secret.", secret_name)
         values = {_PLACEHOLDER_KEY: _PLACEHOLDER_VALUE}
     command = [
         "modal",
@@ -559,6 +620,7 @@ def deploy_remote_service_connector(
     min_containers: int,
     scaledown_window: int,
     deploy_id: str,
+    custom_domains: Sequence[str],
     strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
@@ -569,7 +631,11 @@ def deploy_remote_service_connector(
     subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
     by the modal app at module load. ``scaledown_window`` (idle seconds
     before scaledown; ``0`` = Modal default) is threaded as
-    ``MINDS_CONNECTOR_SCALEDOWN_WINDOW``.
+    ``MINDS_CONNECTOR_SCALEDOWN_WINDOW``. ``custom_domains`` (the tier's
+    ``[origins]`` hosts; may be empty) is always threaded as
+    ``MINDS_CONNECTOR_CUSTOM_DOMAINS`` (empty string = none, overriding any
+    stale value in the ambient env) -- every named domain must already be
+    registered and verified in the tier's Modal workspace or the deploy fails.
 
     ``deploy_id`` is threaded into the subprocess env as ``MINDS_DEPLOY_ID``
     so the deployed connector attaches to the matching ``<svc>-<tier>-<id>``
@@ -579,7 +645,21 @@ def deploy_remote_service_connector(
     _verify_image_requirements_fresh("remote-service-connector", parent_cg)
     with info_span("building the connector frontends (accounts + web chrome)"):
         _build_connector_frontends(parent_cg)
-    with info_span("modal deploy rsc-{} into env {!r} (strategy={})", tier, modal_env, strategy.value):
+    extra_env = {
+        CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers),
+        CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
+        # Always set (empty string = no custom domains, which the app reads as
+        # None) so a stale value exported in the operator's shell can never
+        # leak into the deploy through the inherited os.environ.
+        CONNECTOR_CUSTOM_DOMAINS_ENV_VAR: ",".join(custom_domains),
+    }
+    with info_span(
+        "modal deploy rsc-{} into env {!r} (strategy={}, custom_domains={})",
+        tier,
+        modal_env,
+        strategy.value,
+        list(custom_domains),
+    ):
         return _deploy_modal_app(
             app_file=_connector_app_file(),
             app_name=f"rsc-{tier}",
@@ -587,10 +667,7 @@ def deploy_remote_service_connector(
             tier=tier,
             deploy_id=deploy_id,
             strategy=strategy,
-            extra_env={
-                CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers),
-                CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
-            },
+            extra_env=extra_env,
             parent_cg=parent_cg,
         )
 

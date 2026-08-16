@@ -8,18 +8,30 @@ pool-host queries, the latter for the LiteLLM proxy's Prisma-managed
 backing store). Both DSNs come from the same per-env Neon project.
 """
 
+import os
+from pathlib import Path
+
 import pytest
 from pydantic import SecretStr
 
+import imbue.minds.config
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.envs.per_env_deploy import ModalDeployError
 from imbue.minds.envs.per_env_deploy import _modal_profile_token_workspace
 from imbue.minds.envs.per_env_deploy import _select_deployed_app_id
+from imbue.minds.envs.per_env_deploy import _service_template_path
+from imbue.minds.envs.per_env_deploy import _validate_required_service_values
 from imbue.minds.envs.per_env_deploy import _verify_image_requirements_fresh
+from imbue.minds.envs.per_env_deploy import build_per_env_secret_values
 from imbue.minds.envs.per_env_deploy import compute_per_env_overrides
+from imbue.minds.envs.per_env_deploy import find_missing_template_keys
 from imbue.minds.envs.per_env_deploy import modal_token_reprovision_hint
 from imbue.minds.envs.per_env_deploy import modal_token_workspace_mismatch_message
+from imbue.minds.envs.per_env_deploy import parse_template_declared_keys
 from imbue.minds.envs.primitives import DevEnvName
+from imbue.minds.envs.primitives import SecretTemplateValidationError
+from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.supertokens_app import SuperTokensAppRecord
 
@@ -152,3 +164,109 @@ def test_modal_token_workspace_mismatch_message_none_when_matching_or_undetermin
     assert modal_token_workspace_mismatch_message("minds-dev", "minds-dev") is None
     # Binding couldn't be determined (best-effort skip) -> no problem.
     assert modal_token_workspace_mismatch_message("minds-dev", None) is None
+
+
+def test_parse_template_declared_keys_extracts_export_lines() -> None:
+    template_text = (
+        "# Comment about the service\n"
+        "export FRPS_AUTH_SECRET=\n"
+        "export SHARE_CONTENT_DOMAIN=minds-example.com\n"
+        "# export COMMENTED_OUT=\n"
+        "not_an_export=1\n"
+        "export BROKER_JWT_SIGNING_KEY_PEM=\n"
+    )
+    assert parse_template_declared_keys(template_text) == (
+        "FRPS_AUTH_SECRET",
+        "SHARE_CONTENT_DOMAIN",
+        "BROKER_JWT_SIGNING_KEY_PEM",
+    )
+
+
+def test_find_missing_template_keys_reports_only_absent_keys() -> None:
+    declared = ("A_KEY", "B_KEY", "C_KEY")
+    assert find_missing_template_keys(declared, {"A_KEY", "C_KEY"}) == ("B_KEY",)
+    assert find_missing_template_keys(declared, {"A_KEY", "B_KEY", "C_KEY"}) == ()
+
+
+def test_validate_required_service_values_raises_naming_the_missing_keys() -> None:
+    """Validation runs against the real committed sharing template, so drift in
+    either direction (schema vs deploy check) surfaces here."""
+    template_keys = parse_template_declared_keys(_service_template_path("sharing").read_text())
+    assert len(template_keys) > 2
+    complete_values = {key: "" for key in template_keys}
+    # Complete-but-empty passes: empty means declared-but-unset by design.
+    _validate_required_service_values("sharing", complete_values)
+
+    partial_values = dict(complete_values)
+    del partial_values["FRPS_AUTH_SECRET"]
+    with pytest.raises(SecretTemplateValidationError, match="FRPS_AUTH_SECRET"):
+        _validate_required_service_values("sharing", partial_values)
+
+
+def test_validate_required_service_values_raises_for_unknown_service_template() -> None:
+    with pytest.raises(SecretTemplateValidationError, match="template schema"):
+        _validate_required_service_values("no-such-service-73194", {})
+
+
+def test_every_committed_declared_service_has_a_template_schema() -> None:
+    """Every service a committed deploy.toml declares must have a `.minds/template/<service>.sh` schema.
+
+    Shared-tier deploys hard-fail on a declared service with no template, so a
+    services-list/template mismatch must surface here rather than mid-rollout.
+    Tiers are discovered from disk (every ``envs/*/deploy.toml``) so a new tier
+    cannot silently escape the check; the known four are asserted present.
+    """
+    envs_dir = Path(imbue.minds.config.__file__).parent / "envs"
+    deploy_paths = sorted(envs_dir.glob("*/deploy.toml"))
+    discovered_tiers = {path.parent.name for path in deploy_paths}
+    assert {"ci", "dev", "staging", "production"} <= discovered_tiers, (
+        f"missing deploy.toml for tiers: {sorted({'ci', 'dev', 'staging', 'production'} - discovered_tiers)}"
+    )
+    for tier in sorted(discovered_tiers):
+        for service in load_deploy_config(tier).secrets.services:
+            template_path = _service_template_path(str(service))
+            assert template_path.is_file(), (
+                f"tier {tier!r} declares service {service!r} in [secrets].services, "
+                f"but there is no template schema at {template_path}"
+            )
+
+
+def _install_failing_fake_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put a fake ``vault`` CLI on PATH that fails every invocation with a transient-style error (exit 1)."""
+    fake_vault = tmp_path / "vault"
+    fake_vault.write_text("#!/usr/bin/env bash\necho 'permission denied' >&2\nexit 1\n")
+    fake_vault.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_build_per_env_secret_values_required_propagates_vault_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A required service's failed Vault read aborts instead of degrading to a placeholder."""
+    _install_failing_fake_vault(tmp_path, monkeypatch)
+
+    with ConcurrencyGroup(name="required-vault-failure-test") as cg:
+        with pytest.raises(VaultReadError):
+            build_per_env_secret_values(
+                "sharing",
+                tier_vault_prefix="secrets/minds/staging",
+                overrides={},
+                is_required=True,
+                parent_cg=cg,
+            )
+
+
+def test_build_per_env_secret_values_optional_returns_overrides_on_vault_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_failing_fake_vault(tmp_path, monkeypatch)
+
+    with ConcurrencyGroup(name="optional-vault-failure-test") as cg:
+        values = build_per_env_secret_values(
+            "sharing",
+            tier_vault_prefix="secrets/minds/staging",
+            overrides={"ACCOUNTS_BASE_URL": "https://accounts.example.com"},
+            is_required=False,
+            parent_cg=cg,
+        )
+    assert values == {"ACCOUNTS_BASE_URL": "https://accounts.example.com"}

@@ -72,7 +72,16 @@ def collect_provider_profile_files(
     Scans the provider's subdirectory under the profile (e.g.
     ~/.mngr/profiles/<id>/providers/<provider_name>/) and returns all files
     except those whose names appear in excluded_file_names (typically SSH
-    keypairs and known_hosts).
+    keypairs and known_hosts). ``*.lock`` files are always skipped: they are
+    transient local flock artifacts (e.g. the ``.<key_name>.lock`` files
+    ``load_or_create_ssh_keypair`` leaves behind) and meaningless on the
+    deployed host.
+
+    Files under a profile that lives outside the user's home directory (e.g.
+    a test session's temp profile, or a custom MNGR_HOST_DIR) cannot be
+    expressed as "~/" destinations; they are skipped with a warning instead
+    of failing the whole deploy-file collection -- and thereby the host
+    creation -- over auxiliary profile files.
 
     Returns dict mapping destination paths (starting with "~/") to local
     source paths.
@@ -84,9 +93,20 @@ def collect_provider_profile_files(
 
     user_home = Path.home()
     for file_path in provider_dir.rglob("*"):
-        if file_path.is_file() and file_path.name not in excluded_file_names:
-            relative = file_path.relative_to(user_home)
-            files[Path(f"~/{relative}")] = file_path
+        if not file_path.is_file():
+            continue
+        if file_path.name in excluded_file_names or file_path.name.endswith(".lock"):
+            continue
+        if not file_path.is_relative_to(user_home):
+            logger.warning(
+                "Skipped provider profile file {} for deploy: it is outside the home directory {} "
+                "and cannot be mapped to a '~/' destination.",
+                file_path,
+                user_home,
+            )
+            continue
+        relative = file_path.relative_to(user_home)
+        files[Path(f"~/{relative}")] = file_path
     return files
 
 

@@ -111,10 +111,21 @@ credential is intentionally account-wide so any operator can order +
 manage boxes for the tier.
 
 The schema for each `<service>` is the corresponding file under
-`.minds/template/<service>.sh` at the repo root. `minds env deploy`
-validates every key declared by a Modal-pushed template against the
-Vault entry before pushing anything to Modal, so missing keys are
-caught before they break a deploy.
+`.minds/template/<service>.sh` at the repo root. For staging /
+production (`creates_resources=false`), `minds env deploy` validates
+every key declared by a Modal-pushed template against the Vault entry
+before pushing anything to Modal and hard-fails the deploy on a
+missing key or an unreadable entry -- shipping a placeholder or
+partial secret for a declared service would be a silent outage.
+Empty values are allowed (declared-but-unset; skipped at Modal push).
+Dev/ci envs keep the bootstrap-friendly behavior: an unpopulated
+service becomes a placeholder Modal Secret (logged at error level)
+that a later deploy replaces once the entry is filled in.
+
+Note that `vault kv delete` is a *soft* delete: the key stays in the
+directory listing with no data. The deploy's reader skips such
+tombstones with a warning; to actually remove a key from a service,
+use `vault kv metadata delete` so the listing is clean too.
 
 `<tier>` is one of `dev`, `staging`, `production`. Per-dev-env secrets
 (the values `minds env deploy` generates per developer for a dev env)

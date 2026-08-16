@@ -19,15 +19,24 @@ def _write_fake_vault(tmp_path: Path, body: str) -> Path:
     return script
 
 
-def _make_split_vault_binary(tmp_path: Path, value_by_key: dict[str, str]) -> Path:
+def _make_split_vault_binary(
+    tmp_path: Path, value_by_key: dict[str, str], *, deleted_keys: tuple[str, ...] = ()
+) -> Path:
     """Fake ``vault`` for the split layout: ``kv list`` returns the keys, ``kv get`` returns each leaf's ``value``.
 
     Models the real two-call read path: a single ``kv list`` of the service
     directory followed by one ``kv get`` per child leaf, each holding a single
-    ``value`` field.
+    ``value`` field. Keys in ``deleted_keys`` are soft-deleted: they still show
+    up in the ``kv list`` output, but their ``kv get`` payload has ``data.data``
+    null with only a metadata block (as the real CLI returns after ``vault kv
+    delete``).
     """
     list_path = tmp_path / "_list.json"
-    list_path.write_text(json.dumps(sorted(value_by_key)))
+    list_path.write_text(json.dumps(sorted([*value_by_key, *deleted_keys])))
+    deleted_payload_path = tmp_path / "_deleted.json"
+    deleted_payload_path.write_text(
+        json.dumps({"data": {"data": None, "metadata": {"deletion_time": "2026-08-15T19:00:00Z", "destroyed": False}}})
+    )
     lines = [
         'sub="$2"',
         'path="${@: -1}"',
@@ -39,6 +48,10 @@ def _make_split_vault_binary(tmp_path: Path, value_by_key: dict[str, str]) -> Pa
         leaf_path = tmp_path / f"_get_{key}.json"
         leaf_path.write_text(json.dumps({"data": {"data": {"value": value}}}))
         lines.append(f'  if [ "$key" = {shlex.quote(key)} ]; then cat {shlex.quote(str(leaf_path))}; exit 0; fi')
+    for key in deleted_keys:
+        lines.append(
+            f'  if [ "$key" = {shlex.quote(key)} ]; then cat {shlex.quote(str(deleted_payload_path))}; exit 0; fi'
+        )
     lines.append('  echo "No value found" >&2; exit 2')
     lines.append("fi")
     lines.append('echo "unexpected vault invocation" >&2; exit 9')
@@ -147,6 +160,33 @@ def test_read_vault_kv_malformed_leaf_data_shape(tmp_path: Path) -> None:
     """The reader rejects leaf payloads that don't have a ``data.data`` dict."""
     fake = _make_branching_vault_binary(
         tmp_path, list_stdout='["CLOUDFLARE_API_TOKEN"]', get_stdout='{"data": "not a dict"}'
+    )
+    with pytest.raises(VaultReadError, match="no data.data dict"):
+        read_vault_kv(VaultPath("secrets/minds/dev/cloudflare"), vault_binary=str(fake))
+
+
+def test_read_vault_kv_skips_soft_deleted_leaves_and_keeps_the_live_ones(tmp_path: Path) -> None:
+    """A soft-deleted leaf (still in LIST, no data on GET) is skipped, not fatal.
+
+    This is the failure that gutted the staging ``sharing`` secret on
+    2026-08-15: one lingering ``vault kv delete`` tombstone made the whole
+    directory read raise, and the deploy shipped a placeholder secret.
+    """
+    fake = _make_split_vault_binary(
+        tmp_path,
+        {"FRPS_AUTH_SECRET": "s3cret", "SHARE_CONTENT_DOMAIN": "minds-staging.com"},
+        deleted_keys=("SHARE_DEFAULT_REGION",),
+    )
+
+    result = read_vault_kv(VaultPath("secrets/minds/dev/sharing"), vault_binary=str(fake))
+
+    assert result == {"FRPS_AUTH_SECRET": "s3cret", "SHARE_CONTENT_DOMAIN": "minds-staging.com"}
+
+
+def test_read_vault_kv_still_rejects_dataless_leaf_without_metadata(tmp_path: Path) -> None:
+    """A leaf with no data AND no metadata block is corruption, not a soft delete."""
+    fake = _make_branching_vault_binary(
+        tmp_path, list_stdout='["CLOUDFLARE_API_TOKEN"]', get_stdout='{"data": {"data": null}}'
     )
     with pytest.raises(VaultReadError, match="no data.data dict"):
         read_vault_kv(VaultPath("secrets/minds/dev/cloudflare"), vault_binary=str(fake))

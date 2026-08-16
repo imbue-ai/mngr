@@ -53,12 +53,14 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
+from imbue.imbue_common.pure import pure
 from imbue.minds.build_info import DEFAULT_WEB_TEMPLATE_REPO_KEY
 from imbue.minds.build_info import FALLBACK_BRANCH
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import DeployLifecycleConfig
 from imbue.minds.config.data_types import ModalEnvStrategy
+from imbue.minds.config.data_types import OriginsConfig
 from imbue.minds.config.data_types import WebWorkspacesConfig
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import load_client_config
@@ -259,6 +261,10 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # the same way (see :class:`DeployStrategy`).
 # (modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg) -> deployed URL.
 DeployModalAppFn = Callable[[str, str, int, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
+# Same shape plus the connector-only ``custom_domains`` tuple (Modal custom
+# domain hosts from the tier's ``[origins]`` block; empty = none).
+# (modal_env, tier, min_containers, scaledown_window, deploy_id, custom_domains, strategy, cg) -> deployed URL.
+DeployConnectorAppFn = Callable[[str, str, int, int, str, tuple[str, ...], DeployStrategy, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -318,7 +324,11 @@ EnsureGenerationIdFn = Callable[[str, ConcurrencyGroup], str]
 # (tier_vault_prefix, cg) -> None. Removes the generation Vault entry
 # so the next deploy mints a fresh one. Used by tier destroys.
 DeleteGenerationIdFn = Callable[[str, ConcurrencyGroup], None]
-ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
+# (service, tier_vault_prefix, overrides, is_required, cg) -> merged values.
+# ``is_required`` marks services a shared tier's [secrets].services declares:
+# the implementation must fail (not degrade to a placeholder) when the Vault
+# entry is unreadable or misses template-declared keys.
+ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], bool, ConcurrencyGroup], dict[str, str]]
 # (name, cg) -> None. Removes the env's mngr Docker state container +
 # backing volume, targeting the one exact container by name. No-op when
 # there is no Docker daemon. Real impl lives in ``envs.docker_cleanup``.
@@ -354,16 +364,22 @@ class Providers(FrozenModel):
     create_supertokens_app: CreateSuperTokensAppFn = Field(description="Create the per-dev-env SuperTokens app.")
     delete_supertokens_app: DeleteSuperTokensAppFn = Field(description="Delete the per-dev-env SuperTokens app.")
     read_per_env_secret_values: ReadPerEnvSecretValuesFn = Field(
-        description="(service, tier_vault_prefix, overrides, cg) -> merged values dict for one Modal Secret.",
+        description="(service, tier_vault_prefix, overrides, is_required, cg) -> merged values dict for one Modal Secret.",
     )
     push_per_env_modal_secret: PushPerEnvSecretFn = Field(
         description="(secret_name, values, modal_env, cg) -> upsert the Modal Secret in the named Modal env.",
     )
     deploy_litellm_proxy: DeployModalAppFn = Field(
-        description="(modal_env, tier, cg) -> `modal deploy` the llm app into ``modal_env``.",
+        description=(
+            "(modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg) "
+            "-> `modal deploy` the llm app into ``modal_env``."
+        ),
     )
-    deploy_remote_service_connector: DeployModalAppFn = Field(
-        description="(modal_env, tier, cg) -> `modal deploy` the connector app into ``modal_env``.",
+    deploy_remote_service_connector: DeployConnectorAppFn = Field(
+        description=(
+            "(modal_env, tier, min_containers, scaledown_window, deploy_id, custom_domains, strategy, cg) "
+            "-> `modal deploy` the connector app into ``modal_env``."
+        ),
     )
     stop_modal_app: StopModalAppFn = Field(
         description="(app_name, modal_env, cg) -> `modal app stop` the named app. Idempotent.",
@@ -869,22 +885,34 @@ def _deploy_env_locked(
         supertokens_record=supertokens_record,
         expected_connector_url=expected_connector_url,
         expected_litellm_proxy_url=expected_litellm_proxy_url,
+        origins=deploy_config.origins,
     )
     litellm_master_key = _read_litellm_master_key(tier_vault_prefix, providers, parent_concurrency_group)
     with info_span("Pushing per-env Modal Secrets into env {!r}", modal_env):
         # Vault-backed services: one Modal Secret per entry in
         # ``[secrets].services``, base values from Vault + per-service
         # overrides from ``_compute_secret_overrides``.
+        # On shared tiers ([secrets].services with operator-managed Vault
+        # entries) every declared service is required: an unreadable or
+        # schema-incomplete entry aborts the deploy rather than shipping a
+        # placeholder secret. Dev/ci tiers (creates_resources=true) keep the
+        # bootstrap-friendly placeholder fallback. All reads (and thus all
+        # required-service validation) complete before the first push, so a
+        # bad entry aborts the deploy before any Modal Secret is written.
+        is_service_required = not lifecycle.creates_resources
+        values_by_secret_name: list[tuple[str, dict[str, str]]] = []
         for service in services:
             per_service_overrides = dict(first_pass_overrides.get(service, {}))
-            secret_name = timestamped_secret_name(service, tier, deploy_id)
-            with info_span("Pushing per-env Modal Secret {!r}", secret_name):
-                values = providers.read_per_env_secret_values(
-                    service,
-                    tier_vault_prefix,
-                    per_service_overrides,
-                    parent_concurrency_group,
-                )
+            values = providers.read_per_env_secret_values(
+                service,
+                tier_vault_prefix,
+                per_service_overrides,
+                is_service_required,
+                parent_concurrency_group,
+            )
+            values_by_secret_name.append((timestamped_secret_name(service, tier, deploy_id), values))
+        for secret_name, values in values_by_secret_name:
+            with info_span("Pushing per-env Modal Secret {!r} ({} values)", secret_name, len(values)):
                 providers.push_per_env_modal_secret(
                     secret_name,
                     values,
@@ -922,7 +950,7 @@ def _deploy_env_locked(
                 connector_secret_overrides.setdefault("MINDS_WEB_SHAPE_MEMORY_GB", str(int(web_workspaces.memory_gb)))
             if web_workspaces.gpu_count is not None:
                 connector_secret_overrides.setdefault("MINDS_WEB_SHAPE_GPU_COUNT", str(int(web_workspaces.gpu_count)))
-            connector_secret_overrides.setdefault("SHARE_CHROME_ORIGIN", str(expected_connector_url).rstrip("/"))
+            connector_secret_overrides.setdefault("SHARE_CHROME_ORIGIN", _bare_origin(expected_connector_url))
         # When the operator sets MINDS_INJECT_BROKEN_HEALTHCHECK at deploy time,
         # propagate it into the deployed connector's Modal Secret so the
         # in-container healthcheck returns 500 and the auto-rollback path
@@ -986,6 +1014,7 @@ def _deploy_env_locked(
             connector_min_containers,
             connector_scaledown_window,
             deploy_id,
+            custom_domain_hosts_for_origins(deploy_config.origins),
             deploy_strategy,
             parent_concurrency_group,
         )
@@ -1123,6 +1152,7 @@ def _resolve_host_pool_dsn_for_migrations(
         "neon",
         tier_vault_prefix,
         {},
+        False,
         parent_concurrency_group,
     )
     database_url = neon_vault_values.get("DATABASE_URL", "")
@@ -1181,6 +1211,25 @@ def relay_region_for_env(name: DevEnvName) -> str:
     return str(name).replace("_", "-").lower()
 
 
+@pure
+def _bare_origin(origin_url: AnyUrl) -> str:
+    """Serialize an origin URL without pydantic's trailing slash (origins are compared byte-exactly)."""
+    return str(origin_url).rstrip("/")
+
+
+@pure
+def custom_domain_hosts_for_origins(origins: OriginsConfig | None) -> tuple[str, ...]:
+    """The Modal custom-domain hosts a tier's connector must be deployed with (empty when no [origins] block)."""
+    if origins is None:
+        return ()
+    hosts: list[str] = []
+    for origin_url in (origins.accounts_origin, origins.chrome_origin):
+        host = origin_url.host or ""
+        if host and host not in hosts:
+            hosts.append(host)
+    return tuple(hosts)
+
+
 def _compute_secret_overrides(
     *,
     name: DevEnvName,
@@ -1190,6 +1239,7 @@ def _compute_secret_overrides(
     supertokens_record: SuperTokensAppRecord | None,
     expected_connector_url: AnyUrl,
     expected_litellm_proxy_url: AnyUrl,
+    origins: OriginsConfig | None,
 ) -> dict[str, dict[str, str]]:
     """Build the per-service Modal Secret override dict for one deploy.
 
@@ -1198,11 +1248,25 @@ def _compute_secret_overrides(
     from the computed-up-front values. For ``creates_resources=false``
     tiers the operator's Vault entries already hold the DSNs +
     connection URI -- we only inject the URL-dependent values.
+
+    A tier with an ``[origins]`` block gets its whole browser-facing origin
+    layout stamped from git: the accounts surface moves to ``accounts_origin``
+    (AUTH_WEBSITE_DOMAIN + ACCOUNTS_BASE_URL), the session cookie widens to the
+    shared apex (ACCOUNTS_COOKIE_DOMAIN), and the chrome embed origin becomes
+    ``chrome_origin`` (SHARE_CHROME_ORIGIN). These deploy-time overrides win
+    over any stale Vault values, so deploy.toml is the source of truth.
     """
+    auth_website_domain = _bare_origin(origins.accounts_origin) if origins is not None else str(expected_connector_url)
     overrides: dict[str, dict[str, str]] = {
-        "supertokens": {"AUTH_WEBSITE_DOMAIN": str(expected_connector_url)},
+        "supertokens": {"AUTH_WEBSITE_DOMAIN": auth_website_domain},
         "litellm-connector": {"LITELLM_PROXY_URL": str(expected_litellm_proxy_url)},
     }
+    if origins is not None:
+        overrides["sharing"] = {
+            "ACCOUNTS_BASE_URL": _bare_origin(origins.accounts_origin),
+            "ACCOUNTS_COOKIE_DOMAIN": str(origins.cookie_domain),
+        }
+        overrides["litellm-connector"]["SHARE_CHROME_ORIGIN"] = _bare_origin(origins.chrome_origin)
     # The relay fleet is not env config: relays live in the connector's
     # relays table, registered by `just provision-dev-relay` (dev/ci; the env
     # name is the region label) or the staging/production runbook. Per-env
@@ -1342,6 +1406,7 @@ def destroy_env(
                 "supertokens",
                 tier_vault_prefix,
                 {},
+                False,
                 parent_concurrency_group,
             )
             _wipe_supertokens_for_tier(supertokens_values, providers=providers, tier=tier)
@@ -1358,6 +1423,7 @@ def destroy_env(
                 "neon",
                 tier_vault_prefix,
                 {},
+                False,
                 parent_concurrency_group,
             )
             _wipe_neon_for_tier(neon_values, providers=providers, tier=tier, parent_cg=parent_concurrency_group)
@@ -1399,6 +1465,7 @@ def destroy_env(
         "storage",
         tier_vault_prefix,
         {},
+        False,
         parent_concurrency_group,
     )
     if is_workspace_storage_configured(storage_values):
@@ -1480,7 +1547,7 @@ def _read_litellm_master_key(
     string when the Vault entry isn't populated lets the caller skip the
     override instead of writing an empty value.
     """
-    values = providers.read_per_env_secret_values("litellm", tier_vault_prefix, {}, parent_concurrency_group)
+    values = providers.read_per_env_secret_values("litellm", tier_vault_prefix, {}, False, parent_concurrency_group)
     return values.get("LITELLM_MASTER_KEY", "")
 
 

@@ -79,3 +79,16 @@ max_active_synced_workspaces = 200
 # Deploy-time env vars MINDS_WEB_TEMPLATE_REPO / MINDS_WEB_TEMPLATE_REF
 # override for one-off deploys.
 [web_workspaces]
+
+# User-facing custom-domain origin layout (sharing redesign): the hosted
+# accounts surface and the web chrome are Modal custom domains on the
+# connector, sharing one browser session via a cookie scoped to the apex.
+# The apex is first-party only -- untrusted workspace content lives on the
+# separate content domain (imbueminds.com); policy: user content never gets
+# an imbue.com hostname. Both hosts must be registered and verified in the
+# minds-production Modal workspace (dashboard -> Domains) BEFORE deploying
+# with this block, or the deploy fails.
+[origins]
+accounts_origin = "https://accounts.imbue.com"
+chrome_origin = "https://minds.imbue.com"
+cookie_domain = "imbue.com"
