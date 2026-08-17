@@ -3,7 +3,7 @@ revision = 3
 requires-python = "==3.12.13"
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-08-03T18:17:14.217335569Z"
 exclude-newer-span = "P14D"
 
 [[package]]
@@ -744,9 +744,11 @@ name = "imbue-common"
 version = "0.1.20"
 source = { editable = "../../../../libs/imbue_common" }
 dependencies = [
+    { name = "argon2-cffi" },
     { name = "boto3" },
     { name = "click" },
     { name = "cowsay-python" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "pydantic" },
@@ -757,9 +759,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "boto3", specifier = ">=1.34" },
     { name = "click", specifier = ">=8.0" },
     { name = "cowsay-python", specifier = ">=1.0.2" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
@@ -793,6 +797,7 @@ dependencies = [
     { name = "pygtail" },
     { name = "pyinfra" },
     { name = "python-dotenv" },
+    { name = "python-frontmatter" },
     { name = "requests" },
     { name = "resource-guards" },
     { name = "rich" },
@@ -818,11 +823,12 @@ requires-dist = [
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
-    { name = "psutil", specifier = ">=5.9" },
+    { name = "psutil", specifier = ">=7.2" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pygtail", specifier = ">=0.14.0" },
     { name = "pyinfra", specifier = ">=3.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "python-frontmatter", specifier = ">=1.1.0" },
     { name = "requests", specifier = ">=2.26" },
     { name = "resource-guards", editable = "../../../../libs/resource_guards" },
     { name = "rich", specifier = ">=13.0" },
@@ -875,6 +881,21 @@ requires-dist = [
 dev = [{ name = "imbue-mngr-modal", editable = "../../../../libs/mngr_modal" }]
 
 [[package]]
+name = "imbue-mngr-codex"
+version = "0.1.4"
+source = { editable = "../../../../libs/mngr_codex" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "../../../../libs/mngr" },
+    { name = "websockets", specifier = ">=13" },
+]
+
+[[package]]
 name = "imbue-mngr-forward"
 version = "0.1.6"
 source = { editable = "../../../../libs/mngr_forward" }
@@ -922,9 +943,11 @@ name = "imbue-mngr-imbue-cloud"
 version = "0.1.6"
 source = { editable = "../../../../libs/mngr_imbue_cloud" }
 dependencies = [
+    { name = "boto3" },
     { name = "click" },
     { name = "click-option-group" },
     { name = "concurrency-group" },
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
@@ -940,9 +963,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3" },
     { name = "click" },
     { name = "click-option-group" },
     { name = "concurrency-group", editable = "../../../../libs/concurrency_group" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "../../../../libs/imbue_common" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
@@ -996,12 +1021,14 @@ source = { editable = "../../../../libs/mngr_lima" }
 dependencies = [
     { name = "imbue-mngr" },
     { name = "pyyaml" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "tenacity", specifier = ">=8.0" },
 ]
 
 [[package]]
@@ -1039,6 +1066,17 @@ requires-dist = [
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "ovh", specifier = ">=1.2.0" },
 ]
+
+[[package]]
+name = "imbue-mngr-pi-coding"
+version = "0.1.14"
+source = { editable = "../../../../libs/mngr_pi_coding" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "../../../../libs/mngr" }]
 
 [[package]]
 name = "imbue-mngr-vps"
@@ -1091,19 +1129,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00.369Z" },
-]
-
-[[package]]
-name = "jinjax"
-version = "0.63"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "jinja2" },
-    { name = "markupsafe" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6c/11/d86874087e96cd56fd59050b9a87beede2fa8ea6e1b16632324ae9d2f828/jinjax-0.63.tar.gz", hash = "sha256:2cab0bb8e336a0a12a46541e407ad002bc70f3408a36d2a560215ac791fee006", size = 31431, upload-time = "2025-12-03T20:07:03.788Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/8d/6c52f82511e523e4ef219bcdb2b601991f71995662b5a2e55f85a6ef8adb/jinjax-0.63-py3-none-any.whl", hash = "sha256:74b0c9a6dc360ed4b9d3ef26dd46e280d61f89ce847d0f29dd876f2f062fdd94", size = 20224, upload-time = "2025-12-03T20:07:04.815Z" },
 ]
 
 [[package]]
@@ -1231,11 +1256,10 @@ dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-aws" },
     { name = "imbue-mngr-forward" },
+    { name = "imbue-mngr-imbue-cloud" },
     { name = "imbue-mngr-latchkey" },
     { name = "imbue-mngr-vps" },
     { name = "itsdangerous" },
-    { name = "jinja2" },
-    { name = "jinjax" },
     { name = "loguru" },
     { name = "modal" },
     { name = "paramiko" },
@@ -1243,11 +1267,13 @@ dependencies = [
     { name = "psycopg2-binary" },
     { name = "pydantic" },
     { name = "sentry-sdk" },
+    { name = "simple-websocket" },
     { name = "spectree" },
     { name = "telethon" },
     { name = "tenacity" },
     { name = "tomlkit" },
     { name = "traceback-with-variables" },
+    { name = "tzlocal" },
     { name = "werkzeug" },
     { name = "wsgidav" },
 ]
@@ -1268,11 +1294,10 @@ requires-dist = [
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "imbue-mngr-aws", editable = "../../../../libs/mngr_aws" },
     { name = "imbue-mngr-forward", editable = "../../../../libs/mngr_forward" },
+    { name = "imbue-mngr-imbue-cloud", editable = "../../../../libs/mngr_imbue_cloud" },
     { name = "imbue-mngr-latchkey", editable = "../../../../libs/mngr_latchkey" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
-    { name = "jinja2", specifier = ">=3.1.0" },
-    { name = "jinjax", specifier = ">=0.45" },
     { name = "loguru" },
     { name = "modal", specifier = ">=1.4.3" },
     { name = "paramiko", specifier = ">=3.0" },
@@ -1280,14 +1305,19 @@ requires-dist = [
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "sentry-sdk", specifier = ">=2.59.0" },
+    { name = "simple-websocket", specifier = ">=1.0" },
     { name = "spectree", specifier = ">=1.4" },
     { name = "telethon", specifier = ">=1.40.0" },
     { name = "tenacity" },
     { name = "tomlkit", specifier = ">=0.12.0" },
     { name = "traceback-with-variables", specifier = ">=2.0" },
+    { name = "tzlocal", specifier = ">=5" },
     { name = "werkzeug", specifier = ">=3.0" },
     { name = "wsgidav", specifier = ">=4.3" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "imbue-mngr-behaviors", editable = "../../../../libs/mngr_behaviors" }]
 
 [[package]]
 name = "minds-desktop"
@@ -1299,12 +1329,14 @@ dependencies = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-aws" },
     { name = "imbue-mngr-claude" },
+    { name = "imbue-mngr-codex" },
     { name = "imbue-mngr-forward" },
     { name = "imbue-mngr-imbue-cloud" },
     { name = "imbue-mngr-latchkey" },
     { name = "imbue-mngr-lima" },
     { name = "imbue-mngr-modal" },
     { name = "imbue-mngr-ovh" },
+    { name = "imbue-mngr-pi-coding" },
     { name = "imbue-mngr-vps" },
     { name = "minds" },
     { name = "modal-proxy" },
@@ -1319,12 +1351,14 @@ requires-dist = [
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
     { name = "imbue-mngr-aws", editable = "../../../../libs/mngr_aws" },
     { name = "imbue-mngr-claude", editable = "../../../../libs/mngr_claude" },
+    { name = "imbue-mngr-codex", editable = "../../../../libs/mngr_codex" },
     { name = "imbue-mngr-forward", editable = "../../../../libs/mngr_forward" },
     { name = "imbue-mngr-imbue-cloud", editable = "../../../../libs/mngr_imbue_cloud" },
     { name = "imbue-mngr-latchkey", editable = "../../../../libs/mngr_latchkey" },
     { name = "imbue-mngr-lima", editable = "../../../../libs/mngr_lima" },
     { name = "imbue-mngr-modal", editable = "../../../../libs/mngr_modal" },
     { name = "imbue-mngr-ovh", editable = "../../../../libs/mngr_ovh" },
+    { name = "imbue-mngr-pi-coding", editable = "../../../../libs/mngr_pi_coding" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "minds", editable = "../../" },
     { name = "modal-proxy", editable = "../../../../libs/modal_proxy" },
@@ -1789,6 +1823,18 @@ wheels = [
 ]
 
 [[package]]
+name = "python-frontmatter"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/e8/79cbe69864d44f3b48e70ebee0a872a7d5a4e7150c9f8577ed7a5beefff0/python_frontmatter-1.3.0.tar.gz", hash = "sha256:acc73e477a568dc2a25c9e130c6c68ae8daa8c204c8f7e813db47d6a7280dcf2", size = 8322, upload-time = "2026-05-20T19:21:44.164Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a6/a3/17c284b4f4d8ad50f0f9ba70ad8fcc35c777aeafcdbbffdd91bbdc5ab379/python_frontmatter-1.3.0-py3-none-any.whl", hash = "sha256:9f7dd9260bec99044219159a329f64f039087f9d1a2124c9442556f2fe6f82ec", size = 10562, upload-time = "2026-05-20T19:21:43.323Z" },
+]
+
+[[package]]
 name = "pywin32"
 version = "311"
 source = { registry = "https://pypi.org/simple" }
@@ -1927,6 +1973,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/b7/06145c238c0a6d2c4bc881f8be230bb9f36d2bf51aff7bddcb796d5eed67/setproctitle-1.3.7-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:d8828b356114f6b308b04afe398ed93803d7fca4a955dd3abe84430e28d33739", size = 32795, upload-time = "2025-09-05T12:49:46.419Z" },
     { url = "https://files.pythonhosted.org/packages/ef/dc/ef76a81fac9bf27b84ed23df19c1f67391a753eed6e3c2254ebcb5133f56/setproctitle-1.3.7-cp312-cp312-win32.whl", hash = "sha256:b0304f905efc845829ac2bc791ddebb976db2885f6171f4a3de678d7ee3f7c9f", size = 12552, upload-time = "2025-09-05T12:49:47.635Z" },
     { url = "https://files.pythonhosted.org/packages/e2/5b/a9fe517912cd6e28cf43a212b80cb679ff179a91b623138a99796d7d18a0/setproctitle-1.3.7-cp312-cp312-win_amd64.whl", hash = "sha256:9888ceb4faea3116cf02a920ff00bfbc8cc899743e4b4ac914b03625bdc3c300", size = 13247, upload-time = "2025-09-05T12:49:49.16Z" },
+]
+
+[[package]]
+name = "simple-websocket"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wsproto" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b0/d4/bfa032f961103eba93de583b161f0e6a5b63cebb8f2c7d0c6e6efe1e3d2e/simple_websocket-1.1.0.tar.gz", hash = "sha256:7939234e7aa067c534abdab3a9ed933ec9ce4691b0713c78acb195560aa52ae4", size = 17300, upload-time = "2024-10-10T22:39:31.412Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/52/59/0782e51887ac6b07ffd1570e0364cf901ebc36345fea669969d2084baebb/simple_websocket-1.1.0-py3-none-any.whl", hash = "sha256:4af6069630a38ed6c561010f0e11a5bc0d4ca569b36306eb257cd9a192497c8c", size = 13842, upload-time = "2024-10-10T22:39:29.645Z" },
 ]
 
 [[package]]
@@ -2118,6 +2176,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/19/f5/cd531b2d15a671a40c0f66cf06bc3570a12cd56eef98960068ebbad1bf5a/tzdata-2026.1.tar.gz", hash = "sha256:67658a1903c75917309e753fdc349ac0efd8c27db7a0cb406a25be4840f87f98", size = 197639, upload-time = "2026-04-03T11:25:22.002Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b0/70/d460bd685a170790ec89317e9bd33047988e4bce507b831f5db771e142de/tzdata-2026.1-py2.py3-none-any.whl", hash = "sha256:4b1d2be7ac37ceafd7327b961aa3a54e467efbdb563a23655fbfe0d39cfc42a9", size = 348952, upload-time = "2026-04-03T11:25:20.313Z" },
+]
+
+[[package]]
+name = "tzlocal"
+version = "5.4.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/81/5b/879b2f932adfa7a053c360d50bc896c977fa6426109185f7c12ebdd0cb9d/tzlocal-5.4.4.tar.gz", hash = "sha256:8dbb8660838688a7b6ba4fed31d18dedf842afb4d47ca050d6d891c2c15f3be4", size = 31170, upload-time = "2026-06-29T08:03:40.026Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/a4/017a7a6cbe387d961a688ec31364ae60a5c4e22c96ae9921b79a947c855d/tzlocal-5.4.4-py3-none-any.whl", hash = "sha256:aae09f0126a8a86fa736be266eb4a471380d26a0de3bc14844e7821fee3e2a15", size = 18115, upload-time = "2026-06-29T08:03:38.666Z" },
 ]
 
 [[package]]
