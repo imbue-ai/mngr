@@ -95,6 +95,13 @@ class RemoteSSHInfo(FrozenModel):
     host: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
     key_path: Path = Field(description="Path to SSH private key file")
+    known_hosts_path: Path | None = Field(
+        default=None,
+        description=(
+            "Path to the known_hosts file pinning the host's SSH host key, when the producer "
+            "supplied one. None falls back to the file next to key_path."
+        ),
+    )
 
 
 class SSHTunnelError(Exception):
@@ -731,23 +738,45 @@ class SSHTunnelManager(MutableModel):
             self._tmpdir = None
 
 
+def _resolve_known_hosts_path(ssh_info: RemoteSSHInfo) -> Path | None:
+    """Pick the known_hosts file to verify the host key against, or None when no candidate exists.
+
+    The explicitly-supplied path wins when it exists on disk. A supplied path
+    that is missing falls back to the key-sibling rather than failing: a stale
+    producer path must never break a connection the sibling convention would
+    have allowed.
+    """
+    if ssh_info.known_hosts_path is not None and ssh_info.known_hosts_path.exists():
+        return ssh_info.known_hosts_path
+    # CLEANUP: drop this key-sibling fallback (and the sibling branch of the
+    # error message in _create_ssh_client) once every supported producer of
+    # SSH info events/snapshots emits the explicit known_hosts_path field.
+    sibling_path = ssh_info.key_path.parent / "known_hosts"
+    if sibling_path.exists():
+        return sibling_path
+    return None
+
+
 def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """Create a paramiko SSH connection to the given host.
 
-    Uses the known_hosts file from the same directory as the SSH key (this is
-    where mngr stores it for each provider). A missing known_hosts file is an
-    error: falling back to trust-on-first-use would silently pin whatever key
-    an interposer presents, defeating strict host-key checking everywhere else.
+    Prefers the explicitly-supplied known_hosts path, falling back to the file
+    next to the SSH key (the long-standing "mngr stores it next to the key"
+    convention). A missing known_hosts file in both places is an error: falling
+    back to trust-on-first-use would silently pin whatever key an interposer
+    presents, defeating strict host-key checking everywhere else.
 
-    Raises SSHTunnelError when no known_hosts file exists next to the key.
+    Raises SSHTunnelError when no known_hosts file can be found.
     """
     client = paramiko.SSHClient()
 
-    known_hosts_path = ssh_info.key_path.parent / "known_hosts"
-    if not known_hosts_path.exists():
-        raise SSHTunnelError(
-            f"No known_hosts file at {known_hosts_path}; refusing to connect without a pinned host key"
+    known_hosts_path = _resolve_known_hosts_path(ssh_info)
+    if known_hosts_path is None:
+        sibling_path = ssh_info.key_path.parent / "known_hosts"
+        checked_paths = (
+            f"{ssh_info.known_hosts_path} or {sibling_path}" if ssh_info.known_hosts_path is not None else sibling_path
         )
+        raise SSHTunnelError(f"No known_hosts file at {checked_paths}; refusing to connect without a pinned host key")
     client.load_host_keys(str(known_hosts_path))
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
 

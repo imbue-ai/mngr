@@ -240,8 +240,10 @@ def _provider_error(provider_name: str) -> DiscoveryError:
     )
 
 
-def _make_ssh_info(host: str, port: int, key_path: Path) -> SSHInfo:
-    return SSHInfo(user="root", host=host, port=port, key_path=key_path, command="ssh")
+def _make_ssh_info(host: str, port: int, key_path: Path, known_hosts_path: Path | None = None) -> SSHInfo:
+    return SSHInfo(
+        user="root", host=host, port=port, key_path=key_path, known_hosts_path=known_hosts_path, command="ssh"
+    )
 
 
 def _make_host(
@@ -303,9 +305,10 @@ def test_host_ssh_info_after_discovery_re_fires_with_ssh_info(tmp_path: Path) ->
         key_path = tmp_path / "id_rsa"
         key_path.write_text("fake")
 
+        known_hosts_path = tmp_path / "known_hosts"
         consumer._on_observe_output(_agent_discovery_line(agent), is_stdout=True)
         consumer._on_observe_output(
-            _host_ssh_info_line(host_id, _make_ssh_info("h1", 2222, key_path)),
+            _host_ssh_info_line(host_id, _make_ssh_info("h1", 2222, key_path, known_hosts_path)),
             is_stdout=True,
         )
 
@@ -318,6 +321,7 @@ def test_host_ssh_info_after_discovery_re_fires_with_ssh_info(tmp_path: Path) ->
     assert second.ssh_info.host == "h1"
     assert second.ssh_info.port == 2222
     assert second.ssh_info.key_path == key_path
+    assert second.ssh_info.known_hosts_path == known_hosts_path
 
 
 def test_agent_discovery_after_known_ssh_info_fires_with_ssh_info(tmp_path: Path) -> None:

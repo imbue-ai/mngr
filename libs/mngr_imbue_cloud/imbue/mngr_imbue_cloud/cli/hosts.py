@@ -32,6 +32,7 @@ from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
+from imbue.mngr_imbue_cloud.providers.adoption import invalidate_adoption_verification
 from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
 from imbue.mngr_imbue_cloud.providers.adoption import load_adoption_marker
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_client_key
@@ -176,8 +177,11 @@ def rotate_host_keys(host_ref: str, account: str | None, connector_url: str | No
 
     # An unadopted host is adopted here first, which already rotates both host
     # keys as part of taking ownership; an adopted host gets verified/healed
-    # and then explicitly re-rotated.
+    # and then explicitly re-rotated. This explicit rotate is the user's
+    # recovery tool, so the durable already-verified stamp is cleared first --
+    # the verify/heal pass (reconciler reinstall included) must actually run.
     is_already_adopted = load_adoption_marker(host_state_dir) is not None
+    invalidate_adoption_verification(host_state_dir)
     try:
         ensure_adopted(access, target, is_full_verification=True)
     except HostKeyDriftError as exc:

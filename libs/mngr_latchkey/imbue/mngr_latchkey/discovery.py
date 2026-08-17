@@ -567,7 +567,15 @@ class LatchkeyDiscoveryHandler(MutableModel):
             if connection_info is None:
                 return None
             user, hostname, port, key_path = connection_info
-            return _GatewayRoute(outer_ssh_info=RemoteSSHInfo(user=user, host=hostname, port=port, key_path=key_path))
+            return _GatewayRoute(
+                outer_ssh_info=RemoteSSHInfo(
+                    user=user,
+                    host=hostname,
+                    port=port,
+                    key_path=key_path,
+                    known_hosts_path=outer.get_ssh_known_hosts_path(),
+                )
+            )
 
     def reload_provider_config(self) -> None:
         """Re-read the provider set from settings and forget cached route resolutions.

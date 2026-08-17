@@ -13,9 +13,15 @@ per host, from the user's own machine:
   and pinned user-origin in the host-key store, so the connector's bake-time
   keys stop mattering (the store's precedence rules keep bootstrap pins from
   ever displacing these);
-- a client-side **marker** in the per-host state dir records the adoption, so
-  later connects are a pure-local no-op (with a full re-verification at most
-  once per process, and after start/rebuild).
+- a client-side **marker** in the per-host state dir records the adoption AND
+  the schema version it was last fully verified at, so later connects are a
+  pure-local no-op. A full SSH-visiting re-verification runs again only when
+  the stamp is invalidated (restart/relocation, explicit ``hosts rotate``),
+  the code's ADOPTION_SCHEMA_VERSION moves past the stamp (a migration), or
+  local pending-rotation/RSA evidence shows unfinished key work. Drift the
+  stamp cannot see is refused by the strict pinned-key SSH handshake (the
+  same refusal verification gives) and healed by the in-VM reconciler at
+  boot.
 
 Rotation is a small persisted state machine: the fresh keypair is written to
 the client's per-host state dir *before* the host is touched, so a crash at any
@@ -43,6 +49,7 @@ from pydantic import Field
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -69,6 +76,13 @@ _RECONCILER_UNIT_PATH: Final[str] = f"/etc/systemd/system/{RECONCILER_UNIT_NAME}
 _RECONCILER_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-key-reconciler.sh"
 _DESIRED_AUTHORIZED_KEYS_PATH: Final[str] = "/etc/mngr/root_authorized_keys.desired"
 _DESIRED_HOST_KEY_PATH: Final[str] = "/etc/mngr/ssh_host_ed25519_key"
+
+# The current adoption schema version, stamped into the marker by a successful
+# full verification (and by fresh adoption, which subsumes one). Bump this
+# when a code change needs every already-adopted host swept through one more
+# full verification pass -- the verification pass is the migration channel
+# (the RSA -> Ed25519 client-key rotation reached existing hosts this way).
+ADOPTION_SCHEMA_VERSION: Final[int] = 1
 
 # Client-side per-host state filenames (inside the provider's per-host dir).
 ADOPTION_MARKER_FILENAME: Final[str] = "adoption.json"
@@ -126,6 +140,20 @@ class AdoptionMarker(FrozenModel):
     """Client-side record that this host has been adopted (per-host state dir)."""
 
     adopted_at: datetime = Field(description="When adoption completed on this machine")
+    verified_schema_version: int = Field(
+        # Markers written before the field existed parse as 0: below every real
+        # version, so such a host gets exactly one full re-verification (which
+        # also runs the historical heals, e.g. RSA -> Ed25519) and is then
+        # stamped current.
+        default=0,
+        description=(
+            "The ADOPTION_SCHEMA_VERSION this host was last fully verified at. A successful "
+            "verification is durable: no SSH-visiting re-verification happens again until this "
+            "falls behind ADOPTION_SCHEMA_VERSION (a code migration), the stamp is invalidated "
+            "(restart/relocation may replay cloud-init), or local pending-rotation/RSA-key "
+            "evidence says key work is unfinished."
+        ),
+    )
 
 
 class SliceAdoptionTarget(FrozenModel):
@@ -432,7 +460,38 @@ def load_adoption_marker(host_state_dir: Path) -> AdoptionMarker | None:
 def _write_adoption_marker(host_state_dir: Path) -> None:
     atomic_write(
         adoption_marker_path(host_state_dir),
-        AdoptionMarker(adopted_at=datetime.now(timezone.utc)).model_dump_json(indent=2),
+        AdoptionMarker(
+            adopted_at=datetime.now(timezone.utc),
+            verified_schema_version=ADOPTION_SCHEMA_VERSION,
+        ).model_dump_json(indent=2),
+    )
+
+
+def _stamp_marker_verified(host_state_dir: Path, marker: AdoptionMarker) -> None:
+    """Record a successful full verification, preserving the original adoption time."""
+    atomic_write(
+        adoption_marker_path(host_state_dir),
+        marker.model_copy_update(
+            to_update(marker.field_ref().verified_schema_version, ADOPTION_SCHEMA_VERSION),
+        ).model_dump_json(indent=2),
+    )
+
+
+def invalidate_adoption_verification(host_state_dir: Path) -> None:
+    """Force the next host build to run a full SSH-visiting re-verification.
+
+    Called by the restart/relocation paths, where the VM may have replayed
+    cloud-init over the SSH material (or moved to a different box entirely).
+    The host stays adopted -- only the durable verified stamp is reset.
+    """
+    marker = load_adoption_marker(host_state_dir)
+    if marker is None:
+        return
+    atomic_write(
+        adoption_marker_path(host_state_dir),
+        marker.model_copy_update(
+            to_update(marker.field_ref().verified_schema_version, 0),
+        ).model_dump_json(indent=2),
     )
 
 
@@ -646,6 +705,26 @@ def ensure_client_key_current(access: SliceVmAccessInterface, target: SliceAdopt
     rotate_client_key(access, target)
 
 
+def _has_local_evidence_of_unfinished_key_work(target: SliceAdoptionTarget) -> bool:
+    """Whether the per-host state dir says key work still needs SSH round trips.
+
+    All three signals are pure-local file reads: an in-flight client-key
+    rotation, an in-flight host-key rotation (either endpoint), or a legacy
+    RSA client key awaiting the Ed25519 rotation. Each converges through one
+    full verification pass, after which the evidence is gone.
+    """
+    if load_pending_client_key_rotation(target.host_state_dir) is not None:
+        return True
+    if any(load_pending_host_key_rotation(target.host_state_dir, kind) is not None for kind in AdoptionEndpointKind):
+        return True
+    private_key_path = target.host_state_dir / CLIENT_KEY_NAME
+    try:
+        private_key_text = private_key_path.read_text()
+    except OSError:
+        return False
+    return _is_rsa_private_key(private_key_text)
+
+
 def ensure_adopted(
     access: SliceVmAccessInterface,
     target: SliceAdoptionTarget,
@@ -654,9 +733,16 @@ def ensure_adopted(
     """Idempotently adopt (or re-verify) a leased slice.
 
     Marker absent: run full adoption. Marker present: a no-op unless
-    ``is_full_verification`` (callers pass it at most once per process per
-    host, plus after start/restart/rebuild), which verifies host keys, the
-    desired ``authorized_keys`` state, and the reconciler unit, healing drift.
+    ``is_full_verification``, and even then the SSH-visiting verification is
+    durable: once a host has been fully verified at the current
+    :data:`ADOPTION_SCHEMA_VERSION`, later calls are pure-local no-ops until
+    the stamp is invalidated (restart/relocation --
+    :func:`invalidate_adoption_verification`), the schema version bumps (a
+    code migration), or local pending-rotation/RSA evidence says key work is
+    unfinished (:func:`_has_local_evidence_of_unfinished_key_work`). Drift the
+    stamp can no longer see is caught by the strict pinned-key SSH handshake
+    (which refuses exactly like verification would) and healed by the in-VM
+    reconciler at boot.
     Both the adopt and the full-verification paths finish by bringing the
     per-host client key current (see :func:`ensure_client_key_current`).
     """
@@ -667,8 +753,13 @@ def ensure_adopted(
         return
     if not is_full_verification:
         return
+    if marker.verified_schema_version >= ADOPTION_SCHEMA_VERSION and not _has_local_evidence_of_unfinished_key_work(
+        target
+    ):
+        return
     _verify_and_heal(access, target)
     ensure_client_key_current(access, target)
+    _stamp_marker_verified(target.host_state_dir, marker)
 
 
 def _pending_client_key_rotation_path(host_state_dir: Path) -> Path:

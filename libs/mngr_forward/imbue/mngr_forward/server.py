@@ -24,6 +24,7 @@ import re
 import secrets
 import socket as socket_module
 import threading
+import time
 from collections.abc import AsyncGenerator
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -50,8 +51,10 @@ from jinja2 import Environment
 from jinja2 import PackageLoader
 from jinja2 import select_autoescape
 from loguru import logger
+from pydantic import Field
 from websockets import ClientConnection
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.auth import AuthStoreInterface
@@ -838,6 +841,40 @@ def _handle_subdomain_auth_bridge(
     return response
 
 
+class TunnelWarningRateLimiter(MutableModel):
+    """Interval rate limit for the repeated per-agent tunnel-setup-failed warning.
+
+    A refused tunnel is retried about once a second while a workspace view is
+    open, so an unreachable workspace floods the log with (usually identical)
+    warnings. One line per interval per agent (carrying the count of suppressed
+    earlier warnings, whatever their message) keeps the signal without the noise.
+    """
+
+    interval_seconds: float = Field(
+        frozen=True, default=60.0, description="Minimum seconds between logged warnings per agent"
+    )
+    now_fn: Callable[[], float] = Field(
+        frozen=True, default=time.monotonic, description="Monotonic clock, injectable for tests"
+    )
+    last_logged_at_by_agent: dict[str, float] = Field(
+        default_factory=dict, description="Monotonic time of the last logged warning per agent"
+    )
+    suppressed_count_by_agent: dict[str, int] = Field(
+        default_factory=dict, description="Warnings suppressed since the last logged one per agent"
+    )
+
+    def suppressed_repeats_if_should_log(self, agent_key: str) -> int | None:
+        """Return the count of warnings suppressed since the last logged one when a warning should log now, or None to suppress."""
+        now = self.now_fn()
+        last_logged_at = self.last_logged_at_by_agent.get(agent_key)
+        if last_logged_at is None or now - last_logged_at >= self.interval_seconds:
+            suppressed_count = self.suppressed_count_by_agent.pop(agent_key, 0)
+            self.last_logged_at_by_agent[agent_key] = now
+            return suppressed_count
+        self.suppressed_count_by_agent[agent_key] = self.suppressed_count_by_agent.get(agent_key, 0) + 1
+        return None
+
+
 async def _handle_workspace_forward_http(
     request: Request,
     host_info: ParsedForwardHost,
@@ -853,6 +890,7 @@ async def _handle_workspace_forward_http(
     envelope_writer: EnvelopeWriter,
     use_http2: bool,
     stall_notice_seconds: float,
+    tunnel_warning_limiter: TunnelWarningRateLimiter,
 ) -> Response:
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
         return _handle_subdomain_auth_bridge(request, host_info, auth_store, use_http2)
@@ -942,7 +980,10 @@ async def _handle_workspace_forward_http(
         # Emit a backend-failure envelope so a consumer can react (e.g. drive
         # its own recovery UI), and serve the same styled loader as the
         # UNRESOLVED path instead of raw error text.
-        logger.warning("SSH tunnel setup failed for {}: {}", agent_id, e)
+        suppressed_repeats = tunnel_warning_limiter.suppressed_repeats_if_should_log(str(agent_id))
+        if suppressed_repeats is not None:
+            repeat_suffix = f" ({suppressed_repeats} earlier failures suppressed)" if suppressed_repeats > 0 else ""
+            logger.warning("SSH tunnel setup failed for {}: {}{}", agent_id, e, repeat_suffix)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
 
@@ -1375,6 +1416,7 @@ def create_forward_app(
     beyond the default 'self' + workspace-family deny-external posture.
     """
     env = _build_jinja_env()
+    tunnel_warning_limiter = TunnelWarningRateLimiter()
 
     app = FastAPI(
         title="mngr forward",
@@ -1411,6 +1453,7 @@ def create_forward_app(
             envelope_writer=envelope_writer,
             use_http2=use_http2,
             stall_notice_seconds=stall_notice_seconds,
+            tunnel_warning_limiter=tunnel_warning_limiter,
         )
         # The proxy owns embedding policy for every workspace origin: APPEND a
         # frame-ancestors CSP header (never modify what the service sent --

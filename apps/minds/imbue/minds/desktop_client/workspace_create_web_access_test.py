@@ -13,6 +13,8 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import SucceedingCreateShareCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import make_share_probe_result
+from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -74,6 +76,12 @@ def _store_with_associated_workspace(
     tmp_path: Path, cli: FakeImbueCloudCli | None = None, is_cloud_row: bool = True
 ) -> tuple[MultiAccountSessionStore, FakeImbueCloudCli]:
     effective_cli = cli if cli is not None else make_fake_imbue_cloud_cli()
+    # The enable flow's first step is the one-exec workspace state probe; a
+    # healthy answer (gateway present, nothing shared yet) lets each test reach
+    # the step it actually exercises.
+    caller = effective_cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     effective_cli.add_account(user_id="user-1", email="owner@example.com", display_name=None)
     store = make_session_store_for_test(tmp_path, cli=effective_cli)
     store.associate_created_workspace(
@@ -161,9 +169,14 @@ def _injected_share_env_text(cli: FakeImbueCloudCli) -> str:
     assert isinstance(caller, RecordingMngrCaller)
     for argv in caller.calls:
         command = argv[-1]
-        if "data/.secrets/share.env" in command and "printf '%s'" in command:
-            encoded = command.split("printf '%s' ", 1)[1].split(" | base64 -d", 1)[0].strip()
-            return base64.b64decode(encoded).decode("utf-8")
+        if "data/.secrets/share.env" not in command or "printf '%s'" not in command:
+            continue
+        # The combined write carries one clause per file; the share.env clause
+        # is the one whose payload lands in $tmp_env.
+        for clause in command.split(" && "):
+            if 'base64 -d > "$tmp_env"' in clause:
+                encoded = clause.split("printf '%s' ", 1)[1].split(" | base64 -d", 1)[0].strip()
+                return base64.b64decode(encoded).decode("utf-8")
     raise AssertionError("no share.env write was recorded")
 
 
@@ -211,6 +224,7 @@ def test_web_access_enabler_swallows_sharing_failures(tmp_path: Path) -> None:
         is_cloud_row=True,
         backend_resolver=_empty_resolver(),
         client_env_config=_client_env_config(),
+        active_share_cache=ActiveShareCache(),
     )
 
     enabler(_AGENT_ID, HostId(_HOST_ID))
@@ -232,6 +246,7 @@ def test_web_access_enabler_enables_sharing_for_cloud_rows(tmp_path: Path) -> No
         is_cloud_row=True,
         backend_resolver=_empty_resolver(),
         client_env_config=_client_env_config(),
+        active_share_cache=ActiveShareCache(),
     )
 
     enabler(_AGENT_ID, HostId(_HOST_ID))
@@ -240,3 +255,26 @@ def test_web_access_enabler_enables_sharing_for_cloud_rows(tmp_path: Path) -> No
     share_env_text = _injected_share_env_text(cli)
     connector_url = str(FAKE_CONNECTOR_URL).rstrip("/")
     assert f"SHARE_CONNECTOR_URL={connector_url}" in share_env_text
+
+
+def test_web_access_enabler_invalidates_the_readiness_polls_share_cache(tmp_path: Path) -> None:
+    # A readiness poll racing the post-create worker can cache a "not shared"
+    # lookup just before the enable lands; the enabler must drop that entry
+    # (like the sharing PUT handler does) so the poll observes the new share
+    # immediately rather than at cache-TTL expiry.
+    succeeding_cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    store, cli = _store_with_associated_workspace(tmp_path, cli=succeeding_cli, is_cloud_row=True)
+    cache = ActiveShareCache()
+    cache.put(_HOST_ID, None)
+    enabler = WebAccessEnabler(
+        cli=cli,
+        session_store=store,
+        is_cloud_row=True,
+        backend_resolver=_empty_resolver(),
+        client_env_config=_client_env_config(),
+        active_share_cache=cache,
+    )
+
+    enabler(_AGENT_ID, HostId(_HOST_ID))
+
+    assert cache.get(_HOST_ID) is None

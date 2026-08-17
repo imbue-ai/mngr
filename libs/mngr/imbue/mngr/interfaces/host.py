@@ -395,6 +395,17 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         """
         ...
 
+    def get_ssh_known_hosts_path(self) -> Path | None:
+        """Path of the known_hosts file that pins this host's SSH host key, when configured.
+
+        Returns ``None`` by default. A host whose connector was provisioned with
+        strict host-key checking surfaces the pin file here so consumers handed
+        only connection endpoints (``mngr list --format json``, discovery
+        events, the forward SSH tunnel) can verify the host key without
+        guessing the file's location from the private key's directory.
+        """
+        return None
+
     def get_outer_ssh_port(self) -> int | None:
         """Port of the host's outer/management sshd, when distinct from the agent connection.
 

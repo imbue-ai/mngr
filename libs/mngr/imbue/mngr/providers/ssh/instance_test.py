@@ -14,6 +14,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.ssh.instance import SSHHostConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
+from imbue.mngr.providers.ssh_utils import SSH_BANNER_TIMEOUT_SECONDS
 
 
 def make_ssh_provider(
@@ -235,6 +236,22 @@ def test_different_host_names_have_different_ids(temp_mngr_ctx: MngrContext) -> 
     host2 = provider.get_host(HostName("host2"))
 
     assert host1.id != host2.id
+
+
+def test_create_pyinfra_host_sets_banner_timeout(temp_mngr_ctx: MngrContext) -> None:
+    """The pyinfra host must carry the widened paramiko banner timeout.
+
+    A slow-but-working tunnel (e.g. a degraded Modal sandbox) needs more than
+    paramiko's 15s default, so the generic ssh provider passes the shared
+    timeout through ssh_paramiko_connect_kwargs like every other backend.
+    """
+    provider = make_ssh_provider(temp_mngr_ctx)
+
+    host = provider._create_pyinfra_host(SSHHostConfig(address="localhost", port=2222, user="deploy"))
+
+    assert host.data.get("ssh_user") == "deploy"
+    assert host.data.get("ssh_port") == 2222
+    assert host.data.get("ssh_paramiko_connect_kwargs") == {"banner_timeout": SSH_BANNER_TIMEOUT_SECONDS}
 
 
 # =========================================================================

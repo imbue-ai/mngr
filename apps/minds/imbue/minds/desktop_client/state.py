@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -193,6 +194,14 @@ class DesktopClientState(MutableModel):
         default_factory=MachineSharingLockRegistry,
         frozen=True,
         description="Per-machine locks serializing the machine-sharing PUT/DELETE handlers",
+    )
+    active_share_cache: ActiveShareCache = Field(
+        default_factory=ActiveShareCache,
+        frozen=True,
+        description=(
+            "Short-TTL cache of connector share lookups for the sharing readiness poll "
+            "(invalidated by the sharing PUT/DELETE handlers)"
+        ),
     )
 
 

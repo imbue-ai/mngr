@@ -1303,6 +1303,41 @@ def test_parse_agents_from_json_extracts_ssh_info() -> None:
     assert ssh_info.host == "remote.example.com"
     assert ssh_info.port == 12345
     assert ssh_info.key_path == Path("/home/user/.mngr/providers/modal/modal_ssh_key")
+    # Older mngr versions don't emit known_hosts_path; its absence must parse as
+    # None (the tunnel then falls back to the key-sibling convention).
+    assert ssh_info.known_hosts_path is None
+
+
+def test_parse_agents_from_json_carries_the_explicit_known_hosts_path() -> None:
+    ssh_data = {
+        "user": "root",
+        "host": "remote.example.com",
+        "port": 12345,
+        "key_path": "/tmp/key",
+        "known_hosts_path": "/tmp/pins/known_hosts",
+    }
+    json_str = _make_agents_json_with_ssh((str(_AGENT_A), ssh_data))
+    result = parse_agents_from_json(json_str)
+
+    ssh_info = result.ssh_info_by_agent_id.get(str(_AGENT_A))
+    assert ssh_info is not None
+    assert ssh_info.known_hosts_path == Path("/tmp/pins/known_hosts")
+
+
+def test_parse_agents_from_json_drops_ssh_info_with_a_non_string_known_hosts_path() -> None:
+    """A malformed known_hosts_path value must degrade to no SSH info, not crash the parse."""
+    ssh_data = {
+        "user": "root",
+        "host": "remote.example.com",
+        "port": 12345,
+        "key_path": "/tmp/key",
+        "known_hosts_path": 123,
+    }
+    json_str = _make_agents_json_with_ssh((str(_AGENT_A), ssh_data))
+    result = parse_agents_from_json(json_str)
+
+    assert _AGENT_A in result.agent_ids
+    assert str(_AGENT_A) not in result.ssh_info_by_agent_id
 
 
 def test_parse_agents_from_json_returns_none_ssh_for_local_agents() -> None:

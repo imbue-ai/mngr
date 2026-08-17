@@ -1,3 +1,4 @@
+import base64
 import json
 import tempfile
 from collections.abc import Iterator
@@ -41,6 +42,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import ServiceName
+from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.api.discovery_events import DiscoveredProvider
@@ -355,6 +357,34 @@ class RecordingImbueCloudCli(FakeImbueCloudCli):
             key=SecretStr("sk-fake-litellm-key"),
             base_url=AnyUrl("https://litellm.example.com"),
         )
+
+
+def make_share_probe_result(
+    is_gateway_present: bool = True,
+    is_share_env_present: bool = False,
+    grants_toml_text: str | None = None,
+) -> MngrCallResult:
+    """A canned ``mngr exec --format json`` result answering the share state probe.
+
+    Tests hand this to a :class:`RecordingMngrCaller` so the enable flow's
+    one-exec probe (``probe_share_state_in_agent``) parses a realistic
+    envelope. The same result is returned for every later call too, which is
+    harmless: the write exec only inspects the returncode.
+    """
+    grants_line = (
+        "MNGR_SHARE_GRANTS_B64=" + base64.b64encode(grants_toml_text.encode()).decode("ascii")
+        if grants_toml_text is not None
+        else "MNGR_SHARE_GRANTS_B64=ABSENT"
+    )
+    stdout = "\n".join(
+        [
+            f"MNGR_SHARE_GATEWAY={1 if is_gateway_present else 0}",
+            f"MNGR_SHARE_ENV={1 if is_share_env_present else 0}",
+            grants_line,
+        ]
+    )
+    envelope = {"results": [{"agent": "probe", "stdout": stdout, "stderr": "", "success": True}]}
+    return MngrCallResult(returncode=0, stdout=json.dumps(envelope))
 
 
 def make_fake_imbue_cloud_cli() -> FakeImbueCloudCli:

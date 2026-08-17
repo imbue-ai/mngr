@@ -430,6 +430,7 @@ class ForwardStreamManager(MutableModel):
             host=event.ssh.host,
             port=event.ssh.port,
             key_path=event.ssh.key_path,
+            known_hosts_path=event.ssh.known_hosts_path,
         )
         host_id_str = str(event.host_id)
         with self._lock:

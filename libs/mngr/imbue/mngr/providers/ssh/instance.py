@@ -37,6 +37,7 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.ssh.config import SSHHostConfig
+from imbue.mngr.providers.ssh_utils import SSH_BANNER_TIMEOUT_SECONDS
 
 # Fixed UUID namespace for generating deterministic host IDs from names
 _SSH_PROVIDER_NAMESPACE: Final[uuid.UUID] = uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
@@ -128,6 +129,8 @@ class SSHProviderInstance(BaseProviderInstance):
         host_data: dict[str, Any] = {
             "ssh_user": host_config.user,
             "ssh_port": host_config.port,
+            # Tolerate slow-but-working tunnels (see SSH_BANNER_TIMEOUT_SECONDS).
+            "ssh_paramiko_connect_kwargs": {"banner_timeout": SSH_BANNER_TIMEOUT_SECONDS},
         }
         if host_config.key_file is not None:
             host_data["ssh_key"] = str(host_config.key_file)

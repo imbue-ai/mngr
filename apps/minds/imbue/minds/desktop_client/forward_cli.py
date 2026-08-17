@@ -622,7 +622,11 @@ class EnvelopeStreamConsumer(MutableModel):
     def _record_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         """Store the SSH connection info carried by a HostSSHInfoEvent, keyed by host id."""
         ssh_info = RemoteSSHInfo(
-            user=event.ssh.user, host=event.ssh.host, port=event.ssh.port, key_path=event.ssh.key_path
+            user=event.ssh.user,
+            host=event.ssh.host,
+            port=event.ssh.port,
+            key_path=event.ssh.key_path,
+            known_hosts_path=event.ssh.known_hosts_path,
         )
         with self._lock:
             self._ssh_by_host_id[str(event.host_id)] = ssh_info

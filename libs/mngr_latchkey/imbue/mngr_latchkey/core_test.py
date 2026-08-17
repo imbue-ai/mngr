@@ -1343,6 +1343,9 @@ class _StubOuterHost(MutableModel):
         info = self.ssh_connection_info
         return info.user, info.host, info.port, info.key_path
 
+    def get_ssh_known_hosts_path(self) -> Path | None:
+        return self.ssh_connection_info.known_hosts_path
+
 
 class _StaleListingHandler(LatchkeyDiscoveryHandler):
     """Handler that resolves routes through a single stale-listing provider stub."""

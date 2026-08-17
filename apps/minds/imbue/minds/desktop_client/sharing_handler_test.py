@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import SucceedingCreateShareCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import make_share_probe_result
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
@@ -219,6 +220,9 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
     # ``shares create`` plus materials injection over the user's own SSH. (The
     # connector's server-side enable-sharing primitive is web-create-only.)
     cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
     grants = {"emails": ["owner@example.com", "friend@example.com"], "email_domains": []}
@@ -228,18 +232,17 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
     )
 
     assert cli.create_share_calls == [("owner@example.com", host_id, None, None)]
-    # Four execs go through the injection channel: the share-gateway capability
-    # probe, the grants write, the share.env materials write, and the
-    # owner-email file.
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
+    # Exactly TWO execs touch the workspace: the one-shot state probe and the
+    # combined write of grants + owner email + share.env. Each exec pays a full
+    # mngr process + SSH round trip on a remote host, so the count is the
+    # contract, not an implementation detail.
     exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
-    assert len(exec_calls) == 4
-    exec_commands = " ".join(part for call in exec_calls for part in call)
-    assert "system/services/share_gateway" in exec_commands
-    assert "share_grants.toml" in exec_commands
-    assert "data/.secrets/share.env" in exec_commands
-    assert "data/.state/share/owner_email" in exec_commands
+    assert len(exec_calls) == 2
+    probe_command, write_command = exec_calls[0][2], exec_calls[1][2]
+    assert "system/services/share_gateway" in probe_command
+    assert "share_grants.toml" in write_command
+    assert "data/.secrets/share.env" in write_command
+    assert "data/.state/share/owner_email" in write_command
     assert document["enabled"] is True
     assert document["grants"]["workspace"] == grants
 
@@ -265,9 +268,10 @@ def test_enable_sharing_refuses_a_pre_share_gateway_workspace(is_cloud_row: bool
 
     # Nothing was provisioned: no connector share, no injection past the probe.
     assert cli.shares_by_account == {}
-    assert [call for call in caller.calls if call and call[0] == "exec"] == [
-        ["exec", str(agent_id), "test -d system/services/share_gateway", "--no-start"]
-    ]
+    exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
+    assert len(exec_calls) == 1
+    assert "system/services/share_gateway" in exec_calls[0][2]
+    assert exec_calls[0][-3:] == ["--no-start", "--format", "json"]
 
 
 class _PreferredRegionRecordingCli(FakeImbueCloudCli):
@@ -305,6 +309,9 @@ def test_enable_sharing_first_time_local_share_passes_the_measured_preferred_reg
     # measurement (no sockets are opened), but the picked region must still be
     # forwarded to the connector's create.
     cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     cli.relays_to_return = {"us9": ("relay-us9.example:7000",)}
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
@@ -319,16 +326,44 @@ def test_enable_sharing_first_time_local_share_passes_the_measured_preferred_reg
     assert cli.relay_list_call_count == 1
 
 
-def test_enable_sharing_re_share_sends_no_preferred_region() -> None:
-    # A machine with an existing share record keeps its region server-side
-    # (the region is baked into the workspace domain), so a re-share must not
-    # measure latency and must not send any preference.
+def test_enable_sharing_re_share_still_measures_but_the_preference_is_advisory() -> None:
+    # A local enable with no materials in the workspace (first share or
+    # re-share after a disable) measures relay latency and passes the result as
+    # preferred_region. For a re-share this is deliberate and harmless: the
+    # connector honors the preference only for hosts it has no region record
+    # of, so an existing share keeps its region -- and the common enable path
+    # never has to consult the connector's status first to tell the two apart.
     cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     cli.relays_to_return = {"us9": ("relay-us9.example:7000",)}
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
-    # An inactive record routes past the grants-only fast path into the full
-    # (re-)provisioning create.
+    cli.shares_by_account.setdefault("owner@example.com", {})[host_id] = "inactive"
+    grants = {"emails": ["owner@example.com"], "email_domains": []}
+
+    with pytest.raises(SharingError):
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+        )
+
+    assert cli.recorded_preferred_regions == ["us9"]
+    assert cli.relay_list_call_count == 1
+
+
+def test_enable_sharing_with_stale_materials_reprovisions_without_measuring() -> None:
+    # Materials present but the connector says the share is inactive (disabled
+    # from another device): the flow consults the status (the one path that
+    # still needs it), then falls through to a full re-provisioning create --
+    # with no latency measurement, since the workspace side is already placed.
+    cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
+    cli.relays_to_return = {"us9": ("relay-us9.example:7000",)}
+    agent_id = AgentId("agent-" + "c" * 32)
+    host_id = "host-" + "d" * 32
     cli.shares_by_account.setdefault("owner@example.com", {})[host_id] = "inactive"
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
@@ -347,6 +382,9 @@ def test_enable_sharing_cloud_row_skips_the_relay_latency_measurement() -> None:
     # sent (the connector applies its default region). The raise from the
     # recording create also proves a connector refusal surfaces as SharingError.
     cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     cli.relays_to_return = {"us1": ("relay-us1.example:7000",), "us2": ("relay-us2.example:7000",)}
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32

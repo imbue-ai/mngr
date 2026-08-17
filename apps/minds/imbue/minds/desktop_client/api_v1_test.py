@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.conftest import make_share_probe_result
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
@@ -1503,11 +1504,13 @@ class FakeSharingCli(FakeImbueCloudCli):
     share: ShareCliInfo | None = None
     created_shares: list[str] = Field(default_factory=list)
     deleted_shares: list[str] = Field(default_factory=list)
+    share_status_call_count: int = Field(default=0, description="How many times get_share_status was consulted")
     create_share_error: str | None = Field(
         default=None, description="When set, create_share raises an ImbueCloudCliError with this message"
     )
 
     def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
+        self.share_status_call_count += 1
         if self.share is None:
             return None
         # The status document never carries the relay token (only create does).
@@ -2014,6 +2017,35 @@ def test_machine_sharing_status_reports_unknown_grants_when_the_read_fails(tmp_p
     assert body["grants"] is None
 
 
+class _ShareProbeCaller(RecordingMngrCaller):
+    """Recording caller answering the enable flow's one-exec share state probe.
+
+    The probe command is recognized by its marker prefix; every other call
+    (the combined write exec) keeps the canned default result. ``grants_stdout``
+    is the current grants document ('' plays the absent-document case).
+    """
+
+    is_gateway_present: bool = Field(default=True, description="Whether the probe reports the share gateway")
+    is_share_env_present: bool = Field(default=False, description="Whether the probe reports share.env present")
+    grants_stdout: str = Field(default="", description="The current grants document; '' means absent")
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        if any("MNGR_SHARE_GATEWAY" in part for part in argv):
+            return make_share_probe_result(
+                is_gateway_present=self.is_gateway_present,
+                is_share_env_present=self.is_share_env_present,
+                grants_toml_text=self.grants_stdout or None,
+            )
+        return result
+
+
 class _GrantsReadCaller(RecordingMngrCaller):
     """Recording caller that answers the grants read with a proper exec JSON envelope.
 
@@ -2057,7 +2089,10 @@ def test_machine_sharing_status_reports_unknown_grants_when_the_document_is_malf
 
 def test_machine_sharing_put_refuses_to_replace_a_malformed_grants_document(tmp_path: Path) -> None:
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller(grants_stdout="not toml [["))
+    cli = _fake_sharing_cli(
+        share=_active_share(),
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout="not toml [["),
+    )
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -2076,7 +2111,7 @@ def test_machine_sharing_put_refuses_to_replace_a_malformed_grants_document(tmp_
 
 def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> None:
     agent_id = AgentId()
-    cli = _fake_sharing_cli()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -2091,8 +2126,8 @@ def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> No
     assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
     assert cli.created_shares == [_TEST_HOST_ID]
-    # The materials + grants writes ride over the recording mngr caller: one
-    # exec for the grants file, one for share.env.
+    # The grants + owner email + share.env writes ride over the recording mngr
+    # caller in a single combined exec.
     recorded = _recorded_mngr_calls(cli)
     assert any("share_grants.toml" in " ".join(argv) for argv in recorded)
     assert any("share.env" in " ".join(argv) for argv in recorded)
@@ -2100,8 +2135,9 @@ def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> No
 
 def test_machine_sharing_put_on_active_share_updates_grants_without_rotation(tmp_path: Path) -> None:
     agent_id = AgentId()
-    # The guard read before the replace sees no existing document (fresh envelope).
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
+    # The probe reports materials present with no existing document, so the
+    # guard sees nothing to protect and the grants-only path runs.
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -2117,26 +2153,6 @@ def test_machine_sharing_put_on_active_share_updates_grants_without_rotation(tmp
     assert not any("share.env" in " ".join(argv) and "printf" in " ".join(argv) for argv in recorded)
 
 
-class _SharePresenceProbeFailingCaller(RecordingMngrCaller):
-    """Recording caller whose share-materials presence probe reports absent.
-
-    Every other mngr call (grants + share.env writes) still succeeds, so the
-    repair path can be observed end to end.
-    """
-
-    def call(
-        self,
-        argv: Sequence[str],
-        timeout: float | None = None,
-        env_overrides: Mapping[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> MngrCallResult:
-        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
-        if any("test -f" in part for part in argv):
-            return MngrCallResult(returncode=1)
-        return result
-
-
 def test_machine_sharing_put_reprovisions_an_active_share_whose_materials_are_missing(tmp_path: Path) -> None:
     """An enable that failed between the connector create and the injection must be repairable.
 
@@ -2146,7 +2162,7 @@ def test_machine_sharing_put_reprovisions_an_active_share_whose_materials_are_mi
     the share row and rotates the token) and inject the materials.
     """
     agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_SharePresenceProbeFailingCaller())
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=False))
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -2179,7 +2195,7 @@ def test_machine_sharing_put_rejects_empty_grants(tmp_path: Path) -> None:
 
 def test_machine_sharing_put_surfaces_connector_errors(tmp_path: Path) -> None:
     agent_id = AgentId()
-    cli = _fake_sharing_cli(create_share_error="shares create failed (exit 1)")
+    cli = _fake_sharing_cli(create_share_error="shares create failed (exit 1)", mngr_caller=_ShareProbeCaller())
     client = _sharing_client(tmp_path, agent_id, cli)
 
     response = client.put(
@@ -2254,6 +2270,35 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     assert json.loads(response.data) == {"ready": True, "cert_not_after": None, "last_tunnel_login_at": None}
     # It probed the shell LABEL origin, never the bare machine domain.
     assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
+
+
+def test_machine_sharing_readiness_polls_reuse_the_cached_share_lookup(tmp_path: Path) -> None:
+    # The readiness poll fires every ~2 seconds; each uncached share lookup is
+    # a multi-second CLI subprocess, so back-to-back polls must reuse one
+    # lookup (the TLS probe below is the only per-tick work).
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share())
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://accounts.example/share/authorize"})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(_handler), follow_redirects=False)
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        http_client=http_client,
+        service_logs={
+            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+        },
+    )
+
+    first = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
+    second = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
+
+    assert json.loads(first.data)["ready"] is True
+    assert json.loads(second.data)["ready"] is True
+    assert cli.share_status_call_count == 1
 
 
 def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: Path) -> None:

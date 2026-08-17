@@ -99,6 +99,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_dir_layouts import host_dir_fallbacks
 from imbue.mngr.providers.host_key_store import move_host_endpoint_pins
@@ -137,6 +138,7 @@ from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
+from imbue.mngr_imbue_cloud.providers.adoption import invalidate_adoption_verification
 from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
 from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
 from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_raw
@@ -368,10 +370,11 @@ class ImbueCloudProvider(BaseProviderInstance):
     # or ``docker cp`` (stopped), and consumed by ``get_host_and_agent_details``
     # so the two listing phases share a single outer-SSH round-trip per host.
     _listing_raw_cache: dict[HostId, dict[str, Any]] = PrivateAttr(default_factory=dict)
-    # host_ids whose adoption was attempted (adopt or full re-verification) this
-    # process. Adoption is marker-driven and idempotent, but the verification
-    # costs SSH round trips, so it runs at most once per process lifetime per
-    # host -- plus after start/restart (those paths discard the entry).
+    # host_ids whose adoption was attempted (adopt or verification) this
+    # process, so a failed attempt is not hammered on every host build within
+    # one process. Successful verification is durable across processes (the
+    # marker's verified stamp -- see adoption.ensure_adopted); the
+    # start/restart paths discard this entry AND invalidate that stamp.
     _adoption_attempted_host_ids: set[str] = PrivateAttr(default_factory=set)
 
     # ------------------------------------------------------------------
@@ -1121,12 +1124,16 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``command`` string changes.
         """
         private_key_path, _ = self._host_keypair_paths(host_id)
+        known_hosts_path = self._host_known_hosts_path(host_id)
         return SSHInfo(
             user=lease.ssh_user,
             host=lease.vps_address,
             port=lease.container_ssh_port,
             key_path=private_key_path,
-            command=f"ssh -i {private_key_path} -p {lease.container_ssh_port} {lease.ssh_user}@{lease.vps_address}",
+            known_hosts_path=known_hosts_path,
+            command=build_ssh_connect_command(
+                lease.ssh_user, lease.vps_address, lease.container_ssh_port, private_key_path, known_hosts_path
+            ),
         )
 
     def _build_offline_details_from_workspace(
@@ -1373,8 +1380,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         # Adopt the slice (or re-verify its adoption) before handing back a
         # connectable host: at lease time this rotates both endpoints' host
         # keys to user-origin material and installs the in-VM reconciler; on
-        # later connects it is a pure-local marker check (with one full
-        # re-verification per process).
+        # later connects it is a pure-local marker check (the SSH-visiting
+        # verification is durable once it has succeeded -- see ensure_adopted).
         self._ensure_host_adopted(lease)
 
         pyinfra_host = create_pyinfra_host(
@@ -1402,10 +1409,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         """Adopt (or re-verify the adoption of) a leased slice, best-effort.
 
         Slices only (adoption does not cover plain OVH VPS pool hosts, of which
-        none exist in production). Runs the SSH-visiting work at most once per
-        process lifetime per host; every later call is a pure-local no-op. A
-        failure is logged and swallowed: the host keeps working on its existing
-        (bootstrap) trust material and the next process retries.
+        none exist in production). The SSH-visiting verification is durable:
+        once a host has verified at the current adoption schema version, every
+        later call -- this process or any other -- is a pure-local no-op until
+        the stamp is invalidated or local key work is pending (see
+        ensure_adopted). A failure is logged and swallowed: the host keeps
+        working on its existing (bootstrap) trust material and a later process
+        retries.
         """
         if not is_slice_lease(lease.container_ssh_port, self.config.container_ssh_port):
             return
@@ -2331,8 +2341,9 @@ class ImbueCloudProvider(BaseProviderInstance):
             self._wait_for_container_sshd(leased)
         # A restart may have rebooted the VM (replaying cidata over the SSH
         # material); make the host build below run a full adoption
-        # re-verification rather than the cheap once-per-process path.
+        # re-verification rather than the durable already-verified path.
         self._adoption_attempted_host_ids.discard(str(host_id))
+        invalidate_adoption_verification(self._host_state_dir(host_id))
         return self._build_host_object(leased)
 
     def _start_workspace_and_wait(self, host_id: HostId, workspace: WorkspaceInfo) -> None:
@@ -2386,6 +2397,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # The relocation may have re-run cloud-init from the uploaded cidata;
         # force a full adoption re-verification on the next host build.
         self._adoption_attempted_host_ids.discard(str(host_id))
+        invalidate_adoption_verification(self._host_state_dir(host_id))
         wait_for_sshd(started.vps_address, started.ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
         logger.debug(
             "Workspace {} is running again on {} (ports vm={}/container={})",

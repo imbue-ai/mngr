@@ -57,6 +57,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.utils.name_generator import generate_host_name
 from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -94,12 +95,14 @@ def _ssh_info_from_host(host: HostInterface) -> SSHInfo | None:
     if ssh_connection is None:
         return None
     user, hostname, port, key_path = ssh_connection
+    known_hosts_path = host.get_ssh_known_hosts_path()
     return SSHInfo(
         user=user,
         host=hostname,
         port=port,
         key_path=key_path,
-        command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+        known_hosts_path=known_hosts_path,
+        command=build_ssh_connect_command(user, hostname, port, key_path, known_hosts_path),
     )
 
 

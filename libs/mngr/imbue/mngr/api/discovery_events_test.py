@@ -304,6 +304,9 @@ class _FakeHostWithSSH:
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path]:
         return ("root", "remote.example.com", 2222, Path("/tmp/key"))
 
+    def get_ssh_known_hosts_path(self) -> Path | None:
+        return Path("/tmp/pins/known_hosts")
+
 
 class _FakeLocalHost:
     """Minimal stub for testing _build_ssh_info_from_host without SSH info."""
@@ -319,7 +322,11 @@ def test_build_ssh_info_from_host_returns_ssh_info_for_remote_host() -> None:
     assert result.host == "remote.example.com"
     assert result.port == 2222
     assert result.key_path == Path("/tmp/key")
-    assert result.command == "ssh -i /tmp/key -p 2222 root@remote.example.com"
+    assert result.known_hosts_path == Path("/tmp/pins/known_hosts")
+    assert result.command == (
+        'ssh -i /tmp/key -o "UserKnownHostsFile=/tmp/pins/known_hosts" -o StrictHostKeyChecking=yes '
+        "-p 2222 root@remote.example.com"
+    )
 
 
 def test_build_ssh_info_from_host_returns_none_for_local_host() -> None:

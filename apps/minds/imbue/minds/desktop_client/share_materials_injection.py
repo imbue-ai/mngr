@@ -19,13 +19,16 @@ need shell quoting.
 """
 
 import base64
+import binascii
 import json
 import threading
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
@@ -125,92 +128,163 @@ def _quote_toml_key(key: str) -> str:
     return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _write_file_via_exec(agent_id: AgentId, relative_path: str, content: str, mngr_caller: MngrCaller) -> None:
+def _atomic_write_clause(relative_path: str, content: str, tmp_var: str) -> str:
+    """One shell clause atomically writing ``content`` (base64 in transit) to ``relative_path``.
+
+    The tmp name comes from mktemp, never a fixed `<path>.tmp`: two
+    concurrent writers sharing one tmp path interleave their bytes and the
+    loser's mv publishes a corrupted file. With a unique tmp per write the
+    final mv stays atomic for readers and the last writer wins whole.
+    """
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
     directory, _, filename = relative_path.rpartition("/")
-    # The tmp name comes from mktemp, never a fixed `<path>.tmp`: two
-    # concurrent writers sharing one tmp path interleave their bytes and the
-    # loser's mv publishes a corrupted file. With a unique tmp per write the
-    # final mv stays atomic for readers and the last writer wins whole.
+    return (
+        f'mkdir -p {directory} && {tmp_var}="$(mktemp {directory}/.{filename}.XXXXXX)" '
+        f"&& printf '%s' {encoded} | base64 -d > \"${tmp_var}\" "
+        f'&& mv "${tmp_var}" {relative_path}'
+    )
+
+
+def provision_share_files_in_agent(
+    agent_id: AgentId,
+    grants_toml_text: str,
+    owner_email: str,
+    # None means "grants + owner email only" (the grants-only update path);
+    # the running gateway re-reads grants per request, so share.env is
+    # untouched and the tunnel never restarts.
+    share_env_text: str | None,
+    mngr_caller: MngrCaller,
+) -> None:
+    """Write all of a share's files into the agent in ONE exec round trip.
+
+    Ordering inside the script matters: the grants document (and the owner
+    email) land BEFORE share.env, because the share-gateway brings the whole
+    stack up the moment share.env appears -- the grants must already be in
+    place by then. The owner-email write is best-effort (services must
+    tolerate its absence), so its clause is wrapped to never fail the exec;
+    the grants and share.env writes are fatal.
+    """
+    clauses = [_atomic_write_clause(_SHARE_GRANTS_FILE, grants_toml_text, "tmp_grants")]
+    if owner_email:
+        owner_clause = _atomic_write_clause(_SHARE_OWNER_EMAIL_FILE, owner_email, "tmp_owner")
+        clauses.append(f"{{ {owner_clause} || true; }}")
+    else:
+        logger.debug("Skipping owner-email injection for agent {}: no owner email", agent_id)
+    if share_env_text is not None:
+        clauses.append(_atomic_write_clause(_SHARE_ENV_FILE, share_env_text, "tmp_env"))
     result = mngr_caller.call(
-        [
-            "exec",
-            str(agent_id),
-            f'mkdir -p {directory} && tmp="$(mktemp {directory}/.{filename}.XXXXXX)" '
-            f"&& printf '%s' {encoded} | base64 -d > \"$tmp\" "
-            f'&& mv "$tmp" {relative_path}',
-        ],
+        ["exec", str(agent_id), " && ".join(clauses)],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        raise ShareInjectionError(f"Failed to write {relative_path} into agent {agent_id}: {result.stderr.strip()}")
-
-
-def inject_share_grants_into_agent(agent_id: AgentId, grants_toml_text: str, mngr_caller: MngrCaller) -> None:
-    """Write (or replace) the grants document. Takes effect on the gateway's next request."""
-    _write_file_via_exec(agent_id, _SHARE_GRANTS_FILE, grants_toml_text, mngr_caller)
-
-
-def inject_share_materials_into_agent(agent_id: AgentId, share_env_text: str, mngr_caller: MngrCaller) -> None:
-    """Write (or replace) share.env; the workspace's share-gateway brings the stack up."""
-    _write_file_via_exec(agent_id, _SHARE_ENV_FILE, share_env_text, mngr_caller)
-
-
-def inject_share_owner_email_into_agent(agent_id: AgentId, owner_email: str, mngr_caller: MngrCaller) -> None:
-    """Write the owner-email file so shared-workspace services can learn the owner.
-
-    Best-effort: this is a convenience artifact (services must tolerate its
-    absence), so a failed write is logged but never fails the enable. An empty
-    email is skipped rather than writing a misleading empty file.
-    """
-    if not owner_email:
-        logger.debug("Skipping owner-email injection for agent {}: no owner email", agent_id)
-        return
-    try:
-        _write_file_via_exec(agent_id, _SHARE_OWNER_EMAIL_FILE, owner_email, mngr_caller)
-    except ShareInjectionError as exc:
-        logger.warning("Failed to inject owner email into agent {}: {}", agent_id, exc)
+        raise ShareInjectionError(f"Failed to write share files into agent {agent_id}: {result.stderr.strip()}")
 
 
 _SHARE_GATEWAY_SERVICE_DIR: Final[str] = "system/services/share_gateway"
 
+# Marker lines the state probe prints (parsed out of the exec JSON envelope so
+# an SSH-level failure stays distinguishable from a negative answer).
+_PROBE_GATEWAY_PREFIX: Final[str] = "MNGR_SHARE_GATEWAY="
+_PROBE_SHARE_ENV_PREFIX: Final[str] = "MNGR_SHARE_ENV="
+_PROBE_GRANTS_B64_PREFIX: Final[str] = "MNGR_SHARE_GRANTS_B64="
+_PROBE_ABSENT_VALUE: Final[str] = "ABSENT"
+_PROBE_UNREADABLE_VALUE: Final[str] = "UNREADABLE"
 
-def has_share_gateway_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> bool:
-    """Whether the workspace's template ships the share-gateway service.
+# One script answering everything the enable flow needs to know about the
+# workspace, so the whole read costs a single exec round trip. The grants read
+# is checked (a failed redirect/read fails the command substitution) so an
+# existing-but-unreadable document reports UNREADABLE rather than looking
+# absent -- the caller's data-loss guard depends on the distinction. `echo |
+# tr` rather than `base64 -w0`: the workspace is a Debian container today, but
+# the pipe form works on any base64 (echo is safe here -- base64 output never
+# starts with a dash and carries no escapes).
+_PROBE_SHARE_STATE_SCRIPT: Final[str] = (
+    f"if test -d {_SHARE_GATEWAY_SERVICE_DIR}; then echo {_PROBE_GATEWAY_PREFIX}1; "
+    f"else echo {_PROBE_GATEWAY_PREFIX}0; fi; "
+    f"if test -f {_SHARE_ENV_FILE}; then echo {_PROBE_SHARE_ENV_PREFIX}1; "
+    f"else echo {_PROBE_SHARE_ENV_PREFIX}0; fi; "
+    f"if test -f {_SHARE_GRANTS_FILE}; then "
+    f'if grants_b64="$(base64 < {_SHARE_GRANTS_FILE})"; then '
+    f"echo \"{_PROBE_GRANTS_B64_PREFIX}$(echo \"$grants_b64\" | tr -d '\\n')\"; "
+    f"else echo {_PROBE_GRANTS_B64_PREFIX}{_PROBE_UNREADABLE_VALUE}; fi; "
+    f"else echo {_PROBE_GRANTS_B64_PREFIX}{_PROBE_ABSENT_VALUE}; fi"
+)
 
-    Workspaces created from a pre-share-gateway template (minds-v0.3.11 and
-    older) have nothing watching ``share.env``, so injecting share materials
-    into them can never bring a share up. Conservative on exec failure:
-    reported as absent, so the caller refuses with the actionable
-    update-your-workspace message rather than provisioning a share that cannot
-    work (a retry after the transient failure clears is cheap).
 
-    # CLEANUP: this probe (and its caller's guard) can be removed once no
-    # supported workspaces predate the share gateway -- i.e. after the first
-    # post-v0.3.11 release is deployed and the remaining old workspaces have
-    # been updated via update-self (they cannot share until they update).
+class ShareAgentProbe(FrozenModel):
+    """One-exec snapshot of the share-related state inside a workspace."""
+
+    has_gateway: bool = Field(
+        description=(
+            "Whether the template ships the share-gateway service. Workspaces from a "
+            "pre-share-gateway template (minds-v0.3.11 and older) have nothing watching "
+            "share.env, so a share enabled for them can never come up. "
+            "CLEANUP: this signal (and its caller's refusal) can be removed once no supported "
+            "workspaces predate the share gateway -- i.e. after the first post-v0.3.11 release "
+            "is deployed and the remaining old workspaces have run update-self."
+        )
+    )
+    has_share_env: bool = Field(
+        description=(
+            "Whether share.env is present (the share stack's on-switch). Distinguishes an "
+            "actively-shared workspace from one whose earlier enable failed between the "
+            "connector-side create and the injection."
+        )
+    )
+    grants_toml_text: str | None = Field(
+        description="The current grants document's content, or None when no document exists."
+    )
+
+
+def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> ShareAgentProbe:
+    """Read the workspace's share state (gateway, share.env, grants) in one exec.
+
+    Conservative on exec failure: everything reports absent, so the caller
+    refuses with the actionable update-your-workspace message rather than
+    provisioning a share that cannot work (a retry after the transient failure
+    clears is cheap, and nothing has been written or created). A successful
+    exec whose grants document exists but could not be read (the script's
+    UNREADABLE marker), or whose grants payload cannot be decoded, raises
+    :class:`ShareInjectionError` -- an unreadable existing policy must never
+    be mistaken for an absent one.
     """
     result = mngr_caller.call(
-        ["exec", str(agent_id), f"test -d {_SHARE_GATEWAY_SERVICE_DIR}", "--no-start"],
+        ["exec", str(agent_id), _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
-    return result.returncode == 0
-
-
-def has_share_materials_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> bool:
-    """Whether share.env is present inside the agent (the share stack's on-switch).
-
-    Distinguishes an actively-shared workspace from one whose earlier enable
-    failed between the connector-side create and the injection. Conservative on
-    exec failure: reported as absent, so the caller re-provisions -- which is
-    safe, because the connector reuses the share row and the injection
-    overwrites in place.
-    """
-    result = mngr_caller.call(
-        ["exec", str(agent_id), f"test -f {_SHARE_ENV_FILE}", "--no-start"],
-        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+    if result.returncode != 0:
+        logger.debug("Share state probe failed for agent {}: {}", agent_id, result.stderr.strip())
+        return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
+    stdout = _extract_exec_stdout(result.stdout)
+    if stdout is None:
+        return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
+    value_by_prefix: dict[str, str] = {}
+    for line in stdout.splitlines():
+        for prefix in (_PROBE_GATEWAY_PREFIX, _PROBE_SHARE_ENV_PREFIX, _PROBE_GRANTS_B64_PREFIX):
+            if line.startswith(prefix):
+                value_by_prefix[prefix] = line[len(prefix) :].strip()
+    grants_value = value_by_prefix.get(_PROBE_GRANTS_B64_PREFIX, _PROBE_ABSENT_VALUE)
+    if grants_value == _PROBE_UNREADABLE_VALUE:
+        raise ShareInjectionError(
+            f"The share grants document in agent {agent_id} exists but could not be read"
+        )
+    if grants_value == _PROBE_ABSENT_VALUE or not grants_value:
+        # An empty value is an empty (whitespace-free) document: the checked
+        # read means a failed one reports UNREADABLE above, and an empty file
+        # grants nobody -- same as absent (read_share_grants_from_agent agrees).
+        grants_toml_text = None
+    else:
+        try:
+            grants_toml_text = base64.b64decode(grants_value).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise ShareInjectionError(
+                f"Could not decode the share grants read from agent {agent_id}: {exc}"
+            ) from exc
+    return ShareAgentProbe(
+        has_gateway=value_by_prefix.get(_PROBE_GATEWAY_PREFIX) == "1",
+        has_share_env=value_by_prefix.get(_PROBE_SHARE_ENV_PREFIX) == "1",
+        grants_toml_text=grants_toml_text,
     )
-    return result.returncode == 0
 
 
 def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> None:

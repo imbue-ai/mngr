@@ -81,6 +81,87 @@ def test_parse_snapshot_with_remote_agent() -> None:
     assert entry.ssh_info.host == "1.2.3.4"
     assert entry.ssh_info.port == 22
     assert entry.ssh_info.key_path == Path("/tmp/k")
+    # Older mngr versions don't emit known_hosts_path; its absence must parse
+    # as None (the tunnel then falls back to the key-sibling convention).
+    assert entry.ssh_info.known_hosts_path is None
+
+
+def test_parse_snapshot_carries_the_explicit_known_hosts_path() -> None:
+    payload = json.dumps(
+        {
+            "agents": [
+                {
+                    "id": str(TEST_AGENT_ID_1),
+                    "host": {
+                        "ssh": {
+                            "user": "root",
+                            "host": "1.2.3.4",
+                            "port": 22,
+                            "key_path": "/tmp/k",
+                            "known_hosts_path": "/tmp/pins/known_hosts",
+                        }
+                    },
+                    "labels": {},
+                }
+            ]
+        }
+    )
+    result = _parse_snapshot(payload)
+    [entry] = result.agents
+    assert entry.ssh_info is not None
+    assert entry.ssh_info.known_hosts_path == Path("/tmp/pins/known_hosts")
+
+
+def test_parse_snapshot_treats_null_known_hosts_path_as_absent() -> None:
+    payload = json.dumps(
+        {
+            "agents": [
+                {
+                    "id": str(TEST_AGENT_ID_1),
+                    "host": {
+                        "ssh": {
+                            "user": "root",
+                            "host": "1.2.3.4",
+                            "port": 22,
+                            "key_path": "/tmp/k",
+                            "known_hosts_path": None,
+                        }
+                    },
+                    "labels": {},
+                }
+            ]
+        }
+    )
+    result = _parse_snapshot(payload)
+    [entry] = result.agents
+    assert entry.ssh_info is not None
+    assert entry.ssh_info.known_hosts_path is None
+
+
+def test_parse_snapshot_drops_ssh_info_with_a_non_string_known_hosts_path() -> None:
+    """A malformed known_hosts_path value must degrade to no SSH info, not crash the parse."""
+    payload = json.dumps(
+        {
+            "agents": [
+                {
+                    "id": str(TEST_AGENT_ID_1),
+                    "host": {
+                        "ssh": {
+                            "user": "root",
+                            "host": "1.2.3.4",
+                            "port": 22,
+                            "key_path": "/tmp/k",
+                            "known_hosts_path": 123,
+                        }
+                    },
+                    "labels": {},
+                }
+            ]
+        }
+    )
+    result = _parse_snapshot(payload)
+    [entry] = result.agents
+    assert entry.ssh_info is None
 
 
 def test_parse_snapshot_skips_agents_without_id() -> None:

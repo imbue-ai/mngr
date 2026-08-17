@@ -46,6 +46,7 @@ from imbue.mngr_forward.ssh_tunnel import _create_ssh_client
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
 from imbue.mngr_forward.ssh_tunnel import _is_transport_unusable
 from imbue.mngr_forward.ssh_tunnel import _open_and_relay
+from imbue.mngr_forward.ssh_tunnel import _resolve_known_hosts_path
 from imbue.mngr_forward.ssh_tunnel import _tunnel_accept_loop
 from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 
@@ -216,6 +217,58 @@ def test_create_ssh_client_refuses_to_connect_without_a_known_hosts_file(tmp_pat
 
     with pytest.raises(SSHTunnelError, match="known_hosts"):
         _create_ssh_client(ssh_info)
+
+
+def test_create_ssh_client_refusal_names_both_candidate_paths(tmp_path: Path) -> None:
+    """When an explicit path was supplied and both candidates are missing, the error names both."""
+    key_path = tmp_path / "ssh_key"
+    key_path.write_text("irrelevant-key-material")
+    explicit_path = tmp_path / "pins" / "known_hosts"
+    ssh_info = RemoteSSHInfo(
+        user="root", host="203.0.113.5", port=22, key_path=key_path, known_hosts_path=explicit_path
+    )
+
+    with pytest.raises(SSHTunnelError, match=rf"{explicit_path}.*{key_path.parent / 'known_hosts'}"):
+        _create_ssh_client(ssh_info)
+
+
+def test_resolve_known_hosts_path_prefers_the_explicit_path_when_it_exists(tmp_path: Path) -> None:
+    key_path = tmp_path / "keys" / "ssh_key"
+    key_path.parent.mkdir()
+    key_path.write_text("irrelevant-key-material")
+    sibling_path = key_path.parent / "known_hosts"
+    sibling_path.write_text("sibling-pin")
+    explicit_path = tmp_path / "pins" / "known_hosts"
+    explicit_path.parent.mkdir()
+    explicit_path.write_text("explicit-pin")
+    ssh_info = RemoteSSHInfo(
+        user="root", host="203.0.113.5", port=22, key_path=key_path, known_hosts_path=explicit_path
+    )
+
+    assert _resolve_known_hosts_path(ssh_info) == explicit_path
+
+
+def test_resolve_known_hosts_path_falls_back_to_the_key_sibling_when_explicit_is_missing(tmp_path: Path) -> None:
+    """A stale producer path must never break a connection the sibling convention would have allowed."""
+    key_path = tmp_path / "keys" / "ssh_key"
+    key_path.parent.mkdir()
+    key_path.write_text("irrelevant-key-material")
+    sibling_path = key_path.parent / "known_hosts"
+    sibling_path.write_text("sibling-pin")
+    missing_explicit_path = tmp_path / "gone" / "known_hosts"
+    ssh_info = RemoteSSHInfo(
+        user="root", host="203.0.113.5", port=22, key_path=key_path, known_hosts_path=missing_explicit_path
+    )
+
+    assert _resolve_known_hosts_path(ssh_info) == sibling_path
+
+
+def test_resolve_known_hosts_path_returns_none_when_no_candidate_exists(tmp_path: Path) -> None:
+    key_path = tmp_path / "ssh_key"
+    key_path.write_text("irrelevant-key-material")
+    ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
+
+    assert _resolve_known_hosts_path(ssh_info) is None
 
 
 def test_remote_ssh_info_round_trip() -> None:

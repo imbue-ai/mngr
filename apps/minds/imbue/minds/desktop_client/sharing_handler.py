@@ -26,6 +26,7 @@ from loguru import logger
 
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
@@ -33,11 +34,8 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
-from imbue.minds.desktop_client.share_materials_injection import has_share_gateway_in_agent
-from imbue.minds.desktop_client.share_materials_injection import has_share_materials_in_agent
-from imbue.minds.desktop_client.share_materials_injection import inject_share_grants_into_agent
-from imbue.minds.desktop_client.share_materials_injection import inject_share_materials_into_agent
-from imbue.minds.desktop_client.share_materials_injection import inject_share_owner_email_into_agent
+from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
+from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.state import get_state
@@ -337,64 +335,70 @@ def _enable_sharing_with_cli(
 ) -> dict[str, Any]:
     grants_toml = render_grants_toml(workspace_grants, service_grants)
 
+    # One exec answers everything the flow needs from the workspace: whether
+    # the template ships the share gateway, whether share.env is present, and
+    # the current grants document.
+    try:
+        probe = probe_share_state_in_agent(agent_id, cli.mngr_caller)
+    except ShareInjectionError as exc:
+        raise SharingError(str(exc)) from exc
+
     # Workspaces created from a pre-share-gateway template (minds-v0.3.11 and
     # older) have no service watching share.env, so a share enabled for them
     # would go active on the connector and never become reachable. Refuse up
     # front with the fix: update the workspace (update-self), then re-share --
     # which self-heals, since the gateway picks the materials up on its own.
-    # CLEANUP: drop this guard (and has_share_gateway_in_agent) once no
+    # CLEANUP: drop this guard (and the probe's has_gateway signal) once no
     # supported workspaces predate the share gateway -- i.e. after the first
     # post-v0.3.11 release is deployed and old workspaces have run update-self.
-    if not has_share_gateway_in_agent(agent_id, cli.mngr_caller):
+    if not probe.has_gateway:
         raise SharingError(
             "This machine's workspace template is too old to support sharing. "
             'Ask the machine to update itself (send it "update yourself", which runs '
             "the update-self skill), then enable sharing again."
         )
 
-    try:
-        existing = cli.get_share_status(account=account_email, host_id=host_id)
-    except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not read the machine's sharing status: {describe_connector_failure(exc)}") from exc
-
-    if existing is not None and existing.state == "active" and has_share_materials_in_agent(agent_id, cli.mngr_caller):
-        # Grants-only update: no token rotation, the gateway picks the new
-        # grants up on its next request. Gated on the materials actually being
-        # present in the workspace: an earlier enable that failed between the
-        # connector-side create and the injection leaves the share "active"
-        # with no tunnel, and only the full provisioning path below can repair
-        # that (the connector reuses the share row and rotates the token).
-        #
-        # Before replacing the whole document, make sure the current one is
-        # readable: a save built against a policy that could not be read would
-        # silently erase whatever the unreadable file really granted. (Should
-        # never happen -- writes are atomic and serialized -- but the failure
-        # mode is permanent data loss, so it is checked anyway.)
+    if probe.has_share_env:
+        # Materials are present, so this is either a grants-only update (share
+        # active server-side: no token rotation, the gateway picks the new
+        # grants up on its next request) or stale materials from a share since
+        # disabled elsewhere (fall through to full re-provisioning). Only this
+        # rare path needs the connector's status; the common enable-from-off
+        # path never reads it -- create is the source of truth there.
         try:
-            current_grants_text = read_share_grants_from_agent(agent_id, cli.mngr_caller)
-        except ShareInjectionError as exc:
-            raise SharingError(str(exc)) from exc
-        if current_grants_text is not None and _parse_grants_toml(current_grants_text) is None:
+            existing = cli.get_share_status(account=account_email, host_id=host_id)
+        except ImbueCloudCliError as exc:
             raise SharingError(
-                "The machine's current sharing permissions file is unreadable, so this change "
-                "was not saved (saving would erase whoever it currently grants). To reset it, "
-                "disable sharing for this machine and enable it again."
-            )
-        try:
-            inject_share_grants_into_agent(agent_id, grants_toml, cli.mngr_caller)
-        except ShareInjectionError as exc:
-            raise SharingError(str(exc)) from exc
-        # Refresh the owner-email file too, so a share enabled before this
-        # feature existed gains it on the next grants edit.
-        inject_share_owner_email_into_agent(agent_id, account_email, cli.mngr_caller)
-        return _share_status_document(host_id, existing, workspace_grants, service_grants)
+                f"Could not read the machine's sharing status: {describe_connector_failure(exc)}"
+            ) from exc
+        if existing is not None and existing.state == "active":
+            # Before replacing the whole document, make sure the current one is
+            # readable: a save built against a policy that could not be read
+            # would silently erase whatever the unreadable file really granted.
+            # (Should never happen -- writes are atomic and serialized -- but
+            # the failure mode is permanent data loss, so it is checked anyway.)
+            if probe.grants_toml_text is not None and _parse_grants_toml(probe.grants_toml_text) is None:
+                raise SharingError(
+                    "The machine's current sharing permissions file is unreadable, so this change "
+                    "was not saved (saving would erase whoever it currently grants). To reset it, "
+                    "disable sharing for this machine and enable it again."
+                )
+            try:
+                # The owner-email file is refreshed alongside, so a share
+                # enabled before that feature existed gains it on a grants edit.
+                provision_share_files_in_agent(agent_id, grants_toml, account_email, None, cli.mngr_caller)
+            except ShareInjectionError as exc:
+                raise SharingError(str(exc)) from exc
+            return _share_status_document(host_id, existing, workspace_grants, service_grants)
 
-    # First-time shares of a workspace running on this machine pick the relay
-    # by measured latency from here. A re-share keeps its region server-side,
-    # and a cloud row runs elsewhere (the desktop's latency says nothing about
-    # the pool host's), so both skip the measurement -- the connector then
-    # applies its default region.
-    is_relay_region_measured = existing is None and not is_cloud_row
+    # Local shares with no materials in the workspace pick the relay by
+    # measured latency from here (the workspace runs on this machine, so the
+    # desktop's latency is the right proximity signal). A cloud row runs
+    # elsewhere, and a stale-materials re-provision is already placed, so both
+    # skip the measurement. A re-share after a disable measures again -- the
+    # preference is advisory: the connector honors it only for hosts it has no
+    # region record of, so an existing share always keeps its region.
+    is_relay_region_measured = not is_cloud_row and not probe.has_share_env
     preferred_region = _pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None
     try:
         share = cli.create_share(
@@ -416,12 +420,12 @@ def _enable_sharing_with_cli(
         # and health-probeable from /web exactly like connector-shared ones.
         chrome_origin=_connector_base_url(client_env_config),
     )
+    # Everything lands in one exec, share.env last -- the gateway brings the
+    # stack up the moment it appears, so the grants must already be in place.
     try:
-        inject_share_grants_into_agent(agent_id, grants_toml, cli.mngr_caller)
-        inject_share_materials_into_agent(agent_id, share_env_text, cli.mngr_caller)
+        provision_share_files_in_agent(agent_id, grants_toml, account_email, share_env_text, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
-    inject_share_owner_email_into_agent(agent_id, account_email, cli.mngr_caller)
     return _share_status_document(host_id, share, workspace_grants, service_grants)
 
 
@@ -566,6 +570,22 @@ def get_sharing(
         return document
     workspace_grants, service_grants = parsed_grants
     return _share_status_document(host_id, share, workspace_grants, service_grants)
+
+
+def get_active_share_cached(
+    host_id: str,
+    backend_resolver: BackendResolverInterface,
+    cli: ImbueCloudCli | None,
+    session_store: MultiAccountSessionStore | None,
+    cache: ActiveShareCache,
+) -> ShareCliInfo | None:
+    """:func:`get_active_share` behind the short-TTL cache (the readiness poll's read path)."""
+    cached = cache.get(host_id)
+    if cached is not None:
+        return cached.share
+    share = get_active_share(host_id, backend_resolver, cli, session_store)
+    cache.put(host_id, share)
+    return share
 
 
 def get_active_share(

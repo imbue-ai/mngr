@@ -148,14 +148,18 @@ def _parse_ssh_info(raw: dict[str, Any]) -> RemoteSSHInfo | None:
     ssh = host.get("ssh")
     if not isinstance(ssh, dict):
         return None
+    # known_hosts_path is optional: older mngr versions don't emit it, and the
+    # tunnel falls back to the key-sibling convention when it is absent.
+    raw_known_hosts = ssh.get("known_hosts_path")
     try:
         return RemoteSSHInfo(
             user=ssh["user"],
             host=ssh["host"],
             port=ssh["port"],
             key_path=Path(ssh["key_path"]),
+            known_hosts_path=Path(raw_known_hosts) if raw_known_hosts else None,
         )
-    except (KeyError, ValueError) as e:
+    except (KeyError, TypeError, ValueError) as e:
         logger.warning("Could not parse SSH info: {}", e)
         return None
 

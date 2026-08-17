@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 
 
 def test_outer_host_satisfies_outer_host_interface(temp_mngr_ctx: MngrContext) -> None:
@@ -114,6 +115,59 @@ def test_outer_host_local_get_ssh_connection_info_is_none(temp_mngr_ctx: MngrCon
         mngr_ctx=temp_mngr_ctx,
     )
     assert outer.get_ssh_connection_info() is None
+
+
+def test_outer_host_local_get_ssh_known_hosts_path_is_none(temp_mngr_ctx: MngrContext) -> None:
+    """Local OuterHost has no host key to pin."""
+    pyinfra_host = create_local_pyinfra_host()
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert outer.get_ssh_known_hosts_path() is None
+
+
+def test_outer_host_remote_get_ssh_known_hosts_path_reads_the_connector_host_data(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """A remote OuterHost surfaces the known_hosts file its connector was provisioned with."""
+    key_path = tmp_path / "ssh_key"
+    key_path.write_text("irrelevant-key-material")
+    known_hosts_path = tmp_path / "known_hosts"
+    known_hosts_path.write_text("[203.0.113.5]:22 ssh-ed25519 AAAA-irrelevant")
+    pyinfra_host = create_pyinfra_host(
+        hostname="203.0.113.5",
+        port=22,
+        private_key_path=key_path,
+        known_hosts_path=known_hosts_path,
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert outer.get_ssh_known_hosts_path() == known_hosts_path
+
+
+def test_outer_host_remote_get_ssh_known_hosts_path_treats_dev_null_as_unpinned(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """/dev/null means host-key checking was explicitly disabled, so no pin file is reported."""
+    key_path = tmp_path / "ssh_key"
+    key_path.write_text("irrelevant-key-material")
+    pyinfra_host = create_pyinfra_host(
+        hostname="203.0.113.5",
+        port=22,
+        private_key_path=key_path,
+        known_hosts_path=Path("/dev/null"),
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(pyinfra_host),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert outer.get_ssh_known_hosts_path() is None
 
 
 def test_outer_host_local_executes_command(temp_mngr_ctx: MngrContext) -> None:
@@ -581,12 +635,37 @@ def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: Mn
     assert fake.connect_call_count == 2
 
 
-def test_ensure_connected_gives_up_after_two_banner_read_attempts(temp_mngr_ctx: MngrContext) -> None:
-    """A persistent banner-read failure makes exactly two attempts before surfacing.
+def test_ensure_connected_recovers_when_only_the_third_banner_read_attempt_succeeds(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Two consecutive banner-read failures still recover on the third attempt.
 
-    Each attempt already blocks for paramiko's ~15s banner timeout, so capping
-    at two attempts bounds the worst case (a host that accepts TCP but never
-    speaks SSH) at ~30 seconds.
+    Regression test for the widened retry budget: a slow fresh Modal sandbox
+    outlasted the single retry (both offload attempts of
+    test_exec_json_output_on_modal), so the bounded budget is three attempts.
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=2,
+        message="SSH error (Error reading SSH protocol banner)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    outer._ensure_connected()
+
+    assert fake.connected is True
+    assert fake.connect_call_count == 3
+
+
+def test_ensure_connected_gives_up_after_three_banner_read_attempts(temp_mngr_ctx: MngrContext) -> None:
+    """A persistent banner-read failure makes exactly three attempts before surfacing.
+
+    Each attempt already blocks for paramiko's banner timeout (30s on provider
+    hosts), so capping at three attempts bounds the worst case (a host that
+    accepts TCP but never speaks SSH) at ~90 seconds.
     """
     fake = _FakePyinfraHostRecoveringOnConnect(
         failure_count=5,
@@ -601,7 +680,7 @@ def test_ensure_connected_gives_up_after_two_banner_read_attempts(temp_mngr_ctx:
     with pytest.raises(HostConnectionError):
         outer._ensure_connected()
 
-    assert fake.connect_call_count == 2
+    assert fake.connect_call_count == 3
 
 
 def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mngr_ctx: MngrContext) -> None:

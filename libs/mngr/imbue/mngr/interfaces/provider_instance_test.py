@@ -797,6 +797,7 @@ def test_collect_cached_host_ssh_infos_reads_only_running_hosts(
     online_host = MagicMock(spec=OnlineHostInterface)
     online_host.id = host_id
     online_host.get_ssh_connection_info.return_value = ("root", "203.0.113.5", 2222, Path("/keys/id"))
+    online_host.get_ssh_known_hosts_path.return_value = None
     provider.mock_hosts = [online_host]
 
     running = DiscoveredHost(

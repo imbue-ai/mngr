@@ -5,3 +5,7 @@
 
 connector_url = "https://minds-staging--rsc-staging-api.modal.run"
 litellm_proxy_url = "https://minds-staging--llm-staging-proxy.modal.run"
+
+# The accounts host shared-workspace visitor links point at (a Modal custom
+# domain on the connector app; see the [origins] block in deploy.toml).
+accounts_base_url = "https://accounts.imbue-staging.com"

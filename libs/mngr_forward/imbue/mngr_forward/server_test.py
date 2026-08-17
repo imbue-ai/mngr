@@ -40,6 +40,7 @@ from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
 from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
 from imbue.mngr_forward.resolver import ForwardResolver
+from imbue.mngr_forward.server import TunnelWarningRateLimiter
 from imbue.mngr_forward.server import _PROXY_BACKSTOP_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _PROXY_TIMEOUT
 from imbue.mngr_forward.server import _SSE_READ_TIMEOUT_SECONDS
@@ -2370,3 +2371,50 @@ def test_bare_origin_responses_carry_no_frame_ancestors(
     client, _store, _resolver = app_setup
     response = client.get("/")
     assert "content-security-policy" not in response.headers
+
+
+# -- TunnelWarningRateLimiter ----------------------------------------------
+
+
+def test_tunnel_warning_rate_limiter_logs_the_first_warning_per_agent() -> None:
+    clock = [100.0]
+    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+
+    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    assert limiter.suppressed_repeats_if_should_log("agent-b") == 0
+
+
+def test_tunnel_warning_rate_limiter_suppresses_repeats_inside_the_interval() -> None:
+    clock = [100.0]
+    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+
+    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    clock[0] = 130.0
+    assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+    clock[0] = 159.9
+    assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+
+
+def test_tunnel_warning_rate_limiter_reports_the_suppressed_count_after_the_interval() -> None:
+    clock = [100.0]
+    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+
+    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    for tick in (110.0, 120.0, 130.0):
+        clock[0] = tick
+        assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+    clock[0] = 161.0
+    assert limiter.suppressed_repeats_if_should_log("agent-a") == 3
+    # The count resets once reported.
+    clock[0] = 222.0
+    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+
+
+def test_tunnel_warning_rate_limiter_tracks_agents_independently() -> None:
+    clock = [100.0]
+    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+
+    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    clock[0] = 110.0
+    assert limiter.suppressed_repeats_if_should_log("agent-b") == 0
+    assert limiter.suppressed_repeats_if_should_log("agent-a") is None

@@ -5,11 +5,13 @@ import pytest
 from pydantic import AnyUrl
 
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import _CONNECTOR_URL_SUBPROCESS_ENV
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_conflict_stored
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_stderr_error_message
@@ -263,3 +265,42 @@ def test_expect_success_raises_typed_email_not_verified_error_with_the_email() -
 
     assert exc_info.value.email == "alice@example.com"
     assert "verified email" in str(exc_info.value)
+
+
+# --- ActiveShareCache ---
+
+
+def test_active_share_cache_serves_hits_and_caches_negative_lookups() -> None:
+    cache = ActiveShareCache()
+    share = ShareCliInfo(host_id="host-" + "a" * 32, workspace_domain="d.example", region="us1", state="active")
+
+    assert cache.get("host-" + "a" * 32) is None
+    cache.put("host-" + "a" * 32, share)
+    cache.put("host-" + "b" * 32, None)
+
+    hit = cache.get("host-" + "a" * 32)
+    assert hit is not None
+    assert hit.share == share
+    # A cached "not shared" answer is a hit too (share=None), distinct from a miss.
+    negative_hit = cache.get("host-" + "b" * 32)
+    assert negative_hit is not None
+    assert negative_hit.share is None
+
+
+def test_active_share_cache_expires_entries_after_the_ttl() -> None:
+    cache = ActiveShareCache(ttl_seconds=0.0)
+    share = ShareCliInfo(host_id="host-" + "c" * 32, workspace_domain="d.example", region="us1", state="active")
+
+    cache.put("host-" + "c" * 32, share)
+
+    assert cache.get("host-" + "c" * 32) is None
+
+
+def test_active_share_cache_invalidate_forces_the_next_lookup_to_miss() -> None:
+    cache = ActiveShareCache()
+    share = ShareCliInfo(host_id="host-" + "d" * 32, workspace_domain="d.example", region="us1", state="active")
+    cache.put("host-" + "d" * 32, share)
+
+    cache.invalidate("host-" + "d" * 32)
+
+    assert cache.get("host-" + "d" * 32) is None

@@ -407,18 +407,25 @@ def test_get_account_parses(monkeypatch: pytest.MonkeyPatch) -> None:
                 "plan_name": "ally",
                 "entitlements": {
                     "max_remote_workspaces": 10,
+                    "max_total_workspaces": 50,
                     "max_buckets": 20,
                     "max_total_bucket_bytes": 536870912000,
                     "monthly_llm_spend_usd": 1000.0,
                     "max_active_synced_workspaces": 200,
+                    # The connector serves these tunnel-era compat zeros for
+                    # v0.3.11 clients; this client must tolerate them.
+                    "max_tunnels": 0,
+                    "max_services_per_tunnel": 0,
                 },
                 "usage": {
                     "remote_workspaces": 2,
+                    "total_workspaces": 3,
                     "buckets": 1,
                     "total_bucket_bytes": 12345,
                     "llm_spend_usd_this_period": 42.5,
                     "llm_budget_resets_at": "2026-08-01T00:00:00Z",
                     "active_synced_workspaces": 4,
+                    "tunnels": 0,
                 },
                 "available_plans": ["ally", "explorer"],
             },
@@ -428,7 +435,9 @@ def test_get_account_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     info = client.get_account(SecretStr("tok"))
     assert info.plan_name == "ally"
     assert info.entitlements.max_remote_workspaces == 10
+    assert info.entitlements.max_total_workspaces == 50
     assert info.usage.llm_spend_usd_this_period == 42.5
+    assert info.usage.total_workspaces == 3
     assert info.available_plans == ("ally", "explorer")
 
 
@@ -586,6 +595,7 @@ def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch
                 "plan_name": "explorer",
                 "entitlements": {
                     "max_remote_workspaces": 2,
+                    "max_total_workspaces": 6,
                     "max_buckets": 5,
                     "max_total_bucket_bytes": 53687091200,
                     "monthly_llm_spend_usd": 0.0,
@@ -593,6 +603,7 @@ def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch
                 },
                 "usage": {
                     "remote_workspaces": 0,
+                    "total_workspaces": 0,
                     "buckets": 0,
                     "total_bucket_bytes": 0,
                     "llm_spend_usd_this_period": 0.0,

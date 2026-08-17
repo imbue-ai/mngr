@@ -432,15 +432,19 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         if ssh is None:
             continue
 
+        # known_hosts_path is optional: older mngr versions don't emit it, and the
+        # tunnel falls back to the key-sibling convention when it is absent.
+        raw_known_hosts = ssh.get("known_hosts_path")
         try:
             ssh_info = RemoteSSHInfo(
                 user=ssh["user"],
                 host=ssh["host"],
                 port=ssh["port"],
                 key_path=Path(ssh["key_path"]),
+                known_hosts_path=Path(raw_known_hosts) if raw_known_hosts else None,
             )
             ssh_info_by_id[agent_id_str] = ssh_info
-        except (KeyError, ValueError) as e:
+        except (KeyError, TypeError, ValueError) as e:
             logger.warning("Failed to parse SSH info for agent {}: {}", agent_id_str, e)
 
     return ParsedAgentsResult(

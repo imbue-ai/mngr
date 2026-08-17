@@ -15,9 +15,11 @@ from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr_imbue_cloud.errors import AdoptionError
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
 from imbue.mngr_imbue_cloud.interfaces import SliceReconcilerState
+from imbue.mngr_imbue_cloud.providers.adoption import ADOPTION_SCHEMA_VERSION
 from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
+from imbue.mngr_imbue_cloud.providers.adoption import invalidate_adoption_verification
 from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
 from imbue.mngr_imbue_cloud.providers.adoption import load_adoption_marker
 from imbue.mngr_imbue_cloud.providers.adoption import load_pending_host_key_rotation
@@ -162,6 +164,68 @@ def test_ensure_adopted_is_a_pure_local_noop_when_marked_and_not_verifying(tmp_p
     assert access.call_count == call_count_after_adoption
 
 
+def test_successful_verification_is_durable_and_skips_ssh_work(tmp_path: Path) -> None:
+    """Once a host has verified clean at the current schema version, later full
+    verifications are pure-local no-ops -- across processes, since the stamp
+    lives in the marker file, not memory."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+    ensure_adopted(access, target, is_full_verification=False)
+    invalidate_adoption_verification(target.host_state_dir)
+    ensure_adopted(access, target, is_full_verification=True)
+    call_count_after_verification = access.call_count
+    marker = load_adoption_marker(target.host_state_dir)
+    assert marker is not None
+    assert marker.verified_schema_version == ADOPTION_SCHEMA_VERSION
+
+    ensure_adopted(access, target, is_full_verification=True)
+
+    assert access.call_count == call_count_after_verification
+
+
+def test_invalidating_the_stamp_forces_exactly_one_reverification(tmp_path: Path) -> None:
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+    ensure_adopted(access, target, is_full_verification=False)
+    call_count_after_adoption = access.call_count
+
+    invalidate_adoption_verification(target.host_state_dir)
+    marker_after_invalidation = load_adoption_marker(target.host_state_dir)
+    assert marker_after_invalidation is not None
+    assert marker_after_invalidation.verified_schema_version == 0
+
+    ensure_adopted(access, target, is_full_verification=True)
+    call_count_after_reverification = access.call_count
+    assert call_count_after_reverification > call_count_after_adoption
+
+    ensure_adopted(access, target, is_full_verification=True)
+    assert access.call_count == call_count_after_reverification
+
+
+def test_marker_from_before_the_stamp_field_gets_one_full_verification(tmp_path: Path) -> None:
+    """Markers written before verified_schema_version existed parse as version 0,
+    so such a host is swept through exactly one full pass and then stamped."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+    ensure_adopted(access, target, is_full_verification=False)
+    marker_path = target.host_state_dir / "adoption.json"
+    marker_path.write_text(json.dumps({"adopted_at": "2026-07-01T00:00:00+00:00"}))
+    call_count_before = access.call_count
+
+    ensure_adopted(access, target, is_full_verification=True)
+
+    assert access.call_count > call_count_before
+    marker = load_adoption_marker(target.host_state_dir)
+    assert marker is not None
+    assert marker.verified_schema_version == ADOPTION_SCHEMA_VERSION
+
+
 def test_full_verification_heals_a_disabled_reconciler_and_missing_client_key(tmp_path: Path) -> None:
     host_id = HostId()
     target = _make_target(tmp_path, host_id)
@@ -170,9 +234,11 @@ def test_full_verification_heals_a_disabled_reconciler_and_missing_client_key(tm
     ensure_adopted(access, target, is_full_verification=False)
 
     # Model a cloud-init replay having clobbered the live file and the unit
-    # having been disabled out-of-band.
+    # having been disabled out-of-band -- observed through a restart, which
+    # invalidates the durable verified stamp (a stamped host is never scanned).
     access.is_unit_enabled = False
     access.vm_authorized_keys = f"{_BAKE_KEY}\n{_POOL_KEY}\n"
+    invalidate_adoption_verification(target.host_state_dir)
 
     ensure_adopted(access, target, is_full_verification=True)
 
@@ -193,6 +259,7 @@ def test_full_verification_refuses_a_foreign_rekey(tmp_path: Path) -> None:
     pins_before = _endpoint_pin_map(target)
 
     access.served_key_by_port[_VM_PORT] = "ssh-ed25519 AAAAEVIL operator-rekey"
+    invalidate_adoption_verification(target.host_state_dir)
 
     with pytest.raises(HostKeyDriftError):
         ensure_adopted(access, target, is_full_verification=True)
@@ -210,6 +277,7 @@ def test_explicit_rotation_recovers_a_drifted_container_endpoint(tmp_path: Path)
     ensure_adopted(access, target, is_full_verification=False)
     foreign_key = "ssh-ed25519 AAAAEVIL operator-rekey"
     access.served_key_by_port[_CONTAINER_PORT] = foreign_key
+    invalidate_adoption_verification(target.host_state_dir)
     with pytest.raises(HostKeyDriftError):
         ensure_adopted(access, target, is_full_verification=True)
 

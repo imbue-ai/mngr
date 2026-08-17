@@ -354,15 +354,57 @@ def test_effective_ssh_user_root_uses_root_key(temp_mngr_ctx: MngrContext) -> No
     assert identity.exists()
 
 
-def test_root_ssh_keypair_falls_back_to_legacy_shared_pair(lima_provider: LimaProviderInstance) -> None:
-    """A VM from before per-host client keys only authorizes the legacy provider-wide key."""
+def test_root_ssh_keypair_heals_legacy_shared_pair_into_the_host_keys_dir(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    """A VM from before per-host client keys only authorizes the legacy provider-wide key.
+
+    The fallback must materialize that key inside the host's own keys dir (as a
+    symlink), so consumers that derive the pinned-host-keys file as the key's
+    sibling ``known_hosts`` land on the per-host pin file lima renders.
+    """
     host_id = HostId.generate()
     legacy_path, legacy_public = load_or_create_ssh_keypair(lima_provider._ensure_keys_dir(), "root_ssh_key")
 
     resolved_path, resolved_public = lima_provider._root_ssh_keypair(host_id)
 
+    assert resolved_path == lima_provider._host_keys_dir(host_id) / "root_ssh_key"
+    assert resolved_path.is_symlink()
+    assert resolved_path.resolve() == legacy_path.resolve()
+    assert resolved_path.read_text() == legacy_path.read_text()
+    assert resolved_public == legacy_public
+    # The public half is linked alongside, so the per-host pair is complete and
+    # wins resolution outright on the next call.
+    public_link_path = lima_provider._host_keys_dir(host_id) / "root_ssh_key.pub"
+    assert public_link_path.is_symlink()
+    second_path, second_public = lima_provider._root_ssh_keypair(host_id)
+    assert second_path == resolved_path
+    assert second_public == legacy_public
+
+
+def test_root_ssh_keypair_heal_leaves_an_unrelated_partial_pair_alone(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    """An unrelated private key without its .pub must not be completed with legacy halves.
+
+    Linking the legacy public key next to it would mint a mismatched pair that
+    wins resolution but can never authenticate; the resolver must keep using
+    the legacy provider-wide pair instead.
+    """
+    host_id = HostId.generate()
+    legacy_path, legacy_public = load_or_create_ssh_keypair(lima_provider._ensure_keys_dir(), "root_ssh_key")
+    host_keys_dir = lima_provider._host_keys_dir(host_id)
+    host_keys_dir.mkdir(parents=True, exist_ok=True)
+    stray_private_path = host_keys_dir / "root_ssh_key"
+    stray_private_path.write_text("unrelated-key-material")
+
+    resolved_path, resolved_public = lima_provider._root_ssh_keypair(host_id)
+
     assert resolved_path == legacy_path
     assert resolved_public == legacy_public
+    # The stray file is untouched and no legacy .pub was linked alongside it.
+    assert stray_private_path.read_text() == "unrelated-key-material"
+    assert not (host_keys_dir / "root_ssh_key.pub").exists()
 
 
 def test_root_ssh_keypair_prefers_per_host_pair_over_legacy(lima_provider: LimaProviderInstance) -> None:

@@ -14,9 +14,8 @@ from imbue.minds.desktop_client.share_materials_injection import MachineSharingL
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
-from imbue.minds.desktop_client.share_materials_injection import inject_share_grants_into_agent
-from imbue.minds.desktop_client.share_materials_injection import inject_share_materials_into_agent
-from imbue.minds.desktop_client.share_materials_injection import inject_share_owner_email_into_agent
+from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
+from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -116,27 +115,92 @@ def test_render_grants_toml_emits_valid_toml_with_quoted_entries() -> None:
     assert parsed["services"]["my-app"]["emails"] == ["carol@example.com"]
 
 
-def test_inject_writes_files_via_base64_exec() -> None:
+def test_provision_writes_all_share_files_in_one_exec() -> None:
     caller = RecordingMngrCaller()
     agent_id = AgentId()
+    grants_text = "[workspace]\nemails = []\n"
+    env_text = "export SHARE_WORKSPACE_DOMAIN=x\n"
 
-    inject_share_grants_into_agent(agent_id, "[workspace]\nemails = []\n", caller)
-    inject_share_materials_into_agent(agent_id, "export SHARE_WORKSPACE_DOMAIN=x\n", caller)
+    provision_share_files_in_agent(agent_id, grants_text, "owner@example.com", env_text, caller)
 
-    grants_call = " ".join(caller.calls[0])
-    materials_call = " ".join(caller.calls[1])
-    assert "share_grants.toml" in grants_call
-    assert "share.env" in materials_call
-    # The content rides base64-encoded so emails and tokens never need shell quoting.
-    encoded = base64.b64encode(b"[workspace]\nemails = []\n").decode("ascii")
-    assert encoded in grants_call
+    # One exec carries everything -- this is the whole point (each exec pays a
+    # full mngr process + SSH round trip on remote hosts).
+    assert len(caller.calls) == 1
+    command = caller.calls[0][2]
+    assert "share_grants.toml" in command
+    assert "data/.state/share/owner_email" in command
+    assert "data/.secrets/share.env" in command
+    # The contents ride base64-encoded so emails and tokens never need shell quoting.
+    assert base64.b64encode(grants_text.encode()).decode("ascii") in command
+    assert base64.b64encode(b"owner@example.com").decode("ascii") in command
+    assert base64.b64encode(env_text.encode()).decode("ascii") in command
+    # share.env is written LAST: the gateway brings the stack up the moment it
+    # appears, so the grants must already be in place by then.
+    assert command.index("share_grants.toml") < command.index("data/.secrets/share.env")
+    assert command.index("owner_email") < command.index("data/.secrets/share.env")
+    # The best-effort owner clause is brace-grouped with its `|| true` INSIDE
+    # the group: && / || are left-associative, so a bare `... || true && ...`
+    # would swallow a grants failure and publish share.env without grants.
+    assert "{ mkdir -p data/.state/share" in command
+    assert "|| true; }" in command
+    assert not command.endswith("|| true")
 
 
-def test_inject_raises_on_exec_failure() -> None:
+def test_provision_omits_share_env_on_a_grants_only_update() -> None:
+    caller = RecordingMngrCaller()
+
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", "owner@example.com", None, caller)
+
+    command = caller.calls[0][2]
+    assert "share_grants.toml" in command
+    assert "share.env" not in command
+
+
+def test_provision_skips_an_empty_owner_email() -> None:
+    caller = RecordingMngrCaller()
+
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", "", "export A=b\n", caller)
+
+    command = caller.calls[0][2]
+    assert "owner_email" not in command
+    assert "share_grants.toml" in command
+    assert "share.env" in command
+
+
+def test_provision_raises_on_exec_failure() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="boom"))
 
     with pytest.raises(ShareInjectionError):
-        inject_share_grants_into_agent(AgentId(), "[workspace]\n", caller)
+        provision_share_files_in_agent(AgentId(), "[workspace]\n", "owner@example.com", "export A=b\n", caller)
+
+
+def test_provision_owner_email_failure_never_fails_the_share_writes(tmp_path: Path) -> None:
+    # The owner-email file is a convenience artifact; its clause is wrapped so
+    # a failure (here: its parent path exists as a FILE, so mkdir -p fails)
+    # cannot fail the exec or stop share.env from landing.
+    caller = _ExecutingMngrCaller(work_dir=tmp_path)
+    (tmp_path / "data" / ".state").mkdir(parents=True)
+    (tmp_path / "data" / ".state" / "share").write_text("not a directory")
+
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", "owner@example.com", "export A=b\n", caller)
+
+    assert (tmp_path / "data" / ".secrets" / "share_grants.toml").read_text() == "[workspace]\n"
+    assert (tmp_path / "data" / ".secrets" / "share.env").read_text() == "export A=b\n"
+
+
+def test_provision_grants_failure_stops_share_env_from_landing(tmp_path: Path) -> None:
+    # A failed grants write must surface as an error with share.env unpublished.
+    # (The brace-grouping of the owner clause -- asserted structurally in the
+    # one-exec test above -- is what keeps its `|| true` from swallowing a
+    # grants failure, since shell && / || are left-associative.)
+    caller = _ExecutingMngrCaller(work_dir=tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / ".secrets").write_text("not a directory")
+
+    with pytest.raises(ShareInjectionError):
+        provision_share_files_in_agent(AgentId(), "[workspace]\n", "owner@example.com", "export A=b\n", caller)
+
+    assert not (tmp_path / "data" / ".secrets" / "share.env").exists()
 
 
 def test_read_share_grants_returns_none_when_absent(tmp_path: Path) -> None:
@@ -154,7 +218,7 @@ def test_read_share_grants_round_trips_the_document_through_the_exec_envelope(tm
     grants_text = render_grants_toml({"emails": ["a@example.com"], "email_domains": []}, {})
     caller = _ExecutingMngrCaller(work_dir=tmp_path)
     agent_id = AgentId()
-    inject_share_grants_into_agent(agent_id, grants_text, caller)
+    provision_share_files_in_agent(agent_id, grants_text, "owner@example.com", None, caller)
 
     assert read_share_grants_from_agent(agent_id, caller) == grants_text
 
@@ -190,35 +254,6 @@ def test_read_share_grants_raises_on_an_unrecognized_exec_envelope() -> None:
         read_share_grants_from_agent(AgentId(), caller)
 
 
-def test_inject_share_owner_email_writes_the_app_readable_state_file() -> None:
-    caller = RecordingMngrCaller()
-    agent_id = AgentId()
-
-    inject_share_owner_email_into_agent(agent_id, "owner@example.com", caller)
-
-    call = " ".join(caller.calls[0])
-    assert "data/.state/share/owner_email" in call
-    # Rides base64-encoded like the other materials, so arbitrary emails never
-    # need shell quoting.
-    assert base64.b64encode(b"owner@example.com").decode("ascii") in call
-
-
-def test_inject_share_owner_email_skips_an_empty_email() -> None:
-    caller = RecordingMngrCaller()
-
-    inject_share_owner_email_into_agent(AgentId(), "", caller)
-
-    assert caller.calls == []
-
-
-def test_inject_share_owner_email_is_best_effort_on_exec_failure() -> None:
-    # A convenience artifact must never fail the enable: a failed write is
-    # swallowed (logged), unlike the critical share.env / grants writes.
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
-
-    inject_share_owner_email_into_agent(AgentId(), "owner@example.com", caller)
-
-
 def test_clear_share_materials_is_best_effort_and_no_start() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
 
@@ -233,14 +268,16 @@ def test_clear_share_materials_is_best_effort_and_no_start() -> None:
 
 def test_writes_use_a_unique_tmp_name_per_write() -> None:
     # A fixed `<path>.tmp` shared by concurrent writers interleaves their
-    # bytes; the write command must mint its tmp name via mktemp instead.
+    # bytes; every write clause must mint its tmp name via mktemp instead.
     caller = RecordingMngrCaller()
 
-    inject_share_grants_into_agent(AgentId(), "[workspace]\n", caller)
+    provision_share_files_in_agent(AgentId(), "[workspace]\n", "owner@example.com", "export A=b\n", caller)
 
     command = caller.calls[0][2]
     assert "mktemp data/.secrets/.share_grants.toml.XXXXXX" in command
-    assert "share_grants.toml.tmp" not in command
+    assert "mktemp data/.state/share/.owner_email.XXXXXX" in command
+    assert "mktemp data/.secrets/.share.env.XXXXXX" in command
+    assert ".tmp" not in command
 
 
 def test_concurrent_grant_writes_never_corrupt_the_file(tmp_path: Path) -> None:
@@ -257,7 +294,7 @@ def test_concurrent_grant_writes_never_corrupt_the_file(tmp_path: Path) -> None:
         for _ in range(10):
             try:
                 barrier.wait(timeout=30)
-                inject_share_grants_into_agent(agent_id, payload, caller)
+                provision_share_files_in_agent(agent_id, payload, "owner@example.com", None, caller)
             except (ShareInjectionError, threading.BrokenBarrierError) as exc:
                 write_errors.append(exc)
                 return
@@ -274,6 +311,105 @@ def test_concurrent_grant_writes_never_corrupt_the_file(tmp_path: Path) -> None:
     # parse alone would not catch a last-writer-wins mix of the two.
     assert final_text in (payload_a, payload_b)
     tomllib.loads(final_text)
+
+
+def test_probe_reports_everything_absent_in_an_empty_workspace(tmp_path: Path) -> None:
+    caller = _ExecutingMngrCaller(work_dir=tmp_path)
+
+    probe = probe_share_state_in_agent(AgentId(), caller)
+
+    assert probe.has_gateway is False
+    assert probe.has_share_env is False
+    assert probe.grants_toml_text is None
+
+
+def test_probe_round_trips_the_full_share_state_in_one_exec(tmp_path: Path) -> None:
+    caller = _ExecutingMngrCaller(work_dir=tmp_path)
+    (tmp_path / "system" / "services" / "share_gateway").mkdir(parents=True)
+    grants_text = render_grants_toml({"emails": ["a@example.com"], "email_domains": []}, {})
+    provision_share_files_in_agent(AgentId(), grants_text, "owner@example.com", "export A=b\n", caller)
+
+    probe = probe_share_state_in_agent(AgentId(), caller)
+
+    assert probe.has_gateway is True
+    assert probe.has_share_env is True
+    assert probe.grants_toml_text == grants_text
+
+
+def test_probe_treats_an_empty_grants_file_as_absent(tmp_path: Path) -> None:
+    # A present-but-empty document grants nobody, so the probe reports it as
+    # None just like an absent one. The checked read keeps this safe: a failed
+    # read reports UNREADABLE (and raises), so an empty value can only mean a
+    # genuinely empty file.
+    caller = _ExecutingMngrCaller(work_dir=tmp_path)
+    (tmp_path / "system" / "services" / "share_gateway").mkdir(parents=True)
+    secrets_dir = tmp_path / "data" / ".secrets"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "share.env").write_text("export A=b\n")
+    (secrets_dir / "share_grants.toml").write_text("")
+
+    probe = probe_share_state_in_agent(AgentId(), caller)
+
+    assert probe.has_gateway is True
+    assert probe.has_share_env is True
+    assert probe.grants_toml_text is None
+
+
+def test_probe_is_conservative_on_exec_failure() -> None:
+    # A failed probe must refuse (everything absent) rather than provision a
+    # share against unknown state; nothing has been written or created yet.
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
+
+    probe = probe_share_state_in_agent(AgentId(), caller)
+
+    assert probe.has_gateway is False
+    assert probe.has_share_env is False
+    assert probe.grants_toml_text is None
+    assert caller.calls[0][-3:] == ["--no-start", "--format", "json"]
+
+
+def test_probe_raises_on_an_undecodable_grants_payload() -> None:
+    # An unreadable existing policy must never be mistaken for an absent one:
+    # the caller would otherwise overwrite grants nobody ever saw.
+    envelope = json.dumps(
+        {
+            "results": [
+                {
+                    "agent": "a",
+                    "stdout": "MNGR_SHARE_GATEWAY=1\nMNGR_SHARE_ENV=1\nMNGR_SHARE_GRANTS_B64=@@not-base64@@\n",
+                    "stderr": "",
+                    "success": True,
+                }
+            ]
+        }
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=envelope))
+
+    with pytest.raises(ShareInjectionError):
+        probe_share_state_in_agent(AgentId(), caller)
+
+
+def test_probe_raises_when_the_grants_file_exists_but_cannot_be_read() -> None:
+    # The script's checked read reports UNREADABLE (rather than an empty value)
+    # when the document exists but the read fails; the parser must raise, or
+    # the caller's data-loss guard would treat the unreadable policy as absent
+    # and silently overwrite it.
+    envelope = json.dumps(
+        {
+            "results": [
+                {
+                    "agent": "a",
+                    "stdout": "MNGR_SHARE_GATEWAY=1\nMNGR_SHARE_ENV=1\nMNGR_SHARE_GRANTS_B64=UNREADABLE\n",
+                    "stderr": "",
+                    "success": True,
+                }
+            ]
+        }
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=envelope))
+
+    with pytest.raises(ShareInjectionError):
+        probe_share_state_in_agent(AgentId(), caller)
 
 
 def test_lock_registry_returns_one_lock_per_host() -> None:

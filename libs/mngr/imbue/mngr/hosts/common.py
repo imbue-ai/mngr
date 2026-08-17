@@ -13,6 +13,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_config_registry import is_known_agent_type
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -41,7 +42,7 @@ def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
     return get_agents_root_dir(host_dir) / str(agent_id)
 
 
-def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
+def get_ssh_known_hosts_file(host: OuterHostInterface) -> Path | None:
     """Extract the known_hosts file path from a host's SSH configuration.
 
     Returns None if no known_hosts file is configured, or if it is set to /dev/null

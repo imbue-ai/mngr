@@ -665,12 +665,62 @@ sudo poweroff
         before that only authorize the legacy provider-wide ``root_ssh_key``,
         so it wins when no per-host pair is on disk.
         """
-        return resolve_keypair_with_fallback(
+        private_key_path, public_key = resolve_keypair_with_fallback(
             self._host_keys_dir(host_id),
             self._keys_dir,
             _ROOT_SSH_KEY_NAME,
             lambda: self._create_per_host_root_ssh_keypair(host_id),
         )
+        # CLEANUP: drop this heal (and its test) once lima hosts get per-host
+        # client-key rotation/adoption -- at that point no host resolves to the
+        # legacy provider-wide key anymore. When the fallback picks that legacy
+        # key, symlink the pair into the per-host keys dir so per-host
+        # resolution wins from the next call on. Consumers handed only a
+        # private-key path (the forward SSH tunnel) derive the pinned-host-keys
+        # file as its sibling ``known_hosts``; lima renders pins only into the
+        # per-host file (localhost ports churn and get reused across VMs, so a
+        # provider-wide pin file would go stale and collide), so the legacy
+        # key's own dir can never hold a valid sibling.
+        if private_key_path.parent != self._host_keys_dir(host_id):
+            if self._link_legacy_root_key_into_host_dir(host_id):
+                per_host_private = self._host_keys_dir(host_id) / _ROOT_SSH_KEY_NAME
+                return per_host_private, public_key
+            logger.warning(
+                "Not healing the legacy root client key into {}: an unrelated partial keypair occupies it; "
+                "continuing on the legacy provider-wide key",
+                self._host_keys_dir(host_id),
+            )
+        return private_key_path, public_key
+
+    def _link_legacy_root_key_into_host_dir(self, host_id: HostId) -> bool:
+        """Symlink the legacy provider-wide root client keypair into the host's keys dir.
+
+        Returns True when both per-host slots resolve to the legacy pair afterwards.
+        A partial per-host dir whose existing file is not the legacy key (e.g. a
+        private key left behind by an interrupted create, which loses resolution
+        for lack of its ``.pub``) is left untouched and reported as False:
+        completing such a pair with legacy halves would mint a mismatched
+        keypair that wins resolution but can never authenticate.
+        """
+        host_keys_dir = self._host_keys_dir(host_id)
+        host_keys_dir.mkdir(parents=True, exist_ok=True)
+        file_names = (_ROOT_SSH_KEY_NAME, f"{_ROOT_SSH_KEY_NAME}.pub")
+        for file_name in file_names:
+            link_path = host_keys_dir / file_name
+            if not link_path.is_symlink() and not link_path.exists():
+                continue
+            if link_path.resolve() != (self._keys_dir / file_name).resolve():
+                return False
+        for file_name in file_names:
+            link_path = host_keys_dir / file_name
+            if link_path.is_symlink() or link_path.exists():
+                continue
+            try:
+                link_path.symlink_to(Path("..") / ".." / file_name)
+            except FileExistsError:
+                # A concurrent caller created it between the check and the symlink.
+                pass
+        return True
 
     def _effective_ssh_user_and_identity(
         self, ssh_config: LimaSshConfig, is_run_as_root: bool, host_id: HostId

@@ -107,6 +107,7 @@ def _convert_ssh_info(ssh: SSHInfo) -> RemoteSSHInfo:
         host=ssh.host,
         port=ssh.port,
         key_path=ssh.key_path,
+        known_hosts_path=ssh.known_hosts_path,
     )
 
 

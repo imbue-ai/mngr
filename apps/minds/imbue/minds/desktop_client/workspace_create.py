@@ -18,6 +18,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
+from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
@@ -218,6 +219,14 @@ class WebAccessEnabler(MutableModel):
             "in the post-create worker thread, where get_state()'s current_app is unbound."
         ),
     )
+    active_share_cache: ActiveShareCache = Field(
+        frozen=True,
+        description=(
+            "The readiness poll's connector share-lookup cache (captured in the request context, like "
+            "client_env_config). Invalidated after the bring-up attempt, so a negative lookup cached "
+            "while this worker was still enabling never delays the ready signal by the cache TTL."
+        ),
+    )
 
     def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
         try:
@@ -240,6 +249,13 @@ class WebAccessEnabler(MutableModel):
             # that worker and skip the create's remaining steps (region
             # persistence). The user can still enable sharing from settings.
             logger.opt(exception=exc).error("Unexpected error enabling web access for {}", agent_id)
+        finally:
+            # Mirror the sharing PUT handler: the share state may have changed
+            # even on failure (the connector create can succeed before the
+            # injection fails), and a readiness poll racing this worker may
+            # have cached a "not shared" lookup -- drop it so the poll sees
+            # the new state immediately rather than at TTL expiry.
+            self.active_share_cache.invalidate(str(host_id))
 
 
 class CreateOnCreatedCallback(MutableModel):
@@ -299,6 +315,7 @@ def _build_web_access_enabler(launch_mode: LaunchMode, is_web_access_enabled: bo
         is_cloud_row=launch_mode is LaunchMode.IMBUE_CLOUD,
         backend_resolver=get_state().backend_resolver,
         client_env_config=client_env_config,
+        active_share_cache=get_state().active_share_cache,
     )
 
 

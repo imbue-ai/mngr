@@ -641,6 +641,7 @@ def test_host_ssh_info_refires_discovery_with_ssh_info(consumer: EnvelopeStreamC
             host="1.2.3.4",
             port=22,
             key_path=Path("/tmp/k"),
+            known_hosts_path=Path("/tmp/pins/known_hosts"),
             command="ssh -i /tmp/k -p 22 root@1.2.3.4",
         ),
     )
@@ -654,6 +655,7 @@ def test_host_ssh_info_refires_discovery_with_ssh_info(consumer: EnvelopeStreamC
     assert second is not None
     assert second.user == "root"
     assert second.host == "1.2.3.4"
+    assert second.known_hosts_path == Path("/tmp/pins/known_hosts")
 
 
 # --- observe stream: agent / host destroyed -------------------------------

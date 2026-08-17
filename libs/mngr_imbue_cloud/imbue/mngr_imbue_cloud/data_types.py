@@ -549,22 +549,34 @@ class StorageRecheckResult(FrozenModel):
 class AccountEntitlementValues(FrozenModel):
     """The quota values an account currently holds (mirrors the connector's PlanEntitlements)."""
 
-    max_remote_workspaces: int = Field(description="Max concurrent pool-host leases (running or stopped)")
+    max_remote_workspaces: int = Field(description="Max running remote workspaces (leased/stopping/starting)")
+    max_total_workspaces: int = Field(description="Max total remote workspaces, running + stopped")
     max_buckets: int = Field(description="Max R2 buckets")
     max_total_bucket_bytes: int = Field(description="Max total bytes across all the account's buckets")
     monthly_llm_spend_usd: float = Field(description="Monthly LLM spend cap in USD (rolling)")
     max_active_synced_workspaces: int = Field(description="Max ACTIVE synced workspace records")
+    # CLEANUP: drop the two tunnel-era compat fields below once the connector
+    # stops serving them (the connector hardcodes them to 0 for v0.3.11
+    # clients and removes them once the desktop fleet is on the first
+    # post-v0.3.11 minds release; see _DEPRECATED_TUNNEL_ENTITLEMENT_FIELDS in
+    # the connector's accounts.py). They exist here only so extra="forbid"
+    # does not reject the compat payload.
+    max_tunnels: int = Field(default=0, description="Deprecated tunnel-era compat field; always 0")
+    max_services_per_tunnel: int = Field(default=0, description="Deprecated tunnel-era compat field; always 0")
 
 
 class AccountUsageInfo(FrozenModel):
     """Live usage numbers for an account (mirrors the connector's AccountUsage)."""
 
-    remote_workspaces: int = Field(description="Current pool-host leases")
+    remote_workspaces: int = Field(description="Current running pool-host leases")
+    total_workspaces: int = Field(description="Current total remote workspaces, running + stopped")
     buckets: int = Field(description="Current R2 buckets")
     total_bucket_bytes: int = Field(description="Total bytes across the account's buckets")
     llm_spend_usd_this_period: float = Field(description="LiteLLM aggregate spend in the current budget period")
     llm_budget_resets_at: str | None = Field(default=None, description="When the rolling LLM budget period resets")
     active_synced_workspaces: int = Field(description="Current ACTIVE synced workspace records")
+    # CLEANUP: drop alongside the tunnel-era compat entitlement fields above.
+    tunnels: int = Field(default=0, description="Deprecated tunnel-era compat field; always 0")
 
 
 class AccountInfo(FrozenModel):

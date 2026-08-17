@@ -18,6 +18,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import load_host_key_record
+from imbue.mngr.providers.ssh_utils import SSH_BANNER_TIMEOUT_SECONDS
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -678,6 +679,9 @@ def test_create_pyinfra_host_configures_all_ssh_data(tmp_path: Path) -> None:
     assert host.data.get("ssh_user") == "root"
     assert host.data.get("ssh_key") == str(private_key_path)
     assert host.data.get("ssh_known_hosts_file") == str(known_hosts_path)
+    # The widened banner window must reach paramiko: a slow-but-working tunnel
+    # (e.g. a degraded Modal sandbox) needs more than paramiko's 15s default.
+    assert host.data.get("ssh_paramiko_connect_kwargs") == {"banner_timeout": SSH_BANNER_TIMEOUT_SECONDS}
 
 
 def test_create_pyinfra_host_uses_custom_ssh_user(tmp_path: Path) -> None:

@@ -82,6 +82,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
@@ -2030,12 +2031,14 @@ class VpsProvider(BaseProviderInstance):
         ssh_connection = host.get_ssh_connection_info()
         if ssh_connection is not None:
             user, hostname, port, key_path = ssh_connection
+            known_hosts_path = host.get_ssh_known_hosts_path()
             ssh_info = SSHInfo(
                 user=user,
                 host=hostname,
                 port=port,
                 key_path=key_path,
-                command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+                known_hosts_path=known_hosts_path,
+                command=build_ssh_connect_command(user, hostname, port, key_path, known_hosts_path),
             )
 
         boot_time = timestamp_to_datetime(raw.get("btime"))

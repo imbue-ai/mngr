@@ -55,6 +55,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 
@@ -361,12 +362,14 @@ def _build_ssh_info_from_host(host: OnlineHostInterface) -> SSHInfo | None:
     if ssh_connection is None:
         return None
     user, hostname, port, key_path = ssh_connection
+    known_hosts_path = host.get_ssh_known_hosts_path()
     return SSHInfo(
         user=user,
         host=hostname,
         port=port,
         key_path=key_path,
-        command=f"ssh -i {key_path} -p {port} {user}@{hostname}",
+        known_hosts_path=known_hosts_path,
+        command=build_ssh_connect_command(user, hostname, port, key_path, known_hosts_path),
     )
 
 

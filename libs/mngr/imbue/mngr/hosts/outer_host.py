@@ -63,6 +63,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
+from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
@@ -256,11 +257,16 @@ def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
 
 _retry_on_transient_ssh_connect_error = retry(
     retry=retry_if_exception(_is_transient_ssh_connect_error),
-    # One immediate retry, no pause: each failed attempt already blocked for
-    # paramiko's banner timeout (15s by default) waiting for sshd to answer,
-    # so two attempts bound the worst case (a host that accepts TCP but never
-    # speaks SSH) at ~30 seconds while still riding out the boot race.
-    stop=stop_after_attempt(2),
+    # Immediate retries, no pause: each failed attempt already blocked for
+    # paramiko's banner timeout waiting for sshd to answer (30s for provider
+    # hosts via ssh_paramiko_connect_kwargs -- see SSH_BANNER_TIMEOUT_SECONDS
+    # in providers/ssh_utils.py -- 15s paramiko default elsewhere). Three
+    # attempts ride out the boot race while bounding the worst case (a host
+    # that accepts TCP but never speaks SSH) at ~90 seconds; two attempts
+    # proved one window too tight in practice (a slow fresh Modal sandbox
+    # outlasted the single retry on both offload attempts of
+    # test_exec_json_output_on_modal, 2026-08-17 CI run).
+    stop=stop_after_attempt(3),
     wait=wait_fixed(0),
     reraise=True,
 )
@@ -457,10 +463,11 @@ class OuterHost(OuterHostInterface):
         """Connect the pyinfra host, retrying banner-read connect failures.
 
         Each banner-read failure already spent paramiko's own banner timeout
-        waiting for sshd to answer, so a single immediate retry rides out the
-        boot race where a freshly created host accepts TCP before sshd is
-        ready -- which otherwise surfaces to users as a spurious create
-        failure -- while keeping the worst case bounded at ~30 seconds.
+        waiting for sshd to answer, so immediate retries ride out the boot
+        race where a freshly created host accepts TCP before sshd is ready --
+        which otherwise surfaces to users as a spurious create failure --
+        while keeping the worst case bounded (~90 seconds at the 30s provider
+        banner timeout).
         """
         self.connector.host.connect(raise_exceptions=True)
 
@@ -1296,3 +1303,8 @@ class OuterHost(OuterHostInterface):
             return (user, hostname, port, Path(""))
 
         return (user, hostname, port, Path(key_path_str))
+
+    def get_ssh_known_hosts_path(self) -> Path | None:
+        if self.is_local:
+            return None
+        return get_ssh_known_hosts_file(self)

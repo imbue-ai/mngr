@@ -118,6 +118,9 @@ class _StubImbueCloudProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
         return self._stub_keypair_dir / "ssh_key", self._stub_keypair_dir / "ssh_key.pub"
 
+    def _host_known_hosts_path(self, host_id: HostId) -> Path:
+        return self._stub_keypair_dir / "known_hosts"
+
 
 def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_path: Path) -> None:
     """When outer SSH is unreachable, the lease-only fallback must keep the host visible.

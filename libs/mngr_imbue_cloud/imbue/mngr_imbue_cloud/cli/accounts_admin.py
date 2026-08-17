@@ -55,8 +55,8 @@ def admin_set_quota(
 ) -> None:
     """Set a single entitlement VALUE on the account (an operator bump).
 
-    ENTITLEMENT is one of: max_remote_workspaces, max_buckets,
-    max_total_bucket_bytes, monthly_llm_spend_usd,
+    ENTITLEMENT is one of: max_remote_workspaces, max_total_workspaces,
+    max_buckets, max_total_bucket_bytes, monthly_llm_spend_usd,
     max_active_synced_workspaces.
     """
     client = make_connector_client(connector_url)

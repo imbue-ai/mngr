@@ -24,6 +24,16 @@ from imbue.mngr.providers.host_key_store import pin_host_key
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_until
 
+# How long paramiko waits for the server's SSH banner after the TCP connect,
+# passed to every provider SSH connection via ssh_paramiko_connect_kwargs.
+# paramiko's default is 15 seconds, which degraded Modal sandbox tunnels have
+# been observed to hover right at (13-16s measured end to end per exec on
+# 2026-08-17): every connection then dies with "Error reading SSH protocol
+# banner" no matter how often it is retried. Doubling the window tolerates a
+# slow-but-working tunnel; a genuinely dead endpoint still fails fast at the
+# TCP layer (refused/unreachable), which this timeout does not extend.
+SSH_BANNER_TIMEOUT_SECONDS: Final[float] = 30.0
+
 
 def _generate_ed25519_keypair() -> tuple[str, str]:
     """Generate a new Ed25519 keypair, serialized as text.
@@ -536,6 +546,7 @@ def create_pyinfra_host(
         "ssh_key": str(private_key_path),
         "ssh_known_hosts_file": str(known_hosts_path),
         "ssh_strict_host_key_checking": "yes",
+        "ssh_paramiko_connect_kwargs": {"banner_timeout": SSH_BANNER_TIMEOUT_SECONDS},
     }
 
     names_data = ([(hostname, host_data)], {})
