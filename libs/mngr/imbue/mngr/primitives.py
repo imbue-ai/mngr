@@ -7,6 +7,7 @@ from typing import Final
 from typing import Mapping
 from typing import Self
 
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema
@@ -662,6 +663,11 @@ class CertifiedDataError(Exception):
 class SSHInfo(FrozenModel):
     """SSH connection information for a remote host."""
 
+    # Parsed from persisted discovery event streams that newer program versions
+    # also write, so unknown (future, additive) fields are ignored rather than
+    # rejected -- see EventEnvelope for the full rationale.
+    model_config = ConfigDict(extra="ignore")
+
     user: str = Field(description="SSH username")
     host: str = Field(description="SSH hostname")
     port: int = Field(description="SSH port")
@@ -671,6 +677,11 @@ class SSHInfo(FrozenModel):
 
 class DiscoveredHost(FrozenModel):
     """Lightweight host data collected during discovery (without connecting to the host)."""
+
+    # Parsed from persisted discovery event streams that newer program versions
+    # also write, so unknown (future, additive) fields are ignored rather than
+    # rejected -- see EventEnvelope for the full rationale.
+    model_config = ConfigDict(extra="ignore")
 
     host_id: HostId = Field(description="Unique identifier for the host")
     host_name: HostName = Field(description="Human-readable name of the host")
@@ -687,6 +698,11 @@ class DiscoveredAgent(FrozenModel):
     the host to be online. The certified_data field contains the raw data.json contents,
     and property methods provide convenient typed access to common fields.
     """
+
+    # Parsed from persisted discovery event streams that newer program versions
+    # also write, so unknown (future, additive) fields are ignored rather than
+    # rejected -- see EventEnvelope for the full rationale.
+    model_config = ConfigDict(extra="ignore")
 
     host_id: HostId
     agent_id: AgentId

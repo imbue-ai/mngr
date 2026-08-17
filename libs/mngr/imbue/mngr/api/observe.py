@@ -35,8 +35,8 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
+from imbue.mngr.api.discovery_events import DiscoverySchemaMismatchWarner
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -527,6 +527,11 @@ class AgentObserver(MutableModel):
     # Triggered to wake the periodic-snapshot loop early when a provider error is
     # observed, so UNKNOWN state propagates without waiting for the full poll interval.
     _snapshot_trigger: threading.Event = PrivateAttr(default_factory=threading.Event)
+    # Deduplicates warnings for discovery lines that do not match this version's
+    # schema (the child echoes lines other mngr versions wrote to the shared log).
+    _discovery_schema_warner: DiscoverySchemaMismatchWarner = PrivateAttr(
+        default_factory=lambda: DiscoverySchemaMismatchWarner(source_description="mngr observe discovery stream")
+    )
 
     def run(self) -> None:
         """Run the observer. Blocks until stopped or interrupted."""
@@ -618,7 +623,11 @@ class AgentObserver(MutableModel):
         if not stripped:
             return
 
-        event = parse_discovery_event_line(stripped)
+        try:
+            event = self._discovery_schema_warner.parse(stripped)
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse discovery line {!r}: {}", stripped[:200], e)
+            return
         if event is None:
             return
 

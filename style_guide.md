@@ -1464,6 +1464,16 @@ Event log files are always append-only. Never modify or delete individual lines.
 
 Event files can be rotated (by date, by size) if they get too large. Rotation should preserve the file naming convention (`events.jsonl`) and archive old files with a date suffix (e.g. `events.2026-02-28.jsonl.gz`). Not all sources should (or even can) be rotated.
 
+## Schema evolution
+
+Persisted event records are cross-process, cross-version wire data: a shared append-only events file is routinely read back by a *different* (often older) program version than the one that wrote it. Therefore:
+
+- Event models -- and every payload model nested inside them -- must ignore unknown fields (`extra="ignore"`), never reject them (`extra="forbid"`). One additive field must never make an already-released reader reject the whole stream.
+- Schema changes to event models must be additive-with-defaults. A breaking change (removing, renaming, or re-typing a required field) needs a new event type or an explicit versioning mechanism instead.
+- Readers should skip-and-warn on individual lines that fail schema validation (including wholly unknown event types from newer versions) rather than failing the whole read.
+
+The `EventEnvelope` base class in `imbue_common` provides the tolerant config, and a repo-wide meta check (`test_meta_ratchets.py`) bans its subclasses from re-tightening `extra` to `"forbid"`.
+
 # Configuration
 
 Always use .toml files for configuration

@@ -46,6 +46,32 @@ def test_event_envelope_serializes_all_fields() -> None:
     assert "source" in data
 
 
+def test_event_envelope_ignores_unknown_fields() -> None:
+    """An additive field from a future writer version must not make an old reader reject the event."""
+    envelope = EventEnvelope.model_validate(
+        {
+            "timestamp": str(_TS),
+            "type": "test_event",
+            "event_id": str(_EID),
+            "source": str(_SRC),
+            "field_from_a_future_version": "some-value",
+        }
+    )
+    assert envelope.event_id == _EID
+    assert not hasattr(envelope, "field_from_a_future_version")
+
+
+def test_event_envelope_config_keeps_extra_ignore() -> None:
+    """Persisted event records are cross-version wire data; the base class must never re-tighten extra.
+
+    Reverting to FrozenModel's extra="forbid" would re-create the downgrade
+    wedge where one additive field makes every already-released reader reject a
+    shared append-only event log (see mngr-internal#422).
+    """
+    assert EventEnvelope.model_config.get("extra") == "ignore"
+    assert EventEnvelope.model_config.get("frozen") is True
+
+
 def test_event_envelope_is_frozen() -> None:
     envelope = EventEnvelope(
         timestamp=_TS,

@@ -5,6 +5,7 @@ consistent envelope fields across all event sources. See the style guide
 section "Event logging to disk" for conventions.
 """
 
+from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -43,7 +44,18 @@ class EventEnvelope(FrozenModel):
 
     The envelope ensures that every event line is self-describing: you never
     need to know the filename to understand the event.
+
+    Event records are durable, cross-process data: a persisted events.jsonl is
+    routinely read back by a *different* (often older) program version than the
+    one that wrote it. Unknown fields are therefore ignored rather than
+    rejected (overriding FrozenModel's ``extra="forbid"``; ``frozen=True`` is
+    kept via config merging), so an additive schema change never makes an
+    already-released reader reject the whole stream. Schema evolution on event
+    models must be additive-with-defaults; breaking changes need a new event
+    type or an explicit versioning mechanism instead.
     """
+
+    model_config = ConfigDict(extra="ignore")
 
     timestamp: IsoTimestamp
     type: EventType

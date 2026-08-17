@@ -42,10 +42,10 @@ from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEvent
+from imbue.mngr.api.discovery_events import DiscoverySchemaMismatchWarner
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
@@ -143,6 +143,11 @@ class DiscoveryStreamConsumer(MutableModel):
     # the same failure (e.g. missing credentials) logs once per process, not once
     # per poll cycle. Clean snapshots feed it below to re-arm on recovery.
     _error_log_suppressor: DiscoveryErrorLogSuppressor = PrivateAttr(default_factory=DiscoveryErrorLogSuppressor)
+    # Deduplicates warnings for discovery lines that do not match this version's
+    # schema (the observe echo can carry lines written by other mngr versions).
+    _discovery_schema_warner: DiscoverySchemaMismatchWarner = PrivateAttr(
+        default_factory=lambda: DiscoverySchemaMismatchWarner(source_description="latchkey discovery stream")
+    )
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every agent discovered (or re-fired on late SSH info)."""
@@ -241,8 +246,8 @@ class DiscoveryStreamConsumer(MutableModel):
         if not stripped:
             return
         try:
-            event = parse_discovery_event_line(stripped)
-        except (ValueError, json.JSONDecodeError) as e:
+            event = self._discovery_schema_warner.parse(stripped)
+        except json.JSONDecodeError as e:
             logger.warning("Failed to parse discovery line {!r}: {}", stripped[:200], e)
             return
         if event is None:

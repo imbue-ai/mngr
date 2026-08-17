@@ -59,10 +59,10 @@ from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import DiscoveryEvent
+from imbue.mngr.api.discovery_events import DiscoverySchemaMismatchWarner
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
@@ -219,6 +219,12 @@ class EnvelopeStreamConsumer(MutableModel):
     # the same failure (e.g. missing credentials) logs once per process, not once
     # per poll cycle. Clean snapshots feed it to re-arm on recovery.
     _error_log_suppressor: DiscoveryErrorLogSuppressor = PrivateAttr(default_factory=DiscoveryErrorLogSuppressor)
+    # Deduplicates warnings for discovery payloads that do not match this
+    # version's schema (the forward envelope replays a shared log that other
+    # mngr versions also write).
+    _discovery_schema_warner: DiscoverySchemaMismatchWarner = PrivateAttr(
+        default_factory=lambda: DiscoverySchemaMismatchWarner(source_description="forward observe stream")
+    )
     # Collapses the provider errors dropped while the events-file backlog
     # replays: one snapshot per discovery cycle of downtime, each carrying a
     # wedged-provider error, logs as one counted line per distinct error once
@@ -453,7 +459,7 @@ class EnvelopeStreamConsumer(MutableModel):
         # Re-serialize to a single-line JSON so we can reuse mngr's parser.
         try:
             line = json.dumps(payload, separators=(",", ":"))
-            event = parse_discovery_event_line(line)
+            event = self._discovery_schema_warner.parse(line)
         except (ValueError, TypeError) as e:
             logger.warning("Could not parse observe payload: {}", e)
             return
