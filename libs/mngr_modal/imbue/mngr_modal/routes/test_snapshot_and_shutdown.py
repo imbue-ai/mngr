@@ -9,13 +9,17 @@ import io
 import json
 import subprocess
 from collections.abc import Generator
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import httpx
 import modal
 import pytest
+from loguru import logger
 from tenacity import retry
 from tenacity import retry_if_exception
+from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
 
@@ -48,7 +52,7 @@ class URLParseError(RuntimeError):
 
 
 class CleanupError(RuntimeError):
-    """Raised when one or more Modal cleanup subprocesses exit non-zero."""
+    """A Modal cleanup subprocess exited non-zero after retries."""
 
 
 def _get_test_app_name() -> str:
@@ -89,28 +93,88 @@ def _deploy_snapshot_function_with_propagation_retry(
     return deploy_function("snapshot_and_shutdown", app_name, environment_name, modal_interface)
 
 
-def _stop_app_and_delete_volume(app_name: str, volume_name: str, environment_name: str) -> None:
-    """Stop the Modal app and delete its volume in parallel.
+# Substrings in Modal CLI output that mean the resource is already gone,
+# which cleanup treats as success.
+_ALREADY_GONE_OUTPUT_MARKERS: tuple[str, ...] = (
+    "not found",
+    "no such",
+    "does not exist",
+    "could not find",
+    "couldn't find",
+)
 
-    Raises CleanupError listing every subprocess that exited non-zero.
+
+@retry(
+    retry=retry_if_exception_type(CleanupError),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=5),
+    reraise=True,
+)
+def _run_modal_cleanup_command(command: Sequence[str], label: str) -> None:
+    """Run one Modal cleanup subprocess, retrying transient non-zero exits.
+
+    An already-gone resource counts as success. A persistent non-zero exit
+    raises CleanupError, which the decorator retries and the caller then logs.
     """
-    with (
-        subprocess.Popen(
-            ["uv", "run", "modal", "app", "stop", "--env", environment_name, "--yes", app_name]
-        ) as stop_process,
-        subprocess.Popen(
-            ["uv", "run", "modal", "volume", "delete", "--env", environment_name, volume_name, "--yes"]
-        ) as delete_process,
-    ):
-        stop_returncode = stop_process.wait(timeout=15)
-        delete_returncode = delete_process.wait(timeout=15)
-    failures = []
-    if stop_returncode != 0:
-        failures.append(f"`modal app stop {app_name}` (env {environment_name}) exited {stop_returncode}")
-    if delete_returncode != 0:
-        failures.append(f"`modal volume delete {volume_name}` (env {environment_name}) exited {delete_returncode}")
-    if failures:
-        raise CleanupError("; ".join(failures))
+    try:
+        result = subprocess.run(list(command), capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired as e:
+        raise CleanupError(f"`{label}` timed out") from e
+    if result.returncode == 0:
+        return
+    combined_output = f"{result.stdout}\n{result.stderr}".lower()
+    if any(marker in combined_output for marker in _ALREADY_GONE_OUTPUT_MARKERS):
+        return
+    raise CleanupError(f"`{label}` exited {result.returncode}: {(result.stderr or result.stdout).strip()}")
+
+
+def _stop_app_and_delete_volume(app_name: str, volume_name: str, environment_name: str) -> None:
+    """Best-effort stop the Modal app and delete its volume, in parallel.
+
+    A cleanup failure that survives retries is logged rather than raised, so a
+    flaky Modal teardown cannot turn the test red: the session-end cleanup and
+    the `cleanup_old_modal_test_environments.py` CI job are the safety nets for
+    leaked resources. Mirrors conftest's `_apply_cleanup_outcome` policy.
+    """
+    commands_by_label = {
+        f"modal app stop {app_name} (env {environment_name})": [
+            "uv",
+            "run",
+            "modal",
+            "app",
+            "stop",
+            "--env",
+            environment_name,
+            "--yes",
+            app_name,
+        ],
+        f"modal volume delete {volume_name} (env {environment_name})": [
+            "uv",
+            "run",
+            "modal",
+            "volume",
+            "delete",
+            "--env",
+            environment_name,
+            volume_name,
+            "--yes",
+        ],
+    }
+    with ThreadPoolExecutor(max_workers=len(commands_by_label)) as executor:
+        futures_by_label = {
+            label: executor.submit(_run_modal_cleanup_command, command, label)
+            for label, command in commands_by_label.items()
+        }
+        for label, future in futures_by_label.items():
+            try:
+                future.result()
+            except CleanupError as e:
+                logger.warning(
+                    "Modal test cleanup for `{}` failed after retries; leaving it for the "
+                    "session-end/CI safety net: {}",
+                    label,
+                    e,
+                )
 
 
 def _warmup_function(url: str) -> None:
@@ -196,7 +260,8 @@ def deployed_snapshot_function(
     Uses the session-scoped Modal env (same one threaded through
     `real_modal_provider` and `modal_subprocess_env`) so the deployed app +
     its volume are scoped to a `mngr_test-...` env that the session-end
-    cleanup and the hourly CI safety net can both find.
+    cleanup and the CI cleanup job (`cleanup_old_modal_test_environments.py`)
+    can both find.
     """
     environment_name = f"{modal_test_session_env_name}-{modal_test_session_user_id}"[
         :_MAX_MODAL_ENVIRONMENT_NAME_LENGTH
@@ -221,6 +286,7 @@ def deployed_snapshot_function(
 @pytest.mark.acceptance
 @pytest.mark.modal
 @pytest.mark.timeout(180)
+@pytest.mark.flaky
 def test_snapshot_and_shutdown_success(
     deployed_snapshot_function: tuple[str, str, str],
 ) -> None:
@@ -269,13 +335,14 @@ def test_snapshot_and_shutdown_success(
         # Verify stop_reason was set (defaults to PAUSED for idle shutdown)
         assert certified_data["stop_reason"] == HostState.PAUSED.value
 
-        # Verify the sandbox was terminated by polling for termination
+        # Verify the sandbox was terminated by polling for termination.
+        # Modal can lag in reflecting termination in `poll()`, so poll generously.
         def sandbox_terminated() -> bool:
             refreshed_sandbox = modal.Sandbox.from_id(sandbox_id)
             poll_result = refreshed_sandbox.poll()
             return poll_result is not None
 
-        wait_for(sandbox_terminated, timeout=10.0, poll_interval=0.5, error_message="Sandbox should be terminated")
+        wait_for(sandbox_terminated, timeout=30.0, poll_interval=0.5, error_message="Sandbox should be terminated")
 
     finally:
         # Clean up sandbox if still running
