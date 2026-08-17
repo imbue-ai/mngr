@@ -385,6 +385,14 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
  * behind it -- kept here beside #local-page-scroll so the shell's geometry
  * lives in one place.
  *
+ * Flush to the left, right and bottom edges of the window: only the top is
+ * inset, clearing the titlebar. The per-workspace accent therefore shows as a
+ * band above the machine rather than as a border around it. All four corners
+ * are rounded even so: the machine reads as one card tucked under the
+ * titlebar, and the bottom pair land exactly on the OS window's own rounded
+ * corners. (#notice-band matches this geometry; the two have to move together
+ * or the band overhangs the surface below it.)
+ *
  * --notice-band-height is 0 until the shell's failure band is up, at which
  * point the surface shrinks by exactly the band's measured height. The band
  * layers over the app, never over the machine: whatever the user was looking
@@ -395,16 +403,16 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 }
 .workspace-surface {
   position: fixed;
-  left: 4px;
-  width: calc(100% - 8px);
+  left: 0;
+  width: 100%;
   top: calc(38px + var(--notice-band-height));
-  height: calc(100% - 42px - var(--notice-band-height));
+  height: calc(100% - 38px - var(--notice-band-height));
   border-radius: 12px;
 }
 /*
- * With the band up, it carries this card's top corners (it is inset and
- * rounded to the same 4px / 12px), so the surface meets it square: one card,
- * one accent border around it, no seam where the two edges disagree.
+ * With the band up, it carries this card's top corners (it is flush and
+ * rounded to the same 12px), so the surface meets it square: one card, no
+ * seam where the two edges disagree.
  */
 body:has(#notice-band) .workspace-surface {
   border-top-left-radius: 0;

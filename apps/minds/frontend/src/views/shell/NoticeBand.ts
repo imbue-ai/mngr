@@ -54,15 +54,15 @@ export function NoticeBand(): m.Component<NoticeBandAttrs> {
           // colour -- and its contrast -- would be set by a colour the user
           // picked: a light accent leaves the message near 1.5:1.
           //
-          // Inset and rounded to match the card it sits on top of (the 4px /
-          // 12px of .workspace-surface), whose top corners go square while
-          // this is up: the two read as one card with the accent bleeding
-          // evenly around it, rather than a full-bleed strip overhanging a
-          // rounded surface. overflow-hidden clips the tinted child to the
-          // radius.
+          // Flush to the window's left and right edges, matching the surface
+          // it sits on top of (.workspace-surface): the two stack as one
+          // continuous card under the titlebar, rather than the band
+          // overhanging -- or falling short of -- the machine below it. It
+          // carries that card's top corners while it is up (the surface
+          // squares its own to meet this), so the pair still reads as one
+          // rounded card. overflow-hidden clips the tinted child to the radius.
           class:
-            "fixed left-[4px] right-[4px] top-[38px] z-[95] " +
-            "bg-surface-primary rounded-t-xl overflow-hidden",
+            "fixed left-0 right-0 top-[38px] z-[95] bg-surface-primary rounded-t-xl overflow-hidden",
         },
         m(
           "div",

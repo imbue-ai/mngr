@@ -772,6 +772,9 @@
   .flex-\[2\] {
     flex: 2;
   }
+  .flex-shrink {
+    flex-shrink: 1;
+  }
   .shrink {
     flex-shrink: 1;
   }
@@ -2974,6 +2977,9 @@ body:has(#minds-titlebar.titlebar-surface) #local-page-scroll {
 .cloud-wheel-item.is-exit {
   transform: translateX(calc(var(--wheel-offset) * 1.5)) scale(0.4);
   opacity: 0;
+}
+.dark .cloud-wheel-item {
+  filter: invert(1);
 }
 .cloud-wheel-name {
   position: absolute;
