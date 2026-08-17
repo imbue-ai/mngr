@@ -27,7 +27,6 @@ from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import ConfigScope
-from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
@@ -1074,16 +1073,14 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
 
     for template_name, raw_options in raw_templates.items():
         raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
-        # make sure the options don't define anything that cannot be handled
-        # (an ``__extend`` suffix is a valid operator on any CLI option key, so
-        # strip it before checking against the CreateCliOptions schema).
-        for field in raw_options.keys():
-            base_field = bare_key(field) if is_extend_key(field) else field
-            if base_field not in CreateCliOptions.model_fields:
-                raise ConfigParseError(
-                    f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
-                )
-        # fine, add the template
+        # Deliberately NOT rejecting keys that are not `mngr create` options here. A template
+        # may also set a field on the agent type the create resolves to -- how a role states
+        # harness behaviour (`output_style`, `append_system_prompt`) without naming a harness.
+        # Judging those requires the agent-type config registry, which the harness plugins
+        # populate only after config parsing, so any check here would see an empty registry and
+        # reject every such key. `apply_create_template` does the rejecting instead, once the
+        # type is resolved and the plugins are loaded, and its message can name the type and
+        # which types support the key.
         templates[CreateTemplateName(template_name)] = CreateTemplate.model_construct(options=raw_options)
 
     return templates

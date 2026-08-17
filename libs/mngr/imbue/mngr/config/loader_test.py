@@ -798,14 +798,22 @@ def test_parse_create_templates_accepts_extend_suffix() -> None:
     assert result[CreateTemplateName("dev")].options == {"env__extend": ["DEBUG=1"]}
 
 
-def test_parse_create_templates_rejects_unknown_field_even_with_extend_suffix() -> None:
-    """``<unknown>__extend`` is still rejected -- the ``__extend`` suffix opts the
-    base key into additive merge, but the base key still has to be a real
-    CreateCliOptions field. (Same shape as the bare-key validation that flagged
-    typos in template options before.)"""
-    raw = {"dev": {"bogus_typo__extend": ["X=1"]}}
-    with pytest.raises(ConfigParseError, match="Unknown field 'bogus_typo__extend'"):
-        _parse_create_templates(raw)
+def test_parse_create_templates_defers_non_option_keys_instead_of_rejecting_them() -> None:
+    """A key that is not a create option parses through, for `apply_create_template` to judge.
+
+    Parsing cannot judge these: a template may set a field on the agent type the create
+    resolves to (`output_style`), and the registry naming those fields is populated by the
+    harness plugins only *after* config parsing. A check here would therefore see an empty
+    registry and reject every such key -- which is exactly what broke a real workspace
+    create. The key asserted is deliberately nonsense: if this ever consults the registry
+    again, `output_style` might pass while this still fails.
+    """
+    raw = {"dev": {"not_a_create_option": "x", "also_not_one__extend": ["X=1"]}}
+    result = _parse_create_templates(raw)
+    assert result[CreateTemplateName("dev")].options == {
+        "not_a_create_option": "x",
+        "also_not_one__extend": ["X=1"],
+    }
 
 
 # =============================================================================

@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import shutil
 import time
 import tomllib
+from collections import deque
+from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from typing import cast
 
@@ -19,15 +22,22 @@ import pytest
 
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
+from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import AgentInstallationError
+from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -38,16 +48,18 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import LifecycleProbeResult
+from imbue.mngr.primitives import OutputStyleName
+from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.utils.polling import wait_for
-from imbue.mngr.utils.testing import cleanup_tmux_session
-from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
-from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
-from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
+from imbue.mngr_codex.app_server_client import AppServerTransport
+from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
+from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
-from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import TRANSCRIPT_PATH_FILENAME
+from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
 from imbue.mngr_codex.codex_config import get_codex_home
@@ -57,7 +69,9 @@ from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
 from imbue.mngr_codex.plugin import CodexUpdatePolicy
+from imbue.mngr_codex.plugin import _app_server_client_version
 from imbue.mngr_codex.plugin import _resolve_adopt_session
+from imbue.mngr_codex.plugin import _resolve_lifecycle_state_for_permission
 from imbue.mngr_codex.plugin import _session_id_from_rollout_path
 from imbue.mngr_codex.plugin import _sessions_root_for_rollout
 from imbue.mngr_codex.plugin import _user_native_codex_home
@@ -95,21 +109,23 @@ def test_codex_agent_config_merge_with_replaces_cli_args() -> None:
     assert str(merged.command) == "codex"
 
 
-def test_codex_agent_subclasses_interactive_tui_agent() -> None:
-    assert issubclass(CodexAgent, InteractiveTuiAgent)
+def test_codex_agent_subclasses_base_agent_not_send_keys_or_interactive_tui() -> None:
+    """codex drives the app-server, so it subclasses ``BaseAgent`` directly -- not
+    ``SendKeysAgent`` (it sends no keys) nor the send-keys/evidence-probe ``InteractiveTuiAgent``.
 
-
-def test_codex_agent_advertises_tui_ready_indicator() -> None:
-    """The ready indicator is a fixed header string that renders with the input composer.
-
-    codex has no pre-input readiness hook (SessionStart fires lazily on the first
-    prompt), so this banner poll is the readiness signal.
+    Matching how ``pi`` / ``opencode`` subclass ``BaseAgent`` and override their own transport,
+    this retires the abstract ``_build_submission_evidence_probes`` contract and the ready-glyph
+    poll while leaving ``tui_agent.py`` / ``tui_utils.py`` intact for claude.
     """
-    assert CodexAgent.TUI_READY_INDICATOR == "/model to change"
-
-
-def test_codex_agent_implements_submission_evidence_probes() -> None:
-    assert "_build_submission_evidence_probes" not in CodexAgent.__abstractmethods__
+    assert issubclass(CodexAgent, BaseAgent)
+    assert not issubclass(CodexAgent, SendKeysAgent)
+    assert not issubclass(CodexAgent, InteractiveTuiAgent)
+    assert not hasattr(CodexAgent, "_build_submission_evidence_probes")
+    assert not hasattr(CodexAgent, "TUI_READY_INDICATOR")
+    # It MUST still declare InteractiveAgentMixin -- the marker `require_interactive_agent` gates
+    # `mngr message` on. `SendKeysAgent` provided it implicitly; on BaseAgent it must be explicit
+    # (as pi/opencode do), or `mngr message` fails "does not accept interactive messages".
+    assert issubclass(CodexAgent, InteractiveAgentMixin)
 
 
 def test_register_agent_type_returns_codex_class_and_config() -> None:
@@ -312,6 +328,409 @@ def codex_agent(local_provider: LocalProviderInstance, tmp_path: Path) -> CodexA
 
 
 # =============================================================================
+# send_message (app-server drive)
+# =============================================================================
+
+
+class _ScriptedTransport:
+    """A scripted in-memory ``AppServerTransport`` for ``send_message`` tests.
+
+    Configure per-method responses via ``respond_result`` / ``respond_error``; the client
+    reads them back off the inbound queue. Sent frames are recorded for assertions, and
+    ``is_closed`` proves ``send_message`` always closes its connection.
+    """
+
+    def __init__(self) -> None:
+        self._inbound: deque[str] = deque()
+        self.sent: list[str] = []
+        self._responders: dict[str, Callable[[Mapping[str, Any]], None]] = {}
+        self.is_closed = False
+
+    def send(self, message: str) -> None:
+        self.sent.append(message)
+        request = json.loads(message)
+        responder = self._responders.get(request.get("method"))
+        if responder is not None:
+            responder(request)
+
+    def receive(self, timeout: float | None) -> str:
+        if not self._inbound:
+            raise TimeoutError("no frame available")
+        return self._inbound.popleft()
+
+    def close(self) -> None:
+        self.is_closed = True
+
+    def _push(self, frame: Mapping[str, Any]) -> None:
+        self._inbound.append(json.dumps(frame))
+
+    def respond_result(self, method: str, result: Mapping[str, Any]) -> None:
+        self._responders[method] = lambda request: self._push(
+            {"jsonrpc": "2.0", "id": request["id"], "result": result}
+        )
+
+    def respond_error(self, method: str, code: int, message: str) -> None:
+        self._responders[method] = lambda request: self._push(
+            {"jsonrpc": "2.0", "id": request["id"], "error": {"code": code, "message": message}}
+        )
+
+    def params_of(self, method: str) -> Mapping[str, Any]:
+        for frame in self.sent:
+            parsed = json.loads(frame)
+            if parsed.get("method") == method:
+                return parsed["params"]
+        raise AssertionError(f"no {method!r} frame was sent")
+
+    def sent_methods(self) -> list[str]:
+        return [json.loads(frame).get("method") for frame in self.sent]
+
+
+def _initialize_result() -> dict[str, Any]:
+    return {"userAgent": "mngr", "codexHome": "/h", "platformFamily": "unix", "platformOs": "linux"}
+
+
+def _thread_read_result(status: Mapping[str, Any], turns: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {"thread": {"id": "thread-1", "status": status, "turns": list(turns)}}
+
+
+def _scripted_codex_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, transport: _ScriptedTransport
+) -> CodexAgent:
+    """A codex agent whose app-server connection is the given scripted transport."""
+
+    class _ScriptedCodexAgent(CodexAgent):
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            return transport
+
+    return _make_codex_agent(_ScriptedCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+
+
+def test_send_message_delivers_when_idle(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """Idle thread -> ``turn/start``: a fresh thread is started, persisted, and delivered."""
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/loaded/list", {"data": []})
+    transport.respond_result("thread/start", {"thread": {"id": "thread-1", "status": {"type": "idle"}}})
+    transport.respond_result("turn/start", {"turn": {"id": "turn-1", "status": "inProgress"}})
+    # Post-send block check: active, no waiting flags -> not blocked.
+    transport.respond_result("thread/read", _thread_read_result({"type": "active", "activeFlags": []}, []))
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
+
+    agent.send_message("hello world")
+
+    assert "turn/start" in transport.sent_methods()
+    assert "turn/steer" not in transport.sent_methods()
+    start_params = transport.params_of("turn/start")
+    assert start_params["input"] == [{"type": "text", "text": "hello world"}]
+    assert start_params["clientUserMessageId"].startswith("mngr-cid-")
+    assert start_params["threadId"] == "thread-1"
+    # The started thread id is persisted as this agent's root thread.
+    persisted = (agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME).read_text().strip()
+    assert persisted == "thread-1"
+    assert transport.is_closed is True
+
+
+def test_send_message_parks_when_busy(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A running turn -> ``turn/steer``: the message parks into the live turn, not a new one."""
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/loaded/list", {"data": ["thread-1"]})
+    transport.respond_result(
+        "thread/read",
+        _thread_read_result({"type": "active", "activeFlags": []}, [{"id": "turn-7", "status": "inProgress"}]),
+    )
+    transport.respond_result("turn/steer", {"turnId": "turn-7"})
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
+
+    agent.send_message("park me")
+
+    assert "turn/steer" in transport.sent_methods()
+    assert "turn/start" not in transport.sent_methods()
+    steer_params = transport.params_of("turn/steer")
+    assert steer_params["expectedTurnId"] == "turn-7"
+    assert steer_params["clientUserMessageId"].startswith("mngr-cid-")
+    # The single loaded thread is adopted and persisted as the root.
+    persisted = (agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME).read_text().strip()
+    assert persisted == "thread-1"
+    assert transport.is_closed is True
+
+
+def test_send_message_pins_persisted_root_among_loaded_subagents(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """With sub-agent threads also loaded, the persisted root id is the one sent to."""
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/loaded/list", {"data": ["subagent-a", "root-thread", "subagent-b"]})
+    transport.respond_result("thread/read", _thread_read_result({"type": "idle"}, []))
+    transport.respond_result("turn/start", {"turn": {"id": "turn-9", "status": "inProgress"}})
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
+    agent.host.write_text_file(agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME, "root-thread")
+
+    agent.send_message("to the root")
+
+    assert transport.params_of("turn/start")["threadId"] == "root-thread"
+
+
+def test_send_message_raises_send_message_error_when_not_accepted(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A daemon rejection of the submit is a non-delivery -> ``SendMessageError`` (not blocked)."""
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/loaded/list", {"data": []})
+    transport.respond_result("thread/start", {"thread": {"id": "thread-1", "status": {"type": "idle"}}})
+    transport.respond_error("turn/start", -32000, "model provider unavailable")
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
+
+    with pytest.raises(SendMessageError) as exc_info:
+        agent.send_message("nope")
+    assert not isinstance(exc_info.value, MessageDeliveredButBlockedError)
+    assert transport.is_closed is True
+
+
+def test_send_message_raises_when_handshake_fails(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A failed ``initialize`` is a send failure -> ``SendMessageError``, connection closed."""
+    transport = _ScriptedTransport()
+    transport.respond_error("initialize", -32600, "requires experimentalApi capability")
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
+
+    with pytest.raises(SendMessageError):
+        agent.send_message("hello")
+    assert transport.is_closed is True
+
+
+def test_send_message_raises_delivered_but_blocked_when_agent_blocks(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Delivered, but the thread is left awaiting approval -> ``MessageDeliveredButBlockedError``."""
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/loaded/list", {"data": []})
+    transport.respond_result("thread/start", {"thread": {"id": "thread-1", "status": {"type": "idle"}}})
+    transport.respond_result("turn/start", {"turn": {"id": "turn-1", "status": "inProgress"}})
+    transport.respond_result(
+        "thread/read",
+        _thread_read_result(
+            {"type": "active", "activeFlags": ["waitingOnApproval"]}, [{"id": "turn-1", "status": "inProgress"}]
+        ),
+    )
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
+
+    with pytest.raises(MessageDeliveredButBlockedError):
+        agent.send_message("do the risky thing")
+    # It IS delivered: the turn was started before the block was detected.
+    assert "turn/start" in transport.sent_methods()
+    assert transport.is_closed is True
+
+
+# =============================================================================
+# Lifecycle / waiting_reason re-sourced from live thread status (event-sourced)
+# =============================================================================
+
+
+def _status_transport(
+    status: Mapping[str, Any],
+    turns: Sequence[Mapping[str, Any]],
+    *,
+    loaded: list[str] | None = None,
+) -> _ScriptedTransport:
+    """A scripted transport that answers a lifecycle status probe of the root thread.
+
+    Responds to the handshake, ``thread/loaded/list`` (the root ``thread-1`` is loaded by
+    default), and ``thread/read`` with the given ``status`` / ``turns``.
+    """
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/loaded/list", {"data": ["thread-1"] if loaded is None else loaded})
+    transport.respond_result("thread/read", _thread_read_result(status, turns))
+    return transport
+
+
+def _live_codex_agent(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    transport: _ScriptedTransport,
+    base_state: AgentLifecycleState,
+    *,
+    base_pid: int | None = None,
+) -> CodexAgent:
+    """A codex agent whose daemon status is scripted AND whose process-presence probe is fixed.
+
+    The scripted transport drives ``_read_live_thread_status``; the fixed base probe stands in
+    for the tmux/ps process-presence result (RUNNING/WAITING = window alive) so the live
+    RUNNING-vs-WAITING re-derivation is exercised without a real pane. The root thread id is
+    persisted so the status probe binds it.
+    """
+
+    class _LiveCodexAgent(CodexAgent):
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            return transport
+
+        def _base_probe_lifecycle(self) -> LifecycleProbeResult:
+            return LifecycleProbeResult(state=base_state, pid=base_pid)
+
+    agent = _make_codex_agent(_LiveCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    agent.host.write_text_file(agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME, "thread-1")
+    return agent
+
+
+def test_get_lifecycle_state_running_when_turn_in_flight(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A live turn (thread active, in-progress turn) reads RUNNING."""
+    transport = _status_transport({"type": "active", "activeFlags": []}, [{"id": "turn-1", "status": "inProgress"}])
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+
+
+def test_get_lifecycle_state_waiting_when_thread_idle_even_if_marker_lags(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An idle thread reads WAITING immediately -- even though the process is present (base RUNNING).
+
+    This is the A6/lifecycle fix: once the turn completes the daemon is idle, so the state flips to
+    WAITING at once instead of lingering on a stale ``active`` marker (base RUNNING) until a hook fires.
+    """
+    transport = _status_transport({"type": "idle"}, [])
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+
+
+def test_get_lifecycle_state_promotes_to_waiting_on_approval(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A turn parked awaiting approval promotes RUNNING -> WAITING (no permissions_waiting marker)."""
+    transport = _status_transport(
+        {"type": "active", "activeFlags": ["waitingOnApproval"]}, [{"id": "turn-1", "status": "inProgress"}]
+    )
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+
+
+def test_get_lifecycle_state_stays_running_through_the_flush_tail_until_completed(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """RUNNING lasts until the turn is FULLY done (contract A6), not when token-generation stops.
+
+    While the daemon reports the thread ``active`` with an in-progress turn -- including the flush
+    tail after the model has stopped producing tokens but before ``turn/completed`` -- the state is
+    RUNNING (no ``waitingOn*`` flag, so it is not a parked WAITING). Only when the turn completes
+    and the thread goes ``idle`` does the state flip to WAITING; there is no earlier idle blip.
+    """
+    # The flush tail: the turn is still in progress (active, no waiting flags) even though tokens
+    # may have stopped. This must read RUNNING, not WAITING.
+    running = _status_transport({"type": "active", "activeFlags": []}, [{"id": "turn-1", "status": "inProgress"}])
+    agent = _live_codex_agent(local_provider, tmp_path, running, AgentLifecycleState.RUNNING)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+
+    # turn/completed: the thread is now idle, so the state flips to WAITING at once.
+    completed = _status_transport({"type": "idle"}, [])
+    idle_agent = _live_codex_agent(local_provider, tmp_path, completed, AgentLifecycleState.RUNNING)
+    assert idle_agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+
+
+def test_get_lifecycle_state_keeps_stopped_without_querying_the_daemon(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A dead/absent window (base STOPPED) is reported verbatim and never queries the daemon.
+
+    Process presence is authoritative for STOPPED/DONE/REPLACED, so no WebSocket connection is
+    opened for a stopped agent (no per-``mngr ls`` churn against a daemon that is gone anyway).
+    """
+    transport = _status_transport({"type": "idle"}, [])
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.STOPPED)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.STOPPED
+    assert transport.sent == []
+
+
+def test_probe_lifecycle_resources_split_and_preserves_pid(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """``probe_lifecycle`` re-derives the RUNNING/WAITING split from live status, keeping the pid."""
+    transport = _status_transport({"type": "idle"}, [])
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING, base_pid=4242)
+    probe = agent.probe_lifecycle()
+    assert probe.state == AgentLifecycleState.WAITING
+    assert probe.pid == 4242
+
+
+@pytest.mark.parametrize(
+    "status, flags, expected",
+    [
+        ("active", [], None),
+        ("idle", [], WaitingReason.END_OF_TURN),
+        ("active", ["waitingOnApproval"], WaitingReason.PERMISSIONS),
+        ("active", ["waitingOnUserInput"], WaitingReason.PERMISSIONS),
+    ],
+)
+def test_compute_waiting_reason_from_live_status(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    status: str,
+    flags: list[str],
+    expected: WaitingReason | None,
+) -> None:
+    """The waiting reason is read live from thread status (running -> None; parked -> PERMISSIONS)."""
+    turns = [{"id": "turn-1", "status": "inProgress"}] if status == "active" else []
+    transport = _status_transport({"type": status, "activeFlags": flags}, turns)
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert agent.compute_waiting_reason() == expected
+
+
+def test_waiting_reason_generator_uses_live_status(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """The ``waiting_reason`` field generator delegates to the live-status read for a codex agent."""
+    transport = _status_transport({"type": "active", "activeFlags": []}, [{"id": "turn-1", "status": "inProgress"}])
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert _waiting_reason(agent, agent.host) is None
+
+
+def test_status_probe_never_starts_a_thread(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """With no root thread loadable, a status probe returns None and starts nothing.
+
+    A lifecycle read must be side-effect-light: it must never create a conversation, so no
+    ``thread/start`` is sent when there is no root thread to bind.
+    """
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/loaded/list", {"data": []})
+
+    class _NoPersistLiveAgent(CodexAgent):
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            return transport
+
+    agent = _make_codex_agent(_NoPersistLiveAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    # No persisted root id and nothing loaded -> nothing to bind.
+    assert agent._read_live_thread_status() is None
+    assert "thread/start" not in transport.sent_methods()
+    assert "thread/read" not in transport.sent_methods()
+
+
+def test_read_live_thread_status_returns_none_on_remote_host(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A remote host's unix socket is unreachable from the mngr process -> None (no marker fallback)."""
+    agent = _make_remote_codex_agent(local_provider, tmp_path, {})
+    assert agent._read_live_thread_status() is None
+
+
+def test_get_lifecycle_state_degrades_to_waiting_when_daemon_unreachable(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """When the daemon can't be read, the split degrades to WAITING -- there is NO marker fallback.
+
+    A failed ``initialize`` yields no live status. With the marker path deleted, an alive-but-
+    unreadable daemon is reported WAITING (the conservative "cannot confirm a running turn"
+    default), regardless of any on-disk file. ``waiting_reason`` likewise degrades to END_OF_TURN.
+    """
+    transport = _ScriptedTransport()
+    transport.respond_error("initialize", -32600, "handshake refused")
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+    assert agent.compute_waiting_reason() == WaitingReason.END_OF_TURN
+
+
+# =============================================================================
 # Simple accessors
 # =============================================================================
 
@@ -383,34 +802,111 @@ def test_resolve_canonical_path_resolves_symlinks(codex_agent: CodexAgent, tmp_p
 def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
     command = str(codex_agent.assemble_command(codex_agent.host, (), None))
     codex_home = str(codex_agent._get_codex_home())
+    # The socket lives at a short /tmp path (NOT under CODEX_HOME) to stay under the unix-socket
+    # SUN_LEN limit; every client resolves it via get_codex_app_server_socket_path.
+    socket_path = str(get_codex_app_server_socket_path(codex_agent._get_codex_home()))
     # Backgrounded supervisor, scoped to `&` so codex is the foreground process.
     assert "codex_background_tasks.sh" in command
     assert command.split("&", 1)[0].strip().startswith("( bash")
     # cwd is the work dir (codex accepts the dotted path; no symlink workaround).
     assert f"cd {codex_agent.work_dir}" in command
-    # CODEX_HOME injected only on the codex process; hook trust bypassed.
+    # CODEX_HOME injected only on the codex process.
     assert f"env CODEX_HOME={codex_home}" in command
-    assert "--dangerously-bypass-hook-trust" in command
-    # Resume prelude reads the recorded root session id and selects `resume <id>`.
-    assert "codex_root_session" in command
-    assert "set -- resume" in command
+    # The stale socket is cleaned before the daemon binds.
+    assert f"rm -f {socket_path}" in command
+    # The daemon runs in a detached sidecar window; the visible TUI is `codex --remote`.
+    assert "tmux new-window -d" in command
+    assert "app-server --listen" in command
+    assert "--remote" in command
+    assert f"unix://{socket_path}" in command
 
 
-def test_assemble_command_resets_stale_marker_state(codex_agent: CodexAgent) -> None:
-    """Each launch clears stale lifecycle-marker state a SIGKILL-mid-turn stop can leave.
+def test_assemble_command_launches_both_windows(codex_agent: CodexAgent) -> None:
+    """The primary window runs the visible `--remote` TUI; a detached sidecar runs the daemon."""
+    command = str(codex_agent.assemble_command(codex_agent.host, (), None))
+    socket_url = f"unix://{get_codex_app_server_socket_path(codex_agent._get_codex_home())}"
+    # Sidecar daemon window, named and detached, running the app-server on the socket. The daemon
+    # carries --dangerously-bypass-hook-trust --enable hooks (top-level, before the subcommand):
+    # codex gates hooks behind a default-off feature flag, and an enabled command hook still stays
+    # untrusted until bypassed, so without both the daemon fires NO hooks (verified live).
+    assert "codex-app-server" in command
+    daemon_index = command.index("app-server --listen")
+    assert f"--dangerously-bypass-hook-trust --enable hooks app-server --listen {socket_url}" in command
+    # Primary window: the visible remote TUI on the same socket, after the daemon spawn.
+    remote_index = command.index("codex --remote")
+    assert f"codex --remote {socket_url}" in command
+    # The remote TUI also carries --dangerously-bypass-hook-trust. (Hooks fire only on turns TYPED
+    # into this TUI; codex does not fire hooks on programmatic app-server turns -- verified live.)
+    assert "codex --remote" in command
+    assert "--dangerously-bypass-hook-trust" in command[remote_index:]
+    # The primary window waits (bounded) for the socket before attaching.
+    assert "-S" in command and "while" in command
+    # The daemon is spawned before the primary `--remote` attaches.
+    assert daemon_index < remote_index
 
-    Otherwise a killed subagent's `codex_subagents/<id>` file (whose SubagentStop
-    will never arrive) or a leftover `codex_root_active`/`active` could strand the
-    resumed agent as RUNNING. The resume id (`codex_root_session`) is NOT reset.
+
+def test_assemble_command_daemon_window_sources_agent_env(codex_agent: CodexAgent) -> None:
+    """The daemon sidecar window must inherit the agent env, or its hooks die with exit 127.
+
+    Turns run in the daemon, so the daemon is where codex fires its hooks (the UserPromptSubmit
+    transcript-marker writer, the PreToolUse policy hooks). Those are invoked as
+    ``bash "$MNGR_AGENT_STATE_DIR/..."`` / ``bash "$MNGR_AGENT_WORK_DIR/..."``; the detached
+    ``tmux new-window`` starts with a bare environment, so without sourcing the agent env every
+    hook path resolves to a nonexistent file. Assert the env-sourcing step is spawned INSIDE the
+    daemon window (after ``tmux new-window``) and BEFORE the ``app-server`` exec.
     """
     command = str(codex_agent.assemble_command(codex_agent.host, (), None))
-    assert 'rm -rf "$MNGR_AGENT_STATE_DIR/active"' in command
-    assert "$MNGR_AGENT_STATE_DIR/codex_root_active" in command
-    assert "$MNGR_AGENT_STATE_DIR/codex_subagents" in command
-    assert "$MNGR_AGENT_STATE_DIR/codex_marker.lock" in command
-    # The reset must run before codex launches but must not clobber the resume id.
-    assert command.index("rm -rf") < command.index("env CODEX_HOME=")
-    assert "$MNGR_AGENT_STATE_DIR/codex_root_session" not in command.split("env CODEX_HOME=")[0].split("rm -rf")[1]
+    new_window_index = command.index("tmux new-window")
+    daemon_index = command.index("app-server --listen")
+    # The full env-sourcing block (set -a ... set +a) is spawned inside the daemon window,
+    # before the app-server exec.
+    assert new_window_index < command.index("set -a") < daemon_index
+    assert new_window_index < command.index("set +a") < daemon_index
+    # An env file is sourced (the source paths end in `/env`).
+    assert "/env" in command[new_window_index:daemon_index]
+
+
+def test_assemble_command_has_no_marker_reset_but_stamps_process_start(codex_agent: CodexAgent) -> None:
+    """The lifecycle no longer reads any marker, so the launch prelude resets none.
+
+    RUNNING/WAITING comes from the daemon's thread/status, so there is no stale ``active`` /
+    ``codex_root_active`` / ``codex_subagents`` / lock to clear on relaunch. The process-start
+    stamp is still written (the system_interface activity tracker uses its mtime as a stale-tail
+    gate). The primary window READS ``codex_root_session`` to resume the root conversation, but
+    only reads it (``cat``) -- it is never removed or overwritten -- and the transcript path is
+    left untouched.
+    """
+    command = str(codex_agent.assemble_command(codex_agent.host, (), None))
+    assert "rm -rf" not in command
+    assert "$MNGR_AGENT_STATE_DIR/active" not in command
+    assert "codex_root_active" not in command
+    assert "codex_subagents" not in command
+    assert "codex_marker.lock" not in command
+    # The process-start boundary is still stamped.
+    assert 'touch "$MNGR_AGENT_STATE_DIR/codex_process_started"' in command
+    # codex_root_session is read (for the self-healing resume, via command substitution) but
+    # never written or removed: it appears only in read contexts (`[ ! -s <file> ]`, `$(cat ...)`).
+    assert "codex_root_session" in command
+    assert "$(cat " in command
+    assert "rm -f " + shlex.quote(str(codex_agent._get_root_session_file_path())) not in command
+    assert "codex_transcript_path" not in command
+
+
+def test_assemble_command_resumes_root_conversation_self_healing(codex_agent: CodexAgent) -> None:
+    """The primary window resumes the persisted root, falling back to a fresh TUI when there is none.
+
+    On start/resume ``codex_root_session`` already holds the root id, so the TUI attaches to the
+    ONE root conversation via ``codex resume <id> --remote``; when the file is empty (a degraded
+    create, or genuinely no prior session) it launches a fresh ``codex --remote`` -- self-healing,
+    never a hang. A bounded wait for the id file synchronizes the TUI with mngr writing it at create.
+    """
+    command = str(codex_agent.assemble_command(codex_agent.host, (), None))
+    assert 'if [ -n "$__mngr_sid" ]; then' in command
+    assert 'resume "$__mngr_sid" --remote' in command
+    # Fresh fallback (the else branch) still launches --remote against the same socket.
+    assert "--remote unix://" in command
+    # Bounded wait for the persisted id file before the TUI launches (create/start synchronization).
+    assert "codex_root_session" in command and "-lt" in command
 
 
 def test_assemble_command_appends_cli_and_agent_args(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
@@ -424,14 +920,229 @@ def test_assemble_command_appends_cli_and_agent_args(local_provider: LocalProvid
 def test_assemble_command_honors_command_override(codex_agent: CodexAgent) -> None:
     command = str(codex_agent.assemble_command(codex_agent.host, (), CommandString("/opt/codex")))
     assert "env CODEX_HOME=" in command
-    assert "/opt/codex --dangerously-bypass-hook-trust" in command
+    # The override binary drives both the daemon and the visible remote TUI.
+    assert "/opt/codex --dangerously-bypass-hook-trust --enable hooks app-server --listen" in command
+    assert "/opt/codex --remote" in command
 
 
 def test_assemble_command_is_posix_compatible(codex_agent: CodexAgent) -> None:
     """The assembled command runs in the user's interactive shell (possibly zsh), so it
-    must avoid bash-only constructs (the resume prelude uses POSIX `set --` / "$@")."""
+    must avoid bash-only constructs (the socket-wait loop uses POSIX `[ -S ]` / `$(())`)."""
     command = str(codex_agent.assemble_command(codex_agent.host, ("a b", "--flag"), None))
     assert_posix_compatible(command)
+
+
+# =============================================================================
+# wait_for_ready_signal (app-server readiness)
+# =============================================================================
+
+
+def _make_remote_codex_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, command_results: dict[str, CommandResult]
+) -> CodexAgent:
+    """Build a codex agent whose (non-local) host answers shell probes from a script."""
+    host = _stub_host(tmp_path / "remote_host", is_local=False, command_results=command_results)
+    return CodexAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-codex"),
+        agent_type=AgentTypeName("codex"),
+        work_dir=tmp_path / "work",
+        create_time=datetime.now(timezone.utc),
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=CodexAgentConfig(),
+        host=host,
+    )
+
+
+def test_wait_for_ready_signal_runs_start_action_and_skips_wait_when_not_awaited(
+    codex_agent: CodexAgent,
+) -> None:
+    calls: list[str] = []
+    codex_agent.wait_for_ready_signal(False, lambda: calls.append("started"))
+    # start_action ran; no readiness wait was performed (nothing to connect to).
+    assert calls == ["started"]
+
+
+def test_wait_for_ready_signal_times_out_when_daemon_never_binds(codex_agent: CodexAgent) -> None:
+    """On a local host, readiness connects to the socket; a missing daemon times out cleanly."""
+    calls: list[str] = []
+    with pytest.raises(AgentStartError):
+        codex_agent.wait_for_ready_signal(True, lambda: calls.append("started"), timeout=0.3)
+    assert calls == ["started"]
+
+
+def test_wait_for_ready_signal_ready_when_remote_socket_present(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_remote_codex_agent(
+        local_provider, tmp_path, {"test -S": CommandResult(stdout="ready\n", stderr="", success=True)}
+    )
+    # Returns without raising once the socket is present on the (remote) host.
+    agent.wait_for_ready_signal(True, lambda: None, timeout=5.0)
+
+
+def test_wait_for_ready_signal_remote_times_out_when_socket_absent(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_remote_codex_agent(
+        local_provider, tmp_path, {"test -S": CommandResult(stdout="", stderr="", success=True)}
+    )
+    with pytest.raises(AgentStartError):
+        agent.wait_for_ready_signal(True, lambda: None, timeout=0.3)
+
+
+def test_wait_for_ready_signal_establishes_and_persists_root_conversation(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """On create (awaited), once the daemon is ready mngr establishes ONE root conversation.
+
+    It ``thread/start``s a thread, materializes its rollout with ``thread/inject_items`` (a single
+    environmentContext item, no model turn), and persists the returned id to BOTH pointer files --
+    so ``assemble_command``'s ``codex resume <id> --remote`` and the send/status bind path all land
+    on the same conversation.
+    """
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/start", {"thread": {"id": "root-1", "status": {"type": "idle"}}})
+    transport.respond_result("thread/inject_items", {})
+
+    fake_rollout = tmp_path / "sessions" / "2026" / "01" / "01" / "rollout-2026-01-01T00-00-00-root-1.jsonl"
+
+    class _Agent(CodexAgent):
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            return transport
+
+        # Skip the real socket handshake; the scripted transport stands in for the daemon.
+        def _wait_for_app_server_ready(self, timeout: float | None) -> None:
+            return None
+
+        # No live tmux pane here; the hook-trust clear is a tmux concern, tested on its own below.
+        def _clear_hook_trust_prompt(self) -> None:
+            return None
+
+        # Stand in for the rollout the daemon would materialize, so the transcript-path write runs
+        # without a live daemon (and without the find racing a real file).
+        def _find_adopted_rollout_path(
+            self, host: OnlineHostInterface, sessions_dir: Path, session_id: str
+        ) -> Path | None:
+            return fake_rollout if session_id == "root-1" else None
+
+    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    calls: list[str] = []
+    agent.wait_for_ready_signal(True, lambda: calls.append("started"))
+
+    assert calls == ["started"]
+    assert "thread/start" in transport.sent_methods()
+    assert "thread/inject_items" in transport.sent_methods()
+    assert transport.params_of("thread/inject_items")["items"] == [{"type": "environmentContext", "text": ""}]
+    # Materialize only -- never a model turn.
+    assert "turn/start" not in transport.sent_methods()
+    # The root id is persisted to both pointer files (same value == the rollout session id).
+    assert (agent._get_agent_dir() / ROOT_SESSION_FILENAME).read_text().strip() == "root-1"
+    assert (agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME).read_text().strip() == "root-1"
+    # mngr records the rollout path for the transcript streamer (the UserPromptSubmit hook that
+    # would normally do this never fires on a programmatic turn).
+    assert (agent._get_agent_dir() / TRANSCRIPT_PATH_FILENAME).read_text().strip() == str(fake_rollout)
+
+
+def test_wait_for_ready_signal_skips_establish_when_root_already_persisted(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An adopted root (``codex_root_session`` already written) is resumed as-is.
+
+    ``on_after_provisioning`` writes the pointer for an ``--adopt`` / ``--from`` clone, so
+    establishment must NOT start a second thread over it (no handshake, no ``thread/start``) -- but it
+    MUST still finish the pointers adopt does not write: bind the send/status path to the adopted
+    thread (``codex_app_server_thread``) and record its rollout (``codex_transcript_path``).
+    """
+    transport = _ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    transport.respond_result("thread/start", {"thread": {"id": "root-new", "status": {"type": "idle"}}})
+    fake_rollout = tmp_path / "sessions" / "2026" / "01" / "01" / "rollout-2026-01-01T00-00-00-adopted-9.jsonl"
+
+    class _Agent(CodexAgent):
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            return transport
+
+        def _wait_for_app_server_ready(self, timeout: float | None) -> None:
+            return None
+
+        # No live tmux pane here; the hook-trust clear is a tmux concern, tested on its own below.
+        def _clear_hook_trust_prompt(self) -> None:
+            return None
+
+        def _find_adopted_rollout_path(
+            self, host: OnlineHostInterface, sessions_dir: Path, session_id: str
+        ) -> Path | None:
+            return fake_rollout if session_id == "adopted-9" else None
+
+    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    agent_dir = agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / ROOT_SESSION_FILENAME).write_text("adopted-9")
+
+    agent.wait_for_ready_signal(True, lambda: None)
+
+    # Nothing sent: establishment short-circuited on the already-persisted root (no new thread).
+    assert transport.sent_methods() == []
+    assert (agent_dir / ROOT_SESSION_FILENAME).read_text().strip() == "adopted-9"
+    # But the adopted pointers are completed so sends bind the adopted thread and the transcript fills.
+    assert (agent_dir / APP_SERVER_THREAD_FILENAME).read_text().strip() == "adopted-9"
+    assert (agent_dir / TRANSCRIPT_PATH_FILENAME).read_text().strip() == str(fake_rollout)
+
+
+_HOOK_TRUST_SCREEN = "  Hooks need review\n  8 hooks are new or changed.\n  2. Trust all and continue\n"
+_COMPOSER_SCREEN = "  OpenAI Codex (v0.147.0)\n  model: gpt-5.5   /model to change\n"
+
+
+def test_clear_hook_trust_prompt_selects_trust_all_when_prompt_is_showing(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """When the --remote TUI shows "Hooks need review", mngr selects "Trust all and continue".
+
+    Until this is cleared the daemon's hooks stay untrusted and never fire (safety guards + the
+    session-pointer recorder), on typed OR programmatic turns -- so the create-time clear is what
+    makes the workspace hooks actually run.
+    """
+    sent: list[str] = []
+
+    class _Agent(CodexAgent):
+        def capture_pane_content(
+            self, include_scrollback: bool = False, window: "int | str | None" = None
+        ) -> str | None:
+            return _HOOK_TRUST_SCREEN
+
+        def _send_hook_trust_keypress(self) -> None:
+            sent.append("trust")
+
+    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    agent._clear_hook_trust_prompt()
+    assert sent == ["trust"]
+
+
+def test_is_on_hook_trust_prompt_detects_only_the_trust_screen(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """The detector is True only for the trust screen -- not the composer, not a blank/absent pane
+    (a false positive there would send a stray "2" into the conversation)."""
+
+    def _agent_with_pane(pane: str | None) -> CodexAgent:
+        class _Agent(CodexAgent):
+            def capture_pane_content(
+                self, include_scrollback: bool = False, window: "int | str | None" = None
+            ) -> str | None:
+                return pane
+
+        return _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+
+    assert _agent_with_pane(_HOOK_TRUST_SCREEN)._is_on_hook_trust_prompt() is True
+    assert _agent_with_pane(_COMPOSER_SCREEN)._is_on_hook_trust_prompt() is False
+    assert _agent_with_pane(None)._is_on_hook_trust_prompt() is False
+
+
+def test_app_server_client_version_is_a_nonempty_string() -> None:
+    assert isinstance(_app_server_client_version(), str)
+    assert _app_server_client_version() != ""
 
 
 # =============================================================================
@@ -464,10 +1175,13 @@ def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent, isolated_
     hooks_path = get_codex_hooks_path(codex_home)
     assert hooks_path.exists()
     hooks_text = hooks_path.read_text()
-    assert SET_ACTIVE_MARKER_SCRIPT_NAME in hooks_text
-    assert CLEAR_ACTIVE_MARKER_SCRIPT_NAME in hooks_text
-    # The permission-waiting marker hooks (PermissionRequest/PostToolUse) are wired too.
-    assert PERMISSIONS_WAITING_FILENAME in hooks_text
+    # The one mngr hook records the session/transcript pointers; no lifecycle-marker hooks.
+    assert RECORD_SESSION_POINTERS_SCRIPT_NAME in hooks_text
+    assert "set_active_marker.sh" not in hooks_text
+    assert "clear_active_marker.sh" not in hooks_text
+    assert "permissions_waiting" not in hooks_text
+    # The session-pointer recorder script is provisioned into commands/.
+    assert (codex_agent._get_agent_dir() / "commands" / RECORD_SESSION_POINTERS_SCRIPT_NAME).exists()
 
     # auth.json is a symlink to the shared user auth.json. With the shared auth
     # seeded (isolated_codex_home), the symlink resolves to that real file rather
@@ -871,50 +1585,32 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
 
 
 # =============================================================================
-# Lifecycle state + waiting_reason field generator
+# Lifecycle promotion + waiting_reason field generator
 # =============================================================================
 
 
-@pytest.mark.tmux
-def test_lifecycle_reports_waiting_when_blocked_on_permission(
-    local_provider: LocalProviderInstance, tmp_path: Path
+@pytest.mark.parametrize(
+    "base_state, is_blocked, expected",
+    [
+        # Only a RUNNING base is promoted, and only while blocked on a dialog.
+        (AgentLifecycleState.RUNNING, True, AgentLifecycleState.WAITING),
+        (AgentLifecycleState.RUNNING, False, AgentLifecycleState.RUNNING),
+        # Every non-RUNNING base passes through unchanged, blocked or not.
+        (AgentLifecycleState.WAITING, True, AgentLifecycleState.WAITING),
+        (AgentLifecycleState.STOPPED, True, AgentLifecycleState.STOPPED),
+        (AgentLifecycleState.REPLACED, True, AgentLifecycleState.REPLACED),
+        (AgentLifecycleState.DONE, True, AgentLifecycleState.DONE),
+        (
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+            True,
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        ),
+    ],
+)
+def test_resolve_lifecycle_state_for_permission(
+    base_state: AgentLifecycleState, is_blocked: bool, expected: AgentLifecycleState
 ) -> None:
-    """End-to-end against a live pane: the lifecycle reads RUNNING, and a
-    permissions_waiting marker turns it to WAITING; removing the marker restores RUNNING.
-    (The state rule itself is unit-tested without tmux in mngr core, over
-    ``determine_lifecycle_probe_result``.)"""
-    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
-    # A long-lived process that ps reports as "codex" (the expected process name) so
-    # the base lifecycle reads RUNNING -- the renamed-sleep trick from base_agent_test.
-    sleep_bin = shutil.which("sleep")
-    assert sleep_bin is not None
-    fake_codex = tmp_path / "codex"
-    shutil.copy(sleep_bin, fake_codex)
-    fake_codex.chmod(0o755)
-    agent_dir = agent._get_agent_dir()
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / ACTIVE_MARKER_FILENAME).write_text("")
-    session_name = agent.session_name
-    window_name = agent.mngr_ctx.config.tmux.primary_window_name
-    # Name the primary window so lifecycle detection (which targets it by name) finds the pane.
-    agent.host.execute_idempotent_command(
-        f"tmux new-session -d -s {shlex.quote(session_name)} -n {shlex.quote(window_name)} {shlex.quote(str(fake_codex))} 600",
-        timeout_seconds=5.0,
-    )
-    try:
-        wait_for(
-            lambda: agent.get_lifecycle_state() == AgentLifecycleState.RUNNING,
-            error_message="expected codex agent to read RUNNING with a live pane",
-        )
-        (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
-        assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
-        # The agent listing reads the probe rather than get_lifecycle_state, so both must agree.
-        assert agent.probe_lifecycle().state == AgentLifecycleState.WAITING
-        (agent_dir / PERMISSIONS_WAITING_FILENAME).unlink()
-        assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
-        assert agent.probe_lifecycle().state == AgentLifecycleState.RUNNING
-    finally:
-        cleanup_tmux_session(session_name)
+    assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
 
 
 def test_agent_field_generators_exposes_codex_waiting_reason() -> None:
@@ -926,38 +1622,24 @@ def test_agent_field_generators_exposes_codex_waiting_reason() -> None:
     assert callable(generators["waiting_reason"])
 
 
-def test_waiting_reason_returns_permissions_when_active_and_blocked(codex_agent: CodexAgent) -> None:
-    """A real open dialog: the active marker (set at turn start) is present *and*
-    permissions_waiting is present, so the agent is blocked on an approval dialog."""
-    agent_dir = codex_agent._get_agent_dir()
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / ACTIVE_MARKER_FILENAME).touch()
-    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
-    assert _waiting_reason(codex_agent, codex_agent.host) == WaitingReason.PERMISSIONS
+def test_waiting_reason_generator_reports_permissions_from_live_status(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """The field generator delegates to the live-status read: a parked approval -> PERMISSIONS."""
+    transport = _status_transport(
+        {"type": "active", "activeFlags": ["waitingOnApproval"]}, [{"id": "turn-1", "status": "inProgress"}]
+    )
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert _waiting_reason(agent, agent.host) == WaitingReason.PERMISSIONS
 
 
-def test_waiting_reason_ignores_stranded_permissions_marker_after_turn(codex_agent: CodexAgent) -> None:
-    """A stranded permissions_waiting marker (active absent -> turn over) reports
-    END_OF_TURN, not PERMISSIONS. The PERMISSIONS verdict is gated on the active
-    marker, so correctness does not depend on the Stop/UserPromptSubmit safety nets
-    having deleted the file."""
-    agent_dir = codex_agent._get_agent_dir()
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
-    assert _waiting_reason(codex_agent, codex_agent.host) == WaitingReason.END_OF_TURN
-
-
-def test_waiting_reason_returns_end_of_turn_when_idle(codex_agent: CodexAgent) -> None:
-    agent_dir = codex_agent._get_agent_dir()
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    assert _waiting_reason(codex_agent, codex_agent.host) == WaitingReason.END_OF_TURN
-
-
-def test_waiting_reason_returns_none_when_active(codex_agent: CodexAgent) -> None:
-    agent_dir = codex_agent._get_agent_dir()
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / ACTIVE_MARKER_FILENAME).touch()
-    assert _waiting_reason(codex_agent, codex_agent.host) is None
+def test_waiting_reason_generator_returns_end_of_turn_for_an_idle_daemon(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """An idle live thread reads END_OF_TURN through the generator (the daemon is the sole source)."""
+    transport = _status_transport({"type": "idle"}, [])
+    agent = _live_codex_agent(local_provider, tmp_path, transport, AgentLifecycleState.RUNNING)
+    assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
 
 
 # =============================================================================
@@ -1347,3 +2029,50 @@ def test_on_before_create_fails_fast_on_a_bad_adopt_id(local_provider: LocalProv
     args = _on_before_create_args(local_provider, adopt_session=("not-a-real-session-id",))
     with pytest.raises(UserInputError):
         on_before_create(args, local_provider.mngr_ctx)
+
+
+class _StyleReadingHost:
+    """Minimal host exposing only what ``read_output_style_files`` touches."""
+
+    def __init__(self, styles_dir: Path, style_body: str) -> None:
+        self._styles_dir = styles_dir
+        self._style_body = style_body
+
+    def path_exists(self, path: Path) -> bool:
+        return path == self._styles_dir
+
+    def list_directory(self, path: Path, recursive: bool = False) -> list[Any]:
+        return [SimpleNamespace(path="engineering-subordinate.md", file_type=FileType.FILE)]
+
+    def read_text_file(self, path: Path) -> str:
+        return self._style_body
+
+
+def test_a_style_and_every_stacked_prompt_reach_codex_developer_instructions(tmp_path: Path) -> None:
+    """Codex has no output-style concept, so the style body and the prompts share one channel.
+
+    Each stacked role's block comes first in order, then the style body verbatim (frontmatter
+    included, so a style reads identically whichever harness runs it). Three sentinels, so a
+    dropped or reordered piece is visible rather than inferred.
+    """
+    styles_dir = tmp_path / ".agents" / "output-styles"
+    style_body = "---\nname: Engineering Subordinate\n---\nSENTINEL_C"
+    agent = CodexAgent.model_construct(
+        agent_config=CodexAgentConfig(
+            output_style=OutputStyleName("Engineering Subordinate"),
+            append_system_prompt=(SystemPromptText("SENTINEL_A"), SystemPromptText("SENTINEL_B")),
+        ),
+        work_dir=str(tmp_path),
+    )
+    instructions = agent._build_developer_instructions(cast(Any, _StyleReadingHost(styles_dir, style_body)))
+
+    assert instructions is not None
+    for sentinel in ("SENTINEL_A", "SENTINEL_B", "SENTINEL_C"):
+        assert sentinel in instructions, f"{sentinel} missing from developer_instructions"
+    # Roles in stack order, style last.
+    assert instructions.index("SENTINEL_A") < instructions.index("SENTINEL_B") < instructions.index("SENTINEL_C")
+
+
+def test_codex_developer_instructions_is_none_when_no_role_contributed_anything() -> None:
+    agent = CodexAgent.model_construct(agent_config=CodexAgentConfig(), work_dir="/nonexistent")
+    assert agent._build_developer_instructions(cast(Any, object())) is None

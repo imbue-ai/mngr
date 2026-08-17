@@ -17,8 +17,10 @@ from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import MessageResult
+from imbue.mngr.api.message import _deliver_text
 from imbue.mngr.api.message import _process_host_for_messaging
 from imbue.mngr.api.message import _send_message_to_agent
+from imbue.mngr.api.message import send_key_chord_to_agents
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -81,6 +83,20 @@ def test_send_message_to_agents_returns_empty_result_when_no_agents(
     result = send_message_to_agents(
         mngr_ctx=temp_mngr_ctx,
         message_content="Hello",
+        agents_to_message=[],
+    )
+
+    assert result.successful_agents == []
+    assert result.failed_agents == []
+
+
+def test_send_key_chord_to_agents_returns_empty_result_when_no_agents(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """send_key_chord_to_agents returns an empty result when no agents are provided."""
+    result = send_key_chord_to_agents(
+        mngr_ctx=temp_mngr_ctx,
+        key="M-q",
         agents_to_message=[],
     )
 
@@ -353,6 +369,7 @@ def test_send_message_records_failure_when_revive_fails(
         agent=agent,
         host=agent.host,
         message_content="hello",
+        deliver=_deliver_text,
         result=result,
         result_lock=Lock(),
         error_behavior=ErrorBehavior.CONTINUE,
@@ -422,6 +439,7 @@ def test_send_message_records_failure_when_the_lifecycle_probe_raises(
             agent=agent,
             host=agent.host,
             message_content="hello",
+            deliver=_deliver_text,
             result=result,
             result_lock=Lock(),
             error_behavior=error_behavior,
@@ -511,6 +529,7 @@ def test_unreachable_host_fails_its_agents_or_aborts(
             matches=_make_matches_on_host(provider, host_id, "stopped-host", agent_names),
             provider=provider,
             message_content="hello",
+            deliver=_deliver_text,
             error_behavior=error_behavior,
             is_start_desired=is_start_desired,
             result=result,
@@ -569,6 +588,7 @@ def test_host_that_cannot_list_its_agents_fails_them(
         matches=_make_matches_on_host(provider, provider.host_id, "test", agent_names),
         provider=provider,
         message_content="hello",
+        deliver=_deliver_text,
         error_behavior=ErrorBehavior.CONTINUE,
         is_start_desired=False,
         result=result,
@@ -615,6 +635,7 @@ def test_agent_missing_from_its_host_is_recorded_before_the_abort(
             matches=matches,
             provider=local_provider,
             message_content="hello",
+            deliver=_deliver_text,
             error_behavior=error_behavior,
             is_start_desired=False,
             result=result,

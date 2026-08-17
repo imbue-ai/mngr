@@ -38,6 +38,8 @@ from imbue.mngr.agents.common_transcript import maybe_provision_common_transcrip
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.output_styles import read_output_style_files
+from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import POST_SUBMIT_DIALOG_OBSERVE_SECONDS
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
@@ -96,6 +98,8 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import OutputStyleName
+from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
@@ -105,6 +109,7 @@ from imbue.mngr_claude import resources as _claude_resources
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import ClaudeOnboardingNotCompletedError
+from imbue.mngr_claude.claude_config import KEYBINDINGS_FILENAME
 from imbue.mngr_claude.claude_config import MANAGED_SETTINGS_RELATIVE_PATH
 from imbue.mngr_claude.claude_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
@@ -117,6 +122,7 @@ from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.claude_config import ensure_chat_cancel_tap_keybinding
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_config_in_isolated_mode
 from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
@@ -135,6 +141,12 @@ from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
+
+# The agent's live model selection, at the agent state dir root, for any client
+# that wants to show or reconcile it. Seeded at provision from the launch
+# settings; thereafter written by the statusline script. Kept in sync with
+# claude_status_line.sh, the workspace-side writer.
+_MODEL_STATE_FILE_NAME: Final[str] = "model_state.json"
 
 # Budget for leaving a bare-`!` shell-mode strand: retries, and the wait for the
 # `❯` prompt to return after each.
@@ -252,8 +264,32 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
     return adopt_session_arg, match.parent
 
 
+# Separator between stacked `append_system_prompt` blocks. Blank line, so each role's
+# block reads as its own paragraph in the assembled prompt.
+APPEND_SYSTEM_PROMPT_SEPARATOR: Final[str] = "\n\n"
+
+
 class ClaudeAgentConfig(AgentTypeConfig):
     """Config for the claude agent type."""
+
+    # --- role behaviour, set by a create template and applied by this harness ---
+    #
+    # Both are harness-neutral *intent*: a role states them once and each harness applies
+    # them its own way. They live on the harness subclasses rather than AgentTypeConfig so
+    # a harness that cannot honour them has no field to route to -- the create then fails
+    # naming the template, instead of launching an agent that quietly ignores its role.
+    output_style: OutputStyleName | None = Field(
+        default=None,
+        description="Name of an output style to launch with, matched against the `name:` "
+        "frontmatter of a file in the work dir's output-style directory. Scalar: the last "
+        "template in the stack to set it wins.",
+    )
+    append_system_prompt: tuple[SystemPromptText, ...] = Field(
+        default=(),
+        description="Blocks to append to the agent's system prompt, in stack order. Aggregate: "
+        "write `append_system_prompt__extend = [...]` in a template so stacked roles each "
+        "contribute a block instead of the last one replacing the rest.",
+    )
 
     command: CommandString = Field(
         default=CommandString("claude"),
@@ -568,6 +604,14 @@ an mngr agent rather than in the user's persistent ~/.claude/ directory.
 _MANAGED_SETTINGS_SHELL_PATH: Final[str] = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
 MANAGED_SETTINGS_LAUNCH_ARG: Final[str] = f'--settings "{_MANAGED_SETTINGS_SHELL_PATH}"'
 
+# Where claude itself looks for output styles, relative to the work_dir. mngr validates
+# `output_style` against this exact path -- the one claude will read -- so a name that
+# resolves here is guaranteed to resolve for claude too.
+CLAUDE_OUTPUT_STYLES_DIR: Final[str] = ".claude/output-styles"
+
+# The settings.json key claude reads to select an output style by name.
+OUTPUT_STYLE_SETTING_KEY: Final[str] = "outputStyle"
+
 
 _PLUGINS_DIR_MARKER: Final[str] = "/plugins/"
 """Generic marker for extracting relative plugin paths.
@@ -669,6 +713,7 @@ def _build_settings_json(
     *,
     is_unattended: bool = False,
     allow_narrowing: bool = False,
+    extra_settings: dict[str, Any] | None = None,
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
@@ -702,6 +747,10 @@ def _build_settings_json(
     data = apply_settings_patch(
         data, config.settings_overrides, allow_narrowing=allow_narrowing, base_description=base_description
     )
+    # Applied last so a resolved agent-type setting (currently only `output_style`) wins
+    # over a settings_overrides value for the same key.
+    if extra_settings:
+        data.update(extra_settings)
     return json.dumps(data, indent=2) + "\n"
 
 
@@ -1910,6 +1959,23 @@ class ClaudeCoreAgent(
 
         return transfers
 
+    def _build_output_style_settings(self, host: OnlineHostInterface) -> dict[str, Any]:
+        """Return the ``outputStyle`` settings patch for this agent type, or ``{}`` if unset.
+
+        Claude resolves the style file itself at launch, so mngr only needs to pass the
+        name -- but it validates first, against ``.claude/output-styles/`` in the work_dir:
+        the very directory claude will read. Validating claude's own path (rather than
+        wherever the styles are authored, which may be a symlink away) is what turns a
+        broken link or a misspelled name into a failed create instead of an agent that
+        launches silently unstyled.
+        """
+        if self.agent_config.output_style is None:
+            return {}
+        styles_dir = Path(self.work_dir) / CLAUDE_OUTPUT_STYLES_DIR
+        # Raises UserInputError, listing what is available, when the name has no match.
+        resolve_output_style(self.agent_config.output_style, read_output_style_files(host, styles_dir))
+        return {OUTPUT_STYLE_SETTING_KEY: str(self.agent_config.output_style)}
+
     def _configure_agent_hooks(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
         """Write mngr's hooks (and the user's settings_overrides) to the managed settings file.
 
@@ -1945,6 +2011,11 @@ class ClaudeCoreAgent(
             allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
             base_description="mngr's managed Claude hooks",
         )
+        # Folded on last so a role's `output_style` wins over a settings_overrides
+        # outputStyle. Merged into the resolved dict rather than layered as config, so it
+        # cannot disturb the model / fastMode / skipDangerousModePermissionPrompt keys
+        # already resolved above.
+        settings.update(self._build_output_style_settings(host))
 
         settings_path = get_managed_settings_path(self._get_agent_dir())
         # The plugin/claude/ parent may not exist yet (in use_env_config_dir
@@ -2049,6 +2120,8 @@ class ClaudeCoreAgent(
             sync_local=config.sync_home_settings,
             is_unattended=self.is_unattended_enabled(),
             allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
+            # Same fold as the shared-mode path in _configure_agent_hooks.
+            extra_settings=self._build_output_style_settings(host),
         )
 
         generated_files: dict[Path, str] = {
@@ -2208,6 +2281,19 @@ class ClaudeCoreAgent(
             # actually reads); in isolated mode the per-agent config inherits it.
             acknowledge_cost_threshold(self._dialog_dismissal_config_path())
 
+            # Seed the live model state from the launch settings so the chat
+            # model bar is populatable the moment readiness fires (the
+            # statusline, the live writer, first fires seconds later).
+            self._seed_model_state(host)
+
+            # Provision the Chat-only meta+q -> chat:cancel chord the dwt shoulder tap
+            # delivers to flush the parked message queue natively. Merged into the
+            # user-scope keybindings.json (idempotent, never clobbering an existing
+            # meta+q): in shared mode claude reads it directly; in isolated mode the
+            # per-agent config dir inherits it via _sync_user_resources, the same way
+            # keybindings.json is already synced.
+            ensure_chat_cancel_tap_keybinding(get_user_claude_config_dir() / KEYBINDINGS_FILENAME)
+
             # Transfer plugin data from source agent before config setup (if cloning via --from).
             # This copies sessions, memory, transcript offsets, etc. The subsequent config setup
             # will overwrite identity-specific files (.claude.json, credentials) with fresh values.
@@ -2230,6 +2316,34 @@ class ClaudeCoreAgent(
 
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_backgroun_script_thread.join(60.0)
+
+    def _seed_model_state(self, host: OnlineHostInterface) -> None:
+        """Seed ``model_state.json`` from the launch settings before first start.
+
+        The statusline script (``claude_status_line.sh``) is the live writer of
+        this file, but its first fire lands seconds after the session starts --
+        after the chat surface is already visible. The launch settings know the
+        model at provision time, so seeding here makes the model bar populatable
+        the moment readiness fires; the statusline's later writes reconcile the
+        seed to claude's self-reported values. The seeded model is the settings
+        value verbatim (a catalog option id like ``opus[1m]``), which the chat
+        UI's matcher accepts alongside claude's reported ids. Skipped when no
+        model is pinned in ``settings_overrides`` (nothing authoritative to
+        seed).
+        """
+        overrides = self.agent_config.settings_overrides
+        model = overrides.get("model")
+        if not isinstance(model, str) or not model:
+            return
+        effort = overrides.get("effortLevel")
+        state: dict[str, Any] = {
+            "model": model,
+            "effort": effort if isinstance(effort, str) else None,
+            "fast": overrides.get("fastMode") is True,
+        }
+        state_path = self._get_agent_dir() / _MODEL_STATE_FILE_NAME
+        with log_span("Seeding model state at {}", state_path):
+            write_json_dict_via_host(host, state_path, state, make_parent=True)
 
     def _transfer_source_plugin_data(self, source_agent_state_location: HostLocation) -> None:
         """Rsync the source agent's ``plugin/`` into this agent's state dir.
@@ -2883,6 +2997,22 @@ class ClaudeAgent(
         script_path = "$MNGR_AGENT_STATE_DIR/commands/claude_background_tasks.sh"
         return f"( {script_path} {shlex.quote(session_name)} {shlex.quote(primary_window_name)} ) &"
 
+    def _build_append_system_prompt_args(self) -> tuple[str, ...]:
+        """Turn this agent type's ``append_system_prompt`` blocks into claude's own flag.
+
+        Joined into ONE flag rather than repeated: claude's ``--append-system-prompt`` is
+        last-wins, verified against claude 2.1.220, so passing the flag per block would
+        deliver only the final one and silently drop every role stacked before it.
+
+        ``output_style`` is deliberately absent here: claude takes it as the ``outputStyle``
+        setting written during provisioning (see ``_build_output_style_settings``), not as a
+        launch flag.
+        """
+        blocks = self.agent_config.append_system_prompt
+        if not blocks:
+            return ()
+        return ("--append-system-prompt", APPEND_SYSTEM_PROMPT_SEPARATOR.join(str(block) for block in blocks))
+
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -2942,6 +3072,10 @@ class ClaudeAgent(
         # (Claude is last-wins) -- the accepted, documented limitation of that mode.
         cli_args = self.agent_config.cli_args
         all_extra_args = cli_args + quote_agent_args(agent_args)
+        # Role-contributed system-prompt blocks, joined into a single flag (see
+        # _build_append_system_prompt_args). Quoted here rather than in the builder so the
+        # builder stays a plain value function.
+        all_extra_args = all_extra_args + quote_agent_args(self._build_append_system_prompt_args())
         # Claude appends & unions repeated --disallowed-tools flags.
         if self.agent_config.auto_disable_questions:
             all_extra_args = all_extra_args + ("--disallowed-tools", "AskUserQuestion")

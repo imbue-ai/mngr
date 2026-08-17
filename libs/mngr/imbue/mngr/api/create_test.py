@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -6,6 +7,7 @@ import pytest
 from pydantic import Field
 
 from imbue.mngr import hookimpl
+from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.create import _create_new_host
 from imbue.mngr.api.create import _generate_unique_host_name
 from imbue.mngr.api.create import _run_post_host_create_commands
@@ -16,8 +18,12 @@ from imbue.mngr.api.create import create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.providers import _instance_cache
+from imbue.mngr.config.agent_class_registry import register_agent_class
+from imbue.mngr.config.agent_config_registry import register_agent_config
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
@@ -45,6 +51,7 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.plugin_testing import PLACEHOLDER_AGENT_TYPE
+from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 
 
@@ -601,3 +608,49 @@ def test_validate_session_adoption_allows_adopt_with_clone_source(
         ),
         temp_mngr_ctx,
     )
+
+
+class _NeverReadyAgent(SendKeysAgent[AgentTypeConfig]):
+    """Agent whose readiness wait starts the process and then always times out."""
+
+    def wait_for_ready_signal(
+        self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
+    ) -> None:
+        start_action()
+        raise AgentStartError(str(self.name), "simulated readiness timeout")
+
+
+@pytest.mark.tmux
+def test_create_on_existing_host_tears_down_agent_when_readiness_wait_fails(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """A create whose readiness wait times out destroys the half-started agent.
+
+    The agent process is already running when the wait gives up; without the
+    teardown it would linger as a registered, running agent while create()
+    reports failure (the zombie the chat UI then mistakes for a live agent).
+    """
+    register_agent_class("never-ready", _NeverReadyAgent)
+    register_agent_config("never-ready", AgentTypeConfig)
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    with allow_warnings():
+        with pytest.raises(AgentStartError, match="simulated readiness timeout"):
+            create(
+                source_location=HostLocation(host=host, path=temp_work_dir),
+                target_host=host,
+                agent_options=CreateAgentOptions(
+                    name=AgentName("never-ready-agent"),
+                    agent_type=AgentTypeName("never-ready"),
+                    command=CommandString("sleep 60"),
+                    transfer_mode=TransferMode.NONE,
+                    label_options=AgentLabelOptions(),
+                ),
+                mngr_ctx=temp_mngr_ctx,
+                create_work_dir=False,
+            )
+
+    assert host.get_agents() == []

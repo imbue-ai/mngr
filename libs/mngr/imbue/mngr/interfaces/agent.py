@@ -775,6 +775,36 @@ def require_interactive_agent(agent: AgentInterface[Any]) -> InteractiveAgentMix
     return agent
 
 
+class SupportsKeyChordMixin(ABC):
+    """Mixin for agent types whose runtime lives in a tmux pane we can press keys into.
+
+    The contract is a single ``press_key_chord`` that delivers ONE tmux key token
+    (e.g. ``"M-q"``, ``"C-c"``) into the agent's pane, serialized against concurrent
+    text sends by the same per-agent message lock. Only keystroke-driven agents
+    (``SendKeysAgent`` / ``InteractiveTuiAgent``) can honor it -- headless and
+    server/extension-driven agents (opencode, pi) drive their input over an API and
+    have no pane to press into, so they do not inherit this. Callers narrow with
+    ``require_key_chord_agent`` to refuse those with a clear error.
+    """
+
+    @abstractmethod
+    def press_key_chord(self, key: str) -> None:
+        """Press a single tmux key token (e.g. ``"M-q"``) in the running agent's pane."""
+        ...
+
+
+def require_key_chord_agent(agent: AgentInterface[Any]) -> SupportsKeyChordMixin:
+    """Return ``agent`` narrowed to :class:`SupportsKeyChordMixin`, or raise if it takes no key chords.
+
+    Used by the key-chord delivery path (``send_key_chord_to_agents``) to refuse an
+    agent type whose input is not a tmux pane (headless, or an API-driven harness)
+    with a clear error rather than an attribute error.
+    """
+    if not isinstance(agent, SupportsKeyChordMixin):
+        raise SendMessageError(str(agent.name), f"agent type '{agent.agent_type}' does not accept key chords")
+    return agent
+
+
 class CliBackedAgentMixin:
     """Marker for agents that wrap a specific external coding-model CLI (claude, codex,
     antigravity, opencode, pi), as opposed to the bare ``command`` / ``headless_command``

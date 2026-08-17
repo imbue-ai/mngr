@@ -290,8 +290,17 @@ def test_prevent_bash_without_strict_mode() -> None:
     paths; the snapshot is pinned to the highest observed count. Adding
     ``sigwinch_panes.sh`` alongside the per-session SIGWINCH client-attached hook
     raised that count from 11 to 12.
+
+    The helper scans the whole git repository containing ``_REPO_ROOT``. When
+    this checkout is vendored inside another git repository (e.g. as a subtree
+    under ``system/vendor/mngr``), that repository is the outer one, so scope
+    the result to scripts under the mngr checkout itself; in a standalone
+    checkout the filter is a no-op.
     """
-    violations = find_bash_scripts_without_strict_mode(_REPO_ROOT)
+    checkout_root = _REPO_ROOT.resolve()
+    violations = [
+        v for v in find_bash_scripts_without_strict_mode(_REPO_ROOT) if Path(v).resolve().is_relative_to(checkout_root)
+    ]
     assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )

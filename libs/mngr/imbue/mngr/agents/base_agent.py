@@ -36,6 +36,7 @@ from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
+from imbue.mngr.interfaces.agent import SupportsKeyChordMixin
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -672,7 +673,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """
 
 
-class SendKeysAgent(InteractiveAgentMixin, BaseAgent[AgentConfigT]):
+class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[AgentConfigT]):
     """A ``BaseAgent`` that delivers interactive messages by sending keystrokes into its tmux pane.
 
     Shared by the keystroke-driven agents -- the interactive TUI coding agents
@@ -680,8 +681,29 @@ class SendKeysAgent(InteractiveAgentMixin, BaseAgent[AgentConfigT]):
     and the server/extension-driven agents (opencode, pi) do not use this:
     headless agents take no interactive input at all, and opencode/pi implement
     ``send_message`` against their own APIs. Implements the
-    ``InteractiveAgentMixin`` contract with a literal-text-plus-Enter send.
+    ``InteractiveAgentMixin`` contract with a literal-text-plus-Enter send, and the
+    ``SupportsKeyChordMixin`` contract with a single locked tmux key press.
     """
+
+    def press_key_chord(self, key: str) -> None:
+        """Press ONE tmux key token (e.g. ``"M-q"``) into the agent's pane, under the message lock.
+
+        Holds the same per-agent ``message.lock`` as ``send_message`` so a chord can
+        never interleave with a text send (whose literal text and Enter are two
+        separate tmux writes): an unserialized chord landing between them would cancel
+        a half-delivered message. The token is passed straight to ``tmux send-keys``
+        as a key name (NOT ``-l`` literal), so ``M-q`` reaches the pane as Meta+q.
+        The choice of which key to press belongs to the caller; this presses whatever
+        it is given.
+        """
+        with self._message_lock(), log_span("Pressing key chord {} to agent {}", key, self.name):
+            target_arg = self.tmux_target.as_shell_arg()
+            send_cmd = f"tmux send-keys -t {target_arg} {shlex.quote(key)}"
+            result = self.host.execute_stateful_command(send_cmd)
+            if not result.success:
+                raise SendMessageError(
+                    str(self.name), f"tmux send-keys {key} failed: {result.stderr or result.stdout}"
+                )
 
     def send_message(self, message: str) -> None:
         """Send a message to the running agent.

@@ -17,6 +17,7 @@ from imbue.mngr.api.message import send_message_with_resend_guidance
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import DuplicateAgentIdOnHostError
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
@@ -401,26 +402,50 @@ def create(
                         agent.stage_initial_message(initial_message)
                     logger.info("Starting agent {} ...", agent.name)
                     host.start_agents([agent.id])
-                elif initial_message is not None:
-                    # Start agent with signal-based readiness detection
-                    # Raises AgentStartError if the agent doesn't signal readiness in time
+                else:
+                    # Start the agent and wait for its readiness signal BEFORE returning,
+                    # whether or not there is an initial message to send. Waiting even in
+                    # the no-message case means callers -- including the chat UI, which
+                    # always creates with no initial message -- only ever see the agent
+                    # once it can actually accept input. Otherwise a no-message create
+                    # returns the instant the process spawns, which for a slow-booting
+                    # harness (pi writes its session + model-state files several seconds
+                    # after launch) surfaces a live-looking agent that cannot yet take a
+                    # message. wait_for_ready_signal is the same per-harness check the
+                    # message path uses (claude/codex poll for the composer prompt in the
+                    # pane; pi waits for its session-started sentinel file); its base
+                    # implementation just runs start_action, so a plain command agent that
+                    # does not override it starts exactly as before, with no wait.
+                    # Raises AgentStartError if the agent doesn't signal readiness in time.
                     logger.info("Starting agent {} ...", agent.name)
                     timeout = (
                         agent_options.ready_timeout_seconds
                         if agent_options.ready_timeout_seconds is not None
                         else mngr_ctx.config.agent_ready_timeout
                     )
-                    agent.wait_for_ready_signal(
-                        is_readiness_awaited=True,
-                        start_action=lambda: host.start_agents([agent.id]),
-                        timeout=timeout,
-                    )
-                    logger.info("Sending initial message...")
-                    send_message_with_resend_guidance(agent, initial_message, "created and started")
-                else:
-                    # No initial message - just start the agent
-                    logger.info("Starting agent {} ...", agent.name)
-                    host.start_agents([agent.id])
+                    try:
+                        agent.wait_for_ready_signal(
+                            is_readiness_awaited=True,
+                            start_action=lambda: host.start_agents([agent.id]),
+                            timeout=timeout,
+                        )
+                    except AgentStartError:
+                        # The agent process is already running and may well finish booting
+                        # after the budget -- without a teardown it would linger as a
+                        # registered, running agent while this create reports failure
+                        # (and a chat UI showing the failure would later flip to a live
+                        # chat when the zombie surfaces). A failed create must leave
+                        # nothing behind. destroy_agent is best-effort aggregate; if it
+                        # cannot clean up, its CleanupFailedGroup propagates chained to
+                        # this readiness error.
+                        logger.warning(
+                            "Agent {} did not signal readiness within {}s; tearing it down", agent.name, timeout
+                        )
+                        host.destroy_agent(agent)
+                        raise
+                    if initial_message is not None:
+                        logger.info("Sending initial message...")
+                        send_message_with_resend_guidance(agent, initial_message, "created and started")
 
                 # Build and return the result
                 result = CreateAgentResult(agent=agent, host=host)

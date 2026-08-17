@@ -1,8 +1,10 @@
 """Unit tests for the codex common-transcript converter (common_transcript_convert.py).
 
-Exercises ``convert`` and its helpers directly against synthetic codex rollout
-streams on disk, without the surrounding shell script. The shell integration
-(common_transcript.sh invoking this module) is covered by common_transcript_test.py.
+Exercises ``convert`` and its helpers directly against codex rollout streams on
+disk -- both synthetic shapes and a real rollout captured from the patched codex
+0.146.0 build (test_fixtures/codex_0146_rollout_exec_turn.jsonl) -- without the
+surrounding shell script. The shell integration (common_transcript.sh invoking
+this module) is covered by common_transcript_test.py.
 """
 
 from __future__ import annotations
@@ -13,6 +15,12 @@ from typing import Any
 
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr_codex.resources import common_transcript_convert
+
+# A verbatim rollout captured live from the patched codex 0.146.0 build: one turn
+# that ran `echo fixture-marker && cat /etc/hostname` through the unified exec
+# tool (custom_tool_call / custom_tool_call_output) with the AGENTS.md context
+# injection riding in as a user-role message.
+_REAL_0146_ROLLOUT = Path(__file__).parent / "test_fixtures" / "codex_0146_rollout_exec_turn.jsonl"
 
 
 def _line(type_: str, payload: dict[str, Any], timestamp: str = "2026-06-09T07:00:00.000Z") -> dict[str, Any]:
@@ -95,6 +103,93 @@ def test_function_call_and_output_pair_into_tool_result(tmp_path: Path) -> None:
     assert "stop_reason" not in assistant[0]
     for event in events:
         assert validate_common_transcript_record(event) is None
+
+
+def test_custom_tool_call_and_output_pair_into_tool_result(tmp_path: Path) -> None:
+    # The 0.146 unified exec tool emits custom_tool_call (invocation under
+    # "input") / custom_tool_call_output; they must pair exactly like the
+    # legacy function_call shapes.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    call = _line(
+        "response_item",
+        {"type": "custom_tool_call", "name": "exec", "input": 'tools.exec_command({"cmd":"ls"})', "call_id": "c1"},
+    )
+    output = _line(
+        "response_item",
+        {"type": "custom_tool_call_output", "call_id": "c1", "output": [{"type": "input_text", "text": "file-a\n"}]},
+    )
+    _write(input_file, [call, output])
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 2
+    events = _events(output_file)
+    assistant = [e for e in events if e["type"] == "assistant_message"]
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert len(assistant) == 1 and len(results) == 1
+    assert assistant[0]["tool_calls"] == [
+        {"tool_call_id": "line-1-tc", "tool_name": "exec", "input_preview": 'tools.exec_command({"cmd":"ls"})'}
+    ]
+    assert results[0]["tool_call_id"] == "line-1-tc"
+    assert results[0]["tool_name"] == "exec"
+    assert results[0]["output"] == "file-a\n"
+    for event in events:
+        assert validate_common_transcript_record(event) is None
+
+
+def test_real_0146_rollout_surfaces_paired_tool_activity(tmp_path: Path) -> None:
+    # Fixture-driven guard against silent drops: the real 0.146 rollout ran one
+    # command, so the converted transcript must carry a NONZERO amount of tool
+    # activity (a schema-valid but tool-free output is exactly the original bug).
+    output_file = tmp_path / "out.jsonl"
+    assert common_transcript_convert.convert(str(_REAL_0146_ROLLOUT), str(output_file)) > 0
+    events = _events(output_file)
+    tool_calls = [call for e in events if e["type"] == "assistant_message" for call in e["tool_calls"]]
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert len(tool_calls) > 0, "real rollout yielded zero tool calls (silent drop)"
+    assert len(results) > 0, "real rollout yielded zero tool results (silent drop)"
+    # Every result pairs back to an emitted assistant tool_call.
+    call_ids = {call["tool_call_id"] for call in tool_calls}
+    for result in results:
+        assert result["tool_call_id"] in call_ids
+    # The one exec invocation and its output round-trip with their content.
+    assert len(tool_calls) == 1 and len(results) == 1
+    assert tool_calls[0]["tool_name"] == "exec"
+    assert "echo fixture-marker" in tool_calls[0]["input_preview"]
+    assert "fixture-marker" in results[0]["output"]
+    for event in events:
+        assert validate_common_transcript_record(event) is None
+
+
+def test_real_0146_rollout_emits_only_the_genuine_user_turn(tmp_path: Path) -> None:
+    # The AGENTS.md injection arrives as a giant user-role message; only the
+    # genuine user turn may surface as user_message -- exactly once.
+    output_file = tmp_path / "out.jsonl"
+    common_transcript_convert.convert(str(_REAL_0146_ROLLOUT), str(output_file))
+    user_contents = [e["content"] for e in _events(output_file) if e["type"] == "user_message"]
+    assert user_contents == ["run: echo fixture-marker && cat /etc/hostname"]
+
+
+def test_instruction_injection_shapes_are_skipped(tmp_path: Path) -> None:
+    # All three injection envelopes are dropped; the genuine turn still converts.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    agents_md = "# AGENTS.md instructions for /some/dir\n\n<INSTRUCTIONS>\nbe good\n</INSTRUCTIONS>"
+    _write(
+        input_file,
+        [
+            _user(agents_md),
+            _user("<user_instructions>\nalways answer in haiku\n</user_instructions>"),
+            _user("<environment_context>\ncwd: /tmp\n</environment_context>"),
+            _user("genuine question"),
+        ],
+    )
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
+    assert [e["content"] for e in _events(output_file)] == ["genuine question"]
+
+
+def test_agents_md_lookalike_without_envelope_is_kept(tmp_path: Path) -> None:
+    # A genuine user message that merely starts like the AGENTS.md header (no
+    # <INSTRUCTIONS> envelope) must NOT be filtered.
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user("# AGENTS.md instructions for this repo look wrong, can you fix them?")])
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 1
 
 
 def test_function_call_output_content_array_is_stringified(tmp_path: Path) -> None:

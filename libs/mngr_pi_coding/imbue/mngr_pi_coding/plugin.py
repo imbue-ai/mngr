@@ -18,6 +18,8 @@ from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
+from imbue.mngr.agents.output_styles import read_output_style_files
+from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
@@ -58,6 +60,8 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import OutputStyleName
+from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
@@ -73,16 +77,21 @@ _PI_AGENT_SUBDIR: str = "agent"
 # a synced subagent extension would load but find no agents to delegate to.
 #
 # Note: the ``npm`` dir (where ``pi install`` materialises npm-package extensions
-# under ``npm/node_modules``) is deliberately NOT synced. pi re-resolves the
-# ``packages`` list in the synced ``settings.json`` on every startup and
-# auto-installs any missing ones into the per-agent ``$PI_CODING_AGENT_DIR/npm``,
-# so npm-package extensions (e.g. ``npm:pi-subagents``) become available without
-# copying ``node_modules`` around, and each agent keeps an isolated install. The
-# only cost is a per-agent ``npm install`` (~1s) on first launch, which needs
-# network and so would not work on a fully-offline host; if that latency or the
-# offline case ever matters, copy ``npm`` into the per-agent dir here (copy, not
-# symlink -- a shared ``node_modules`` would race across concurrent startups).
+# under ``npm/node_modules``) is not symlink-synced like the dirs above -- a
+# shared ``node_modules`` would race across concurrent agent startups. It is
+# instead COPIED into the per-agent dir at provision time (see
+# ``_seed_npm_dir_from_home``): pi re-resolves the ``packages`` list in the
+# synced ``settings.json`` on every startup and installs anything missing into
+# the per-agent ``$PI_CODING_AGENT_DIR/npm`` BEFORE starting the session, which
+# on an unseeded agent costs 45-55s of npm ahead of the readiness sentinel.
+# With the seed, pi's startup resolve finds the packages present and first boot
+# is as fast as a warm boot; packages added to settings.json since the home
+# install still get delta-installed by pi itself.
 _SYNCED_RESOURCE_DIRS: tuple[str, ...] = ("skills", "prompts", "extensions", "themes", "agents")
+
+# The npm extension-install dir under both ``~/.pi/agent/`` and the per-agent
+# config dir. Kept in sync with pi's own layout.
+_NPM_DIR_NAME: str = "npm"
 
 # The pi agent-type name, used for the per-agent transcript directories
 # (``events/<type>/common_transcript`` and ``logs/<type>_transcript``) and
@@ -106,6 +115,23 @@ _SESSION_STARTED_SENTINEL_NAME: str = "pi_session_started"
 # evaluated) by ``assemble_command`` to resume via ``pi --session <file>``. Kept
 # in sync with ``SESSION_FILE_NAME`` in mngr_pi_lifecycle.ts.
 _SESSION_FILE_NAME: str = "pi_session_file"
+
+# The output-style body + appended system prompt are written here, in the per-agent
+# pi config dir. pi auto-APPENDS this file to its default system prompt every turn
+# (usage.md: "Append to the default prompt ... with APPEND_SYSTEM.md"). This is the
+# pi analogue of codex writing developer_instructions into config.toml.
+# ``sync_home_settings`` only syncs settings.json + resource dirs, never
+# APPEND_SYSTEM.md, so provisioning owns this file.
+_APPEND_SYSTEM_FILE_NAME: str = "APPEND_SYSTEM.md"
+
+# Where output styles are authored, relative to the work_dir -- the same shared source
+# codex/claude read (``.agents/output-styles``). Replicated here rather than imported
+# from codex_config, to avoid a cross-plugin dependency.
+_OUTPUT_STYLES_DIR_RELPATH: str = ".agents/output-styles"
+
+# Separator between appended system-prompt blocks (mirrors codex's
+# DEVELOPER_INSTRUCTIONS_SEPARATOR) so stacked blocks do not run together.
+_APPEND_SYSTEM_SEPARATOR: str = "\n\n"
 
 # The per-agent pi config dir, relative to the agent state dir (POSIX). Replaces
 # ~/.pi/agent/ for this agent via ``PI_CODING_AGENT_DIR`` (see ``get_pi_config_dir``).
@@ -131,6 +157,14 @@ _INBOX_FILE_NAME: str = "pi_inbox"
 # The lifecycle marker the pi extension maintains while a turn is in flight
 # (RUNNING vs WAITING). Kept in sync with ACTIVE_MARKER_NAME in mngr_pi_lifecycle.ts.
 _ACTIVE_MARKER_NAME: str = "active"
+
+# Process-start boundary marker, touched on every launch/resume. The system_interface
+# activity tracker compares transcript timestamps against this marker's mtime to ignore a
+# tail left over from a turn a prior process abandoned mid-flight (which would otherwise pin
+# "Thinking..." forever after a restart). Mirrors mngr_claude's `claude_process_started` /
+# mngr_codex's `codex_process_started`; kept in sync with the pi harness's
+# HarnessActivityTracker.marker_filename on the system-interface side.
+_PROCESS_STARTED_MARKER_NAME: str = "pi_process_started"
 
 # After inboxing a message, wait up to this long for the turn to start (the
 # ``active`` marker to appear) as delivery confirmation. Covers the extension's
@@ -325,6 +359,19 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=True,
         description="Share settings.json and resource dirs from ~/.pi/agent/ into the per-agent config dir.",
     )
+    share_home_npm_dir: bool = Field(
+        default=False,
+        description="Symlink the per-agent pi npm dir to the shared ~/.pi/agent/npm instead of copying it "
+        "(local hosts only). The default copy gives every agent a UNIQUE npm path, which is a cache miss for "
+        "pi's jiti transpile cache (keyed by absolute path) -- so a fresh agent re-transpiles all extension "
+        "TypeScript from scratch (~16-24s for a couple of extensions). Sharing the one stable path lets that "
+        "cache hit across agents, cutting extension-heavy startup from ~30s to ~10s. SAFE ONLY when every "
+        "package pinned in settings.json is already installed in ~/.pi/agent/npm (e.g. baked into the image): "
+        "if pi has to install a missing package it writes into node_modules, and a shared dir would race "
+        "across concurrent agent startups and mutate the user's home npm. The copy default exists precisely to "
+        "avoid that race, so leave this off unless the extension set is fully pre-seeded. Ignored on remote "
+        "hosts, which have no shared home npm.",
+    )
     sync_auth: bool = Field(
         default=True,
         description="Share ~/.pi/agent/auth.json into the per-agent config dir.",
@@ -395,6 +442,19 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=True,
         description="When destroying this agent, first copy its transcripts and resumable session "
         "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
+    )
+    output_style: OutputStyleName | None = Field(
+        default=None,
+        description="Name of an output style (from .agents/output-styles/) whose body is written "
+        "verbatim to APPEND_SYSTEM.md in the per-agent pi config dir, so pi appends it to its system "
+        "prompt every turn. pi has no native output-style setting, so the style reaches it as appended "
+        "instructions -- the pi analogue of codex's developer_instructions.",
+    )
+    append_system_prompt: tuple[SystemPromptText, ...] = Field(
+        default=(),
+        description="Extra system-prompt blocks appended (before the output-style body) to "
+        "APPEND_SYSTEM.md. Write `append_system_prompt__extend = [...]` in a template so stacked "
+        "roles each contribute a block.",
     )
 
 
@@ -501,10 +561,10 @@ class PiCodingAgent(
 
         Delivery is confirmed by the turn starting (the ``active`` marker
         appearing), the same signal lifecycle detection uses. If the marker is
-        already present (a steering message to an already-running agent), the
-        injected message is queued (``deliverAs: followUp``) and we return without
-        a marker-based confirmation. The message lock serializes concurrent sends
-        so their inbox appends don't interleave.
+        already present (a message to an already-running agent), the extension
+        steers the message into the live turn (``deliverAs: steer``) and we
+        return without a marker-based confirmation. The message lock serializes
+        concurrent sends so their inbox appends don't interleave.
         """
         with self._message_lock(), log_span("Sending message to agent {} (length={})", self.name, len(message)):
             self._append_to_inbox(message)
@@ -526,7 +586,7 @@ class PiCodingAgent(
         """Wait for the injected message to start a turn (the ``active`` marker appearing)."""
         marker_path = self._get_agent_dir() / _ACTIVE_MARKER_NAME
         if self._check_file_exists(marker_path):
-            # Already running: the followUp message is queued; no marker-based confirmation.
+            # Already running: the message is steered into the live turn; no marker-based confirmation.
             return
         if poll_until(
             lambda: self._check_file_exists(marker_path),
@@ -606,14 +666,25 @@ class PiCodingAgent(
         invocation = f"{base_command} -e {shlex.quote(str(self._get_lifecycle_extension_path()))}"
         if self.agent_config.auto_dismiss_dialogs:
             invocation = f"{invocation} {_PI_APPROVE_FLAG}"
+        # Stamp the process-start boundary and clear a stale `active` marker on every
+        # launch/resume, so the system_interface activity tracker ignores a tail left by a
+        # turn a prior process abandoned mid-flight, and a crash-stale `active` never reads
+        # RUNNING before the first post-launch turn. Mirrors mngr_codex's launch prelude;
+        # `|| true` so a stray failure can't block the launch. The extension re-creates
+        # `active` on the next `agent_start`.
+        active_marker = shlex.quote(str(self._get_agent_dir() / _ACTIVE_MARKER_NAME))
+        process_started_marker = shlex.quote(str(self._get_agent_dir() / _PROCESS_STARTED_MARKER_NAME))
+        marker_prelude = (
+            f"rm -f {active_marker} 2>/dev/null || true; touch {process_started_marker} 2>/dev/null || true"
+        )
         if not self.agent_config.resume_session:
-            return CommandString(invocation)
+            return CommandString(f"{marker_prelude}; {invocation}")
         quoted_session_file = shlex.quote(str(self._get_agent_dir() / _SESSION_FILE_NAME))
         resume_prelude = (
             f"__mngr_pi_sess=$(cat {quoted_session_file} 2>/dev/null || true); set --; "
             'if [ -n "$__mngr_pi_sess" ] && [ -f "$__mngr_pi_sess" ]; then set -- --session "$__mngr_pi_sess"; fi'
         )
-        return CommandString(f'{resume_prelude}; {invocation} "$@"')
+        return CommandString(f'{marker_prelude}; {resume_prelude}; {invocation} "$@"')
 
     def wait_for_ready_signal(
         self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
@@ -734,6 +805,41 @@ class PiCodingAgent(
                 if source.exists():
                     symlink_on_host(host, source, config_dir / dir_name)
 
+            self._seed_npm_dir_from_home(host, config, home_pi, config_dir)
+
+    def _seed_npm_dir_from_home(
+        self, host: OnlineHostInterface, config: PiCodingAgentConfig, home_pi: Path, config_dir: Path
+    ) -> None:
+        """Copy the home npm extension install into the per-agent npm dir.
+
+        pi re-resolves the synced ``settings.json`` package list on every startup
+        and installs anything missing into the per-agent npm dir BEFORE starting
+        the session -- observed at 45-55s of npm on a cold agent, all of it ahead
+        of the readiness sentinel. Seeding the install at provision time makes
+        first boot as fast as a warm boot. A copy, not a symlink: a shared
+        ``node_modules`` would race across concurrent agent startups. Packages
+        added to settings.json since the home install was made are still picked
+        up by pi's own startup resolve (it installs only the delta).
+
+        ``share_home_npm_dir`` overrides this to a SYMLINK. The copy avoids the
+        install race, but it also gives each agent a unique npm path, and pi
+        loads its extensions as TypeScript through jiti, whose transpile cache is
+        keyed by absolute path -- so a fresh per-agent copy is a permanent cache
+        miss and every new agent re-transpiles the whole extension set (~16-24s).
+        Symlinking to the one shared home path makes that cache hit across agents.
+        It is only safe when the pinned packages are already present in the home
+        npm dir (so pi installs nothing and never writes into the shared tree);
+        the config field's description spells out that contract.
+        """
+        npm_source = home_pi / _NPM_DIR_NAME
+        if not npm_source.exists():
+            return
+        if config.share_home_npm_dir:
+            symlink_on_host(host, npm_source, config_dir / _NPM_DIR_NAME)
+            return
+        with log_span("Seeding per-agent pi npm dir from {}", npm_source):
+            host.copy_directory(host, npm_source, config_dir / _NPM_DIR_NAME)
+
     def _setup_remote_config_dir(
         self,
         host: OnlineHostInterface,
@@ -761,12 +867,50 @@ class PiCodingAgent(
             # per file (a full round-trip over the SSH tunnel) and does not
             # scale to large resource sets -- see github issue 1825.
             include_args: list[str] = []
-            for dir_name in _SYNCED_RESOURCE_DIRS:
+            # The npm dir rides along in the same rsync: seeding the extension
+            # install at provision time is what keeps pi's first boot from
+            # spending 45-55s in npm before the readiness sentinel (see
+            # _seed_npm_dir_from_home for the local-host equivalent).
+            for dir_name in (*_SYNCED_RESOURCE_DIRS, _NPM_DIR_NAME):
                 if (home_pi / dir_name).is_dir():
                     include_args.extend([f"--include={dir_name}/", f"--include={dir_name}/**"])
             if include_args:
                 include_args.append("--exclude=*")
                 host.copy_local_directory(home_pi, config_dir, " ".join(include_args))
+
+    def _build_append_system(self, host: OnlineHostInterface) -> str | None:
+        """Join this agent type's system-prompt additions into one blob, or None if there are none.
+
+        The ``append_system_prompt`` blocks come first (in stack order), then the output-style file's
+        body last, verbatim (frontmatter included) -- identical to codex's
+        ``_build_developer_instructions``, so a style reads the same whichever harness runs it. pi has
+        no output-style setting, so the style reaches it via ``APPEND_SYSTEM.md`` instead. Reuses the
+        shared ``output_styles`` helpers and the ``.agents/output-styles`` source of truth.
+        """
+        blocks: list[str] = [str(prompt) for prompt in self.agent_config.append_system_prompt]
+        if self.agent_config.output_style is not None:
+            styles_dir = Path(self.work_dir) / _OUTPUT_STYLES_DIR_RELPATH
+            # Raises UserInputError, listing what is available, when the name has no match.
+            blocks.append(
+                resolve_output_style(self.agent_config.output_style, read_output_style_files(host, styles_dir))
+            )
+        if not blocks:
+            return None
+        return _APPEND_SYSTEM_SEPARATOR.join(blocks)
+
+    def _provision_append_system_prompt(self, host: OnlineHostInterface) -> None:
+        """Write (or clear) ``APPEND_SYSTEM.md`` in the per-agent pi config dir.
+
+        pi appends this file to its default system prompt every turn. Cleared when there is nothing
+        to append, so a re-provision with the style removed leaves no stale file.
+        """
+        append_system = self._build_append_system(host)
+        append_path = self.get_pi_config_dir() / _APPEND_SYSTEM_FILE_NAME
+        if append_system is None:
+            host.execute_idempotent_command(f"rm -f {shlex.quote(str(append_path))}", timeout_seconds=5.0)
+            return
+        with log_span("Writing pi APPEND_SYSTEM.md to {}", append_path):
+            host.write_text_file(append_path, append_system)
 
     def provision(
         self,
@@ -791,6 +935,7 @@ class PiCodingAgent(
         # non-interactive-without-opt-in case exits cleanly before any setup.
         self._ensure_source_repo_trusted(mngr_ctx)
         self._setup_per_agent_config_dir(host, config)
+        self._provision_append_system_prompt(host)
         self._seed_per_agent_workspace_trust(host)
         self._provision_lifecycle_extension(host)
 

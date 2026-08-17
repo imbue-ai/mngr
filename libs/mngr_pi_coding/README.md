@@ -58,6 +58,7 @@ Tunables on the `pi-coding` agent type:
 |---|---|---|
 | `command` | `pi` | Command to run the pi coding agent. |
 | `sync_home_settings` | `true` | Share settings.json and resource dirs from ~/.pi/agent/ into the per-agent config dir. |
+| `share_home_npm_dir` | `false` | Symlink the per-agent pi npm dir to the shared ~/.pi/agent/npm instead of copying it (local hosts only). The default copy gives every agent a UNIQUE npm path, which is a cache miss for pi's jiti transpile cache (keyed by absolute path) -- so a fresh agent re-transpiles all extension TypeScript from scratch (~16-24s for a couple of extensions). Sharing the one stable path lets that cache hit across agents, cutting extension-heavy startup from ~30s to ~10s. SAFE ONLY when every package pinned in settings.json is already installed in ~/.pi/agent/npm (e.g. baked into the image): if pi has to install a missing package it writes into node_modules, and a shared dir would race across concurrent agent startups and mutate the user's home npm. The copy default exists precisely to avoid that race, so leave this off unless the extension set is fully pre-seeded. Ignored on remote hosts, which have no shared home npm. |
 | `sync_auth` | `true` | Share ~/.pi/agent/auth.json into the per-agent config dir. |
 | `check_installation` | `true` | Verify pi is installed (and install on remote hosts when allowed). If False, assumes it is already present. |
 | `version` | unset | Pin the pi CLI version to install (e.g., '1.2.3'). When set, installation runs `npm install -g @earendil-works/pi-coding-agent@<version>` and provisioning verifies the installed pi matches, erroring on a mismatch. When None (the default), installs the latest version. |
@@ -68,6 +69,8 @@ Tunables on the `pi-coding` agent type:
 | `emit_raw_transcript` | `true` | Capture the raw pi message stream. |
 | `auto_dismiss_dialogs` | `false` | Trust the workspace without prompting, suppressing pi's 'Trust project folder?' dialog. When set, mngr launches pi with `--approve` so pi auto-trusts the project folder for the run. Also implied by `mngr create --yes`. When False and the source repo is not already trusted, mngr prompts interactively and refuses to run non-interactively. |
 | `preserve_on_destroy` | `true` | When destroying this agent, first copy its transcripts and resumable session store to <local_host_dir>/preserved/ so they survive. Set to False to discard them. |
+| `output_style` | `None` | Name of an output style (from .agents/output-styles/) whose body is written verbatim to APPEND_SYSTEM.md in the per-agent pi config dir, so pi appends it to its system prompt every turn. pi has no native output-style setting, so the style reaches it as appended instructions -- the pi analogue of codex's developer_instructions. |
+| `append_system_prompt` | `()` | Extra system-prompt blocks appended (before the output-style body) to APPEND_SYSTEM.md. Write `append_system_prompt__extend = [...]` in a template so stacked roles each contribute a block. |
 <!-- END GENERATED CONFIG TABLE -->
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md) for more details.

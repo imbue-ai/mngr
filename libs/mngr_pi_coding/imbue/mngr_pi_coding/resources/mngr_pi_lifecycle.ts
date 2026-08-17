@@ -30,6 +30,19 @@
 //      which `mngr transcript` reads. Emitting straight from the structured
 //      events avoids re-parsing pi's tree-structured session JSONL.
 //
+//   4. Model/effort state. pi carries no static per-agent model config file (its
+//      model comes from launch args / pi settings, its effort from the thinking
+//      level), so the chat model bar cannot read the selection off disk. Instead
+//      this extension writes the harness-uniform
+//      `$MNGR_AGENT_STATE_DIR/model_state.json`
+//      (`{model: "provider/id", effort, fast}` -- the schema every harness's
+//      writer emits; see docs/system/blueprint/live-model-state/ in the
+//      workspace template) from the pi-resolved values: on `session_start`
+//      (which fires at TUI startup, before the first prompt, so the pre-turn-1
+//      selection is available immediately) and again on `model_select` /
+//      `thinking_level_select` as the user switches. The system interface reads
+//      this file for the model bar.
+//
 // Design rules:
 //   * Every handler body is wrapped so a bug here can never disrupt pi's loop.
 //   * All filesystem work is synchronous (node's *Sync calls), so ordering is
@@ -40,7 +53,8 @@
 //     itself is installed (npm, brew, bundled binary). Event/message shapes are
 //     declared locally as the minimal structural types we read.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 // --- Minimal structural types for the bits of pi we read. -------------------
@@ -104,16 +118,58 @@ interface MessageEndEvent {
 interface SessionManager {
   getSessionFile?: () => string | undefined;
 }
-interface ExtensionContext {
-  sessionManager?: SessionManager;
+interface PiModel {
+  provider?: string;
+  id?: string;
+}
+// pi's model registry, the synchronous facade pi exposes to extensions on the ctx.
+// ``find`` resolves a provider + model id to pi's own Model object (the object
+// ``setModel`` wants); ``hasConfiguredAuth`` reports whether that model's provider is
+// authenticated. Optional so a stub/fake ctx (the test harness) still type-checks.
+interface ModelRegistry {
+  find?: (provider: string, modelId: string) => PiModel | undefined;
+  hasConfiguredAuth?: (model: PiModel) => boolean;
 }
 
-// pi's ExtensionAPI -- `on` plus `sendUserMessage` (used to inject input without
-// tmux keystrokes). `sendUserMessage` is optional so a stub/fake `pi` (the test
-// harness) still type-checks; the inbox watcher guards on its presence.
+// Minimal structural view of pi's editor (composer) accessors, exposed on ctx.ui.
+// Used by the atomic shoulder-tap: on abort pi drains its parked steers INTO the
+// editor, so we read them back and restore any pre-existing draft. Optional so the
+// test's fake ctx still type-checks; every use is guarded on presence.
+interface ExtensionUi {
+  getEditorText?: () => string;
+  setEditorText?: (text: string) => void;
+}
+
+interface ExtensionContext {
+  sessionManager?: SessionManager;
+  // Active model and its current effective thinking level (pi's effort axis). pi
+  // passes these on the ctx to every handler; read to record the live model/effort
+  // for the chat model bar.
+  model?: PiModel;
+  thinkingLevel?: string;
+  // pi's model registry (see above); used to resolve a control-file switch's
+  // "provider/model" slug into the Model object ``pi.setModel`` requires.
+  modelRegistry?: ModelRegistry;
+  // Whether the agent is idle (not streaming). Used to gate the atomic shoulder-tap
+  // (only interrupt a running turn) and to know when it is safe to resubmit.
+  isIdle?: () => boolean;
+  // Abort the current agent operation. In interactive mode (how mngr runs pi) this
+  // routes to pi's own handler, which drains the parked steers into the editor and
+  // stops the model stream -- both synchronously.
+  abort?: () => void;
+  // Editor (composer) accessors; see ExtensionUi.
+  ui?: ExtensionUi;
+}
+
+// pi's ExtensionAPI -- `on`, `sendUserMessage` (input injection without tmux
+// keystrokes), and the native model/effort setters `setModel` / `setThinkingLevel`.
+// All but `on` are optional so a stub/fake `pi` (the test harness) still type-checks;
+// each caller guards on presence. `setModel` returns false when the provider is unauthed.
 interface PiApi {
   on: (event: string, handler: (event: any, ctx: ExtensionContext) => void | Promise<void>) => void;
   sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void | Promise<void>;
+  setModel?: (model: PiModel) => Promise<boolean> | boolean;
+  setThinkingLevel?: (level: string) => void;
 }
 
 // --- Constants kept in sync with plugin.py / base_agent.py. -----------------
@@ -121,11 +177,52 @@ interface PiApi {
 const ACTIVE_MARKER_NAME = "active";
 const SESSION_STARTED_SENTINEL_NAME = "pi_session_started";
 const SESSION_FILE_NAME = "pi_session_file";
+// The live model state in the harness-uniform schema ({model, effort, fast}),
+// written for the chat model bar to read before turn 1 and across switches.
+// Kept in sync with the shared reader on the system-interface side
+// (harnesses/model.py).
+const MODEL_STATE_NAME = "model_state.json";
 // mngr appends one JSON-encoded message string per line here; we inject each new
 // line into the live session via pi.sendUserMessage (no tmux keystrokes). Kept
 // in sync with _INBOX_FILE_NAME in plugin.py.
 const INBOX_NAME = "pi_inbox";
+// Where prior-generation inbox lines are archived at load (raw history preserved
+// verbatim), so `pi_inbox` itself only ever holds current-generation lines. The
+// Minds queue mirror replays `pi_inbox` from zero and relies on this scoping.
+const INBOX_HISTORY_NAME = "pi_inbox_history";
 const INBOX_POLL_MS = 200;
+// How many consecutive drain ticks a flush/retract sentinel may be deferred waiting for
+// injected steers to park (pendingInjections to drain) before it is consumed anyway:
+// 10 ticks at the 200ms cadence is ~2s -- the same bound as the dwt stop path's message-lock
+// wait (STOP_LOCK_WAIT_SECONDS = 2.0) and far above a normal park (sub-second). The bound
+// keeps stop-wins (U2): a send whose promise never settles must not defer the abort forever
+// (an unstoppable turn). Proceeding past the bound means a still-un-parked steer can escape
+// the flush/retract and commit as a visible duplicate -- the class the queue-sweep series
+// already accepts -- which is strictly better than a stop that never lands.
+const SENTINEL_SETTLE_MAX_TICKS = 10;
+// Atomic shoulder-tap control records. Minds appends one JSON OBJECT line to pi_inbox
+// (a normal message is a JSON *string*, so the two never collide). Because it rides the
+// same ordered append-only inbox, every message queued before it has already been injected
+// by the time we see it. There are two sentinels, one distinct key each -- a separate key,
+// not a field on one, so an old extension treats the unknown key as inert rather than
+// mistaking a retract for a flush and double-sending. Kept in sync with the Minds pi
+// endpoint (harnesses/pi_coding/inbox.py).
+//   * Flush (shoulder tap): interrupt the running turn and RESUBMIT its parked steers as
+//     one merged turn.
+const INTERRUPT_KEY = "minds_interrupt";
+//   * Retract (stop button): interrupt the running turn and DISCARD its parked steers --
+//     Minds hands the queued messages back to the user's composer, so resubmitting them
+//     here would double-deliver.
+const RETRACT_KEY = "minds_interrupt_retract";
+// Single-slot switch mailbox: the chat model bar's resolver atomically
+// OVERWRITES this file with one JSON intent ({model_id: "provider/model",
+// thinking_level: "high"|null}) -- a newer pick replaces an unconsumed older
+// one (buffer of size 1, last wins). We consume it (rename, apply, delete),
+// so anything present at startup is by definition pending: a switch parked
+// while the agent was stopped applies on the next start. Kept in sync with
+// _CONTROL_NAME in the pi harness resolver (harnesses/pi_coding/model.py).
+const CONTROL_NAME = "pi_control.json";
+const CONTROL_POLL_MS = 200;
 
 const INPUT_PREVIEW_LIMIT = 200;
 const TOOL_OUTPUT_LIMIT = 2000;
@@ -244,6 +341,211 @@ function partsFromContent(content: ContentBlock[] | undefined): Array<Record<str
   return parts;
 }
 
+// --- Shell-command safety guards (see system/scripts/POLICY_HOOKS.md). -------
+//
+// The same shell-command policies claude/codex enforce via PreToolUse hooks, in
+// the form pi's extension API allows: a `tool_call` handler that returns
+// `{block, reason}` to refuse a command, or mutates `event.input.command` to
+// rewrite it. Kept in step with the claude scripts of the same purpose:
+//   claude_block_pipe_tail_head.sh, claude_prevent_commit_rewrite.sh,
+//   claude_rewrite_bash_command.py.
+// (The tk workflow-discipline guards -- require-steps, tk-standalone, carryover,
+// stop nudge -- are defined further down, just above the extension.)
+
+// Block: a command that pipes into tail/head (mirrors claude_block_pipe_tail_head.sh).
+const PIPE_TAIL_HEAD_RE = /\|\s*(tail|head)(\s|$)/;
+// Block: git history-rewriting commands (mirrors claude_prevent_commit_rewrite.sh).
+const GIT_REBASE_RE = /^git\s+rebase/;
+const GIT_COMMIT_RE = /^git\s+commit\b/;
+const GIT_COMMIT_REWRITE_RE = /--(amend|fixup)/;
+const GIT_PULL_RE = /^git\s+pull\b/;
+const GIT_PULL_REBASE_RE = /(--rebase|\s-r(\s|$))/;
+// The OOM self-tag band for agent subprocesses (kept in sync with
+// oom_priority.bands.AGENT_SUBPROCESS == 900).
+const OOM_SUBPROCESS_BAND = 900;
+
+/** Single-quote a value for safe interpolation into a shell command. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** The reason to block a command, or null if it is allowed. Cannot throw. */
+function commandBlockReason(command: string): string | null {
+  if (PIPE_TAIL_HEAD_RE.test(command)) {
+    return "Do not pipe commands through tail or head. Redirect to a temp file (e.g. cmd > /tmp/out.txt) and read that instead.";
+  }
+  if (GIT_REBASE_RE.test(command)) return "git rebase is not allowed.";
+  if (GIT_COMMIT_RE.test(command) && GIT_COMMIT_REWRITE_RE.test(command)) {
+    return "git commit with --amend or --fixup is not allowed.";
+  }
+  if (GIT_PULL_RE.test(command) && GIT_PULL_REBASE_RE.test(command)) {
+    return "git pull --rebase is not allowed (use git pull --merge instead).";
+  }
+  return null;
+}
+
+/** Read a string field from a mngr data.json, or null. */
+function readDataField(path: string, field: string): string | null {
+  try {
+    const value = (JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>)[field];
+    return typeof value === "string" && value ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The `export GIT_AUTHOR_.../GIT_COMMITTER_...; ` prefix, or "" when unresolved.
+ * Mirrors claude_rewrite_bash_command.py's resolve_commit_identity: name from
+ * <state_dir>/data.json (fallback MNGR_AGENT_NAME), email <agent_id>@<host_id>. */
+function gitIdentityPrefix(): string {
+  const agentId = process.env.MNGR_AGENT_ID;
+  const stateDir = process.env.MNGR_AGENT_STATE_DIR;
+  const hostDir = process.env.MNGR_HOST_DIR;
+  const name =
+    (stateDir ? readDataField(join(stateDir, "data.json"), "name") : null) ??
+    process.env.MNGR_AGENT_NAME ??
+    null;
+  const hostId = hostDir ? readDataField(join(hostDir, "data.json"), "host_id") : null;
+  if (!name || !agentId || !hostId) return "";
+  const email = `${agentId}@${hostId}`;
+  const q = shellQuote;
+  return (
+    `export GIT_AUTHOR_NAME=${q(name)} GIT_COMMITTER_NAME=${q(name)} ` +
+    `GIT_AUTHOR_EMAIL=${q(email)} GIT_COMMITTER_EMAIL=${q(email)}; `
+  );
+}
+
+/** The guarded oom self-tag prefix (mirrors build_oom_tag_prefix). */
+function oomTagPrefix(): string {
+  return `test -w /proc/self/oom_score_adj && echo ${OOM_SUBPROCESS_BAND} > /proc/self/oom_score_adj 2>/dev/null; `;
+}
+
+/** Prepend the git-identity (if resolvable) + oom-tag prefixes to a command. */
+function rewriteBashCommand(command: string): string {
+  return gitIdentityPrefix() + oomTagPrefix() + command;
+}
+
+// --- tk workflow-discipline guards (see system/scripts/POLICY_HOOKS.md). -----
+//
+// The step/progress-view discipline claude enforces via its tk hooks, re-expressed
+// for pi. pi shells out to the vendored `ticket` binary for step state (the same
+// source the claude scripts read) and reuses the python tk-standalone checker
+// verbatim; the reminder text is copied from the scripts so all harnesses read
+// identically. Mapping to pi's SDK channels:
+//   * tk-standalone block  -> the tool_call handler ({block, reason}).
+//   * require-steps nudge  -> the tool_result handler (append to the result content;
+//     pi's tool_call result cannot inject non-blocking context, so the reminder
+//     rides the tool result -- same visible effect, one tool-round later).
+//   * open-steps carryover -> before_agent_start (append to the turn's systemPrompt).
+//   * open-steps stop nudge-> agent_settled (stderr only).
+
+const WORK_DIR = process.env.MNGR_AGENT_WORK_DIR || process.cwd();
+const TICKET_SCRIPT = join(WORK_DIR, "system", "vendor", "tk", "ticket");
+const TK_STANDALONE_CHECKER = join(WORK_DIR, "system", "scripts", "claude_tk_standalone_check.py");
+const TICKETS_DIR = process.env.TICKETS_DIR || join(WORK_DIR, ".tickets");
+
+// pi's read-only tools -- the substantive-work reminder never fires for these
+// (mirrors the skip list in claude_require_steps_pretool.sh).
+const READONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+// A bash command that itself invokes tk/ticket -- the require-steps reminder skips
+// it so the agent can freely create/manage steps (mirrors the script's tk skip).
+const TK_COMMAND_RE = /(^|[|&;]\s*|\/)(tk|ticket)\s/;
+
+// Reminder text copied verbatim from claude_require_steps_pretool.sh /
+// claude_open_tickets_reminder.sh so every harness reads identically.
+const REQUIRE_STEPS_NONE =
+  "\n[Step tracking reminder]\n\n" +
+  "You are about to do work without declaring any step records. The chat progress view requires steps to render your work as a structured timeline.\n\n" +
+  'Before continuing, declare your plan as step records (each prints `Created <id>: <title>`):\n' +
+  '  tk create --step "Description of first step"\n' +
+  '  tk create --step "Description of second step"\n' +
+  "  ...\n" +
+  "Then start the first step with its literal id: tk start <id>\n\n" +
+  "See CLAUDE.md > Task management for the full protocol.\n";
+const REQUIRE_STEPS_NOT_STARTED =
+  "\n[Step tracking reminder]\n\n" +
+  "You have declared step records but none is currently in_progress. Call `tk start <id>` on your next step before doing more work. Steps must be serial -- only one in_progress at a time.\n";
+
+/** Run `ticket steps [args]` and return non-empty step lines, or null when tk
+ * cannot be consulted (no tickets dir / script). "" means consulted, no steps.
+ * Never throws. */
+function ticketSteps(args: string[]): string | null {
+  if (!existsSync(TICKETS_DIR) || !existsSync(TICKET_SCRIPT)) return null;
+  try {
+    // Invoke via `bash` (the ticket script is bash) rather than exec'ing it directly,
+    // so it works even when it sits on a noexec mount. TICKETS_DIR is exported explicitly:
+    // the constant may be the WORK_DIR fallback (env var unset), and the child must read
+    // the same tickets dir this guard checked -- the shell hooks these mirror export it too.
+    const res = spawnSync("bash", [TICKET_SCRIPT, "steps", ...args], {
+      encoding: "utf-8",
+      env: { ...process.env, TICKETS_DIR },
+    });
+    // tk exits non-zero when there are no steps at all; that is "" (consulted), not null.
+    const out = res.status === 0 && typeof res.stdout === "string" ? res.stdout : "";
+    return out.split("\n").filter((line) => line.trim() !== "").join("\n");
+  } catch {
+    return null;
+  }
+}
+
+/** The require-steps reminder to inject, or null to stay silent. Mirrors
+ * claude_require_steps_pretool.sh: silent when a step is in_progress or tk can't be
+ * consulted; "not started" when steps exist but none is in_progress; else "no steps". */
+function requireStepsReminder(): string | null {
+  const inProgress = ticketSteps(["--status=in_progress"]);
+  if (inProgress === null || inProgress !== "") return null;
+  const openAll = ticketSteps([]);
+  if (openAll === null) return null;
+  return openAll !== "" ? REQUIRE_STEPS_NOT_STARTED : REQUIRE_STEPS_NONE;
+}
+
+/** The open-steps carryover reminder to inject, or null when there are none.
+ * Mirrors claude_open_tickets_reminder.sh. */
+function carryoverReminder(): string | null {
+  const openAll = ticketSteps([]);
+  if (!openAll) return null;
+  return (
+    "\n[Open task reminder from default-workspace-template]\n\n" +
+    "You have step records that are not yet closed:\n\n" +
+    openAll +
+    "\n\n" +
+    "For each one, decide before continuing: keep working on it (call `tk start <id>` if it's not already in_progress), " +
+    'replace it with a fresh step, or close it now with `tk close <id> "<summary>"` (the positional summary is required for steps). ' +
+    "The summary is a concise one-line description of the *work done* in this step (the caption a non-technical user sees), not the outcome -- " +
+    "the outcome goes in your final assistant message. Steps are sequential: do not start a new step until the previous one is closed.\n\n" +
+    "See CLAUDE.md > Task management for the full protocol.\n"
+  );
+}
+
+/** Count this agent's still-open step records (for the stop nudge). */
+function openStepCount(): number {
+  const openAll = ticketSteps([]);
+  return openAll ? openAll.split("\n").filter((line) => line.trim() !== "").length : 0;
+}
+
+/** The block reason when a bash command is a non-standalone tk start/close, else
+ * null. Reuses the exact shlex tokenizing checker the claude hook runs. Never throws
+ * (fails open: a checker error blocks nothing). */
+function tkStandaloneReason(command: string): string | null {
+  if (!/\b(tk|ticket)\b/.test(command) || !existsSync(TK_STANDALONE_CHECKER)) return null;
+  try {
+    // TICKETS_DIR is exported for the same reason as in ticketSteps: the checker must see
+    // the resolved dir even when only the WORK_DIR fallback names it.
+    const res = spawnSync("python3", [TK_STANDALONE_CHECKER, command], {
+      encoding: "utf-8",
+      env: { ...process.env, TICKETS_DIR },
+    });
+    if (res.status === 2) {
+      const reason = typeof res.stderr === "string" ? res.stderr.trim() : "";
+      return reason || "Run `tk start` / `tk close` as the only command in the tool call.";
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // --- Extension. -------------------------------------------------------------
 
 export default function mngrPiLifecycle(pi: PiApi): void {
@@ -260,6 +562,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   const markerPath = join(stateDir, ACTIVE_MARKER_NAME);
   const sentinelPath = join(stateDir, SESSION_STARTED_SENTINEL_NAME);
   const sessionFilePath = join(stateDir, SESSION_FILE_NAME);
+  const modelStatePath = join(stateDir, MODEL_STATE_NAME);
   const rawPath = join(stateDir, "logs", `${agentType}_transcript`, "events.jsonl");
   const commonPath = join(stateDir, "events", agentType, "common_transcript", "events.jsonl");
   const commonSource = `${agentType}/common_transcript`;
@@ -302,50 +605,209 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     }
   };
 
+  // Record the live model + thinking level (pi's effort axis) for the chat model
+  // bar, in the harness-uniform schema: {model: "provider/id", effort, fast}.
+  // Called on session_start -- which fires at TUI startup, before the first
+  // prompt -- so the pre-turn-1 selection is available immediately, and on
+  // model_select / thinking_level_select as the user switches. The changed axis is
+  // taken from the event (ctx.model / ctx.thinkingLevel may not have updated yet at
+  // the instant the event fires); the untouched axis comes from ctx. Nothing is
+  // written until the model resolves, so a prior good state is never blanked by a
+  // thinking-only event. Atomic (fixed tmp name + rename) so the reader never
+  // sees a torn write.
+  const recordModelState = (ctx: ExtensionContext, override?: { model?: PiModel; thinkingLevel?: string }): void => {
+    const model = override?.model ?? ctx.model;
+    const thinkingLevel = override?.thinkingLevel ?? ctx.thinkingLevel;
+    const provider = typeof model?.provider === "string" ? model.provider : "";
+    const modelId = typeof model?.id === "string" ? model.id : "";
+    const thinking = typeof thinkingLevel === "string" ? thinkingLevel : "";
+    if (!provider || !modelId) {
+      return;
+    }
+    const tmpPath = modelStatePath + ".tmp";
+    writeFileSync(tmpPath, JSON.stringify({ model: `${provider}/${modelId}`, effort: thinking || null, fast: false }));
+    renameSync(tmpPath, modelStatePath);
+  };
+
   // Input injection. mngr delivers messages by appending one JSON-encoded string
   // per line to <state>/pi_inbox; we inject each new line via pi.sendUserMessage
   // so the agent receives input without tmux keystroke simulation, while the TUI
-  // stays viewable. The offset is seeded from the current line count *now* (at
-  // load, before session_start writes the readiness sentinel mngr waits on), so
-  // a resumed restart never re-injects the prior session's already-delivered
-  // messages, and -- because mngr only writes after seeing the sentinel -- no
-  // message sent right after readiness is skipped.
+  // stays viewable. At load (before session_start writes the readiness sentinel
+  // mngr waits on) the prior generation's lines are archived to pi_inbox_history
+  // and the inbox is truncated, so a resumed restart never re-injects the prior
+  // session's already-delivered messages, and -- because mngr only writes after
+  // seeing the sentinel -- no message sent right after readiness is skipped.
+  //
+  // Delivered as `steer`, not `followUp`: pi's agent loop re-polls its steering queue
+  // after every tool-call round and injects steered messages before the next model
+  // response, so a message sent to a busy agent reaches it greedily at the next tool
+  // boundary rather than waiting for the whole turn to end (followUp). Sent to an idle
+  // agent, steer starts a turn the same as followUp would.
+  // The latest ExtensionContext, captured in the handlers below. Held here so the
+  // inbox/control drain timers can reach ctx.abort()/isIdle()/ui and modelRegistry.
+  // pi's ctx getters read live runner state, so a held ctx stays valid.
+  let latestCtx: ExtensionContext | undefined;
+
   const inboxPath = join(stateDir, INBOX_NAME);
+  // Generation-scope the durable inbox: any lines present at load were written for a
+  // prior process generation (mngr only appends after the readiness sentinel, which
+  // `session_start` writes AFTER this load, so nothing can land concurrently here).
+  // Archive them to the sibling history file (raw history preserved verbatim) and
+  // truncate the inbox in place, so the inbox holds current-generation lines only BY
+  // CONSTRUCTION -- the offset seed below then reads 0, and the Minds queue mirror's
+  // replay-from-zero of `pi_inbox` is generation-scoped with no extra bookkeeping.
+  safe("inbox generation reset", () => {
+    if (existsSync(inboxPath)) {
+      const prior = readFileSync(inboxPath, "utf-8");
+      if (prior.length > 0) {
+        appendFileSync(join(stateDir, INBOX_HISTORY_NAME), prior);
+        writeFileSync(inboxPath, "");
+      }
+    }
+  });
   let processedInbox = countLines(inboxPath);
+  // Holds the parked-steer text between an atomic shoulder-tap's abort and its
+  // resubmit. While non-null the inbox drain is PAUSED (no new steer is injected), so
+  // nothing can open a competing turn between the interrupt and the resubmit.
+  let pendingResubmit: string | null = null;
+
+  // Count of steer injections whose async send has been initiated but not yet settled (parked).
+  // A sentinel (flush/retract) must not abort until this is 0: pi.sendUserMessage resolves when
+  // the message LANDS in the steering queue, so an abort while injections are still outstanding
+  // could fire before a just-injected steer has parked, letting it escape the flush/retract and
+  // commit as a stray turn. Gating the sentinel on this counter makes "the steer has parked"
+  // provable rather than assumed-within-one-poll (the prior single-tick deferral). The gate is
+  // BOUNDED by SENTINEL_SETTLE_MAX_TICKS so a send that never settles cannot defer a stop forever.
+  let pendingInjections = 0;
+  // Consecutive drain ticks the current head-of-inbox sentinel has been deferred by the settle
+  // gate; reset whenever a sentinel is consumed.
+  let sentinelDeferredTicks = 0;
+
+  const injectSteer = (content: string): void => {
+    // Delivery is best-effort. pi.sendUserMessage is async (returns a Promise), so the
+    // offset advances right after the call is initiated, not after the message lands --
+    // an async rejection is logged and not retried. We must attach a rejection handler:
+    // a bare `void promise` would surface as an unhandled rejection, which on modern
+    // Node terminates the process and would take pi down with it (the one thing this
+    // extension must never do). We also track the in-flight count (settled in `finally`)
+    // so a sentinel can wait for the steer to actually park -- see `pendingInjections`.
+    const sent = pi.sendUserMessage?.(content, { deliverAs: "steer" });
+    if (sent != null && typeof (sent as Promise<void>).then === "function") {
+      pendingInjections++;
+      // Assimilate through Promise.resolve: the guard above proves only `.then`, so a
+      // then-only thenable would lack `.catch`/`.finally` and the chain would throw
+      // synchronously, leaking the pendingInjections entry and deadlocking the settle gate.
+      Promise.resolve(sent as Promise<void>)
+        .catch((error) => logDiagnostic("inbox inject", error))
+        .finally(() => {
+          pendingInjections--;
+        });
+    }
+  };
+
+  // The shared abort-and-capture core of both sentinels. If a turn is running, interrupt it
+  // and return its parked steers; returns null when idle (nothing to interrupt). Runs in ONE
+  // synchronous tick -- no await between the isIdle check and the abort -- so nothing
+  // (agent_end, the agent loop) can interleave; this is the anti-race guarantee.
+  //
+  // pi's abort (in interactive mode) drains the parked steers INTO the composer and stops the
+  // stream, both synchronously. Since it APPENDS onto whatever is typed, we clear any draft
+  // first and restore it after -- so the captured steers are sourced purely from pi's own
+  // queue (authoritative; no Minds-view lag) and no draft leaks in. The two sentinel branches
+  // differ ONLY in the returned steers' fate: flush resubmits them, retract discards them.
+  const abortAndCaptureSteers = (): string | null => {
+    const ctx = latestCtx;
+    if (!ctx || typeof ctx.isIdle !== "function" || ctx.isIdle() || typeof ctx.abort !== "function") {
+      return null; // idle / no live turn -> nothing to interrupt
+    }
+    const draft = ctx.ui?.getEditorText?.() ?? "";
+    ctx.ui?.setEditorText?.("");
+    ctx.abort();
+    const steers = ctx.ui?.getEditorText?.() ?? "";
+    ctx.ui?.setEditorText?.(draft);
+    return steers;
+  };
+
   const drainInbox = (): void => {
     safe("inbox", () => {
+      // Waiting to resubmit after an interrupt: hold ALL injection until the aborted
+      // turn settles (isIdle), then send the captured steers as one merged fresh turn.
+      if (pendingResubmit !== null) {
+        const ctx = latestCtx;
+        if (ctx && typeof ctx.isIdle === "function" && ctx.isIdle()) {
+          const text = pendingResubmit;
+          pendingResubmit = null;
+          if (text.trim() !== "") {
+            injectSteer(text);
+          }
+        }
+        return;
+      }
       if (typeof pi.sendUserMessage !== "function" || !existsSync(inboxPath)) {
         return;
       }
       const lines = readFileSync(inboxPath, "utf-8").split("\n");
       const total = lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
+      // Whether this tick has already injected a string line. injectSteer initiates an ASYNC
+      // send, so a sentinel encountered after one must be DEFERRED (below) until every injected
+      // steer has parked -- otherwise the abort could fire before a just-injected steer has
+      // landed in the steering queue, and the steer would escape the flush/retract.
+      let injectedStringThisTick = false;
       while (processedInbox < total) {
         const raw = lines[processedInbox];
-        if (raw !== "") {
-          let content: unknown;
-          try {
-            content = JSON.parse(raw);
-          } catch {
-            // Skip a malformed line rather than inject garbage or stall.
-            processedInbox++;
+        if (raw === "") {
+          processedInbox++;
+          continue;
+        }
+        let content: unknown;
+        try {
+          content = JSON.parse(raw);
+        } catch {
+          // Skip a malformed line rather than inject garbage or stall.
+          processedInbox++;
+          continue;
+        }
+        if (typeof content === "string") {
+          processedInbox++;
+          injectSteer(content);
+          injectedStringThisTick = true;
+          continue;
+        }
+        const isFlush = content !== null && typeof content === "object" && (content as Record<string, unknown>)[INTERRUPT_KEY] === true;
+        const isRetract = content !== null && typeof content === "object" && (content as Record<string, unknown>)[RETRACT_KEY] === true;
+        if (isFlush || isRetract) {
+          // Deferral: never consume a sentinel while any injected steer is still un-parked --
+          // either one was injected in THIS tick, or an injection from a prior tick has not yet
+          // settled (pendingInjections > 0). Return WITHOUT advancing processedInbox so this
+          // sentinel is re-read on a later tick, once every prior steer has landed in the
+          // steering queue and is thus flushable/retractable. Waiting on the actual settle
+          // (not a single poll) is what makes the abort provably not race a slow-parking steer.
+          // The deferral is BOUNDED (SENTINEL_SETTLE_MAX_TICKS): past the bound the sentinel
+          // proceeds even with injections outstanding, so a send whose promise never settles
+          // cannot make the turn unstoppable -- the un-parked steer may then escape as a
+          // visible duplicate, the accepted trade for a stop that always lands.
+          if ((injectedStringThisTick || pendingInjections > 0) && sentinelDeferredTicks < SENTINEL_SETTLE_MAX_TICKS) {
+            sentinelDeferredTicks++;
+            return;
+          }
+          sentinelDeferredTicks = 0;
+          processedInbox++;
+          // Every prior message rode the same ordered inbox, so it is already injected.
+          const steers = abortAndCaptureSteers();
+          if (steers === null) {
+            // Agent was idle, nothing to interrupt -> keep draining.
             continue;
           }
-          if (typeof content === "string") {
-            // Delivery is best-effort. pi.sendUserMessage is async (returns a
-            // Promise), so the offset advances right after the call is initiated
-            // (line below), not after the message actually lands -- an async
-            // rejection is logged and the message is not retried. A *synchronous*
-            // throw, by contrast, propagates before the offset advances and so
-            // retries on the next tick. We must attach a rejection handler: a
-            // bare `void promise` would surface as an unhandled rejection, which
-            // on modern Node terminates the process and would take pi down with
-            // it (the one thing this extension must never do).
-            const sent = pi.sendUserMessage(content, { deliverAs: "followUp" });
-            if (sent != null && typeof (sent as Promise<void>).catch === "function") {
-              (sent as Promise<void>).catch((error) => logDiagnostic("inbox inject", error));
-            }
+          if (isFlush) {
+            // Flush: resubmit the parked steers as one merged turn (pause the drain until idle).
+            pendingResubmit = steers;
           }
+          // Retract: discard the steers -- Minds hands them back to the user's composer, so
+          // resubmitting them here would double-deliver. pendingResubmit stays null, so the
+          // drain simply resumes on the next tick.
+          return; // interrupted -> end this tick
         }
+        // An unknown object line (a foreign/future sentinel) is inert under skew: skip it.
         processedInbox++;
       }
     });
@@ -355,11 +817,107 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     inboxTimer.unref();
   }
 
+  // Model/effort switching from the chat model bar: a single-slot mailbox (see
+  // CONTROL_NAME). We apply the intent natively via pi.setModel /
+  // pi.setThinkingLevel; applying fires model_select / thinking_level_select,
+  // whose handlers below write model_state.json, so the bar reconciles
+  // from the live state file with no extra wiring.
+  //
+  // Model resolution needs ctx.modelRegistry, which pi hands to event handlers, not to this
+  // timer -- so we hold the latest ctx (captured in the handlers). The registry's getters read
+  // live runner state, so a held ctx stays valid. Nothing is consumed until a
+  // ctx exists, so a switch parked before session_start (including while the
+  // agent was stopped) is applied exactly once, never dropped.
+  const controlPath = join(stateDir, CONTROL_NAME);
+  const controlConsumePath = controlPath + ".consuming";
+
+  const applySwitch = (intent: unknown, ctx: ExtensionContext): void => {
+    if (intent == null || typeof intent !== "object") {
+      return;
+    }
+    const record = intent as { model_id?: unknown; thinking_level?: unknown };
+    const modelId = typeof record.model_id === "string" ? record.model_id : "";
+    const thinkingLevel = typeof record.thinking_level === "string" ? record.thinking_level : "";
+    // Effort: pi's ThinkingLevel strings are exactly our effort strings, so pass through.
+    // Skip when unchanged to avoid a redundant thinking_level_select.
+    if (thinkingLevel && ctx.thinkingLevel !== thinkingLevel && typeof pi.setThinkingLevel === "function") {
+      try {
+        pi.setThinkingLevel(thinkingLevel);
+      } catch (error) {
+        logDiagnostic("switch: setThinkingLevel", error);
+      }
+    }
+    // Model: resolve the "provider/model" slug to pi's Model via the registry, then apply if
+    // authed and not already current. Model ids can contain "/", so split on the first only.
+    if (modelId) {
+      const slash = modelId.indexOf("/");
+      const provider = slash > 0 ? modelId.slice(0, slash) : "";
+      const id = slash > 0 ? modelId.slice(slash + 1) : "";
+      const registry = ctx.modelRegistry;
+      if (!provider || !id || typeof registry?.find !== "function") {
+        logDiagnostic("switch: unresolved model id", modelId);
+      } else {
+        const model = registry.find(provider, id);
+        if (model == null) {
+          logDiagnostic("switch: unknown model", modelId);
+        } else if (typeof registry.hasConfiguredAuth === "function" && !registry.hasConfiguredAuth(model)) {
+          logDiagnostic("switch: provider not authenticated", provider);
+        } else {
+          const alreadyCurrent = ctx.model?.provider === provider && ctx.model?.id === id;
+          if (!alreadyCurrent && typeof pi.setModel === "function") {
+            const applied = pi.setModel(model);
+            if (applied != null && typeof (applied as Promise<boolean>).catch === "function") {
+              (applied as Promise<boolean>).catch((error) => logDiagnostic("switch: setModel", error));
+            }
+          }
+        }
+      }
+    }
+  };
+
+  const drainControl = (): void => {
+    safe("control", () => {
+      const ctx = latestCtx;
+      if (ctx === undefined || !existsSync(controlPath)) {
+        // No ctx yet (before session_start): leave the mailbox so the intent
+        // applies once ctx exists.
+        return;
+      }
+      // Consume by rename: the resolver's atomic overwrite either lands before
+      // the rename (we apply it) or after (it creates a fresh mailbox for the
+      // next drain). Reading the renamed copy means a concurrent overwrite can
+      // never be half-read or silently deleted unapplied.
+      renameSync(controlPath, controlConsumePath);
+      const raw = readFileSync(controlConsumePath, "utf-8");
+      rmSync(controlConsumePath, { force: true });
+      let intent: unknown = null;
+      try {
+        intent = JSON.parse(raw);
+      } catch {
+        // Malformed mailbox: drop it rather than stall (the next pick rewrites it).
+      }
+      if (intent !== null) {
+        applySwitch(intent, ctx);
+      }
+    });
+  };
+  const controlTimer = setInterval(drainControl, CONTROL_POLL_MS);
+  if (typeof controlTimer.unref === "function") {
+    controlTimer.unref();
+  }
+
   pi.on("session_start", (_event, ctx) => {
     safe("session_start", () => {
+      // Hold the ctx so the control-file drain can reach ctx.modelRegistry (see drainControl).
+      latestCtx = ctx;
+      // Session file and model state land BEFORE the readiness sentinel: the
+      // sentinel is the signal mngr's create wait reports readiness on, and
+      // everything the chat surface needs at first paint (the model bar reads
+      // model_state.json) must already be on disk when that signal fires.
+      recordSessionFile(ctx);
+      recordModelState(ctx);
       mkdirSync(dirname(sentinelPath), { recursive: true });
       writeFileSync(sentinelPath, "1");
-      recordSessionFile(ctx);
     });
   });
 
@@ -369,9 +927,104 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     });
   });
 
+  // pi's model + thinking-level (effort) selectors. model_select fires on the
+  // /model command, Ctrl+P cycling, or session restore; thinking_level_select on any
+  // thinking change. Recording both keeps model_state.json live so the chat model
+  // bar reconciles to a terminal-side switch.
+  pi.on("model_select", (event, ctx) => {
+    safe("model_select", () => {
+      latestCtx = ctx;
+      recordModelState(ctx, { model: event?.model });
+    });
+  });
+
+  pi.on("thinking_level_select", (event, ctx) => {
+    safe("thinking_level_select", () => {
+      latestCtx = ctx;
+      recordModelState(ctx, { thinkingLevel: event?.level });
+    });
+  });
+
   pi.on("agent_start", (_event, _ctx) => {
     safe("agent_start", () => {
       writeFileSync(markerPath, "1");
+    });
+  });
+
+  // Policy guard: block disallowed bash commands and rewrite the rest with the
+  // oom self-tag + git identity (see the "Policy guards" section above and
+  // system/scripts/POLICY_HOOKS.md). NOT wrapped in safe() -- a guard that
+  // swallowed its error would fail OPEN. The block check is a pure regex over a
+  // string and cannot throw; the best-effort rewrite is isolated so a failure
+  // leaves the command unchanged rather than blocking a legitimate command.
+  // `event`/return are loosely typed here to match PiApi.on's shim signature; at
+  // runtime pi passes a BashToolCallEvent with a mutable `input` and honors a
+  // returned `{block, reason}` (see the SDK's ToolCallEvent/ToolCallEventResult).
+  pi.on("tool_call", (event: any) => {
+    if (event?.toolName !== "bash") return;
+    const input = event.input as { command?: string };
+    const command = input?.command;
+    if (typeof command !== "string" || !command) return;
+    const reason = commandBlockReason(command);
+    if (reason !== null) return { block: true, reason };
+    // Hard-block a chained/redirected tk start/close (mirrors claude_tk_standalone.sh).
+    const tkReason = tkStandaloneReason(command);
+    if (tkReason !== null) return { block: true, reason: tkReason };
+    try {
+      input.command = rewriteBashCommand(command);
+    } catch {
+      // Rewrite is best-effort (matches claude's pass-through-on-failure); never block on it.
+    }
+  });
+
+  // Require-steps soft nudge (mirrors claude_require_steps_pretool.sh). pi's tool_call
+  // result can only block, so the non-blocking reminder rides the tool RESULT: when a
+  // substantive tool ran with no in-progress step, append the reminder to the result the
+  // model reads. Skipped for read-only tools and for bash commands that invoke tk itself.
+  // Not wrapped in safe(): it must return a value, and it already fails silent internally.
+  pi.on("tool_result", (event: any) => {
+    try {
+      const toolName = event?.toolName;
+      if (typeof toolName !== "string" || READONLY_TOOLS.has(toolName)) return undefined;
+      if (toolName === "bash") {
+        const command = event?.input?.command;
+        if (typeof command === "string" && TK_COMMAND_RE.test(command)) return undefined;
+      }
+      const reminder = requireStepsReminder();
+      if (reminder === null) return undefined;
+      const content = Array.isArray(event?.content) ? event.content : [];
+      return { content: [...content, { type: "text", text: reminder }] };
+    } catch {
+      return undefined;
+    }
+  });
+
+  // Open-steps carryover (mirrors claude_open_tickets_reminder.sh): when a new turn
+  // starts with still-open steps, append the reminder to this turn's system prompt --
+  // the guaranteed model-visible channel; pi resets the override each turn.
+  pi.on("before_agent_start", (event: any) => {
+    try {
+      const reminder = carryoverReminder();
+      if (reminder === null) return undefined;
+      const base = typeof event?.systemPrompt === "string" ? event.systemPrompt : "";
+      return { systemPrompt: `${base}\n\n${reminder}` };
+    } catch {
+      return undefined;
+    }
+  });
+
+  // Open-steps stop nudge (mirrors claude_open_tickets_stop_nudge.sh): a non-blocking,
+  // stderr-only note when the run settles with steps still open. agent_settled is pi's
+  // true "run fully settled" signal (fires after any retry/continuation drains).
+  pi.on("agent_settled", () => {
+    safe("agent_settled nudge", () => {
+      const count = openStepCount();
+      if (count > 0) {
+        process.stderr.write(
+          `[task-management] Stopping with ${count} step record(s) still open. ` +
+            "They'll appear at the top of the next turn's progress block.\n",
+        );
+      }
     });
   });
 

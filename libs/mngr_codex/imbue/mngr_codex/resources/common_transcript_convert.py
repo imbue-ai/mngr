@@ -6,7 +6,8 @@ produced verbatim by stream_transcript.sh) and appends the semantically
 important rollout items in the agent-agnostic common format to
 ``events/codex/common_transcript/events.jsonl``.
 
-codex rollout wire shape (verified live against codex 0.64.0):
+codex rollout wire shape (verified live against codex 0.64.0 and the patched
+codex 0.146.0 build):
   {"timestamp":"<ISO8601>","type":<t>,"payload":<p>}
 with the item kinds this converter cares about carried under type
 "response_item":
@@ -15,6 +16,16 @@ with the item kinds this converter cares about carried under type
   payload.type=="function_call"              -> assistant_message (tool_calls
                                     attached); also remembered by payload.call_id
   payload.type=="function_call_output"       -> tool_result, paired by call_id
+  payload.type=="custom_tool_call"           -> assistant_message (tool_calls
+                                    attached); the 0.146 unified exec tool emits
+                                    these (payload.input, not .arguments)
+  payload.type=="custom_tool_call_output"    -> tool_result, paired by call_id
+
+User-role messages that are instruction injections rather than genuine user
+turns -- the AGENTS.md context blob ("# AGENTS.md instructions for <dir>" with
+an "<INSTRUCTIONS>" envelope) and codex's own "<user_instructions>" /
+"<environment_context>" initial-context items -- are skipped so they never
+surface as user_message records.
 
 codex models a tool invocation as its own rollout item, separate from the
 assistant's reasoning text (a distinct ``message`` item), so the call is emitted
@@ -53,6 +64,22 @@ _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 _SOURCE = "codex/common_transcript"
 
+# codex wraps its own initial-context items in these envelopes and carries them
+# as user-role messages; they are plumbing, not user turns.
+_CONTEXT_INJECTION_PREFIXES = ("<user_instructions>", "<environment_context>")
+# The AGENTS.md context injection (seen live on codex 0.146.0): a user-role
+# message opening with this header, with the file body in an <INSTRUCTIONS> envelope.
+_AGENTS_MD_INJECTION_PREFIX = "# AGENTS.md instructions for "
+_AGENTS_MD_INJECTION_ENVELOPE = "<INSTRUCTIONS>"
+
+
+def _is_injected_instructions(text: str) -> bool:
+    """True for instruction-injection messages that must not surface as user turns."""
+    stripped = text.lstrip()
+    if stripped.startswith(_AGENTS_MD_INJECTION_PREFIX) and _AGENTS_MD_INJECTION_ENVELOPE in stripped:
+        return True
+    return stripped.startswith(_CONTEXT_INJECTION_PREFIXES)
+
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -77,7 +104,7 @@ def _join_content_text(content: JsonValue, item_type: str) -> str:
 
 
 def _stringify_output(output: JsonValue) -> str:
-    """Render function_call_output.output, which is a string OR a content array."""
+    """Render a tool output payload (.output), which is a string OR a content array."""
     if isinstance(output, str):
         return output
     # An array of content items: join the text of each, falling back to a JSON
@@ -151,6 +178,10 @@ def convert(input_file: str, output_file: str) -> int:
                 # An empty user message carries no signal -> drop it.
                 if not text:
                     continue
+                # Instruction injections ride in as user-role messages but are
+                # not user turns -> drop them (export-side filtering only).
+                if _is_injected_instructions(text):
+                    continue
                 new_events.append(
                     (
                         timestamp,
@@ -196,12 +227,17 @@ def convert(input_file: str, output_file: str) -> int:
                     )
                 )
 
-            elif payload_type == "function_call":
+            elif payload_type in ("function_call", "custom_tool_call"):
                 call_id = payload.get("call_id")
                 if not isinstance(call_id, str) or not call_id:
                     continue
                 name = payload.get("name", "")
-                arguments = payload.get("arguments", "")
+                # A custom_tool_call (the 0.146 unified exec tool) carries its
+                # invocation under "input"; a function_call under "arguments".
+                if payload_type == "custom_tool_call":
+                    arguments = payload.get("input", "")
+                else:
+                    arguments = payload.get("arguments", "")
                 if not isinstance(arguments, str):
                     arguments = json.dumps(arguments, separators=(",", ":"))
                 tool_call_id = f"line-{line_index}-tc"
@@ -243,10 +279,10 @@ def convert(input_file: str, output_file: str) -> int:
                     )
                 )
 
-            elif payload_type == "function_call_output":
+            elif payload_type in ("function_call_output", "custom_tool_call_output"):
                 call_id = payload.get("call_id")
                 pending = pending_call_by_id.pop(call_id, None) if isinstance(call_id, str) else None
-                # A function_call_output with no matching function_call has
+                # An output with no matching call has
                 # nothing to pair with -> drop it.
                 if pending is None:
                     continue
@@ -272,8 +308,9 @@ def convert(input_file: str, output_file: str) -> int:
                 )
 
             else:
-                # Other payload types (session_meta, turn_context, token_count,
-                # compacted, ...) are bookkeeping, not conversation content.
+                # Other payload types (reasoning, web_search_call, ...) and
+                # non-user/assistant message roles (developer instruction
+                # injections) are bookkeeping, not conversation content.
                 continue
 
     if not new_events:

@@ -637,6 +637,18 @@ class CommandString(NonEmptyStr):
     """Command string to be executed."""
 
 
+class OutputStyleName(NonEmptyStr):
+    """Display name of an output style, matched against a style file's `name:` frontmatter.
+
+    A human-readable label (e.g. "Engineering Subordinate"), not a filename or slug --
+    spaces are expected, so this is a NonEmptyStr rather than a SafeName.
+    """
+
+
+class SystemPromptText(NonEmptyStr):
+    """Free-form text appended to an agent's system prompt."""
+
+
 class SnapshotName(str):
     """Human-readable name for a snapshot."""
 

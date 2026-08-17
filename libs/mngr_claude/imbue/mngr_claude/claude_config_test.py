@@ -1,7 +1,9 @@
 """Unit tests for claude_config.py."""
 
 import json
+import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,12 +18,15 @@ from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.claude_config import ensure_chat_cancel_tap_keybinding
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_config_in_isolated_mode
 from imbue.mngr_claude.claude_config import find_user_config_in_unisolated_mode
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
+from imbue.mngr_claude.claude_config import is_tap_binding_active
+from imbue.mngr_claude.claude_config import mark_claude_agent_idle
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 
@@ -948,6 +953,192 @@ def test_encode_claude_project_dir_name(raw: str, expected: str) -> None:
     assert encode_claude_project_dir_name(Path(raw)) == expected
 
 
+def _chat_meta_q(keybindings: dict[str, Any]) -> str | None:
+    """Return the action bound to meta+q in the Chat context of a keybindings dict, or None."""
+    for entry in keybindings.get("bindings", []):
+        if entry.get("context") == "Chat":
+            return entry.get("bindings", {}).get("meta+q")
+    return None
+
+
+def test_ensure_tap_keybinding_merges_into_existing_chat_entry(tmp_path: Path) -> None:
+    """Adds meta+q -> chat:cancel to an existing Chat entry without disturbing its other bindings."""
+    path = tmp_path / "keybindings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "$schema": "https://example/schema.json",
+                "bindings": [
+                    {"context": "Global", "bindings": {"ctrl+t": "app:toggleTodos"}},
+                    {"context": "Chat", "bindings": {"escape": "chat:cancel", "enter": "chat:submit"}},
+                ],
+            }
+        )
+    )
+    ensure_chat_cancel_tap_keybinding(path)
+    result = json.loads(path.read_text())
+    assert _chat_meta_q(result) == "chat:cancel"
+    # Existing metadata and bindings survive untouched.
+    assert result["$schema"] == "https://example/schema.json"
+    chat = next(e for e in result["bindings"] if e["context"] == "Chat")
+    assert chat["bindings"]["escape"] == "chat:cancel"
+    assert chat["bindings"]["enter"] == "chat:submit"
+
+
+def test_ensure_tap_keybinding_creates_file_and_entry_when_absent(tmp_path: Path) -> None:
+    """Creates the file, bindings list, and Chat entry when none exist."""
+    path = tmp_path / "keybindings.json"
+    assert not path.exists()
+    ensure_chat_cancel_tap_keybinding(path)
+    result = json.loads(path.read_text())
+    assert _chat_meta_q(result) == "chat:cancel"
+
+
+def test_ensure_tap_keybinding_creates_chat_entry_when_only_other_contexts_present(tmp_path: Path) -> None:
+    """Appends a fresh Chat entry when the file has contexts but no Chat one."""
+    path = tmp_path / "keybindings.json"
+    path.write_text(json.dumps({"bindings": [{"context": "Global", "bindings": {"ctrl+t": "app:toggleTodos"}}]}))
+    ensure_chat_cancel_tap_keybinding(path)
+    result = json.loads(path.read_text())
+    assert _chat_meta_q(result) == "chat:cancel"
+    assert any(e["context"] == "Global" for e in result["bindings"])
+
+
+def test_ensure_tap_keybinding_never_clobbers_existing_chat_meta_q(tmp_path: Path) -> None:
+    """A meta+q already bound in Chat (to anything) is left untouched."""
+    path = tmp_path / "keybindings.json"
+    path.write_text(json.dumps({"bindings": [{"context": "Chat", "bindings": {"meta+q": "chat:modelPicker"}}]}))
+    ensure_chat_cancel_tap_keybinding(path)
+    assert _chat_meta_q(json.loads(path.read_text())) == "chat:modelPicker"
+
+
+def test_ensure_tap_keybinding_never_clobbers_global_meta_q(tmp_path: Path) -> None:
+    """A meta+q bound in Global blocks the Chat binding (the chord would be shadowed)."""
+    path = tmp_path / "keybindings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "bindings": [
+                    {"context": "Global", "bindings": {"meta+q": "app:quit"}},
+                    {"context": "Chat", "bindings": {"escape": "chat:cancel"}},
+                ]
+            }
+        )
+    )
+    ensure_chat_cancel_tap_keybinding(path)
+    # Neither the Global binding nor the Chat entry gains a meta+q.
+    result = json.loads(path.read_text())
+    assert _chat_meta_q(result) is None
+    global_entry = next(e for e in result["bindings"] if e["context"] == "Global")
+    assert global_entry["bindings"]["meta+q"] == "app:quit"
+
+
+def test_ensure_tap_keybinding_unrelated_context_meta_q_does_not_block(tmp_path: Path) -> None:
+    """A meta+q bound only in an unrelated context (not Chat/Global) does not block the merge."""
+    path = tmp_path / "keybindings.json"
+    path.write_text(json.dumps({"bindings": [{"context": "Settings", "bindings": {"meta+q": "settings:something"}}]}))
+    ensure_chat_cancel_tap_keybinding(path)
+    assert _chat_meta_q(json.loads(path.read_text())) == "chat:cancel"
+
+
+def test_ensure_tap_keybinding_is_idempotent(tmp_path: Path) -> None:
+    """Running twice leaves exactly one meta+q -> chat:cancel and identical content."""
+    path = tmp_path / "keybindings.json"
+    ensure_chat_cancel_tap_keybinding(path)
+    first = path.read_text()
+    ensure_chat_cancel_tap_keybinding(path)
+    assert path.read_text() == first
+    assert _chat_meta_q(json.loads(first)) == "chat:cancel"
+
+
+def test_ensure_tap_keybinding_leaves_corrupt_file_untouched(tmp_path: Path) -> None:
+    """A file that is not valid JSON is left exactly as-is rather than overwritten."""
+    path = tmp_path / "keybindings.json"
+    path.write_text("{ this is not valid json")
+    ensure_chat_cancel_tap_keybinding(path)
+    assert path.read_text() == "{ this is not valid json"
+
+
+def test_ensure_tap_keybinding_replaces_non_dict_chat_bindings(tmp_path: Path) -> None:
+    """A Chat entry whose "bindings" is not an object is replaced with a fresh dict, not crashed on."""
+    path = tmp_path / "keybindings.json"
+    path.write_text(json.dumps({"bindings": [{"context": "Chat", "bindings": "not-a-dict"}]}))
+    ensure_chat_cancel_tap_keybinding(path)
+    result = json.loads(path.read_text())
+    assert _chat_meta_q(result) == "chat:cancel"
+
+
+def _write_binding_and_marker(
+    tmp_path: Path, chat_meta_q: str | None, keybindings_before_marker: bool
+) -> tuple[Path, Path]:
+    """Write a keybindings.json (Chat meta+q optionally set) and a process marker with ordered mtimes."""
+    keybindings_path = tmp_path / "keybindings.json"
+    chat_bindings: dict[str, str] = {"escape": "chat:cancel"}
+    if chat_meta_q is not None:
+        chat_bindings["meta+q"] = chat_meta_q
+    keybindings_path.write_text(json.dumps({"bindings": [{"context": "Chat", "bindings": chat_bindings}]}))
+    marker_path = tmp_path / "claude_process_started"
+    marker_path.write_text("")
+    # Order the two files' mtimes explicitly so the test does not depend on write timing.
+    if keybindings_before_marker:
+        os.utime(keybindings_path, (1000, 1000))
+        os.utime(marker_path, (2000, 2000))
+    else:
+        os.utime(keybindings_path, (2000, 2000))
+        os.utime(marker_path, (1000, 1000))
+    return keybindings_path, marker_path
+
+
+def test_is_tap_binding_active_true_when_bound_and_predates_marker(tmp_path: Path) -> None:
+    """Active when Chat binds meta+q -> chat:cancel and the file predates the process marker."""
+    keybindings_path, marker_path = _write_binding_and_marker(tmp_path, "chat:cancel", keybindings_before_marker=True)
+    assert is_tap_binding_active(keybindings_path, marker_path) is True
+
+
+def test_is_tap_binding_active_false_when_edited_after_launch(tmp_path: Path) -> None:
+    """Inactive (conservative) when the binding is present but written after the process started."""
+    keybindings_path, marker_path = _write_binding_and_marker(tmp_path, "chat:cancel", keybindings_before_marker=False)
+    assert is_tap_binding_active(keybindings_path, marker_path) is False
+
+
+def test_is_tap_binding_active_false_when_meta_q_bound_elsewhere(tmp_path: Path) -> None:
+    """Inactive when Chat binds meta+q to something other than chat:cancel."""
+    keybindings_path, marker_path = _write_binding_and_marker(
+        tmp_path, "chat:modelPicker", keybindings_before_marker=True
+    )
+    assert is_tap_binding_active(keybindings_path, marker_path) is False
+
+
+def test_is_tap_binding_active_false_when_chord_absent(tmp_path: Path) -> None:
+    """Inactive when the Chat context has no meta+q binding at all."""
+    keybindings_path, marker_path = _write_binding_and_marker(tmp_path, None, keybindings_before_marker=True)
+    assert is_tap_binding_active(keybindings_path, marker_path) is False
+
+
+def test_is_tap_binding_active_false_when_marker_missing(tmp_path: Path) -> None:
+    """Inactive when the process-started marker is absent (no live process to tap)."""
+    keybindings_path, _ = _write_binding_and_marker(tmp_path, "chat:cancel", keybindings_before_marker=True)
+    assert is_tap_binding_active(keybindings_path, tmp_path / "does_not_exist") is False
+
+
+def test_is_tap_binding_active_false_when_keybindings_missing(tmp_path: Path) -> None:
+    """Inactive when keybindings.json does not exist."""
+    marker_path = tmp_path / "claude_process_started"
+    marker_path.write_text("")
+    assert is_tap_binding_active(tmp_path / "missing.json", marker_path) is False
+
+
+def test_is_tap_binding_active_false_when_keybindings_malformed(tmp_path: Path) -> None:
+    """A corrupt keybindings.json reads as not-active, never raises. ``ensure_chat_cancel_tap_keybinding``
+    tolerates (and does not repair) a malformed file, so the gate must not raise on it -- the stop
+    button then falls back to the base restart-drain instead of 500ing."""
+    keybindings_path = tmp_path / "keybindings.json"
+    keybindings_path.write_text("{ this is not valid json")
+    marker_path = tmp_path / "claude_process_started"
+    marker_path.write_text("")
+    assert is_tap_binding_active(keybindings_path, marker_path) is False
+
+
 def test_build_permission_auto_allow_hooks_config_has_permission_request_hook() -> None:
     """build_permission_auto_allow_hooks_config should produce a PermissionRequest hook with wildcard matcher."""
     config = build_permission_auto_allow_hooks_config()
@@ -963,3 +1154,45 @@ def test_build_permission_auto_allow_hooks_config_has_permission_request_hook() 
     assert inner_hook["timeout"] == 5
     assert "allow" in inner_hook["command"]
     assert "PermissionRequest" in inner_hook["command"]
+
+
+def test_mark_claude_agent_idle_clears_markers_and_emits_activity_event(tmp_path: Path) -> None:
+    """mark_claude_agent_idle removes both markers and appends one format-conformant activity event.
+
+    It runs the same shell snippet the Notification / SessionStart / Stop hooks run, so the
+    emitted line must match the hooks' activity-event format exactly."""
+    state_dir = tmp_path / "agent"
+    state_dir.mkdir()
+    (state_dir / "active").write_text("")
+    (state_dir / "permissions_waiting").write_text("")
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    mark_claude_agent_idle(state_dir, host_dir)
+
+    # Both markers are cleared, so the agent stops reporting RUNNING.
+    assert not (state_dir / "active").exists()
+    assert not (state_dir / "permissions_waiting").exists()
+    # Exactly one activity event was appended, in the hooks' own format.
+    events_file = host_dir / "events" / "mngr" / "activity" / "events.jsonl"
+    lines = events_file.read_text().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["source"] == "mngr/activity"
+    assert event["type"] == "activity"
+    assert event["event_id"].startswith("evt-")
+    assert event["timestamp"].endswith("Z")
+
+
+def test_mark_claude_agent_idle_is_idempotent_on_absent_markers(tmp_path: Path) -> None:
+    """Absent markers are a no-op (``rm -f``); the activity event is still emitted."""
+    state_dir = tmp_path / "agent"
+    state_dir.mkdir()
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    mark_claude_agent_idle(state_dir, host_dir)
+
+    assert not (state_dir / "active").exists()
+    events_file = host_dir / "events" / "mngr" / "activity" / "events.jsonl"
+    assert len(events_file.read_text().splitlines()) == 1

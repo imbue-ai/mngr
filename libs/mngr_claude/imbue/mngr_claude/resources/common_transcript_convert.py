@@ -43,6 +43,25 @@ _MAX_OUTPUT_LENGTH = 2000
 # viewers show them under the tool role rather than the user role (no human
 # typed them).
 
+# A slash command the user types (``/foo bar``) is not recorded verbatim: Claude
+# Code expands it into plumbing records -- the expansion tags (led by
+# <command-name> for built-ins, <command-message> for custom commands), the
+# local execution output (<local-command-stdout>), and an isMeta caveat wrapper
+# (<local-command-caveat>). None of these is a conversation turn, so the
+# converter drops them entirely (the chat UI's session parser filters the same
+# markup). The check anchors on the leading tag, so a genuine turn that merely
+# quotes the markup mid-text is kept.
+_COMMAND_PLUMBING_PREFIXES = (
+    "<command-name>",
+    "<command-message>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+)
+
+
+def _is_command_plumbing(text: str) -> bool:
+    return text.lstrip().startswith(_COMMAND_PLUMBING_PREFIXES)
+
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -139,10 +158,6 @@ def convert(input_file: str, output_file: str) -> int:
 
             # -- assistant messages --
             if event_type == "assistant":
-                event_id = _make_event_id(uuid, "assistant")
-                if event_id in existing_ids:
-                    continue
-
                 raw_message = raw.get("message")
                 if not isinstance(raw_message, dict):
                     # A null/missing message carries no usable content -- drop the
@@ -150,6 +165,22 @@ def convert(input_file: str, output_file: str) -> int:
                     continue
                 message = raw_message
                 content_blocks = message.get("content", [])
+
+                # Record tool names BEFORE the dedup skip below: a tool_result
+                # converted in a later pass than its (already-emitted) call still
+                # needs the map filled from the full input, or it would be labeled
+                # "unknown" forever.
+                for block in content_blocks:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        call_id = block.get("id", "")
+                        tool_name = block.get("name", "")
+                        if call_id and tool_name:
+                            tool_name_by_call_id[call_id] = tool_name
+
+                event_id = _make_event_id(uuid, "assistant")
+                if event_id in existing_ids:
+                    continue
+
                 model = message.get("model", "unknown")
                 stop_reason = message.get("stop_reason")
                 usage_raw = message.get("usage", {})
@@ -176,11 +207,6 @@ def convert(input_file: str, output_file: str) -> int:
                         input_preview = _truncate(
                             json.dumps(tool_input, separators=(",", ":")), _MAX_INPUT_PREVIEW_LENGTH
                         )
-
-                        # Track for tool result labeling
-                        if call_id and tool_name:
-                            tool_name_by_call_id[call_id] = tool_name
-
                         tool_call = {
                             "tool_call_id": call_id,
                             "tool_name": tool_name,
@@ -192,6 +218,13 @@ def convert(input_file: str, output_file: str) -> int:
                         # Other block types (thinking, redacted_thinking, etc.)
                         # carry no transcript-visible text or tool call.
                         continue
+
+                if not parts:
+                    # A thinking/redacted_thinking-only message has no
+                    # transcript-visible content at all; emitting it would render
+                    # as a "(no content)" turn. Drop it, mirroring how empty user
+                    # messages are already dropped.
+                    continue
 
                 # Build usage
                 usage = None
@@ -233,7 +266,12 @@ def convert(input_file: str, output_file: str) -> int:
                 # Emit user text message if there is actual user text
                 if not _has_tool_results_only(content):
                     text = _extract_text_content(content)
-                    if is_meta:
+                    if _is_command_plumbing(text):
+                        # Slash-command plumbing (expansion tags, local stdout,
+                        # the isMeta caveat wrapper) is not a conversation turn:
+                        # emit nothing for it, on both the meta and plain paths.
+                        pass
+                    elif is_meta:
                         # Framework-injected message (stop hook output, etc.) --
                         # reclassify as tool_result so it doesn't masquerade as user input.
                         event_id = _make_event_id(uuid, "meta")

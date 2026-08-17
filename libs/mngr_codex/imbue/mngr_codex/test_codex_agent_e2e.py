@@ -35,6 +35,12 @@ from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_mngr_subprocess
+from imbue.mngr_codex.app_server_client import CodexAppServerClient
+from imbue.mngr_codex.app_server_client import CodexAppServerError
+from imbue.mngr_codex.app_server_client import connect_app_server_transport
+from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
+from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
+from imbue.mngr_codex.codex_config import get_codex_home
 
 # Resolved at import time, before the autouse ``setup_test_mngr_env`` fixture redirects
 # $HOME / mutates PATH: the real home (auth source) and the real codex binary.
@@ -88,6 +94,60 @@ class _CodexReleaseProfile(AgentReleaseProfile):
         if _CODEX_BIN is None or not _REAL_AUTH.exists():
             return "codex CLI not installed or ~/.codex/auth.json missing (not logged in)"
         return None
+
+    # codex has no ``active`` marker: RUNNING vs WAITING is read live from the daemon's
+    # ``thread/status``. A turn in flight is ``active``; idle (or no daemon yet) is WAITING.
+    def is_waiting_after_create(self, host_dir: Path) -> bool:
+        return self._thread_status_type(host_dir) != "active"
+
+    def is_reporting_running(self, host_dir: Path) -> bool:
+        return self._thread_status_type(host_dir) == "active"
+
+    def _thread_status_type(self, host_dir: Path) -> str | None:
+        """The bound root thread's live status tag, or ``None`` when the daemon is unreachable.
+
+        Mirrors the plugin's send-path bind (persisted root id, else the single loaded thread) and
+        reads ``thread/status`` -- the same source the live lifecycle uses -- over a short-lived
+        connection. Any failure (no socket yet, no bindable thread) reads as "not active".
+        """
+        agent_dirs = [path for path in (host_dir / "agents").glob("*") if path.is_dir()]
+        if len(agent_dirs) != 1:
+            return None
+        socket_path = get_codex_app_server_socket_path(get_codex_home(agent_dirs[0]))
+        if not socket_path.exists():
+            return None
+        try:
+            client = CodexAppServerClient(transport=connect_app_server_transport(socket_path))
+        except OSError:
+            return None
+        try:
+            client.initialize("mngr-codex-release-test", "0")
+            if not self._bind_root_thread(client, agent_dirs[0]):
+                return None
+            return client.read_thread_status().status_type
+        except (CodexAppServerError, OSError):
+            return None
+        finally:
+            client.close()
+
+    def _bind_root_thread(self, client: CodexAppServerClient, agent_state_dir: Path) -> bool:
+        """Bind the agent's root thread (persisted id, else the single loaded one); False if none."""
+        thread_file = agent_state_dir / APP_SERVER_THREAD_FILENAME
+        persisted = thread_file.read_text().strip() if thread_file.exists() else ""
+        loaded = client.thread_loaded_list()
+        if persisted and persisted in loaded:
+            client.bind_thread(persisted)
+            return True
+        if persisted:
+            try:
+                client.thread_resume(persisted)
+                return True
+            except CodexAppServerError:
+                return False
+        if len(loaded) == 1:
+            client.bind_thread(loaded[0])
+            return True
+        return False
 
     def setup(self, tmp_path: Path) -> AgentReleaseContext:
         assert _CODEX_BIN is not None
@@ -159,12 +219,11 @@ def test_codex_agent_full_lifecycle(tmp_path: Path) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_codex_message_delivery_journey(tmp_path: Path) -> None:
-    """Drive the evidence-confirmed send pipeline through its racey delivery scenarios.
+    """Drive the app-server send pipeline through its racey delivery scenarios.
 
-    codex confirms sends via its ``active`` marker (set by the UserPromptSubmit
-    hook), so this proves the marker-probe path: idle delivery, send-while-busy
-    (confirmation may wait for the running turn to dequeue the prompt), rapid
-    sequential sends, and a long buffer-pasted message -- each delivered
-    exactly once.
+    codex delivers over the ``codex app-server`` daemon (idle -> ``turn/start``, busy ->
+    ``turn/steer``), so this exercises that path: idle delivery, send-while-busy (parked
+    into the running turn), rapid sequential sends, and a long buffer-pasted message --
+    each delivered exactly once.
     """
     run_message_delivery_journey(_CodexReleaseProfile(), tmp_path)

@@ -24,6 +24,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import require_interactive_agent
+from imbue.mngr.interfaces.agent import require_key_chord_agent
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import ErrorBehavior
@@ -48,6 +49,22 @@ class MessageResult(MutableModel):
     )
 
 
+# One delivery of a payload to a single live agent (the payload is a message string
+# for a text send, a tmux key token for a key chord). Raises an mngr error the fan-out
+# records; a MessageDeliveredButBlockedError is treated as a delivered-but-blocked send.
+DeliverToAgent = Callable[[AgentInterface, str], None]
+
+
+def _deliver_text(agent: AgentInterface, payload: str) -> None:
+    """Deliver ``payload`` as an interactive text message (the default fan-out action)."""
+    require_interactive_agent(agent).send_message(payload)
+
+
+def _deliver_key_chord(agent: AgentInterface, payload: str) -> None:
+    """Deliver ``payload`` as a single tmux key token pressed into the agent's pane."""
+    require_key_chord_agent(agent).press_key_chord(payload)
+
+
 @log_call
 def send_message_to_agents(
     mngr_ctx: MngrContext,
@@ -64,11 +81,71 @@ def send_message_to_agents(
     or one agent's failure does not block messages to other agents. Callers
     typically obtain ``agents_to_message`` from ``find_all_agents``.
     """
+    return _deliver_to_agents(
+        mngr_ctx=mngr_ctx,
+        payload=message_content,
+        deliver=_deliver_text,
+        agents_to_message=agents_to_message,
+        error_behavior=error_behavior,
+        is_start_desired=is_start_desired,
+        on_success=on_success,
+        on_error=on_error,
+    )
+
+
+@log_call
+def send_key_chord_to_agents(
+    mngr_ctx: MngrContext,
+    key: str,
+    agents_to_message: Sequence[AgentMatch],
+    error_behavior: ErrorBehavior = ErrorBehavior.CONTINUE,
+    is_start_desired: bool = False,
+    on_success: Callable[[str], None] | None = None,
+    on_error: Callable[[str, str], None] | None = None,
+) -> MessageResult:
+    """Press ONE tmux key token (e.g. ``"M-q"``) into a pre-resolved set of agents' panes.
+
+    The keystroke sibling of :func:`send_message_to_agents`: same host-grouped,
+    concurrent fan-out and same per-agent ``message.lock`` serialization (via
+    ``press_key_chord``), but it presses a raw key rather than pasting text + Enter.
+    The lock is what keeps a chord from landing between a concurrent text send's paste
+    and its Enter. ``key`` is a tmux ``send-keys`` token; the caller owns the choice of
+    which key. Agent types with no tmux pane (headless, or an API-driven harness like
+    pi/opencode) are refused per-agent via ``require_key_chord_agent``.
+    """
+    return _deliver_to_agents(
+        mngr_ctx=mngr_ctx,
+        payload=key,
+        deliver=_deliver_key_chord,
+        agents_to_message=agents_to_message,
+        error_behavior=error_behavior,
+        is_start_desired=is_start_desired,
+        on_success=on_success,
+        on_error=on_error,
+    )
+
+
+def _deliver_to_agents(
+    mngr_ctx: MngrContext,
+    payload: str,
+    deliver: DeliverToAgent,
+    agents_to_message: Sequence[AgentMatch],
+    error_behavior: ErrorBehavior,
+    is_start_desired: bool,
+    on_success: Callable[[str], None] | None,
+    on_error: Callable[[str, str], None] | None,
+) -> MessageResult:
+    """Fan ``deliver(payload)`` out to a pre-resolved set of agents, grouped by host.
+
+    The shared engine behind ``send_message_to_agents`` (text) and
+    ``send_key_chord_to_agents`` (key chord). Hosts are resolved and deliveries run
+    concurrently so one slow host or one agent's failure does not block the others.
+    """
     result = MessageResult()
     result_lock = Lock()
 
     matches_by_host = group_agents_by_host(agents_to_message)
-    logger.trace("Messaging agents across {} hosts", len(matches_by_host))
+    logger.trace("Delivering to agents across {} hosts", len(matches_by_host))
 
     futures: list[Future[None]] = []
     with mngr_executor(
@@ -81,7 +158,8 @@ def send_message_to_agents(
                     _process_host_for_messaging,
                     matches=matches_on_host,
                     provider=provider,
-                    message_content=message_content,
+                    message_content=payload,
+                    deliver=deliver,
                     error_behavior=error_behavior,
                     is_start_desired=is_start_desired,
                     result=result,
@@ -134,6 +212,7 @@ def _process_host_for_messaging(
     matches: Sequence[AgentMatch],
     provider: BaseProviderInstance,
     message_content: str,
+    deliver: DeliverToAgent,
     error_behavior: ErrorBehavior,
     is_start_desired: bool,
     result: MessageResult,
@@ -189,6 +268,7 @@ def _process_host_for_messaging(
                         agent=agent,
                         host=host,
                         message_content=message_content,
+                        deliver=deliver,
                         result=result,
                         result_lock=result_lock,
                         error_behavior=error_behavior,
@@ -215,6 +295,7 @@ def _send_message_to_agent(
     agent: AgentInterface,
     host: OnlineHostInterface,
     message_content: str,
+    deliver: DeliverToAgent,
     result: MessageResult,
     result_lock: Lock,
     error_behavior: ErrorBehavior,
@@ -222,7 +303,7 @@ def _send_message_to_agent(
     on_success: Callable[[str], None] | None,
     on_error: Callable[[str, str], None] | None,
 ) -> None:
-    """Send a message to a single agent.
+    """Deliver ``message_content`` to a single agent via ``deliver``.
 
     Called from a worker thread. Known errors (MngrError) are recorded in
     `result`; in ABORT mode they are also re-raised so the ConcurrencyGroup
@@ -267,8 +348,8 @@ def _send_message_to_agent(
             return
 
     try:
-        with log_span("Sending message to agent {}", agent_name):
-            require_interactive_agent(agent).send_message(message_content)
+        with log_span("Delivering to agent {}", agent_name):
+            deliver(agent, message_content)
         with result_lock:
             result.successful_agents.append(agent_name)
         if on_success:

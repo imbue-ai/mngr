@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "imbue-mngr==0.2.17",
+    # WebSocket client for the per-agent ``codex app-server`` JSON-RPC connection
+    # (see ``app_server_client``). The daemon speaks WebSocket over its unix socket.
+    "websockets>=13",
 ]
 
 [project.entry-points.mngr]
@@ -17,7 +20,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
-exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/test_fixtures/**"]
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }

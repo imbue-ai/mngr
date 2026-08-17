@@ -310,28 +310,23 @@ def _get_mngr_repo_root() -> Path:
 def get_mngr_dockerfile_path(mode: MngrInstallMode) -> Path:
     """Get the path to the mngr Dockerfile based on the install mode.
 
-    For EDITABLE mode, the Dockerfile is found by navigating from the mngr-schedule
-    source directory to the mngr resources directory within the monorepo.
-    For PACKAGE mode, the Dockerfile is loaded from the installed mngr package
-    via importlib.resources.
+    The Dockerfile is a packaged resource of imbue.mngr (imbue/mngr/resources/
+    Dockerfile), so every mode resolves it from the package location via
+    importlib.resources: for EDITABLE/SKIP installs that lands in the monorepo
+    source tree, and for PACKAGE installs it lands in site-packages. Deriving
+    the path from the package rather than the enclosing git root also works
+    when the monorepo is vendored inside another git repository (where the git
+    root is not the mngr checkout).
     """
     match mode:
-        case MngrInstallMode.EDITABLE | MngrInstallMode.SKIP:
-            mngr_repo_root = _get_mngr_repo_root()
-            dockerfile_path = mngr_repo_root / "libs" / "mngr" / "imbue" / "mngr" / "resources" / "Dockerfile"
-            if not dockerfile_path.exists():
-                raise ScheduleDeployError(
-                    f"mngr Dockerfile not found at {dockerfile_path}. "
-                    "Expected the mngr monorepo to contain libs/mngr/imbue/mngr/resources/Dockerfile."
-                )
-            return dockerfile_path
-        case MngrInstallMode.PACKAGE:
+        case MngrInstallMode.EDITABLE | MngrInstallMode.SKIP | MngrInstallMode.PACKAGE:
             resources_dir = importlib.resources.files(mngr_resources)
             dockerfile_resource = resources_dir / "Dockerfile"
             dockerfile_path = Path(str(dockerfile_resource))
             if not dockerfile_path.exists():
                 raise ScheduleDeployError(
-                    "mngr Dockerfile not found in installed package. The mngr package may be missing its resources."
+                    f"mngr Dockerfile not found at {dockerfile_path}. "
+                    "The imbue.mngr package may be missing its resources."
                 )
             return dockerfile_path
         case MngrInstallMode.AUTO:

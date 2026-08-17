@@ -23,6 +23,7 @@ from imbue.mngr.cli.common_opts import parse_output_options
 from imbue.mngr.cli.common_opts import restore_cli_list_values
 from imbue.mngr.cli.common_opts import save_cli_list_values_for_restoration
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
@@ -32,6 +33,7 @@ from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugins import hookspecs
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
@@ -366,14 +368,33 @@ def test_apply_create_template_multiple_templates_stack(mngr_test_prefix: str) -
 
 
 def test_apply_create_template_later_template_overrides_earlier(mngr_test_prefix: str) -> None:
-    """apply_create_template should let later templates override earlier ones for the same key."""
+    """apply_create_template should let later templates override earlier ones for the same
+    key (shown with a non-type scalar; conflicting `type` is rejected -- see
+    test_apply_create_template_conflicting_base_types_raise)."""
     ctx = _make_click_context(
         params={
             "template": ("first", "second"),
-            "type": None,
+            "snapshot": None,
         },
     )
 
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("first"): CreateTemplate(options={"snapshot": "snap-a"}),
+            CreateTemplateName("second"): CreateTemplate(options={"snapshot": "snap-b"}),
+        },
+    )
+
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+
+    assert result["snapshot"] == "snap-b"
+
+
+def test_apply_create_template_conflicting_base_types_raise(mngr_test_prefix: str) -> None:
+    """Stacking two templates that declare different base types is rejected -- a create
+    resolves to exactly one -- rather than silently letting the last win."""
+    ctx = _make_click_context(params={"template": ("first", "second"), "type": None})
     config = MngrConfig(
         prefix=mngr_test_prefix,
         create_templates={
@@ -381,10 +402,24 @@ def test_apply_create_template_later_template_overrides_earlier(mngr_test_prefix
             CreateTemplateName("second"): CreateTemplate(options={"type": "claude"}),
         },
     )
+    with pytest.raises(UserInputError, match="Conflicting base types"):
+        apply_create_template(ctx, ctx.params.copy(), config)
 
+
+def test_apply_create_template_same_type_across_templates_is_ok(mngr_test_prefix: str) -> None:
+    """Two templates declaring the SAME base type (and a role template leaving it unset)
+    do not conflict."""
+    ctx = _make_click_context(params={"template": ("a", "b", "role"), "type": None, "snapshot": None})
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("a"): CreateTemplate(options={"type": "codex"}),
+            CreateTemplateName("b"): CreateTemplate(options={"type": "codex"}),
+            CreateTemplateName("role"): CreateTemplate(options={"snapshot": "snap"}),
+        },
+    )
     result = apply_create_template(ctx, ctx.params.copy(), config)
-
-    assert result["type"] == "claude"
+    assert result["type"] == "codex"
 
 
 def test_apply_create_template_cli_args_override_all_templates(mngr_test_prefix: str) -> None:
@@ -663,10 +698,16 @@ def test_apply_create_template_skips_none_values(mngr_test_prefix: str) -> None:
     assert result["name"] == "from-template"
 
 
-def test_apply_create_template_skips_unknown_params(mngr_test_prefix: str) -> None:
-    """apply_create_template should skip template params not in the original params dict."""
+def test_apply_create_template_rejects_a_key_that_is_neither_option_nor_agent_type_setting(
+    mngr_test_prefix: str,
+) -> None:
+    """A template key that names nothing raises instead of being silently dropped.
+
+    Silently dropping it is what let a typo -- or a role stacked onto a harness that cannot
+    honour it -- produce an agent that quietly ignored part of its configuration.
+    """
     ctx = _make_click_context(
-        params={"template": ("mytemplate",), "name": "default"},
+        params={"template": ("mytemplate",), "name": "default", "type": "claude", "setting": ()},
     )
     config = MngrConfig(
         prefix=mngr_test_prefix,
@@ -674,8 +715,51 @@ def test_apply_create_template_skips_unknown_params(mngr_test_prefix: str) -> No
             CreateTemplateName("mytemplate"): CreateTemplate(options={"nonexistent_param": "value"}),
         },
     )
+    with pytest.raises(UserInputError, match="nonexistent_param"):
+        apply_create_template(ctx, ctx.params.copy(), config)
+
+
+def test_apply_create_template_routes_an_agent_type_setting_to_the_resolved_type(
+    mngr_test_prefix: str,
+) -> None:
+    """A role's `output_style` lands on whichever agent type the stack resolved to.
+
+    This is what lets a role state harness behaviour once without naming a harness:
+    `-t codex -t chat` and `-t claude -t chat` route the same template key to different
+    agent types.
+    """
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("chat"): CreateTemplate(options={"output_style": "Engineering Subordinate"}),
+        },
+    )
+    for agent_type in ("claude", "codex"):
+        ctx = _make_click_context(
+            params={"template": ("chat",), "name": "n", "type": agent_type, "setting": ()},
+        )
+        result = apply_create_template(ctx, ctx.params.copy(), config)
+        assert result["setting"] == (f'agent_types.{agent_type}.output_style="Engineering Subordinate"',)
+
+
+def test_apply_create_template_accumulates_append_system_prompt_across_stacked_roles(
+    mngr_test_prefix: str,
+) -> None:
+    """Two stacked roles each contribute a prompt block rather than the last one winning."""
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("worker"): CreateTemplate(options={"append_system_prompt__extend": ["first"]}),
+            CreateTemplateName("subskill"): CreateTemplate(options={"append_system_prompt__extend": ["second"]}),
+        },
+    )
+    ctx = _make_click_context(
+        params={"template": ("worker", "subskill"), "name": "n", "type": "claude", "setting": ()},
+    )
     result = apply_create_template(ctx, ctx.params.copy(), config)
-    assert "nonexistent_param" not in result
+    # One entry, not one per template: each entry extends the base independently, so two of
+    # them would each extend the empty base and the later would win.
+    assert result["setting"] == ('agent_types.claude.append_system_prompt__extend=["first", "second"]',)
 
 
 # =============================================================================
@@ -1753,3 +1837,95 @@ def test_apply_settings_to_config_rejects_setting_the_narrowing_flag(flag_settin
     config = MngrConfig(prefix=mngr_test_prefix)
     with pytest.raises(UserInputError, match="allow_settings_key_assignment_narrowing"):
         apply_settings_to_config(config, (flag_setting,), frozenset())
+
+
+# =============================================================================
+# Role settings: a template stack contributing to the agent type's config
+# =============================================================================
+
+
+def _role_stack_config(
+    mngr_test_prefix: str, agent_type: str, templates: dict[str, dict[str, Any]], stack: tuple[str, ...]
+) -> Any:
+    """Resolve ``stack`` against ``templates`` and return the resulting agent config.
+
+    Walks the real pipeline -- template application, then the settings fold, then agent-type
+    resolution -- because the defect this guards against lived between those steps: each
+    ``--setting`` entry extends the base config independently, so one entry per template
+    left the last role's value simply overwriting the rest.
+    """
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName(name): CreateTemplate(options=options) for name, options in templates.items()
+        },
+    )
+    params = {"template": stack, "type": agent_type, "setting": (), "name": "n"}
+    ctx = _make_click_context(params=params)
+    applied = apply_create_template(ctx, params.copy(), config)
+    folded = apply_settings_to_config(config, tuple(applied["setting"]), config.disabled_plugins)
+    return resolve_agent_type(AgentTypeName(agent_type), folded).agent_config
+
+
+@pytest.mark.parametrize("agent_type", ["claude", "codex"])
+def test_two_templates_each_contribute_a_system_prompt_block(mngr_test_prefix: str, agent_type: str) -> None:
+    """Two roles in one stack each add a block, in stack order.
+
+    The whole point of the aggregate: before the fix this returned only "SENTINEL_B",
+    because the second role's settings entry replaced the first's instead of extending it.
+    """
+    agent_config = _role_stack_config(
+        mngr_test_prefix,
+        agent_type,
+        {
+            "first": {"append_system_prompt__extend": ["SENTINEL_A"]},
+            "second": {"append_system_prompt__extend": ["SENTINEL_B"]},
+        },
+        ("first", "second"),
+    )
+    assert [str(block) for block in agent_config.append_system_prompt] == ["SENTINEL_A", "SENTINEL_B"]
+
+
+@pytest.mark.parametrize("agent_type", ["claude", "codex"])
+def test_a_style_on_the_first_role_survives_a_second_role_adding_a_prompt(
+    mngr_test_prefix: str, agent_type: str
+) -> None:
+    """A scalar set by one role and an aggregate extended by another do not clobber each other.
+
+    They compile into separate settings entries against the same agent type, so a bug in
+    either path would show up as the other field going missing.
+    """
+    agent_config = _role_stack_config(
+        mngr_test_prefix,
+        agent_type,
+        {
+            "first": {"output_style": "Engineering Subordinate", "append_system_prompt__extend": ["SENTINEL_A"]},
+            "second": {"append_system_prompt__extend": ["SENTINEL_B"]},
+        },
+        ("first", "second"),
+    )
+    assert str(agent_config.output_style) == "Engineering Subordinate"
+    assert [str(block) for block in agent_config.append_system_prompt] == ["SENTINEL_A", "SENTINEL_B"]
+
+
+def test_a_later_role_overrides_an_earlier_roles_output_style(mngr_test_prefix: str) -> None:
+    """The scalar is assign-by-default: the last role to set it wins, unlike the aggregate."""
+    agent_config = _role_stack_config(
+        mngr_test_prefix,
+        "claude",
+        {"first": {"output_style": "First Style"}, "second": {"output_style": "Second Style"}},
+        ("first", "second"),
+    )
+    assert str(agent_config.output_style) == "Second Style"
+
+
+def test_a_role_setting_unknown_to_the_resolved_type_names_the_types_that_support_it(
+    mngr_test_prefix: str,
+) -> None:
+    """A harness with no such field fails the create rather than ignoring the role.
+
+    ``wait`` is a registered type whose config is the bare base class, standing in for any
+    harness that cannot honour a role -- the error names it and lists who can.
+    """
+    with pytest.raises(UserInputError, match="nor a setting of agent type 'wait'"):
+        _role_stack_config(mngr_test_prefix, "wait", {"chat": {"output_style": "Engineering Subordinate"}}, ("chat",))

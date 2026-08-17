@@ -181,6 +181,22 @@ class AgentReleaseProfile(abc.ABC):
         """
         init_git_repo(work_dir, initial_commit=True)
 
+    def is_waiting_after_create(self, host_dir: Path) -> bool:
+        """Whether the just-created, un-messaged agent reports WAITING (not running a turn).
+
+        Default: the ``active`` marker is absent. A harness whose lifecycle is read live rather
+        than from a marker (codex reads the daemon's ``thread/status``) overrides this.
+        """
+        return not _marker_path(host_dir).exists()
+
+    def is_reporting_running(self, host_dir: Path) -> bool:
+        """Whether the agent is reporting RUNNING (a turn in flight).
+
+        Default: the ``active`` marker exists. Overridden by a harness whose RUNNING signal is
+        read live (codex: a turn in flight is ``thread/status`` ``active``).
+        """
+        return _marker_path(host_dir).exists()
+
 
 def _agent_state_dir(host_dir: Path) -> Path:
     candidates = [path for path in (host_dir / "agents").glob("*") if path.is_dir()]
@@ -393,16 +409,19 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
             timeout=_CREATE_TIMEOUT_SECONDS,
         )
         assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
-        assert not _marker_path(host_dir).exists(), "expected WAITING (no active marker) right after create"
+        assert profile.is_waiting_after_create(host_dir), "expected WAITING (no turn in flight) right after create"
 
-        # 2. Seed the secret and observe the RUNNING marker (every agent surfaces it).
+        # 2. Seed the secret and observe RUNNING (every agent surfaces it -- via the active marker,
+        #    or, for a live-lifecycle harness like codex, the daemon's thread/status).
         seed = profile.run_mngr(
             ctx, "message", agent_name, "--message", profile.seed_prompt(secret), timeout=_MESSAGE_TIMEOUT_SECONDS
         )
         assert seed.returncode == 0, f"seed message failed:\n{seed.stdout}\n{seed.stderr}"
         assert poll_until(
-            condition=_marker_path(host_dir).exists, timeout=_RUNNING_TIMEOUT_SECONDS, poll_interval=0.2
-        ), "active marker never appeared -> agent never reported RUNNING"
+            condition=lambda: profile.is_reporting_running(host_dir),
+            timeout=_RUNNING_TIMEOUT_SECONDS,
+            poll_interval=0.2,
+        ), "agent never reported RUNNING"
 
         # 3. The seed turn must be captured: user_message carries the secret, plus a reply
         #    (and a tool_result when the agent forces a tool call).

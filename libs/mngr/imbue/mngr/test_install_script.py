@@ -17,7 +17,24 @@ import pytest
 from imbue.mngr.utils.testing import write_executable_script
 
 _THIS_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = next(p for p in [_THIS_DIR, *_THIS_DIR.parents] if (p / ".git").exists())
+
+
+def _find_repo_root() -> Path:
+    """Locate the mngr checkout root in both standalone and vendored layouts.
+
+    The mngr monorepo may be vendored inside another git repository (e.g. as a
+    subtree under ``system/vendor/mngr``), in which case the nearest ``.git``
+    ancestor is the *outer* repo, not the mngr root. The ``scripts/install.sh``
+    these tests exercise identifies the actual mngr checkout root, so look for
+    that first and only fall back to the nearest ``.git`` ancestor.
+    """
+    for candidate in [_THIS_DIR, *_THIS_DIR.parents]:
+        if (candidate / "scripts" / "install.sh").exists():
+            return candidate
+    return next(p for p in [_THIS_DIR, *_THIS_DIR.parents] if (p / ".git").exists())
+
+
+_REPO_ROOT = _find_repo_root()
 _INSTALL_SH = _REPO_ROOT / "scripts" / "install.sh"
 # Resolve bash up-front so the subprocess lookup is independent of the
 # minimal PATH we hand the child (which only contains the mock bin dir

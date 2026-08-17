@@ -16,9 +16,12 @@
 #       converter's read-modify-write so the background 5s daemon and an
 #       on-demand `--single-pass` flush never both append the same events into
 #       permanent duplicates (event-id dedup only skips IDs already present at
-#       read time). mkdir is atomic on POSIX filesystems, so it doubles as the
-#       mutex; a lock left by a crashed pass is broken once it is older than a
-#       minute. Same idiom as codex's codex_marker_lock.
+#       read time). Raw streamers with a read-offset/append/write-offset
+#       section of their own (codex's stream_transcript.sh) take the same lock,
+#       so their 1s daemon and the turn-end `--single-pass` flush cannot both
+#       emit the same rollout lines. mkdir is atomic on POSIX filesystems, so
+#       it doubles as the mutex; a lock left by a crashed pass is broken once
+#       it is older than a minute. Same idiom as codex's codex_marker_lock.
 #
 #   - mngr_common_transcript_release_lock
 #       Drop the lock (idempotent).

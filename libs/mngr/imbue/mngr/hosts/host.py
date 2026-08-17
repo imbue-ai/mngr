@@ -3540,20 +3540,28 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # hypothetical env var like `OTHER_MNGR_AGENT_ID=...` cannot trigger a
         # false match. We use BRE (drop -F) because -F has no anchors.
         #
-        # Trailing `; true` forces a clean exit: the for loop's exit code is the
-        # last iteration's `[ -r ... ] && grep ... && echo ...` chain, which is 1
-        # when the final PID doesn't match (the common case). Without `; true`,
-        # `result.success` would be False even when stdout contains real matches,
-        # and the env-scan fallback would silently no-op. We rely on stdout
-        # content alone -- the exit code carries no useful signal here.
+        # ONE grep invocation over every environ file, not one grep per process:
+        # the per-process form forks ~15-20ms of grep per pid (measured under
+        # gVisor), which multiplies to seconds per agent on a busy host and past
+        # the 10s cleanup bound under a parallel multi-agent destroy -- at which
+        # point the scan was skipped and orphans were never killed. `grep -l`
+        # prints the matching /proc/<pid>/environ paths (stopping each file at
+        # its first match) in 0.05-0.1s; the tiny shell loop over MATCHES ONLY
+        # converts paths to pids and drops SELF. Unreadable environ files are
+        # silenced by 2>/dev/null exactly as before.
+        #
+        # Trailing `; true` forces a clean exit: grep exits 1 when nothing
+        # matches (the common case). Without `; true`, `result.success` would be
+        # False even on a legitimately empty scan, and the env-scan fallback
+        # would silently no-op. We rely on stdout content alone -- the exit code
+        # carries no useful signal here.
         cmd = (
             f"AGENT_ID={quoted_id}; "
             "SELF=$$; "
             'if [ "$(uname -s)" = "Linux" ]; then '
-            "  for d in /proc/[0-9]*; do "
-            "    pid=${d##*/}; "
-            '    [ "$pid" = "$SELF" ] && continue; '
-            '    [ -r "$d/environ" ] && grep -qza "^MNGR_AGENT_ID=$AGENT_ID" "$d/environ" 2>/dev/null && echo "$pid"; '
+            '  for f in $(grep -lza "^MNGR_AGENT_ID=$AGENT_ID" /proc/[0-9]*/environ 2>/dev/null); do '
+            "    pid=${f#/proc/}; pid=${pid%/environ}; "
+            '    [ "$pid" = "$SELF" ] || echo "$pid"; '
             "  done; "
             "fi; true"
         )

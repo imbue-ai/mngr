@@ -30,6 +30,7 @@ from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.api.message import MessageResult
+from imbue.mngr.api.message import _deliver_text
 from imbue.mngr.api.message import _send_message_to_agent
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
@@ -70,6 +71,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.docker.host_store import HostRecord
@@ -1246,11 +1248,15 @@ def test_build_readiness_hooks_config_has_hook(hook_name: str, expected_substrin
 
     assert hook_name in config["hooks"]
     assert len(config["hooks"][hook_name]) == 1
-    hook = config["hooks"][hook_name][0]["hooks"][0]
-    assert hook["type"] == "command"
-    assert "MNGR_AGENT_STATE_DIR" in hook["command"]
+    # Several events now carry more than one hook (e.g. the model-state snapshot runs first at
+    # Stop, before wait_for_stop_hook.sh blocks), so look for the expected command across all of
+    # them rather than assuming it is the first.
+    commands = [h["command"] for h in config["hooks"][hook_name][0]["hooks"] if h["type"] == "command"]
+    assert any("MNGR_AGENT_STATE_DIR" in command for command in commands)
     for substring in expected_substrings:
-        assert substring in hook["command"], f"Expected '{substring}' in {hook_name} hook command"
+        assert any(substring in command for command in commands), (
+            f"Expected '{substring}' in a {hook_name} hook command"
+        )
 
 
 def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
@@ -2209,6 +2215,7 @@ def test_send_message_routes_delivered_but_blocked_to_blocked_agents(
         agent=agent,
         host=host,
         message_content="/model fable",
+        deliver=_deliver_text,
         result=result,
         result_lock=Lock(),
         error_behavior=ErrorBehavior.CONTINUE,
@@ -2378,6 +2385,47 @@ def test_configure_agent_hooks_applies_settings_overrides_in_managed_file(
     assert settings["permissions"]["allow"] == ["Bash(npm *)"]
     assert "SessionStart" in settings["hooks"]
     assert "__extend" not in content
+
+
+def test_seed_model_state_writes_launch_selection(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The provision-time seed puts the configured model on disk in the statusline's
+    schema, so the chat model bar is populatable the moment readiness fires."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    agent = _make_hooks_test_agent(
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(
+            check_installation=False,
+            settings_overrides={"model": "opus[1m]", "fastMode": False},
+        ),
+    )
+
+    agent._seed_model_state(host)
+
+    state = json.loads((agent._get_agent_dir() / "model_state.json").read_text())
+    assert state == {"model": "opus[1m]", "effort": None, "fast": False}
+
+
+def test_seed_model_state_skips_when_no_model_pinned(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, settings_overrides={})
+    )
+
+    agent._seed_model_state(host)
+
+    assert not (agent._get_agent_dir() / "model_state.json").exists()
 
 
 def test_configure_agent_hooks_does_not_touch_existing_settings_local(
@@ -7078,3 +7126,30 @@ def test_approve_api_key_no_host_argument_falls_back_to_process_env(monkeypatch:
     approve_api_key_for_claude(data)
     approved = cast(dict[str, list[str]], data["customApiKeyResponses"])["approved"]
     assert key[-20:] in approved
+
+
+def test_stacked_role_prompts_reach_claude_as_one_flag_carrying_every_block() -> None:
+    """Claude gets ONE --append-system-prompt whose value holds every stacked role's block.
+
+    One flag rather than one per block because claude's flag is last-wins (verified against
+    claude 2.1.220): repeating it would deliver only the final block and silently drop every
+    role stacked before it. The sentinels make both blocks' presence checkable.
+    """
+    agent = ClaudeAgent.model_construct(
+        agent_config=ClaudeAgentConfig(
+            append_system_prompt=(SystemPromptText("SENTINEL_A"), SystemPromptText("SENTINEL_B")),
+            check_installation=False,
+        )
+    )
+    args = agent._build_append_system_prompt_args()
+    assert len(args) == 2, f"expected exactly one flag and one value, got {args!r}"
+    flag, value = args
+    assert flag == "--append-system-prompt"
+    assert "SENTINEL_A" in value
+    assert "SENTINEL_B" in value
+    assert value.index("SENTINEL_A") < value.index("SENTINEL_B"), "blocks must keep stack order"
+
+
+def test_claude_emits_no_prompt_flag_when_no_role_contributed_one() -> None:
+    agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(check_installation=False))
+    assert agent._build_append_system_prompt_args() == ()

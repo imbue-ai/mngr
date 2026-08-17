@@ -223,6 +223,9 @@ def test_handle_not_implemented_error_non_interactive_exits(monkeypatch: pytest.
 @pytest.mark.allow_warnings(match=r"^Error: some feature")
 def test_handle_not_implemented_error_interactive_declined(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode, if user declines to report, just exits."""
+    # Pin IS_AUTONOMOUS so the prompt path is exercised even in sandboxes that
+    # export IS_AUTONOMOUS=1 (which makes _prompt_and_report_issue return early).
+    monkeypatch.delenv("IS_AUTONOMOUS", raising=False)
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.click.confirm", lambda *args, **kwargs: False)
 
@@ -244,6 +247,9 @@ def test_handle_not_implemented_error_empty_message(monkeypatch: pytest.MonkeyPa
 @pytest.mark.allow_warnings(match=r"^Error: --sync-mode=full is not implemented yet")
 def test_handle_not_implemented_error_interactive_opens_existing_issue(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode with existing issue found, opens its URL."""
+    # Pin IS_AUTONOMOUS so the prompt path is exercised even in sandboxes that
+    # export IS_AUTONOMOUS=1 (which makes _prompt_and_report_issue return early).
+    monkeypatch.delenv("IS_AUTONOMOUS", raising=False)
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.click.confirm", lambda *args, **kwargs: True)
 
@@ -280,6 +286,9 @@ def test_handle_not_implemented_error_interactive_opens_existing_issue(monkeypat
 @pytest.mark.allow_warnings(match=r"^Error: --exclude is not implemented yet")
 def test_handle_not_implemented_error_interactive_opens_new_issue_form(monkeypatch: pytest.MonkeyPatch) -> None:
     """In interactive mode with no existing issue, opens new issue form."""
+    # Pin IS_AUTONOMOUS so the prompt path is exercised even in sandboxes that
+    # export IS_AUTONOMOUS=1 (which makes _prompt_and_report_issue return early).
+    monkeypatch.delenv("IS_AUTONOMOUS", raising=False)
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("imbue.mngr.cli.issue_reporting.click.confirm", lambda *args, **kwargs: True)
 
