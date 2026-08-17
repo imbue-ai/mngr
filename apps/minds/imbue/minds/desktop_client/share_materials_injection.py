@@ -205,7 +205,7 @@ _PROBE_SHARE_STATE_SCRIPT: Final[str] = (
     f"else echo {_PROBE_SHARE_ENV_PREFIX}0; fi; "
     f"if test -f {_SHARE_GRANTS_FILE}; then "
     f'if grants_b64="$(base64 < {_SHARE_GRANTS_FILE})"; then '
-    f"echo \"{_PROBE_GRANTS_B64_PREFIX}$(echo \"$grants_b64\" | tr -d '\\n')\"; "
+    f'echo "{_PROBE_GRANTS_B64_PREFIX}$(echo "$grants_b64" | tr -d \'\\n\')"; '
     f"else echo {_PROBE_GRANTS_B64_PREFIX}{_PROBE_UNREADABLE_VALUE}; fi; "
     f"else echo {_PROBE_GRANTS_B64_PREFIX}{_PROBE_ABSENT_VALUE}; fi"
 )
@@ -265,9 +265,7 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
                 value_by_prefix[prefix] = line[len(prefix) :].strip()
     grants_value = value_by_prefix.get(_PROBE_GRANTS_B64_PREFIX, _PROBE_ABSENT_VALUE)
     if grants_value == _PROBE_UNREADABLE_VALUE:
-        raise ShareInjectionError(
-            f"The share grants document in agent {agent_id} exists but could not be read"
-        )
+        raise ShareInjectionError(f"The share grants document in agent {agent_id} exists but could not be read")
     if grants_value == _PROBE_ABSENT_VALUE or not grants_value:
         # An empty value is an empty (whitespace-free) document: the checked
         # read means a failed one reports UNREADABLE above, and an empty file
@@ -277,9 +275,7 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
         try:
             grants_toml_text = base64.b64decode(grants_value).decode("utf-8")
         except (binascii.Error, UnicodeDecodeError) as exc:
-            raise ShareInjectionError(
-                f"Could not decode the share grants read from agent {agent_id}: {exc}"
-            ) from exc
+            raise ShareInjectionError(f"Could not decode the share grants read from agent {agent_id}: {exc}") from exc
     return ShareAgentProbe(
         has_gateway=value_by_prefix.get(_PROBE_GATEWAY_PREFIX) == "1",
         has_share_env=value_by_prefix.get(_PROBE_SHARE_ENV_PREFIX) == "1",
