@@ -139,11 +139,7 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             self._send_tmux_literal_keys(self.tmux_target, message)
             wait_for_paste_visible(self, self.tmux_target, message)
 
-            policy = (
-                SubmissionConfirmationPolicy.RELAXED
-                if is_slash_command_message(message)
-                else SubmissionConfirmationPolicy.STRICT
-            )
+            policy = self._determine_confirmation_policy(message)
             timeout_seconds = (
                 RELAXED_CONFIRMATION_TIMEOUT_SECONDS
                 if policy == SubmissionConfirmationPolicy.RELAXED
@@ -199,6 +195,19 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
             # blocking dialog that leaves the agent stuck. Subclasses that can detect such dialogs
             # override this; the default is a no-op.
             self._run_post_submit_dialog_check(self.tmux_target)
+
+    def _determine_confirmation_policy(self, message: str) -> SubmissionConfirmationPolicy:
+        """Choose the confirmation policy for a message.
+
+        Slash commands are TUI-local and often leave no durable evidence, so
+        they are confirmed under the relaxed policy (an unconfirmed send is
+        logged, not raised). Everything else is strict: a normal message must
+        never silently vanish. Subclasses may widen the relaxed set for other
+        TUI-local inputs they understand.
+        """
+        if is_slash_command_message(message):
+            return SubmissionConfirmationPolicy.RELAXED
+        return SubmissionConfirmationPolicy.STRICT
 
     def _run_post_submit_dialog_check(self, tmux_target: TmuxWindowTarget) -> None:
         """Handle any blocking dialog opened by the just-submitted message.

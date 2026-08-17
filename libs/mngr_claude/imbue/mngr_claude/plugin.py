@@ -46,6 +46,7 @@ from imbue.mngr.agents.tui_utils import build_changed_token_probe
 from imbue.mngr.agents.tui_utils import build_file_mtime_token_command
 from imbue.mngr.agents.tui_utils import build_normalized_message_probe
 from imbue.mngr.agents.tui_utils import send_enter_keystroke
+from imbue.mngr.agents.tui_utils import send_key_keystroke
 from imbue.mngr.agents.update_policy import AgentUpdatePolicy
 from imbue.mngr.agents.update_policy import is_self_update_disabled
 from imbue.mngr.api.preservation import PreservedItem
@@ -134,6 +135,11 @@ from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 from imbue.mngr_claude.stream_buffer import SnapshotDeltaReader
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
+
+# Budget for leaving a bare-`!` shell-mode strand: retries, and the wait for the
+# `❯` prompt to return after each.
+_SHELL_MODE_EXIT_MAX_ATTEMPTS: Final[int] = 3
+_SHELL_MODE_EXIT_POLL_SECONDS: Final[float] = 2.0
 
 # Paths within ~/.claude/ to sync to the per-agent config dir.
 # Used by both get_files_for_deploy() and provision() to ensure consistency.
@@ -1493,6 +1499,54 @@ def has_input_prompt_line(pane_content: str) -> bool:
     return _INPUT_PROMPT_LINE_RE.search(pane_content) is not None
 
 
+# Claude Code's shell (bash) mode: typing `!` at an empty prompt swaps the column-0 `❯`
+# input glyph for `!` and shows the shell-mode footer, and submitting an empty shell line
+# is a no-op that STAYS in shell mode, hiding the `❯` prompt. A single Backspace deletes
+# the `!` and returns to normal mode.
+_SHELL_MODE_FOOTER_TEXT: Final[str] = "! for shell mode"
+# The shell-mode input row with an EMPTY command. Claude renders the empty box as `!` plus
+# a non-breaking space (U+00A0), so that is matched alongside ordinary spaces/tabs.
+_EMPTY_SHELL_MODE_INPUT_RE: Final[re.Pattern[str]] = re.compile(r"^![ \t\xa0]*$", re.MULTILINE)
+
+
+@pure
+def is_shell_command_message(message: str) -> bool:
+    """Whether a message drives Claude Code's shell (bash) mode -- a leading ``!``.
+
+    Such a message runs a bash command in the pane (or, for a bare ``!``, does nothing)
+    rather than sending a model turn.
+    """
+    return message.lstrip().startswith("!")
+
+
+@pure
+def is_stranded_in_empty_shell_mode(pane_content: str) -> bool:
+    """Whether the pane is stranded in Claude's shell mode on an empty command line -- the state a bare ``!`` submission leaves behind."""
+    if _SHELL_MODE_FOOTER_TEXT not in pane_content:
+        return False
+    if has_input_prompt_line(pane_content):
+        return False
+    return _EMPTY_SHELL_MODE_INPUT_RE.search(pane_content) is not None
+
+
+@pure
+def is_pending_shell_command(pane_content: str) -> bool:
+    """Whether the pane is in Claude's shell mode holding an unsubmitted (non-empty) command.
+
+    Within shell mode this is the complement of :func:`is_stranded_in_empty_shell_mode`: the
+    footer is up and the ``❯`` prompt is hidden, but the input row is not the empty strand. mngr
+    never leaves this state -- its own sends always submit with Enter -- so it can only be a
+    command a human typed directly into the pane and did not submit. Keyed off the *absence* of an
+    empty input row rather than the presence of a bare ``!`` line, so a prior ``!<command>`` echoed
+    in the transcript is not mistaken for the pending input. See ``_preflight_send_message``.
+    """
+    if _SHELL_MODE_FOOTER_TEXT not in pane_content:
+        return False
+    if has_input_prompt_line(pane_content):
+        return False
+    return not is_stranded_in_empty_shell_mode(pane_content)
+
+
 @pure
 def extract_blocking_selector_block(pane_content: str) -> str | None:
     """Return the text block of a blocking numbered selector if one is open, else None.
@@ -1557,6 +1611,17 @@ class DialogDetectedError(SendMessageError):
             agent_name,
             f"A dialog is blocking the agent's input ({dialog_description} detected in terminal). "
             f"Connect to the agent with 'mngr connect {agent_name}' to resolve it.",
+        )
+
+
+class ShellCommandPendingError(SendMessageError):
+    """The agent is stopped in Claude's shell mode on a command a human typed but did not submit."""
+
+    def __init__(self, agent_name: str) -> None:
+        super().__init__(
+            agent_name,
+            f"The agent is in shell mode with an unsubmitted command. Connect with "
+            f"'mngr connect {agent_name}' and press Enter to run it or Escape to cancel, then retry.",
         )
 
 
@@ -2535,16 +2600,22 @@ class ClaudeAgent(
         return SnapshotDeltaReader()
 
     def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
-        """Check for (and optionally clear) blocking dialogs before sending a message.
+        """Check for (and optionally clear) blocking input states before sending a message.
 
         Permission prompts (the ``permissions_waiting`` marker) are a distinct class that is
-        never auto-accepted -- always a hard raise. Any other blocking dialog already present (a
-        known-caption dialog or a generic numbered selector) is auto-accepted up to
-        ``auto_accept_preflight_prompt_depth`` times; if one remains, the send is aborted with
-        DialogDetectedError.
+        never auto-accepted -- always a hard raise. A non-empty shell command a human left
+        unsubmitted is likewise a hard raise (ShellCommandPendingError): it hides the ``❯`` prompt,
+        so surfacing it here gives an actionable error instead of a downstream readiness timeout.
+        Any other blocking dialog already present (a known-caption dialog or a generic numbered
+        selector) is auto-accepted up to ``auto_accept_preflight_prompt_depth`` times; if one
+        remains, the send is aborted with DialogDetectedError.
         """
         if self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME):
             raise DialogDetectedError(str(self.name), "permission dialog")
+
+        content = self._capture_pane_content(tmux_target)
+        if content is not None and is_pending_shell_command(content):
+            raise ShellCommandPendingError(str(self.name))
 
         remaining_dialog = self._accept_dialogs_up_to_depth(
             tmux_target,
@@ -2589,6 +2660,10 @@ class ClaudeAgent(
         message landed. Seeing the column-0 input prompt with no selector means the agent is
         clear; seeing neither (an unexpected state) is still success but is warned about.
         """
+        # Leave a possible bare-`!` shell-mode strand first: it hides the `❯` prompt the
+        # checks below key off. Only a lone `!` can strand a mngr send here -- a `!<command>`
+        # was submitted with Enter and already left shell mode.
+        self._exit_empty_shell_mode(tmux_target)
         # Observe the pane for at least the full window so a selector that renders a beat after
         # delivery is caught. Early-exit only when a selector actually appears (the input prompt
         # alone is not a reliable "no dialog" signal -- the just-submitted command echo keeps a
@@ -2690,6 +2765,51 @@ class ClaudeAgent(
     def _press_enter(self, tmux_target: TmuxWindowTarget) -> None:
         """Send a single Enter keystroke to the agent's pane (accepts a selector's highlighted default)."""
         send_enter_keystroke(self, tmux_target)
+
+    def _determine_confirmation_policy(self, message: str) -> SubmissionConfirmationPolicy:
+        """Confirm a leading-``!`` shell command under the relaxed policy, like a slash command.
+
+        A ``!`` message leaves no durable submission record, so a strict confirmation
+        would hang for the full window and then wrongly fail.
+        """
+        if is_shell_command_message(message):
+            return SubmissionConfirmationPolicy.RELAXED
+        return super()._determine_confirmation_policy(message)
+
+    def _exit_empty_shell_mode(self, tmux_target: TmuxWindowTarget) -> None:
+        """Leave Claude's shell mode if a bare ``!`` submission stranded the agent on an empty line.
+
+        Empty-only by design. Every message mngr delivers is submitted with Enter, so a
+        ``!<command>`` runs and leaves shell mode on its own; only a lone ``!`` submits nothing and
+        stays. A non-empty line is a command a human typed and did not submit -- refused up front by
+        ``_preflight_send_message`` (see ``is_pending_shell_command``), never finished or deleted here.
+        """
+        content = self._capture_pane_content(tmux_target)
+        if content is None or not is_stranded_in_empty_shell_mode(content):
+            return
+        logger.info(
+            "Agent {} is in Claude shell mode after an empty `!`; sending Backspace to restore the input prompt",
+            self.name,
+        )
+        for _ in range(_SHELL_MODE_EXIT_MAX_ATTEMPTS):
+            self._press_backspace(tmux_target)
+            if poll_until(lambda: self._input_prompt_present(tmux_target), timeout=_SHELL_MODE_EXIT_POLL_SECONDS):
+                self.record_message_delivery_event(
+                    "exited_shell_mode", "left Claude shell mode after an empty `!` submission"
+                )
+                return
+        logger.warning(
+            "Agent {} still lacks the `❯` input prompt after attempting to leave Claude shell mode", self.name
+        )
+
+    def _input_prompt_present(self, tmux_target: TmuxWindowTarget) -> bool:
+        """Whether the pane currently shows Claude Code's column-0 ``❯`` input prompt."""
+        content = self._capture_pane_content(tmux_target)
+        return content is not None and has_input_prompt_line(content)
+
+    def _press_backspace(self, tmux_target: TmuxWindowTarget) -> None:
+        """Send a single Backspace keystroke to the agent's pane (leaves an empty shell mode)."""
+        send_key_keystroke(self, tmux_target, "BSpace")
 
     def wait_for_ready_signal(
         self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None

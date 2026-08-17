@@ -96,6 +96,7 @@ from imbue.mngr_claude.plugin import DialogDetectedError
 from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import NumberedSelectorDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
+from imbue.mngr_claude.plugin import ShellCommandPendingError
 from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
@@ -124,6 +125,9 @@ from imbue.mngr_claude.plugin import compute_settings_json_flags
 from imbue.mngr_claude.plugin import extract_blocking_selector_block
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import has_input_prompt_line
+from imbue.mngr_claude.plugin import is_pending_shell_command
+from imbue.mngr_claude.plugin import is_shell_command_message
+from imbue.mngr_claude.plugin import is_stranded_in_empty_shell_mode
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import should_trust_work_dir
@@ -1888,6 +1892,44 @@ def test_has_input_prompt_line_matches_only_column_zero_glyph() -> None:
     assert has_input_prompt_line("just some text") is False
 
 
+def test_is_shell_command_message_detects_leading_bang() -> None:
+    """A leading `!` (after any leading whitespace) selects shell mode; nothing else does."""
+    assert is_shell_command_message("!") is True
+    assert is_shell_command_message("!echo mngr-behaviors-probe") is True
+    assert is_shell_command_message("   !ls") is True
+    assert is_shell_command_message("/clear") is False
+    assert is_shell_command_message("hello") is False
+    assert is_shell_command_message("echo !bang-in-the-middle") is False
+
+
+# The empty shell-mode input row Claude renders after a bare `!` (column-0 `!` plus the
+# non-breaking space U+00A0 it pads the empty box with), the footer it shows in shell mode,
+# and the rule lines that frame the input box.
+_EMPTY_SHELL_MODE_PANE = "────────\n!\xa0\n────────\n  ! for shell mode"
+_COMMAND_SHELL_MODE_PANE = "────────\n! echo mngr-behaviors-probe\n────────\n  ! for shell mode"
+_NORMAL_READY_PANE = "────────\n❯ \n────────\n  ⏵⏵ bypass permissions on"
+
+
+def test_is_stranded_in_empty_shell_mode_detects_bare_bang_strand() -> None:
+    """Only an EMPTY shell line under the shell-mode footer counts as a strand needing recovery."""
+    assert is_stranded_in_empty_shell_mode(_EMPTY_SHELL_MODE_PANE) is True
+    # A pending command must never be mistaken for a strand: recovery would delete it.
+    assert is_stranded_in_empty_shell_mode(_COMMAND_SHELL_MODE_PANE) is False
+    assert is_stranded_in_empty_shell_mode(_NORMAL_READY_PANE) is False
+    assert is_stranded_in_empty_shell_mode("❯ \n  ! for shell mode") is False
+    assert is_stranded_in_empty_shell_mode("! \n❯ ") is False
+
+
+def test_is_pending_shell_command_detects_unsubmitted_command() -> None:
+    """A non-empty shell line under the shell-mode footer is a pending command; empty and normal are not."""
+    assert is_pending_shell_command(_COMMAND_SHELL_MODE_PANE) is True
+    # The bare-`!` strand is empty, not pending -- the two are complementary.
+    assert is_pending_shell_command(_EMPTY_SHELL_MODE_PANE) is False
+    assert is_pending_shell_command(_NORMAL_READY_PANE) is False
+    # The shell footer with the `❯` prompt showing is normal mode, not a pending command.
+    assert is_pending_shell_command("❯ \n  ! for shell mode") is False
+
+
 def test_detect_preexisting_input_text_ignores_selector_option_line(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -2107,6 +2149,30 @@ def test_preflight_permissions_marker_is_hard_raise_never_auto_accepted(
     with pytest.raises(DialogDetectedError):
         agent._preflight_send_message(_TARGET)
     assert agent.enter_press_count == 0
+
+
+@pytest.mark.witnesses(
+    "message-delivery.pending-shell-command-blocks",
+    partial="drives the send preflight directly; does not also assert delivery resumes once the command is resolved",
+)
+def test_preflight_refuses_a_pending_shell_command(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A human's unsubmitted `!<command>` is refused at the send preflight with an actionable error.
+
+    Witnesses message-delivery.pending-shell-command-blocks: delivery is blocked by design and
+    surfaced immediately -- the send raises ShellCommandPendingError (naming the recovery) rather
+    than proceeding into the readiness timeout it would otherwise hit while shell mode hides `❯`.
+    """
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_COMMAND_SHELL_MODE_PANE])
+    with pytest.raises(ShellCommandPendingError) as exc_info:
+        agent._preflight_send_message(_TARGET)
+    message = str(exc_info.value)
+    assert "mngr connect" in message and "Enter" in message and "Escape" in message
+
+    # A bare-`!` empty strand is auto-recovered after submit, not refused here, so preflight passes.
+    empty_agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_EMPTY_SHELL_MODE_PANE])
+    empty_agent._preflight_send_message(_TARGET)
 
 
 class _BlockedAfterDeliveryClaudeAgent(ClaudeAgent):

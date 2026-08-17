@@ -42,8 +42,10 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
@@ -53,6 +55,7 @@ import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import _read_common_records
 from imbue.mngr.agents.agent_release_testing import _send_expecting_success
 from imbue.mngr.agents.agent_release_testing import _wait_for_user_message
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
@@ -65,6 +68,7 @@ from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_claude.plugin import extract_blocking_selector_block
+from imbue.mngr_claude.plugin import has_input_prompt_line
 
 # claude's native resumable session store, relative to the agent state dir: the
 # per-agent Claude config dir's session JSONLs (see ``_AGENT_CLAUDE_PROJECTS_RELPATH``
@@ -219,6 +223,10 @@ def test_claude_agent_full_lifecycle(tmp_path: Path) -> None:
     run_agent_release_lifecycle(_ClaudeReleaseProfile(), tmp_path)
 
 
+@pytest.mark.witnesses(
+    "message-delivery.stays-ready",
+    partial="witnesses the ordinary/queued/slash instances: each of a sequence of sends is confirmed, so the agent stayed ready for the next; does not cover shell-mode (`!`) messages",
+)
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
@@ -317,6 +325,10 @@ def _capture_agent_pane(ctx: AgentReleaseContext, agent_name: str) -> str:
     return result.stdout
 
 
+@pytest.mark.witnesses(
+    "message-delivery.stays-ready",
+    partial="witnesses the `/model` (blocking-selector) instance: a normal message is still delivered after /model",
+)
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
@@ -598,3 +610,322 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
         finally:
             if ctx.teardown is not None:
                 ctx.teardown()
+
+
+# MIND-171: a `!`-prefixed message strands the agent in Claude's shell mode
+
+# The stranded `!` send hangs for the full strict-confirmation window
+# (ClaudeAgent.confirmation_timeout_seconds, ~90s) before it fails, so the send
+# timeout must sit comfortably above it. Create can provision a real claude.
+_BANG_CREATE_TIMEOUT_SECONDS = 600.0
+_BANG_SEND_TIMEOUT_SECONDS = 150.0
+_BANG_DESTROY_TIMEOUT_SECONDS = 150.0
+
+
+def _login_home() -> Path:
+    """The invoking user's real home, independent of a redirected ``HOME``.
+
+    The release harness isolates ``HOME`` to a temp dir; a subscription (no
+    API key) Claude login lives under the *real* home -- ``~/.claude`` and, on
+    macOS, the login keychain at ``~/Library/Keychains`` -- so both the
+    availability check and the ``mngr`` subprocesses must consult it to
+    authenticate. Read from the password database so a patched ``HOME`` env var
+    does not hide it.
+    """
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def _local_claude_login_present() -> bool:
+    """Whether a local ``claude`` can authenticate without ``ANTHROPIC_API_KEY``.
+
+    The rest of the release suite requires ``ANTHROPIC_API_KEY``, but this
+    reproduction needs only a live claude TUI -- the strand is a TUI/tmux
+    behaviour and a bare ``!`` never reaches the model. A developer logged into
+    Claude locally (a subscription/OAuth login, as minds users are) can run it:
+    the OAuth token lives in ``~/.claude/.credentials.json`` or, on macOS, the
+    login keychain under the ``Claude Code-credentials`` service. Both are keyed
+    to the real login home, not the harness's redirected ``HOME``.
+    """
+    home = _login_home()
+    if (home / ".claude" / ".credentials.json").exists():
+        return True
+    if sys.platform == "darwin":
+        probe = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials"],
+            capture_output=True,
+            check=False,
+            env={**os.environ, "HOME": str(home)},
+        )
+        if probe.returncode == 0:
+            return True
+    return False
+
+
+class _BangShellModeProfile(_ClaudeReleaseProfile):
+    """A Claude release profile that also runs on a locally-logged-in (no API key) machine.
+
+    Reuses ``_ClaudeReleaseProfile``'s workspace/config plumbing, but widens the
+    availability gate to accept a local Claude login. With an ``ANTHROPIC_API_KEY``
+    set it behaves exactly like the parent profile (isolated config dir, key passed
+    into the agent), so the reproduction still runs in the key-based release
+    pipeline. Without one it authenticates from the developer's existing local
+    Claude login (a subscription/OAuth login, as minds users have):
+
+    * The ``mngr`` subprocesses run under the *real* login home, since the harness
+      isolates ``HOME`` to a temp dir and the macOS login keychain / ``~/.claude``
+      credentials live under the real home.
+    * The agent is provisioned in *shared* config-dir mode
+      (``isolate_local_config_dir = false``) so it reuses that login directly. This
+      is the mode mngr itself recommends for macOS subscription users (isolated
+      mode copies the credentials into a separate keychain entry that goes stale).
+      As a result the agent shares the developer's ``~/.claude`` while it runs; the
+      bare ``!`` reproduction never reaches the model, so this leaves at most a
+      short empty session behind. mngr's own state stays isolated via
+      ``MNGR_HOST_DIR`` and the per-test tmux server.
+    """
+
+    def unavailable_reason(self) -> str | None:
+        if shutil.which("claude") is None:
+            return "Reproduction requires `claude` on PATH."
+        if os.environ.get("ANTHROPIC_API_KEY") or _local_claude_login_present():
+            return None
+        return "Reproduction requires ANTHROPIC_API_KEY or a local Claude login (~/.claude credentials or macOS keychain)."
+
+    def setup(self, tmp_path: Path) -> AgentReleaseContext:
+        ctx = super().setup(tmp_path)
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            # No API key: reuse the developer's local login (see class docstring). Shared
+            # config-dir mode is what mngr recommends for a macOS subscription.
+            settings_path = Path(ctx.env["MNGR_PROJECT_CONFIG_DIR"]) / "settings.local.toml"
+            with settings_path.open("a") as settings_file:
+                settings_file.write("\n[agent_types.claude]\nisolate_local_config_dir = false\n")
+        return ctx
+
+    def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
+        env = dict(ctx.env)
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            # Point at the real login home so keychain / ~/.claude auth resolves.
+            env["HOME"] = str(_login_home())
+        return run_mngr_subprocess(*args, env=env, timeout=timeout)
+
+    def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
+        args: list[str] = ["--no-ensure-clean", "--source", str(ctx.workspace)]
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            args += ["--pass-env", "ANTHROPIC_API_KEY"]
+        args += ["--", "--dangerously-skip-permissions", "--model", _MODEL]
+        return args
+
+
+def _create_bang_agent(profile: _BangShellModeProfile, ctx: AgentReleaseContext) -> str:
+    """Create a real haiku claude agent from ``ctx`` and return its name."""
+    agent_name = f"claude-bang-{get_short_random_string()}"
+    create = profile.run_mngr(
+        ctx,
+        "create",
+        agent_name,
+        profile.agent_type,
+        "--no-connect",
+        "--yes",
+        *profile.create_extra_args(ctx),
+        timeout=_BANG_CREATE_TIMEOUT_SECONDS,
+    )
+    assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+    return agent_name
+
+
+def _wait_for_agent_prompt(ctx: AgentReleaseContext, agent_name: str, *, timeout: float = 60.0) -> str:
+    """Poll the agent pane until Claude renders its ``❯`` input prompt; return that pane.
+
+    ``mngr create`` returns once the launch command has been sent, a beat before the
+    TUI finishes rendering, so a single immediate capture can catch the launch line
+    instead of the prompt. Fails with the last pane on timeout.
+    """
+    captured: list[str] = []
+
+    def ready() -> bool:
+        pane = _capture_agent_pane(ctx, agent_name)
+        captured.append(pane)
+        return has_input_prompt_line(pane)
+
+    assert poll_until(ready, timeout=timeout, poll_interval=1.0), (
+        f"agent never rendered the ❯ input prompt within {timeout:.0f}s; last pane:\n{captured[-1] if captured else ''}"
+    )
+    return captured[-1]
+
+
+# The continuation glyph Claude renders before a shell command's captured output
+# (e.g. ``⎿  mngr-behaviors-probe``). Its presence in the pane means a command ran and
+# produced output; its absence means no shell command ran.
+_COMMAND_OUTPUT_MARKER = "⎿"
+
+
+def _capture_agent_pane_with_scrollback(ctx: AgentReleaseContext, agent_name: str) -> str:
+    """Capture the agent's pane including scrollback, so output above the fold is visible."""
+    session = ctx.env["MNGR_PREFIX"] + agent_name
+    result = subprocess.run(
+        ["tmux", "capture-pane", "-p", "-S", "-", "-t", f"={session}:0"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout
+
+
+def _find_command_output_line(pane: str, token: str) -> str | None:
+    """Return the pane line showing ``token`` as a shell command's OUTPUT, or None.
+
+    Distinguishes the command's output from the echoed command line: the output line
+    carries ``token`` but not the ``echo`` verb that only the typed command contains.
+    """
+    for line in pane.splitlines():
+        if token in line and "echo" not in line:
+            return line
+    return None
+
+
+@pytest.mark.witnesses("message-delivery.bare-bang-inert")
+@pytest.mark.witnesses(
+    "message-delivery.stays-ready",
+    partial="witnesses only the lone-`!` instance: a normal message is still delivered after a bare `!`",
+)
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) -> None:
+    """A bare ``!`` is inert and leaves the agent ready: no command runs, no new turn.
+
+    Witnesses ``message-delivery.bare-bang-inert`` (fully) and the
+    ``message-delivery.stays-ready`` invariant (the lone-``!`` instance) in the
+    ``libs/mngr_claude/behaviors`` corpus.
+
+    mngr types a short message with ``tmux send-keys -l``, so a leading ``!`` is
+    delivered as a literal keystroke and flips Claude Code into shell (bash)
+    mode: the input row's column-0 ``❯`` prompt is replaced by ``!`` and the
+    footer reads "! for shell mode". Submitting an empty shell line (a bare ``!``)
+    is a no-op that stays in shell mode, so without the fix the pane can never
+    leave shell mode on its own and the ``❯``-keyed readiness checks desync. The
+    plugin recognizes this and leaves shell mode (a Backspace), restoring the prompt.
+
+    This asserts all three observable claims of the scenario: the bare ``!`` runs
+    no shell command (no command output appears in the conversation), the
+    conversation gains no new turn (the common transcript is unchanged, and the
+    later follow-up is the only turn), and the agent is ready for the next message
+    (the ``❯`` prompt is back and a normal follow-up is delivered and recorded).
+    """
+    profile = _BangShellModeProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = _create_bang_agent(profile, ctx)
+    subdir = profile.common_transcript_subdir
+    run_id = get_short_random_string()
+    try:
+        _wait_for_agent_prompt(ctx, agent_name)
+        # Baseline: the freshly-created agent (no seed message) has no conversation turns yet.
+        baseline_records = _read_common_records(ctx.host_dir, subdir)
+
+        # The send's exit code is intentionally not asserted: a fix may legitimately
+        # reject `!` quickly rather than deliver it.
+        profile.run_mngr(ctx, "message", agent_name, "--message", "!", timeout=_BANG_SEND_TIMEOUT_SECONDS)
+
+        # The agent must be back at its input prompt, not wedged in shell mode.
+        pane = _capture_agent_pane_with_scrollback(ctx, agent_name)
+        assert has_input_prompt_line(pane), (
+            "after a bare `!` the agent is stranded in Claude shell mode -- "
+            f"the ❯ input prompt is gone (footer typically reads '! for shell mode'):\n{pane}"
+        )
+        # No shell command runs: a command would render its output under the `⎿` marker.
+        assert _COMMAND_OUTPUT_MARKER not in pane, (
+            f"a bare `!` must run no shell command, but command output ('{_COMMAND_OUTPUT_MARKER}') "
+            f"appears in the conversation:\n{pane}"
+        )
+        # The conversation gains no new turn: the common transcript is unchanged by the bare `!`.
+        assert _read_common_records(ctx.host_dir, subdir) == baseline_records, (
+            "a bare `!` added a conversation turn: the common transcript changed after delivering `!`"
+        )
+
+        # The user can still interact: a normal follow-up is delivered and reaches the transcript.
+        token = f"AFTERBANG-{run_id}"
+        _send_expecting_success(profile, ctx, agent_name, f"Remember this exact value: {token}. Reply with just OK.")
+        _wait_for_user_message(
+            ctx.host_dir,
+            subdir,
+            token,
+            description="follow-up message after a `!` send never reached the transcript -- "
+            "the agent is desynced (stranded in shell mode)",
+        )
+        # The follow-up is the ONLY delivered turn: the bare `!` contributed no user turn of its own.
+        final_records = _read_common_records(ctx.host_dir, subdir)
+        user_turn_count = sum(1 for r in final_records if r["type"] == "user_message")
+        assert user_turn_count == 1, (
+            f"expected exactly one user turn (the follow-up); the bare `!` must add none, got {user_turn_count}"
+        )
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_BANG_DESTROY_TIMEOUT_SECONDS)
+        if ctx.teardown is not None:
+            ctx.teardown()
+
+
+@pytest.mark.witnesses("message-delivery.runs-command")
+@pytest.mark.witnesses(
+    "message-delivery.stays-ready",
+    partial="witnesses only the `!<command>` instance: the agent is ready (❯ prompt) after a bang command runs",
+)
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(1500)
+def test_claude_bang_command_runs_and_leaves_agent_ready(tmp_path: Path) -> None:
+    """A ``!<command>`` runs the command, its output appears, and the agent stays ready.
+
+    Witnesses ``message-delivery.runs-command`` and the ``message-delivery.stays-ready``
+    invariant (the ``!<command>`` instance) in the ``libs/mngr_claude/behaviors`` corpus.
+
+    Delivering ``!echo mngr-behaviors-probe`` drives Claude Code's shell mode: the command
+    runs in the pane and its stdout is rendered as the command's output (``⎿  mngr-behaviors-probe``),
+    then the input box returns to normal mode on its own. A ``!`` command leaves no durable
+    submission record, so the plugin confirms it under the relaxed policy (a strict send would
+    hang and wrongly fail); the observable contract is the command's output in the conversation
+    and the ``❯`` prompt afterward, which is what this asserts (via the pane the interactive
+    client sees), not any mngr terminal internal.
+    """
+    profile = _BangShellModeProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    ctx = profile.setup(tmp_path)
+    agent_name = _create_bang_agent(profile, ctx)
+    try:
+        _wait_for_agent_prompt(ctx, agent_name)
+
+        # The send's exit code is not asserted; the observable contract is the command's output.
+        profile.run_mngr(
+            ctx, "message", agent_name, "--message", "!echo mngr-behaviors-probe", timeout=_BANG_SEND_TIMEOUT_SECONDS
+        )
+
+        # The command's OUTPUT (not just the echoed command) must appear in the conversation.
+        output_lines: list[str | None] = []
+
+        def output_present() -> bool:
+            pane = _capture_agent_pane_with_scrollback(ctx, agent_name)
+            output_lines.append(_find_command_output_line(pane, "mngr-behaviors-probe"))
+            return output_lines[-1] is not None
+
+        assert poll_until(output_present, timeout=90.0, poll_interval=2.0), (
+            "the `!echo mngr-behaviors-probe` command's output 'mngr-behaviors-probe' never appeared "
+            f"in the conversation as command output:\n{_capture_agent_pane_with_scrollback(ctx, agent_name)}"
+        )
+
+        # After running the command, the agent is back at its input prompt, ready for the next message.
+        pane = _capture_agent_pane_with_scrollback(ctx, agent_name)
+        assert has_input_prompt_line(pane), (
+            f"after a `!echo` command the agent is not ready -- the ❯ input prompt is gone:\n{pane}"
+        )
+    finally:
+        profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_BANG_DESTROY_TIMEOUT_SECONDS)
+        if ctx.teardown is not None:
+            ctx.teardown()

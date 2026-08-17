@@ -255,15 +255,24 @@ def _is_paste_visible(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, mess
     return _check_paste_content(content, message)
 
 
-def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -> None:
-    """Send a single Enter via ``tmux send-keys``; raise SendMessageError on failure."""
-    send_enter_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter"
-    result = agent.host.execute_stateful_command(send_enter_cmd)
+def send_key_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, key: str) -> None:
+    """Send a single named key (e.g. ``Enter``, ``BSpace``) via ``tmux send-keys``.
+
+    ``key`` is a tmux key name, not literal text, so it is spliced into the
+    command unquoted (as tmux expects). Raises SendMessageError on failure.
+    """
+    send_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} {key}"
+    result = agent.host.execute_stateful_command(send_cmd)
     if not result.success:
         raise SendMessageError(
             str(agent.name),
-            f"tmux send-keys Enter failed: {result.stderr or result.stdout}",
+            f"tmux send-keys {key} failed: {result.stderr or result.stdout}",
         )
+
+
+def send_enter_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget) -> None:
+    """Send a single Enter via ``tmux send-keys``; raise SendMessageError on failure."""
+    send_key_keystroke(agent, tmux_target, "Enter")
 
 
 # ---------------------------------------------------------------------------
