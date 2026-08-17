@@ -45,12 +45,14 @@ that audit:
   remains out of scope (each VM's authorized_keys is overwritten from its
   baked lima.yaml every boot); lima workspaces gain web-drivability later
   via per-host keys.
-- [x] **`[web_workspaces]` defaults from the release tag.** Done:
-  `template_repo`/`template_ref` are optional, resolved as env var
-  (`MINDS_WEB_TEMPLATE_REPO`/`REF`) > deploy.toml pin > default (canonical
-  repo key + `FALLBACK_BRANCH`, now in `build_info.py`); staging and
-  production carry `[web_workspaces]` blocks, so web create is active there
-  (unadvertised).
+- [x] **`[web_workspaces]` defaults from the release tag.** Done: the repo
+  resolves as env var (`MINDS_WEB_TEMPLATE_REPO`) > deploy.toml
+  `template_repo` pin > the canonical repo key. The ref is never committed
+  (there is no `template_ref` key): shared tiers resolve
+  `MINDS_WEB_TEMPLATE_REF` > `FALLBACK_BRANCH` (in `build_info.py`), while
+  dev-tier deploys must set `MINDS_WEB_TEMPLATE_REF` explicitly or the
+  deploy refuses up front. Staging and production carry `[web_workspaces]`
+  blocks, so web create is active there (unadvertised).
 
 ## Phase 0: independent preparation and verification
 

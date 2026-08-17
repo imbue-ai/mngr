@@ -114,6 +114,12 @@ class OriginsConfigError(MindError, ValueError):
     ...
 
 
+class WebTemplateRefRequiredError(MindError):
+    """Raised when a dev-tier deploy with web workspaces enabled has no explicit ``MINDS_WEB_TEMPLATE_REF``."""
+
+    ...
+
+
 class EnvelopeStreamConsumerError(MindError, RuntimeError):
     """Raised when the envelope stream consumer is used out of lifecycle order."""
 

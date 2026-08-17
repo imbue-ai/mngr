@@ -108,26 +108,43 @@ from imbue.minds.envs.secret_lifecycle import gc_old_per_tier_secrets
 from imbue.minds.envs.secret_lifecycle import make_deploy_id
 from imbue.minds.envs.secret_lifecycle import timestamped_secret_name
 from imbue.minds.errors import MindError
+from imbue.minds.errors import WebTemplateRefRequiredError
+from imbue.mngr_imbue_cloud.primitives import DEV_TIER
 
 
-def resolve_web_template_pin(web_workspaces: WebWorkspacesConfig) -> tuple[str, str]:
+def resolve_web_template_pin(web_workspaces: WebWorkspacesConfig, *, tier: str) -> tuple[str, str]:
     """Resolve the (template_repo, template_ref) pin for a tier's web creates.
 
-    Precedence per value: the ``MINDS_WEB_TEMPLATE_REPO`` /
-    ``MINDS_WEB_TEMPLATE_REF`` env var (deploy-time override, for dev
-    iteration on a branch) > the explicit deploy.toml pin > the default (the
-    canonical default-workspace-template repo key, and the app's pinned
-    release tag ``FALLBACK_BRANCH`` -- so the web pin moves with the release
-    automatically, matching the tag the pool is re-baked from).
+    The repo resolves as: the ``MINDS_WEB_TEMPLATE_REPO`` env var > the
+    deploy.toml ``template_repo`` pin > the canonical
+    default-workspace-template repo key.
+
+    The ref is never committed (a committed ref silently goes stale when the
+    pool is re-baked at a newer version): shared tiers resolve
+    ``MINDS_WEB_TEMPLATE_REF`` env var > the app's pinned release tag
+    ``FALLBACK_BRANCH`` (the same tag their pool is re-baked from), while
+    dev-tier deploys must set ``MINDS_WEB_TEMPLATE_REF`` explicitly --
+    raises :class:`WebTemplateRefRequiredError` otherwise, so the operator
+    always states the ref their dev pool is actually baked at.
     """
     repo_override = os.environ.get("MINDS_WEB_TEMPLATE_REPO")
     ref_override = os.environ.get("MINDS_WEB_TEMPLATE_REF")
     template_repo = repo_override or (
         str(web_workspaces.template_repo) if web_workspaces.template_repo else DEFAULT_WEB_TEMPLATE_REPO_KEY
     )
-    template_ref = ref_override or (
-        str(web_workspaces.template_ref) if web_workspaces.template_ref else FALLBACK_BRANCH
-    )
+    if ref_override:
+        template_ref = ref_override
+    elif tier == DEV_TIER:
+        raise WebTemplateRefRequiredError(
+            "This dev-tier deploy enables web workspace creation ([web_workspaces] in the dev "
+            "deploy.toml), so the template ref must be stated explicitly -- web creates lease "
+            "only pool hosts whose baked repo_branch_or_tag matches it exactly. Re-run with "
+            "MINDS_WEB_TEMPLATE_REF=<branch-or-tag> set to the ref your dev pool is baked at "
+            "(see `just list-pool-hosts` for the rows' repo_branch_or_tag), e.g.: "
+            "MINDS_WEB_TEMPLATE_REF=minds-v0.3.16 uv run minds env deploy"
+        )
+    else:
+        template_ref = FALLBACK_BRANCH
     return template_repo, template_ref
 
 
@@ -659,6 +676,14 @@ def _deploy_env_locked(
             "Run `minds env recover` first."
         )
 
+    # Resolve the web-create template pin up front so a dev-tier deploy
+    # missing its explicit MINDS_WEB_TEMPLATE_REF refuses here, before any
+    # cloud resource is touched -- not mid-deploy after the Modal env /
+    # Neon project steps have already run.
+    web_template_pin: tuple[str, str] | None = None
+    if deploy_config.web_workspaces is not None:
+        web_template_pin = resolve_web_template_pin(deploy_config.web_workspaces, tier=tier)
+
     # Mint a fresh deploy id (UTC ISO-compact timestamp). Used as the
     # suffix on every Modal Secret pushed below and threaded into the
     # deployed Modal app's env so it pins to the matching Secret set.
@@ -939,9 +964,9 @@ def _deploy_env_locked(
         # origin lets the hosted web chrome embed shared workspaces (the chrome
         # is path-served on the connector origin, so the two are the same URL).
         # Both are scoped to tiers that opt into web workspace creation.
-        if deploy_config.web_workspaces is not None:
+        if deploy_config.web_workspaces is not None and web_template_pin is not None:
             web_workspaces = deploy_config.web_workspaces
-            web_template_repo, web_template_ref = resolve_web_template_pin(web_workspaces)
+            web_template_repo, web_template_ref = web_template_pin
             connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REPO", web_template_repo)
             connector_secret_overrides.setdefault("MINDS_WEB_TEMPLATE_REF", web_template_ref)
             if web_workspaces.cpus is not None:

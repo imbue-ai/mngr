@@ -79,11 +79,13 @@ max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
 
-# Pinned template for browser-driven workspace creation (the connector's
-# POST /hosts/claim). The repo is the canonical host/org/repo key the pool
-# bake stamps into row attributes; the ref must match what the dev pool was
-# baked from (see `just bake-slice-dev`). Web creates lease only exact
-# matches, so advancing this pin goes together with a pool re-bake.
+# Enables browser-driven workspace creation (the connector's POST
+# /hosts/claim). The repo is the canonical host/org/repo key the pool bake
+# stamps into row attributes. The template REF is deliberately not committed
+# here: web creates lease only exact matches, so a committed ref silently
+# goes stale the moment the dev pool is re-baked at a newer version. Every
+# dev-tier deploy must instead state the ref explicitly, matching what the
+# dev pool is baked at (see `just bake-slice-dev` / `bake-slice-prod`):
+#   MINDS_WEB_TEMPLATE_REF=<branch-or-tag> uv run minds env deploy
 [web_workspaces]
 template_repo = "github.com/imbue-ai/default-workspace-template"
-template_ref = "mngr/hopefully-last-web-details"

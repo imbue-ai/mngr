@@ -49,7 +49,10 @@ from imbue.minds.envs.provisioning import resolve_web_template_pin
 from imbue.minds.envs.recover import RecoverTargetAlreadyExistsError
 from imbue.minds.envs.testing import make_workspace_storage_vault_values
 from imbue.minds.errors import MindError
+from imbue.minds.errors import WebTemplateRefRequiredError
 from imbue.minds.primitives import ServiceName
+from imbue.mngr_imbue_cloud.primitives import DEV_TIER
+from imbue.mngr_imbue_cloud.primitives import STAGING_TIER
 
 
 @pytest.fixture
@@ -116,6 +119,7 @@ def _deploy_config(
     lifecycle: DeployLifecycleConfig | None = None,
     services: tuple[str, ...] = ("cloudflare",),
     origins: OriginsConfig | None = None,
+    web_workspaces: WebWorkspacesConfig | None = None,
 ) -> DeployEnvConfig:
     if lifecycle is None:
         lifecycle = _DEV_LIFECYCLE if tier == "dev" else _SHARED_TIER_LIFECYCLE
@@ -131,6 +135,7 @@ def _deploy_config(
         paid=paid if paid is not None else PaidDefaultsConfig(),
         plans=plans if plans is not None else {},
         origins=origins,
+        web_workspaces=web_workspaces,
     )
 
 
@@ -1742,34 +1747,81 @@ def test_compute_secret_overrides_stamps_storage_prefix_only_for_per_env_tiers()
     assert "storage" not in shared_overrides
 
 
-def test_resolve_web_template_pin_defaults_to_the_release_tag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
-    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REF", raising=False)
-    template_repo, template_ref = resolve_web_template_pin(WebWorkspacesConfig())
-    assert template_repo == DEFAULT_WEB_TEMPLATE_REPO_KEY
-    assert template_ref == FALLBACK_BRANCH
-
-
-def test_resolve_web_template_pin_prefers_the_deploy_toml_pin_over_the_default(
+def test_resolve_web_template_pin_defaults_to_the_release_tag_on_shared_tiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
     monkeypatch.delenv("MINDS_WEB_TEMPLATE_REF", raising=False)
-    config = WebWorkspacesConfig(
-        template_repo=NonEmptyStr("github.com/example/custom-template"),
-        template_ref=NonEmptyStr("my/branch"),
+    template_repo, template_ref = resolve_web_template_pin(WebWorkspacesConfig(), tier=STAGING_TIER)
+    assert template_repo == DEFAULT_WEB_TEMPLATE_REPO_KEY
+    assert template_ref == FALLBACK_BRANCH
+
+
+def test_resolve_web_template_pin_honors_the_deploy_toml_repo_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REF", raising=False)
+    config = WebWorkspacesConfig(template_repo=NonEmptyStr("github.com/example/custom-template"))
+    assert resolve_web_template_pin(config, tier=STAGING_TIER) == (
+        "github.com/example/custom-template",
+        FALLBACK_BRANCH,
     )
-    assert resolve_web_template_pin(config) == ("github.com/example/custom-template", "my/branch")
 
 
 def test_resolve_web_template_pin_env_override_wins_over_everything(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINDS_WEB_TEMPLATE_REPO", "github.com/example/override-template")
     monkeypatch.setenv("MINDS_WEB_TEMPLATE_REF", "override/branch")
-    config = WebWorkspacesConfig(
-        template_repo=NonEmptyStr("github.com/example/custom-template"),
-        template_ref=NonEmptyStr("my/branch"),
+    config = WebWorkspacesConfig(template_repo=NonEmptyStr("github.com/example/custom-template"))
+    assert resolve_web_template_pin(config, tier=STAGING_TIER) == (
+        "github.com/example/override-template",
+        "override/branch",
     )
-    assert resolve_web_template_pin(config) == ("github.com/example/override-template", "override/branch")
+
+
+def test_resolve_web_template_pin_dev_tier_requires_the_explicit_ref_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REF", raising=False)
+    with pytest.raises(WebTemplateRefRequiredError, match="MINDS_WEB_TEMPLATE_REF"):
+        resolve_web_template_pin(WebWorkspacesConfig(), tier=DEV_TIER)
+
+
+def test_resolve_web_template_pin_dev_tier_uses_the_explicit_ref_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
+    monkeypatch.setenv("MINDS_WEB_TEMPLATE_REF", "minds-v9.9.9")
+    template_repo, template_ref = resolve_web_template_pin(WebWorkspacesConfig(), tier=DEV_TIER)
+    assert template_repo == DEFAULT_WEB_TEMPLATE_REPO_KEY
+    assert template_ref == "minds-v9.9.9"
+
+
+def test_deploy_env_dev_tier_with_web_workspaces_refuses_before_any_cloud_mutation(
+    _isolated_home: Path, _root_cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dev deploy with [web_workspaces] but no explicit ref refuses up front.
+
+    The pin is resolved at the top of the locked deploy body, so the refusal
+    must land before the first provider call (no Modal env / Neon / SuperTokens
+    mutation) and before any local env state is written.
+    """
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REPO", raising=False)
+    monkeypatch.delenv("MINDS_WEB_TEMPLATE_REF", raising=False)
+    call_log = _make_call_log()
+    providers = _build_fake_providers(call_log)
+    with pytest.raises(WebTemplateRefRequiredError, match="MINDS_WEB_TEMPLATE_REF"):
+        deploy_env(
+            DevEnvName("dev-erin"),
+            tier="dev",
+            deploy_config=_deploy_config(web_workspaces=WebWorkspacesConfig()),
+            credentials=_credentials(),
+            providers=providers,
+            parent_concurrency_group=_root_cg,
+        )
+    assert call_log["calls"] == []
+    assert not client_config_exists(DevEnvName("dev-erin"))
 
 
 def test_compute_secret_overrides_stamps_the_origin_layout_when_origins_configured() -> None:

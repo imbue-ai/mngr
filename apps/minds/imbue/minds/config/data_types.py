@@ -340,14 +340,17 @@ class WebWorkspacesConfig(FrozenModel):
     Modal Secret as ``MINDS_WEB_TEMPLATE_*`` / ``MINDS_WEB_SHAPE_*`` env vars.
     The connector's ``POST /hosts/claim`` (browser-driven workspace creation)
     leases only pool hosts whose baked attributes match this pin exactly.
-    Tiers without the block have web workspace creation disabled; a tier with
-    the block but no explicit pins gets the defaults (the app's pinned release
-    tag ``FALLBACK_BRANCH`` and the canonical default-workspace-template repo
-    key), so the web pin advances with the release automatically -- the same
-    tag the pool is re-baked from. ``MINDS_WEB_TEMPLATE_REPO`` /
-    ``MINDS_WEB_TEMPLATE_REF`` env vars override at deploy time (dev
-    iteration on a branch), winning over both the deploy.toml pin and the
-    default.
+    Tiers without the block have web workspace creation disabled.
+
+    There is deliberately no ``template_ref`` field: a committed ref pin
+    silently goes stale the moment the pool is re-baked at a newer version
+    (a dev tier shipped exactly that bug). Shared tiers (staging /
+    production) always track the app's pinned release tag
+    (``FALLBACK_BRANCH``) -- the same tag the pool is re-baked from -- and
+    dev-tier deploys must state the ref explicitly via the
+    ``MINDS_WEB_TEMPLATE_REF`` env var (which also overrides the default on
+    every other tier). ``MINDS_WEB_TEMPLATE_REPO`` likewise overrides
+    ``template_repo`` at deploy time.
     """
 
     template_repo: NonEmptyStr | None = Field(
@@ -356,13 +359,6 @@ class WebWorkspacesConfig(FrozenModel):
             "Canonical repo key the pool bake stamps into row attributes "
             "(``host/org/repo``, e.g. ``github.com/imbue-ai/default-workspace-template``). "
             "Unset resolves to the canonical default-workspace-template key."
-        ),
-    )
-    template_ref: NonEmptyStr | None = Field(
-        default=None,
-        description=(
-            "The pinned template branch or tag web creates lease (must match the pool bake). "
-            "Unset resolves to the app's pinned release tag (``FALLBACK_BRANCH``)."
         ),
     )
     cpus: NonNegativeInt | None = Field(
