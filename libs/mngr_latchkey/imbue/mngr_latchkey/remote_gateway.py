@@ -50,6 +50,7 @@ from imbue.mngr_latchkey.core import bundled_gateway_extension_content
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.owner_exec_vm import provision_owner_exec_vm
 from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -1423,6 +1424,12 @@ def provision_remote_gateway(
             host.get_name(),
         )
         return
+    # Stand up the VM-resident owner-exec daemon first: it is independent of the
+    # latchkey gateway (a web workspace uses it to configure the VM, including to
+    # provision latchkey), and piggybacking on this pass is how every remote
+    # provider converges on the one exec channel. A failure here fails the whole
+    # provisioning pass, which is retried on the next discovery cycle.
+    provision_owner_exec_vm(host, host_id)
     _ensure_latchkey_installed(host)
     # Tear down any pre-supervisord (nohup + PID-file) gateway/tunnel first: an
     # old build's processes still hold OUTER_PORT and the container's forward

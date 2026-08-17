@@ -116,12 +116,17 @@ class _StubOuter(MutableModel):
     ) -> CommandResult:
         self.recorded.append(_Recorded(command=command, timeout_seconds=timeout_seconds))
         # Only the dedicated $HOME-resolution probe gets the home response; the
-        # container lookup returns the configured name; everything else
-        # (install/gateway/keypair/tunnel scripts) returns the configured result.
+        # container lookup returns the configured name; the owner-exec vm
+        # docker-bridge probe resolves to a bridge address (so the vm daemon
+        # provisioning that provision_remote_gateway now runs succeeds instead of
+        # failing closed); everything else (install/gateway/keypair/tunnel
+        # scripts) returns the configured result.
         if command.strip() == 'echo "$HOME"':
             return CommandResult(stdout=f"{self.home}\n", stderr="", success=True)
         if command.startswith("docker ps"):
             return CommandResult(stdout=f"{self.container_name}\n", stderr="", success=True)
+        if "addr show docker0" in command:
+            return CommandResult(stdout="172.17.0.1\n", stderr="", success=True)
         return self.result
 
     def path_exists(self, path: Path) -> bool:

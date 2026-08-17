@@ -1,0 +1,171 @@
+{
+  "description": "owner-exec RFC 9421/9530 strict-profile cross-implementation VERIFICATION vectors. Each envelope is verified by the client at verify_at against the given inputs; expect_valid states the outcome. Signatures are not byte-compared (created/nonce vary per regeneration).",
+  "requests": [
+    {
+      "name": "run-valid",
+      "expect_valid": true,
+      "method": "POST",
+      "url": "http://127.0.0.1:8793/run",
+      "audience": "vm:host-abcd",
+      "authorized_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c",
+      "body_b64": "eyJjb21tYW5kIjpbImVjaG8iLCJoZWxsbyJdfQ==",
+      "verify_at": 1786928267,
+      "headers": {
+        "Content-Digest": "sha-256=:+Agg7eeO3ycAcmgVucO6YSWVLV+96yM7Do/orXecbrg=:",
+        "Signature": "sig1=:lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==:",
+        "Signature-Input": "sig1=(\"@method\" \"@path\" \"content-digest\" \"x-exec-audience\" \"x-exec-public-key\");created=1786928267;expires=1786928327;nonce=\"nonce-0123456789abcdef\";tag=\"imbue-owner-exec\";keyid=\"SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8\"",
+        "X-Exec-Audience": "vm:host-abcd",
+        "X-Exec-Public-Key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c"
+      }
+    },
+    {
+      "name": "read-file-valid",
+      "expect_valid": true,
+      "method": "POST",
+      "url": "http://127.0.0.1:8793/read-file",
+      "audience": "container:host-abcd",
+      "authorized_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c",
+      "body_b64": "eyJwYXRoIjoiZGF0YS9leGFtcGxlLnR4dCJ9",
+      "verify_at": 1786928267,
+      "headers": {
+        "Content-Digest": "sha-256=:Q0y+dibZPYjmymTbGY7vCqZLC8bIOoJBHWRWUngGc6U=:",
+        "Signature": "sig1=:oIuRrodxLSuKYe6vWsZxBnhCIaIHPJiPAEhIFx9gggLNp6x71pqnqT+BlBbHfhaAqnRKBFIvSlFyaOi35FNaBw==:",
+        "Signature-Input": "sig1=(\"@method\" \"@path\" \"content-digest\" \"x-exec-audience\" \"x-exec-public-key\");created=1786928267;expires=1786928327;nonce=\"nonce-fedcba9876543210\";tag=\"imbue-owner-exec\";keyid=\"SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8\"",
+        "X-Exec-Audience": "container:host-abcd",
+        "X-Exec-Public-Key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c"
+      }
+    },
+    {
+      "name": "run-unauthorized-key",
+      "expect_valid": false,
+      "method": "POST",
+      "url": "http://127.0.0.1:8793/run",
+      "audience": "vm:host-abcd",
+      "authorized_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIE5dw6ofRdfVqNUZsNMfszLjYqRtO43ol32D1uPybOU",
+      "body_b64": "eyJjb21tYW5kIjpbImVjaG8iLCJoZWxsbyJdfQ==",
+      "verify_at": 1786928267,
+      "headers": {
+        "Content-Digest": "sha-256=:+Agg7eeO3ycAcmgVucO6YSWVLV+96yM7Do/orXecbrg=:",
+        "Signature": "sig1=:lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==:",
+        "Signature-Input": "sig1=(\"@method\" \"@path\" \"content-digest\" \"x-exec-audience\" \"x-exec-public-key\");created=1786928267;expires=1786928327;nonce=\"nonce-0123456789abcdef\";tag=\"imbue-owner-exec\";keyid=\"SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8\"",
+        "X-Exec-Audience": "vm:host-abcd",
+        "X-Exec-Public-Key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c"
+      }
+    },
+    {
+      "name": "run-wrong-audience",
+      "expect_valid": false,
+      "method": "POST",
+      "url": "http://127.0.0.1:8793/run",
+      "audience": "vm:host-different",
+      "authorized_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c",
+      "body_b64": "eyJjb21tYW5kIjpbImVjaG8iLCJoZWxsbyJdfQ==",
+      "verify_at": 1786928267,
+      "headers": {
+        "Content-Digest": "sha-256=:+Agg7eeO3ycAcmgVucO6YSWVLV+96yM7Do/orXecbrg=:",
+        "Signature": "sig1=:lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==:",
+        "Signature-Input": "sig1=(\"@method\" \"@path\" \"content-digest\" \"x-exec-audience\" \"x-exec-public-key\");created=1786928267;expires=1786928327;nonce=\"nonce-0123456789abcdef\";tag=\"imbue-owner-exec\";keyid=\"SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8\"",
+        "X-Exec-Audience": "vm:host-abcd",
+        "X-Exec-Public-Key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c"
+      }
+    },
+    {
+      "name": "run-tampered-body",
+      "expect_valid": false,
+      "method": "POST",
+      "url": "http://127.0.0.1:8793/run",
+      "audience": "vm:host-abcd",
+      "authorized_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c",
+      "body_b64": "eyJjb21tYW5kIjpbInJtIiwiLXJmIiwiLyJdfQ==",
+      "verify_at": 1786928267,
+      "headers": {
+        "Content-Digest": "sha-256=:+Agg7eeO3ycAcmgVucO6YSWVLV+96yM7Do/orXecbrg=:",
+        "Signature": "sig1=:lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==:",
+        "Signature-Input": "sig1=(\"@method\" \"@path\" \"content-digest\" \"x-exec-audience\" \"x-exec-public-key\");created=1786928267;expires=1786928327;nonce=\"nonce-0123456789abcdef\";tag=\"imbue-owner-exec\";keyid=\"SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8\"",
+        "X-Exec-Audience": "vm:host-abcd",
+        "X-Exec-Public-Key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c"
+      }
+    },
+    {
+      "name": "run-expired",
+      "expect_valid": false,
+      "method": "POST",
+      "url": "http://127.0.0.1:8793/run",
+      "audience": "vm:host-abcd",
+      "authorized_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c",
+      "body_b64": "eyJjb21tYW5kIjpbImVjaG8iLCJoZWxsbyJdfQ==",
+      "verify_at": 1787028267,
+      "headers": {
+        "Content-Digest": "sha-256=:+Agg7eeO3ycAcmgVucO6YSWVLV+96yM7Do/orXecbrg=:",
+        "Signature": "sig1=:lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==:",
+        "Signature-Input": "sig1=(\"@method\" \"@path\" \"content-digest\" \"x-exec-audience\" \"x-exec-public-key\");created=1786928267;expires=1786928327;nonce=\"nonce-0123456789abcdef\";tag=\"imbue-owner-exec\";keyid=\"SHA256:fe85JkIjo8VPe+XqXJGH5Mau1EMFdK1OdKvJUFicyA8\"",
+        "X-Exec-Audience": "vm:host-abcd",
+        "X-Exec-Public-Key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIqI4910CfGV/VLbLTy6XXLKZwm/HZQSG/N0iAG0D29c"
+      }
+    }
+  ],
+  "responses": [
+    {
+      "name": "run-response-valid",
+      "expect_valid": true,
+      "status_code": 200,
+      "host_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP0XJDhaoMdbZPt4zWAvodmR/ev3axPFjtcC6sg16fYY",
+      "host_key_id": "SHA256:doxiASlJnKSD9j+JpVoWpfEFHjUrsF9ZYr+cir4FYjo",
+      "request_headers": {
+        "Signature": "sig1=:lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==:"
+      },
+      "request_method": "POST",
+      "request_url": "http://127.0.0.1:8793/run",
+      "body_b64": "eyJ3cml0dGVuIjp0cnVlfQ==",
+      "verify_at": 1786928267,
+      "headers": {
+        "Content-Digest": "sha-256=:ivKxCJv8xkSlsvxGxC4zDXuuFOro8Yes9A5TR2OOjug=:",
+        "Signature": "sig1=:TkwUW7174r1uF21zQyNHsuKQY5MlQDb6ojmJw/Ss9p4Xa2E+mZJMyPia5oxymtZy21c2Frvae2eWXPzieM5vAA==:",
+        "Signature-Input": "sig1=(\"@status\" \"content-digest\" \"@method\";req \"@path\";req \"signature\";key=\"sig1\";req);created=1786928267;tag=\"imbue-owner-exec-resp\";keyid=\"SHA256:doxiASlJnKSD9j+JpVoWpfEFHjUrsF9ZYr+cir4FYjo\""
+      }
+    },
+    {
+      "name": "run-response-wrong-request",
+      "expect_valid": false,
+      "status_code": 200,
+      "host_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP0XJDhaoMdbZPt4zWAvodmR/ev3axPFjtcC6sg16fYY",
+      "host_key_id": "SHA256:doxiASlJnKSD9j+JpVoWpfEFHjUrsF9ZYr+cir4FYjo",
+      "request_headers": {
+        "Signature": "sig1=:j8kf717IUMNDu8j0E+e2IWiScE/U0j6GhUyhvAPDqadeTlZjHQIalleZUEOIEShxvb1wtp1GTZrmU9vSgzlNCA==:"
+      },
+      "request_method": "POST",
+      "request_url": "http://127.0.0.1:8793/run",
+      "body_b64": "eyJ3cml0dGVuIjp0cnVlfQ==",
+      "verify_at": 1786928267,
+      "headers": {
+        "Content-Digest": "sha-256=:ivKxCJv8xkSlsvxGxC4zDXuuFOro8Yes9A5TR2OOjug=:",
+        "Signature": "sig1=:TkwUW7174r1uF21zQyNHsuKQY5MlQDb6ojmJw/Ss9p4Xa2E+mZJMyPia5oxymtZy21c2Frvae2eWXPzieM5vAA==:",
+        "Signature-Input": "sig1=(\"@status\" \"content-digest\" \"@method\";req \"@path\";req \"signature\";key=\"sig1\";req);created=1786928267;tag=\"imbue-owner-exec-resp\";keyid=\"SHA256:doxiASlJnKSD9j+JpVoWpfEFHjUrsF9ZYr+cir4FYjo\""
+      }
+    }
+  ],
+  "streams": [
+    {
+      "name": "run-stream-valid",
+      "expect_valid": true,
+      "host_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP0XJDhaoMdbZPt4zWAvodmR/ev3axPFjtcC6sg16fYY",
+      "host_key_id": "SHA256:doxiASlJnKSD9j+JpVoWpfEFHjUrsF9ZYr+cir4FYjo",
+      "stream_bytes_b64": "eyJ0eXBlIjoic3Rkb3V0IiwiZGF0YSI6ImhlbGxvXG4ifQp7InR5cGUiOiJleGl0IiwiY29kZSI6MH0K",
+      "request_signature": "lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==",
+      "created": 1755300000,
+      "verify_at": 1755300000,
+      "signature": "ThU7LmRh5/BztrCkrC6uV7bnKnYlbgMQJGGdow0TpkkEdKAV4+q8mJzO7cjxly7Ixk+pYw5FOUERtRXNBBvmDw=="
+    },
+    {
+      "name": "run-stream-tampered",
+      "expect_valid": false,
+      "host_key_line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP0XJDhaoMdbZPt4zWAvodmR/ev3axPFjtcC6sg16fYY",
+      "host_key_id": "SHA256:doxiASlJnKSD9j+JpVoWpfEFHjUrsF9ZYr+cir4FYjo",
+      "stream_bytes_b64": "eyJ0eXBlIjoic3Rkb3V0IiwiZGF0YSI6ImhlbGxvXG4ifQp7InR5cGUiOiJleGl0IiwiY29kZSI6MH0KeA==",
+      "request_signature": "lXLwythgWIkEF4H6my/fHLclcjsDYZ6NcrhXP7xsvShhFviCGYyUDuSDF+Q3hjly7HMLfMtTQKp0rGaSNdWOBw==",
+      "created": 1755300000,
+      "verify_at": 1755300000,
+      "signature": "ThU7LmRh5/BztrCkrC6uV7bnKnYlbgMQJGGdow0TpkkEdKAV4+q8mJzO7cjxly7Ixk+pYw5FOUERtRXNBBvmDw=="
+    }
+  ]
+}
