@@ -6,6 +6,7 @@ import click
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.host_dir import deploy_dest_host_dir
 from imbue.mngr_schedule.cli.commands import schedule
 
 
@@ -34,7 +35,12 @@ def get_files_for_deploy(
     files: dict[Path, Path | str] = {}
 
     if include_user_settings:
-        user_home = Path.home()
+        # Reparent the deployer's host-dir files onto the deploy destination host
+        # dir (~/.{root_name}). Deriving destinations from the mngr directory
+        # convention -- rather than from the local file's position under $HOME --
+        # keeps the mapping correct even when the host dir lives outside $HOME
+        # (e.g. MNGR_HOST_DIR points elsewhere, or the acceptance-test host dir).
+        dest_host_dir = deploy_dest_host_dir()
 
         # Top-level mngr config (contains the active profile_id). Read from the
         # deployer's actual host_dir, not the hardcoded ~/.mngr -- a deployer with
@@ -44,11 +50,7 @@ def get_files_for_deploy(
         deployer_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
         mngr_config = deployer_host_dir / "config.toml"
         if mngr_config.is_file():
-            # relative_to raises ValueError if host_dir is outside $HOME; that's a
-            # misconfiguration worth surfacing since the profile files branch below
-            # assumes the same (any path not under $HOME would also fail there).
-            relative = mngr_config.relative_to(user_home)
-            files[Path(f"~/{relative}")] = mngr_config
+            files[dest_host_dir / mngr_config.relative_to(deployer_host_dir)] = mngr_config
 
         # Top-level profile files (settings.toml, user_id) but not provider
         # subdirectories -- those are handled by provider plugins themselves.
@@ -58,8 +60,7 @@ def get_files_for_deploy(
             # regardless of filesystem iteration order.
             for file_path in sorted(profile_dir.iterdir()):
                 if file_path.is_file():
-                    relative = file_path.relative_to(user_home)
-                    files[Path(f"~/{relative}")] = file_path
+                    files[dest_host_dir / file_path.relative_to(deployer_host_dir)] = file_path
 
     if include_project_settings:
         # Include unversioned project-local mngr settings.

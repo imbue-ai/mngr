@@ -1,5 +1,4 @@
 import json
-import os
 import sys
 import tomllib
 from pathlib import Path
@@ -35,6 +34,7 @@ from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.host_dir import read_root_name
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
 from imbue.mngr.errors import PluginSpecifierError
 from imbue.mngr.primitives import OutputFormat
@@ -761,7 +761,7 @@ def _plugin_set_enabled_impl(ctx: click.Context, *, is_enabled: bool) -> None:
 
     _validate_plugin_name_is_known(name, mngr_ctx)
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 

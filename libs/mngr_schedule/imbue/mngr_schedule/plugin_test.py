@@ -16,18 +16,19 @@ from imbue.mngr_schedule.plugin import register_cli_commands
 
 @pytest.fixture
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Override HOME for a test that relies on ``Path.home()`` pointing at
-    an empty directory.
+    """A clean HOME with the default mngr root name pinned to ``mngr``.
 
-    The autouse ``setup_test_mngr_env`` fixture (in plugin_testing.py) sets
-    HOME to ``tmp_path`` and writes ``~/.mngr/config.toml`` into it via
-    ``register_test_sleep_agent_type``. Tests that assert on the contents
-    of ``~/.mngr`` therefore need their own clean HOME, not the one the
-    autouse fixture shares with ``host_dir``.
+    Provides an empty home directory to place the deployer's host dir under, and
+    pins ``MNGR_ROOT_NAME=mngr`` so the deploy destination host dir is the
+    canonical ``~/.mngr`` (deploy destinations are derived from the root-name
+    convention, and the autouse ``setup_test_mngr_env`` fixture otherwise sets a
+    per-test root name). Tests that assert on ``~/.mngr/...`` destinations rely
+    on both.
     """
     home = tmp_path / "isolated_home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("MNGR_ROOT_NAME", "mngr")
     return home
 
 
@@ -84,10 +85,13 @@ def test_get_files_for_deploy_includes_mngr_config(tmp_path: Path, isolated_home
     assert result[Path("~/.mngr/config.toml")] == config_file
 
 
-def test_get_files_for_deploy_reads_config_from_deployer_host_dir(tmp_path: Path, isolated_home: Path) -> None:
+def test_get_files_for_deploy_reads_config_from_deployer_host_dir(
+    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """When the deployer has a non-default MNGR_ROOT_NAME (e.g. minds, mngr-changelog-schedule),
-    the config.toml lives at `~/.{root_name}/config.toml`, NOT `~/.mngr/config.toml`.
-    get_files_for_deploy must read from mngr_ctx.config.default_host_dir, not hardcoded `~/.mngr`."""
+    the config.toml lives at `~/.{root_name}/config.toml`. get_files_for_deploy reads the source
+    from mngr_ctx.config.default_host_dir and stages it to `~/.{root_name}/`, not hardcoded `~/.mngr/`."""
+    monkeypatch.setenv("MNGR_ROOT_NAME", "mngr-changelog-schedule")
     custom_host_dir = isolated_home / ".mngr-changelog-schedule"
     custom_host_dir.mkdir(parents=True, exist_ok=True)
     config_file = custom_host_dir / "config.toml"
@@ -100,9 +104,34 @@ def test_get_files_for_deploy_reads_config_from_deployer_host_dir(tmp_path: Path
         mngr_ctx=mngr_ctx, include_user_settings=True, include_project_settings=True, repo_root=repo_root
     )
 
-    # Staged at the deployer's actual path, not the hardcoded ~/.mngr/
+    # Staged at the deployer's actual root-name path, not the hardcoded ~/.mngr/
     assert Path("~/.mngr-changelog-schedule/config.toml") in result
     assert result[Path("~/.mngr-changelog-schedule/config.toml")] == config_file
+
+
+def test_get_files_for_deploy_maps_files_when_host_dir_outside_home(tmp_path: Path, isolated_home: Path) -> None:
+    """Regression for #392: when the mngr host dir is NOT under $HOME (e.g. MNGR_HOST_DIR points
+    elsewhere, as in the modal acceptance fixture), get_files_for_deploy must not raise and must
+    stage files to the convention path ~/.{root_name}/... regardless of where the host dir lives."""
+    # outside_host_dir deliberately lives outside $HOME -- the modal acceptance layout.
+    outside_host_dir = tmp_path / "outside" / "mngr"
+    profile_dir = outside_host_dir / "profiles" / "abc123"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    config_file = outside_host_dir / "config.toml"
+    config_file.write_text('profile = "abc123"\n')
+    settings_file = profile_dir / "settings.toml"
+    settings_file.write_text("[settings]\n")
+    assert not outside_host_dir.is_relative_to(isolated_home)
+    mngr_ctx = _make_mngr_ctx_with_profile(profile_dir, outside_host_dir)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    result = get_files_for_deploy(
+        mngr_ctx=mngr_ctx, include_user_settings=True, include_project_settings=True, repo_root=repo_root
+    )
+
+    assert result[Path("~/.mngr/config.toml")] == config_file
+    assert result[Path("~/.mngr/profiles/abc123/settings.toml")] == settings_file
 
 
 def test_get_files_for_deploy_includes_top_level_profile_files(tmp_path: Path, isolated_home: Path) -> None:

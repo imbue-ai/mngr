@@ -9,6 +9,7 @@ from loguru import logger
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.host_dir import deploy_dest_host_dir
 from imbue.mngr.errors import MngrError
 
 
@@ -77,36 +78,24 @@ def collect_provider_profile_files(
     ``load_or_create_ssh_keypair`` leaves behind) and meaningless on the
     deployed host.
 
-    Files under a profile that lives outside the user's home directory (e.g.
-    a test session's temp profile, or a custom MNGR_HOST_DIR) cannot be
-    expressed as "~/" destinations; they are skipped with a warning instead
-    of failing the whole deploy-file collection -- and thereby the host
-    creation -- over auxiliary profile files.
-
     Returns dict mapping destination paths (starting with "~/") to local
-    source paths.
+    source paths. Each provider file is reparented from the local host dir onto
+    the deploy destination host dir (~/.{root_name}), so destinations are
+    correct even when the local host dir lives outside $HOME.
     """
     files: dict[Path, Path | str] = {}
     provider_dir = mngr_ctx.profile_dir / "providers" / provider_name
     if not provider_dir.is_dir():
         return files
 
-    user_home = Path.home()
+    dest_host_dir = deploy_dest_host_dir()
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
     for file_path in provider_dir.rglob("*"):
         if not file_path.is_file():
             continue
         if file_path.name in excluded_file_names or file_path.name.endswith(".lock"):
             continue
-        if not file_path.is_relative_to(user_home):
-            logger.warning(
-                "Skipped provider profile file {} for deploy: it is outside the home directory {} "
-                "and cannot be mapped to a '~/' destination.",
-                file_path,
-                user_home,
-            )
-            continue
-        relative = file_path.relative_to(user_home)
-        files[Path(f"~/{relative}")] = file_path
+        files[dest_host_dir / file_path.relative_to(local_host_dir)] = file_path
     return files
 
 

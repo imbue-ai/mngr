@@ -9,6 +9,7 @@ from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.host_dir import read_root_name
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 
@@ -206,7 +207,7 @@ def _resolve_config_files() -> list[dict[str, Any]]:
     Used by the lightweight pre-readers; the project root is resolved from
     MNGR_PROJECT_CONFIG_DIR or the cwd's git worktree root.
     """
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
     base_dir = read_default_host_dir()
     profile_dir = find_profile_dir_lightweight(base_dir)
 

@@ -17,12 +17,11 @@ from loguru import logger
 from imbue.mngr.utils.testing import generate_test_environment_name
 
 # Read the real home directory at import time, BEFORE any autouse fixture
-# overrides HOME. We do NOT pass real HOME to subprocesses: doing so leaves
-# them in a split-brain state where HOME points at the developer's real home
-# but MNGR_HOST_DIR / MNGR_ROOT_NAME still point at the test tmp dir, which
-# trips plugin code that assumes the host dir lives under $HOME (e.g.
-# get_files_for_deploy's relative_to(user_home) call). We only use the real
-# home to read ~/.modal.toml below and pass the tokens in as env vars.
+# overrides HOME. We do NOT pass real HOME to subprocesses: they run under the
+# test-isolated HOME (matching the isolated MNGR_HOST_DIR / MNGR_ROOT_NAME) so
+# the subprocess mngr stays within its tmp sandbox instead of reading or writing
+# the developer's real home. We only use the real home to read ~/.modal.toml
+# below and pass the tokens in as env vars.
 REAL_HOME: Path = Path.home()
 
 # Capture the repo root at import time, BEFORE the autouse fixture chdir's
@@ -81,9 +80,9 @@ def load_modal_creds_from_home() -> dict[str, str]:
 def build_subprocess_env() -> dict[str, str]:
     """Build environment for subprocess calls that need Modal credentials.
 
-    Keeps the test-isolated HOME so subprocess plugin code that assumes the
-    mngr host_dir lives under $HOME (e.g. get_files_for_deploy's
-    relative_to(user_home)) stays consistent. Modal credentials come from
+    Keeps the test-isolated HOME (matching the isolated MNGR_HOST_DIR /
+    MNGR_ROOT_NAME) so the subprocess mngr stays within its tmp sandbox rather
+    than touching the developer's real home. Modal credentials come from
     env vars in CI/offload; locally we fall back to reading them out of
     the developer's ~/.modal.toml and passing them in as
     MODAL_TOKEN_ID/MODAL_TOKEN_SECRET so HOME can remain isolated.

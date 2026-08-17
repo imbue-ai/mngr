@@ -33,6 +33,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.external_settings import MNGR_MERGE_KEY
 from imbue.mngr.config.external_settings import OP_SUFFIXES
+from imbue.mngr.config.host_dir import read_root_name
 from imbue.mngr.config.key_resolver import is_settings_overrides_path
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
@@ -245,7 +246,7 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
         is_format_template_supported=True,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
 
     if opts.schema_view:
         if opts.scope:
@@ -433,7 +434,7 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         command_class=ConfigCliOptions,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
 
     if opts.scope:
         # Get from specific scope
@@ -571,7 +572,7 @@ def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) ->
         command_class=ConfigCliOptions,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
@@ -622,7 +623,7 @@ def _config_merge_op_impl(ctx: click.Context, key: str, value: str, *, op: str, 
         command_class=ConfigCliOptions,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
@@ -793,7 +794,7 @@ def _config_unset_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         command_class=ConfigCliOptions,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
@@ -871,7 +872,7 @@ def _config_edit_impl(ctx: click.Context, **kwargs: Any) -> None:
         command_class=ConfigCliOptions,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
     scope = ConfigScope((opts.scope or "project").upper())
     config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
@@ -1040,7 +1041,7 @@ def _config_path_impl(ctx: click.Context, **kwargs: Any) -> None:
         command_class=ConfigCliOptions,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
 
     if opts.scope:
         # Show specific scope
@@ -1156,7 +1157,7 @@ def _config_wizard_impl(ctx: click.Context, **kwargs: Any) -> None:
         command_class=ConfigCliOptions,
     )
 
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
     config_path = get_config_path(ConfigScope.USER, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
 
     write_human_line("mngr config wizard")

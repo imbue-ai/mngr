@@ -38,6 +38,7 @@ from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import TmuxConfig
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.host_dir import read_root_name
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
@@ -180,7 +181,7 @@ def load_config(
     """
 
     # Read MNGR_ROOT_NAME early to use for config file discovery
-    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    root_name = read_root_name()
 
     # Determine base directory (may be overridden by env var)
     base_dir = read_default_host_dir()

@@ -1,7 +1,7 @@
 """Unit tests for deploy_utils shared utilities."""
 
-import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -13,7 +13,6 @@ from imbue.mngr.providers.deploy_utils import collect_deploy_files
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
 from imbue.mngr.providers.deploy_utils import detect_mngr_install_mode
 from imbue.mngr.providers.deploy_utils import resolve_mngr_install_mode
-from imbue.mngr.utils.testing import allow_warnings
 
 
 class _MockHook:
@@ -236,6 +235,32 @@ def test_collect_provider_profile_files_excludes_specified_files(
     assert any("config.toml" in str(p) for p in dest_paths)
 
 
+def _ctx_with_host_dir(host_dir: Path, profile_dir: Path) -> MngrContext:
+    """MngrContext stand-in exposing just profile_dir + config.default_host_dir."""
+    config = SimpleNamespace(default_host_dir=host_dir)
+    return cast(MngrContext, SimpleNamespace(profile_dir=profile_dir, config=config))
+
+
+def test_collect_provider_profile_files_maps_when_host_dir_outside_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for #392: provider files are staged to ~/.{root_name}/... even when the
+    host dir lives outside $HOME (the modal acceptance-fixture layout that raised ValueError)."""
+    monkeypatch.setenv("MNGR_ROOT_NAME", "mngr")
+    # host_dir deliberately lives outside $HOME -- the layout that raised ValueError.
+    host_dir = tmp_path / "outside" / "mngr"
+    profile_dir = host_dir / "profiles" / "abc123"
+    provider_dir = profile_dir / "providers" / "modal"
+    provider_dir.mkdir(parents=True, exist_ok=True)
+    settings_file = provider_dir / "settings.toml"
+    settings_file.write_text("x = 1\n")
+    mngr_ctx = _ctx_with_host_dir(host_dir, profile_dir)
+
+    result = collect_provider_profile_files(mngr_ctx, "modal", frozenset())
+
+    assert result[Path("~/.mngr/profiles/abc123/providers/modal/settings.toml")] == settings_file
+
+
 def test_collect_provider_profile_files_skips_lock_files(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -259,36 +284,3 @@ def test_collect_provider_profile_files_skips_lock_files(
 
     assert len(result) == 1
     assert any("config.toml" in str(p) for p in result)
-
-
-class _MockProfileDirCtx:
-    """Concrete mock for MngrContext exposing only profile_dir."""
-
-    def __init__(self, profile_dir: Path) -> None:
-        self.profile_dir = profile_dir
-
-
-def test_collect_provider_profile_files_skips_files_outside_home() -> None:
-    """A profile outside the home directory must not fail the collection.
-
-    Such files cannot be expressed as "~/" destinations; they are skipped
-    (with a warning) instead of raising and failing the whole host creation,
-    which is how a stray provider-profile file broke modal creates in CI.
-    Uses a system temp dir rather than tmp_path because the test fixtures
-    place tmp_path under the overridden HOME.
-    """
-    with tempfile.TemporaryDirectory(prefix="mngr-outside-home-73194-") as temp_dir:
-        outside_home_profile = Path(temp_dir) / "profile"
-        provider_dir = outside_home_profile / "providers" / "test-provider"
-        provider_dir.mkdir(parents=True)
-        (provider_dir / "config.toml").write_text("test config")
-        assert not provider_dir.is_relative_to(Path.home())
-
-        with allow_warnings(match=r"^Skipped provider profile file "):
-            result = collect_provider_profile_files(
-                mngr_ctx=cast(MngrContext, _MockProfileDirCtx(outside_home_profile)),
-                provider_name="test-provider",
-                excluded_file_names=frozenset(),
-            )
-
-    assert result == {}

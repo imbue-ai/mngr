@@ -306,8 +306,12 @@ def test_stage_deploy_files_creates_home_directory_structure(
 
 def test_stage_deploy_files_stages_multiple_home_files(
     run_staging: Callable[[Path | None], Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """stage_deploy_files stages multiple home files preserving directory structure."""
+    # Deploy destinations are ~/.{root_name}; pin the default so the host dir
+    # (~/.mngr) and the staged destination (home/.mngr/) are the canonical pair.
+    monkeypatch.setenv("MNGR_ROOT_NAME", "mngr")
     mngr_dir = Path.home() / ".mngr"
     mngr_dir.mkdir(parents=True, exist_ok=True)
     mngr_config = mngr_dir / "config.toml"
