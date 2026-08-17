@@ -92,11 +92,20 @@ def _verify_remote_has_tag(repo_url: str, tag: str) -> None:
 
 
 def _clone_repo_at_tag(repo_url: str, tag: str, dest_dir: Path) -> None:
-    """Shallow-clone ``repo_url`` at exactly ``tag`` into ``dest_dir``."""
+    """Clone ``repo_url`` at exactly ``tag`` into ``dest_dir``, with full history.
+
+    Deliberately NOT a shallow clone: this checkout's ``.git`` is what ends up
+    baked into the pool-host image and adopted verbatim by every fast-path
+    lease, so a shallow clone here ships workspaces whose history dead-ends at
+    a parentless graft commit -- breaking ``git log`` archaeology and the
+    workspace's update-self flow. Full history costs ~one repo pack per bake
+    and keeps leased workspaces consistent with the docker/lima paths, which
+    always transfer full history.
+    """
     cg = ConcurrencyGroup(name="bake-source-clone-tag")
     with cg:
         result = cg.run_process_to_completion(
-            command=["git", "clone", "--depth", "1", "--branch", tag, repo_url, str(dest_dir)],
+            command=["git", "clone", "--branch", tag, repo_url, str(dest_dir)],
             timeout=_GIT_TIMEOUT_SECONDS,
             is_checked_after=False,
         )

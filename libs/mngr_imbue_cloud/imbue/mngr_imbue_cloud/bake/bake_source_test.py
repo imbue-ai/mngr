@@ -176,6 +176,32 @@ def test_clone_repo_at_tag_materializes_tagged_content(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_clone_repo_at_tag_clones_full_history_not_shallow(tmp_path: Path) -> None:
+    """The tag clone must carry the tag's full ancestry.
+
+    Regression: a --depth 1 clone here propagated all the way into leased
+    pool-host workspaces (the build-context clone, the baked image, and the
+    fast-path adopt all preserve the source's depth), leaving users with a
+    history that dead-ends at a parentless graft commit.
+    """
+    source_repo = tmp_path / "source"
+    _init_repo(source_repo, origin_url=_ORIGIN_URL)
+    (source_repo / "f.txt").write_text("second version")
+    subprocess.run(["git", "-C", str(source_repo), "commit", "-q", "-am", "second"], check=True)
+    subprocess.run(["git", "-C", str(source_repo), "tag", "v1.2.3"], check=True)
+    dest = tmp_path / "clone"
+    _clone_repo_at_tag(str(source_repo), "v1.2.3", dest)
+    count_result = subprocess.run(
+        ["git", "-C", str(dest), "rev-list", "--count", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert count_result.stdout.strip() == "2"
+    assert not (dest / ".git" / "shallow").exists()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
 def test_clone_repo_at_tag_raises_on_bad_tag(tmp_path: Path) -> None:
     source_repo = tmp_path / "source"
     _init_repo(source_repo, origin_url=_ORIGIN_URL)
