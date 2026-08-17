@@ -93,7 +93,8 @@ class _RecordingHandlers:
                 )
             )
 
-    def on_destroyed(self, agent_id: AgentId) -> None:
+    def on_destroyed(self, agent_id: AgentId, host_id: HostId) -> None:
+        del host_id
         with self._lock:
             self._destroyed_calls.append(agent_id)
 

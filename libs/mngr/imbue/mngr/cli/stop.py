@@ -46,7 +46,6 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -118,8 +117,8 @@ def _stop_hosts_for_addresses(
 
     # Fetch each distinct host once (SSH-free) -- this is also what validates
     # the resolved host still exists. Honor any explicit @HOST[.PROVIDER]
-    # qualifier against the fetched host's name, mirroring the non-stop-host
-    # path.
+    # qualifier against the fetched host's name and id, mirroring the
+    # non-stop-host path.
     hosts_to_stop: dict[HostId, tuple[ResolvedAgentHost, HostInterface]] = {}
     for address in agent_addresses:
         resolved = resolved_by_identifier[str(address.agent)]
@@ -128,8 +127,7 @@ def _stop_hosts_for_addresses(
         else:
             host = get_provider_instance(resolved.provider_name, mngr_ctx).get_host(resolved.host_id)
         if address.host is not None:
-            concrete = HostAddress(host=host.get_name(), provider=resolved.provider_name)
-            if not address.host.matches(concrete):
+            if not address.host.matches_host(resolved.host_id, host.get_name(), resolved.provider_name):
                 raise AgentNotFoundError(f"No agent found matching address: {address}")
         hosts_to_stop[resolved.host_id] = (resolved, host)
 

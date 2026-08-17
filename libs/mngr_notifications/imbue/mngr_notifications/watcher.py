@@ -45,11 +45,13 @@ def watch_for_waiting_agents(
     logger.info("Watching for agent state transitions in {}", events_path)
 
     last_size = _get_file_size(events_path)
-    # Per-agent bit: True iff the agent transitioned from RUNNING to UNKNOWN
-    # and has not yet transitioned out. Used to recognize the indirect
-    # RUNNING -> UNKNOWN -> WAITING sequence as equivalent to RUNNING ->
-    # WAITING. Cleared on any transition out of UNKNOWN that isn't WAITING.
-    was_running_before_unknown_by_agent_id: dict[str, bool] = {}
+    # Per-agent-instance bit (keyed ``<agent_id>@<host_id>``): True iff the
+    # agent transitioned from RUNNING to UNKNOWN and has not yet transitioned
+    # out. Used to recognize the indirect RUNNING -> UNKNOWN -> WAITING
+    # sequence as equivalent to RUNNING -> WAITING. Cleared on any transition
+    # out of UNKNOWN that isn't WAITING. Instance-keyed because agent ids are
+    # only unique per host, so two same-id agents must not share the bit.
+    was_running_before_unknown_by_instance: dict[str, bool] = {}
 
     if ready_event is not None:
         ready_event.set()
@@ -72,7 +74,7 @@ def watch_for_waiting_agents(
                     plugin_config,
                     notifier,
                     mngr_ctx.concurrency_group,
-                    was_running_before_unknown_by_agent_id,
+                    was_running_before_unknown_by_instance,
                 )
             last_size = current_size
 
@@ -102,7 +104,7 @@ def _process_events(
     plugin_config: NotificationsPluginConfig,
     notifier: Notifier,
     cg: ConcurrencyGroup,
-    was_running_before_unknown_by_agent_id: dict[str, bool],
+    was_running_before_unknown_by_instance: dict[str, bool],
 ) -> None:
     """Parse JSONL content and send notifications for agents going to WAITING.
 
@@ -127,14 +129,21 @@ def _process_events(
         old_state = record.data.get("old_state")
         new_state = record.data.get("new_state")
         agent_id = record.data.get("agent_id", "unknown")
+        # The event's full AgentDetails carries the host; fall back to the bare
+        # agent id for old event lines missing it (that line then behaves as it
+        # did before instance keying).
+        agent_data = record.data.get("agent", {})
+        host_data = agent_data.get("host", {}) if isinstance(agent_data, dict) else {}
+        host_id = host_data.get("id") if isinstance(host_data, dict) else None
+        instance_key = f"{agent_id}@{host_id}" if host_id is not None else agent_id
 
         # Maintain the "was RUNNING before UNKNOWN" bit BEFORE deciding whether to fire.
         if old_state == "RUNNING" and new_state == "UNKNOWN":
-            was_running_before_unknown_by_agent_id[agent_id] = True
+            was_running_before_unknown_by_instance[instance_key] = True
         elif old_state == "UNKNOWN" and new_state != "WAITING":
             # Any non-WAITING transition out of UNKNOWN clears the bit
             # (notably UNKNOWN -> RUNNING after the provider recovers).
-            was_running_before_unknown_by_agent_id.pop(agent_id, None)
+            was_running_before_unknown_by_instance.pop(instance_key, None)
         else:
             # Every other transition leaves the bit alone -- including UNKNOWN -> WAITING,
             # which is consumed by the firing-decision below.
@@ -144,7 +153,7 @@ def _process_events(
         is_indirect_transition = (
             old_state == "UNKNOWN"
             and new_state == "WAITING"
-            and was_running_before_unknown_by_agent_id.pop(agent_id, False)
+            and was_running_before_unknown_by_instance.pop(instance_key, False)
         )
         if not (is_direct_transition or is_indirect_transition):
             continue

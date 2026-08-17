@@ -10,13 +10,13 @@ Unless otherwise specified, `mngr` assumes:
 - agent data exists at `$MNGR_AGENT_STATE_DIR` (i.e., `$MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/`)
 - there are `events` subdirectories inside `$MNGR_HOST_DIR` and each `$MNGR_AGENT_STATE_DIR` for storing structured event data (JSONL files under `events/`). Plain-text service logs (sshd, activity watcher, volume sync, shutdown) are stored under `$MNGR_HOST_DIR/logs/`.
 - environment variables for hosts and agents are stored in `$MNGR_HOST_DIR/env` and `$MNGR_AGENT_STATE_DIR/env` respectively
-- IDs are base16-encoded UUID4s
+- IDs are base16-encoded UUID4s. Host ids are globally unique; agent ids are unique per host (the same agent id may exist on multiple hosts, e.g. mid-migration)
 - Names are human-readable strings that can contain letters, numbers, and hyphens (no underscores, spaces, etc because they are used for DNS)
 
 `mngr` automatically sets these additional environment variables inside agent tmux sessions:
 
 - `MNGR_HOST_DIR` — The base directory for all mngr data within the host where the agent is running. See [host spec](../future_specs/host.md) for data layout (default: `~/.mngr`).
-- `MNGR_AGENT_ID` — The agent's unique identifier
+- `MNGR_AGENT_ID` — The agent's identifier (unique per host, not globally)
 - `MNGR_AGENT_NAME` — The agent's human-readable name
 - `MNGR_AGENT_STATE_DIR` — The per-agent directory for status, activity, plugins. See [agent spec](../future_specs/agent.md) for data layout (default: `$MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/`)
 - `MNGR_AGENT_WORK_DIR` — The directory in which the agent is started, which contains your project files

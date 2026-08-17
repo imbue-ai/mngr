@@ -43,6 +43,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -119,6 +120,14 @@ class AgentRemovedEvent(EventEnvelope):
 
     agent_id: AgentId = Field(description="ID of the removed agent")
     agent_name: AgentName = Field(description="Name of the removed agent")
+    host_id: HostId | None = Field(
+        default=None,
+        description=(
+            "ID of the host the removed agent was on. Agent ids are unique per host, "
+            "not globally, so consumers need the host to know which instance is gone. "
+            "None only for event lines written before this field existed."
+        ),
+    )
 
 
 # === Path Helpers ===
@@ -216,8 +225,8 @@ def make_agent_state_change_event(
     )
 
 
-def make_agent_removed_event(agent_id: AgentId, agent_name: AgentName) -> AgentRemovedEvent:
-    """Build an event recording that a single agent was removed."""
+def make_agent_removed_event(agent_id: AgentId, agent_name: AgentName, host_id: HostId) -> AgentRemovedEvent:
+    """Build an event recording that a single agent instance was removed."""
     timestamp, event_id = _make_envelope_fields()
     return AgentRemovedEvent(
         timestamp=timestamp,
@@ -226,6 +235,7 @@ def make_agent_removed_event(agent_id: AgentId, agent_name: AgentName) -> AgentR
         source=OBSERVE_EVENT_SOURCE,
         agent_id=agent_id,
         agent_name=agent_name,
+        host_id=host_id,
     )
 
 
@@ -296,6 +306,15 @@ class _TrackedState(FrozenModel):
     host_state: str | None
 
 
+def _details_instance_key(agent: AgentDetails) -> str:
+    """Instance key (``<agent_id>@<host_id>``) for one probed AgentDetails.
+
+    Agent ids are unique per host, not globally, so all per-agent observer
+    tracking is keyed by the instance rather than the bare agent id.
+    """
+    return str(AgentInstanceKey.build(agent.id, agent.host.id))
+
+
 # === History Loading ===
 
 
@@ -307,7 +326,9 @@ def load_base_state_from_history(
     Scans the observe events file for the latest AGENTS_FULL_STATE event and
     reconstructs the last known lifecycle and host states for each agent.
 
-    Returns a dict mapping agent ID -> _TrackedState.
+    Returns a dict mapping agent instance key (``<agent_id>@<host_id>``) ->
+    _TrackedState. A history line missing host details (which current writers
+    always include) falls back to the bare agent id for that line only.
     """
     events_path = get_observe_events_path(events_base_dir)
     if not events_path.exists():
@@ -327,20 +348,22 @@ def load_base_state_from_history(
     if latest_agents_data is None:
         return {}
 
-    last_state_by_id: dict[str, _TrackedState] = {}
+    last_state_by_instance: dict[str, _TrackedState] = {}
     for agent_dict in latest_agents_data:
         agent_id = agent_dict.get("id")
         if agent_id is not None:
             state = agent_dict.get("state")
             host_dict = agent_dict.get("host", {})
             host_state = host_dict.get("state") if isinstance(host_dict, dict) else None
+            host_id = host_dict.get("id") if isinstance(host_dict, dict) else None
+            instance_key = f"{agent_id}@{host_id}" if host_id is not None else str(agent_id)
             if state is not None:
-                last_state_by_id[str(agent_id)] = _TrackedState(
+                last_state_by_instance[instance_key] = _TrackedState(
                     agent_state=str(state),
                     host_state=str(host_state) if host_state is not None else None,
                 )
 
-    return last_state_by_id
+    return last_state_by_instance
 
 
 # === Locking ===
@@ -469,8 +492,12 @@ class AgentObserver(MutableModel):
     _known_hosts: dict[str, _KnownHost] = PrivateAttr(default_factory=dict)
     _discovery_stream_process: RunningProcess = PrivateAttr(default_factory=dict)
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
-    _last_tracked_state_by_id: dict[str, _TrackedState] = PrivateAttr(default_factory=dict)
-    # PID-death watchers for local agents, keyed by agent id. Each entry owns a
+    # All per-agent tracking below is keyed by the agent *instance* key
+    # (``<agent_id>@<host_id>``): agent ids are unique per host, not globally,
+    # so the same id may exist on multiple hosts (e.g. mid-migration) and each
+    # instance is tracked independently.
+    _last_tracked_state_by_instance: dict[str, _TrackedState] = PrivateAttr(default_factory=dict)
+    # PID-death watchers for local agents, keyed by agent instance. Each entry owns a
     # thread that blocks on psutil until the agent's main process exits, then
     # enqueues the agent's host for a re-probe so the death is emitted as state.
     _watchers: dict[str, _AgentWatcher] = PrivateAttr(default_factory=dict)
@@ -482,10 +509,11 @@ class AgentObserver(MutableModel):
     _sink_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _activity_queue: queue.Queue[str] = PrivateAttr(default_factory=queue.Queue)
-    # UNKNOWN-state tracking. Populated only during this process's lifetime
-    # (not from history) so that restart cannot synthesize UNKNOWN for agents
-    # that may have been deliberately destroyed while the observer was down.
-    _last_known_details_by_id: dict[str, AgentDetails] = PrivateAttr(default_factory=dict)
+    # UNKNOWN-state tracking, keyed by agent instance. Populated only during
+    # this process's lifetime (not from history) so that restart cannot
+    # synthesize UNKNOWN for agents that may have been deliberately destroyed
+    # while the observer was down.
+    _last_known_details_by_instance: dict[str, AgentDetails] = PrivateAttr(default_factory=dict)
     # Most recently observed set of currently-errored providers (from discovery
     # snapshots and incremental DiscoveryErrorEvents). Agents whose provider is
     # in this set get an UNKNOWN AgentDetails synthesized on the next full state
@@ -505,10 +533,10 @@ class AgentObserver(MutableModel):
         with self._concurrency_group:
             # Load base state from event history so we can detect state changes since last run
             with log_span("Loading base state from history"):
-                self._last_tracked_state_by_id = load_base_state_from_history(self.events_base_dir)
+                self._last_tracked_state_by_instance = load_base_state_from_history(self.events_base_dir)
                 logger.debug(
                     "Loaded base state for {} agent(s) from history",
-                    len(self._last_tracked_state_by_id),
+                    len(self._last_tracked_state_by_instance),
                 )
 
             # Phase 1: initial full state snapshot
@@ -595,9 +623,9 @@ class AgentObserver(MutableModel):
             return
 
         # Snapshot the agent map before applying so we can name agents that this
-        # event removes (the delta carries only ids, and the aggregator forgets
-        # the agent's data as part of applying the removal).
-        agents_before = self._aggregator.get_agent_by_id()
+        # event removes (the delta carries only instance keys, and the aggregator
+        # forgets the agent's data as part of applying the removal).
+        agents_before = self._aggregator.get_agent_by_instance()
         delta = self._aggregator.apply_event(event)
         self._sync_known_state_from_aggregator()
         self._reconcile_activity_streams(delta)
@@ -606,7 +634,7 @@ class AgentObserver(MutableModel):
             self._snapshot_trigger.set()
 
     def _handle_agent_membership_delta(
-        self, delta: AggregatorDelta, agents_before: dict[str, DiscoveredAgent]
+        self, delta: AggregatorDelta, agents_before: dict[AgentInstanceKey, DiscoveredAgent]
     ) -> None:
         """React to agents appearing/disappearing in the discovery stream.
 
@@ -614,28 +642,30 @@ class AgentObserver(MutableModel):
         discovered agent enqueues its host for a re-probe so its real lifecycle
         state (and pid) is emitted promptly, matching the near-instant create
         latency consumers had when they read the discovery stream directly. A
-        removed agent emits an AGENT_REMOVED event on the agents stream and drops
-        its per-agent tracking and PID watcher, so a consumer of --stream-events
-        learns of the removal without waiting for the next full snapshot.
+        removed agent instance emits an AGENT_REMOVED event on the agents stream
+        and drops its per-agent tracking and PID watcher, so a consumer of
+        --stream-events learns of the removal without waiting for the next full
+        snapshot. Removal is instance-scoped: destroying an agent on one host
+        never drops tracking for a same-id agent on another host.
         """
-        if delta.added_agent_ids:
-            agents_after = self._aggregator.get_agent_by_id()
-            for agent_id_str in delta.added_agent_ids:
-                agent = agents_after.get(agent_id_str)
+        if delta.added_agent_instances:
+            agents_after = self._aggregator.get_agent_by_instance()
+            for instance_key in delta.added_agent_instances:
+                agent = agents_after.get(instance_key)
                 if agent is not None:
                     self._activity_queue.put(str(agent.host_id))
-        for agent_id_str in delta.removed_agent_ids:
-            prior = agents_before.get(agent_id_str)
-            agent_name = prior.agent_name if prior is not None else AgentName(agent_id_str)
-            self._emit_agent_removed(AgentId(agent_id_str), agent_name)
-            self._drop_agent_tracking(agent_id_str)
+        for instance_key in delta.removed_agent_instances:
+            prior = agents_before.get(instance_key)
+            agent_name = prior.agent_name if prior is not None else AgentName(str(instance_key.agent_id))
+            self._emit_agent_removed(instance_key.agent_id, agent_name, instance_key.host_id)
+            self._drop_agent_tracking(str(instance_key))
 
-    def _drop_agent_tracking(self, agent_id_str: str) -> None:
-        """Forget all per-agent state for a removed agent and close its PID watcher."""
-        self._close_watcher(agent_id_str)
+    def _drop_agent_tracking(self, instance_key_str: str) -> None:
+        """Forget all per-agent state for a removed agent instance and close its PID watcher."""
+        self._close_watcher(instance_key_str)
         with self._lock:
-            self._last_tracked_state_by_id.pop(agent_id_str, None)
-            self._last_known_details_by_id.pop(agent_id_str, None)
+            self._last_tracked_state_by_instance.pop(instance_key_str, None)
+            self._last_known_details_by_instance.pop(instance_key_str, None)
 
     def _sync_known_state_from_aggregator(self) -> None:
         """Refresh known hosts and provider error/known sets from the aggregator."""
@@ -792,29 +822,29 @@ class AgentObserver(MutableModel):
         (or the polling loop has crashed). Drops previously-observed agents
         whose provider is no longer configured at all.
         """
-        live_agent_ids = {str(agent.id) for agent in agents}
+        live_instance_keys = {_details_instance_key(agent) for agent in agents}
 
-        # Build UNKNOWN synthetic entries and per-id drops in a single locked
+        # Build UNKNOWN synthetic entries and per-instance drops in a single locked
         # region so the provider-error state we use to classify each missing
         # agent stays consistent with the dict mutations we do below.
         unknown_agents: list[AgentDetails] = []
-        ids_to_drop: list[str] = []
+        instance_keys_to_drop: list[str] = []
         with self._lock:
             # First, record everything we just observed.
             for agent in agents:
-                self._last_known_details_by_id[str(agent.id)] = agent
+                self._last_known_details_by_instance[_details_instance_key(agent)] = agent
 
             errored_providers = self._currently_errored_providers
             known_providers = self._known_provider_names
 
-            for agent_id_str, last_details in self._last_known_details_by_id.items():
-                if agent_id_str in live_agent_ids:
+            for instance_key_str, last_details in self._last_known_details_by_instance.items():
+                if instance_key_str in live_instance_keys:
                     continue
                 provider = last_details.host.provider_name
                 # Config removal trumps everything: provider no longer in any current set.
                 # Skip this rule if we don't yet have a known-provider list (first snapshot).
                 if known_providers and provider not in known_providers:
-                    ids_to_drop.append(agent_id_str)
+                    instance_keys_to_drop.append(instance_key_str)
                     continue
                 # Provider currently errored -- its agents' state is unknown, synthesize UNKNOWN.
                 if provider in errored_providers:
@@ -822,35 +852,35 @@ class AgentObserver(MutableModel):
                     continue
                 # Provider is healthy and the agent disappeared from the listing without
                 # an explicit destroy. Treat as implicit destroy (drop).
-                ids_to_drop.append(agent_id_str)
+                instance_keys_to_drop.append(instance_key_str)
 
-            for agent_id_str in ids_to_drop:
-                self._last_known_details_by_id.pop(agent_id_str, None)
+            for instance_key_str in instance_keys_to_drop:
+                self._last_known_details_by_instance.pop(instance_key_str, None)
                 # Stop tracking state-change history for dropped agents too; otherwise
                 # an agent re-created with the same id later would appear to "change
                 # state" relative to the stale tracked record.
-                self._last_tracked_state_by_id.pop(agent_id_str, None)
+                self._last_tracked_state_by_instance.pop(instance_key_str, None)
 
             # Update last-known details with the synthesized UNKNOWN versions so
             # subsequent polls don't re-synthesize from the pre-UNKNOWN details.
             for unknown_agent in unknown_agents:
-                self._last_known_details_by_id[str(unknown_agent.id)] = unknown_agent
+                self._last_known_details_by_instance[_details_instance_key(unknown_agent)] = unknown_agent
 
         emitted_agents = tuple(agents) + tuple(unknown_agents)
 
-        # Detect state changes against `_last_tracked_state_by_id`
+        # Detect state changes against `_last_tracked_state_by_instance`
         state_changes: list[tuple[AgentDetails, str | None, str | None]] = []
         with self._lock:
             for agent in emitted_agents:
-                agent_id_str = str(agent.id)
+                instance_key_str = _details_instance_key(agent)
                 new_agent_state = agent.state.value
                 new_host_state = agent.host.state.value if agent.host.state is not None else None
-                tracked = self._last_tracked_state_by_id.get(agent_id_str)
+                tracked = self._last_tracked_state_by_instance.get(instance_key_str)
                 old_agent_state = tracked.agent_state if tracked else None
                 old_host_state = tracked.host_state if tracked else None
                 if old_agent_state != new_agent_state or old_host_state != new_host_state:
                     state_changes.append((agent, old_agent_state, old_host_state))
-                    self._last_tracked_state_by_id[agent_id_str] = _TrackedState(
+                    self._last_tracked_state_by_instance[instance_key_str] = _TrackedState(
                         agent_state=new_agent_state,
                         host_state=new_host_state,
                     )
@@ -875,8 +905,8 @@ class AgentObserver(MutableModel):
         # provider is unreachable, so the last-known watcher (if any) stays as-is.
         for agent in agents:
             self._reconcile_watcher_for_agent(agent)
-        for agent_id_str in ids_to_drop:
-            self._close_watcher(agent_id_str)
+        for instance_key_str in instance_keys_to_drop:
+            self._close_watcher(instance_key_str)
 
     # === PID Watchers (local agents only) ===
 
@@ -889,13 +919,13 @@ class AgentObserver(MutableModel):
         the one and only user of the local connector. A remote agent, or a local
         agent with no ``pid`` (no longer running), closes any existing watcher.
         """
-        agent_id_str = str(agent.id)
+        instance_key_str = _details_instance_key(agent)
         if agent.host.provider_name != LOCAL_PROVIDER_NAME or agent.pid is None:
-            self._close_watcher(agent_id_str)
+            self._close_watcher(instance_key_str)
             return
-        self._open_or_replace_watcher(agent_id_str, str(agent.host.id), agent.pid)
+        self._open_or_replace_watcher(instance_key_str, str(agent.host.id), agent.pid)
 
-    def _open_or_replace_watcher(self, agent_id_str: str, host_id_str: str, pid: int) -> None:
+    def _open_or_replace_watcher(self, instance_key_str: str, host_id_str: str, pid: int) -> None:
         """Ensure a watcher thread is running for ``pid``, replacing one on a stale PID.
 
         Held under ``_watchers_lock`` for its whole duration so two reconcile paths
@@ -905,13 +935,13 @@ class AgentObserver(MutableModel):
         lock; joining here is deadlock-free because ``_watch_pid`` never takes it.
         """
         with self._watchers_lock:
-            existing = self._watchers.get(agent_id_str)
+            existing = self._watchers.get(instance_key_str)
             if existing is not None and existing.pid == pid:
                 return
             # New agent or the main process changed (PID differs): stop the stale
             # watcher first, then start a fresh one bound to the current PID.
             if existing is not None:
-                self._watchers.pop(agent_id_str, None)
+                self._watchers.pop(instance_key_str, None)
                 existing.stop_event.set()
                 existing.thread.join(timeout=5.0)
             try:
@@ -927,17 +957,17 @@ class AgentObserver(MutableModel):
             # exit, which would poison the whole ConcurrencyGroup and stop all
             # observation -- see _on_watcher_failure for the intended isolation.
             thread = self._concurrency_group.start_new_thread(
-                target=lambda: self._watch_pid(agent_id_str, host_id_str, process, pid, stop_event),
+                target=lambda: self._watch_pid(instance_key_str, host_id_str, process, pid, stop_event),
                 daemon=True,
-                name=f"observe-pid-watch-{agent_id_str[:8]}",
+                name=f"observe-pid-watch-{instance_key_str[:14]}",
                 on_failure=self._on_watcher_failure,
                 is_checked=False,
             )
-            self._watchers[agent_id_str] = _AgentWatcher(pid=pid, stop_event=stop_event, thread=thread)
+            self._watchers[instance_key_str] = _AgentWatcher(pid=pid, stop_event=stop_event, thread=thread)
 
     def _watch_pid(
         self,
-        agent_id_str: str,
+        instance_key_str: str,
         host_id_str: str,
         process: psutil.Process,
         pid: int,
@@ -959,18 +989,18 @@ class AgentObserver(MutableModel):
                 # psutil.Process.wait() can surface a bare OSError (not a psutil.Error)
                 # when its underlying os.pidfd_open/kqueue/poll fails; treat any such
                 # failure the same as an exit and re-probe rather than crash the watcher.
-                logger.debug("PID watch for agent {} (pid {}) errored, treating as exit: {}", agent_id_str, pid, e)
+                logger.debug("PID watch for agent {} (pid {}) errored, treating as exit: {}", instance_key_str, pid, e)
             # Reached once the process has exited (wait returned) or errored out.
             logger.debug(
                 "Local agent {} main process (pid {}) exited; enqueueing host {} for re-probe",
-                agent_id_str,
+                instance_key_str,
                 pid,
                 host_id_str,
             )
             self._activity_queue.put(host_id_str)
             return
 
-    def _close_watcher(self, agent_id_str: str) -> None:
+    def _close_watcher(self, instance_key_str: str) -> None:
         """Stop and join the watcher for an agent, if any. Idempotent.
 
         Held under ``_watchers_lock`` through the join (deadlock-free because the
@@ -978,7 +1008,7 @@ class AgentObserver(MutableModel):
         reconcile into leaving two entries for the same agent.
         """
         with self._watchers_lock:
-            watcher = self._watchers.pop(agent_id_str, None)
+            watcher = self._watchers.pop(instance_key_str, None)
             if watcher is None:
                 return
             watcher.stop_event.set()
@@ -987,9 +1017,9 @@ class AgentObserver(MutableModel):
     def _close_all_watchers(self) -> None:
         """Tear down every PID watcher (observer shutdown)."""
         with self._watchers_lock:
-            agent_id_strs = list(self._watchers.keys())
-        for agent_id_str in agent_id_strs:
-            self._close_watcher(agent_id_str)
+            instance_key_strs = list(self._watchers.keys())
+        for instance_key_str in instance_key_strs:
+            self._close_watcher(instance_key_str)
 
     def _on_watcher_failure(self, e: BaseException) -> None:
         """Log an unexpected watcher-thread failure without tearing down the observer.
@@ -1012,11 +1042,11 @@ class AgentObserver(MutableModel):
             with self._sink_lock:
                 self.agents_event_sink(event)
 
-    def _emit_agent_removed(self, agent_id: AgentId, agent_name: AgentName) -> None:
-        """Emit an AGENT_REMOVED event to the agents stream for a destroyed agent."""
-        event = make_agent_removed_event(agent_id, agent_name)
+    def _emit_agent_removed(self, agent_id: AgentId, agent_name: AgentName, host_id: HostId) -> None:
+        """Emit an AGENT_REMOVED event to the agents stream for a destroyed agent instance."""
+        event = make_agent_removed_event(agent_id, agent_name, host_id)
         self._emit_observe_event(event)
-        logger.debug("Emitted agent removed event for {} ({})", agent_name, agent_id)
+        logger.debug("Emitted agent removed event for {} ({} on host {})", agent_name, agent_id, host_id)
 
     def _emit_agent_state(self, agent: AgentDetails) -> None:
         """Emit a single agent state event, check for state/host state change, and update tracking."""
@@ -1024,15 +1054,15 @@ class AgentObserver(MutableModel):
         self._emit_observe_event(event)
         logger.debug("Emitted agent state event for {} (state={})", agent.name, agent.state.value)
 
-        agent_id_str = str(agent.id)
+        instance_key_str = _details_instance_key(agent)
         new_agent_state = agent.state.value
         new_host_state = agent.host.state.value if agent.host.state is not None else None
 
         with self._lock:
-            tracked = self._last_tracked_state_by_id.get(agent_id_str)
+            tracked = self._last_tracked_state_by_instance.get(instance_key_str)
             old_agent_state = tracked.agent_state if tracked else None
             old_host_state = tracked.host_state if tracked else None
-            self._last_tracked_state_by_id[agent_id_str] = _TrackedState(
+            self._last_tracked_state_by_instance[instance_key_str] = _TrackedState(
                 agent_state=new_agent_state,
                 host_state=new_host_state,
             )

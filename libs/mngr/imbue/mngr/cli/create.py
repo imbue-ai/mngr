@@ -403,7 +403,12 @@ class _CreateCommand(click.Command):
     type=NEW_AGENT_LOCATION,
     help="Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated]",
 )
-@optgroup.option("--id", help="Explicit agent ID [default: auto-generated]")
+@optgroup.option(
+    "--id",
+    help="Explicit agent ID [default: auto-generated]. Reusing an existing agent's id means "
+    "'this is the same agent' (ids are unique per host, not globally); to make an "
+    "independent copy, use 'mngr clone' instead, which mints a new id.",
+)
 @optgroup.option(
     "--name-style",
     type=click.Choice(_make_name_style_choices(), case_sensitive=False),

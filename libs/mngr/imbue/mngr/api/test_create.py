@@ -18,6 +18,7 @@ from imbue.mngr.api.create import create
 from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import DuplicateAgentIdOnHostError
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
@@ -1061,6 +1062,46 @@ def test_create_rejects_duplicate_agent_name_on_same_host(
 
         assert exc_info.value.agent_name == agent_name
         assert exc_info.value.existing_agent_id == result.agent.id
+
+
+@pytest.mark.tmux
+def test_create_rejects_duplicate_agent_id_on_same_host(
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """Reusing an existing agent id on the SAME host must raise (even under a new name).
+
+    The same id on a *different* host is legal (the migration-overlap case), but on one
+    host the state dir path and MNGR_AGENT_ID matching depend on per-host uniqueness.
+    """
+    agent_name = AgentName(f"test-dup-id-{int(time.time())}")
+    session_name = f"{temp_mngr_ctx.config.prefix}{agent_name}"
+
+    with tmux_session_cleanup(session_name):
+        local_host, source_location = _get_local_host_and_location(temp_mngr_ctx, temp_work_dir)
+
+        result = create(
+            source_location=source_location,
+            target_host=local_host,
+            agent_options=_make_options(agent_name, "sleep 592031", agent_type="command"),
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        with pytest.raises(DuplicateAgentIdOnHostError) as exc_info:
+            create(
+                source_location=source_location,
+                target_host=local_host,
+                agent_options=_make_options(
+                    AgentName(f"{agent_name}-copy"),
+                    "sleep 592032",
+                    agent_type="command",
+                    agent_id=result.agent.id,
+                ),
+                mngr_ctx=temp_mngr_ctx,
+            )
+
+        assert exc_info.value.agent_id == result.agent.id
+        assert exc_info.value.host_id == local_host.id
 
 
 @pytest.mark.tmux

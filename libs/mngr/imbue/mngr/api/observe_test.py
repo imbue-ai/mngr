@@ -31,6 +31,7 @@ from imbue.mngr.api.observe import OBSERVE_EVENT_SOURCE
 from imbue.mngr.api.observe import ObserveEventType
 from imbue.mngr.api.observe import ObserveLockError
 from imbue.mngr.api.observe import _TrackedState
+from imbue.mngr.api.observe import _details_instance_key
 from imbue.mngr.api.observe import _make_unknown_agent_details
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import append_agent_state_change_event
@@ -238,10 +239,10 @@ def test_load_base_state_from_history_loads_latest_full_state(temp_host_dir: Pat
 
     tracked = load_base_state_from_history(temp_host_dir)
     assert len(tracked) == 2
-    assert tracked[str(agent1.id)].agent_state == "RUNNING"
-    assert tracked[str(agent1.id)].host_state == "RUNNING"
-    assert tracked[str(agent2.id)].agent_state == "STOPPED"
-    assert tracked[str(agent2.id)].host_state == "RUNNING"
+    assert tracked[_details_instance_key(agent1)].agent_state == "RUNNING"
+    assert tracked[_details_instance_key(agent1)].host_state == "RUNNING"
+    assert tracked[_details_instance_key(agent2)].agent_state == "STOPPED"
+    assert tracked[_details_instance_key(agent2)].host_state == "RUNNING"
 
 
 def test_load_base_state_from_history_uses_latest_full_state(temp_host_dir: Path) -> None:
@@ -255,8 +256,8 @@ def test_load_base_state_from_history_uses_latest_full_state(temp_host_dir: Path
 
     tracked = load_base_state_from_history(temp_host_dir)
     assert len(tracked) == 1
-    assert str(agent2.id) in tracked
-    assert tracked[str(agent2.id)].agent_state == "STOPPED"
+    assert _details_instance_key(agent2) in tracked
+    assert tracked[_details_instance_key(agent2)].agent_state == "STOPPED"
 
 
 def test_load_base_state_from_history_ignores_non_full_state_events(temp_host_dir: Path) -> None:
@@ -283,7 +284,7 @@ def test_load_base_state_from_history_handles_malformed_lines(temp_host_dir: Pat
     with capture_loguru(level="WARNING") as log_output:
         tracked = load_base_state_from_history(temp_host_dir)
     assert len(tracked) == 1
-    assert tracked[str(agent.id)].agent_state == "RUNNING"
+    assert tracked[_details_instance_key(agent)].agent_state == "RUNNING"
     # Mid-file corruption (followed by another line) should surface as a warning
     assert "Skipped corrupt JSONL line" in log_output.getvalue()
 
@@ -304,7 +305,7 @@ def test_load_base_state_from_history_silent_on_partial_last_line(temp_host_dir:
     with capture_loguru(level="WARNING") as log_output:
         tracked = load_base_state_from_history(temp_host_dir)
     assert len(tracked) == 1
-    assert tracked[str(agent.id)].agent_state == "RUNNING"
+    assert tracked[_details_instance_key(agent)].agent_state == "RUNNING"
     assert log_output.getvalue() == ""
 
 
@@ -557,7 +558,7 @@ def test_agent_observer_emit_agent_state_updates_tracking(temp_mngr_ctx: MngrCon
 
     observer._emit_agent_state(agent)
 
-    tracked = observer._last_tracked_state_by_id[str(agent.id)]
+    tracked = observer._last_tracked_state_by_instance[_details_instance_key(agent)]
     assert tracked.agent_state == "RUNNING"
     assert tracked.host_state == "RUNNING"
 
@@ -612,7 +613,7 @@ def test_agent_observer_emit_agent_state_detects_state_transition(
 
     # Second emit with a different state: RUNNING -> STOPPED
     agent_stopped = make_test_agent_details(name="transitioning", state=AgentLifecycleState.STOPPED)
-    observer._last_tracked_state_by_id[str(agent_stopped.id)] = _TrackedState(
+    observer._last_tracked_state_by_instance[_details_instance_key(agent_stopped)] = _TrackedState(
         agent_state="RUNNING", host_state="RUNNING"
     )
     observer._emit_agent_state(agent_stopped)
@@ -680,7 +681,9 @@ def test_agent_observer_process_snapshot_agents_emits_state_changes(
     agent = make_test_agent_details(name="snapshot-agent", state=AgentLifecycleState.STOPPED)
 
     # Pre-populate with a different state to simulate a transition
-    observer._last_tracked_state_by_id[str(agent.id)] = _TrackedState(agent_state="RUNNING", host_state="RUNNING")
+    observer._last_tracked_state_by_instance[_details_instance_key(agent)] = _TrackedState(
+        agent_state="RUNNING", host_state="RUNNING"
+    )
 
     observer._process_snapshot_agents([agent])
 
@@ -710,7 +713,9 @@ def test_agent_observer_process_snapshot_agents_no_change_when_same_state(
     agent = make_test_agent_details(name="stable-agent", state=AgentLifecycleState.RUNNING)
 
     # Pre-populate with the same agent and host state
-    observer._last_tracked_state_by_id[str(agent.id)] = _TrackedState(agent_state="RUNNING", host_state="RUNNING")
+    observer._last_tracked_state_by_instance[_details_instance_key(agent)] = _TrackedState(
+        agent_state="RUNNING", host_state="RUNNING"
+    )
 
     observer._process_snapshot_agents([agent])
 
@@ -756,7 +761,9 @@ def test_agent_observer_emit_agent_state_detects_host_state_change(
     )
 
     # Pre-populate: agent was RUNNING on a RUNNING host
-    observer._last_tracked_state_by_id[str(agent.id)] = _TrackedState(agent_state="RUNNING", host_state="RUNNING")
+    observer._last_tracked_state_by_instance[_details_instance_key(agent)] = _TrackedState(
+        agent_state="RUNNING", host_state="RUNNING"
+    )
 
     observer._emit_agent_state(agent)
 
@@ -782,7 +789,9 @@ def test_agent_observer_process_snapshot_agents_detects_host_state_change(
     )
 
     # Pre-populate: same agent state, different host state
-    observer._last_tracked_state_by_id[str(agent.id)] = _TrackedState(agent_state="RUNNING", host_state="RUNNING")
+    observer._last_tracked_state_by_instance[_details_instance_key(agent)] = _TrackedState(
+        agent_state="RUNNING", host_state="RUNNING"
+    )
 
     observer._process_snapshot_agents([agent])
 
@@ -960,14 +969,14 @@ def test_process_snapshot_agents_drops_agent_when_provider_removed_from_config(
 
     with observer._concurrency_group:
         observer._process_snapshot_agents([agent])
-        assert str(agent.id) in observer._last_known_details_by_id
+        assert _details_instance_key(agent) in observer._last_known_details_by_instance
         # Provider no longer in known set; not in errored set either
         observer._known_provider_names = {ProviderInstanceName("local")}
         observer._currently_errored_providers = set()
         observer._process_snapshot_agents([])
 
-    assert str(agent.id) not in observer._last_known_details_by_id
-    assert str(agent.id) not in observer._last_tracked_state_by_id
+    assert _details_instance_key(agent) not in observer._last_known_details_by_instance
+    assert _details_instance_key(agent) not in observer._last_tracked_state_by_instance
 
 
 def test_process_snapshot_agents_drops_agent_when_provider_healthy_and_agent_absent(
@@ -989,7 +998,7 @@ def test_process_snapshot_agents_drops_agent_when_provider_healthy_and_agent_abs
         observer._currently_errored_providers = set()
         observer._process_snapshot_agents([])
 
-    assert str(agent.id) not in observer._last_known_details_by_id
+    assert _details_instance_key(agent) not in observer._last_known_details_by_instance
 
 
 def test_process_snapshot_agents_unknown_is_sticky_until_reappearance(
@@ -1011,15 +1020,24 @@ def test_process_snapshot_agents_unknown_is_sticky_until_reappearance(
         observer._currently_errored_providers = {provider}
         observer._known_provider_names = {provider}
         observer._process_snapshot_agents([])
-        assert observer._last_known_details_by_id[str(running_agent.id)].state == AgentLifecycleState.UNKNOWN
+        assert (
+            observer._last_known_details_by_instance[_details_instance_key(running_agent)].state
+            == AgentLifecycleState.UNKNOWN
+        )
         # Provider stays errored; agent stays UNKNOWN (sticky)
         observer._process_snapshot_agents([])
-        assert observer._last_known_details_by_id[str(running_agent.id)].state == AgentLifecycleState.UNKNOWN
+        assert (
+            observer._last_known_details_by_instance[_details_instance_key(running_agent)].state
+            == AgentLifecycleState.UNKNOWN
+        )
 
         # Provider recovers and agent reappears
         observer._currently_errored_providers = set()
         observer._process_snapshot_agents([running_agent])
-        assert observer._last_known_details_by_id[str(running_agent.id)].state == AgentLifecycleState.RUNNING
+        assert (
+            observer._last_known_details_by_instance[_details_instance_key(running_agent)].state
+            == AgentLifecycleState.RUNNING
+        )
 
 
 def test_process_snapshot_agents_unknown_scoped_to_errored_provider(
@@ -1040,9 +1058,12 @@ def test_process_snapshot_agents_unknown_scoped_to_errored_provider(
         observer._process_snapshot_agents([])
 
     # The errored provider's agent is retained as UNKNOWN.
-    assert observer._last_known_details_by_id[str(errored_agent.id)].state == AgentLifecycleState.UNKNOWN
+    assert (
+        observer._last_known_details_by_instance[_details_instance_key(errored_agent)].state
+        == AgentLifecycleState.UNKNOWN
+    )
     # The healthy provider's absent agent is dropped (implicit destroy).
-    assert str(healthy_agent.id) not in observer._last_known_details_by_id
+    assert _details_instance_key(healthy_agent) not in observer._last_known_details_by_instance
 
 
 # === Observe-event parsing (agents stream) ===
@@ -1066,12 +1087,14 @@ def test_parse_observe_event_line_round_trips_full_state() -> None:
 
 def test_parse_observe_event_line_round_trips_agent_removed() -> None:
     agent_id = AgentId.generate()
-    event = make_agent_removed_event(agent_id, AgentName("gone"))
+    host_id = HostId.generate()
+    event = make_agent_removed_event(agent_id, AgentName("gone"), host_id)
     line = json.dumps(event.model_dump(mode="json"))
     parsed = parse_observe_event_line(line)
     assert isinstance(parsed, AgentRemovedEvent)
     assert parsed.agent_id == agent_id
     assert parsed.agent_name == "gone"
+    assert parsed.host_id == host_id
 
 
 def test_parse_observe_event_line_returns_none_for_state_change_and_unknown() -> None:
@@ -1160,7 +1183,7 @@ def test_discovery_removed_agent_emits_agent_removed_and_drops_tracking(
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     agent = make_test_discovered_agent()
     # Seed per-agent tracking so we can assert it is dropped on removal.
-    observer._last_tracked_state_by_id[str(agent.agent_id)] = _TrackedState(
+    observer._last_tracked_state_by_instance[str(agent.instance_key)] = _TrackedState(
         agent_state="RUNNING", host_state="RUNNING"
     )
 
@@ -1179,7 +1202,8 @@ def test_discovery_removed_agent_emits_agent_removed_and_drops_tracking(
     assert len(removed) == 1
     assert removed[0]["agent_id"] == str(agent.agent_id)
     assert removed[0]["agent_name"] == str(agent.agent_name)
-    assert str(agent.agent_id) not in observer._last_tracked_state_by_id
+    assert removed[0]["host_id"] == str(agent.host_id)
+    assert str(agent.instance_key) not in observer._last_tracked_state_by_instance
 
 
 # === PID watchers (local agents) ===
@@ -1210,26 +1234,26 @@ def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext,
     try:
         with observer._concurrency_group:
             agent_a = make_test_agent_details(name="watched", host_id=host_id, pid=proc_a.pid)
-            agent_id_str = str(agent_a.id)
+            instance_key_str = _details_instance_key(agent_a)
 
             # First sighting opens a watcher bound to proc_a.
             observer._reconcile_watcher_for_agent(agent_a)
-            assert observer._watchers[agent_id_str].pid == proc_a.pid
-            first_thread = observer._watchers[agent_id_str].thread
+            assert observer._watchers[instance_key_str].pid == proc_a.pid
+            first_thread = observer._watchers[instance_key_str].thread
 
             # Same PID: no replacement (same watcher thread kept).
             observer._reconcile_watcher_for_agent(agent_a)
-            assert observer._watchers[agent_id_str].thread is first_thread
+            assert observer._watchers[instance_key_str].thread is first_thread
 
             # PID changed: watcher is replaced and the old thread is stopped.
             agent_b = agent_a.model_copy_update(to_update(agent_a.field_ref().pid, proc_b.pid))
             observer._reconcile_watcher_for_agent(agent_b)
-            assert observer._watchers[agent_id_str].pid == proc_b.pid
+            assert observer._watchers[instance_key_str].pid == proc_b.pid
             assert not first_thread.is_alive()
 
             # No live process (pid None): watcher closed and removed.
             observer._reconcile_watcher_for_agent(agent_a.model_copy_update(to_update(agent_a.field_ref().pid, None)))
-            assert agent_id_str not in observer._watchers
+            assert instance_key_str not in observer._watchers
     finally:
         for proc in (proc_a, proc_b):
             proc.terminate()
@@ -1252,17 +1276,17 @@ def test_reconcile_watcher_skips_remote_agents(temp_mngr_ctx: MngrContext, noop_
                 to_update(local_agent.host.field_ref().provider_name, ProviderInstanceName("modal"))
             )
             remote_agent = local_agent.model_copy_update(to_update(local_agent.field_ref().host, remote_host))
-            agent_id_str = str(local_agent.id)
+            instance_key_str = _details_instance_key(local_agent)
 
             # A remote agent carrying a pid does not open a watcher.
             observer._reconcile_watcher_for_agent(remote_agent)
-            assert agent_id_str not in observer._watchers
+            assert instance_key_str not in observer._watchers
 
             # A remote sighting closes a watcher opened while the agent was local.
             observer._reconcile_watcher_for_agent(local_agent)
-            assert agent_id_str in observer._watchers
+            assert instance_key_str in observer._watchers
             observer._reconcile_watcher_for_agent(remote_agent)
-            assert agent_id_str not in observer._watchers
+            assert instance_key_str not in observer._watchers
     finally:
         proc.terminate()
         proc.wait()
@@ -1277,7 +1301,7 @@ def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: Mngr
         with observer._concurrency_group:
             agent = make_test_agent_details(name="dying", host_id=host_id, pid=proc.pid)
             observer._reconcile_watcher_for_agent(agent)
-            assert str(agent.id) in observer._watchers
+            assert _details_instance_key(agent) in observer._watchers
 
             # The process dies on its own; the watcher should notice via psutil and
             # enqueue the agent's host for a re-probe.

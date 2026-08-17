@@ -72,6 +72,46 @@ def test_complete_names_handles_destroyed_agents(tmp_path: Path) -> None:
     assert agent_names == ["kept-agent"]
 
 
+def test_complete_names_destroy_on_one_host_keeps_same_id_agent_on_other_host(tmp_path: Path) -> None:
+    """A host-scoped destroy must not hide a same-id agent on another host.
+
+    Agent ids are unique per host, not globally (the migration-overlap case), so
+    destroying (host-1, agent-0) must leave the (host-2, agent-0) instance's name
+    completable.
+    """
+    events_dir = tmp_path / "events" / "mngr" / "discovery"
+    events_dir.mkdir(parents=True, exist_ok=True)
+    events_path = events_dir / "events.jsonl"
+
+    snapshot = {
+        "timestamp": "2025-01-01T00:00:00Z",
+        "type": "DISCOVERY_FULL",
+        "event_id": "evt-1",
+        "source": "mngr/discovery",
+        "agents": [
+            {"agent_id": "agent-0", "agent_name": "doomed-instance", "host_id": "host-1", "provider_name": "local"},
+            {"agent_id": "agent-0", "agent_name": "surviving-instance", "host_id": "host-2", "provider_name": "modal"},
+        ],
+        "hosts": [
+            {"host_id": "host-1", "host_name": "host-one", "provider_name": "local"},
+            {"host_id": "host-2", "host_name": "host-two", "provider_name": "modal"},
+        ],
+    }
+    destroyed = {
+        "timestamp": "2025-01-01T00:01:00Z",
+        "type": "AGENT_DESTROYED",
+        "event_id": "evt-2",
+        "source": "mngr/discovery",
+        "agent_id": "agent-0",
+        "host_id": "host-1",
+    }
+    events_path.write_text(json.dumps(snapshot) + "\n" + json.dumps(destroyed) + "\n")
+
+    agent_names, _ = resolve_names_from_discovery_stream(events_path)
+
+    assert agent_names == ["surviving-instance"]
+
+
 def test_complete_names_handles_host_destroyed(tmp_path: Path) -> None:
     """The complete_names module should remove agents when their host is destroyed."""
     events_dir = tmp_path / "events" / "mngr" / "discovery"

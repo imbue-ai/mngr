@@ -40,7 +40,9 @@ def _make_state_change_event(
     agent_id: str = "agent-123",
     old_state: str = "RUNNING",
     new_state: str = "WAITING",
+    host_id: str | None = None,
 ) -> str:
+    """One AGENT_STATE_CHANGE event line; ``host_id=None`` models an old line without host details."""
     return json.dumps(
         {
             "timestamp": "2026-01-01T00:00:00Z",
@@ -51,7 +53,7 @@ def _make_state_change_event(
             "agent_name": agent_name,
             "old_state": old_state,
             "new_state": new_state,
-            "agent": {},
+            "agent": {} if host_id is None else {"host": {"id": host_id}},
         }
     )
 
@@ -230,6 +232,49 @@ def test_process_events_was_running_bit_is_per_agent(notification_cg: Concurrenc
 
     assert len(notifier.calls) == 1
     assert "aaa" in notifier.calls[0][1]
+
+
+def test_process_events_bit_is_keyed_by_instance_when_host_details_present(
+    notification_cg: ConcurrencyGroup,
+) -> None:
+    """With host details on the event, the bit is stored under ``<agent_id>@<host_id>``."""
+    notifier = RecordingNotifier()
+    was_running: dict[str, bool] = {}
+    content = _make_state_change_event(agent_id="agent-5", old_state="RUNNING", new_state="UNKNOWN", host_id="host-A")
+
+    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg, was_running)
+
+    assert len(notifier.calls) == 0
+    assert was_running == {"agent-5@host-A": True}
+
+
+def test_process_events_was_running_bit_is_not_shared_across_hosts_for_same_agent_id(
+    notification_cg: ConcurrencyGroup,
+) -> None:
+    """Two same-id agents on different hosts (the migration-overlap case) track the bit independently."""
+    notifier = RecordingNotifier()
+    was_running: dict[str, bool] = {}
+    lines = "\n".join(
+        [
+            # (host-A, agent-X): RUNNING -> UNKNOWN (sets the bit for host-A's instance only)
+            _make_state_change_event(
+                agent_id="agent-X", agent_name="xxx", old_state="RUNNING", new_state="UNKNOWN", host_id="host-A"
+            ),
+            # (host-B, agent-X): UNKNOWN -> WAITING (host-B's bit is NOT set; must not fire)
+            _make_state_change_event(
+                agent_id="agent-X", agent_name="xxx", old_state="UNKNOWN", new_state="WAITING", host_id="host-B"
+            ),
+            # (host-A, agent-X): UNKNOWN -> WAITING (bit IS set; fires)
+            _make_state_change_event(
+                agent_id="agent-X", agent_name="xxx", old_state="UNKNOWN", new_state="WAITING", host_id="host-A"
+            ),
+        ]
+    )
+
+    _process_events(lines, NotificationsPluginConfig(), notifier, notification_cg, was_running)
+
+    assert len(notifier.calls) == 1
+    assert "xxx" in notifier.calls[0][1]
 
 
 # --- watch_for_waiting_agents ---

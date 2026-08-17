@@ -11,7 +11,11 @@ as soon as discovery supplies membership + SSH info instead of waiting on the
 event stream. The live stream still runs and overwrites the seed as soon as it
 delivers, so a stale seed self-corrects within one stream connect.
 
-The cache is a single JSON object mapping agent id -> {service_name -> url}.
+The cache is a single JSON object mapping agent instance key
+(``<agent_id>@<host_id>``) -> {service_name -> url}. Agent ids are unique per
+host, not globally, so entries are instance-scoped; entries persisted by the
+older bare-agent-id format are dropped at seed time (see
+``ForwardResolver.seed_services``).
 It lives under the caller-chosen path (the plugin points it at
 ``$MNGR_HOST_DIR/plugin/forward/``), so staging / production / local minds keep
 independent caches automatically.
@@ -34,7 +38,7 @@ class ServiceMapCache(FrozenModel):
     cache_path: Path = Field(frozen=True, description="JSON file holding the persisted service map")
 
     def load(self) -> dict[str, dict[str, str]]:
-        """Return the persisted ``{agent_id -> {service -> url}}`` map.
+        """Return the persisted ``{agent_instance_key -> {service -> url}}`` map.
 
         A missing, empty, unreadable, or malformed cache file yields ``{}`` --
         seeding from it is then a no-op and startup behaves exactly as if no

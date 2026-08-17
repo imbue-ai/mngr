@@ -226,6 +226,26 @@ class DuplicateAgentNameError(AgentError):
         super().__init__(f"An agent named '{agent_name}' already exists on this host (ID: {existing_agent_id})")
 
 
+class DuplicateAgentIdOnHostError(AgentError):
+    """An agent with this id already exists on the target host.
+
+    Agent ids are unique per host (the state dir path and tmux/env matching
+    depend on it), though the same id may exist on other hosts -- e.g. while
+    an agent is being migrated between hosts.
+    """
+
+    user_help_text = (
+        "An agent id must be unique on its host. To create a second copy of this agent on "
+        "another host, target that host instead; to update the existing agent, re-run create "
+        "with the existing agent's name and --reuse."
+    )
+
+    def __init__(self, agent_id: AgentId, host_id: HostId) -> None:
+        self.agent_id = agent_id
+        self.host_id = host_id
+        super().__init__(f"An agent with id '{agent_id}' already exists on host {host_id}")
+
+
 class AgentStateInconsistencyError(AgentError, RuntimeError):
     """Raised when an agent found during discovery is no longer present on the live host."""
 

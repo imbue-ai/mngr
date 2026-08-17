@@ -161,7 +161,7 @@ def test_parse_agent_or_host_address_agent_at_host_dot_provider_is_agent() -> No
 
 
 # =============================================================================
-# HostAddress.matches tests
+# HostAddress.matches_host tests
 # =============================================================================
 
 
@@ -173,25 +173,43 @@ def _make_host(name: str = "myhost", provider: str = "local") -> DiscoveredHost:
     )
 
 
-def _host_address_for(host: DiscoveredHost) -> HostAddress:
-    return HostAddress(host=host.host_name, provider=host.provider_name)
+def _matches_host(constraint: HostAddress, host: DiscoveredHost) -> bool:
+    return constraint.matches_host(host.host_id, host.host_name, host.provider_name)
 
 
 def test_host_address_matches_by_name() -> None:
     """A constraint with only a host name matches hosts with that name regardless of provider."""
     constraint = HostAddress(host=HostName("myhost"))
 
-    assert constraint.matches(_host_address_for(_make_host("myhost"))) is True
-    assert constraint.matches(_host_address_for(_make_host("otherhost"))) is False
+    assert _matches_host(constraint, _make_host("myhost")) is True
+    assert _matches_host(constraint, _make_host("otherhost")) is False
+
+
+def test_host_address_matches_by_id() -> None:
+    """A constraint with a host id matches the host with that id, whatever its name."""
+    host = _make_host("myhost")
+    constraint = HostAddress(host=host.host_id)
+
+    assert _matches_host(constraint, host) is True
+    assert _matches_host(constraint, _make_host("myhost")) is False
+
+
+def test_host_address_matches_by_id_and_provider() -> None:
+    """A constraint with both host id and provider requires both to match."""
+    host = _make_host("myhost", "modal")
+    constraint = HostAddress(host=host.host_id, provider=ProviderInstanceName("modal"))
+
+    assert _matches_host(constraint, host) is True
+    assert constraint.matches_host(host.host_id, host.host_name, ProviderInstanceName("docker")) is False
 
 
 def test_host_address_matches_by_name_and_provider() -> None:
     """A constraint with both host name and provider requires both to match."""
     constraint = HostAddress(host=HostName("myhost"), provider=ProviderInstanceName("modal"))
 
-    assert constraint.matches(_host_address_for(_make_host("myhost", "modal"))) is True
-    assert constraint.matches(_host_address_for(_make_host("myhost", "docker"))) is False
-    assert constraint.matches(_host_address_for(_make_host("other", "modal"))) is False
+    assert _matches_host(constraint, _make_host("myhost", "modal")) is True
+    assert _matches_host(constraint, _make_host("myhost", "docker")) is False
+    assert _matches_host(constraint, _make_host("other", "modal")) is False
 
 
 # =============================================================================
@@ -225,6 +243,15 @@ def test_address_matches_agent_match_by_host_name() -> None:
 
     assert _address_matches_agent_match(address, _make_match(host_name="myhost")) is True
     assert _address_matches_agent_match(address, _make_match(host_name="other")) is False
+
+
+def test_address_matches_agent_match_by_host_id() -> None:
+    """An ``ID@HOST-ID`` style address (an instance key) filters by host id."""
+    match = _make_match(host_name="myhost")
+    address = AgentAddress(agent=match.agent_id, host=HostAddress(host=match.host_id))
+
+    assert _address_matches_agent_match(address, match) is True
+    assert _address_matches_agent_match(address, _make_match(host_name="myhost")) is False
 
 
 # =============================================================================

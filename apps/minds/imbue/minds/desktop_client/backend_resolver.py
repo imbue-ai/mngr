@@ -6,6 +6,7 @@ from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Final
@@ -576,6 +577,25 @@ def _display_info_from_agent(agent: DiscoveredAgent) -> AgentDisplayInfo:
     )
 
 
+def _warn_if_agent_id_spans_machines(agent_id: AgentId, sorted_host_ids: Sequence[HostId]) -> None:
+    """Warn when a workspace agent id resolves to more than one machine.
+
+    Agent ids are unique per host, not globally, so an id can span machines
+    (e.g. mid-migration). minds has no workspace-level policy for that yet, so
+    callers pick the first machine of the sorted list deterministically and
+    this warns rather than silently first-matching. No-op for a single (or no)
+    machine.
+    """
+    if len(sorted_host_ids) <= 1:
+        return
+    logger.warning(
+        "Workspace agent id {} resolved to {} machines ({}); using the first",
+        agent_id,
+        len(sorted_host_ids),
+        ", ".join(str(host_id) for host_id in sorted_host_ids),
+    )
+
+
 def _find_system_services_agent(records: Iterable[_AgentRecord], workspace_agent_id: AgentId) -> AgentId | None:
     """Resolve the system-services agent that shares the workspace agent's host.
 
@@ -584,9 +604,9 @@ def _find_system_services_agent(records: Iterable[_AgentRecord], workspace_agent
     system-services agent on that same host. ``None`` if either is absent.
     """
     records = tuple(records)
-    host_id: HostId | None = next(
-        (record.host_id for record in records if record.agent_id == workspace_agent_id), None
-    )
+    matching_host_ids = sorted({record.host_id for record in records if record.agent_id == workspace_agent_id})
+    _warn_if_agent_id_spans_machines(workspace_agent_id, matching_host_ids)
+    host_id: HostId | None = matching_host_ids[0] if matching_host_ids else None
     if host_id is None:
         return None
     for record in records:
@@ -1451,9 +1471,16 @@ class MngrCliBackendResolver(BackendResolverInterface):
         retained row still renders name/provider/host until discovery returns.
         """
         with self._lock:
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == agent_id:
-                    return _display_info_from_agent(agent)
+            # Sorted by host id so a duplicated agent id (unique per host, not
+            # globally, e.g. mid-migration) resolves to the same machine on
+            # every refresh rather than flapping with discovery order.
+            live_matches = sorted(
+                (agent for agent in self._agents_result.discovered_agents if agent.agent_id == agent_id),
+                key=lambda agent: str(agent.host_id),
+            )
+            _warn_if_agent_id_spans_machines(agent_id, [agent.host_id for agent in live_matches])
+            if live_matches:
+                return _display_info_from_agent(live_matches[0])
             for retention in self._transition_retention_by_host_id.values():
                 for agent in retention.agents:
                     if agent.agent_id == agent_id:

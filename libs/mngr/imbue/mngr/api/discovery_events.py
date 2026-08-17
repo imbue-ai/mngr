@@ -47,6 +47,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
@@ -860,45 +861,45 @@ class ResolvedAgentHost(FrozenModel):
 
 
 class _ResolutionMaps(MutableModel):
-    """Bundle of the maps built (and mutated in place) while replaying discovery events."""
+    """Bundle of the maps built (and mutated in place) while replaying discovery events.
 
-    # agent_id -> provider_name
-    provider_by_agent_id: dict[str, str] = Field(default_factory=dict)
-    # agent_id -> agent_name
-    name_by_agent_id: dict[str, str] = Field(default_factory=dict)
-    # agent_id -> host_id
-    host_id_by_agent_id: dict[str, str] = Field(default_factory=dict)
-    # agent ids known to be destroyed
-    destroyed_agent_ids: set[str] = Field(default_factory=set)
+    Keyed by :class:`AgentInstanceKey` (the ``(host, agent)`` pair), never by
+    the bare agent id: the same agent id may exist on multiple hosts at once
+    (e.g. mid-migration), and each instance resolves independently.
+    """
+
+    # agent instance -> provider_name
+    provider_by_agent_instance: dict[AgentInstanceKey, str] = Field(default_factory=dict)
+    # agent instance -> agent_name
+    name_by_agent_instance: dict[AgentInstanceKey, str] = Field(default_factory=dict)
+    # agent instances known to be destroyed
+    destroyed_agent_instances: set[AgentInstanceKey] = Field(default_factory=set)
 
     def reset(self) -> None:
         """Clear every map -- used when a full snapshot supersedes prior state."""
-        self.provider_by_agent_id.clear()
-        self.name_by_agent_id.clear()
-        self.host_id_by_agent_id.clear()
-        self.destroyed_agent_ids.clear()
+        self.provider_by_agent_instance.clear()
+        self.name_by_agent_instance.clear()
+        self.destroyed_agent_instances.clear()
 
-    def forget_agent(self, agent_id: str) -> None:
-        """Drop a single agent from every map (it is confirmed gone)."""
-        self.provider_by_agent_id.pop(agent_id, None)
-        self.name_by_agent_id.pop(agent_id, None)
-        self.host_id_by_agent_id.pop(agent_id, None)
-        self.destroyed_agent_ids.discard(agent_id)
+    def forget_agent(self, instance_key: AgentInstanceKey) -> None:
+        """Drop a single agent instance from every map (it is confirmed gone)."""
+        self.provider_by_agent_instance.pop(instance_key, None)
+        self.name_by_agent_instance.pop(instance_key, None)
+        self.destroyed_agent_instances.discard(instance_key)
 
 
 def _record_agent(maps: _ResolutionMaps, agent: DiscoveredAgent) -> None:
     """Record a single discovered agent into the resolution maps."""
-    id_str = str(agent.agent_id)
-    maps.provider_by_agent_id[id_str] = str(agent.provider_name)
-    maps.name_by_agent_id[id_str] = str(agent.agent_name)
-    maps.host_id_by_agent_id[id_str] = str(agent.host_id)
-    maps.destroyed_agent_ids.discard(id_str)
+    instance_key = agent.instance_key
+    maps.provider_by_agent_instance[instance_key] = str(agent.provider_name)
+    maps.name_by_agent_instance[instance_key] = str(agent.agent_name)
+    maps.destroyed_agent_instances.discard(instance_key)
 
 
 def _apply_provider_snapshot_to_maps(
     maps: _ResolutionMaps,
     event: ProviderDiscoverySnapshotEvent,
-    last_event_time_by_agent_id: Mapping[str, datetime],
+    last_event_time_by_agent_instance: Mapping[AgentInstanceKey, datetime],
 ) -> None:
     """Fold one per-provider snapshot into the resolution maps, span-aware.
 
@@ -914,23 +915,25 @@ def _apply_provider_snapshot_to_maps(
     span_start = event.discovery_started_at
     provider_str = str(event.provider_name)
     is_errored = event.error is not None
-    snapshot_agent_ids = {str(agent.agent_id) for agent in event.agents}
+    snapshot_agent_instances = {agent.instance_key for agent in event.agents}
 
     # Reconcile agents previously attributed to this provider but absent from the
     # snapshot: forget them only when the omission is a confirmed removal (the
     # provider's read succeeded and no newer in-span event contradicts it).
-    prior_provider_agent_ids = [aid for aid, name in maps.provider_by_agent_id.items() if name == provider_str]
-    for agent_id in prior_provider_agent_ids:
-        if agent_id in snapshot_agent_ids:
+    prior_provider_instances = [
+        instance_key for instance_key, name in maps.provider_by_agent_instance.items() if name == provider_str
+    ]
+    for instance_key in prior_provider_instances:
+        if instance_key in snapshot_agent_instances:
             continue
-        has_intervening = is_intervening_event(last_event_time_by_agent_id.get(agent_id), span_start)
+        has_intervening = is_intervening_event(last_event_time_by_agent_instance.get(instance_key), span_start)
         if classify_removed_item(is_errored, has_intervening) is RemovedItemDecision.DROP:
-            maps.forget_agent(agent_id)
+            maps.forget_agent(instance_key)
 
     # Apply each snapshot agent unless a newer in-span event already superseded it
     # (e.g. a destroy during the span must not be undone by this stale snapshot).
     for agent in event.agents:
-        if is_intervening_event(last_event_time_by_agent_id.get(str(agent.agent_id)), span_start):
+        if is_intervening_event(last_event_time_by_agent_instance.get(agent.instance_key), span_start):
             continue
         _record_agent(maps, agent)
 
@@ -949,10 +952,10 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
     """
     offset = find_discovery_snapshot_replay_offset(events_path)
     maps = _ResolutionMaps()
-    # Most recent incremental-event time per agent, used to refuse clobbering by an
-    # in-flight snapshot whose span the event falls within. Snapshots do not update it
-    # (only AGENT_DISCOVERED / AGENT_DESTROYED do), matching the aggregator.
-    last_event_time_by_agent_id: dict[str, datetime] = {}
+    # Most recent incremental-event time per agent instance, used to refuse clobbering
+    # by an in-flight snapshot whose span the event falls within. Snapshots do not
+    # update it (only AGENT_DISCOVERED / AGENT_DESTROYED do), matching the aggregator.
+    last_event_time_by_agent_instance: dict[AgentInstanceKey, datetime] = {}
 
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     with open(events_path) as f:
@@ -966,17 +969,20 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
             if isinstance(event, FullDiscoverySnapshotEvent):
                 # Legacy global snapshot: supersedes everything before it.
                 maps.reset()
-                last_event_time_by_agent_id.clear()
+                last_event_time_by_agent_instance.clear()
                 for agent in event.agents:
                     _record_agent(maps, agent)
             elif isinstance(event, ProviderDiscoverySnapshotEvent):
-                _apply_provider_snapshot_to_maps(maps, event, last_event_time_by_agent_id)
+                _apply_provider_snapshot_to_maps(maps, event, last_event_time_by_agent_instance)
             elif isinstance(event, AgentDiscoveryEvent):
                 _record_agent(maps, event.agent)
-                last_event_time_by_agent_id[str(event.agent.agent_id)] = parse_event_timestamp(event.timestamp)
+                last_event_time_by_agent_instance[event.agent.instance_key] = parse_event_timestamp(event.timestamp)
             elif isinstance(event, AgentDestroyedEvent):
-                maps.destroyed_agent_ids.add(str(event.agent_id))
-                last_event_time_by_agent_id[str(event.agent_id)] = parse_event_timestamp(event.timestamp)
+                # Host-scoped: destroying (host A, id X) must not make a same-id
+                # agent on another host unresolvable.
+                instance_key = AgentInstanceKey.build(event.agent_id, event.host_id)
+                maps.destroyed_agent_instances.add(instance_key)
+                last_event_time_by_agent_instance[instance_key] = parse_event_timestamp(event.timestamp)
             else:
                 # Host, SSH info, and error events are not relevant for resolution. A
                 # host's continued existence (and its name) come from provider.get_host
@@ -986,18 +992,28 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
     return maps
 
 
-def _replay_discovery_events_for_resolution(
-    events_path: Path,
-) -> tuple[dict[str, str], dict[str, str], set[str]]:
-    """Replay events from the latest full snapshot into provider-resolution maps.
+def _drop_destroyed_instances(maps: _ResolutionMaps) -> None:
+    """Drop every destroyed instance from the replayed maps (in place) so it cannot resolve."""
+    for destroyed_instance in tuple(maps.destroyed_agent_instances):
+        maps.provider_by_agent_instance.pop(destroyed_instance, None)
+        maps.name_by_agent_instance.pop(destroyed_instance, None)
 
-    Returns ``(provider_by_agent_id, name_by_agent_id, destroyed_agent_ids)``.
-    Raises DiscoverySchemaChangedError if any event line in the file fails
-    schema validation (the caller is responsible for regenerating and retrying).
-    Raises OSError on file I/O failure.
+
+def _build_instance_lookup_maps(
+    maps: _ResolutionMaps,
+) -> tuple[dict[str, set[AgentInstanceKey]], dict[str, set[AgentInstanceKey]]]:
+    """Build id- and name-based lookup maps over the surviving instances.
+
+    Returns ``(instances_by_agent_id, instances_by_name)``. An identifier of
+    either kind can match instances on multiple hosts, so both map to instance
+    sets; the caller enforces any single-host requirement.
     """
-    maps = _replay_discovery_events_into_maps(events_path)
-    return maps.provider_by_agent_id, maps.name_by_agent_id, maps.destroyed_agent_ids
+    instances_by_agent_id: dict[str, set[AgentInstanceKey]] = {}
+    instances_by_name: dict[str, set[AgentInstanceKey]] = {}
+    for instance_key, name_str in maps.name_by_agent_instance.items():
+        instances_by_agent_id.setdefault(str(instance_key.agent_id), set()).add(instance_key)
+        instances_by_name.setdefault(name_str, set()).add(instance_key)
+    return instances_by_agent_id, instances_by_name
 
 
 def resolve_provider_names_for_identifiers(
@@ -1007,7 +1023,9 @@ def resolve_provider_names_for_identifiers(
     """Resolve agent identifiers to the provider names that own them using the event stream.
 
     Reads the latest DISCOVERY_FULL snapshot and replays incremental events to build
-    agent_name -> set[provider_name] and agent_id -> provider_name mappings.
+    agent_name -> set[provider_name] and agent_id -> set[provider_name] mappings.
+    An agent id can match instances on multiple hosts (and thus multiple providers),
+    so ids resolve to the union of their instances' providers, exactly like names.
 
     Returns the deduplicated union of provider names for all identifiers, or None if
     any identifier cannot be resolved (meaning a full scan is needed).
@@ -1022,9 +1040,7 @@ def resolve_provider_names_for_identifiers(
         return None
 
     try:
-        provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
-            events_path
-        )
+        maps = _replay_discovery_events_into_maps(events_path)
     except DiscoverySchemaChangedError as e:
         logger.warning("Discovery event schema mismatch; regenerating snapshot and retrying ({})", e)
         # _regenerate_discovery_events uses ErrorBehavior.CONTINUE, so a
@@ -1034,19 +1050,16 @@ def resolve_provider_names_for_identifiers(
         # layer's, so a hard failure inside list_agents itself will bubble.
         _regenerate_discovery_events(mngr_ctx)
         # after we've regenerated the list, we should no longer get the DiscoverySchemaChangedError anymore
-        provider_by_agent_id, name_by_agent_id, destroyed_agent_ids = _replay_discovery_events_for_resolution(
-            events_path
-        )
+        maps = _replay_discovery_events_into_maps(events_path)
 
-    # Remove destroyed agents from both maps
-    for destroyed_id in destroyed_agent_ids:
-        provider_by_agent_id.pop(destroyed_id, None)
-        name_by_agent_id.pop(destroyed_id, None)
+    _drop_destroyed_instances(maps)
 
-    # Build the name -> providers map from surviving agents
+    # Build the id -> providers and name -> providers maps from surviving instances.
+    providers_by_agent_id: dict[str, set[str]] = {}
     providers_by_agent_name: dict[str, set[str]] = {}
-    for id_str, prov in provider_by_agent_id.items():
-        name_str = name_by_agent_id.get(id_str)
+    for instance_key, prov in maps.provider_by_agent_instance.items():
+        providers_by_agent_id.setdefault(str(instance_key.agent_id), set()).add(prov)
+        name_str = maps.name_by_agent_instance.get(instance_key)
         if name_str is not None:
             providers_by_agent_name.setdefault(name_str, set()).add(prov)
 
@@ -1054,8 +1067,8 @@ def resolve_provider_names_for_identifiers(
     resolved_providers: set[str] = set()
     for identifier in identifiers:
         # Try as agent ID first
-        if identifier in provider_by_agent_id:
-            resolved_providers.add(provider_by_agent_id[identifier])
+        if identifier in providers_by_agent_id:
+            resolved_providers.update(providers_by_agent_id[identifier])
         # Then try as agent name
         elif identifier in providers_by_agent_name:
             resolved_providers.update(providers_by_agent_name[identifier])
@@ -1118,16 +1131,12 @@ def resolve_hosts_for_identifiers(
             _regenerate_discovery_events(mngr_ctx)
             maps = _replay_discovery_events_into_maps(events_path)
 
-    # Drop destroyed agents so they cannot resolve.
-    for destroyed_id in maps.destroyed_agent_ids:
-        maps.provider_by_agent_id.pop(destroyed_id, None)
-        maps.name_by_agent_id.pop(destroyed_id, None)
-        maps.host_id_by_agent_id.pop(destroyed_id, None)
+    # Drop destroyed instances so they cannot resolve.
+    _drop_destroyed_instances(maps)
 
-    # Build agent_name -> set of agent_ids for name-based lookup.
-    agent_ids_by_name: dict[str, set[str]] = {}
-    for agent_id_str, name_str in maps.name_by_agent_id.items():
-        agent_ids_by_name.setdefault(name_str, set()).add(agent_id_str)
+    # Build id- and name-based lookup maps over the surviving instances; the
+    # single-host requirement is checked below.
+    instances_by_agent_id, instances_by_name = _build_instance_lookup_maps(maps)
 
     # Read-after-write fallback: an agent created during an in-flight discovery span may
     # be absent from the latest on-disk snapshot, so the stream alone can miss it. For any
@@ -1138,37 +1147,34 @@ def resolve_hosts_for_identifiers(
         unresolved_identifiers = [
             identifier
             for identifier in identifiers
-            if identifier not in maps.provider_by_agent_id and identifier not in agent_ids_by_name
+            if identifier not in instances_by_agent_id and identifier not in instances_by_name
         ]
         if unresolved_identifiers:
             for agent in live_discovery_fallback(unresolved_identifiers):
                 _record_agent(maps, agent)
-            agent_ids_by_name = {}
-            for agent_id_str, name_str in maps.name_by_agent_id.items():
-                agent_ids_by_name.setdefault(name_str, set()).add(agent_id_str)
+            instances_by_agent_id, instances_by_name = _build_instance_lookup_maps(maps)
 
     resolved: dict[str, ResolvedAgentHost] = {}
     for identifier in identifiers:
-        if identifier in maps.provider_by_agent_id:
-            candidate_agent_ids = {identifier}
-        elif identifier in agent_ids_by_name:
-            candidate_agent_ids = agent_ids_by_name[identifier]
+        if identifier in instances_by_agent_id:
+            candidate_instances = instances_by_agent_id[identifier]
+        elif identifier in instances_by_name:
+            candidate_instances = instances_by_name[identifier]
         else:
             raise AgentNotFoundError(
                 f"Could not resolve a host for agent '{identifier}' from the discovery event stream"
             )
 
-        # Collect the distinct hosts the candidate agent(s) run on. An agent
-        # name spanning more than one host_id is ambiguous and must be
-        # disambiguated explicitly.
+        # Collect the distinct hosts the candidate instance(s) run on. An
+        # identifier (name or id) spanning more than one host is ambiguous and
+        # must be disambiguated explicitly.
         candidate_hosts: dict[str, ResolvedAgentHost] = {}
-        for agent_id_str in candidate_agent_ids:
-            host_id_str = maps.host_id_by_agent_id.get(agent_id_str)
-            provider_str = maps.provider_by_agent_id.get(agent_id_str)
-            if host_id_str is None or provider_str is None:
+        for instance_key in candidate_instances:
+            provider_str = maps.provider_by_agent_instance.get(instance_key)
+            if provider_str is None:
                 continue
-            candidate_hosts[host_id_str] = ResolvedAgentHost(
-                host_id=HostId(host_id_str),
+            candidate_hosts[str(instance_key.host_id)] = ResolvedAgentHost(
+                host_id=instance_key.host_id,
                 provider_name=ProviderInstanceName(provider_str),
             )
 
@@ -1180,7 +1186,7 @@ def resolve_hosts_for_identifiers(
             host_ids = ", ".join(sorted(candidate_hosts))
             raise AgentNotFoundError(
                 f"Agent identifier '{identifier}' matches agents on multiple hosts ({host_ids}); "
-                "disambiguate using NAME@HOST.PROVIDER"
+                "disambiguate using NAME@HOST.PROVIDER (or ID@HOST)"
             )
         resolved[identifier] = next(iter(candidate_hosts.values()))
 

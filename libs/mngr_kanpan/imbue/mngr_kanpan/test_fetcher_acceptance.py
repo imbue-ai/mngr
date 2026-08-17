@@ -327,11 +327,11 @@ def test_set_agent_mute_writes_the_state_it_is_given(
     agent = create_test_agent_state(local_host, work_dir, "set-mute-agent")
     name = AgentName("set-mute-agent")
 
-    set_agent_mute(temp_mngr_ctx, agent.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
     assert _read_persisted_mute(temp_mngr_ctx, name) is True
-    set_agent_mute(temp_mngr_ctx, agent.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
     assert _read_persisted_mute(temp_mngr_ctx, name) is True
-    set_agent_mute(temp_mngr_ctx, agent.id, False)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, False)
     assert _read_persisted_mute(temp_mngr_ctx, name) is False
 
 
@@ -368,7 +368,7 @@ def test_fetch_board_snapshot_muted_agent_in_muted_section(
 ) -> None:
     """A muted agent appears in the MUTED section of the board snapshot."""
     agent = create_test_agent_state(local_host, work_dir, "muted-section-agent")
-    set_agent_mute(temp_mngr_ctx, agent.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
     result = fetch_board_snapshot(temp_mngr_ctx, [], {})
     entries = {e.name: e for e in result.snapshot.entries}
     entry = entries[AgentName("muted-section-agent")]
@@ -397,7 +397,7 @@ def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
     failing provider, so the muted agent must remain in MUTED.
     """
     agent = create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
-    set_agent_mute(temp_mngr_ctx, agent.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
 
     failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
     result = fetch_board_snapshot(failing_ctx, [], {})

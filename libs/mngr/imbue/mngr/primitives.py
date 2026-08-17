@@ -14,6 +14,7 @@ from pydantic_core import core_schema
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
@@ -327,7 +328,14 @@ class WaitingReason(UpperCaseStrEnum):
 
 
 class AgentId(RandomId):
-    """Unique identifier for an agent."""
+    """Identifier for an agent, unique per host (NOT globally).
+
+    An agent id is the agent's stable logical identity. The same id may exist
+    on multiple hosts at once -- e.g. while an agent is being migrated between
+    hosts -- so code that aggregates agents across hosts must key on the
+    ``(host_id, agent_id)`` pair (see :class:`AgentInstanceKey`), never on the
+    bare agent id.
+    """
 
     PREFIX = "agent"
 
@@ -336,6 +344,48 @@ class HostId(RandomId):
     """Unique identifier for a host."""
 
     PREFIX = "host"
+
+
+class InvalidAgentInstanceKey(ValueError):
+    pass
+
+
+class AgentInstanceKey(NonEmptyStr):
+    """``<agent_id>@<host_id>``: the coordinate of one concrete agent instance.
+
+    Agent ids are unique per host, not globally, so anything that aggregates
+    agents across hosts must key on this pair rather than the bare agent id.
+    The string form doubles as a CLI address (``mngr event <agent_id>@<host_id>``
+    parses through the normal address grammar), so an instance key is always
+    directly actionable.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        agent_part, separator, host_part = value.partition("@")
+        if not separator or not agent_part or not host_part:
+            raise InvalidAgentInstanceKey(f"{cls.__name__} must have the form '<agent_id>@<host_id>': '{value}'")
+        # Validate both parts eagerly so a constructed key can never fail later
+        # on its agent_id / host_id property accesses.
+        try:
+            AgentId(agent_part)
+            HostId(host_part)
+        except InvalidRandomIdError as e:
+            raise InvalidAgentInstanceKey(
+                f"{cls.__name__} must have the form '<agent_id>@<host_id>': '{value}' ({e})"
+            ) from e
+        return super().__new__(cls, value)
+
+    @classmethod
+    def build(cls, agent_id: "AgentId", host_id: "HostId") -> "AgentInstanceKey":
+        return cls(f"{agent_id}@{host_id}")
+
+    @property
+    def agent_id(self) -> "AgentId":
+        return AgentId(self.partition("@")[0])
+
+    @property
+    def host_id(self) -> "HostId":
+        return HostId(self.partition("@")[2])
 
 
 class SnapshotId(NonEmptyStr):
@@ -453,18 +503,24 @@ class HostAddress(FrozenModel):
         default=None, description="Provider instance name (the ``.PROVIDER`` qualifier)"
     )
 
-    def matches(self, other: "HostAddress") -> bool:
-        """True if every component of ``self`` matches the corresponding component of ``other``.
+    def matches_host(
+        self,
+        host_id: HostId,
+        host_name: HostName,
+        provider_name: ProviderInstanceName,
+    ) -> bool:
+        """True if this address, read as a constraint, matches the given concrete host.
 
-        ``self`` is read as a constraint (e.g. parsed from a ``--host`` flag);
-        ``other`` is the concrete address being tested. Provider matching is
-        only enforced when ``self.provider`` is set, so a constraint of just
-        ``HOST`` matches every concrete host with that name regardless of
-        provider.
+        The host component dispatches on its runtime type: a :class:`HostId`
+        constraint matches the host's id, a :class:`HostName` constraint its
+        name. Provider matching is only enforced when ``self.provider`` is set,
+        so a constraint of just ``HOST`` matches every concrete host with that
+        name (or id) regardless of provider.
         """
-        if self.host != other.host:
+        concrete_host = host_id if isinstance(self.host, HostId) else host_name
+        if self.host != concrete_host:
             return False
-        if self.provider is not None and self.provider != other.provider:
+        if self.provider is not None and self.provider != provider_name:
             return False
         return True
 
@@ -637,6 +693,11 @@ class DiscoveredAgent(FrozenModel):
     agent_name: AgentName
     provider_name: ProviderInstanceName
     certified_data: Mapping[str, Any] = Field(default_factory=dict)
+
+    @property
+    def instance_key(self) -> AgentInstanceKey:
+        """The ``(host, agent)`` coordinate identifying this concrete instance."""
+        return AgentInstanceKey.build(self.agent_id, self.host_id)
 
     @property
     def agent_type(self) -> "AgentTypeName | None":

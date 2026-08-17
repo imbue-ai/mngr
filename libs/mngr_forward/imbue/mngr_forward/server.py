@@ -864,12 +864,15 @@ async def _handle_workspace_forward_http(
     ):
         return _unauthenticated_subdomain_response(request, listen_port, use_http2, host_info)
 
-    agent_id = resolver.resolve_agent_for_host(str(host_info.host_id_str))
-    if agent_id is None:
+    instance_key = resolver.resolve_agent_for_host(str(host_info.host_id_str))
+    if instance_key is None:
         # No known agent on this host yet (discovery still warming up, or the
         # host is gone). There is no agent to attribute a failure envelope to,
         # so just serve the auto-retrying loader.
         return _service_unavailable_response(request)
+    # Envelopes and logs carry the bare agent id (the wire contract); resolver
+    # lookups use the host-scoped instance key.
+    agent_id = instance_key.agent_id
 
     # CLEANUP: drop this redirect (with ``_parse_legacy_service_path`` and
     # ``ForwardResolver.is_shell_target``) once no supported workspace predates
@@ -890,10 +893,10 @@ async def _handle_workspace_forward_http(
     if (
         legacy_service is not None
         and request.headers.get("sec-fetch-mode") == "navigate"
-        and resolver.is_shell_target(agent_id, host_info.service_name)
+        and resolver.is_shell_target(instance_key, host_info.service_name)
     ):
         legacy_service_name, legacy_remainder_path = legacy_service
-        if resolver.resolve(agent_id, legacy_service_name) is not None:
+        if resolver.resolve(instance_key, legacy_service_name) is not None:
             scheme = "https" if use_http2 else "http"
             next_path = legacy_remainder_path
             if request.url.query:
@@ -907,7 +910,7 @@ async def _handle_workspace_forward_http(
         # the bare domain cannot be served at all). Non-HTML requests (the
         # workspace readiness probe, assets) fall through to serving the shell
         # directly, so nothing that is not a top-level navigation is disrupted.
-        shell_label = resolver.shell_origin_label(agent_id)
+        shell_label = resolver.shell_origin_label(instance_key)
         if shell_label is not None and "text/html" in request.headers.get("accept", ""):
             scheme = "https" if use_http2 else "http"
             next_path = request.url.path
@@ -915,9 +918,9 @@ async def _handle_workspace_forward_http(
                 next_path = f"{next_path}?{request.url.query}"
             location = f"{scheme}://{shell_label}.{host_info.workspace_domain}:{listen_port}{next_path}"
             return Response(status_code=302, headers={"Location": location})
-        target = resolver.resolve(agent_id)
+        target = resolver.resolve(instance_key)
     else:
-        target = resolver.resolve_by_origin_label(agent_id, host_info.service_name)
+        target = resolver.resolve_by_origin_label(instance_key, host_info.service_name)
     if target is None:
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         return _service_unavailable_response(request)
@@ -989,17 +992,18 @@ async def _handle_workspace_forward_websocket(
         await websocket.close(code=4003, reason="Not authenticated")
         return
 
-    agent_id = resolver.resolve_agent_for_host(str(host_info.host_id_str))
-    if agent_id is None:
+    instance_key = resolver.resolve_agent_for_host(str(host_info.host_id_str))
+    if instance_key is None:
         await websocket.close(code=1013, reason="Backend not yet available")
         return
+    agent_id = instance_key.agent_id
 
     # A websocket to a service origin routes by its label; to the bare origin
     # it maps to the shell (no redirect -- there is no navigation to redirect).
     if host_info.service_name is None:
-        target = resolver.resolve(agent_id)
+        target = resolver.resolve(instance_key)
     else:
-        target = resolver.resolve_by_origin_label(agent_id, host_info.service_name)
+        target = resolver.resolve_by_origin_label(instance_key, host_info.service_name)
     if target is None:
         # Mirror the HTTP path: an unresolved backend is a backend failure a
         # consumer must hear about. A loaded SPA whose only live channel is a
@@ -1220,19 +1224,11 @@ def _handle_debug_index(
         html = _render_login_page(env)
         return HTMLResponse(content=html)
     agents = []
-    for agent_id in resolver.list_known_agent_ids():
-        host_id = resolver.get_host_for_agent(agent_id)
-        target = resolver.resolve(agent_id)
-        if host_id is None:
-            agents.append(
-                {
-                    "agent_id": str(agent_id),
-                    "host_id": "",
-                    "is_unresolved": True,
-                    "reason": "(no host known yet)",
-                }
-            )
-        elif target is None:
+    for instance_key in resolver.list_known_agent_instances():
+        agent_id = instance_key.agent_id
+        host_id = str(instance_key.host_id)
+        target = resolver.resolve(instance_key)
+        if target is None:
             agents.append(
                 {
                     "agent_id": str(agent_id),

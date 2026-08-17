@@ -208,6 +208,30 @@ def test_resolve_events_target_finds_agent(
     assert "agent log content" in content
 
 
+def test_resolve_events_target_finds_agent_by_instance_key_address(
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+) -> None:
+    """An ``ID@HOST-ID`` address (an agent instance key) resolves to the agent.
+
+    This is the address form the forward plugin uses for its per-instance
+    event-stream subprocesses, so host-id-qualified resolution must work.
+    """
+    per_host_dir = local_provider.host_dir
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    agent_id = _create_agent_data_json(per_host_dir, "test-resolve-instance", "sleep 94818")
+
+    agent_events_dir = per_host_dir / "agents" / str(agent_id) / "events"
+    agent_events_dir.mkdir(parents=True, exist_ok=True)
+    (agent_events_dir / "output.log").write_text("instance log content\n")
+
+    target = resolve_events_target(AgentAddress(agent=agent_id, host=HostAddress(host=host.id)), temp_mngr_ctx)
+    assert "test-resolve-instance" in target.display_name
+
+    content = read_event_content(target, "output.log")
+    assert "instance log content" in content
+
+
 def test_resolve_events_target_finds_host(
     temp_mngr_ctx: MngrContext,
     local_provider,

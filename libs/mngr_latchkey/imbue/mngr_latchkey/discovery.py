@@ -60,6 +60,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
@@ -281,24 +282,24 @@ class LatchkeyDiscoveryHandler(MutableModel):
             # and let the agent reach it via whatever direct route exists.
             return
 
-        agent_id_str = str(agent_id)
+        instance_key_str = str(AgentInstanceKey.build(agent_id, host_id))
         with self._pending_lock:
-            if agent_id_str in self._pending_remote_agents:
+            if instance_key_str in self._pending_remote_agents:
                 # Latchkey tunnel setup already in flight; skipping duplicate fire.
                 return
-            self._pending_remote_agents.add(agent_id_str)
+            self._pending_remote_agents.add(instance_key_str)
         try:
             self.concurrency_group.start_new_thread(
                 target=self._run_remote_setup,
                 args=(agent_id, host_id, ssh_info, provider_name, host_side_port),
-                name=f"latchkey-discovery-setup-{agent_id_str}",
+                name=f"latchkey-discovery-setup-{instance_key_str}",
                 is_checked=False,
             )
         except (ConcurrencyExceptionGroup, InvalidConcurrencyGroupStateError, RuntimeError):
             # Roll back the pending flag so a later fire (after the CG
             # is healthy again) isn't permanently coalesced away.
             with self._pending_lock:
-                self._pending_remote_agents.discard(agent_id_str)
+                self._pending_remote_agents.discard(instance_key_str)
             raise
 
     def _run_remote_setup(
@@ -310,6 +311,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         host_side_port: int,
     ) -> None:
         """Worker-thread entry point that chooses and wires one workspace gateway."""
+        instance_key = AgentInstanceKey.build(agent_id, host_id)
         is_pending_handed_off = False
         try:
             route = self._resolve_gateway_route(host_id, provider_name)
@@ -323,12 +325,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
             elif route.outer_ssh_info is None:
                 # Confirmed desktop workspace (the provider has no outer host,
                 # or its outer is this very machine): the normal local path.
-                self._setup_desktop_gateway_reachability(agent_id, ssh_info, host_side_port)
+                self._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, host_side_port)
             else:
                 # Drop a desktop->container tunnel opened by an earlier cycle
                 # before the outer host was resolvable; otherwise it holds 1989
                 # and the VPS->container tunnel cannot bind there.
-                self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+                self.tunnel_manager.remove_reverse_tunnels_for_agent(instance_key)
                 self._setup_desktop_gateway_reachability_on_vps(
                     agent_id,
                     host_id,
@@ -344,7 +346,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             # not dispatched) clear it here.
             if not is_pending_handed_off:
                 with self._pending_lock:
-                    self._pending_remote_agents.discard(str(agent_id))
+                    self._pending_remote_agents.discard(str(instance_key))
 
     def _tear_down_stopped_agent(self, agent_id: AgentId, host_id: HostId) -> None:
         """Drop a stopped agent's reverse tunnel and mark its host for re-provisioning.
@@ -356,18 +358,21 @@ class LatchkeyDiscoveryHandler(MutableModel):
         re-runs the idempotent VPS-resident gateway provisioning, since a stopped
         container may be recreated before it comes back.
         """
-        removed_tunnel_count = self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+        removed_tunnel_count = self.tunnel_manager.remove_reverse_tunnels_for_agent(
+            AgentInstanceKey.build(agent_id, host_id)
+        )
         if removed_tunnel_count:
             logger.debug("Removed {} reverse tunnel(s) for stopped agent {}", removed_tunnel_count, agent_id)
         with self._remote_hosts_lock:
             self._provisioned_hosts.discard(str(host_id))
 
     def _setup_desktop_gateway_reachability(
-        self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int
+        self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo, host_side_port: int
     ) -> None:
         """Reverse-tunnel the desktop-side gateway onto the agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``.
 
-        The ``agent_id`` tag lets the destruction handler drop this tunnel via
+        The instance tag (``<agent_id>@<host_id>``; agent ids are unique per
+        host, not globally) lets the destruction handler drop this tunnel via
         ``remove_reverse_tunnels_for_agent``; without it the registry leaks
         across destroyed agents and the 30s health-check loop spins paramiko
         transports against ports that no longer exist. Failures are logged
@@ -379,7 +384,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 ssh_info=ssh_info,
                 local_port=host_side_port,
                 remote_port=AGENT_SIDE_LATCHKEY_PORT,
-                agent_id=str(agent_id),
+                agent_id=AgentInstanceKey.build(agent_id, host_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.opt(exception=e).error(
@@ -399,16 +404,16 @@ class LatchkeyDiscoveryHandler(MutableModel):
         """Expose the desktop gateway on the VPS loopback for the proxy extension.
 
         The VPS currently has a one-to-one relationship with its workspace and
-        main agent. Tagging the tunnel with that agent id preserves the normal
-        destruction behavior: stopping or destroying the agent tears down the
-        now-unused desktop-to-VPS tunnel.
+        main agent. Tagging the tunnel with that agent instance preserves the
+        normal destruction behavior: stopping or destroying the agent tears
+        down the now-unused desktop-to-VPS tunnel.
         """
         try:
             self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=outer_ssh_info,
                 local_port=host_side_port,
                 remote_port=DESKTOP_GATEWAY_VPS_PORT,
-                agent_id=str(agent_id),
+                agent_id=AgentInstanceKey.build(agent_id, host_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.opt(exception=e).error(
@@ -762,7 +767,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             with self._remote_hosts_lock:
                 self._provisioning_hosts.discard(str(host_id))
             with self._pending_lock:
-                self._pending_remote_agents.discard(str(agent_id))
+                self._pending_remote_agents.discard(str(AgentInstanceKey.build(agent_id, host_id)))
 
     # -- Remote credential/permission sync ----------------------------------
 
@@ -924,7 +929,7 @@ class LatchkeyDestructionHandler(FrozenModel):
         description="Manager whose reverse tunnels for the destroyed agent must be torn down"
     )
 
-    def __call__(self, agent_id: AgentId) -> None:
-        removed = self.tunnel_manager.remove_reverse_tunnels_for_agent(str(agent_id))
+    def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
+        removed = self.tunnel_manager.remove_reverse_tunnels_for_agent(AgentInstanceKey.build(agent_id, host_id))
         if removed:
-            logger.debug("Removed {} reverse tunnel(s) for destroyed agent {}", removed, agent_id)
+            logger.debug("Removed {} reverse tunnel(s) for destroyed agent {} on host {}", removed, agent_id, host_id)

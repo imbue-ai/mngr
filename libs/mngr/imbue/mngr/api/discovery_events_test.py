@@ -1727,10 +1727,10 @@ def _fold_into_aggregator(lines: Sequence[str]) -> DiscoveryStateAggregator:
 
 
 def _assert_same_aggregate_state(actual: DiscoveryStateAggregator, expected: DiscoveryStateAggregator) -> None:
-    assert actual.get_agent_by_id() == expected.get_agent_by_id()
+    assert actual.get_agent_by_instance() == expected.get_agent_by_instance()
     assert actual.get_host_by_id() == expected.get_host_by_id()
     assert actual.get_error_by_provider_name() == expected.get_error_by_provider_name()
-    assert actual.get_unknown_agent_ids() == expected.get_unknown_agent_ids()
+    assert actual.get_unknown_agent_instances() == expected.get_unknown_agent_instances()
     assert actual.get_unknown_host_ids() == expected.get_unknown_host_ids()
     actual_providers = {provider.provider_name: provider for provider in actual.get_providers()}
     expected_providers = {provider.provider_name: provider for provider in expected.get_providers()}
@@ -2062,3 +2062,81 @@ def test_rotate_discovery_events_cleans_up_old_rotated_files(tmp_path: Path) -> 
     rotated = sorted(f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl."))
     # With max_rotated_count=1, only the newest file should remain
     assert len(rotated) == 1
+
+
+def _write_same_id_agent_on_two_hosts(
+    config: MngrConfig, local_provider: LocalProviderInstance
+) -> tuple[AgentId, HostId, HostId]:
+    """Seed snapshots with one shared agent id on the local host and a second host.
+
+    Returns ``(shared_agent_id, host_id_a, host_id_b)`` where host A is the local
+    provider's host -- the migration-overlap setup used by the duplicate-id tests.
+    """
+    shared_agent_id = AgentId.generate()
+    host_id_a = local_provider.host_id
+    host_id_b = HostId.generate()
+    agents = [
+        DiscoveredAgent(
+            host_id=host_id,
+            agent_id=shared_agent_id,
+            agent_name=AgentName("migrating-agent"),
+            provider_name=ProviderInstanceName("local"),
+            certified_data={},
+        )
+        for host_id in (host_id_a, host_id_b)
+    ]
+    hosts = [
+        DiscoveredHost(
+            host_id=host_id_a, host_name=HostName(LOCAL_HOST_NAME), provider_name=ProviderInstanceName("local")
+        ),
+        DiscoveredHost(
+            host_id=host_id_b, host_name=HostName("other-host"), provider_name=ProviderInstanceName("local")
+        ),
+    ]
+    _write_provider_snapshots(config, agents, hosts)
+    return shared_agent_id, host_id_a, host_id_b
+
+
+def test_resolve_hosts_raises_disambiguation_for_agent_id_on_multiple_hosts(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """A bare agent id spanning two hosts must raise, not silently pick one.
+
+    Agent ids are unique per host, not globally (the migration-overlap case);
+    ``mngr stop --stop-host`` must never guess which host to stop.
+    """
+    shared_agent_id, _host_id_a, _host_id_b = _write_same_id_agent_on_two_hosts(temp_mngr_ctx.config, local_provider)
+
+    with pytest.raises(AgentNotFoundError, match="multiple hosts"):
+        resolve_hosts_for_identifiers(temp_mngr_ctx, [str(shared_agent_id)])
+
+
+def test_resolve_hosts_destroy_on_one_host_leaves_same_id_on_other_host_resolvable(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """Destroying (host A, id X) must keep (host B, id X) resolvable -- destroys are host-scoped."""
+    shared_agent_id, host_id_a, host_id_b = _write_same_id_agent_on_two_hosts(temp_mngr_ctx.config, local_provider)
+
+    emit_agent_destroyed(temp_mngr_ctx.config, shared_agent_id, host_id_a)
+
+    resolved = resolve_hosts_for_identifiers(temp_mngr_ctx, [str(shared_agent_id)])
+    assert resolved[str(shared_agent_id)].host_id == host_id_b
+
+
+def test_resolve_provider_names_unions_providers_for_duplicated_agent_id(temp_mngr_ctx: MngrContext) -> None:
+    """An agent id with instances on two providers narrows discovery to BOTH providers."""
+    shared_agent_id = AgentId.generate()
+    agents = [
+        DiscoveredAgent(
+            host_id=HostId.generate(),
+            agent_id=shared_agent_id,
+            agent_name=AgentName("migrating-agent"),
+            provider_name=provider_name,
+            certified_data={},
+        )
+        for provider_name in (ProviderInstanceName("docker"), ProviderInstanceName("modal"))
+    ]
+    _write_provider_snapshots(temp_mngr_ctx.config, agents, [])
+
+    resolved = resolve_provider_names_for_identifiers(temp_mngr_ctx, [str(shared_agent_id)])
+    assert resolved == ("docker", "modal")

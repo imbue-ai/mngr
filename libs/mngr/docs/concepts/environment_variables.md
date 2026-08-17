@@ -126,7 +126,7 @@ Additionally, the following non-config env vars are recognized:
 
 mngr automatically sets these inside agent tmux sessions:
 
-- `MNGR_AGENT_ID` — the agent's unique identifier
+- `MNGR_AGENT_ID` — the agent's identifier (unique per host, not globally)
 - `MNGR_AGENT_NAME` — the agent's human-readable name
 - `MNGR_AGENT_STATE_DIR` — per-agent directory for status, plugins, logs, etc. (`$MNGR_HOST_DIR/agents/$MNGR_AGENT_ID/`)
 - `MNGR_AGENT_WORK_DIR` — the directory containing your project files, where the agent starts

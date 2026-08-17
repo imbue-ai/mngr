@@ -32,11 +32,14 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
 from imbue.mngr_forward.auth import FileAuthStore
+from imbue.mngr_forward.data_types import ForwardAgentSnapshot
 from imbue.mngr_forward.data_types import ForwardListSnapshot
 from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
@@ -663,13 +666,19 @@ def _seed_resolver_from_snapshot(
             )
         logger.warning("SIGHUP re-snapshot returned no agents; keeping previous set rather than emptying.")
         return kept
-    agent_ids = tuple(entry.agent_id for entry in kept.agents)
-    resolver.update_known_agents(agent_ids)
+    # Instance keys need the host coordinate; an entry without one could never
+    # be routed (routing is by host origin), so it is skipped with a warning.
+    entries_with_host: list[ForwardAgentSnapshot] = []
     for entry in kept.agents:
         if entry.host_id:
-            resolver.set_agent_host(entry.agent_id, entry.host_id)
+            entries_with_host.append(entry)
+        else:
+            logger.warning("Skipping snapshot agent {} with no host id; it cannot be routed", entry.agent_id)
+    instance_keys = tuple(AgentInstanceKey.build(entry.agent_id, HostId(entry.host_id)) for entry in entries_with_host)
+    resolver.update_known_agents(instance_keys)
+    for entry, instance_key in zip(entries_with_host, instance_keys, strict=True):
         if entry.ssh_info is not None:
-            resolver.update_ssh_info(entry.agent_id, entry.ssh_info)
+            resolver.update_ssh_info(instance_key, entry.ssh_info)
     reverse_handler.setup_for_snapshot(
         tuple((entry.agent_id, entry.ssh_info) for entry in kept.agents if entry.ssh_info is not None)
     )

@@ -32,6 +32,7 @@ from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
@@ -49,6 +50,10 @@ from imbue.mngr_forward.testing import TEST_AGENT_ID_2
 _TIMESTAMP = IsoTimestamp("2026-05-03T00:00:00.000000000+00:00")
 _EVENT_SOURCE = EventSource("mngr/discovery")
 _HOST_ID = HostId("host-" + "0" * 31 + "1")
+# Instance keys for the two canned agents on the shared test host (the
+# resolver and the per-agent stream plumbing are instance-keyed).
+_INSTANCE_1 = AgentInstanceKey.build(TEST_AGENT_ID_1, _HOST_ID)
+_INSTANCE_2 = AgentInstanceKey.build(TEST_AGENT_ID_2, _HOST_ID)
 _DISCOVERY_STARTED_AT = datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc)
 _DISCOVERY_FINISHED_AT = datetime(2026, 5, 3, 0, 0, 1, tzinfo=timezone.utc)
 
@@ -167,11 +172,11 @@ def test_provider_snapshot_updates_resolver_and_fires_callback(
 ) -> None:
     manager, resolver, buf, counter = setup
     discovered: list[tuple[AgentId, RemoteSSHInfo | None, str]] = []
-    manager.add_on_agent_discovered_callback(lambda aid, ssh, prov: discovered.append((aid, ssh, prov)))
+    manager.add_on_agent_discovered_callback(lambda agent_id, ssh, prov: discovered.append((agent_id, ssh, prov)))
     line = _provider_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter)
     _feed_observe(manager, line)
     # Resolver received both agents.
-    assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
+    assert set(resolver.list_known_agent_instances()) == {_INSTANCE_1, _INSTANCE_2}
     # Callback fired once per agent.
     assert {entry[0] for entry in discovered} == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
     # Envelope passthrough: one observe line on the writer.
@@ -192,18 +197,18 @@ def test_agent_discovery_excluded_by_filter_skips_resolver(
         agent_include=("has(agent.labels.workspace)",),
     )
     fired: list[AgentId] = []
-    manager.add_on_agent_discovered_callback(lambda aid, ssh, prov: fired.append(aid))
+    manager.add_on_agent_discovered_callback(lambda agent_id, ssh, prov: fired.append(agent_id))
 
     # Agent with no labels.workspace -> excluded.
     line = _agent_discovered_line(_agent(TEST_AGENT_ID_1, labels={}), counter)
     _feed_observe(manager, line)
-    assert TEST_AGENT_ID_1 not in resolver.list_known_agent_ids()
+    assert _INSTANCE_1 not in resolver.list_known_agent_instances()
     assert fired == []
 
     # Agent with labels.workspace=true -> included.
     line2 = _agent_discovered_line(_agent(TEST_AGENT_ID_2, labels={"workspace": "true"}), counter)
     _feed_observe(manager, line2)
-    assert TEST_AGENT_ID_2 in resolver.list_known_agent_ids()
+    assert _INSTANCE_2 in resolver.list_known_agent_instances()
     assert fired == [TEST_AGENT_ID_2]
 
 
@@ -213,20 +218,20 @@ def test_provider_snapshot_retains_agent_whose_provider_errored_then_drops_on_cl
     """A snapshot omitting an agent whose provider errored keeps it; a clean snapshot drops it."""
     manager, resolver, _buf, counter = setup
     destroyed: list[AgentId] = []
-    manager.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
+    manager.add_on_agent_destroyed_callback(lambda agent_id: destroyed.append(agent_id))
 
     # Both agents present (provider 'modal' succeeded).
     _feed_observe(manager, _provider_snapshot_line((_agent(TEST_AGENT_ID_1), _agent(TEST_AGENT_ID_2)), counter))
-    assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
+    assert set(resolver.list_known_agent_instances()) == {_INSTANCE_1, _INSTANCE_2}
 
     # Snapshot omits agent 2 but its provider 'modal' errored -> retained, no destruction.
     _feed_observe(manager, _provider_snapshot_line_with_error((_agent(TEST_AGENT_ID_1),), "modal", counter))
-    assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1, TEST_AGENT_ID_2}
+    assert set(resolver.list_known_agent_instances()) == {_INSTANCE_1, _INSTANCE_2}
     assert destroyed == []
 
     # Clean snapshot (no provider error) still omits agent 2 -> dropped now.
     _feed_observe(manager, _provider_snapshot_line((_agent(TEST_AGENT_ID_1),), counter))
-    assert set(resolver.list_known_agent_ids()) == {TEST_AGENT_ID_1}
+    assert set(resolver.list_known_agent_instances()) == {_INSTANCE_1}
     assert destroyed == [TEST_AGENT_ID_2]
 
 
@@ -235,15 +240,15 @@ def test_agent_destroyed_clears_resolver_and_fires_callback(
 ) -> None:
     manager, resolver, _buf, counter = setup
     destroyed: list[AgentId] = []
-    manager.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
+    manager.add_on_agent_destroyed_callback(lambda agent_id: destroyed.append(agent_id))
 
     discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
     _feed_observe(manager, discover_line)
-    assert TEST_AGENT_ID_1 in resolver.list_known_agent_ids()
+    assert _INSTANCE_1 in resolver.list_known_agent_instances()
 
     destroyed_line = _agent_destroyed_line(TEST_AGENT_ID_1, _HOST_ID, counter)
     _feed_observe(manager, destroyed_line)
-    assert TEST_AGENT_ID_1 not in resolver.list_known_agent_ids()
+    assert _INSTANCE_1 not in resolver.list_known_agent_instances()
     assert destroyed == [TEST_AGENT_ID_1]
 
 
@@ -253,11 +258,11 @@ def test_host_ssh_info_propagates_to_resolver(
     manager, resolver, _buf, counter = setup
     discover_line = _agent_discovered_line(_agent(TEST_AGENT_ID_1), counter)
     _feed_observe(manager, discover_line)
-    assert resolver.get_ssh_info(TEST_AGENT_ID_1) is None
+    assert resolver.get_ssh_info(_INSTANCE_1) is None
 
     ssh_info_line = _host_ssh_info_line(_HOST_ID, counter)
     _feed_observe(manager, ssh_info_line)
-    ssh = resolver.get_ssh_info(TEST_AGENT_ID_1)
+    ssh = resolver.get_ssh_info(_INSTANCE_1)
     assert ssh is not None
     assert ssh.host == "1.2.3.4"
 
@@ -270,8 +275,8 @@ def test_event_services_updates_resolver(
     _feed_observe(manager, discover_line)
 
     services_line = json.dumps({"source": "services", "service": "system_interface", "url": "http://127.0.0.1:9100"})
-    manager._on_event_output(services_line + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
-    target = resolver.resolve(TEST_AGENT_ID_1)
+    manager._on_event_output(services_line + "\n", is_stdout=True, instance_key=_INSTANCE_1)  # noqa: SLF001
+    target = resolver.resolve(_INSTANCE_1)
     assert target is not None
     assert str(target.url).rstrip("/") == "http://127.0.0.1:9100"
 
@@ -300,14 +305,14 @@ def test_event_services_label_routes_origin_label_to_service(
             "label": "terminal-term1111",
         }
     )
-    manager._on_event_output(labeled + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
-    by_label = resolver.resolve_by_origin_label(TEST_AGENT_ID_1, "terminal-term1111")
+    manager._on_event_output(labeled + "\n", is_stdout=True, instance_key=_INSTANCE_1)  # noqa: SLF001
+    by_label = resolver.resolve_by_origin_label(_INSTANCE_1, "terminal-term1111")
     assert by_label is not None
     assert str(by_label.url).rstrip("/") == "http://127.0.0.1:7681"
 
     unlabeled = json.dumps({"source": "services", "service": "web", "url": "http://127.0.0.1:5000"})
-    manager._on_event_output(unlabeled + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
-    fallback = resolver.resolve_by_origin_label(TEST_AGENT_ID_1, "web")
+    manager._on_event_output(unlabeled + "\n", is_stdout=True, instance_key=_INSTANCE_1)  # noqa: SLF001
+    fallback = resolver.resolve_by_origin_label(_INSTANCE_1, "web")
     assert fallback is not None
     assert str(fallback.url).rstrip("/") == "http://127.0.0.1:5000"
 
@@ -321,7 +326,7 @@ def test_event_non_services_passthrough_only(
     _feed_observe(manager, discover_line)
 
     requests_line = json.dumps({"source": "requests", "type": "request_received"})
-    manager._on_event_output(requests_line + "\n", is_stdout=True, agent_id=TEST_AGENT_ID_1)  # noqa: SLF001
+    manager._on_event_output(requests_line + "\n", is_stdout=True, instance_key=_INSTANCE_1)  # noqa: SLF001
 
     # Envelope was passed through.
     envelopes = [json.loads(s) for s in buf.getvalue().splitlines() if s]
@@ -329,7 +334,7 @@ def test_event_non_services_passthrough_only(
     assert len(event_envs) == 1
     assert event_envs[0]["payload"]["source"] == "requests"
     # Resolver still doesn't have a services entry.
-    assert resolver.resolve(TEST_AGENT_ID_1) is None
+    assert resolver.resolve(_INSTANCE_1) is None
 
 
 def test_invalid_observe_line_is_passthrough_but_not_fatal(
@@ -338,7 +343,7 @@ def test_invalid_observe_line_is_passthrough_but_not_fatal(
     manager, resolver, buf, _counter = setup
     _feed_observe(manager, "not actually json")
     # Resolver state is untouched.
-    assert resolver.list_known_agent_ids() == ()
+    assert resolver.list_known_agent_instances() == ()
     # Envelope passthrough wraps the raw line under {"raw": ...}.
     envelopes = [json.loads(s) for s in buf.getvalue().splitlines() if s]
     assert envelopes == [{"stream": "observe", "payload": {"raw": "not actually json"}}]
@@ -380,8 +385,8 @@ def test_callbacks_isolated_per_failure(
     def boom(_aid: AgentId, _ssh: RemoteSSHInfo | None, _prov: str) -> None:
         raise RuntimeError("boom")
 
-    def ok(aid: AgentId, _ssh: RemoteSSHInfo | None, _prov: str) -> None:
-        fired.append(aid)
+    def ok(agent_id: AgentId, _ssh: RemoteSSHInfo | None, _prov: str) -> None:
+        fired.append(agent_id)
 
     manager.add_on_agent_discovered_callback(boom)
     manager.add_on_agent_discovered_callback(ok)
@@ -494,18 +499,18 @@ class _RecordingConcurrencyGroup:
         return process
 
 
-def _start_events(manager: ForwardStreamManager, agent_id: AgentId) -> None:
+def _start_events(manager: ForwardStreamManager, instance_key: AgentInstanceKey) -> None:
     """Invoke the manager's private per-agent events-stream starter (test hook)."""
-    manager._start_events_stream(agent_id)  # noqa: SLF001
+    manager._start_events_stream(instance_key)  # noqa: SLF001
 
 
 def _pacing_state(
     manager: ForwardStreamManager,
 ) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     """Expose the manager's private respawn-pacing dicts: (backoff, next_respawn_at, spawned_at) (test hook)."""
-    backoff = manager._events_respawn_backoff_by_agent  # noqa: SLF001
-    next_respawn_at = manager._events_next_respawn_at_by_agent  # noqa: SLF001
-    spawned_at = manager._events_spawned_at_by_agent  # noqa: SLF001
+    backoff = manager._events_respawn_backoff_by_instance  # noqa: SLF001
+    next_respawn_at = manager._events_next_respawn_at_by_instance  # noqa: SLF001
+    spawned_at = manager._events_spawned_at_by_instance  # noqa: SLF001
     return backoff, next_respawn_at, spawned_at
 
 
@@ -531,14 +536,14 @@ def test_dead_events_stream_is_respawned_on_next_start(
 
     # First start spawns a live stream; a second start leaves the live stream
     # alone (no duplicate spawn).
-    _start_events(manager, TEST_AGENT_ID_1)
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 1
 
     # Once the stream exits (host restart broke --follow), the next start must
     # drop the dead entry and respawn a fresh one rather than skip the agent.
     fake_cg.spawned[0].mark_dead(1)
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 2
 
 
@@ -558,7 +563,7 @@ def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path:
     )
     counter = [0]
     discovered: list[AgentId] = []
-    manager.add_on_agent_discovered_callback(lambda aid, _ssh, _prov: discovered.append(aid))
+    manager.add_on_agent_discovered_callback(lambda agent_id, _ssh, _prov: discovered.append(agent_id))
 
     manager.start()
     try:
@@ -585,17 +590,17 @@ def test_crash_looping_events_stream_respawn_is_backed_off(
     fake_cg = _RecordingConcurrencyGroup()
     _install_recording_cg(manager, fake_cg)
 
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     fake_cg.spawned[0].mark_dead(1)
     # First death respawns immediately (the backoff window opens now).
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 2
 
     # The respawn dies instantly too; snapshot-cadence retries inside the
     # window must NOT spawn again.
     fake_cg.spawned[1].mark_dead(1)
-    _start_events(manager, TEST_AGENT_ID_1)
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 2
 
 
@@ -611,26 +616,26 @@ def test_events_stream_backoff_resets_after_a_healthy_stream(
     manager, _resolver, _buf, _counter = setup
     fake_cg = _RecordingConcurrencyGroup()
     _install_recording_cg(manager, fake_cg)
-    aid = str(TEST_AGENT_ID_1)
+    instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     fake_cg.spawned[0].mark_dead(1)
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 2
 
     # Simulate the respawned stream living past the healthy age, then dying,
     # with the previous backoff window already elapsed (test hooks on the
     # manager's private pacing state).
     now = time.monotonic()
-    backoff_by_agent, next_respawn_at_by_agent, spawned_at_by_agent = _pacing_state(manager)
-    spawned_at_by_agent[aid] = now - 3600.0
-    next_respawn_at_by_agent[aid] = now - 1.0
+    backoff_by_instance, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
+    spawned_at_by_instance[instance_str] = now - 3600.0
+    next_respawn_at_by_instance[instance_str] = now - 1.0
     fake_cg.spawned[1].mark_dead(1)
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 3
     # The stored next-step backoff is initial*2 -- proof the healthy stream
     # reset the ladder rather than continuing to escalate from the crash loop.
-    assert backoff_by_agent[aid] == 4.0
+    assert backoff_by_instance[instance_str] == 4.0
 
 
 def test_crash_loop_backoff_is_not_reset_by_time_spent_waiting_in_the_window(
@@ -647,26 +652,26 @@ def test_crash_loop_backoff_is_not_reset_by_time_spent_waiting_in_the_window(
     manager, _resolver, _buf, _counter = setup
     fake_cg = _RecordingConcurrencyGroup()
     _install_recording_cg(manager, fake_cg)
-    aid = str(TEST_AGENT_ID_1)
+    instance_str = str(_INSTANCE_1)
 
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     fake_cg.spawned[0].mark_dead(1)
     # First death respawns immediately and stores the escalated next-step
     # backoff (4.0); the respawn dies instantly and its death is noticed by a
     # snapshot inside the window, which keeps the corpse.
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     fake_cg.spawned[1].mark_dead(1)
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 2
 
     # Simulate 61 seconds passing while the corpse waits (shift every stored
     # monotonic timestamp into the past), then let the next snapshot retry.
-    backoff_by_agent, next_respawn_at_by_agent, spawned_at_by_agent = _pacing_state(manager)
-    for pacing in (next_respawn_at_by_agent, spawned_at_by_agent):
+    backoff_by_instance, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
+    for pacing in (next_respawn_at_by_instance, spawned_at_by_instance):
         for key in pacing:
             pacing[key] -= 61.0
-    _start_events(manager, TEST_AGENT_ID_1)
+    _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 3
     # The ladder kept escalating (4 -> stored 8): the instantly-dead stream was
     # not misclassified as healthy just because its corpse sat for 61s.
-    assert backoff_by_agent[aid] == 8.0
+    assert backoff_by_instance[instance_str] == 8.0

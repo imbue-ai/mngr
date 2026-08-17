@@ -10,6 +10,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_sources.github import CiField
@@ -92,6 +93,7 @@ def test_pr_field_is_frozen() -> None:
 def test_agent_board_entry_construction() -> None:
     entry = AgentBoardEntry(
         agent_id=AgentId.generate(),
+        host_id=HostId.generate(),
         name=AgentName("my-agent"),
         state=AgentLifecycleState.RUNNING,
         provider_name=ProviderInstanceName("local"),
@@ -116,6 +118,7 @@ def test_agent_board_entry_with_fields() -> None:
     )
     entry = AgentBoardEntry(
         agent_id=AgentId.generate(),
+        host_id=HostId.generate(),
         name=AgentName("my-agent"),
         state=AgentLifecycleState.DONE,
         provider_name=ProviderInstanceName("local"),
@@ -129,6 +132,7 @@ def test_agent_board_entry_with_fields() -> None:
 def test_board_snapshot_construction() -> None:
     entry = AgentBoardEntry(
         agent_id=AgentId.generate(),
+        host_id=HostId.generate(),
         name=AgentName("agent-1"),
         state=AgentLifecycleState.RUNNING,
         provider_name=ProviderInstanceName("local"),

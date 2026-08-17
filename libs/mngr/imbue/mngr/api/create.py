@@ -17,6 +17,7 @@ from imbue.mngr.api.message import send_message_with_resend_guidance
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import DuplicateAgentIdOnHostError
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
@@ -301,23 +302,30 @@ def create(
         # While we are deploying an agent, lock the host. Block indefinitely (a
         # contended create waits for the other operation rather than failing).
         with host.lock_cooperatively(timeout_seconds=None):
-            # Prevent duplicate agent names on the same host. The tmux session name
-            # is derived from the agent name, so two agents with the same name would
-            # collide on the same tmux session. This check must be inside the lock to
-            # prevent TOCTOU races between concurrent create calls.
-            # In update mode, the agent already exists so we skip this check.
+            # Prevent duplicate agent names and duplicate agent ids on the same
+            # host. The tmux session name is derived from the agent name, so two
+            # agents with the same name would collide on the same tmux session;
+            # the state dir path and MNGR_AGENT_ID env matching are derived from
+            # the agent id, so two agents with the same id on one host would
+            # clobber each other's state. (The same agent id on *different*
+            # hosts is allowed -- that is how an agent exists on both hosts
+            # while it is migrated between them.) These checks must be inside
+            # the lock to prevent TOCTOU races between concurrent create calls.
+            # In update mode, the agent already exists so we skip both checks.
             # Also skip when the existing agent IS the host's pre-baked agent
             # (imbue_cloud lease-adopt): the bake intentionally seeds the host
-            # with the same agent name the caller is creating, and
+            # with the same agent name (and id) the caller is creating, and
             # ``host.create_agent_state`` will hydrate it in place. Without this
             # skip the post-lease duplicate check fires immediately and aborts
             # every fresh imbue_cloud create with ``DuplicateAgentNameError``.
-            if agent_options.name is not None and not agent_options.is_update:
+            if not agent_options.is_update and (agent_options.name is not None or agent_options.agent_id is not None):
                 for existing_agent in host.get_agents():
-                    if existing_agent.name == agent_options.name:
-                        if pre_baked_agent_id is not None and existing_agent.id == pre_baked_agent_id:
-                            continue
+                    if pre_baked_agent_id is not None and existing_agent.id == pre_baked_agent_id:
+                        continue
+                    if agent_options.name is not None and existing_agent.name == agent_options.name:
                         raise DuplicateAgentNameError(agent_options.name, existing_agent.id)
+                    if agent_options.agent_id is not None and existing_agent.id == agent_options.agent_id:
+                        raise DuplicateAgentIdOnHostError(agent_options.agent_id, host.id)
 
             # Create the agent's work_dir on the host
             if create_work_dir:

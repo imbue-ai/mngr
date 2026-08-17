@@ -151,10 +151,11 @@ def filter_one_agent(
     """Find the single agent matching the given identifier (by ID or name).
 
     Raises :class:`AgentNotFoundError` when ``agent`` is an :class:`AgentId`
-    and no agent has that ID (the ID was supposed to identify a specific
-    agent uniquely). Raises :class:`UserInputError` when an :class:`AgentName`
-    has no match, or when more than one agent matches. If ``resolved_host``
-    is given, only agents on that host are considered.
+    and no agent has that ID. Raises :class:`UserInputError` when an
+    :class:`AgentName` has no match, or when more than one agent matches
+    (an agent id is unique per host, not globally, so an id can match one
+    instance per host -- e.g. mid-migration). If ``resolved_host`` is given,
+    only agents on that host are considered.
 
     The multi-match error lists each matching agent in ``NAME@HOST.PROVIDER``
     form so the user can disambiguate.
@@ -169,9 +170,15 @@ def filter_one_agent(
             f"  - {agent_ref.agent_name}@{host_ref.host_name}.{host_ref.provider_name} (ID: {agent_ref.agent_id})"
             for host_ref, agent_ref in matches
         )
+        if isinstance(agent, AgentId):
+            raise UserInputError(
+                f"Agent id '{agent}' exists on multiple hosts:\n{match_lines}\n\n"
+                "Disambiguate using ID@HOST or ID@HOST.PROVIDER."
+            )
         raise UserInputError(
             f"Multiple agents found with name '{agent}':\n{match_lines}\n\n"
-            "Disambiguate using NAME@HOST.PROVIDER or use the agent ID directly."
+            "Disambiguate using NAME@HOST.PROVIDER, or use the agent ID directly "
+            "(ID@HOST if that id itself exists on multiple hosts)."
         )
     return matches[0]
 
@@ -438,7 +445,7 @@ def revive_done_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:
 class AgentMatch(FrozenModel):
     """Information about an agent that matched a search query."""
 
-    agent_id: AgentId = Field(description="Unique identifier for the matched agent")
+    agent_id: AgentId = Field(description="Id of the matched agent (unique per host, not globally)")
     agent_name: AgentName = Field(description="Human-readable name of the matched agent")
     host_id: HostId = Field(description="Unique identifier for the host the agent runs on")
     host_name: HostName = Field(description="Human-readable name of the host the agent runs on")
@@ -572,8 +579,7 @@ def _address_matches_agent_match(address: AgentAddress, match: AgentMatch) -> bo
     """Check if an :class:`AgentMatch` satisfies the host/provider constraints of an address."""
     if address.host is None:
         return True
-    other = HostAddress(host=match.host_name, provider=match.provider_name)
-    return address.host.matches(other)
+    return address.host.matches_host(match.host_id, match.host_name, match.provider_name)
 
 
 @pure

@@ -1104,6 +1104,16 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(
             tunnel_manager.cleanup()
 
 
+def _instance_tag(agent_id: AgentId, host_id: HostId) -> str:
+    """The instance key string (reverse-tunnel tag / pending key) for one agent instance.
+
+    Deliberately not ``AgentInstanceKey.build``: the tests spell out the
+    serialized ``<agent_id>@<host_id>`` form independently of the production
+    helper.
+    """
+    return f"{agent_id}@{host_id}"
+
+
 class _RecordingTunnelManager(SSHTunnelManager):
     """SSHTunnelManager that records setup/remove calls instead of doing SSH."""
 
@@ -1149,6 +1159,7 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
     manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     agent_id = AgentId()
+    host_id = HostId()
     # The ``local`` provider has no outer host, so the handler falls back to the
     # desktop-side reverse tunnel (rather than the VPS-resident gateway path).
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
@@ -1164,7 +1175,7 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, HostId(), ssh_info, "local", HostState.RUNNING)
+        handler(agent_id, host_id, ssh_info, "local", HostState.RUNNING)
 
         assert manager.is_gateway_running
         # ``start_gateway`` is idempotent and returns the bound port even
@@ -1182,10 +1193,12 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
         # to the fixed agent-side port on the container's loopback. The tunnel
-        # must also be tagged with the owning agent's id, so the destruction
+        # must also be tagged with the owning agent instance, so the destruction
         # handler can find and tear it down via remove_reverse_tunnels_for_agent;
         # without that tag the original CPU leak would re-surface.
-        assert tunnel_manager._calls == [(ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
+        assert tunnel_manager._calls == [
+            (ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, _instance_tag(agent_id, host_id))
+        ]
 
         manager.stop_gateway()
 
@@ -1266,7 +1279,7 @@ class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
             with self._remote_hosts_lock:
                 self._provisioning_hosts.discard(str(host_id))
             with self._pending_lock:
-                self._pending_remote_agents.discard(str(agent_id))
+                self._pending_remote_agents.discard(_instance_tag(agent_id, host_id))
 
 
 def test_discovery_does_not_cache_an_unresolvable_gateway_route(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1512,10 +1525,10 @@ def test_discovery_route_resolution_failure_wires_nothing_then_retries(
             poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
 
         assert handler._resolve_calls == 2
-        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
         # The only tunnel ever opened is the desktop->VPS one, once the route resolved.
         assert tunnel_manager._calls == [
-            (_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, str(agent_id))
+            (_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, _instance_tag(agent_id, host_id))
         ]
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
@@ -1556,10 +1569,10 @@ def test_discovery_handler_routes_remote_workspace_only_through_vps_gateway(
                 _VPS_OUTER_SSH_INFO,
                 host_side_port,
                 DESKTOP_GATEWAY_VPS_PORT,
-                str(agent_id),
+                _instance_tag(agent_id, host_id),
             )
         ]
-        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
 
@@ -1608,6 +1621,7 @@ def test_discovery_handler_tears_down_tunnel_for_stopped_host(tmp_path: Path, te
     manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     agent_id = AgentId()
+    host_id = HostId()
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
         handler = LatchkeyDiscoveryHandler(
@@ -1616,11 +1630,11 @@ def test_discovery_handler_tears_down_tunnel_for_stopped_host(tmp_path: Path, te
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, HostId(), ssh_info, "local", HostState.STOPPED)
+        handler(agent_id, host_id, ssh_info, "local", HostState.STOPPED)
 
         assert manager.is_gateway_running
         assert tunnel_manager._calls == []
-        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
         manager.stop_gateway()
 
 
@@ -1655,7 +1669,7 @@ def test_stopped_host_skips_provisioning_and_clears_provisioned_marker(
         handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.STOPPED)
 
         assert handler._provisioned == []
-        assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+        assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
         with handler._remote_hosts_lock:
             assert str(host_id) not in handler._provisioned_hosts
         manager.stop_gateway()
@@ -2014,8 +2028,9 @@ def test_destruction_handler_removes_reverse_tunnels_for_destroyed_agent() -> No
     tunnel_manager = _RecordingTunnelManager()
     handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
     agent_id = AgentId()
-    handler(agent_id)
-    assert tunnel_manager._removed_agent_ids == [str(agent_id)]
+    host_id = HostId()
+    handler(agent_id, host_id)
+    assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
 
 
 # -- services_info / auth_browser --

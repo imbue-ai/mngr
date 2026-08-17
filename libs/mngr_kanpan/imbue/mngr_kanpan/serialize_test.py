@@ -4,6 +4,7 @@ from datetime import timezone
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_source import CellDisplay
 from imbue.mngr_kanpan.data_source import CellRun
@@ -104,8 +105,10 @@ def test_board_snapshot_to_json_preserves_order_within_section() -> None:
 
 def test_board_snapshot_to_json_entry_includes_cells_and_metadata() -> None:
     agent_id = AgentId.generate()
+    host_id = HostId.generate()
     entry = AgentBoardEntry(
         agent_id=agent_id,
+        host_id=host_id,
         name=AgentName("agent-x"),
         state=AgentLifecycleState.WAITING,
         provider_name=ProviderInstanceName("local"),
@@ -116,8 +119,10 @@ def test_board_snapshot_to_json_entry_includes_cells_and_metadata() -> None:
     snapshot = make_board_snapshot(entries=(entry,))
     result = board_snapshot_to_json(snapshot, _COLUMNS, _SECTION_ORDER)
     dumped = result["sections"][0]["entries"][0]
-    # The globally-unique id rides in the JSON so consumers can tell same-named agents apart.
+    # The id and host id ride in the JSON so consumers can tell same-named agents apart
+    # (and, since agent ids are only unique per host, same-id instances on different hosts).
     assert dumped["agent_id"] == str(agent_id)
+    assert dumped["host_id"] == str(host_id)
     assert dumped["name"] == "agent-x"
     assert dumped["state"] == "WAITING"
     assert dumped["branch"] == "mngr/agent-x"
@@ -136,6 +141,7 @@ def test_board_snapshot_to_json_entry_includes_per_run_cell_urls() -> None:
     """
     entry = AgentBoardEntry(
         agent_id=AgentId.generate(),
+        host_id=HostId.generate(),
         name=AgentName("agent-x"),
         state=AgentLifecycleState.WAITING,
         provider_name=ProviderInstanceName("local"),
@@ -176,6 +182,7 @@ def test_board_snapshot_to_json_serializes_full_field_payload() -> None:
     )
     entry = AgentBoardEntry(
         agent_id=AgentId.generate(),
+        host_id=HostId.generate(),
         name=AgentName("agent-x"),
         state=AgentLifecycleState.DONE,
         provider_name=ProviderInstanceName("local"),

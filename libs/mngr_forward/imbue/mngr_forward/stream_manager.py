@@ -9,8 +9,9 @@ slimmed to the parts the plugin needs:
   in-process tail of a shared discovery events file written by another
   observer. Either way lines drive the envelope writer's ``observe`` stream and
   the ``ForwardResolver``'s known-agent set + per-host SSH info.
-- One ``mngr event <id> services requests --follow --quiet`` per
-  filter-matching agent produces service-registration / request events.
+- One ``mngr event <agent_id>@<host_id> services requests --follow --quiet``
+  per filter-matching agent instance produces service-registration / request
+  events (host-scoped addressing, since an agent id is only unique per host).
   Lines pass through to the envelope writer's ``event`` stream and drive
   the resolver's per-agent service map.
 - ``bounce_observe()`` terminates only the observe subprocess and respawns it
@@ -54,6 +55,7 @@ from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.discovery_events import tail_discovery_events_file
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
@@ -133,18 +135,21 @@ class ForwardStreamManager(MutableModel):
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _observe_process: RunningProcess | None = PrivateAttr(default=None)
     _tail_stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
+    # The per-agent maps below are keyed by the agent *instance* key string
+    # (``<agent_id>@<host_id>``): agent ids are unique per host, not globally,
+    # so each instance owns its own events stream, services, and pacing.
     _events_processes: dict[str, RunningProcess] = PrivateAttr(default_factory=dict)
     _events_services: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
-    # Per-agent service name -> origin label, from the same services stream.
+    # Per-instance service name -> origin label, from the same services stream.
     _events_labels: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
-    # Per-agent respawn pacing for the events streams. A stream that dies
+    # Per-instance respawn pacing for the events streams. A stream that dies
     # instantly (unreachable host) must not be respawned at the discovery
     # snapshot cadence: against an SSH server with per-source penalties, a
     # tight reconnect loop turns one transient failure into a permanent
     # lockout of every connection from this machine.
-    _events_respawn_backoff_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
-    _events_next_respawn_at_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
-    _events_spawned_at_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
+    _events_respawn_backoff_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
+    _events_next_respawn_at_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
+    _events_spawned_at_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _compiled_includes: list[Any] = PrivateAttr(default_factory=list)
@@ -373,10 +378,10 @@ class ForwardStreamManager(MutableModel):
         # re-add an agent whose own destroy event landed during this snapshot's span,
         # so restarting a stream from the raw event.agents would resurrect (and never
         # tear down) a stream for an agent already considered gone.
-        present_agent_ids = self._aggregator.get_agent_by_id()
+        present_agent_instances = self._aggregator.get_agent_by_instance()
         for agent in filtered_agents:
-            if str(agent.agent_id) in present_agent_ids:
-                self._start_events_stream(agent.agent_id)
+            if agent.instance_key in present_agent_instances:
+                self._start_events_stream(agent.instance_key)
 
     def _apply_event_and_reconcile(self, event: DiscoveryEvent) -> None:
         """Fold one discovery event into the aggregator and apply the resulting membership delta."""
@@ -384,45 +389,34 @@ class ForwardStreamManager(MutableModel):
         # The aggregator is now the source of truth for the known-agent set; sync
         # the resolver to its full (all-provider) view so a per-provider snapshot
         # never clobbers agents owned by other providers.
-        self.resolver.update_known_agents(tuple(AgentId(aid) for aid in self._aggregator.get_agent_by_id()))
+        self.resolver.update_known_agents(tuple(self._aggregator.get_agent_by_instance()))
         self._apply_membership_delta(delta)
 
     def _apply_membership_delta(self, delta: AggregatorDelta) -> None:
         for host_id_str in delta.removed_host_ids:
             with self._lock:
                 self._ssh_by_host_id.pop(host_id_str, None)
-        for agent_id_str in delta.removed_agent_ids:
-            self._teardown_agent(AgentId(agent_id_str))
-        for agent_id_str in delta.added_agent_ids:
-            self._setup_agent(AgentId(agent_id_str))
+        for instance_key in delta.removed_agent_instances:
+            self._teardown_agent(instance_key)
+        for instance_key in delta.added_agent_instances:
+            self._setup_agent(instance_key)
 
-    def _setup_agent(self, agent_id: AgentId) -> None:
-        agent = self._aggregator.get_agent_by_id().get(str(agent_id))
-        if agent is not None:
-            # Hostnames name hosts, so the resolver needs the host coordinate
-            # to route ``host-<hex>.localhost`` requests back to this agent.
-            self.resolver.set_agent_host(agent_id, str(agent.host_id))
-        else:
-            # The agent id came from delta.added_agent_ids, so a miss violates
-            # an aggregator invariant; without the host mapping this agent's
-            # host origin serves the loading page forever, so leave a
-            # breadcrumb rather than failing silently.
-            logger.warning("Added agent {} missing from the aggregator; host mapping not registered", agent_id)
-        ssh_info = self._ssh_for_agent(agent_id)
+    def _setup_agent(self, instance_key: AgentInstanceKey) -> None:
+        ssh_info = self._ssh_for_agent(instance_key)
         if ssh_info is not None:
-            self.resolver.update_ssh_info(agent_id, ssh_info)
-        self._start_events_stream(agent_id)
-        provider_name = self._provider_name_for_agent(agent_id)
+            self.resolver.update_ssh_info(instance_key, ssh_info)
+        self._start_events_stream(instance_key)
+        provider_name = self._provider_name_for_agent(instance_key)
         for callback in self._on_agent_discovered_callbacks:
-            self._safely_call(callback, agent_id, ssh_info, provider_name, name="on_agent_discovered")
+            self._safely_call(callback, instance_key.agent_id, ssh_info, provider_name, name="on_agent_discovered")
 
-    def _teardown_agent(self, agent_id: AgentId) -> None:
+    def _teardown_agent(self, instance_key: AgentInstanceKey) -> None:
         with self._lock:
-            self._events_services.pop(str(agent_id), None)
-            self._events_labels.pop(str(agent_id), None)
-        self._stop_events_stream(agent_id)
+            self._events_services.pop(str(instance_key), None)
+            self._events_labels.pop(str(instance_key), None)
+        self._stop_events_stream(instance_key)
         for callback in self._on_agent_destroyed_callbacks:
-            self._safely_call(callback, agent_id, name="on_agent_destroyed")
+            self._safely_call(callback, instance_key.agent_id, name="on_agent_destroyed")
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = RemoteSSHInfo(
@@ -435,18 +429,16 @@ class ForwardStreamManager(MutableModel):
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
         self._aggregator.apply_event(event)
-        agents_on_host = [
-            agent.agent_id for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str
-        ]
+        agents_on_host = [agent for agent in self._aggregator.get_agents() if str(agent.host_id) == host_id_str]
 
-        for agent_id in agents_on_host:
-            self.resolver.update_ssh_info(agent_id, ssh_info)
+        for agent in agents_on_host:
+            self.resolver.update_ssh_info(agent.instance_key, ssh_info)
             for callback in self._on_agent_discovered_callbacks:
                 self._safely_call(
                     callback,
-                    agent_id,
+                    agent.agent_id,
                     ssh_info,
-                    self._provider_name_for_agent(agent_id),
+                    self._provider_name_for_agent(agent.instance_key),
                     name="on_agent_discovered (ssh-info-late)",
                 )
 
@@ -455,31 +447,28 @@ class ForwardStreamManager(MutableModel):
             return
         self._apply_event_and_reconcile(event)
 
-    def _ssh_for_agent(self, agent_id: AgentId) -> RemoteSSHInfo | None:
-        agent = self._aggregator.get_agent_by_id().get(str(agent_id))
-        if agent is None:
-            return None
+    def _ssh_for_agent(self, instance_key: AgentInstanceKey) -> RemoteSSHInfo | None:
         with self._lock:
-            return self._ssh_by_host_id.get(str(agent.host_id))
+            return self._ssh_by_host_id.get(str(instance_key.host_id))
 
-    def _provider_name_for_agent(self, agent_id: AgentId) -> str:
-        agent = self._aggregator.get_agent_by_id().get(str(agent_id))
+    def _provider_name_for_agent(self, instance_key: AgentInstanceKey) -> str:
+        agent = self._aggregator.get_agent_by_instance().get(instance_key)
         if agent is None:
             return "unknown"
         return str(agent.provider_name)
 
     # -- per-agent events streams -----------------------------------------
 
-    def _start_events_stream(self, agent_id: AgentId) -> None:
+    def _start_events_stream(self, instance_key: AgentInstanceKey) -> None:
         if self._cg.is_shutting_down():
             return
         if not self._filtered_event_sources:
             # Either ``event_sources`` was empty to begin with, or every
             # source was filtered out by ``--event-include`` / ``--event-exclude``.
             return
-        aid_str = str(agent_id)
+        instance_str = str(instance_key)
         with self._lock:
-            existing = self._events_processes.get(aid_str)
+            existing = self._events_processes.get(instance_str)
             if existing is not None and existing.poll() is None:
                 # A live events stream is already running for this agent.
                 return
@@ -502,41 +491,48 @@ class ForwardStreamManager(MutableModel):
                 # this check). Re-evaluating on every snapshot would let a
                 # corpse waiting out a 60s window "age into" healthiness and
                 # reset the ladder even though the stream died instantly.
-                spawned_at = self._events_spawned_at_by_agent.pop(aid_str, None)
+                spawned_at = self._events_spawned_at_by_instance.pop(instance_str, None)
                 if spawned_at is not None and now - spawned_at >= _EVENTS_STREAM_HEALTHY_AGE_SECONDS:
                     # The dead stream had lived long enough to count as
                     # healthy; treat this exit as a fresh incident.
-                    self._events_respawn_backoff_by_agent.pop(aid_str, None)
-                if now < self._events_next_respawn_at_by_agent.get(aid_str, 0.0):
+                    self._events_respawn_backoff_by_instance.pop(instance_str, None)
+                if now < self._events_next_respawn_at_by_instance.get(instance_str, 0.0):
                     # Still inside the backoff window: keep the dead entry so a
                     # later snapshot retries once the window has passed.
                     return
-                backoff = self._events_respawn_backoff_by_agent.get(aid_str, _EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS)
-                self._events_next_respawn_at_by_agent[aid_str] = now + backoff
-                self._events_respawn_backoff_by_agent[aid_str] = min(backoff * 2, _EVENTS_RESPAWN_MAX_BACKOFF_SECONDS)
+                backoff = self._events_respawn_backoff_by_instance.get(
+                    instance_str, _EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS
+                )
+                self._events_next_respawn_at_by_instance[instance_str] = now + backoff
+                self._events_respawn_backoff_by_instance[instance_str] = min(
+                    backoff * 2, _EVENTS_RESPAWN_MAX_BACKOFF_SECONDS
+                )
                 logger.info(
                     "Per-agent events stream for {} exited (returncode={}); respawning (next retry no sooner than {:.0f}s)",
-                    agent_id,
+                    instance_key,
                     existing.returncode,
                     backoff,
                 )
-                self._events_processes.pop(aid_str, None)
+                self._events_processes.pop(instance_str, None)
             # Preserve any already-known services across a respawn (the new
             # stream re-emits current registrations on connect); only seed an
             # empty map on the first spawn.
-            self._events_services.setdefault(aid_str, {})
+            self._events_services.setdefault(instance_str, {})
         sources: Sequence[str] = self._filtered_event_sources
         try:
+            # The instance key doubles as a host-scoped CLI address
+            # (``<agent_id>@<host_id>``), so this stream stays unambiguous even
+            # when the same agent id exists on another host mid-migration.
             process = self._cg.run_process_in_background(
                 command=[
                     self.mngr_binary,
                     "event",
-                    aid_str,
+                    instance_str,
                     *sources,
                     "--follow",
                     "--quiet",
                 ],
-                on_output=lambda line, is_stdout, _aid=agent_id: self._on_event_output(line, is_stdout, _aid),
+                on_output=lambda line, is_stdout, _key=instance_key: self._on_event_output(line, is_stdout, _key),
                 cwd=Path.home(),
                 is_checked_by_group=False,
                 # A ``--follow`` stream lives as long as its agent does, so retaining
@@ -545,40 +541,40 @@ class ForwardStreamManager(MutableModel):
                 is_output_accumulated=False,
             )
             with self._lock:
-                self._events_processes[aid_str] = process
-                self._events_spawned_at_by_agent[aid_str] = time.monotonic()
+                self._events_processes[instance_str] = process
+                self._events_spawned_at_by_instance[instance_str] = time.monotonic()
         except InvalidConcurrencyGroupStateError:
-            logger.debug("Skipping events stream for {} -- concurrency group inactive", agent_id)
+            logger.debug("Skipping events stream for {} -- concurrency group inactive", instance_key)
 
-    def _stop_events_stream(self, agent_id: AgentId) -> None:
-        aid_str = str(agent_id)
+    def _stop_events_stream(self, instance_key: AgentInstanceKey) -> None:
+        instance_str = str(instance_key)
         with self._lock:
-            process = self._events_processes.pop(aid_str, None)
-            self._events_respawn_backoff_by_agent.pop(aid_str, None)
-            self._events_next_respawn_at_by_agent.pop(aid_str, None)
-            self._events_spawned_at_by_agent.pop(aid_str, None)
+            process = self._events_processes.pop(instance_str, None)
+            self._events_respawn_backoff_by_instance.pop(instance_str, None)
+            self._events_next_respawn_at_by_instance.pop(instance_str, None)
+            self._events_spawned_at_by_instance.pop(instance_str, None)
         if process is None:
             return
         try:
             process.terminate()
         except (OSError, RuntimeError) as e:
-            logger.trace("Error terminating events stream for {}: {}", agent_id, e)
+            logger.trace("Error terminating events stream for {}: {}", instance_key, e)
 
-    def _on_event_output(self, line: str, is_stdout: bool, agent_id: AgentId) -> None:
+    def _on_event_output(self, line: str, is_stdout: bool, instance_key: AgentInstanceKey) -> None:
         if not is_stdout:
             stripped = line.strip()
             if stripped:
-                logger.debug("mngr event stderr for {}: {}", agent_id, stripped)
+                logger.debug("mngr event stderr for {}: {}", instance_key, stripped)
             return
         stripped = line.strip()
         if not stripped:
             return
-        self.envelope_writer.emit_event(agent_id, stripped)
+        self.envelope_writer.emit_event(instance_key.agent_id, stripped)
 
         try:
             raw = json.loads(stripped)
         except json.JSONDecodeError as e:
-            logger.warning("Could not parse event line for {}: {}", agent_id, e)
+            logger.warning("Could not parse event line for {}: {}", instance_key, e)
             return
         if not isinstance(raw, dict):
             return
@@ -593,10 +589,10 @@ class ForwardStreamManager(MutableModel):
         if not isinstance(service, str) or not service:
             return
 
-        aid_str = str(agent_id)
+        instance_str = str(instance_key)
         with self._lock:
-            services = self._events_services.setdefault(aid_str, {})
-            labels = self._events_labels.setdefault(aid_str, {})
+            services = self._events_services.setdefault(instance_str, {})
+            labels = self._events_labels.setdefault(instance_str, {})
             if event_type == "service_deregistered":
                 services.pop(service, None)
                 labels.pop(service, None)
@@ -611,8 +607,8 @@ class ForwardStreamManager(MutableModel):
             services_snapshot = dict(services)
             # Invert to origin-label -> service-name for the resolver's routing.
             label_to_name_snapshot = {label: name for name, label in labels.items()}
-        self.resolver.update_services(agent_id, services_snapshot)
-        self.resolver.update_service_labels(agent_id, label_to_name_snapshot)
+        self.resolver.update_services(instance_key, services_snapshot)
+        self.resolver.update_service_labels(instance_key, label_to_name_snapshot)
 
     @staticmethod
     def _safely_call(callback: Callable[..., None], *args: Any, name: str) -> None:

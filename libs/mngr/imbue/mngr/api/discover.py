@@ -276,6 +276,6 @@ def discover_by_address(
     filtered = {
         host_ref: agent_refs
         for host_ref, agent_refs in agents_by_host.items()
-        if constraint.matches(HostAddress(host=host_ref.host_name, provider=host_ref.provider_name))
+        if constraint.matches_host(host_ref.host_id, host_ref.host_name, host_ref.provider_name)
     }
     return filtered, providers

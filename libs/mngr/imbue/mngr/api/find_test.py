@@ -1062,3 +1062,67 @@ def test_ensure_agent_started_respects_config_when_data_unset(
     ensure_agent_started(agent, agent.host, is_start_desired=True)
 
     assert agent.captured_timeouts == [37.5]
+
+
+def _make_same_id_agents_on_two_hosts() -> tuple[AgentId, dict[DiscoveredHost, list[DiscoveredAgent]]]:
+    """One shared agent id with an instance on each of two hosts (the migration-overlap setup).
+
+    Returns ``(shared_agent_id, agents_by_host)`` with hosts named "host1" and "host2".
+    """
+    shared_agent_id = AgentId.generate()
+    host_ref1 = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("host1"),
+        provider_name=ProviderInstanceName("local"),
+    )
+    host_ref2 = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("host2"),
+        provider_name=ProviderInstanceName("docker"),
+    )
+    agents_by_host = {
+        host_ref: [
+            DiscoveredAgent(
+                host_id=host_ref.host_id,
+                agent_id=shared_agent_id,
+                agent_name=AgentName("migrating-agent"),
+                provider_name=host_ref.provider_name,
+            )
+        ]
+        for host_ref in (host_ref1, host_ref2)
+    }
+    return shared_agent_id, agents_by_host
+
+
+def test_filter_one_agent_raises_with_id_disambiguation_when_id_exists_on_multiple_hosts() -> None:
+    """A bare agent id matching instances on two hosts must error with ID@HOST guidance.
+
+    Agent ids are unique per host, not globally (the migration-overlap case), so a
+    bare id can be ambiguous and the user must pick the instance explicitly.
+    """
+    shared_agent_id, agents_by_host = _make_same_id_agents_on_two_hosts()
+
+    with pytest.raises(UserInputError, match="exists on multiple hosts") as exc_info:
+        filter_one_agent(
+            agent=shared_agent_id,
+            resolved_host=None,
+            agents_by_host=agents_by_host,
+        )
+    assert "ID@HOST" in str(exc_info.value)
+    # Both instances are listed so the user can pick one.
+    assert "host1" in str(exc_info.value)
+    assert "host2" in str(exc_info.value)
+
+
+def test_filter_one_agent_by_id_scoped_to_host_resolves_one_instance() -> None:
+    """With a resolved host, a duplicated agent id narrows to that host's instance."""
+    shared_agent_id, agents_by_host = _make_same_id_agents_on_two_hosts()
+    host_ref2 = next(host for host in agents_by_host if host.host_name == HostName("host2"))
+
+    result = filter_one_agent(
+        agent=shared_agent_id,
+        resolved_host=host_ref2,
+        agents_by_host=agents_by_host,
+    )
+
+    assert result == (host_ref2, agents_by_host[host_ref2][0])

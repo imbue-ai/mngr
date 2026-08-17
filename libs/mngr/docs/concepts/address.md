@@ -25,12 +25,22 @@ All parts are optional:
   digits, and hyphens). If omitted, a name is auto-generated. Without a host
   component, commands that target existing agents search across all hosts and
   providers. In `mngr create`, it defaults to the local host.
+  Commands that target *existing* agents also accept an agent id (`agent-...`)
+  in this slot.
 - **`HOST`** — The host name. Refers to an existing host unless `--new-host` is
   specified. If omitted with a provider (e.g. `@.modal`), a new host with an
-  auto-generated name is created.
+  auto-generated name is created. A host id (`host-...`) is also accepted.
 - **`PROVIDER`** — The provider backend name (e.g. `local`, `docker`, `modal`).
   Used to disambiguate when multiple providers have hosts with the same name, or
   to specify which provider should create a new host.
+
+## Addressing one instance of a duplicated agent id
+
+Agent ids are unique *per host*, not globally: the same agent id may exist on
+multiple hosts at once (for example while an agent is being migrated between
+hosts; see [agents](agents.md)). When a bare id matches instances on more than
+one host, single-target commands refuse and list every instance; use `ID@HOST`
+(or `ID@HOST.PROVIDER`) to target the exact instance.
 
 ## Commands that accept addresses
 

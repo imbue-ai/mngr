@@ -33,6 +33,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
@@ -284,6 +285,35 @@ def test_stop_hosts_for_addresses_routes_to_provider_stop_host(
     with pytest.raises(LocalHostNotStoppableError):
         _stop_hosts_for_addresses(
             [AgentAddress(agent=AgentName("stop-host-agent"))],
+            temp_mngr_ctx,
+            output_opts,
+        )
+
+
+def test_stop_hosts_for_addresses_honors_host_id_qualifier(
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """An ``AGENT@host-...`` address matches the resolved host by id.
+
+    Reaching ``LocalHostNotStoppableError`` proves the id-qualified address
+    passed the ``@HOST`` qualifier check and routed through to
+    ``provider.stop_host``; a qualifier with a different host id must instead
+    be rejected as not matching any agent.
+    """
+    _seed_local_agent_snapshot(temp_mngr_ctx, local_provider, "id-qualified-agent")
+
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    with pytest.raises(LocalHostNotStoppableError):
+        _stop_hosts_for_addresses(
+            [AgentAddress(agent=AgentName("id-qualified-agent"), host=HostAddress(host=local_provider.host_id))],
+            temp_mngr_ctx,
+            output_opts,
+        )
+
+    with pytest.raises(AgentNotFoundError):
+        _stop_hosts_for_addresses(
+            [AgentAddress(agent=AgentName("id-qualified-agent"), host=HostAddress(host=HostId.generate()))],
             temp_mngr_ctx,
             output_opts,
         )

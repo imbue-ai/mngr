@@ -500,8 +500,40 @@ def _find_agents_to_destroy(
         include_destroyed=True,
     )
 
+    _warn_on_multi_instance_id_addresses(addresses, matches)
+
     # Partition matches into online agents vs offline hosts.
     return _partition_destroy_targets(matches, mngr_ctx)
+
+
+def _warn_on_multi_instance_id_addresses(
+    addresses: Sequence[AgentAddress],
+    matches: Sequence[AgentMatch],
+) -> None:
+    """Warn when a bare agent *id* address matched instances on multiple hosts.
+
+    Destroy operates on every match (the uniform filter semantics), but a bare
+    id historically identified exactly one agent, so a same-id agent on more
+    than one host (e.g. mid-migration) deserves an explicit callout -- notably
+    under ``--force``, where no confirmation prompt lists the targets. Target a
+    single instance with ``ID@HOST`` instead.
+    """
+    for address in addresses:
+        if address.host is not None or not isinstance(address.agent, AgentId):
+            continue
+        id_matches = [match for match in matches if match.agent_id == address.agent]
+        if len(id_matches) <= 1:
+            continue
+        instance_lines = ", ".join(
+            f"{match.agent_id}@{match.host_id} ({match.host_name}.{match.provider_name})" for match in id_matches
+        )
+        logger.warning(
+            "Agent id '{}' matched {} instances, ALL of which will be destroyed: {}. "
+            "Use ID@HOST to target a single instance.",
+            address.agent,
+            len(id_matches),
+            instance_lines,
+        )
 
 
 def _partition_destroy_targets(

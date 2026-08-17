@@ -69,7 +69,7 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | ---- | ---- | ----------- | ------- |
 | `-t`, `--template` | text | Use a named template from create_templates config [repeatable, stacks in order] | None |
 | `-n`, `--name` | new_agent_location | Agent address (alternative to positional argument, mutually exclusive) [default: auto-generated] | None |
-| `--id` | text | Explicit agent ID [default: auto-generated] | None |
+| `--id` | text | Explicit agent ID [default: auto-generated]. Reusing an existing agent's id means 'this is the same agent' (ids are unique per host, not globally); to make an independent copy, use 'mngr clone' instead, which mints a new id. | None |
 | `--name-style` | choice (`coolname` &#x7C; `english` &#x7C; `fantasy` &#x7C; `scifi` &#x7C; `painters` &#x7C; `authors` &#x7C; `artists` &#x7C; `musicians` &#x7C; `animals` &#x7C; `scientists` &#x7C; `demons`) | Auto-generated name style | `coolname` |
 | `--type` | text | Which type of agent to run | None |
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |

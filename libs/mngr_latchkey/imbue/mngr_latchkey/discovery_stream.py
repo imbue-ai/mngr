@@ -92,7 +92,7 @@ _OBSERVE_BOUNCE_ERRORS: Final = (
 # observed it yet), so the handler can tell a running agent apart from
 # a stopped/paused one without a second round-trip.
 OnAgentDiscoveredCallback = Callable[[AgentId, HostId, RemoteSSHInfo | None, str, HostState | None], None]
-OnAgentDestroyedCallback = Callable[[AgentId], None]
+OnAgentDestroyedCallback = Callable[[AgentId, HostId], None]
 
 
 def _convert_ssh_info(ssh: SSHInfo) -> RemoteSSHInfo:
@@ -257,8 +257,8 @@ class DiscoveryStreamConsumer(MutableModel):
         # delta into destruction callbacks and fire discovery callbacks for the
         # agents this event carries.
         delta = self._aggregator.apply_event(event)
-        for aid_str in delta.removed_agent_ids:
-            self._safely_call_destroyed(AgentId(aid_str))
+        for instance_key in delta.removed_agent_instances:
+            self._safely_call_destroyed(instance_key.agent_id, instance_key.host_id)
 
         if isinstance(event, ProviderDiscoverySnapshotEvent):
             # A clean snapshot re-arms the provider's error-log suppression (and
@@ -269,9 +269,9 @@ class DiscoveryStreamConsumer(MutableModel):
             # during this snapshot's discovery span is deliberately not re-added, so
             # firing discovered from the raw event.agents would re-establish a reverse
             # tunnel for an agent the aggregator already considers gone.
-            present_agent_ids = self._aggregator.get_agent_by_id()
+            present_agent_instances = self._aggregator.get_agent_by_instance()
             for agent in event.agents:
-                if str(agent.agent_id) in present_agent_ids:
+                if agent.instance_key in present_agent_instances:
                     self._fire_discovered(agent)
         elif isinstance(event, AgentDiscoveryEvent):
             self._fire_discovered(event.agent)
@@ -337,9 +337,9 @@ class DiscoveryStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_discovered callback failed for {}: {}", agent_id, e)
 
-    def _safely_call_destroyed(self, agent_id: AgentId) -> None:
+    def _safely_call_destroyed(self, agent_id: AgentId, host_id: HostId) -> None:
         for callback in self._on_agent_destroyed_callbacks:
             try:
-                callback(agent_id)
+                callback(agent_id, host_id)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_destroyed callback failed for {}: {}", agent_id, e)

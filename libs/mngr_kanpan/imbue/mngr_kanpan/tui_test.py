@@ -31,8 +31,10 @@ from urwid.widget.text import Text
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import CellDisplay
@@ -154,7 +156,7 @@ from imbue.mngr_kanpan.tui import _make_readline_edit
 from imbue.mngr_kanpan.tui import _mark_color
 from imbue.mngr_kanpan.tui import _message_command
 from imbue.mngr_kanpan.tui import _mute_focused_agent
-from imbue.mngr_kanpan.tui import _nearest_surviving_id
+from imbue.mngr_kanpan.tui import _nearest_surviving_instance_key
 from imbue.mngr_kanpan.tui import _on_auto_refresh_alarm
 from imbue.mngr_kanpan.tui import _on_batch_poll
 from imbue.mngr_kanpan.tui import _on_deferred_refresh
@@ -225,6 +227,11 @@ class _CallTracker:
         self.calls.append(args)
 
 
+def _random_instance_key() -> AgentInstanceKey:
+    """A fresh instance key for a random agent/host pair (not on any board)."""
+    return AgentInstanceKey.build(AgentId.generate(), HostId.generate())
+
+
 _TEST_SCREEN_COLS: int = 120
 _TEST_SCREEN_ROWS: int = 24
 # Narrow enough that the belt leaves the search prompt a slot the test's query overruns.
@@ -282,7 +289,7 @@ def _make_state(
         executing=False,
         index_to_entry={},
         list_walker=None,
-        focused_agent_id=None,
+        focused_instance_key=None,
         steady_footer_text="  Loading...",
         last_successful_refresh_time=0.0,
         refresh_is_local_only=False,
@@ -713,7 +720,7 @@ def test_render_header_status_unconfigured_stays_empty() -> None:
 def test_update_snapshot_mute() -> None:
     entry = make_board_entry(is_muted=False)
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
-    _update_snapshot_mute(state, entry.agent_id, True)
+    _update_snapshot_mute(state, entry.instance_key, True)
     assert state.snapshot is not None
     assert state.snapshot.entries[0].is_muted is True
 
@@ -721,19 +728,19 @@ def test_update_snapshot_mute() -> None:
 def test_prune_orphaned_marks() -> None:
     entry = make_board_entry(name="agent-a")
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
-    present_id = entry.agent_id
-    absent_id = AgentId.generate()
-    state.marks = {present_id: "d", absent_id: "d"}
+    present_key = entry.instance_key
+    absent_key = _random_instance_key()
+    state.marks = {present_key: "d", absent_key: "d"}
     _prune_orphaned_marks(state)
-    assert present_id in state.marks
-    assert absent_id not in state.marks
+    assert present_key in state.marks
+    assert absent_key not in state.marks
 
 
 def test_clear_focus() -> None:
     state = _make_state()
-    state.focused_agent_id = AgentId.generate()
+    state.focused_instance_key = _random_instance_key()
     _clear_focus(state)
-    assert state.focused_agent_id is None
+    assert state.focused_instance_key is None
 
 
 # =============================================================================
@@ -743,7 +750,7 @@ def test_clear_focus() -> None:
 
 def test_batch_item_label_single() -> None:
     item = _BatchWorkItem(
-        agent_id=AgentId.generate(),
+        instance_key=_random_instance_key(),
         name=AgentName("agent-1"),
         key="p",
         cmd=CustomCommand(name="push"),
@@ -754,12 +761,15 @@ def test_batch_item_label_single() -> None:
 
 def test_batch_item_label_batch() -> None:
     item = _BatchWorkItem(
-        agent_id=AgentId.generate(),
+        instance_key=_random_instance_key(),
         name=AgentName("agent-1"),
         key="d",
         cmd=CustomCommand(name="delete"),
         entry=None,
-        batch_ids=(AgentId.generate(), AgentId.generate()),
+        batch_instance_keys=(
+            _random_instance_key(),
+            _random_instance_key(),
+        ),
         batch_names=(AgentName("agent-1"), AgentName("agent-2")),
     )
     assert "2 agent(s)" in _batch_item_label(item)
@@ -1205,16 +1215,19 @@ def test_compute_board_column_widths_with_entries() -> None:
 # =============================================================================
 
 
-def test_build_board_widgets_renders_a_mark_only_on_its_own_agent_by_id() -> None:
+def test_build_board_widgets_renders_a_mark_only_on_its_own_agent_instance() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     snapshot = make_board_snapshot(entries=(entry,))
-    walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks={entry.agent_id: "d"})
+    walker, idx_map = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks={entry.instance_key: "d"})
     [idx] = idx_map
     marked_row: Any = walker[idx]
     # The mark indicator precedes the name in the name cell.
     assert marked_row.original_widget.contents[0][0].text == "d agent-a"
-    # A mark keyed to a different id does not render on this row -- marks are matched by id.
-    other, other_idx = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks={AgentId.generate(): "d"})
+    # A mark for the same agent id on a DIFFERENT host does not render on this
+    # row -- marks are matched by the (host, agent) instance, so the same id
+    # mid-migration marks each host's row independently.
+    same_id_other_host = AgentInstanceKey.build(entry.agent_id, HostId.generate())
+    other, other_idx = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, marks={same_id_other_host: "d"})
     [other_row_idx] = other_idx
     unmarked_row: Any = other[other_row_idx]
     assert unmarked_row.original_widget.contents[0][0].text == "  agent-a"
@@ -1285,26 +1298,26 @@ def test_toggle_mark_adds_mark() -> None:
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
     _toggle_mark(state, "d")
-    assert entry.agent_id in state.marks
-    assert state.marks[entry.agent_id] == "d"
+    assert entry.instance_key in state.marks
+    assert state.marks[entry.instance_key] == "d"
 
 
 def test_toggle_mark_removes_existing_mark() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
-    state.marks[entry.agent_id] = "d"
+    state.marks[entry.instance_key] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
     _toggle_mark(state, "d")
-    assert entry.agent_id not in state.marks
+    assert entry.instance_key not in state.marks
 
 
 def test_toggle_mark_distinguishes_same_named_agents_on_different_hosts() -> None:
     # Two agents share a name across hosts but carry distinct ids. Marking one must not
     # touch the other's mark. When marks were keyed by name, the second press read the
     # first agent's mark and toggled it off, so the two could never be marked at once.
-    first = make_board_entry(name="fix-login", provider_name="local")
-    second = make_board_entry(name="fix-login", provider_name="docker")
+    first = make_board_entry(name="fix-login", provider_name="local", host_id=HostId.generate())
+    second = make_board_entry(name="fix-login", provider_name="docker", host_id=HostId.generate())
     assert first.name == second.name
     assert first.agent_id != second.agent_id
     state = _make_state_with_walker((first, second))
@@ -1312,7 +1325,7 @@ def test_toggle_mark_distinguishes_same_named_agents_on_different_hosts() -> Non
         idx = next(k for k, v in state.index_to_entry.items() if v.agent_id == entry.agent_id)
         state.list_walker.set_focus(idx)
         _toggle_mark(state, "d")
-    assert state.marks == {first.agent_id: "d", second.agent_id: "d"}
+    assert state.marks == {first.instance_key: "d", second.instance_key: "d"}
 
 
 def test_toggle_mark_no_walker() -> None:
@@ -1329,11 +1342,11 @@ def test_toggle_mark_no_walker() -> None:
 def test_unmark_focused_removes_mark() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
-    state.marks[entry.agent_id] = "d"
+    state.marks[entry.instance_key] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
     _unmark_focused(state)
-    assert entry.agent_id not in state.marks
+    assert entry.instance_key not in state.marks
 
 
 def test_unmark_focused_no_mark_is_noop() -> None:
@@ -1352,7 +1365,7 @@ def test_unmark_focused_no_mark_is_noop() -> None:
 def test_unmark_all_clears_marks() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
-    state.marks[entry.agent_id] = "d"
+    state.marks[entry.instance_key] = "d"
     _unmark_all(state)
     assert state.marks == {}
 
@@ -1370,7 +1383,10 @@ def test_unmark_all_empty_marks_noop() -> None:
 def test_update_mark_count_footer_with_marks() -> None:
     commands = {"d": CustomCommand(name="delete", markable="light red")}
     state = _make_state(commands=commands)
-    state.marks = {AgentId.generate(): "d", AgentId.generate(): "d"}
+    state.marks = {
+        _random_instance_key(): "d",
+        _random_instance_key(): "d",
+    }
     _update_mark_count_footer(state)
     assert "delete" in state.footer_left_text.text or "d" in state.footer_left_text.text
 
@@ -1396,7 +1412,7 @@ def test_execute_marks_no_marks_does_nothing() -> None:
 
 def test_execute_marks_already_executing_does_nothing() -> None:
     state = _make_state()
-    state.marks = {AgentId.generate(): "d"}
+    state.marks = {_random_instance_key(): "d"}
     state.executing = True
     _execute_marks(state)
 
@@ -1410,11 +1426,11 @@ def test_prune_orphaned_marks_with_orphans() -> None:
     commands = {"d": CustomCommand(name="delete", markable="light red")}
     state = _make_state(commands=commands)
     state.steady_footer_text = "  Steady"
-    gone_id = AgentId.generate()
-    state.marks = {gone_id: "d"}
+    gone_key = _random_instance_key()
+    state.marks = {gone_key: "d"}
     state.snapshot = make_board_snapshot(entries=())
     _prune_orphaned_marks(state)
-    assert gone_id not in state.marks
+    assert gone_key not in state.marks
 
 
 # =============================================================================
@@ -1431,19 +1447,19 @@ def test_dispatch_command_markable_key_toggles_mark() -> None:
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
     _dispatch_command(state, "d", commands["d"])
-    assert entry.agent_id in state.marks
+    assert entry.instance_key in state.marks
 
 
 def test_dispatch_command_unmark_key_removes_mark() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
-    state.marks[entry.agent_id] = "d"
+    state.marks[entry.instance_key] = "d"
     agent_idx = next(k for k, v in state.index_to_entry.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(agent_idx)
     unmark_cmd = ActionBuiltinCommand(role=ActionBuiltinRole.UNMARK, name="unmark")
     state.commands = {_BUILTIN_COMMAND_KEY_UNMARK: unmark_cmd}
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_UNMARK, unmark_cmd)
-    assert entry.agent_id not in state.marks
+    assert entry.instance_key not in state.marks
 
 
 def test_dispatch_command_execute_key_with_marks(tmp_path: Path) -> None:
@@ -1456,7 +1472,7 @@ def test_dispatch_command_execute_key_with_marks(tmp_path: Path) -> None:
     mark_cmd = CustomCommand(name="do-thing", command=f"touch {marker}")
     entry = make_board_entry(name="a")
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)), commands={"z": mark_cmd})
-    state.marks = {entry.agent_id: "z"}
+    state.marks = {entry.instance_key: "z"}
     execute_cmd = ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
     # Should start batch execution (sets executing=True; with loop=None the
@@ -1477,7 +1493,7 @@ def test_dispatch_command_execute_user_override_of_delete_runs_shell(tmp_path: P
     state = _make_state(
         snapshot=make_board_snapshot(entries=(entry,)), commands={_BUILTIN_COMMAND_KEY_DELETE: override}
     )
-    state.marks = {entry.agent_id: _BUILTIN_COMMAND_KEY_DELETE}
+    state.marks = {entry.instance_key: _BUILTIN_COMMAND_KEY_DELETE}
     execute_cmd = ActionBuiltinCommand(role=ActionBuiltinRole.EXECUTE, name="execute")
     _dispatch_command(state, _BUILTIN_COMMAND_KEY_EXECUTE, execute_cmd)
     assert state.executing is True
@@ -1504,10 +1520,14 @@ def test_refresh_display_restores_focus_to_the_exact_agent_not_a_namesake() -> N
     # Two agents share a name on different hosts. A refresh must return focus to the one
     # that was focused, by id -- not to the first row that happens to share the name (which
     # is what name-keyed restoration did, silently retargeting later keypresses).
-    first = make_board_entry(name="dup", provider_name="local", section=BoardSection.STILL_COOKING)
-    second = make_board_entry(name="dup", provider_name="docker", section=BoardSection.STILL_COOKING)
+    first = make_board_entry(
+        name="dup", provider_name="local", section=BoardSection.STILL_COOKING, host_id=HostId.generate()
+    )
+    second = make_board_entry(
+        name="dup", provider_name="docker", section=BoardSection.STILL_COOKING, host_id=HostId.generate()
+    )
     state = _make_state(snapshot=make_board_snapshot(entries=(first, second)))
-    state.focused_agent_id = second.agent_id
+    state.focused_instance_key = second.instance_key
     _refresh_display(state)
     focused = _get_focused_entry(state)
     assert focused is not None
@@ -1618,7 +1638,7 @@ def test_update_snapshot_mute_none_snapshot() -> None:
     # When snapshot is None, function should return without error
     state = _make_state()
     state.snapshot = None
-    _update_snapshot_mute(state, AgentId.generate(), True)
+    _update_snapshot_mute(state, _random_instance_key(), True)
 
 
 # =============================================================================
@@ -1640,7 +1660,7 @@ def test_assemble_column_defs_empty_order_falls_back_to_builtins() -> None:
 def test_input_handler_U_key_clears_marks() -> None:
     entry = make_board_entry(name="agent-a", section=BoardSection.STILL_COOKING)
     state = _make_state_with_walker((entry,))
-    state.marks = {entry.agent_id: "d"}
+    state.marks = {entry.instance_key: "d"}
     handler = _KanpanInputHandler(state=state)
     result = handler("U")
     assert result is True
@@ -1655,7 +1675,7 @@ def test_input_handler_command_key_dispatches() -> None:
     handler = _KanpanInputHandler(state=state)
     result = handler("d")
     assert result is True
-    assert entry.agent_id in state.marks
+    assert entry.instance_key in state.marks
 
 
 def test_input_handler_up_key_not_first_passes_through() -> None:
@@ -1677,7 +1697,7 @@ def test_input_handler_up_key_on_first_clears_focus() -> None:
     handler = _KanpanInputHandler(state=state)
     result = handler("up")
     assert result is True
-    assert state.focused_agent_id is None
+    assert state.focused_instance_key is None
 
 
 def test_input_handler_down_key_passes_through() -> None:
@@ -1778,7 +1798,7 @@ def test_toggle_mark_push_no_work_dir_shows_message() -> None:
     a_idx = next(k for k, v in idx_map.items() if v.name == AgentName("agent-a"))
     state.list_walker.set_focus(a_idx)
     _toggle_mark(state, _BUILTIN_COMMAND_KEY_PUSH)
-    assert entry.agent_id not in state.marks
+    assert entry.instance_key not in state.marks
     assert "Cannot push" in state.footer_left_text.text
 
 
@@ -1841,10 +1861,10 @@ def _make_done_future(result: subprocess.CompletedProcess[str]) -> "Future[subpr
 
 
 def _batch_item(
-    name: str = "agent-a", key: str = "c", agent_id: AgentId | None = None, **kwargs: Any
+    name: str = "agent-a", key: str = "c", instance_key: AgentInstanceKey | None = None, **kwargs: Any
 ) -> _BatchWorkItem:
     return _BatchWorkItem(
-        agent_id=agent_id or AgentId.generate(),
+        instance_key=instance_key or _random_instance_key(),
         name=AgentName(name),
         key=key,
         cmd=CustomCommand(name="custom"),
@@ -1855,26 +1875,26 @@ def _batch_item(
 
 def test_record_batch_result_clears_the_mark_on_success() -> None:
     state = _make_state()
-    agent_id = AgentId.generate()
-    item = _batch_item(agent_id=agent_id)
-    state.marks = {agent_id: "c"}
+    instance_key = _random_instance_key()
+    item = _batch_item(instance_key=instance_key)
+    state.marks = {instance_key: "c"}
     results: list[_BatchItemResult] = []
     _record_batch_result(state, item, _make_done_future(_completed(0)), results)
     assert [r.is_success for r in results] == [True]
-    assert agent_id not in state.marks
+    assert instance_key not in state.marks
 
 
 def test_record_batch_result_keeps_the_mark_and_the_stderr_on_failure() -> None:
     state = _make_state()
-    agent_id = AgentId.generate()
-    item = _batch_item(agent_id=agent_id)
-    state.marks = {agent_id: "c"}
+    instance_key = _random_instance_key()
+    item = _batch_item(instance_key=instance_key)
+    state.marks = {instance_key: "c"}
     results: list[_BatchItemResult] = []
     _record_batch_result(state, item, _make_done_future(_completed(1, "something bad")), results)
     assert results[0].is_success is False
     assert results[0].detail == "something bad"
     # The surviving mark is the retry set.
-    assert agent_id in state.marks
+    assert instance_key in state.marks
 
 
 def test_record_batch_result_reports_a_timeout_in_words() -> None:
@@ -1895,16 +1915,16 @@ def test_record_batch_result_clears_every_mark_the_delete_call_covered() -> None
     # The builtin delete puts all marked agents through one `mngr destroy`, so its single
     # result stands for each of them.
     state = _make_state()
-    id_a = AgentId.generate()
-    id_b = AgentId.generate()
+    key_a = _random_instance_key()
+    key_b = _random_instance_key()
     item = _batch_item(
         name="a",
         key=_BUILTIN_COMMAND_KEY_DELETE,
-        agent_id=id_a,
-        batch_ids=(id_a, id_b),
+        instance_key=key_a,
+        batch_instance_keys=(key_a, key_b),
         batch_names=(AgentName("a"), AgentName("b")),
     )
-    state.marks = {id_a: _BUILTIN_COMMAND_KEY_DELETE, id_b: _BUILTIN_COMMAND_KEY_DELETE}
+    state.marks = {key_a: _BUILTIN_COMMAND_KEY_DELETE, key_b: _BUILTIN_COMMAND_KEY_DELETE}
     results: list[_BatchItemResult] = []
     _record_batch_result(state, item, _make_done_future(_completed(0)), results)
     assert state.marks == {}
@@ -1947,13 +1967,14 @@ def test_on_batch_poll_finishes_once_the_last_one_lands() -> None:
 def test_submit_batch_item_push_with_work_dir(tmp_path: Path) -> None:
     entry = AgentBoardEntry(
         agent_id=AgentId.generate(),
+        host_id=HostId.generate(),
         name=AgentName("agent-a"),
         state=AgentLifecycleState.RUNNING,
         provider_name=ProviderInstanceName("local"),
         work_dir=tmp_path,
     )
     item = _BatchWorkItem(
-        agent_id=entry.agent_id,
+        instance_key=entry.instance_key,
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
         cmd=MarkableBuiltinCommand(role=MarkableBuiltinRole.PUSH, name="push", markable="yellow"),
@@ -1968,7 +1989,7 @@ def test_submit_batch_item_push_with_work_dir(tmp_path: Path) -> None:
 def test_submit_batch_item_push_no_work_dir() -> None:
     entry = make_board_entry(name="agent-a")
     item = _BatchWorkItem(
-        agent_id=entry.agent_id,
+        instance_key=entry.instance_key,
         name=AgentName("agent-a"),
         key=_BUILTIN_COMMAND_KEY_PUSH,
         cmd=MarkableBuiltinCommand(role=MarkableBuiltinRole.PUSH, name="push", markable="yellow"),
@@ -1981,7 +2002,7 @@ def test_submit_batch_item_push_no_work_dir() -> None:
 
 def test_submit_batch_item_shell_command() -> None:
     item = _BatchWorkItem(
-        agent_id=AgentId.generate(),
+        instance_key=_random_instance_key(),
         name=AgentName("agent-a"),
         key="c",
         cmd=CustomCommand(name="custom", command="true"),
@@ -1995,7 +2016,7 @@ def test_submit_batch_item_shell_command() -> None:
 
 def test_submit_batch_item_no_command_returns_none() -> None:
     item = _BatchWorkItem(
-        agent_id=AgentId.generate(),
+        instance_key=_random_instance_key(),
         name=AgentName("agent-a"),
         key="c",
         cmd=CustomCommand(name="custom"),
@@ -2018,23 +2039,25 @@ class _CapturingExecutor(ThreadPoolExecutor):
         return _make_done_future(_completed(0))
 
 
-def test_submit_batch_item_delete_targets_agents_by_id() -> None:
-    # The delete builtin destroys the marked agents by id, so `mngr destroy` receives ids,
-    # never names. A name would match every same-named agent across hosts and destroy them all.
-    first = make_board_entry(name="fix-login", provider_name="local")
-    second = make_board_entry(name="fix-login", provider_name="docker")
+def test_submit_batch_item_delete_targets_agents_by_instance_address() -> None:
+    # The delete builtin destroys the marked agents by host-scoped instance address
+    # (``<agent_id>@<host_id>``), never by name or bare id. A name would match every
+    # same-named agent across hosts; a bare id would match every same-id instance
+    # (e.g. mid-migration) and destroy them all.
+    first = make_board_entry(name="fix-login", provider_name="local", host_id=HostId.generate())
+    second = make_board_entry(name="fix-login", provider_name="docker", host_id=HostId.generate())
     item = _BatchWorkItem(
-        agent_id=first.agent_id,
+        instance_key=first.instance_key,
         name=first.name,
         key=_BUILTIN_COMMAND_KEY_DELETE,
         cmd=MarkableBuiltinCommand(role=MarkableBuiltinRole.DELETE, name="delete", markable="light red"),
         entry=first,
-        batch_ids=(first.agent_id, second.agent_id),
+        batch_instance_keys=(first.instance_key, second.instance_key),
         batch_names=(first.name, second.name),
     )
     with _CapturingExecutor() as executor:
         _submit_batch_item(executor, item)
-    assert executor.calls == [(_run_destroy, ([str(first.agent_id), str(second.agent_id)],))]
+    assert executor.calls == [(_run_destroy, ([str(first.instance_key), str(second.instance_key)],))]
 
 
 def test_submit_batch_item_custom_command_forwards_agent_id_and_name() -> None:
@@ -2042,7 +2065,7 @@ def test_submit_batch_item_custom_command_forwards_agent_id_and_name() -> None:
     # MNGR_AGENT_NAME); the id is what lets the command target the agent unambiguously.
     entry = make_board_entry(name="agent-a")
     item = _BatchWorkItem(
-        agent_id=entry.agent_id,
+        instance_key=entry.instance_key,
         name=entry.name,
         key="c",
         cmd=CustomCommand(name="stop", command="mngr stop $MNGR_AGENT_ID"),
@@ -2052,7 +2075,7 @@ def test_submit_batch_item_custom_command_forwards_agent_id_and_name() -> None:
     with _CapturingExecutor() as executor:
         _submit_batch_item(executor, item)
     assert executor.calls == [
-        (_run_shell_command_sync, ("mngr stop $MNGR_AGENT_ID", str(entry.name), "", entry.agent_id))
+        (_run_shell_command_sync, ("mngr stop $MNGR_AGENT_ID", str(entry.name), "", entry.instance_key))
     ]
 
 
@@ -2066,11 +2089,11 @@ def test_execute_marks_skips_a_mark_whose_agent_is_no_longer_on_the_board() -> N
     state.loop = _make_mock_loop()
     executor = _CapturingExecutor()
     state.batch_executor = executor
-    departed_id = AgentId.generate()
-    state.marks = {on_board.agent_id: "r", departed_id: "r"}
+    departed_key = _random_instance_key()
+    state.marks = {on_board.instance_key: "r", departed_key: "r"}
     _execute_marks(state)
     # Exactly one command runs -- for the agent still on the board; the departed mark is skipped.
-    assert executor.calls == [(_run_shell_command_sync, ("true", str(on_board.name), "", on_board.agent_id))]
+    assert executor.calls == [(_run_shell_command_sync, ("true", str(on_board.name), "", on_board.instance_key))]
 
 
 # =============================================================================
@@ -2099,7 +2122,11 @@ def test_execute_batch_reports_an_item_it_cannot_run_as_skipped() -> None:
     # or the batch would quietly report fewer operations than were marked.
     state = _make_state()
     item = _BatchWorkItem(
-        agent_id=AgentId.generate(), name=AgentName("agent-a"), key="c", cmd=CustomCommand(name="noop"), entry=None
+        instance_key=_random_instance_key(),
+        name=AgentName("agent-a"),
+        key="c",
+        cmd=CustomCommand(name="noop"),
+        entry=None,
     )
     _execute_batch(state, [item])
     assert state.executing is False
@@ -2420,7 +2447,7 @@ def test_update_peek_header_names_agent() -> None:
     state = _make_state_with_walker((entry,))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
-    state.peek_agent_id = entry.agent_id
+    state.peek_instance_key = entry.instance_key
     _update_peek_header(state)
     assert "agent-a" in state.peek_box.title_widget.text
 
@@ -2429,7 +2456,7 @@ def test_update_peek_header_missing_agent_falls_back() -> None:
     state = _make_state_with_walker((make_board_entry(name="agent-a"),))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("gone")
-    state.peek_agent_id = AgentId.generate()
+    state.peek_instance_key = _random_instance_key()
     _update_peek_header(state)
     assert state.peek_box.title_widget.text.strip() == "Peek"
 
@@ -2439,7 +2466,7 @@ def test_refresh_display_updates_open_peek_header() -> None:
     state = _make_state(snapshot=make_board_snapshot(entries=(entry,)))
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-a")
-    state.peek_agent_id = entry.agent_id
+    state.peek_instance_key = entry.instance_key
     # A completed board refresh re-renders the open panel's title from the new entries.
     _refresh_display(state)
     title = state.peek_box.title_widget.text
@@ -2523,7 +2550,7 @@ def test_toggle_peek_opens_panel_for_focused_agent() -> None:
     _toggle_peek(state)
     # The panel replaces the footer (saved for restore-on-close) and takes key focus.
     assert state.peek_agent_name == AgentName("agent-a")
-    assert state.focused_agent_id == entry.agent_id
+    assert state.focused_instance_key == entry.instance_key
     assert state.saved_footer is original_footer
     assert state.frame.footer is state.peek_box
     assert state.frame.focus_position == "footer"
@@ -2548,7 +2575,7 @@ def test_submit_peek_reply_empty_input_is_noop() -> None:
     _build_peek_panel(state)
     state.frame.footer = Text("panel")
     state.peek_agent_name = AgentName("agent-a")
-    state.peek_agent_id = entry.agent_id
+    state.peek_instance_key = entry.instance_key
     # An empty reply sends nothing and leaves the panel open (attach is a board action).
     _submit_peek_reply(state)
     assert state.peek_agent_name == AgentName("agent-a")
@@ -2573,12 +2600,12 @@ def test_on_peek_reply_poll_failure_drops_echo_and_shows_error() -> None:
     state = _make_state()
     state.loop = _make_mock_loop()
     _build_peek_panel(state)
-    peek_id = AgentId.generate()
+    peek_key = _random_instance_key()
     state.peek_agent_name = AgentName("agent-a")
-    state.peek_agent_id = peek_id
+    state.peek_instance_key = peek_key
     state.peek_pending_replies = ["my reply"]
     future = _make_reply_result(returncode=1, stderr="agent not running\n")
-    _on_peek_reply_poll(state.loop, (state, future, peek_id, AgentName("agent-a"), "my reply"))
+    _on_peek_reply_poll(state.loop, (state, future, peek_key, AgentName("agent-a"), "my reply"))
     # The optimistic echo is dropped (it will never appear in the transcript) and the
     # failure renders in the panel instead of vanishing silently.
     assert state.peek_pending_replies == []
@@ -2596,12 +2623,12 @@ def test_on_peek_reply_poll_success_keeps_echo_and_refreshes_board() -> None:
     state = _make_state()
     state.loop = _make_mock_loop()
     _build_peek_panel(state)
-    peek_id = AgentId.generate()
+    peek_key = _random_instance_key()
     state.peek_agent_name = AgentName("agent-a")
-    state.peek_agent_id = peek_id
+    state.peek_instance_key = peek_key
     state.peek_pending_replies = ["my reply"]
     future = _make_reply_result(returncode=0)
-    _on_peek_reply_poll(state.loop, (state, future, peek_id, AgentName("agent-a"), "my reply"))
+    _on_peek_reply_poll(state.loop, (state, future, peek_key, AgentName("agent-a"), "my reply"))
     # A delivered reply keeps its echo until the transcript refresh prunes it.
     assert state.peek_pending_replies == ["my reply"]
     assert state.peek_reply_error == ""
@@ -2617,13 +2644,13 @@ def test_on_peek_reply_poll_success_does_not_stack_refreshes() -> None:
     state = _make_state()
     state.loop = _make_mock_loop()
     _build_peek_panel(state)
-    peek_id = AgentId.generate()
+    peek_key = _random_instance_key()
     state.peek_agent_name = AgentName("agent-a")
-    state.peek_agent_id = peek_id
+    state.peek_instance_key = peek_key
     in_flight: Future[FetchResult] = Future()
     state.refresh_future = in_flight
     _on_peek_reply_poll(
-        state.loop, (state, _make_reply_result(returncode=0), peek_id, AgentName("agent-a"), "my reply")
+        state.loop, (state, _make_reply_result(returncode=0), peek_key, AgentName("agent-a"), "my reply")
     )
     # A refresh already in flight is left alone rather than being replaced mid-fetch, and
     # the reply's own refresh is held rather than dropped: that fetch was started before the
@@ -2636,8 +2663,17 @@ def test_on_peek_reply_poll_failure_after_close_shows_transient() -> None:
     state = _make_state()
     state.loop = _make_mock_loop()
     future = _make_reply_result(returncode=1, stderr="delivery timed out\n")
-    # No panel is open (peek_agent_id is None), so the passed id matches nothing.
-    _on_peek_reply_poll(state.loop, (state, future, AgentId.generate(), AgentName("agent-a"), "my reply"))
+    # No panel is open (peek_instance_key is None), so the passed instance matches nothing.
+    _on_peek_reply_poll(
+        state.loop,
+        (
+            state,
+            future,
+            _random_instance_key(),
+            AgentName("agent-a"),
+            "my reply",
+        ),
+    )
     # Panel closed: the failure goes to the (now visible) footer as a transient message, which
     # outranks the "Refreshing" spinner the re-probe puts there.
     assert state.transient_message is not None
@@ -2651,12 +2687,21 @@ def test_on_peek_reply_poll_failure_with_other_agent_peeked_renders_in_panel() -
     state.loop = _make_mock_loop()
     _build_peek_panel(state)
     state.peek_agent_name = AgentName("agent-b")
-    state.peek_agent_id = AgentId.generate()
+    state.peek_instance_key = _random_instance_key()
     state.peek_pending_replies = ["draft to b"]
     future = _make_reply_result(returncode=1, stderr="agent not running\n")
-    # agent-b's panel is open, but agent-a's reply failed, so the failed id does not match
-    # the open panel's.
-    _on_peek_reply_poll(state.loop, (state, future, AgentId.generate(), AgentName("agent-a"), "my reply"))
+    # agent-b's panel is open, but agent-a's reply failed, so the failed instance does not
+    # match the open panel's.
+    _on_peek_reply_poll(
+        state.loop,
+        (
+            state,
+            future,
+            _random_instance_key(),
+            AgentName("agent-a"),
+            "my reply",
+        ),
+    )
     # agent-b's panel hides the footer, so the failure renders in the panel body,
     # named so it cannot be misread as agent-b's failure.
     body = str(state.peek_body_text.text)
@@ -2772,23 +2817,34 @@ def _drain_prompt_executor(state: _KanpanState) -> None:
 
 def test_run_shell_command_sync_sets_agent_name_and_input_env_vars() -> None:
     result = _run_shell_command_sync(
-        'printf "%s|%s" "$MNGR_AGENT_NAME" "$MNGR_INPUT"', "agent-a", "needs review", AgentId.generate()
+        'printf "%s|%s" "$MNGR_AGENT_NAME" "$MNGR_INPUT"',
+        "agent-a",
+        "needs review",
+        _random_instance_key(),
     )
     assert result.returncode == 0
     assert result.stdout == "agent-a|needs review"
 
 
-def test_run_shell_command_sync_sets_agent_id_env_var() -> None:
-    agent_id = AgentId.generate()
-    result = _run_shell_command_sync('printf "%s" "$MNGR_AGENT_ID"', "agent-a", "", agent_id)
+def test_run_shell_command_sync_sets_agent_id_and_host_id_env_vars() -> None:
+    instance_key = _random_instance_key()
+    result = _run_shell_command_sync('printf "%s@%s" "$MNGR_AGENT_ID" "$MNGR_HOST_ID"', "agent-a", "", instance_key)
     assert result.returncode == 0
-    assert result.stdout == str(agent_id)
+    # The two env vars recompose into the full instance address, so a custom
+    # command can target the exact instance even when the id exists on
+    # multiple hosts.
+    assert result.stdout == str(instance_key)
 
 
 def test_run_shell_command_sync_does_not_word_split_quoted_input() -> None:
     # The value travels through the environment, never through the shell's parse phase,
     # so a quoted expansion of a multi-word value stays one argument.
-    result = _run_shell_command_sync('printf "[%s]" "$MNGR_INPUT"', "agent-a", "two words", AgentId.generate())
+    result = _run_shell_command_sync(
+        'printf "[%s]" "$MNGR_INPUT"',
+        "agent-a",
+        "two words",
+        _random_instance_key(),
+    )
     assert result.stdout == "[two words]"
 
 
@@ -3523,9 +3579,9 @@ _SEARCH_ENTRIES = (
 )
 
 
-def _search_entry_id(name: str) -> AgentId:
-    """The agent id of the `_SEARCH_ENTRIES` row with this name (focus memory is keyed by id)."""
-    return next(entry.agent_id for entry in _SEARCH_ENTRIES if str(entry.name) == name)
+def _search_entry_instance_key(name: str) -> AgentInstanceKey:
+    """The instance key of the `_SEARCH_ENTRIES` row with this name (focus memory is keyed by instance)."""
+    return next(entry.instance_key for entry in _SEARCH_ENTRIES if str(entry.name) == name)
 
 
 _ONE_ROW: tuple[tuple[AgentName, str], ...] = ((AgentName("agent-a"), "agent-a RUNNING"),)
@@ -3728,7 +3784,7 @@ def test_close_search_keeps_the_match_focused() -> None:
     _type_query(state, "kanpan")
     _close_search(state, is_cancelled=False)
     assert _focused_name(state) == "kanpan-peek"
-    assert state.focused_agent_id == _search_entry_id("kanpan-peek")
+    assert state.focused_instance_key == _search_entry_instance_key("kanpan-peek")
     assert state.search_input is None
     assert len(state.footer_pile.contents) == 2
     assert state.frame.focus_position == "body"
@@ -3742,7 +3798,7 @@ def test_close_search_cancelled_restores_the_prior_row() -> None:
     assert _focused_name(state) == "release-candidate"
     _close_search(state, is_cancelled=True)
     assert _focused_name(state) == "lima-host-dir"
-    assert state.focused_agent_id == _search_entry_id("lima-host-dir")
+    assert state.focused_instance_key == _search_entry_instance_key("lima-host-dir")
 
 
 def test_close_search_cancelled_restores_having_selected_nothing() -> None:
@@ -3755,7 +3811,7 @@ def test_close_search_cancelled_restores_having_selected_nothing() -> None:
     _type_query(state, "kanpan")
     _close_search(state, is_cancelled=True)
     assert _focused_name(state) is None
-    assert state.focused_agent_id is None
+    assert state.focused_instance_key is None
 
 
 def test_close_search_forgets_the_prior_row_when_it_commits_no_selection() -> None:
@@ -3769,7 +3825,7 @@ def test_close_search_forgets_the_prior_row_when_it_commits_no_selection() -> No
     # The board shows nothing selected, so a later refresh must not resurrect the row
     # the search opened on.
     assert _focused_name(state) is None
-    assert state.focused_agent_id is None
+    assert state.focused_instance_key is None
 
 
 def test_close_search_cancelled_when_the_prior_row_has_left_the_board() -> None:
@@ -3783,7 +3839,7 @@ def test_close_search_cancelled_when_the_prior_row_has_left_the_board() -> None:
     # With nowhere to come back to, cancelling clears -- keeping the match is what
     # committing looks like, and the two gestures must not agree.
     assert _focused_name(state) is None
-    assert state.focused_agent_id is None
+    assert state.focused_instance_key is None
 
 
 def test_close_search_clears_the_explicit_highlight() -> None:
@@ -3800,7 +3856,7 @@ def test_close_search_when_not_open_is_a_noop() -> None:
     _close_search(state, is_cancelled=False)
     # Closing takes the board's focus memory from the focused row; with no prompt open
     # there is nothing to take it for, so the memory stays where the board left it.
-    assert state.focused_agent_id is None
+    assert state.focused_instance_key is None
 
 
 def test_handle_search_key_enter_commits() -> None:
@@ -3809,7 +3865,7 @@ def test_handle_search_key_enter_commits() -> None:
     _type_query(state, "kanpan")
     assert _handle_search_key(state, "enter") is True
     assert state.search_input is None
-    assert state.focused_agent_id == _search_entry_id("kanpan-peek")
+    assert state.focused_instance_key == _search_entry_instance_key("kanpan-peek")
 
 
 def test_handle_search_key_esc_cancels() -> None:
@@ -3819,7 +3875,7 @@ def test_handle_search_key_esc_cancels() -> None:
     _type_query(state, "kanpan")
     assert _handle_search_key(state, "esc") is True
     assert state.search_input is None
-    assert state.focused_agent_id == _search_entry_id("lima-host-dir")
+    assert state.focused_instance_key == _search_entry_instance_key("lima-host-dir")
 
 
 def test_handle_search_key_arrows_cycle() -> None:
@@ -4460,12 +4516,12 @@ class _PumpLoop:
 
 def _make_batch_state(commands: dict[str, CustomCommand], marks: dict[str, str]) -> _KanpanState:
     entries = tuple(make_board_entry(name=name) for name in marks)
-    id_by_name = {entry.name: entry.agent_id for entry in entries}
+    key_by_name = {entry.name: entry.instance_key for entry in entries}
     state = _make_state(snapshot=make_board_snapshot(entries=entries), commands=commands)
     state.loop = _PumpLoop(state.frame)
     state.batch_executor = _ImmediateExecutor()
     state.frame.footer = Text("keybinding-bar")
-    state.marks = {id_by_name[AgentName(name)]: key for name, key in marks.items()}
+    state.marks = {key_by_name[AgentName(name)]: key for name, key in marks.items()}
     return state
 
 
@@ -4498,7 +4554,7 @@ def test_batch_prompt_cancelled_runs_nothing_and_keeps_the_marks(tmp_path: Path)
     assert state.executing is False
     assert list(out_dir.iterdir()) == []
     assert state.snapshot is not None
-    assert set(state.marks) == {e.agent_id for e in state.snapshot.entries}
+    assert set(state.marks) == {e.instance_key for e in state.snapshot.entries}
 
 
 def test_batch_prompts_once_per_marked_command_and_keeps_the_answers_apart(tmp_path: Path) -> None:
@@ -5165,7 +5221,13 @@ def test_batch_submits_every_operation_before_collecting_any() -> None:
     state.batch_executor = executor
     cmd = CustomCommand(name="message", command="true", markable=True)
     work = [
-        _BatchWorkItem(agent_id=AgentId.generate(), name=AgentName(name), key="M", cmd=cmd, entry=None)
+        _BatchWorkItem(
+            instance_key=_random_instance_key(),
+            name=AgentName(name),
+            key="M",
+            cmd=cmd,
+            entry=None,
+        )
         for name in ("a", "b", "c")
     ]
 
@@ -5186,9 +5248,19 @@ def test_batch_progress_opens_with_an_unrunnable_item_already_counted() -> None:
     state.batch_executor = executor
     runnable = CustomCommand(name="message", command="true", markable=True)
     work = [
-        _BatchWorkItem(agent_id=AgentId.generate(), name=AgentName("a"), key="M", cmd=runnable, entry=None),
         _BatchWorkItem(
-            agent_id=AgentId.generate(), name=AgentName("b"), key="M", cmd=CustomCommand(name="noop"), entry=None
+            instance_key=_random_instance_key(),
+            name=AgentName("a"),
+            key="M",
+            cmd=runnable,
+            entry=None,
+        ),
+        _BatchWorkItem(
+            instance_key=_random_instance_key(),
+            name=AgentName("b"),
+            key="M",
+            cmd=CustomCommand(name="noop"),
+            entry=None,
         ),
     ]
 
@@ -5316,15 +5388,16 @@ def test_refresh_holds_the_view_when_the_focused_row_is_deleted() -> None:
     assert focused is not None and focused.name != doomed.name
 
 
-def test_nearest_surviving_id_prefers_the_row_below() -> None:
-    ids = [AgentId.generate() for _ in range(5)]
-    order = list(ids)
-    present = {ids[0], ids[3]}
-    # ids[2] is gone: ids[3] (below) wins over ids[0] (further above).
-    assert _nearest_surviving_id(order, ids[2], present) == ids[3]
+def test_nearest_surviving_instance_key_prefers_the_row_below() -> None:
+    keys = [_random_instance_key() for _ in range(5)]
+    order = list(keys)
+    present = {keys[0], keys[3]}
+    # keys[2] is gone: keys[3] (below) wins over keys[0] (further above).
+    assert _nearest_surviving_instance_key(order, keys[2], present) == keys[3]
     # With nothing below, it walks back up.
-    assert _nearest_surviving_id(order, ids[4], {ids[1]}) == ids[1]
+    assert _nearest_surviving_instance_key(order, keys[4], {keys[1]}) == keys[1]
     # Nothing left to anchor to at all.
-    assert _nearest_surviving_id(order, ids[2], set()) is None
-    # An id that was never on the board cannot be located.
-    assert _nearest_surviving_id(order, AgentId.generate(), present) is None
+    assert _nearest_surviving_instance_key(order, keys[2], set()) is None
+    # An instance that was never on the board cannot be located.
+    never_on_board = _random_instance_key()
+    assert _nearest_surviving_instance_key(order, never_on_board, present) is None

@@ -22,6 +22,7 @@ from imbue.mngr.api.discovery_reconciliation import classify_removed_item
 from imbue.mngr.api.discovery_reconciliation import is_intervening_event
 from imbue.mngr.api.discovery_reconciliation import parse_event_timestamp
 from imbue.mngr.api.discovery_reconciliation import should_apply_snapshot_item
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ProviderInstanceName
@@ -32,14 +33,19 @@ class AggregatorDelta(FrozenModel):
 
     Lets consumers that manage per-agent/per-host resources (event streams,
     reverse tunnels) react to exactly what appeared or disappeared, without
-    re-diffing the whole world. ``added`` ids became present; ``removed`` ids
+    re-diffing the whole world. ``added`` keys became present; ``removed`` keys
     became absent. Items whose data merely changed are reported in neither set.
+
+    Agents are identified by their :class:`AgentInstanceKey` (the
+    ``(host, agent)`` pair), never by the bare agent id: the same agent id may
+    exist on multiple hosts at once (e.g. mid-migration), and a delta must
+    distinguish which instance appeared or disappeared.
     """
 
-    added_agent_ids: frozenset[str] = Field(default_factory=frozenset)
-    removed_agent_ids: frozenset[str] = Field(default_factory=frozenset)
-    added_host_ids: frozenset[str] = Field(default_factory=frozenset)
-    removed_host_ids: frozenset[str] = Field(default_factory=frozenset)
+    added_agent_instances: frozenset[AgentInstanceKey] = Field(default=frozenset())
+    removed_agent_instances: frozenset[AgentInstanceKey] = Field(default=frozenset())
+    added_host_ids: frozenset[str] = Field(default=frozenset())
+    removed_host_ids: frozenset[str] = Field(default=frozenset())
 
 
 class DiscoveryStateAggregator(MutableModel):
@@ -52,22 +58,27 @@ class DiscoveryStateAggregator(MutableModel):
     observed during a snapshot's discovery span is never clobbered by that snapshot
     (see :func:`should_apply_snapshot_item` / :func:`classify_removed_item`).
 
+    Agents are keyed by :class:`AgentInstanceKey` (the ``(host, agent)`` pair):
+    the same agent id may exist on multiple hosts at once, and each instance is
+    tracked independently -- notably, an agent-destroyed event for one host
+    never evicts a same-id agent on another host.
+
     Thread-safe: every public method holds an internal lock, so a consumer may feed
     events from one thread while another reads the accumulated state.
     """
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _agent_by_id: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
+    _agent_by_instance: dict[AgentInstanceKey, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _host_by_id: dict[str, DiscoveredHost] = PrivateAttr(default_factory=dict)
-    _provider_name_by_agent_id: dict[str, str] = PrivateAttr(default_factory=dict)
+    _provider_name_by_agent_instance: dict[AgentInstanceKey, str] = PrivateAttr(default_factory=dict)
     _provider_name_by_host_id: dict[str, str] = PrivateAttr(default_factory=dict)
     _provider_by_name: dict[ProviderInstanceName, DiscoveredProvider] = PrivateAttr(default_factory=dict)
     _error_by_provider_name: dict[ProviderInstanceName, DiscoveryError] = PrivateAttr(default_factory=dict)
-    _unknown_agent_ids: set[str] = PrivateAttr(default_factory=set)
+    _unknown_agent_instances: set[AgentInstanceKey] = PrivateAttr(default_factory=set)
     _unknown_host_ids: set[str] = PrivateAttr(default_factory=set)
     # Most recent incremental-event time per item, used to refuse clobbering by an
     # in-flight snapshot whose span the event falls within.
-    _last_event_time_by_agent_id: dict[str, datetime] = PrivateAttr(default_factory=dict)
+    _last_event_time_by_agent_instance: dict[AgentInstanceKey, datetime] = PrivateAttr(default_factory=dict)
     _last_event_time_by_host_id: dict[str, datetime] = PrivateAttr(default_factory=dict)
     _last_event_at: datetime | None = PrivateAttr(default=None)
     _last_snapshot_at_by_provider: dict[ProviderInstanceName, datetime] = PrivateAttr(default_factory=dict)
@@ -101,7 +112,7 @@ class DiscoveryStateAggregator(MutableModel):
 
     def _apply_provider_snapshot(self, event: ProviderDiscoverySnapshotEvent) -> AggregatorDelta:
         with self._lock:
-            before_agent_ids = frozenset(self._agent_by_id)
+            before_agent_instances = frozenset(self._agent_by_instance)
             before_host_ids = frozenset(self._host_by_id)
 
             provider_name = event.provider_name
@@ -126,8 +137,8 @@ class DiscoveryStateAggregator(MutableModel):
             self._bump_last_event_at(event.discovery_finished_at)
 
             return _membership_delta(
-                before_agent_ids,
-                frozenset(self._agent_by_id),
+                before_agent_instances,
+                frozenset(self._agent_by_instance),
                 before_host_ids,
                 frozenset(self._host_by_id),
             )
@@ -138,49 +149,52 @@ class DiscoveryStateAggregator(MutableModel):
         provider_str: str,
         is_errored: bool,
     ) -> None:
-        snapshot_agent_by_id = {str(agent.agent_id): agent for agent in event.agents}
+        snapshot_agent_by_instance = {agent.instance_key: agent for agent in event.agents}
+        # The snapshot's unknown-agent marker is id-scoped on the wire; every prior
+        # instance whose bare id is marked unknown is conservatively retained.
         unknown_agent_ids = {str(agent_id) for agent_id in event.unknown_agent_ids}
         # Hosts whose read timed out this poll: their agents were never read, so an
         # agent absent from this snapshot but living on such a host is unknown, not gone.
         unknown_host_ids = {str(host_id) for host_id in event.unknown_host_ids}
 
         # Apply each snapshot agent unless a newer event already updated it.
-        for agent_id_str, agent in snapshot_agent_by_id.items():
+        for instance_key, agent in snapshot_agent_by_instance.items():
             has_intervening = is_intervening_event(
-                self._last_event_time_by_agent_id.get(agent_id_str), event.discovery_started_at
+                self._last_event_time_by_agent_instance.get(instance_key), event.discovery_started_at
             )
             if should_apply_snapshot_item(has_intervening):
-                self._agent_by_id[agent_id_str] = agent
-                self._provider_name_by_agent_id[agent_id_str] = provider_str
-                self._unknown_agent_ids.discard(agent_id_str)
+                self._agent_by_instance[instance_key] = agent
+                self._provider_name_by_agent_instance[instance_key] = provider_str
+                self._unknown_agent_instances.discard(instance_key)
 
         # Reconcile agents we previously attributed to this provider that are absent
         # from the snapshot. Scope the diff to THIS provider so other providers'
         # agents are never touched.
-        prior_provider_agent_ids = {
-            agent_id_str for agent_id_str, name in self._provider_name_by_agent_id.items() if name == provider_str
+        prior_provider_instances = {
+            instance_key
+            for instance_key, name in self._provider_name_by_agent_instance.items()
+            if name == provider_str
         }
-        removed_agent_ids = prior_provider_agent_ids - set(snapshot_agent_by_id)
-        for agent_id_str in removed_agent_ids:
-            if agent_id_str in unknown_agent_ids:
+        removed_agent_instances = prior_provider_instances - set(snapshot_agent_by_instance)
+        for instance_key in removed_agent_instances:
+            if str(instance_key.agent_id) in unknown_agent_ids:
                 # Explicitly unknown (sub-provider timeout): retain prior data, mark unknown.
-                self._unknown_agent_ids.add(agent_id_str)
+                self._unknown_agent_instances.add(instance_key)
                 continue
-            prior_agent = self._agent_by_id.get(agent_id_str)
-            if prior_agent is not None and str(prior_agent.host_id) in unknown_host_ids:
+            if str(instance_key.host_id) in unknown_host_ids:
                 # The agent's host timed out, so its agents were never read this poll:
                 # retain the agent's prior data and mark it unknown rather than dropping it.
-                self._unknown_agent_ids.add(agent_id_str)
+                self._unknown_agent_instances.add(instance_key)
                 continue
             has_intervening = is_intervening_event(
-                self._last_event_time_by_agent_id.get(agent_id_str), event.discovery_started_at
+                self._last_event_time_by_agent_instance.get(instance_key), event.discovery_started_at
             )
             decision = classify_removed_item(is_errored, has_intervening)
             if decision is RemovedItemDecision.DROP:
-                self._forget_agent(agent_id_str)
+                self._forget_agent(instance_key)
             elif is_errored:
                 # Provider errored: keep the agent but surface it as unknown/stale.
-                self._unknown_agent_ids.add(agent_id_str)
+                self._unknown_agent_instances.add(instance_key)
             else:
                 # Retained because a newer event landed during the snapshot's span:
                 # that event already set the agent's state, so leave it as-is.
@@ -228,16 +242,16 @@ class DiscoveryStateAggregator(MutableModel):
     def _apply_agent_discovered(self, event: AgentDiscoveryEvent) -> AggregatorDelta:
         event_at = parse_event_timestamp(event.timestamp)
         agent = event.agent
-        agent_id_str = str(agent.agent_id)
+        instance_key = agent.instance_key
         with self._lock:
-            was_present = agent_id_str in self._agent_by_id
-            self._agent_by_id[agent_id_str] = agent
-            self._provider_name_by_agent_id[agent_id_str] = str(agent.provider_name)
-            self._unknown_agent_ids.discard(agent_id_str)
-            self._last_event_time_by_agent_id[agent_id_str] = event_at
+            was_present = instance_key in self._agent_by_instance
+            self._agent_by_instance[instance_key] = agent
+            self._provider_name_by_agent_instance[instance_key] = str(agent.provider_name)
+            self._unknown_agent_instances.discard(instance_key)
+            self._last_event_time_by_agent_instance[instance_key] = event_at
             self._bump_last_event_at(event_at)
-            added = frozenset() if was_present else frozenset({agent_id_str})
-            return AggregatorDelta(added_agent_ids=added)
+            added = frozenset() if was_present else frozenset({instance_key})
+            return AggregatorDelta(added_agent_instances=added)
 
     def _apply_host_discovered(self, event: HostDiscoveryEvent) -> AggregatorDelta:
         event_at = parse_event_timestamp(event.timestamp)
@@ -255,32 +269,34 @@ class DiscoveryStateAggregator(MutableModel):
 
     def _apply_agent_destroyed(self, event: AgentDestroyedEvent) -> AggregatorDelta:
         event_at = parse_event_timestamp(event.timestamp)
-        agent_id_str = str(event.agent_id)
+        # Host-scoped: destroying (host A, id X) must never evict a same-id
+        # agent on another host (the migration-overlap case).
+        instance_key = AgentInstanceKey.build(event.agent_id, event.host_id)
         with self._lock:
-            was_present = agent_id_str in self._agent_by_id
-            self._forget_agent(agent_id_str)
+            was_present = instance_key in self._agent_by_instance
+            self._forget_agent(instance_key)
             # Record the destroy time so a snapshot whose span predates it cannot resurrect the agent.
-            self._last_event_time_by_agent_id[agent_id_str] = event_at
+            self._last_event_time_by_agent_instance[instance_key] = event_at
             self._bump_last_event_at(event_at)
-            removed = frozenset({agent_id_str}) if was_present else frozenset()
-            return AggregatorDelta(removed_agent_ids=removed)
+            removed = frozenset({instance_key}) if was_present else frozenset()
+            return AggregatorDelta(removed_agent_instances=removed)
 
     def _apply_host_destroyed(self, event: HostDestroyedEvent) -> AggregatorDelta:
         event_at = parse_event_timestamp(event.timestamp)
         host_id_str = str(event.host_id)
-        agent_id_strs = [str(agent_id) for agent_id in event.agent_ids]
+        instance_keys = [AgentInstanceKey.build(agent_id, event.host_id) for agent_id in event.agent_ids]
         with self._lock:
             removed_host = frozenset({host_id_str}) if host_id_str in self._host_by_id else frozenset()
             self._forget_host(host_id_str)
             self._last_event_time_by_host_id[host_id_str] = event_at
-            removed_agents: set[str] = set()
-            for agent_id_str in agent_id_strs:
-                if agent_id_str in self._agent_by_id:
-                    removed_agents.add(agent_id_str)
-                self._forget_agent(agent_id_str)
-                self._last_event_time_by_agent_id[agent_id_str] = event_at
+            removed_agents: set[AgentInstanceKey] = set()
+            for instance_key in instance_keys:
+                if instance_key in self._agent_by_instance:
+                    removed_agents.add(instance_key)
+                self._forget_agent(instance_key)
+                self._last_event_time_by_agent_instance[instance_key] = event_at
             self._bump_last_event_at(event_at)
-            return AggregatorDelta(removed_host_ids=removed_host, removed_agent_ids=frozenset(removed_agents))
+            return AggregatorDelta(removed_host_ids=removed_host, removed_agent_instances=frozenset(removed_agents))
 
     def _apply_discovery_error(self, event: DiscoveryErrorEvent) -> AggregatorDelta:
         event_at = parse_event_timestamp(event.timestamp)
@@ -295,10 +311,10 @@ class DiscoveryStateAggregator(MutableModel):
             self._bump_last_event_at(event_at)
             return AggregatorDelta()
 
-    def _forget_agent(self, agent_id_str: str) -> None:
-        self._agent_by_id.pop(agent_id_str, None)
-        self._provider_name_by_agent_id.pop(agent_id_str, None)
-        self._unknown_agent_ids.discard(agent_id_str)
+    def _forget_agent(self, instance_key: AgentInstanceKey) -> None:
+        self._agent_by_instance.pop(instance_key, None)
+        self._provider_name_by_agent_instance.pop(instance_key, None)
+        self._unknown_agent_instances.discard(instance_key)
 
     def _forget_host(self, host_id_str: str) -> None:
         self._host_by_id.pop(host_id_str, None)
@@ -313,11 +329,11 @@ class DiscoveryStateAggregator(MutableModel):
 
     def get_agents(self) -> list[DiscoveredAgent]:
         with self._lock:
-            return list(self._agent_by_id.values())
+            return list(self._agent_by_instance.values())
 
-    def get_agent_by_id(self) -> dict[str, DiscoveredAgent]:
+    def get_agent_by_instance(self) -> dict[AgentInstanceKey, DiscoveredAgent]:
         with self._lock:
-            return dict(self._agent_by_id)
+            return dict(self._agent_by_instance)
 
     def get_hosts(self) -> list[DiscoveredHost]:
         with self._lock:
@@ -335,9 +351,9 @@ class DiscoveryStateAggregator(MutableModel):
         with self._lock:
             return dict(self._error_by_provider_name)
 
-    def get_unknown_agent_ids(self) -> frozenset[str]:
+    def get_unknown_agent_instances(self) -> frozenset[AgentInstanceKey]:
         with self._lock:
-            return frozenset(self._unknown_agent_ids)
+            return frozenset(self._unknown_agent_instances)
 
     def get_unknown_host_ids(self) -> frozenset[str]:
         with self._lock:
@@ -366,15 +382,15 @@ class DiscoveryStateAggregator(MutableModel):
 
 @pure
 def _membership_delta(
-    before_agent_ids: frozenset[str],
-    after_agent_ids: frozenset[str],
+    before_agent_instances: frozenset[AgentInstanceKey],
+    after_agent_instances: frozenset[AgentInstanceKey],
     before_host_ids: frozenset[str],
     after_host_ids: frozenset[str],
 ) -> AggregatorDelta:
-    """Compute appeared/disappeared id sets between two membership snapshots."""
+    """Compute appeared/disappeared key sets between two membership snapshots."""
     return AggregatorDelta(
-        added_agent_ids=after_agent_ids - before_agent_ids,
-        removed_agent_ids=before_agent_ids - after_agent_ids,
+        added_agent_instances=after_agent_instances - before_agent_instances,
+        removed_agent_instances=before_agent_instances - after_agent_instances,
         added_host_ids=after_host_ids - before_host_ids,
         removed_host_ids=before_host_ids - after_host_ids,
     )

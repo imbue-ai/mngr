@@ -23,7 +23,7 @@ Agent state is separated into two classes:
 
 | JSON Path (within `data.json`) | Notes                                             |
 |--------------------------------|---------------------------------------------------|
-| `id`                           | Unique identifier.                                |
+| `id`                           | Identifier, unique per host (NOT globally: the same id may exist on multiple hosts, e.g. mid-migration). |
 | `name`                         | Human-readable name                               |
 | `type`                         | Agent type (claude, codex, etc.)                  |
 | `command`                      | The command used to start the agent               |

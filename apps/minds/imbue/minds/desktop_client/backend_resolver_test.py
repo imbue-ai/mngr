@@ -1437,6 +1437,31 @@ def test_mngr_cli_resolver_get_agent_display_info_returns_none_for_unknown_agent
     assert resolver.get_agent_display_info(_AGENT_B) is None
 
 
+def test_mngr_cli_resolver_get_agent_display_info_picks_smallest_host_for_duplicated_id() -> None:
+    """A workspace id on two machines (agent ids are unique per host) resolves deterministically.
+
+    The instances are fed in descending host-id order to prove the selection sorts
+    by host id rather than following discovery order, so the displayed machine
+    cannot flap between refreshes during a migration window.
+    """
+    host_id_small = "host-" + "0" * 31 + "1"
+    host_id_large = "host-" + "0" * 31 + "2"
+    agents_json = json.dumps(
+        {
+            "agents": [
+                {"id": str(_AGENT_A), "host": {"id": host_id_large, "name": "machine-two"}},
+                {"id": str(_AGENT_A), "host": {"id": host_id_small, "name": "machine-one"}},
+            ]
+        }
+    )
+    resolver = make_resolver_with_data(agents_json=agents_json, service_logs={})
+
+    info = resolver.get_agent_display_info(_AGENT_A)
+
+    assert info is not None
+    assert info.host_id == host_id_small
+
+
 # -- BackendResolverInterface.get_agent_display_info default --
 
 

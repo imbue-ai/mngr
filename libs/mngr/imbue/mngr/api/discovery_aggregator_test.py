@@ -159,7 +159,7 @@ def test_apply_provider_snapshot_adds_agents_and_hosts() -> None:
 
     assert {a.agent_id for a in aggregator.get_agents()} == {agent.agent_id}
     assert {h.host_id for h in aggregator.get_hosts()} == {host.host_id}
-    assert delta.added_agent_ids == frozenset({str(agent.agent_id)})
+    assert delta.added_agent_instances == frozenset({agent.instance_key})
     assert delta.added_host_ids == frozenset({str(host.host_id)})
 
 
@@ -189,7 +189,7 @@ def test_errored_provider_snapshot_retains_prior_agents_as_unknown() -> None:
 
     # The agent is retained (not dropped) and surfaced as unknown.
     assert agent.agent_id in {a.agent_id for a in aggregator.get_agents()}
-    assert str(agent.agent_id) in aggregator.get_unknown_agent_ids()
+    assert agent.instance_key in aggregator.get_unknown_agent_instances()
     assert ProviderInstanceName("modal") in aggregator.get_error_by_provider_name()
 
 
@@ -200,7 +200,7 @@ def test_healthy_provider_snapshot_drops_absent_agent() -> None:
     aggregator.apply_event(_snapshot("docker", (), ()))
 
     assert aggregator.get_agents() == []
-    assert str(agent.agent_id) not in aggregator.get_unknown_agent_ids()
+    assert agent.instance_key not in aggregator.get_unknown_agent_instances()
 
 
 def test_unknown_agent_id_in_snapshot_retains_and_marks_unknown() -> None:
@@ -211,7 +211,7 @@ def test_unknown_agent_id_in_snapshot_retains_and_marks_unknown() -> None:
     aggregator.apply_event(_snapshot("vps", (), (), unknown_agent_ids=(agent.agent_id,)))
 
     assert agent.agent_id in {a.agent_id for a in aggregator.get_agents()}
-    assert str(agent.agent_id) in aggregator.get_unknown_agent_ids()
+    assert agent.instance_key in aggregator.get_unknown_agent_instances()
 
 
 def test_unknown_host_in_snapshot_retains_its_agents_as_unknown() -> None:
@@ -228,7 +228,7 @@ def test_unknown_host_in_snapshot_retains_its_agents_as_unknown() -> None:
     assert host.host_id in {h.host_id for h in aggregator.get_hosts()}
     assert str(host.host_id) in aggregator.get_unknown_host_ids()
     assert agent.agent_id in {a.agent_id for a in aggregator.get_agents()}
-    assert str(agent.agent_id) in aggregator.get_unknown_agent_ids()
+    assert agent.instance_key in aggregator.get_unknown_agent_instances()
 
 
 def test_error_then_success_clears_error_and_unknown() -> None:
@@ -237,11 +237,11 @@ def test_error_then_success_clears_error_and_unknown() -> None:
     aggregator.apply_event(_snapshot("modal", (agent,), ()))
     error = DiscoveryError(type_name="X", message="y", provider_name=ProviderInstanceName("modal"))
     aggregator.apply_event(_snapshot("modal", (), (), error=error))
-    assert str(agent.agent_id) in aggregator.get_unknown_agent_ids()
+    assert agent.instance_key in aggregator.get_unknown_agent_instances()
 
     # Provider recovers and re-lists the agent.
     aggregator.apply_event(_snapshot("modal", (agent,), ()))
-    assert str(agent.agent_id) not in aggregator.get_unknown_agent_ids()
+    assert agent.instance_key not in aggregator.get_unknown_agent_instances()
     assert ProviderInstanceName("modal") not in aggregator.get_error_by_provider_name()
 
 
@@ -316,7 +316,7 @@ def test_state_change_during_span_is_not_clobbered_by_in_flight_snapshot() -> No
         _snapshot("docker", (stale_agent,), (), started_at=span_start, finished_at=span_start + timedelta(seconds=2))
     )
 
-    current = aggregator.get_agent_by_id()[str(agent_id)]
+    current = aggregator.get_agent_by_instance()[fresh_agent.instance_key]
     assert current.certified_data["work_dir"] == "/new"
 
 
@@ -331,7 +331,7 @@ def test_host_destroyed_event_removes_host_and_its_agents() -> None:
     assert aggregator.get_hosts() == []
     assert aggregator.get_agents() == []
     assert delta.removed_host_ids == frozenset({str(host.host_id)})
-    assert delta.removed_agent_ids == frozenset({str(agent.agent_id)})
+    assert delta.removed_agent_instances == frozenset({agent.instance_key})
 
 
 # === Freshness + provider metadata ===
@@ -393,3 +393,66 @@ def test_provider_discovery_snapshot_event_round_trips() -> None:
     assert len(parsed.hosts) == 1
     assert len(parsed.unknown_agent_ids) == 1
     assert parsed.discovery_started_at == event.discovery_started_at
+
+
+# === Duplicate agent ids across hosts (the migration-overlap case) ===
+
+
+def test_agent_destroyed_on_one_host_does_not_evict_same_id_on_another_host() -> None:
+    """The keystone regression: destroying (host A, id X) must never evict (host B, id X)."""
+    aggregator = DiscoveryStateAggregator()
+    shared_agent_id = AgentId.generate()
+    host_a = _make_host("docker", "host-a")
+    host_b = _make_host("docker", "host-b")
+    agent_on_a = DiscoveredAgent(
+        host_id=host_a.host_id,
+        agent_id=shared_agent_id,
+        agent_name=AgentName("migrating"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    agent_on_b = DiscoveredAgent(
+        host_id=host_b.host_id,
+        agent_id=shared_agent_id,
+        agent_name=AgentName("migrating"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    aggregator.apply_event(_snapshot("docker", (agent_on_a, agent_on_b), (host_a, host_b)))
+    assert len(aggregator.get_agents()) == 2
+
+    delta = aggregator.apply_event(_agent_destroyed(agent_on_a, at=_BASE_TIME + timedelta(seconds=5)))
+
+    assert delta.removed_agent_instances == frozenset({agent_on_a.instance_key})
+    surviving = aggregator.get_agent_by_instance()
+    assert agent_on_a.instance_key not in surviving
+    assert agent_on_b.instance_key in surviving
+
+
+def test_two_providers_reporting_same_agent_id_keep_both_instances() -> None:
+    """A duplicated id across providers must not flip-flop between their snapshots."""
+    aggregator = DiscoveryStateAggregator()
+    shared_agent_id = AgentId.generate()
+    docker_agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=shared_agent_id,
+        agent_name=AgentName("migrating"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    modal_agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=shared_agent_id,
+        agent_name=AgentName("migrating"),
+        provider_name=ProviderInstanceName("modal"),
+        certified_data={},
+    )
+    aggregator.apply_event(_snapshot("docker", (docker_agent,), ()))
+    aggregator.apply_event(_snapshot("modal", (modal_agent,), ()))
+
+    # A later per-provider snapshot from each side must leave the other's instance alone.
+    aggregator.apply_event(_snapshot("docker", (docker_agent,), (), started_at=_BASE_TIME + timedelta(seconds=10)))
+    aggregator.apply_event(_snapshot("modal", (modal_agent,), (), started_at=_BASE_TIME + timedelta(seconds=10)))
+
+    surviving = aggregator.get_agent_by_instance()
+    assert set(surviving) == {docker_agent.instance_key, modal_agent.instance_key}

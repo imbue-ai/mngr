@@ -8,6 +8,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
@@ -16,6 +17,7 @@ from imbue.mngr.cli.destroy import _destroy_single_offline_host
 from imbue.mngr.cli.destroy import _drop_targets_covered_by_explicit_hosts
 from imbue.mngr.cli.destroy import _emit_dry_run_entries
 from imbue.mngr.cli.destroy import _output_result
+from imbue.mngr.cli.destroy import _warn_on_multi_instance_id_addresses
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
 from imbue.mngr.config.data_types import MngrContext
@@ -28,10 +30,15 @@ from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def test_get_agent_name_from_session_extracts_name() -> None:
@@ -729,3 +736,49 @@ def test_destroy_single_host_records_explicit_host_destruction(temp_mngr_ctx: Mn
     assert destroyed_agents == [AgentName("rider-agent")]
     assert destroyed_host_names == [host.get_name()]
     assert failures == []
+
+
+# === _warn_on_multi_instance_id_addresses ===
+
+
+def _make_agent_match(agent_id: AgentId, host_name: str) -> AgentMatch:
+    return AgentMatch(
+        agent_id=agent_id,
+        agent_name=AgentName("migrating-agent"),
+        host_id=HostId.generate(),
+        host_name=HostName(host_name),
+        provider_name=ProviderInstanceName("docker"),
+    )
+
+
+def test_warn_on_multi_instance_id_addresses_lists_every_instance_for_a_bare_id() -> None:
+    """A bare agent-id address matching instances on two hosts warns with the full instance list."""
+    shared_agent_id = AgentId.generate()
+    matches = [_make_agent_match(shared_agent_id, "host-one"), _make_agent_match(shared_agent_id, "host-two")]
+
+    with capture_loguru(level="WARNING") as log_output:
+        _warn_on_multi_instance_id_addresses([AgentAddress(agent=shared_agent_id)], matches)
+
+    warning = log_output.getvalue()
+    assert "ALL of which will be destroyed" in warning
+    assert "ID@HOST" in warning
+    for match in matches:
+        assert f"{match.agent_id}@{match.host_id}" in warning
+
+
+def test_warn_on_multi_instance_id_addresses_is_silent_when_not_ambiguous() -> None:
+    """No warning for a single-instance id, a host-scoped id address, or a name address."""
+    shared_agent_id = AgentId.generate()
+    matches = [_make_agent_match(shared_agent_id, "host-one"), _make_agent_match(shared_agent_id, "host-two")]
+
+    with capture_loguru(level="WARNING") as log_output:
+        # Bare id matching exactly one instance.
+        _warn_on_multi_instance_id_addresses([AgentAddress(agent=shared_agent_id)], matches[:1])
+        # Host-scoped id address: the user already picked the instance.
+        _warn_on_multi_instance_id_addresses(
+            [AgentAddress(agent=shared_agent_id, host=HostAddress(host=matches[0].host_id))], matches
+        )
+        # Name address: plural name matches are the documented filter semantics.
+        _warn_on_multi_instance_id_addresses([AgentAddress(agent=AgentName("migrating-agent"))], matches)
+
+    assert log_output.getvalue() == ""

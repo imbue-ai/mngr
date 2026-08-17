@@ -4,7 +4,11 @@ An agent is simply a process running in window 0 of a properly-named tmux sessio
 
 Each agent runs inside a working directory (`work_dir`) on a [host](./hosts.md).
 
-Each agent has a name, a unique identifier (`agent-id`), and is a particular ["agent type"](agent_types.md).
+Each agent has a name, an identifier (`agent-id`), and is a particular ["agent type"](agent_types.md).
+
+An agent's id is its stable logical identity, and it is unique *per host*, not globally: the same agent id may exist on multiple hosts at the same time (for example while an agent is being migrated from one host to another).
+When an id matches agents on more than one host, address the exact instance as `ID@HOST` (see [addresses](address.md)).
+Reusing an id (via `mngr create --id`) means "this is the same agent"; to make an independent copy of an agent, use `mngr clone`, which mints a new id.
 
 Each agent can have **labels** -- key-value string pairs that provide metadata about the agent. The most common label is `project`, which is automatically set based on the git remote origin or folder name. Labels are used for filtering and organizing agents (e.g., `mngr list --project mngr` or `mngr list --label env=prod`).
 

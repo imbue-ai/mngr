@@ -116,21 +116,25 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
 
 
 class ResolverSnapshotPayload(FrozenModel):
-    """Emitted on every resolver mutation: full per-agent service map.
+    """Emitted on every resolver mutation: full per-instance service map.
 
-    Carries the full ``{agent_id: {service_name: url}}`` map held by the
-    plugin's ``ForwardResolver`` at the moment of mutation. A consumer can
-    keep the latest copy in process state to mirror which services the
-    plugin has resolved for a given agent (e.g. for diagnostics).
+    Carries the full ``{"<agent_id>@<host_id>": {service_name: url}}`` map held
+    by the plugin's ``ForwardResolver`` at the moment of mutation. Keys are
+    agent *instance* keys (agent ids are unique per host, not globally, so the
+    same id on two hosts keeps two independent entries). A consumer can keep
+    the latest copy in process state to mirror which services the plugin has
+    resolved for a given agent instance (e.g. for diagnostics).
 
-    The full map is sent on every change (no per-agent diff) so a consumer
+    The full map is sent on every change (no per-instance diff) so a consumer
     that connects late only needs the most recent envelope to be in sync.
     """
 
     type: Literal["resolver_snapshot"] = "resolver_snapshot"
+    # The wire field name stays ``services_by_agent`` for compatibility with
+    # existing consumers; only the key form changed to instance keys.
     services_by_agent: dict[str, dict[str, str]] = Field(
         default_factory=dict,
-        description="Full per-agent service map: {agent_id_str: {service_name: url}}",
+        description="Full per-instance service map: {'<agent_id>@<host_id>': {service_name: url}}",
     )
 
 

@@ -3121,7 +3121,20 @@ log "=== Shutdown script completed ==="
                 updated_certified_data,
             ),
         )
-        self._get_host(host_id, host_record=updated_host_record).set_certified_data(updated_certified_data)
+        host = self._get_host(host_id, host_record=updated_host_record)
+        if isinstance(host, OnlineHostInterface):
+            # A Modal filesystem snapshot transiently breaks new connections through the
+            # sandbox's tunnels: for a window afterwards (longer when Modal is under
+            # load), the tunnel edge accepts TCP and then closes it without an SSH
+            # banner. The certified-data write below opens a fresh SSH connection, so
+            # re-verify the tunnel with a full handshake probe first, just like host
+            # creation does after boot. This also means create/snapshot only returns
+            # once the tunnel is healthy again, so follow-up commands don't hit the
+            # same window.
+            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
+            with log_span("Waiting for the SSH tunnel to recover after the snapshot"):
+                self._wait_for_sshd(ssh_host, ssh_port, self.config.ssh_connect_timeout)
+        host.set_certified_data(updated_certified_data)
         logger.debug(
             "Created snapshot: id={}, name={}",
             snapshot_id,

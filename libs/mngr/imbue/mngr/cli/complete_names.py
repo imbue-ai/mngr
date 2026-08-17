@@ -81,15 +81,15 @@ def _find_replay_start_idx(lines: list[str]) -> int:
 
 def _drop_provider_state(
     provider_name: str,
-    agent_name_by_id: dict[str, str],
+    agent_name_by_instance: dict[str, str],
     host_name_by_id: dict[str, str],
-    provider_by_agent_id: dict[str, str],
+    provider_by_agent_instance: dict[str, str],
     provider_by_host_id: dict[str, str],
 ) -> None:
     """Forget every agent/host attributed to one provider (its per-provider snapshot supersedes them)."""
-    for agent_id in [aid for aid, prov in provider_by_agent_id.items() if prov == provider_name]:
-        agent_name_by_id.pop(agent_id, None)
-        provider_by_agent_id.pop(agent_id, None)
+    for instance_key in [key for key, prov in provider_by_agent_instance.items() if prov == provider_name]:
+        agent_name_by_instance.pop(instance_key, None)
+        provider_by_agent_instance.pop(instance_key, None)
     for host_id in [hid for hid, prov in provider_by_host_id.items() if prov == provider_name]:
         host_name_by_id.pop(host_id, None)
         provider_by_host_id.pop(host_id, None)
@@ -120,12 +120,14 @@ def resolve_names_from_discovery_stream(
     start_idx = _find_replay_start_idx(all_lines)
     lines_to_replay = all_lines[start_idx:]
 
-    # Map from agent_id -> agent_name for currently active agents.
-    agent_name_by_id: dict[str, str] = {}
+    # Map from agent instance key ("<agent_id>@<host_id>") -> agent_name for
+    # currently active agents. Agent ids are unique per host, not globally, so a
+    # host-scoped destroy must only forget that host's instance.
+    agent_name_by_instance: dict[str, str] = {}
     # Map from host_id -> host_name for currently active hosts.
     host_name_by_id: dict[str, str] = {}
     # Provider attribution, so a per-provider snapshot can reset only its own items.
-    provider_by_agent_id: dict[str, str] = {}
+    provider_by_agent_instance: dict[str, str] = {}
     provider_by_host_id: dict[str, str] = {}
 
     for line in lines_to_replay:
@@ -140,12 +142,12 @@ def resolve_names_from_discovery_stream(
         event_type = data.get("type")
         if event_type == "DISCOVERY_FULL":
             # Legacy global snapshot: reset all state, then repopulate.
-            agent_name_by_id.clear()
+            agent_name_by_instance.clear()
             host_name_by_id.clear()
-            provider_by_agent_id.clear()
+            provider_by_agent_instance.clear()
             provider_by_host_id.clear()
             for agent in data.get("agents", ()):
-                _record_agent(agent, agent_name_by_id, provider_by_agent_id)
+                _record_agent(agent, agent_name_by_instance, provider_by_agent_instance)
             for host in data.get("hosts", ()):
                 _record_host(host, host_name_by_id, provider_by_host_id)
 
@@ -153,24 +155,28 @@ def resolve_names_from_discovery_stream(
             # Per-provider snapshot: reset only this provider's items, then repopulate.
             provider_name = data.get("provider_name", "")
             _drop_provider_state(
-                provider_name, agent_name_by_id, host_name_by_id, provider_by_agent_id, provider_by_host_id
+                provider_name, agent_name_by_instance, host_name_by_id, provider_by_agent_instance, provider_by_host_id
             )
             for agent in data.get("agents", ()):
-                _record_agent(agent, agent_name_by_id, provider_by_agent_id)
+                _record_agent(agent, agent_name_by_instance, provider_by_agent_instance)
             for host in data.get("hosts", ()):
                 _record_host(host, host_name_by_id, provider_by_host_id)
 
         elif event_type == "AGENT_DISCOVERED":
-            _record_agent(data.get("agent", {}), agent_name_by_id, provider_by_agent_id)
+            _record_agent(data.get("agent", {}), agent_name_by_instance, provider_by_agent_instance)
 
         elif event_type == "HOST_DISCOVERED":
             _record_host(data.get("host", {}), host_name_by_id, provider_by_host_id)
 
         elif event_type == "AGENT_DESTROYED":
+            # Host-scoped: the same agent id may exist on another host, and its
+            # name must survive this host's destroy.
             agent_id = data.get("agent_id", "")
+            host_id = data.get("host_id", "")
             if agent_id:
-                agent_name_by_id.pop(agent_id, None)
-                provider_by_agent_id.pop(agent_id, None)
+                instance_key = f"{agent_id}@{host_id}"
+                agent_name_by_instance.pop(instance_key, None)
+                provider_by_agent_instance.pop(instance_key, None)
 
         elif event_type == "HOST_DESTROYED":
             host_id = data.get("host_id", "")
@@ -179,28 +185,30 @@ def resolve_names_from_discovery_stream(
                 provider_by_host_id.pop(host_id, None)
                 # Remove all agents belonging to this host.
                 for agent_id in data.get("agent_ids", []):
-                    agent_name_by_id.pop(agent_id, None)
-                    provider_by_agent_id.pop(agent_id, None)
+                    instance_key = f"{agent_id}@{host_id}"
+                    agent_name_by_instance.pop(instance_key, None)
+                    provider_by_agent_instance.pop(instance_key, None)
 
         else:
             pass
 
-    agent_names = sorted(set(agent_name_by_id.values()))
+    agent_names = sorted(set(agent_name_by_instance.values()))
     host_names = sorted(set(host_name_by_id.values()))
     return agent_names, host_names
 
 
 def _record_agent(
     agent: dict[str, Any],
-    agent_name_by_id: dict[str, str],
-    provider_by_agent_id: dict[str, str],
+    agent_name_by_instance: dict[str, str],
+    provider_by_agent_instance: dict[str, str],
 ) -> None:
     """Record one discovered agent dict into the name/provider maps (no-op if it lacks id/name)."""
     agent_id = agent.get("agent_id", "")
     agent_name = agent.get("agent_name", "")
     if agent_id and agent_name:
-        agent_name_by_id[agent_id] = agent_name
-        provider_by_agent_id[agent_id] = agent.get("provider_name", "")
+        instance_key = f"{agent_id}@{agent.get('host_id', '')}"
+        agent_name_by_instance[instance_key] = agent_name
+        provider_by_agent_instance[instance_key] = agent.get("provider_name", "")
 
 
 def _record_host(
