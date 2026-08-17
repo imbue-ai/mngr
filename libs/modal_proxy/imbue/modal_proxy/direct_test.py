@@ -46,6 +46,7 @@ from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
+from imbue.modal_proxy.errors import is_deploy_function_vanished_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SecretInterface
@@ -344,6 +345,20 @@ def test_is_app_locked_error(message: str, expected: bool) -> None:
     assert is_app_locked_error(message) is expected
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        pytest.param("Error: Function fu-7O62Sp60LIHTdROU1VJl6q not found", True, id="real_modal_message"),
+        pytest.param("error: FUNCTION FU-abc123 NOT FOUND", True, id="case_insensitive"),
+        pytest.param("Lookup failed for Function 'snapshot_and_shutdown' not found", False, id="name_not_id"),
+        pytest.param("Failed to deploy snapshot.py: some other error", False, id="unrelated_error"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_is_deploy_function_vanished_error(message: str, expected: bool) -> None:
+    assert is_deploy_function_vanished_error(message) is expected
+
+
 # --- Deploy retry tests ---
 
 # The real Modal message; deploy must classify this as retryable.
@@ -382,6 +397,20 @@ def test_deploy_retries_on_locked_app_then_succeeds(tmp_path: Path, monkeypatch:
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
     # Should ride through the transient lock and return normally.
+    DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
+
+    assert counter.read_text().strip() == "2", "expected one failed attempt followed by a successful retry"
+
+
+def test_deploy_retries_on_vanished_function_then_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The function-vanished flavor of the concurrent-deploy race must retry like the app lock."""
+    bin_dir = tmp_path / "bin"
+    counter = tmp_path / "count"
+    _write_fake_modal(
+        bin_dir, counter, fail_times=1, error_message="Error: Function fu-7O62Sp60LIHTdROU1VJl6q not found"
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
     DirectModalInterface().deploy(tmp_path / "snapshot.py", app_name="my-app")
 
     assert counter.read_text().strip() == "2", "expected one failed attempt followed by a successful retry"

@@ -21,6 +21,25 @@ def is_app_locked_error(message: str) -> bool:
     return _APP_LOCKED_RE.search(message) is not None
 
 
+# The second wire shape of the same concurrent-deploy race: instead of the app
+# lock, the losing `modal deploy` can fail with "Function fu-<id> not found"
+# when the winning deploy finalizes a new app version and the loser's
+# freshly-minted function object vanishes mid-deploy. The id form (`fu-...`)
+# is only ever produced by the deploy in flight, so this wording cannot mean a
+# genuine misconfiguration (those reference functions by name, not id).
+_DEPLOY_FUNCTION_VANISHED_RE = re.compile(r"function fu-\w+ not found", re.IGNORECASE)
+
+
+def is_deploy_function_vanished_error(message: str) -> bool:
+    """Check whether a `modal deploy` failure is the function-vanished flavor of the concurrent-modification race.
+
+    Retrying the whole deploy succeeds once the racing deploy finishes (deploys
+    of the same script are idempotent), so callers should treat this exactly
+    like :func:`is_app_locked_error`.
+    """
+    return _DEPLOY_FUNCTION_VANISHED_RE.search(message) is not None
+
+
 def is_environment_not_found_error(e: Exception) -> bool:
     """Check if a not-found exception indicates the Modal environment itself is gone.
 
@@ -67,11 +86,14 @@ class ModalProxyRemoteError(ModalProxyError):
 
 
 class ModalProxyAppLockedError(ModalProxyError):
-    """Raised when a Modal app is locked due to a concurrent modification.
+    """Raised when a Modal operation fails due to a concurrent modification of the same app.
 
     Modal serializes mutations to a single app, so concurrent operations on the
     same app (e.g. parallel ``modal deploy`` calls, or a deploy racing app
-    creation) fail with "The selected app is locked". The lock is transient --
-    it is released once the conflicting operation completes -- so callers should
-    retry with backoff. See ``is_app_locked_error``.
+    creation) fail transiently. The race has two wire shapes: "The selected app
+    is locked" (see ``is_app_locked_error``), and the losing deploy's fresh
+    function id vanishing with "Function fu-<id> not found" when the winner
+    finalizes a new app version (see ``is_deploy_function_vanished_error``).
+    Both clear once the conflicting operation completes, so callers should
+    retry with backoff.
     """

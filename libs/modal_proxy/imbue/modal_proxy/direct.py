@@ -50,6 +50,7 @@ from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
+from imbue.modal_proxy.errors import is_deploy_function_vanished_error
 from imbue.modal_proxy.errors import is_environment_not_found_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
@@ -670,9 +671,11 @@ class DirectModalInterface(ModalInterface):
             output = (result.stdout + "\n" + result.stderr).strip()
             # A concurrent modification to the same app is transient: the lock
             # clears once the other operation finishes, so raise the retryable
-            # error type the deploy retry decorator rides through.
-            if is_app_locked_error(output):
-                raise ModalProxyAppLockedError(f"Failed to deploy {script_path} (app locked): {output}")
+            # error type the deploy retry decorator rides through. The race has
+            # two wire shapes -- the app lock, and the losing deploy's fresh
+            # function id vanishing when the winner finalizes a new version.
+            if is_app_locked_error(output) or is_deploy_function_vanished_error(output):
+                raise ModalProxyAppLockedError(f"Failed to deploy {script_path} (concurrent modification): {output}")
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
 
     def enable_output_capture(
