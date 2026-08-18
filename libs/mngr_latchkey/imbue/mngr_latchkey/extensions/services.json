@@ -141,6 +141,7 @@
     {
       "scope": "github-rest-api",
       "display_name": "GitHub (REST API)",
+      "service_display_name": "GitHub",
       "description": "Any interaction with the GitHub REST API.",
       "permissions": [
         {
@@ -212,12 +213,14 @@
     {
       "scope": "github-graphql-api",
       "display_name": "GitHub (GraphQL API)",
+      "service_display_name": "GitHub",
       "description": "Any interaction with the GitHub GraphQL API.",
       "permissions": []
     },
     {
       "scope": "github-git",
       "display_name": "GitHub (git)",
+      "service_display_name": "GitHub",
       "description": "Any Git protocol operation (clone, fetch, push) on GitHub.",
       "permissions": [
         {
@@ -235,6 +238,7 @@
     {
       "scope": "gitlab-api",
       "display_name": "GitLab (REST API)",
+      "service_display_name": "GitLab",
       "description": "Any request to GitLab.",
       "permissions": [
         {
@@ -302,6 +306,7 @@
     {
       "scope": "gitlab-git",
       "display_name": "GitLab (git)",
+      "service_display_name": "GitLab",
       "description": "Git operations (clone, fetch, push) on GitLab repositories.",
       "permissions": [
         {

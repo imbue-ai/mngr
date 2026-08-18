@@ -452,7 +452,7 @@ def build_permission_overview(
     overviews = [
         ServicePermissionOverview(
             service_name=service_name,
-            display_name=services_catalog.as_mapping()[service_name][0].display_name,
+            display_name=services_catalog.as_mapping()[service_name][0].service_display_name,
             accounts=account_overviews,
             # A probe that somehow did not report leaves the sign-in offered
             # rather than disabling an action that may well work.

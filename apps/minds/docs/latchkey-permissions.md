@@ -412,7 +412,11 @@ Each entry has the shape:
 * `scope` -- the detent scope schema the service owns; used as the rule
   key in `latchkey_permissions.json` and as the value the agent puts
   in its permission request's `scope` field.
-* `display_name` -- human-readable label shown in the dialog header.
+* `display_name` -- human-readable label for the *scope*, shown in the
+  dialog header (`GitHub (REST API)`).
+* `service_display_name` -- label for the whole service (`GitHub`), for
+  surfaces that name a connection rather than one of its scopes. Present
+  only where it differs from `display_name`.
 * `permissions` -- granular detent permission schemas the dialog offers
   as switches. The catch-all ``any`` schema is added client-side as an
   available option (the gateway file does not list it) at the head of

@@ -469,7 +469,7 @@ def build_workspace_permissions_view(
     for service_name, infos in services_catalog.as_mapping().items():
         if not infos:
             continue
-        display_name = infos[0].display_name
+        display_name = infos[0].service_display_name
         stored = tuple(entry.account for entry in accounts_by_service.get(service_name, ()))
         granted_accounts = frozenset(
             account for (scope, account) in granted if any(info.scope == scope for info in infos)
@@ -706,7 +706,9 @@ def connect_service_with_credentials(
     infos = services_catalog.get(service_name)
     if not infos:
         raise PermissionToggleError(f"Unknown service '{service_name}'.")
-    display_name = infos[0].display_name
+    # Every message below is about the connection as a whole -- one credential
+    # backs all of a service's scopes -- so it takes the service's own name.
+    display_name = infos[0].service_display_name
     service_info = latchkey.services_info(service_name, is_offline=True)
     if service_info is None:
         # Everything below is read off this probe; without an answer there is

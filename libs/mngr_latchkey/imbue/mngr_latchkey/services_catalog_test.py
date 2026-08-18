@@ -214,3 +214,18 @@ def test_additional_service_scope_resolves_to_its_service_name() -> None:
     """A granted additional-service scope maps back to its service name (credential-sync path)."""
     config = LatchkeyPermissionsConfig(rules=({"claude-ai": ["everything"]},))
     assert ServicesCatalog().services_for_permissions(config) == frozenset({"claude-ai"})
+
+
+# -- Service-level display names ----------------------------------------------
+
+
+def test_service_display_name_names_the_service_not_one_of_its_scopes() -> None:
+    catalog = ServicesCatalog()
+    # ``github`` exposes REST / GraphQL / git, each label disambiguated by a
+    # parenthetical; the connection spanning them carries the service's name.
+    assert [info.display_name for info in catalog.get("github")][0] == "GitHub (REST API)"
+    assert {info.service_display_name for info in catalog.get("github")} == {"GitHub"}
+    # A service the catalog gives no name of its own takes its scope's label,
+    # parenthetical and all -- there it is part of the name, not a scope marker.
+    assert catalog.get("notion-mcp")[0].service_display_name == "Notion (MCP)"
+    assert catalog.get("slack")[0].service_display_name == "Slack"

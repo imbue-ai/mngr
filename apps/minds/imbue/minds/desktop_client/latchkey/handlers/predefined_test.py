@@ -113,6 +113,7 @@ _SLACK_SERVICE_INFO = ServicePermissionInfo(
     name="slack",
     scope="slack-api",
     display_name="Slack",
+    service_display_name="Slack",
     permission_schemas=(
         "any",
         "slack-read-all",

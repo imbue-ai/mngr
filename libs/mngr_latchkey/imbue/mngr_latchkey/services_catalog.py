@@ -29,6 +29,8 @@ through :class:`ServicesCatalog`, which serves two layers:
   :meth:`ServicesCatalog.get_by_scope` / :meth:`ServicesCatalog.as_mapping`
   (returning :class:`ServicePermissionInfo`) to render a granted scope
   with its display name and the checkbox list of grantable permissions.
+  A surface that names the service as a whole rather than one of its
+  scopes reads ``ServicePermissionInfo.service_display_name``.
 
 The dialog used to fetch this from the running gateway's
 ``GET /permissions/available`` endpoint, but that endpoint was a pure
@@ -110,6 +112,10 @@ class _ServiceScopeEntry(FrozenModel):
 
     scope: str = Field(min_length=1, description="Detent scope schema name; appears as a permissions rule key.")
     display_name: str = Field(min_length=1, description="Human-readable label shown in the dialog header.")
+    service_display_name: str = Field(
+        default="",
+        description="Label for the service as a whole; absent when it is just ``display_name``.",
+    )
     description: str = Field(default="", description="Plain-English summary of the scope (Detent's ``$comment``).")
     permissions: tuple[_AvailablePermission, ...] = Field(
         default=(), description="Permissions the user can grant for this scope, each with its summary."
@@ -126,7 +132,10 @@ class ServicePermissionInfo(FrozenModel):
 
     name: str = Field(description="Raw service name (e.g. 'slack', 'google-gmail').")
     scope: str = Field(description="Detent scope schema; matches the request event's ``scope`` field.")
-    display_name: str = Field(description="Human-readable label shown in the dialog header.")
+    display_name: str = Field(description="Human-readable label for this *scope*, shown as the dialog header.")
+    service_display_name: str = Field(
+        description="Human-readable label for the *service*, shown wherever a whole connection is named.",
+    )
     description: str = Field(
         default="", description="Plain-English summary of the scope (Detent's ``$comment``); empty when unknown."
     )
@@ -191,6 +200,7 @@ def _service_info_from_entry(name: str, entry: _ServiceScopeEntry) -> ServicePer
         name=name,
         scope=entry.scope,
         display_name=entry.display_name,
+        service_display_name=entry.service_display_name or entry.display_name,
         description=entry.description,
         permission_schemas=permission_schemas,
         description_by_permission_name=description_by_permission_name,
