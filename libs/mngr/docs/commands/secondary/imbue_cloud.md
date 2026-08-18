@@ -1249,6 +1249,7 @@ mngr imbue_cloud admin server prep [OPTIONS]
 | `--lima-version` | text | Lima release to install on the box. | `2.2.0` |
 | `--slice-base-image-url` | text | Guest OS image to stage on the box once (slices boot from this via file://, never the mirror). | `https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2` |
 | `--database-url` | text | Neon pool DB DSN (defaults to the activated env's secrets). | None |
+| `--extra-prep-script` | file | Path to an additional idempotent root bash script appended to the box prep script (e.g. the observability collector install rendered by `observability render-collector-install`). Runs on the box after the standard prep steps, under the same `sudo bash` invocation. | None |
 
 ## mngr imbue_cloud admin server list
 

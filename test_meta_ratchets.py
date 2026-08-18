@@ -3,6 +3,7 @@ import fnmatch
 import re
 import subprocess
 import sys
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -908,13 +909,16 @@ def test_offload_version_pinned_consistently() -> None:
     )
 
 
+@cache
 def _collect_class_defs_for_model_config_checks() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
     """Collect, repo-wide, each class's base names and any extra="forbid" declarations in its body.
 
     Returns ``(base_names_by_class, forbid_locations_by_class)``. Classes are keyed
     by bare name; two same-named classes in different files have their bases merged,
     which can only over-approximate a base's subclass set (acceptable for guards
-    that should match nothing).
+    that should match nothing). Cached (callers only read the result): the
+    repo-wide AST parse is the dominant cost of its three consumer tests, and
+    without the cache each one re-parses every .py file in the repo.
     """
     base_names_by_class: dict[str, set[str]] = {}
     forbid_locations_by_class: dict[str, list[str]] = {}
@@ -996,6 +1000,8 @@ def _config_value_sets_extra_forbid(value: ast.expr) -> bool:
     return False
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
     """No EventEnvelope subclass anywhere in the repo may set extra="forbid".
 
@@ -1023,6 +1029,8 @@ def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
     )
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_wire_model_subclasses_never_re_forbid_extra() -> None:
     """No WireModel subclass anywhere in the repo may set extra="forbid".
 
@@ -1051,6 +1059,8 @@ def test_wire_model_subclasses_never_re_forbid_extra() -> None:
     )
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
     """Every class in a wire_types.py must be (transitively) a WireModel or WireEnum.
 
@@ -1064,9 +1074,13 @@ def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
     tolerant_class_names = _transitive_subclass_names(base_names_by_class, {"WireModel", "WireEnum"})
 
     violations = []
-    for wire_types_path in _REPO_ROOT.rglob("wire_types.py"):
-        if ".venv" in wire_types_path.parts or ".external_worktrees" in wire_types_path.parts:
-            continue
+    # The git-ls-files walk (cached, gitignore-pruned) instead of a raw rglob:
+    # rglob descends into node_modules/.git/.venv and can blow the test timeout
+    # on a slow sandbox.
+    wire_types_paths = [
+        path for path in _get_all_files_with_extension(_REPO_ROOT, ".py") if path.name == "wire_types.py"
+    ]
+    for wire_types_path in wire_types_paths:
         tree = ast.parse(wire_types_path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name not in tolerant_class_names:

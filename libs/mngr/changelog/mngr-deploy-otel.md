@@ -1,0 +1,1 @@
+Deployment pass for the observability bring-up: this branch carries `mngr/log-and-telemetry-aggregation`, whose only mngr-project change is the regenerated CLI command reference for `mngr imbue_cloud admin server prep` (new optional `--extra-prep-script <file>`).

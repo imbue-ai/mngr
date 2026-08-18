@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.cli.server import _bake_one_slice_with_retry
 from imbue.mngr_imbue_cloud.cli.server import _box_ssh_host_key_options
+from imbue.mngr_imbue_cloud.cli.server import _compose_prep_script
 from imbue.mngr_imbue_cloud.cli.server import _destroy_one_pool_host
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import _kill_bake_worker_processes
@@ -130,6 +131,20 @@ def test_box_ssh_host_key_options_fails_closed_without_a_key() -> None:
     with pytest.raises(BareMetalProvisioningError, match="strict host-key"):
         with _box_ssh_host_key_options("203.0.113.7", "") as _opts:
             pass
+
+
+def test_compose_prep_script_without_an_extra_script_is_the_base_script() -> None:
+    assert _compose_prep_script("echo base\n", None) == "echo base\n"
+
+
+def test_compose_prep_script_runs_the_extra_script_after_the_standard_prep_steps(tmp_path: Path) -> None:
+    # The extra script (e.g. the observability collector install) must run in the
+    # same sudo bash session, strictly after the base prep, on its own line (so
+    # its first command is never glued onto the base script's last line).
+    extra_path = tmp_path / "install_collector.sh"
+    extra_path.write_text("echo extra")
+    composed = _compose_prep_script("echo base", extra_path)
+    assert composed == "echo base\necho extra"
 
 
 def test_server_group_help_lists_commands() -> None:

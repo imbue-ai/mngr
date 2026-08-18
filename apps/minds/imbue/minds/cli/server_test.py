@@ -44,6 +44,7 @@ def test_build_server_prep_admin_args_minimal() -> None:
         database_url=None,
         lima_version=None,
         slice_base_image_url=None,
+        extra_prep_script=None,
     ) == ["prep", "--server-id", "feb11eae-a20a-4d9e-a0a3-ce06a526956c"]
 
 
@@ -53,10 +54,12 @@ def test_build_server_prep_admin_args_forwards_overrides() -> None:
         database_url="postgres://x",
         lima_version="1.0.7",
         slice_base_image_url="https://example.com/img.qcow2",
+        extra_prep_script="/tmp/install_collector.sh",
     )
     assert args[args.index("--database-url") + 1] == "postgres://x"
     assert args[args.index("--lima-version") + 1] == "1.0.7"
     assert args[args.index("--slice-base-image-url") + 1] == "https://example.com/img.qcow2"
+    assert args[args.index("--extra-prep-script") + 1] == "/tmp/install_collector.sh"
 
 
 def test_server_list_requires_activated_env(_isolated_env: Path) -> None:

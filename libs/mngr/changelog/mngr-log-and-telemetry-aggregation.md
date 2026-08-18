@@ -1,0 +1,1 @@
+Regenerated the committed CLI command reference for `mngr imbue_cloud admin server prep`, which gained an optional `--extra-prep-script <file>` (an additional idempotent root script appended to the box prep; the observability rollout uses it to install the pinned OpenTelemetry Collector on bare-metal boxes).

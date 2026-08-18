@@ -50,6 +50,7 @@ def build_server_prep_admin_args(
     database_url: str | None,
     lima_version: str | None,
     slice_base_image_url: str | None,
+    extra_prep_script: str | None,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin server prep`` argv.
 
@@ -64,6 +65,8 @@ def build_server_prep_admin_args(
         args.extend(["--lima-version", lima_version])
     if slice_base_image_url is not None:
         args.extend(["--slice-base-image-url", slice_base_image_url])
+    if extra_prep_script is not None:
+        args.extend(["--extra-prep-script", extra_prep_script])
     return args
 
 
@@ -153,11 +156,23 @@ def server_list(database_url: str | None, is_occupancy_verified: bool) -> None:
     default=None,
     help="Override the guest OS image staged on the box (default: the admin CLI's pinned image).",
 )
+@click.option(
+    "--extra-prep-script",
+    "extra_prep_script",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help=(
+        "Additional idempotent root script appended to the box prep (forwarded verbatim; "
+        "`just prep-server` renders and passes the observability collector install here "
+        "when the tier's Vault entry carries a boxes ingest credential)."
+    ),
+)
 def server_prep(
     server_id: str,
     database_url: str | None,
     lima_version: str | None,
     slice_base_image_url: str | None,
+    extra_prep_script: str | None,
 ) -> None:
     """(Re-)prep a bare-metal box for slice baking (qemu/lima/tooling + image staging).
 
@@ -175,6 +190,7 @@ def server_prep(
         database_url=resolve_host_pool_dsn(env_name, database_url),
         lima_version=lima_version,
         slice_base_image_url=slice_base_image_url,
+        extra_prep_script=extra_prep_script,
     )
     logger.info("Prepping bare-metal server {} for env '{}'", server_id, env_name)
     raise_on_admin_command_failure(
