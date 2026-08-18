@@ -3198,8 +3198,7 @@ log "=== Shutdown script completed ==="
         """
         host_id = host.id if isinstance(host, HostInterface) else host
 
-        # Read host record from volume
-        host_record = self._read_host_record(host_id)
+        host_record = self._read_host_record(host_id, use_cache=False)
         if host_record is None:
             return []
 
