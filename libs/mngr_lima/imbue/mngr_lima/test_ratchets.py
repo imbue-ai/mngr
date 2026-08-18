@@ -122,7 +122,7 @@ def test_prevent_yaml_usage() -> None:
     # generate_default_lima_yaml from test helpers and on comments naming a
     # host's lima.yaml file (the regex matches the substring, not actual
     # yaml usage).
-    rc.check_yaml_usage(_DIR, snapshot(134))
+    rc.check_yaml_usage(_DIR, snapshot(135))
 
 
 def test_prevent_functools_partial() -> None:

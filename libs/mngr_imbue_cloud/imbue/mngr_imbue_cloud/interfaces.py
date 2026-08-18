@@ -18,6 +18,13 @@ class SliceReconcilerState(FrozenModel):
     is_live_matching_desired: bool = Field(
         description="Whether /root/.ssh/authorized_keys currently equals the desired-state file"
     )
+    installed_content_hash: str | None = Field(
+        description=(
+            "sha256 of the installed reconciler unit + script contents, or None when either file is absent. "
+            "Compared against what the current client version would install, so the heal pass replaces stale "
+            "reconciler content, not just a missing/disabled unit."
+        )
+    )
 
 
 class SliceVmAccessInterface(MutableModel, ABC):

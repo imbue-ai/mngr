@@ -11,22 +11,30 @@ import os
 import shutil
 import time
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
 
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import _build_destroy_command
 from imbue.minds.desktop_client.destroying import delete_destroying
+from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import is_pid_alive
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
+from imbue.minds.desktop_client.destroying import read_provider_name
 from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 
 
 def _wait_for_pid_exit(pid: int, timeout: float = 5.0, poll: float = 0.05) -> bool:
@@ -109,6 +117,107 @@ def test_start_destroy_writes_pid_log_and_host_id(tmp_path: Path) -> None:
 def test_read_host_id_returns_none_when_absent(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     assert read_host_id(AgentId.generate(), paths) is None
+
+
+def _start_finished_destroy(
+    tmp_path: Path, paths: WorkspacePaths, host_id: HostId, provider_name: str | None
+) -> AgentId:
+    """Write a destroy marker whose subprocess has already exited, returning its agent id."""
+    agent_id = AgentId.generate()
+    fake = _make_fake_mngr(tmp_path, exit_code=0)
+    record = start_destroy(
+        agent_id,
+        paths,
+        host_id=host_id,
+        provider_name=provider_name,
+        env=_path_with_fake_mngr(fake),
+        mngr_binary="mngr",
+    )
+    assert _wait_for_pid_exit(record.pid)
+    return agent_id
+
+
+def test_start_destroy_records_the_owning_provider_when_known(tmp_path: Path) -> None:
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = _start_finished_destroy(tmp_path, paths, HostId.generate(), provider_name="imbue_cloud_user")
+    assert read_provider_name(agent_id, paths) == "imbue_cloud_user"
+
+
+def test_start_destroy_writes_no_provider_file_when_unknown(tmp_path: Path) -> None:
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = _start_finished_destroy(tmp_path, paths, HostId.generate(), provider_name=None)
+    assert read_provider_name(agent_id, paths) is None
+
+
+def test_is_host_still_active_true_while_owning_provider_has_not_reported(tmp_path: Path) -> None:
+    """The startup race: the host is absent from discovery only because its (slow)
+    provider has not produced a snapshot yet. Without positive absence evidence the
+    host must read as still active, so the destroy stays FAILED instead of being
+    falsely finalized as DONE (which tombstoned records for still-leased hosts)."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    host_id = HostId.generate()
+    agent_id = _start_finished_destroy(tmp_path, paths, host_id, provider_name="imbue_cloud_user")
+    resolver = MngrCliBackendResolver()
+
+    assert is_host_still_active(resolver, paths, agent_id) is True
+
+    # Once the provider reports cleanly without the host, it is positively gone.
+    resolver.update_providers(
+        provider_name=ProviderInstanceName("imbue_cloud_user"),
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+        clean_snapshot_host_ids=(),
+    )
+    assert is_host_still_active(resolver, paths, agent_id) is False
+
+
+def test_is_host_still_active_true_when_clean_snapshot_still_lists_the_host(tmp_path: Path) -> None:
+    """A clean snapshot that still reports the host (even with unknown state) proves
+    the destroy did not finish tearing it down."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    host_id = HostId.generate()
+    agent_id = _start_finished_destroy(tmp_path, paths, host_id, provider_name="imbue_cloud_user")
+    resolver = MngrCliBackendResolver()
+    resolver.update_providers(
+        provider_name=ProviderInstanceName("imbue_cloud_user"),
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+        clean_snapshot_host_ids=(str(host_id),),
+    )
+
+    assert is_host_still_active(resolver, paths, agent_id) is True
+
+
+def test_is_host_still_active_false_when_host_state_is_destroyed(tmp_path: Path) -> None:
+    paths = WorkspacePaths(data_dir=tmp_path)
+    host_id = HostId.generate()
+    agent_id = _start_finished_destroy(tmp_path, paths, host_id, provider_name="imbue_cloud_user")
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(ParsedAgentsResult(host_state_by_host_id={str(host_id): HostState.DESTROYED}))
+
+    assert is_host_still_active(resolver, paths, agent_id) is False
+
+
+def test_is_host_still_active_true_when_host_state_is_known_and_not_destroyed(tmp_path: Path) -> None:
+    paths = WorkspacePaths(data_dir=tmp_path)
+    host_id = HostId.generate()
+    agent_id = _start_finished_destroy(tmp_path, paths, host_id, provider_name="imbue_cloud_user")
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(ParsedAgentsResult(host_state_by_host_id={str(host_id): HostState.UNKNOWN}))
+
+    assert is_host_still_active(resolver, paths, agent_id) is True
+
+
+def test_is_host_still_active_legacy_marker_without_provider_keeps_old_absence_behavior(tmp_path: Path) -> None:
+    """A marker written before provider attribution has no provider file; those
+    destroys must still converge, so absence from discovery keeps counting as gone."""
+    paths = WorkspacePaths(data_dir=tmp_path)
+    agent_id = _start_finished_destroy(tmp_path, paths, HostId.generate(), provider_name=None)
+    resolver = MngrCliBackendResolver()
+
+    assert is_host_still_active(resolver, paths, agent_id) is False
 
 
 def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:

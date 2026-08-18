@@ -31,6 +31,7 @@ the install) or already serves the new one (finish by pinning it).
 """
 
 import base64
+import hashlib
 import shlex
 from datetime import datetime
 from datetime import timezone
@@ -82,7 +83,12 @@ _DESIRED_HOST_KEY_PATH: Final[str] = "/etc/mngr/ssh_host_ed25519_key"
 # when a code change needs every already-adopted host swept through one more
 # full verification pass -- the verification pass is the migration channel
 # (the RSA -> Ed25519 client-key rotation reached existing hosts this way).
-ADOPTION_SCHEMA_VERSION: Final[int] = 1
+# Version 2 sweeps the fixed reconciler unit content (WantedBy=cloud-init.target,
+# replacing the multi-user.target ordering cycle) out to already-adopted hosts:
+# the verify/heal pass's installed-content-hash check only helps hosts it
+# actually visits, and the sweep must land while a host is still serving its
+# user-origin key -- a reboot with the broken unit leaves it unreachable.
+ADOPTION_SCHEMA_VERSION: Final[int] = 2
 
 # Client-side per-host state filenames (inside the provider's per-host dir).
 ADOPTION_MARKER_FILENAME: Final[str] = "adoption.json"
@@ -96,6 +102,7 @@ CLIENT_KEY_NAME: Final[str] = "ssh_key"
 _RECONCILER_ENABLED_PREFIX: Final[str] = "MNGR_RECONCILER_ENABLED="
 _DESIRED_B64_PREFIX: Final[str] = "MNGR_DESIRED_B64="
 _LIVE_MATCHES_PREFIX: Final[str] = "MNGR_LIVE_MATCHES="
+_INSTALLED_HASH_PREFIX: Final[str] = "MNGR_RECONCILER_SHA256="
 _DESIRED_ABSENT_VALUE: Final[str] = "ABSENT"
 
 _VM_COMMAND_TIMEOUT_SECONDS: Final[float] = 60.0
@@ -253,7 +260,14 @@ Type=oneshot
 ExecStart={_RECONCILER_SCRIPT_PATH}
 
 [Install]
-WantedBy=multi-user.target
+# Activated by cloud-init.target, NOT multi-user.target: cloud-final.service is
+# itself ordered After=multi-user.target, so a unit wanted by multi-user.target
+# that is also After=cloud-final.service creates an ordering cycle, and systemd
+# resolves it by deleting THIS unit's start job -- the reconciler then never
+# runs on any boot. This unit is explicitly After=cloud-init.target (which is
+# itself after cloud-final.service), so hanging off cloud-init.target gives
+# cloud-final -> cloud-init.target -> reconciler with no cycle.
+WantedBy=cloud-init.target
 """
 
 
@@ -265,6 +279,18 @@ def _build_write_file_command(path: str, content: str, mode: str) -> str:
 
 
 @pure
+def expected_reconciler_content_hash() -> str:
+    """The sha256 of the unit + script this client version installs, matching the in-VM read.
+
+    Compared against the hash :func:`build_read_reconciler_state_command` reports
+    (``cat unit script | sha256sum``, same concatenation order) so the heal pass
+    reinstalls when a VM carries an older client version's reconciler content --
+    an ``enabled`` unit alone says nothing about whether its content is current.
+    """
+    return hashlib.sha256((render_reconciler_unit() + render_reconciler_script()).encode()).hexdigest()
+
+
+@pure
 def build_reconciler_install_command(desired_authorized_keys: str) -> str:
     """Shell command that installs/refreshes the reconciler and runs it once (asserting the state now)."""
     steps = [
@@ -273,7 +299,13 @@ def build_reconciler_install_command(desired_authorized_keys: str) -> str:
         _build_write_file_command(_RECONCILER_SCRIPT_PATH, render_reconciler_script(), "755"),
         _build_write_file_command(_RECONCILER_UNIT_PATH, render_reconciler_unit(), "644"),
         "systemctl daemon-reload",
-        f"systemctl enable {RECONCILER_UNIT_NAME}",
+        # reenable (not enable): enable only adds symlinks for the CURRENT
+        # [Install] section, so a unit previously enabled under a different
+        # WantedBy target keeps its stale symlink -- and the stale
+        # multi-user.target edge is exactly what created the ordering cycle
+        # this unit's [Install] comment describes. reenable drops every
+        # existing enablement symlink first.
+        f"systemctl reenable {RECONCILER_UNIT_NAME}",
         _RECONCILER_SCRIPT_PATH,
     ]
     return "\n".join(steps)
@@ -295,6 +327,11 @@ if cmp -s {_DESIRED_AUTHORIZED_KEYS_PATH} /root/.ssh/authorized_keys 2>/dev/null
 else
     echo "{_LIVE_MATCHES_PREFIX}0"
 fi
+if [ -f {_RECONCILER_UNIT_PATH} ] && [ -f {_RECONCILER_SCRIPT_PATH} ]; then
+    echo "{_INSTALLED_HASH_PREFIX}$(cat {_RECONCILER_UNIT_PATH} {_RECONCILER_SCRIPT_PATH} | sha256sum | cut -d' ' -f1)"
+else
+    echo "{_INSTALLED_HASH_PREFIX}{_DESIRED_ABSENT_VALUE}"
+fi
 """
 
 
@@ -304,6 +341,7 @@ def parse_reconciler_state_output(stdout: str) -> SliceReconcilerState:
     is_unit_enabled = False
     desired: str | None = None
     is_live_matching = False
+    installed_content_hash: str | None = None
     for line in stdout.splitlines():
         stripped = line.strip()
         if stripped.startswith(_RECONCILER_ENABLED_PREFIX):
@@ -313,12 +351,16 @@ def parse_reconciler_state_output(stdout: str) -> SliceReconcilerState:
             desired = None if value == _DESIRED_ABSENT_VALUE else base64.b64decode(value).decode()
         elif stripped.startswith(_LIVE_MATCHES_PREFIX):
             is_live_matching = stripped.removeprefix(_LIVE_MATCHES_PREFIX) == "1"
+        elif stripped.startswith(_INSTALLED_HASH_PREFIX):
+            hash_value = stripped.removeprefix(_INSTALLED_HASH_PREFIX)
+            installed_content_hash = None if hash_value == _DESIRED_ABSENT_VALUE else hash_value
         else:
             continue
     return SliceReconcilerState(
         is_unit_enabled=is_unit_enabled,
         desired_authorized_keys=desired,
         is_live_matching_desired=is_live_matching,
+        installed_content_hash=installed_content_hash,
     )
 
 
@@ -624,15 +666,26 @@ def _verify_and_heal(access: SliceVmAccessInterface, target: SliceAdoptionTarget
     complete_pending_host_key_rotations(access, target)
 
     # The reconciler and its desired state: reinstall whenever the unit is off,
-    # the desired file is missing this machine's client key, or the live file
-    # has drifted from it. The heal only ever adds -- desired lines from the VM
-    # and the live file are unioned, so a key another device added is kept.
+    # its installed unit/script content is not what this client version ships
+    # (an ``enabled`` unit from an older version can be broken -- e.g. the
+    # WantedBy=multi-user.target ordering cycle -- so content staleness must
+    # count as drift), the desired file is missing this machine's client key,
+    # or the live file has drifted from it. The heal only ever adds -- desired
+    # lines from the VM and the live file are unioned, so a key another device
+    # added is kept.
     state = access.read_reconciler_state()
     desired = state.desired_authorized_keys
     is_client_key_listed = desired is not None and target.client_public_key.strip() in {
         line.strip() for line in desired.splitlines()
     }
-    if not state.is_unit_enabled or desired is None or not is_client_key_listed or not state.is_live_matching_desired:
+    is_installed_content_current = state.installed_content_hash == expected_reconciler_content_hash()
+    if (
+        not state.is_unit_enabled
+        or not is_installed_content_current
+        or desired is None
+        or not is_client_key_listed
+        or not state.is_live_matching_desired
+    ):
         logger.debug("Healing adoption drift on host {} (reconciler/desired-state out of date)", target.host_id)
         live_content = access.read_vm_root_authorized_keys()
         merged_existing = (desired or "") + "\n" + (live_content or "")

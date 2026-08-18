@@ -1184,7 +1184,13 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
     tracker = get_state().system_interface_health_tracker
     if tracker is not None:
         tracker.suppress_unattended_recovery(parsed_id, is_stop_in_flight=True)
-    destroying.start_destroy(parsed_id, paths, host_id, mngr_binary=get_state().mngr_binary)
+    destroying.start_destroy(
+        parsed_id,
+        paths,
+        host_id,
+        provider_name=info.provider_name,
+        mngr_binary=get_state().mngr_binary,
+    )
     return OperationHandleResponse(operation_id=str(parsed_id), kind="destroy"), 202
 
 
@@ -1559,8 +1565,10 @@ def _handle_destroy_operation_status(operation_id: str) -> DestroyOperationStatu
     # A destroy is only DONE once the workspace's *host* is gone (not merely the
     # workspace agent): a destroy that tore down only the agent while the host's
     # ``system-services`` kept it alive must read as FAILED, not a false DONE.
-    # ``destroying.is_host_still_active`` answers that (active-set membership OR a
-    # host not yet in ``DESTROYED``); see :func:`destroying.read_destroying`.
+    # ``destroying.is_host_still_active`` answers that: the host counts as still
+    # up on active-set membership, a known non-DESTROYED state, or -- when its
+    # state is unknown -- the lack of positive absence evidence from its owning
+    # provider (see its docstring and :func:`destroying.read_destroying`).
     record = destroying.read_destroying(
         parsed_id, paths, destroying.is_host_still_active(backend_resolver, paths, parsed_id)
     )

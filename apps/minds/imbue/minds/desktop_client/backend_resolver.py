@@ -164,6 +164,22 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
+    def is_host_positively_absent(self, provider_name: ProviderInstanceName, host_id: HostId) -> bool:
+        """Whether the named provider's latest clean snapshot positively omits this host.
+
+        True only on positive evidence of gone-ness: the provider that owns the
+        host produced an error-free discovery snapshot this session, and the
+        host is not in it. False whenever there is no such evidence -- the
+        provider has not reported cleanly yet (startup warm-up), or its polls
+        are erroring (hosts unreachable, not absent). Callers deciding whether
+        a host is *gone* (e.g. destroy finalization) must use this rather than
+        treating an unknown :meth:`get_host_state` as absence.
+
+        Default implementation has no snapshot data and returns False (no
+        evidence). Subclasses fed by discovery should override this.
+        """
+        return False
+
     def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
         """Optimistically override a host's state until discovery confirms it.
 
@@ -756,6 +772,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # last full discovery event" counter, while a workspace's recovery redirect
     # gates on its own provider's entry.
     _last_snapshot_at_by_provider: dict[ProviderInstanceName, datetime] = PrivateAttr(default_factory=dict)
+    # Host-id set of each provider's latest CLEAN (error-free, state-current)
+    # snapshot this session. Positive evidence for ``is_host_positively_absent``:
+    # only a clean snapshot enumerates everything its provider manages, so only
+    # absence from one proves a host is gone rather than unreachable or simply
+    # not yet discovered. Errored snapshots never land here, and neither does
+    # the errored pre-start replay whose error (and state-current claim)
+    # ``forward_cli`` drops; a CLEAN pre-start replay does land here -- it is a
+    # real poll from while minds was closed, so it postdates every host this
+    # client could hold a destroy marker for.
+    _clean_snapshot_host_ids_by_provider: dict[ProviderInstanceName, frozenset[str]] = PrivateAttr(
+        default_factory=dict
+    )
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
@@ -1034,6 +1062,15 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 self._error_by_provider_name.pop(provider_name, None)
             if is_snapshot_state_current:
                 self._last_snapshot_at_by_provider[provider_name] = last_snapshot_at
+            # Record positive-evidence host sets only from clean, state-current
+            # snapshots: an errored snapshot's hosts are unreachable (not
+            # absent), and a snapshot whose state-current claim the caller
+            # dropped (the errored pre-start replay -- see ``forward_cli``)
+            # carries no usable state -- either would let absence be mistaken
+            # for gone-ness. A clean pre-start replay stays eligible: it is a
+            # real enumeration from while minds was closed.
+            if error is None and clean_snapshot_host_ids is not None and is_snapshot_state_current:
+                self._clean_snapshot_host_ids_by_provider[provider_name] = frozenset(clean_snapshot_host_ids)
             if self._last_event_at is None or last_snapshot_at > self._last_event_at:
                 self._last_event_at = last_snapshot_at
             if (
@@ -1281,6 +1318,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 )
                 return discovery_state
             return override.state
+
+    def is_host_positively_absent(self, provider_name: ProviderInstanceName, host_id: HostId) -> bool:
+        """Whether ``provider_name``'s latest clean snapshot this session omits ``host_id``.
+
+        See the interface docstring: no clean snapshot from the provider yet
+        means no evidence, so False.
+        """
+        with self._lock:
+            clean_host_ids = self._clean_snapshot_host_ids_by_provider.get(provider_name)
+        if clean_host_ids is None:
+            return False
+        return str(host_id) not in clean_host_ids
 
     def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
         """Optimistically override ``host_id``'s state until discovery confirms it; fires on-change."""

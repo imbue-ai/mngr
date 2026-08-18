@@ -109,6 +109,32 @@ def test_generate_default_lima_yaml_with_host_key_injects_block(tmp_path: Path) 
     assert "SSH_KEY_CHANGED=1" in script
 
 
+def test_host_key_block_reinstalls_on_every_boot(tmp_path: Path) -> None:
+    """The host-key install must NOT be guarded to run once per VM: lima mints a
+    fresh cloud-init instance-id on every ``limactl start``, so cloud-init's
+    ``ssh`` module (per-instance, ``ssh_deletekeys`` defaults true) deletes and
+    regenerates the sshd host keys early in every boot. This block, replayed in
+    the final stage, is what restores the pinned ed25519 key -- a run-once
+    marker guard leaves the VM serving an unpinned random key from its second
+    start on, which mngr's strict host-key pinning refuses (verified against a
+    real VM: restart regenerated all key types and changed the served key)."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    fake_private = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC...\n-----END OPENSSH PRIVATE KEY-----\n"
+    fake_public = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPv... mngr-lima@host\n"
+    config = generate_default_lima_yaml(
+        volume_host_path=volume_path,
+        host_dir="/mngr",
+        host_private_key_pem=fake_private,
+        host_public_key_openssh=fake_public,
+    )
+    script = config["provision"][0]["script"]
+    # The key write runs unconditionally, directly after the umask -- no
+    # run-once marker (or any other guard) may wrap it.
+    assert "umask 077\ncat > /etc/ssh/ssh_host_ed25519_key <<" in script
+    assert ".mngr_host_key_installed" not in script
+
+
 def test_provision_script_installs_host_key_before_apt(tmp_path: Path) -> None:
     """Host-key trust must be established before the network-dependent apt
     install: mngr pins the injected key and connects with strict host-key

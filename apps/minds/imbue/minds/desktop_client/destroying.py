@@ -12,15 +12,15 @@ exit -- so it is structurally the wrong tool here. Same justification as
 
 Status is fully derived from disk + the live resolver; there is no
 state.json. For each in-flight destroy ``<paths.data_dir>/destroying/<agent_id>/``
-contains three files: ``pid`` (single-line text), ``host_id`` (the host the
-destroy is tearing down) and ``output.log`` (combined stdout+stderr from the
-bash wrapper). :py:class:`DestroyingStatus` is computed from ``pid`` liveness +
+contains ``pid`` (single-line text), ``host_id`` (the host the destroy is
+tearing down), ``provider`` (the provider instance that owns the host, when
+discovery knew it) and ``output.log`` (combined stdout+stderr from the bash
+wrapper). :py:class:`DestroyingStatus` is computed from ``pid`` liveness +
 whether the workspace's *host* is still up -- the caller answers that via
-``is_host_still_active`` (the workspace agent still in
-``MngrCliBackendResolver.list_active_workspace_ids()`` OR its host not yet in a
-terminal ``DESTROYED`` state). Keying on the host, not just the workspace
-agent, is deliberate: a minds host also runs a ``system-services`` agent, so a
-destroy that removed only the workspace agent must read as FAILED, not DONE.
+``is_host_still_active`` (see its docstring: agent still active, host not yet
+positively gone). Keying on the host, not just the workspace agent, is
+deliberate: a minds host also runs a ``system-services`` agent, so a destroy
+that removed only the workspace agent must read as FAILED, not DONE.
 
   - dir present + pid alive                       -> RUNNING
   - dir present + pid dead + host gone            -> DONE   (caller deletes the dir)
@@ -54,11 +54,14 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import InvalidName
+from imbue.mngr.primitives import ProviderInstanceName
 
 _DESTROYING_DIR_NAME: Final[str] = "destroying"
 _PID_FILE_NAME: Final[str] = "pid"
 _LOG_FILE_NAME: Final[str] = "output.log"
 _HOST_ID_FILE_NAME: Final[str] = "host_id"
+_PROVIDER_FILE_NAME: Final[str] = "provider"
 
 
 class DestroyingStatus(UpperCaseStrEnum):
@@ -88,8 +91,10 @@ class DestroyingRecord(FrozenModel):
     is_host_still_active: bool = Field(
         description=(
             "Whether the workspace's host is still up: the workspace agent is still in "
-            "list_active_workspace_ids(), or its host has not yet reached DESTROYED. A destroy "
-            "is only DONE once this is False (the whole host, not just the agent, is gone)."
+            "list_active_workspace_ids(), or its host is not yet positively gone (state DESTROYED, "
+            "or absent from its owning provider's latest clean discovery snapshot -- see "
+            "is_host_still_active). A destroy is only DONE once this is False (the whole host, "
+            "not just the agent, is gone)."
         )
     )
     status: DestroyingStatus = Field(description="Derived status; see DestroyingStatus docstring")
@@ -112,6 +117,10 @@ def _host_id_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
     return _destroying_dir(paths, agent_id) / _HOST_ID_FILE_NAME
 
 
+def _provider_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+    return _destroying_dir(paths, agent_id) / _PROVIDER_FILE_NAME
+
+
 def read_host_id(agent_id: AgentId, paths: WorkspacePaths) -> HostId | None:
     """Return the host id recorded for this agent's destroy, or None if absent/unreadable.
 
@@ -130,6 +139,30 @@ def read_host_id(agent_id: AgentId, paths: WorkspacePaths) -> HostId | None:
     return HostId(value) if value else None
 
 
+def read_provider_name(agent_id: AgentId, paths: WorkspacePaths) -> ProviderInstanceName | None:
+    """Return the provider instance name recorded for this agent's destroy, or None if absent/unreadable.
+
+    Written by :func:`start_destroy` so a later status read can ask the resolver
+    for positive evidence that the *owning provider* no longer reports the host,
+    rather than mistaking "not discovered yet" for "gone".
+    """
+    path = _provider_file(paths, agent_id)
+    if not path.is_file():
+        return None
+    try:
+        value = path.read_text().strip()
+    except OSError as e:
+        logger.warning("Could not read provider file {} for destroying agent {}: {}", path, agent_id, e)
+        return None
+    if not value:
+        return None
+    try:
+        return ProviderInstanceName(value)
+    except InvalidName as e:
+        logger.warning("Invalid provider name in file {} for destroying agent {}: {}", path, agent_id, e)
+        return None
+
+
 def is_host_still_active(
     backend_resolver: BackendResolverInterface,
     paths: WorkspacePaths | None,
@@ -137,12 +170,20 @@ def is_host_still_active(
 ) -> bool:
     """Whether the workspace's *host* is still up (not just the workspace agent).
 
-    True when the workspace agent is still in ``list_active_workspace_ids()`` OR
-    its recorded host has not yet reached ``HostState.DESTROYED``. This is the
-    canonical value to pass as :func:`read_destroying`'s ``is_host_still_active``
-    argument: keying on the host (not just the workspace agent) is what keeps a
-    destroy that tore down only the workspace agent -- while ``system-services``
-    kept the host alive -- reading as FAILED rather than a false DONE.
+    This is the canonical value to pass as :func:`read_destroying`'s
+    ``is_host_still_active`` argument, and it decides whether a destroy whose
+    subprocess died reads FAILED (host still up) or DONE (host gone, safe to
+    tombstone the record). Two rules shape it:
+
+    - Keying on the host, not just the workspace agent: a destroy that tore
+      down only the workspace agent -- while ``system-services`` kept the host
+      alive -- must read FAILED rather than a false DONE.
+    - Gone-ness needs *positive evidence*: the host's state is DESTROYED, or
+      the provider that owns it produced a clean discovery snapshot this
+      session that omits it. An unknown state alone proves nothing -- at app
+      startup the slow providers have not reported yet, and treating that
+      window as "gone" once finalized a FAILED destroy as DONE (tombstoning
+      the record while the host, and its lease, lived on).
     """
     if agent_id in backend_resolver.list_active_workspace_ids():
         return True
@@ -152,7 +193,21 @@ def is_host_still_active(
     if host_id is None:
         return False
     state = backend_resolver.get_host_state(host_id)
-    return state is not None and state is not HostState.DESTROYED
+    if state is HostState.DESTROYED:
+        return False
+    if state is not None:
+        return True
+    # The host is absent from current discovery. Only positive evidence from
+    # its owning provider distinguishes "gone" from "not reported yet".
+    provider_name = read_provider_name(agent_id, paths)
+    if provider_name is None:
+        # CLEANUP: drop this fallback once no pre-provider-attribution destroy
+        # markers can remain in the field (markers are transient, so any time
+        # after the release carrying this change has been out for a while). A
+        # marker written by an older version has no provider file; keep the old
+        # behavior (absence = gone) so those destroys still converge.
+        return False
+    return not backend_resolver.is_host_positively_absent(provider_name, host_id)
 
 
 def is_pid_alive(pid: int) -> bool:
@@ -221,6 +276,11 @@ def start_destroy(
     agent_id: AgentId,
     paths: WorkspacePaths,
     host_id: HostId,
+    # Provider instance managing the host (from discovery), recorded so status
+    # reads can demand positive absence evidence from that provider. None when
+    # discovery did not report one; the status read then falls back to the
+    # legacy absence-equals-gone behavior for this marker.
+    provider_name: str | None = None,
     env: dict[str, str] | None = None,
     mngr_binary: str = MNGR_BINARY,
 ) -> DestroyingRecord:
@@ -234,8 +294,9 @@ def start_destroy(
 
     The subprocess is detached (``start_new_session=True``), so it survives a
     minds-backend exit. stdout+stderr go to a single ``output.log`` file; the
-    wrapper's PID is written to ``pid`` and the host id to ``host_id`` (so a
-    later status read can confirm the *host* is gone, not just the agent).
+    wrapper's PID is written to ``pid``, the host id to ``host_id``, and the
+    owning provider (when known) to ``provider`` (so a later status read can
+    confirm the *host* is positively gone, not just the agent).
 
     Idempotent: if a destroy is already running for this agent (``pid`` exists
     and is alive), we return the existing record without spawning a second
@@ -258,9 +319,12 @@ def start_destroy(
     log_path = _log_file(paths, agent_id)
     pid_path = _pid_file(paths, agent_id)
 
-    # Record the host id up front so status reads can ask the resolver whether
-    # the host (not just the workspace agent) actually went away.
+    # Record the host id (and its owning provider, when known) up front so
+    # status reads can ask the resolver whether the host (not just the
+    # workspace agent) actually went away.
     _host_id_file(paths, agent_id).write_text(f"{host_id}\n")
+    if provider_name is not None:
+        _provider_file(paths, agent_id).write_text(f"{provider_name}\n")
 
     # Truncate the log file so a Retry doesn't show the previous run's output.
     log_path.write_bytes(b"")
@@ -315,9 +379,10 @@ def read_destroying(
     rather than fetched here, so this module stays free of the resolver's
     threading + locking shape. It must be True when *either* the workspace
     agent is still in ``list_active_workspace_ids()`` *or* the workspace's host
-    has not yet reached DESTROYED -- so a destroy that tore down only the
-    workspace agent while system-services kept the host alive reads as FAILED,
-    not DONE. The status table:
+    is not yet positively gone (see :func:`is_host_still_active`, the canonical
+    source of this value) -- so a destroy that tore down only the workspace
+    agent while system-services kept the host alive reads as FAILED, not DONE.
+    The status table:
 
       - dir absent                                              -> None
       - dir present, pid alive                                  -> RUNNING

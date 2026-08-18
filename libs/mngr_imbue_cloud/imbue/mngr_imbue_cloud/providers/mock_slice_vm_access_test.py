@@ -8,6 +8,7 @@ from pydantic import PrivateAttr
 from imbue.mngr_imbue_cloud.errors import AdoptionError
 from imbue.mngr_imbue_cloud.interfaces import SliceReconcilerState
 from imbue.mngr_imbue_cloud.interfaces import SliceVmAccessInterface
+from imbue.mngr_imbue_cloud.providers.adoption import expected_reconciler_content_hash
 
 
 class MockSliceVmAccess(SliceVmAccessInterface):
@@ -27,6 +28,13 @@ class MockSliceVmAccess(SliceVmAccessInterface):
     container_authorized_keys: str = Field(default="", description="Container root authorized_keys content")
     desired_authorized_keys: str | None = Field(default=None, description="The desired-state file, once installed")
     is_unit_enabled: bool = Field(default=False, description="Whether the reconciler unit is installed + enabled")
+    installed_content_hash: str | None = Field(
+        default=None,
+        description=(
+            "sha256 the installed reconciler unit + script would report, set to the current expected hash by "
+            "install_reconciler; override to model a VM carrying an older client version's reconciler content"
+        ),
+    )
     is_authentication_always_failing: bool = Field(
         default=False, description="Force can_authenticate to fail, modeling an endpoint that rejects every key"
     )
@@ -59,6 +67,7 @@ class MockSliceVmAccess(SliceVmAccessInterface):
         self.desired_authorized_keys = desired_authorized_keys
         self.vm_authorized_keys = desired_authorized_keys
         self.is_unit_enabled = True
+        self.installed_content_hash = expected_reconciler_content_hash()
 
     def read_reconciler_state(self) -> SliceReconcilerState:
         self._record_call()
@@ -67,6 +76,7 @@ class MockSliceVmAccess(SliceVmAccessInterface):
             desired_authorized_keys=self.desired_authorized_keys,
             is_live_matching_desired=self.desired_authorized_keys is not None
             and self.vm_authorized_keys == self.desired_authorized_keys,
+            installed_content_hash=self.installed_content_hash,
         )
 
     def install_vm_host_key(self, private_key_pem: str, public_key: str) -> None:

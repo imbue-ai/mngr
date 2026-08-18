@@ -18,7 +18,9 @@ from imbue.mngr_imbue_cloud.interfaces import SliceReconcilerState
 from imbue.mngr_imbue_cloud.providers.adoption import ADOPTION_SCHEMA_VERSION
 from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
+from imbue.mngr_imbue_cloud.providers.adoption import build_reconciler_install_command
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
+from imbue.mngr_imbue_cloud.providers.adoption import expected_reconciler_content_hash
 from imbue.mngr_imbue_cloud.providers.adoption import invalidate_adoption_verification
 from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
 from imbue.mngr_imbue_cloud.providers.adoption import load_adoption_marker
@@ -26,6 +28,7 @@ from imbue.mngr_imbue_cloud.providers.adoption import load_pending_host_key_rota
 from imbue.mngr_imbue_cloud.providers.adoption import parse_reconciler_state_output
 from imbue.mngr_imbue_cloud.providers.adoption import remove_key_from_desired_authorized_keys
 from imbue.mngr_imbue_cloud.providers.adoption import render_desired_authorized_keys
+from imbue.mngr_imbue_cloud.providers.adoption import render_reconciler_unit
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_client_key
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_endpoint_host_key
 from imbue.mngr_imbue_cloud.providers.mock_slice_vm_access_test import MockSliceVmAccess
@@ -104,19 +107,77 @@ def test_remove_key_from_desired_authorized_keys_drops_only_the_retired_line() -
 def test_parse_reconciler_state_output_round_trips_desired_content() -> None:
     desired = f"{_POOL_KEY}\n{_CLIENT_KEY}\n"
     encoded = base64.b64encode(desired.encode()).decode()
-    stdout = f"MNGR_RECONCILER_ENABLED=enabled\nMNGR_DESIRED_B64={encoded}\nMNGR_LIVE_MATCHES=1\n"
+    content_hash = "a" * 64
+    stdout = (
+        f"MNGR_RECONCILER_ENABLED=enabled\nMNGR_DESIRED_B64={encoded}\n"
+        f"MNGR_LIVE_MATCHES=1\nMNGR_RECONCILER_SHA256={content_hash}\n"
+    )
     state = parse_reconciler_state_output(stdout)
     assert state == SliceReconcilerState(
-        is_unit_enabled=True, desired_authorized_keys=desired, is_live_matching_desired=True
+        is_unit_enabled=True,
+        desired_authorized_keys=desired,
+        is_live_matching_desired=True,
+        installed_content_hash=content_hash,
     )
 
 
 def test_parse_reconciler_state_output_reads_absent_desired_file() -> None:
-    stdout = "MNGR_RECONCILER_ENABLED=unknown\nMNGR_DESIRED_B64=ABSENT\nMNGR_LIVE_MATCHES=0\n"
+    stdout = "MNGR_RECONCILER_ENABLED=unknown\nMNGR_DESIRED_B64=ABSENT\nMNGR_LIVE_MATCHES=0\nMNGR_RECONCILER_SHA256=ABSENT\n"
     state = parse_reconciler_state_output(stdout)
     assert state == SliceReconcilerState(
-        is_unit_enabled=False, desired_authorized_keys=None, is_live_matching_desired=False
+        is_unit_enabled=False,
+        desired_authorized_keys=None,
+        is_live_matching_desired=False,
+        installed_content_hash=None,
     )
+
+
+def test_reconciler_unit_is_activated_by_cloud_init_target_to_avoid_the_ordering_cycle() -> None:
+    """WantedBy=multi-user.target + After=cloud-final.service is an ordering cycle
+    (cloud-final is itself After=multi-user.target), which systemd breaks by deleting
+    the reconciler's start job -- so the unit must hang off cloud-init.target instead."""
+    unit = render_reconciler_unit()
+    assert "WantedBy=cloud-init.target" in unit
+    assert "WantedBy=multi-user.target" not in unit
+    assert "After=cloud-final.service" in unit
+
+
+def test_reconciler_install_command_reenables_so_stale_enablement_symlinks_are_dropped() -> None:
+    command = build_reconciler_install_command(f"{_CLIENT_KEY}\n")
+    assert "systemctl reenable mngr-key-reconciler.service" in command
+    assert "systemctl enable mngr-key-reconciler.service" not in command
+
+
+def test_schema_bump_sweeps_stale_reconciler_content_onto_adopted_hosts(tmp_path: Path) -> None:
+    """A host adopted and verified by an older client version (stamped at the
+    previous schema version) carries reconciler content that hashes differently
+    -- e.g. the multi-user.target ordering-cycle unit. The schema-version bump
+    alone must sweep it through one full verification, whose content-hash check
+    replaces the stale unit/script while the host is still reachable (after a
+    reboot with the broken unit it no longer would be)."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+    ensure_adopted(access, target, is_full_verification=False)
+    assert access.installed_content_hash == expected_reconciler_content_hash()
+
+    # Model an older client version's install: unit enabled, keys fine, but the
+    # unit/script content hashes differently and the marker is stamped at the
+    # previous schema version (NOT invalidated -- the bump is the trigger).
+    access.installed_content_hash = "0" * 64
+    marker_path = target.host_state_dir / "adoption.json"
+    marker_path.write_text(
+        json.dumps({"adopted_at": "2026-07-01T00:00:00+00:00", "verified_schema_version": ADOPTION_SCHEMA_VERSION - 1})
+    )
+
+    ensure_adopted(access, target, is_full_verification=True)
+
+    # Only install_reconciler updates the hash, so this proves the reinstall ran.
+    assert access.installed_content_hash == expected_reconciler_content_hash()
+    marker = load_adoption_marker(target.host_state_dir)
+    assert marker is not None
+    assert marker.verified_schema_version == ADOPTION_SCHEMA_VERSION
 
 
 def test_is_slice_lease_distinguishes_forwarded_ports_from_the_publish_port() -> None:

@@ -628,7 +628,9 @@ def _write_dead_destroy_dir(paths: WorkspacePaths, agent_id: AgentId, host_id: H
     """Create a destroying/<agent_id>/ dir whose wrapper pid is already dead.
 
     Spawns and reaps a trivial child so its pid is reliably not alive, then
-    writes the same three files ``start_destroy`` would (pid, host_id, log).
+    writes a legacy-shaped destroy marker (pid, host_id, log -- no ``provider``
+    file, which ``start_destroy`` also writes when discovery knows the owning
+    provider), so status reads take the legacy absence-equals-gone path.
     """
     dir_path = paths.data_dir / "destroying" / str(agent_id)
     dir_path.mkdir(parents=True)

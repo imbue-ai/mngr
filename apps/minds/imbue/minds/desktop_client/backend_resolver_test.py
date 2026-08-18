@@ -965,6 +965,78 @@ def test_last_good_topology_retains_provider_hosts_on_errored_snapshot(tmp_path:
     assert set(resolver.list_restorable_workspace_ids()) == {cloud_agent}
 
 
+def test_is_host_positively_absent_requires_a_clean_snapshot_from_the_owning_provider() -> None:
+    """Absence evidence needs a clean snapshot: before one arrives there is no
+    evidence (the startup warm-up window that once let a FAILED destroy finalize
+    as DONE), and a clean snapshot that still lists the host proves presence."""
+    host_id = HostId.generate()
+    provider = ProviderInstanceName("imbue_cloud_user")
+    resolver = MngrCliBackendResolver()
+
+    # No snapshot from the provider yet: no evidence.
+    assert not resolver.is_host_positively_absent(provider, host_id)
+
+    # A clean snapshot that still lists the host: present, not absent.
+    resolver.update_providers(
+        provider_name=provider,
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+        clean_snapshot_host_ids=(str(host_id),),
+    )
+    assert not resolver.is_host_positively_absent(provider, host_id)
+
+    # A later clean snapshot without the host: positively absent.
+    resolver.update_providers(
+        provider_name=provider,
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+        clean_snapshot_host_ids=(),
+    )
+    assert resolver.is_host_positively_absent(provider, host_id)
+
+
+def test_is_host_positively_absent_ignores_errored_and_not_state_current_snapshots() -> None:
+    """An errored poll proves nothing (hosts unreachable, not absent), and a
+    snapshot whose state-current claim was dropped (production: the errored
+    pre-start replay) carries no usable state -- neither may create or replace
+    absence evidence."""
+    host_id = HostId.generate()
+    provider = ProviderInstanceName("imbue_cloud_user")
+    resolver = MngrCliBackendResolver()
+
+    # A snapshot marked not state-current records no evidence, even though it
+    # is error-free and omits the host.
+    resolver.update_providers(
+        provider_name=provider,
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+        clean_snapshot_host_ids=(),
+        is_snapshot_state_current=False,
+    )
+    assert not resolver.is_host_positively_absent(provider, host_id)
+
+    # A clean snapshot listing the host, then an errored poll: the errored poll
+    # must not replace the presence evidence with absence.
+    resolver.update_providers(
+        provider_name=provider,
+        provider=None,
+        error=None,
+        last_snapshot_at=datetime.now(timezone.utc),
+        clean_snapshot_host_ids=(str(host_id),),
+    )
+    resolver.update_providers(
+        provider_name=provider,
+        provider=None,
+        error=DiscoveryError(type_name="ProviderUnavailableError", message="cloud down", provider_name=provider),
+        last_snapshot_at=datetime.now(timezone.utc),
+        clean_snapshot_host_ids=None,
+    )
+    assert not resolver.is_host_positively_absent(provider, host_id)
+
+
 def test_last_good_topology_resets_legacy_file_without_provider_names(tmp_path: Path) -> None:
     """A pre-provider-attribution topology file fails validation and loads as empty.
 
