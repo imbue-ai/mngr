@@ -22,7 +22,11 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     - ``CONNECT_ERROR``: the plugin could not establish a connection to
       the backend (httpx.ConnectError / RemoteProtocolError before any
       response bytes, or a failure setting up the SSH tunnel to a remote
-      backend -- e.g. when the agent's host has gone away).
+      backend -- e.g. when the agent's host has gone away). It also
+      covers the plugin's own connection pool being exhausted, where the
+      backend is never dialed at all and so its health is unknown: a
+      consumer must not read this reason as proof that the backend
+      itself is at fault.
     - ``SSE_EOF``: the backend dropped the response stream after some
       bytes had already been delivered. Despite the name (motivated by
       the SSE forwarding path that originally surfaced this), it also

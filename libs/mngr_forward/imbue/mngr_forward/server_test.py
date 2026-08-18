@@ -13,18 +13,27 @@ import socket as socket_module
 import tempfile
 import threading
 import time
+from collections.abc import AsyncGenerator
+from collections.abc import MutableMapping
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from loguru import logger
+from pydantic import Field
 from pydantic import PrivateAttr
+from starlette.requests import Request
+from starlette.responses import Response
 from starlette.testclient import TestClient
 from starlette.types import Message
 from starlette.websockets import WebSocketDisconnect
 from websockets.sync.server import ServerConnection
 from websockets.sync.server import serve as ws_serve
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import HostId
@@ -35,6 +44,7 @@ from imbue.mngr_forward.cookie import create_subdomain_auth_token
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.embedding import EmbedderOrigin
 from imbue.mngr_forward.envelope import EnvelopeWriter
+from imbue.mngr_forward.errors import MngrForwardError
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
@@ -42,9 +52,14 @@ from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import TunnelWarningRateLimiter
 from imbue.mngr_forward.server import _PROXY_BACKSTOP_TIMEOUT_SECONDS
+from imbue.mngr_forward.server import _PROXY_POOL_LIMITS
 from imbue.mngr_forward.server import _PROXY_TIMEOUT
 from imbue.mngr_forward.server import _SSE_READ_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _STALL_NOTICE_SECONDS
+from imbue.mngr_forward.server import _StallGuardedStreamingResponse
+from imbue.mngr_forward.server import _TUNNEL_POOL_LIMITS
+from imbue.mngr_forward.server import _forward_workspace_http
+from imbue.mngr_forward.server import _get_tunnel_http_client
 from imbue.mngr_forward.server import _is_loopback_url
 from imbue.mngr_forward.server import _sanitize_next_url
 from imbue.mngr_forward.server import _select_ws_receive_payload
@@ -1081,10 +1096,11 @@ def _make_forward_app_with_capture(
             raise raise_error("simulated failure")
         return httpx.Response(backend_status, content=b"hi")
 
-    # Configured exactly like the client ``_managed_lifespan`` builds, so a
-    # captured request's timeout reflects production rather than httpx's
-    # default. ``MockTransport`` never enforces one, so this changes nothing
-    # for the tests that only look at status codes and envelopes.
+    # Given production's timeout, so a captured request carries that rather
+    # than httpx's default. ``MockTransport`` never enforces one, so this
+    # changes nothing for the tests that only look at status codes and
+    # envelopes. The pool ceiling ``_managed_lifespan`` also sets is not
+    # mirrored: httpx ignores ``limits`` when handed an explicit transport.
     mock_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_capture), follow_redirects=False, timeout=_PROXY_TIMEOUT
     )
@@ -1525,7 +1541,11 @@ def test_subdomain_forward_emits_no_stall_envelope_when_the_backend_answers_in_t
 
 
 async def _drive_request_until_client_disconnects(
-    app: FastAPI, path: str, preauth: str, disconnect_after_seconds: float
+    app: FastAPI,
+    path: str,
+    preauth: str,
+    disconnect_after_seconds: float,
+    accept_header: bytes = b"application/json",
 ) -> tuple[float, list[str], int | None]:
     """Run one request through ``app``'s ASGI interface, disconnecting mid-flight.
 
@@ -1566,7 +1586,7 @@ async def _drive_request_until_client_disconnects(
         "headers": [
             (b"host", f"{_TEST_HOST_ID}.localhost:18421".encode("utf-8")),
             (b"cookie", f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}".encode("utf-8")),
-            (b"accept", b"application/json"),
+            (b"accept", accept_header),
         ],
         "client": ("127.0.0.1", 54321),
         "server": ("127.0.0.1", 18421),
@@ -1583,7 +1603,7 @@ def test_subdomain_forward_abandons_the_backend_when_the_client_gives_up(tmp_pat
     plugin-side handler outlives that timeout -- a buffered handler never reads
     the receive channel, so the disconnect goes unnoticed. Left running to the
     backstop, those abandoned probes accumulate at roughly one every four
-    seconds against httpx's 100-connection pool, and for a remote agent each one
+    seconds against the proxy's connection pool, and for a remote agent each one
     also pins an SSH channel and its relay thread.
     """
     instance_key = _make_test_instance_key()
@@ -1612,6 +1632,45 @@ def test_subdomain_forward_abandons_the_backend_when_the_client_gives_up(tmp_pat
     # 499, not the 504 a genuinely-timed-out backend gets: nothing answered
     # wrongly here, the client stopped listening. The status is only there to
     # end the ASGI exchange, but it must not claim success or blame the backend.
+    assert sent_status == 499
+    assert len(captured) == 1, "the backend request should have been started before being abandoned"
+    # A client hanging up says nothing about the backend's health.
+    assert _envelope_lines(env_out) == []
+
+
+def test_subdomain_forward_abandons_the_backend_stream_when_the_client_gives_up(tmp_path: Path) -> None:
+    """An SSE client that disconnects during the backend handoff releases the pooled slot.
+
+    Once the streaming response exists, starlette guards the body: hypercorn
+    advertises ASGI spec 2.1, so ``StreamingResponse.__call__`` races
+    ``listen_for_disconnect`` against the body loop. Nothing guarded the window
+    *before* that -- opening the backend stream -- so a client that left during
+    the handoff held its pooled connection until the SSE read budget expired.
+    """
+    instance_key = _make_test_instance_key()
+    preauth = "preauth-cookie-sse-disconnect"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        instance_key,
+        preauth,
+        # Far longer than the disconnect, so finishing early can only mean the
+        # handoff was abandoned rather than awaited.
+        backend_delay_seconds=5.0,
+    )
+    app.state.http_client = mock_client
+    app.state.ssh_http_clients = {}
+    app.state.ssh_http_clients_lock = threading.Lock()
+
+    elapsed_seconds, sent_types, sent_status = asyncio.run(
+        _drive_request_until_client_disconnects(
+            app, "/api/events", preauth, disconnect_after_seconds=0.05, accept_header=b"text/event-stream"
+        )
+    )
+
+    assert elapsed_seconds < 2.0, "the handler waited for the backend stream instead of abandoning the handoff"
+    assert sent_types == ["http.response.start", "http.response.body"]
     assert sent_status == 499
     assert len(captured) == 1, "the backend request should have been started before being abandoned"
     # A client hanging up says nothing about the backend's health.
@@ -2418,3 +2477,515 @@ def test_tunnel_warning_rate_limiter_tracks_agents_independently() -> None:
     clock[0] = 110.0
     assert limiter.suppressed_repeats_if_should_log("agent-b") == 0
     assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+
+
+# -- Streaming stall/close regression tests --------------------------------
+#
+# Regression tests for the forward pool-saturation wedge: an SSE client leg
+# that went quiet without disconnecting left the ASGI ``send`` blocked forever
+# (the ASGI server has no write timeout for an active stream), pinning the
+# suspended body generator and its pooled backend connection until the pool
+# saturated and every proxied request 504'd without ever dialing the backend.
+# These drive the real streaming response against a real httpx client and a
+# real socket backend, so they exercise the exact resources that leaked.
+
+_SSE_KEEPALIVE_CHUNK = b": keepalive\n\n"
+
+# Bounds the stub backend's keepalive stream so the test server cannot spin
+# forever if a scenario wedges; scenarios finish after a handful of chunks.
+_MAX_TEST_KEEPALIVE_CHUNKS = 10_000
+
+
+async def _serve_sse_keepalives(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Minimal HTTP/1.1 backend: consume the request head, then stream chunked SSE keepalives."""
+    for _ in range(100):
+        line = await reader.readline()
+        if not line or line == b"\r\n":
+            break
+    writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n")
+    try:
+        for _ in range(_MAX_TEST_KEEPALIVE_CHUNKS):
+            writer.write(b"%x\r\n%s\r\n" % (len(_SSE_KEEPALIVE_CHUNK), _SSE_KEEPALIVE_CHUNK))
+            await writer.drain()
+            await asyncio.sleep(0.005)
+    except (ConnectionResetError, BrokenPipeError):
+        pass
+    finally:
+        writer.close()
+
+
+async def _proxy_body_from(backend_response: httpx.Response) -> AsyncGenerator[bytes, None]:
+    """The same shape as ``_forward_workspace_http``'s ``_stream()``: relays chunks, closes nothing."""
+    async for chunk in backend_response.aiter_bytes():
+        yield chunk
+
+
+@asynccontextmanager
+async def _running_sse_backend() -> AsyncGenerator[int, None]:
+    """Serve ``_serve_sse_keepalives`` on a loopback port for the duration of the block."""
+    server = await asyncio.start_server(_serve_sse_keepalives, "127.0.0.1", 0)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@asynccontextmanager
+async def _sse_proxy_scenario(
+    close_events: list[str],
+) -> AsyncGenerator[tuple[httpx.Response, _StallGuardedStreamingResponse], None]:
+    """Yield a live backend SSE response and the guarded streaming response proxying it."""
+    async with _running_sse_backend() as listen_port:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        try:
+            backend_response = await client.send(
+                client.build_request("GET", f"http://127.0.0.1:{listen_port}/api/events"), stream=True
+            )
+
+            async def _close_backend() -> None:
+                close_events.append("close_started")
+                await backend_response.aclose()
+                close_events.append("close_returned")
+
+            response = _StallGuardedStreamingResponse(
+                body_generator=_proxy_body_from(backend_response),
+                close_backend=_close_backend,
+                agent_id=AgentId(),
+                status_code=200,
+                media_type="text/event-stream",
+                headers={},
+                send_timeout_seconds=0.2,
+            )
+            yield backend_response, response
+        finally:
+            await client.aclose()
+
+
+class _StallingSendChannel(MutableModel):
+    """ASGI send stub that accepts a fixed number of messages, then blocks forever (a quiet client leg)."""
+
+    accepted_message_count: int = Field(description="Messages to accept before stalling")
+    sent_messages: list[dict[str, Any]] = Field(default_factory=list, description="Messages accepted so far")
+
+    async def __call__(self, message: MutableMapping[str, Any]) -> None:
+        if len(self.sent_messages) >= self.accepted_message_count:
+            await asyncio.Event().wait()
+        self.sent_messages.append(dict(message))
+
+
+class _RaisingSendChannel(MutableModel):
+    """ASGI send stub that accepts a fixed number of messages, then raises (a torn-down client transport)."""
+
+    accepted_message_count: int = Field(description="Messages to accept before raising")
+    sent_messages: list[dict[str, Any]] = Field(default_factory=list, description="Messages accepted so far")
+
+    async def __call__(self, message: MutableMapping[str, Any]) -> None:
+        if len(self.sent_messages) >= self.accepted_message_count:
+            raise MngrForwardError("simulated client transport failure")
+        self.sent_messages.append(dict(message))
+
+
+class _NeverDisconnectingReceiveChannel(MutableModel):
+    """ASGI receive stub for a client leg that never delivers ``http.disconnect``.
+
+    The (empty) request body is delivered once, as a server would, so a handler
+    reading it does not block; after that the channel goes silent forever.
+    """
+
+    _is_request_delivered: bool = PrivateAttr(default=False)
+
+    async def __call__(self) -> dict[str, Any]:
+        if not self._is_request_delivered:
+            self._is_request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Event().wait()
+        raise MngrForwardError("unreachable: the never-set event resolved")
+
+
+async def _run_stalled_client_scenario() -> None:
+    close_events: list[str] = []
+    async with _sse_proxy_scenario(close_events) as (backend_response, response):
+        send_channel = _StallingSendChannel(accepted_message_count=2)
+        scope = {"type": "http", "asgi": {"spec_version": "2.1", "version": "3.0"}}
+        # The full ASGI call must complete on its own once the per-send stall
+        # timeout trips; the outer timeout only bounds the test on regression.
+        async with asyncio.timeout(10.0):
+            await response(scope, _NeverDisconnectingReceiveChannel(), send_channel)
+        assert close_events == ["close_started", "close_returned"]
+        assert backend_response.is_closed
+        assert len(send_channel.sent_messages) == send_channel.accepted_message_count
+
+
+def test_stalled_client_send_releases_backend_sse_stream() -> None:
+    """A client leg that goes quiet mid-stream must not pin the backend response forever."""
+    asyncio.run(_run_stalled_client_scenario())
+
+
+async def _run_stalled_response_start_scenario() -> None:
+    close_events: list[str] = []
+    async with _sse_proxy_scenario(close_events) as (backend_response, response):
+        # Accepts nothing at all: the response *headers* are the send that stalls.
+        send_channel = _StallingSendChannel(accepted_message_count=0)
+        scope = {"type": "http", "asgi": {"spec_version": "2.1", "version": "3.0"}}
+        async with asyncio.timeout(10.0):
+            await response(scope, _NeverDisconnectingReceiveChannel(), send_channel)
+        assert send_channel.sent_messages == [], "the stall was supposed to happen on the very first send"
+        assert close_events == ["close_started", "close_returned"]
+        assert backend_response.is_closed
+
+
+def test_stalled_response_start_releases_backend_sse_stream() -> None:
+    """A stall on the response headers -- before the body generator ever starts -- must still free the pool slot.
+
+    Hypercorn writes ``http.response.start`` straight to the socket and drains
+    it, so it blocks on the same unwritable client leg as any body chunk. The
+    body generator has not been started at that point, and closing an unstarted
+    async generator runs none of its body, so cleanup owned by the generator's
+    ``finally`` would silently skip this path and pin the pooled backend
+    connection for the life of the process.
+    """
+    asyncio.run(_run_stalled_response_start_scenario())
+
+
+async def _run_raising_send_scenario() -> None:
+    close_events: list[str] = []
+    async with _sse_proxy_scenario(close_events) as (backend_response, response):
+        send_channel = _RaisingSendChannel(accepted_message_count=2)
+        with pytest.raises(MngrForwardError):
+            async with asyncio.timeout(10.0):
+                await response.stream_response(send_channel)
+        # The backend response must be closed by the time stream_response
+        # unwinds -- deterministically, not whenever GC finalizes the
+        # abandoned generator.
+        assert close_events == ["close_started", "close_returned"]
+        assert backend_response.is_closed
+
+
+def test_send_raising_mid_stream_closes_backend_stream_deterministically() -> None:
+    """A ``send`` that raises mid-stream must close the backend response without waiting for GC."""
+    asyncio.run(_run_raising_send_scenario())
+
+
+async def _run_sse_write_failure_through_the_forward_handler(
+    envelope_output: io.StringIO,
+) -> tuple[list[dict[str, Any]], int]:
+    """Proxy a real SSE stream through the real handler, fail a client write, then re-use the pool.
+
+    The client's pool holds exactly one connection, so the follow-up request at
+    the end is the release assertion: it can only be served if the backend
+    stream that just ended gave its slot back.
+    """
+    async with _running_sse_backend() as listen_port:
+        # Accepts the response head plus three chunks, then fails the way a
+        # client transport that has been torn down does. Unlike a disconnect
+        # (which cancels the response, and httpcore closes its own stream under
+        # cancellation regardless), this leaves the body generator suspended at
+        # its ``yield`` -- so only the response's own ``finally`` gives the
+        # pooled slot back.
+        send_channel = _RaisingSendChannel(accepted_message_count=4)
+        receive_channel = _NeverDisconnectingReceiveChannel()
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.1"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/events",
+            "raw_path": b"/api/events",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"accept", b"text/event-stream")],
+            "client": ("127.0.0.1", 54321),
+            "server": ("127.0.0.1", 18421),
+        }
+        http_client = httpx.AsyncClient(
+            follow_redirects=False,
+            timeout=httpx.Timeout(5.0),
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        )
+        try:
+            response = await _forward_workspace_http(
+                request=Request(scope, receive_channel),
+                backend_url=f"http://127.0.0.1:{listen_port}",
+                http_client=http_client,
+                agent_id=AgentId(),
+                envelope_writer=EnvelopeWriter(output=envelope_output),
+                stall_notice_seconds=_STALL_NOTICE_SECONDS,
+            )
+            with pytest.raises(MngrForwardError):
+                # The ASGI call must unwind on its own once the write fails; the
+                # outer timeout only bounds the test on regression.
+                async with asyncio.timeout(10.0):
+                    await response(scope, receive_channel, send_channel)
+            # Short pool budget so a slot that was never released fails here
+            # rather than stalling the test for the full connect budget.
+            probe_response = await http_client.send(
+                http_client.build_request(
+                    "GET",
+                    f"http://127.0.0.1:{listen_port}/api/events",
+                    timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=2.0),
+                ),
+                stream=True,
+            )
+            await probe_response.aclose()
+            return send_channel.sent_messages, probe_response.status_code
+        finally:
+            await http_client.aclose()
+
+
+def test_forwarded_sse_stream_returns_its_pooled_backend_connection_when_a_client_write_fails() -> None:
+    """The handler's own streaming response must free its pooled backend slot when the client leg fails.
+
+    This drives ``_forward_workspace_http`` itself -- not a hand-built response
+    -- against a real socket backend over a real, one-connection pool, so it is
+    what pins the production wiring rather than a replica of it. A handler that
+    returned a plain ``StreamingResponse``, or one that dropped
+    ``close_backend``, leaves the backend stream pinned by a body generator
+    suspended at its ``yield``, and the follow-up request below then finds no
+    free slot and raises ``httpx.PoolTimeout``: the wedge this branch fixes, in
+    miniature -- pool saturated, backend never dialed.
+    """
+    envelope_output = io.StringIO()
+    sent_messages, probe_status_code = asyncio.run(_run_sse_write_failure_through_the_forward_handler(envelope_output))
+
+    assert probe_status_code == 200
+    message_types = [message["type"] for message in sent_messages]
+    assert message_types == ["http.response.start"] + ["http.response.body"] * 3, (
+        "the backend stream never reached the client"
+    )
+    # A client leg that broke says nothing about the backend's health.
+    assert _envelope_lines(envelope_output) == []
+
+
+def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tmp_path: Path) -> None:
+    """``PoolTimeout`` (proxy pool exhausted, backend never dialed) must be tellable apart from a backend timeout.
+
+    Both used to surface as an identical 504 "Backend timed out" +
+    ``CONNECT_ERROR``, which made a saturated proxy indistinguishable from a
+    wedged backend. The envelope reason intentionally stays ``CONNECT_ERROR``
+    (a cross-version contract with consumers); the response body and log line
+    carry the distinction.
+    """
+    instance_key = _make_test_instance_key()
+    preauth = "preauth-cookie-pool-timeout"
+    captured: list[httpx.Request] = []
+    app, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        captured,
+        instance_key,
+        preauth,
+        raise_error=httpx.PoolTimeout,
+    )
+
+    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        sse_response = client.get(
+            "/api/events",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "text/event-stream",
+            },
+        )
+        plain_response = client.get(
+            "/api/state",
+            headers={
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                "accept": "application/json",
+            },
+        )
+
+    assert sse_response.status_code == 504
+    assert sse_response.text == "Proxy connection pool exhausted"
+    assert plain_response.status_code == 504
+    assert plain_response.text == "Proxy connection pool exhausted"
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 2
+    for line in lines:
+        payload = json.loads(line)["payload"]
+        assert payload["type"] == "system_interface_backend_failure"
+        assert payload["reason"] == "CONNECT_ERROR"
+
+
+class _FixedSocketTunnelManager(SSHTunnelManager):
+    """SSHTunnelManager that reports a tunnel socket path without opening a tunnel."""
+
+    reported_socket_path: Path = Field(description="Path reported for every tunnel")
+
+    def get_tunnel_socket_path(self, ssh_info: RemoteSSHInfo, remote_host: str, remote_port: int) -> Path:
+        return self.reported_socket_path
+
+
+def _pool_ceiling_of(client: httpx.AsyncClient) -> int:
+    """Read back the connection ceiling httpx built into a client's transport pool.
+
+    httpx keeps ``limits`` only long enough to construct the pool, so confirming
+    that a client was given one means reading the pool it built. The instance
+    dictionaries are walked rather than the attributes because neither hop
+    type-checks: ``AsyncClient._transport`` is annotated as the abstract
+    ``AsyncBaseTransport``, which declares no pool at all, and ``_pool`` is in
+    turn a union whose other arm is the stub raised when SOCKS support is
+    missing, which declares no ceiling.
+    """
+    pool = client._transport.__dict__["_pool"]
+    return int(pool.__dict__["_max_connections"])
+
+
+def test_both_proxying_http_clients_are_built_with_explicit_pool_ceilings(tmp_path: Path) -> None:
+    """Neither proxying client may fall back to httpx's default connection ceiling.
+
+    That default (100) is exactly hypercorn's ``h2_max_concurrent_streams``, and
+    the coincidence is what turned a handful of wedged streaming responses into
+    a proxy-wide dead end: every later request timed out waiting for a pooled
+    slot without ever dialing a backend. Each ``limits=`` kwarg is one word, and
+    losing either restores that ceiling silently.
+    """
+    instance_key = _make_test_instance_key()
+    preauth = "preauth-cookie-pool-limits"
+    app, _env_out, _mock_client = _make_forward_app_with_capture(tmp_path, [], instance_key, preauth)
+
+    # Entered so the lifespan builds the direct client the way production does.
+    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False):
+        assert _pool_ceiling_of(app.state.http_client) == _PROXY_POOL_LIMITS.max_connections
+
+    # No socket is opened: the tunnel client is only constructed, never dialed.
+    tunnel_client = _get_tunnel_http_client(
+        tunnel_manager=_FixedSocketTunnelManager(reported_socket_path=tmp_path / "tunnel.sock"),
+        backend_url="http://stub-backend:8000",
+        ssh_info=RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
+        ssh_http_clients={},
+        ssh_http_clients_lock=threading.Lock(),
+    )
+    assert tunnel_client is not None
+    try:
+        assert _pool_ceiling_of(tunnel_client) == _TUNNEL_POOL_LIMITS.max_connections
+    finally:
+        asyncio.run(tunnel_client.aclose())
+
+
+# Fragment of the debug line the handler logs when a disconnect ties with the
+# handoff. It is the one observable that separates that branch from the one for
+# a disconnect that arrives *before* the backend stream opens, which is
+# otherwise identical in everything the caller can see.
+_TIE_BRANCH_LOG_FRAGMENT = "as the backend stream"
+
+
+async def _run_simultaneous_disconnect_and_handoff(
+    envelope_output: io.StringIO,
+) -> tuple[Response, list[httpx.Response], list[str]]:
+    """Open an SSE backend stream and deliver the client's disconnect in the same event loop step.
+
+    The ``asyncio.Barrier`` is what rendezvouses the two: the backend handler and
+    the receive channel both wait on it, so neither can finish before the other
+    has arrived. The receive channel is deliberately let there first (the handler
+    yields once before rendezvousing), which leaves the handler as the party that
+    releases the barrier and therefore runs on without yielding, while the
+    receive channel's wakeup is already queued ahead of the ``asyncio.wait``
+    waiter's. Both tasks therefore finish before that waiter resumes, putting
+    both in its ``done`` set. Which branch actually ran is not assumed: the
+    caller checks the branch's own log line.
+
+    The receive channel delivers exactly one ``http.disconnect`` and then goes
+    silent, which is what hypercorn does (``HTTPStream.handle`` queues one when
+    the stream closes). Returns the handler's response, the backend responses
+    the transport produced, and the chunks pulled from the backend stream.
+    """
+    handoff_barrier = asyncio.Barrier(2)
+    backend_responses: list[httpx.Response] = []
+    streamed_chunks: list[str] = []
+
+    async def _backend_body() -> AsyncGenerator[bytes, None]:
+        streamed_chunks.append("chunk")
+        yield _SSE_KEEPALIVE_CHUNK
+
+    async def _handle(request: httpx.Request) -> httpx.Response:
+        # Hand the loop over first, so the client's disconnect is the party
+        # already waiting at the rendezvous rather than the one releasing it.
+        await asyncio.sleep(0)
+        await handoff_barrier.wait()
+        backend_response = httpx.Response(200, headers={"content-type": "text/event-stream"}, content=_backend_body())
+        backend_responses.append(backend_response)
+        return backend_response
+
+    is_body_delivered = False
+    is_disconnect_delivered = False
+
+    async def _receive() -> Message:
+        nonlocal is_body_delivered, is_disconnect_delivered
+        if not is_body_delivered:
+            is_body_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        if is_disconnect_delivered:
+            await asyncio.Event().wait()
+        await handoff_barrier.wait()
+        is_disconnect_delivered = True
+        return {"type": "http.disconnect"}
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.1"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/events",
+        "raw_path": b"/api/events",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"accept", b"text/event-stream")],
+        "client": ("127.0.0.1", 54321),
+        "server": ("127.0.0.1", 18421),
+    }
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handle), follow_redirects=False)
+    try:
+        response = await _forward_workspace_http(
+            request=Request(scope, _receive),
+            backend_url="http://stub-backend",
+            http_client=http_client,
+            agent_id=AgentId(),
+            envelope_writer=EnvelopeWriter(output=envelope_output),
+            stall_notice_seconds=_STALL_NOTICE_SECONDS,
+        )
+    finally:
+        await http_client.aclose()
+    return response, backend_responses, streamed_chunks
+
+
+def test_sse_handoff_that_ties_with_the_client_disconnect_releases_the_backend_stream() -> None:
+    """A disconnect that lands with the backend handoff must end the request, not start a stream.
+
+    Both tasks can finish in the same ``asyncio.wait``, and only one
+    ``http.disconnect`` is ever queued -- so a stream handed on here would be
+    invisible to starlette's own disconnect watcher, while writes to a
+    connection asyncio has already lost are discarded rather than failing or
+    blocking. Neither the watcher nor the stall guard would end it, and a
+    system interface's event stream does not end on its own, so the pooled
+    backend connection would be pinned for the life of the process.
+    """
+    envelope_output = io.StringIO()
+    logged_messages: list[str] = []
+    sink_id = logger.add(logged_messages.append, level="DEBUG")
+    try:
+        response, backend_responses, streamed_chunks = asyncio.run(
+            _run_simultaneous_disconnect_and_handoff(envelope_output)
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert response.status_code == 499
+    # Nothing in the outcome tells the tie apart from a disconnect that simply
+    # won outright: that branch also ends 499, also produces a backend response
+    # (the transport builds one before the cancelled handoff unwinds) and also
+    # ends up closed, because httpx closes the response itself when ``send`` is
+    # cancelled. The branch's own log line is the discriminator.
+    assert any(_TIE_BRANCH_LOG_FRAGMENT in message for message in logged_messages), (
+        "the disconnect never tied with the handoff, so the branch under test did not run"
+    )
+    assert len(backend_responses) == 1
+    # Proves the handler entered ``aclose`` on the stream it had just been
+    # handed. Releasing the pooled slot itself is covered where a real pool
+    # exists, in
+    # ``test_forwarded_sse_stream_returns_its_pooled_backend_connection_when_a_client_write_fails``.
+    assert backend_responses[0].is_closed
+    assert streamed_chunks == [], "the stream was served to a client that had already gone"
+    # A client hanging up says nothing about the backend's health.
+    assert _envelope_lines(envelope_output) == []

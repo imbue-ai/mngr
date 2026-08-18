@@ -26,8 +26,10 @@ import socket as socket_module
 import threading
 import time
 from collections.abc import AsyncGenerator
+from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Mapping
+from contextlib import aclosing
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -52,6 +54,7 @@ from jinja2 import PackageLoader
 from jinja2 import select_autoescape
 from loguru import logger
 from pydantic import Field
+from starlette.types import Send
 from websockets import ClientConnection
 
 from imbue.imbue_common.mutable_model import MutableModel
@@ -97,8 +100,9 @@ _STALL_NOTICE_SECONDS: Final[float] = 30.0
 # by its client staying connected. That is the first line of defence anyway --
 # a request ends when its client disconnects, which is what keeps abandoned
 # requests (minds' 2s health probe against a wedged backend) from accumulating
-# against httpx's 100-connection pool. Nothing caps total request duration, by
-# design: a cap there breaks any user app endpoint that legitimately runs long.
+# against the proxy's connection pool (``_PROXY_POOL_LIMITS``). Nothing caps
+# total request duration, by design: a cap there breaks any user app endpoint
+# that legitimately runs long.
 #
 # The write side gets the same budget, and for the same reason: a backend that
 # accepted the connection and then stopped reading the body is the mirror of one
@@ -119,6 +123,14 @@ _PROXY_CONNECT_TIMEOUT_SECONDS: Final[float] = 30.0
 # SSE request carries no body worth speaking of.
 _SSE_READ_TIMEOUT_SECONDS: Final[float] = 30.0
 
+# How long a single write to the *client* leg of a streamed response may block.
+# This is the mirror of the read budget above, on the other side of the proxy:
+# the ASGI server enforces no write timeout of its own, so a client that goes
+# quiet without disconnecting would otherwise block ``send`` forever. Kept as
+# tight as the SSE read budget and for the same reason -- an SSE consumer that
+# cannot accept a heartbeat within 30s is not reading the stream.
+_SSE_CLIENT_WRITE_TIMEOUT_SECONDS: Final[float] = 30.0
+
 # Timeout for the non-SSE forwarding path: short to connect, long to respond.
 _PROXY_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
     connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
@@ -136,6 +148,30 @@ _SSE_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
     write=_SSE_READ_TIMEOUT_SECONDS,
 )
 
+# Explicit pool ceilings for the two proxying paths. Both exist because httpx's
+# default (100 connections) exactly matches hypercorn's h2_max_concurrent_streams,
+# so 100 wedged streaming responses used to dead-end every proxied request with a
+# pool timeout that never dialed the backend. What both values buy is distance
+# from that coincidence: a ceiling well clear of the h2 stream limit means one
+# wedged client connection can no longer saturate the pool, and a leak that gets
+# past the guards below degrades gradually instead of hard-failing all traffic at
+# once. Neither is tuned against a measured resource budget -- this process never
+# sets its own RLIMIT_NOFILE, and what it inherits depends on whoever spawned it
+# -- so both are set far above any healthy concurrency rather than at a
+# calculated breaking point.
+#
+# The direct (loopback) client gets the higher of the two: a pooled slot there
+# costs one loopback socket and nothing else.
+_PROXY_POOL_LIMITS: Final[httpx.Limits] = httpx.Limits(max_connections=1000, max_keepalive_connections=20)
+
+# The per-tunnel transports get a lower ceiling, because a pooled slot there
+# costs more than a descriptor: ``ssh_tunnel._tunnel_accept_loop`` hands every
+# accepted connection to a dedicated OS thread that opens a paramiko
+# direct-tcpip channel and relays it. The ceiling also applies per agent tunnel,
+# so unlike the single shared ceiling above, the process-wide worst case scales
+# with the number of remote agents -- which is the reason to keep the per-tunnel
+# number well below the shared one.
+_TUNNEL_POOL_LIMITS: Final[httpx.Limits] = httpx.Limits(max_connections=200, max_keepalive_connections=20)
 
 _SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
 
@@ -478,7 +514,7 @@ def _get_tunnel_http_client(
         cached = ssh_http_clients.get(socket_path_str)
         if cached is not None:
             return cached
-        transport = httpx.AsyncHTTPTransport(uds=socket_path_str)
+        transport = httpx.AsyncHTTPTransport(uds=socket_path_str, limits=_TUNNEL_POOL_LIMITS)
         client = httpx.AsyncClient(
             transport=transport,
             follow_redirects=False,
@@ -528,10 +564,72 @@ async def _wait_for_client_disconnect(request: Request) -> None:
     difference, and no client the forward serves half-closes. HTTP/2 does
     distinguish the two, and reports a disconnect only on stream reset or
     connection close.
+
+    Cancelling a caller that lost this race consumes nothing: hypercorn's
+    receive channel is an ``asyncio.Queue``, whose ``get`` re-wakes another
+    getter rather than dropping the item it was cancelled out of. That matters
+    on the SSE path, where starlette reads the same channel afterwards.
     """
     message = await request.receive()
     while message["type"] != "http.disconnect":
         message = await request.receive()
+
+
+class _StallGuardedStreamingResponse(StreamingResponse):
+    """StreamingResponse that bounds each client write and always closes the backend stream.
+
+    The ASGI server has no write timeout for an active stream, so a client leg
+    that goes quiet without disconnecting (e.g. a half-open HTTP/2 connection
+    left behind by a laptop sleep) blocks ``send`` forever. That pins the
+    suspended body generator -- and the pooled backend connection it holds --
+    permanently; enough of these saturate the connection pool, after which
+    every proxied request times out without ever dialing the backend.
+    """
+
+    def __init__(
+        self,
+        body_generator: AsyncGenerator[bytes, None],
+        close_backend: Callable[[], Awaitable[None]],
+        agent_id: AgentId,
+        status_code: int,
+        media_type: str,
+        headers: Mapping[str, str],
+        send_timeout_seconds: float,
+    ) -> None:
+        super().__init__(content=body_generator, status_code=status_code, media_type=media_type, headers=dict(headers))
+        self._body_generator = body_generator
+        self._close_backend = close_backend
+        self._agent_id = agent_id
+        self._send_timeout_seconds = send_timeout_seconds
+
+    async def stream_response(self, send: Send) -> None:
+        # Releasing the backend's pool slot is this method's own job rather than
+        # the body generator's, because the first send below happens before the
+        # generator is ever started -- and closing an async generator that never
+        # started runs none of its body, so a generator-owned close would skip
+        # exactly the exit path that matters most. That first send is the
+        # response headers, which hypercorn writes straight to the socket and
+        # drains, so it blocks on precisely the unwritable client leg this class
+        # exists to survive (routinely, under HTTP/2, where one TCP connection
+        # carries every stream).
+        try:
+            async with aclosing(self._body_generator) as body_generator:
+                async with asyncio.timeout(self._send_timeout_seconds):
+                    await send(
+                        {"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers}
+                    )
+                async for chunk in body_generator:
+                    async with asyncio.timeout(self._send_timeout_seconds):
+                        await send({"type": "http.response.body", "body": chunk, "more_body": True})
+                async with asyncio.timeout(self._send_timeout_seconds):
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except TimeoutError:
+            logger.warning(
+                "Timed out writing a streamed response to {}'s client; closing the backend stream",
+                self._agent_id,
+            )
+        finally:
+            await self._close_backend()
 
 
 async def _forward_workspace_http(
@@ -581,8 +679,25 @@ async def _forward_workspace_http(
         backend_request = http_client.build_request(
             method=request.method, url=url, headers=headers, content=body, timeout=_SSE_TIMEOUT
         )
+        # Race the backend handoff against the client giving up, as the buffered
+        # path below does. Once the response object exists starlette's own
+        # disconnect watcher guards the body (hypercorn advertises ASGI spec
+        # 2.1, so ``StreamingResponse.__call__`` races ``listen_for_disconnect``
+        # against the body loop); until then nothing does, so a client that
+        # leaves during the handoff would hold its pooled slot for the full
+        # ``_SSE_TIMEOUT`` read budget.
+        handoff_task = asyncio.create_task(http_client.send(backend_request, stream=True))
+        disconnect_task = asyncio.create_task(_wait_for_client_disconnect(request))
         try:
-            backend_response = await http_client.send(backend_request, stream=True)
+            done, _pending = await asyncio.wait({handoff_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED)
+            if handoff_task not in done:
+                # As on the buffered path: a disconnect watcher that raised
+                # instead of reporting a disconnect must propagate, rather than
+                # abandon a request whose client is in fact still waiting.
+                disconnect_task.result()
+                logger.debug("Client disconnected before the backend stream for {} opened", agent_id)
+                return Response(status_code=499, content="Client disconnected")
+            backend_response = handoff_task.result()
         except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
             # ``RemoteProtocolError`` here means the backend disconnected
             # before sending headers -- typical when the system interface
@@ -596,6 +711,17 @@ async def _forward_workspace_http(
             logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
             return Response(status_code=502, content="Backend connection lost")
+        except httpx.PoolTimeout as e:
+            # PoolTimeout fires while waiting to check out a pooled connection,
+            # before the backend is ever dialed: the proxy's own pool is
+            # exhausted (e.g. by leaked streaming responses), and the backend's
+            # health is unknown. The envelope reason stays CONNECT_ERROR (it is
+            # a cross-version contract with consumers), but the log line and
+            # response body name the actual condition so the two failures are
+            # tellable apart.
+            logger.warning("Exhausted the proxy connection pool for {} at {}: {}", agent_id, backend_url, e)
+            _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+            return Response(status_code=504, content="Proxy connection pool exhausted")
         except httpx.TimeoutException as e:
             # A wedged-but-listening backend produces a TimeoutException
             # rather than ConnectError. Surface this as CONNECT_ERROR so a
@@ -604,7 +730,36 @@ async def _forward_workspace_http(
             logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
             return Response(status_code=504, content="Backend stream timed out")
+        finally:
+            # Cancelling the loser is what releases its resources; a no-op on
+            # whichever task already finished, so the success path leaves
+            # ``handoff_task`` (and the ``backend_response`` it produced) alone.
+            # Cancelled here rather than after the race because ``asyncio.wait``,
+            # unlike ``gather``, leaves both running if this handler is itself
+            # cancelled (server shutdown).
+            handoff_task.cancel()
+            disconnect_task.cancel()
 
+        if disconnect_task in done:
+            # Both finished in the same wait, so the client is gone *and* the
+            # stream is open. Handing the stream on would strand it: hypercorn
+            # queues exactly one ``http.disconnect`` and the wait above consumed
+            # it, so starlette's own watcher never fires, and a write to a
+            # connection asyncio has already lost is discarded rather than
+            # failing or blocking, so the stall guard never trips either.
+            # Nothing would then end a response the backend does not end.
+            try:
+                # As above: a disconnect watcher that raised instead of
+                # reporting a disconnect must propagate. Either way the stream
+                # is closed here, so its pooled slot is released.
+                disconnect_task.result()
+            finally:
+                await backend_response.aclose()
+            logger.debug("Client disconnected as the backend stream for {} opened", agent_id)
+            return Response(status_code=499, content="Client disconnected")
+
+        # Closing the backend is the response's job, not this generator's: see
+        # ``_StallGuardedStreamingResponse.stream_response``.
         async def _stream() -> AsyncGenerator[bytes, None]:
             try:
                 async for chunk in backend_response.aiter_bytes():
@@ -612,12 +767,12 @@ async def _forward_workspace_http(
             except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
                 logger.warning("Backend SSE stream failed for {}: {}", request.url.path, e)
                 _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
-            finally:
-                await backend_response.aclose()
 
         media_type = backend_response.headers.get("content-type", "text/event-stream")
-        return StreamingResponse(
-            _stream(),
+        return _StallGuardedStreamingResponse(
+            body_generator=_stream(),
+            close_backend=backend_response.aclose,
+            agent_id=agent_id,
             status_code=backend_response.status_code,
             media_type=media_type,
             headers={
@@ -625,6 +780,7 @@ async def _forward_workspace_http(
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
+            send_timeout_seconds=_SSE_CLIENT_WRITE_TIMEOUT_SECONDS,
         )
 
     # The stall notice fires *without* cancelling: a backend that is merely
@@ -676,6 +832,13 @@ async def _forward_workspace_http(
         logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
         return Response(status_code=502, content="Backend connection lost")
+    except httpx.PoolTimeout as e:
+        # Same distinction as the SSE branch above: the proxy's own pool is
+        # exhausted and the backend was never dialed. Envelope reason stays
+        # CONNECT_ERROR; the log line and body name the actual condition.
+        logger.warning("Exhausted the proxy connection pool for {} at {}: {}", agent_id, backend_url, e)
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        return Response(status_code=504, content="Proxy connection pool exhausted")
     except httpx.TimeoutException as e:
         # Either the dial timed out, or the backstop expired on a backend that
         # never answered at all. Both are genuine failures (the stall notice
@@ -1344,7 +1507,9 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     on_listening: Callable[[], None] | None,
 ) -> AsyncGenerator[None, None]:
-    inner_app.state.http_client = httpx.AsyncClient(follow_redirects=False, timeout=_PROXY_TIMEOUT)
+    inner_app.state.http_client = httpx.AsyncClient(
+        follow_redirects=False, timeout=_PROXY_TIMEOUT, limits=_PROXY_POOL_LIMITS
+    )
     # Per-tunnel httpx clients are cached here so they outlive a single request
     # and their connection pools are reused. Lifespan teardown aclose's them
     # all; without this every request to a remote agent would leak a fresh

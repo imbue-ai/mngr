@@ -485,9 +485,16 @@ def test_every_project_excludes_tests_from_wheel() -> None:
 
 
 def _has_test_files(project_dir: Path) -> bool:
-    """Return True if the project contains any test files."""
+    """Return True if the project contains any test files.
+
+    Stops at the first match rather than materializing every one: rglob
+    descends into gitignored subtrees (apps/minds carries node_modules and the
+    frontend build), and enumerating one of those in full costs more than every
+    other project put together -- enough to blow a caller's timeout on a slow
+    sandbox.
+    """
     for pattern in ["*_test.py", "test_*.py"]:
-        if list(project_dir.rglob(pattern)):
+        if next(project_dir.rglob(pattern), None) is not None:
             return True
     return False
 

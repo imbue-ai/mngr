@@ -103,7 +103,9 @@ def test_prevent_asyncio_import() -> None:
     # teardown behavior (bounded SSL shutdown + exception handler), which can
     # only be tested from inside an asyncio loop. server_test.py is the fourth,
     # for the same reason: the stall notice is an event-loop timer, so its stub
-    # backend must yield to the loop to let the timer run at all.
+    # backend must yield to the loop to let the timer run at all, and the
+    # streaming stall/close regression tests drive the async streaming response
+    # against a stub asyncio socket backend.
     rc.check_asyncio_import(_DIR, snapshot(4))
 
 
@@ -147,7 +149,31 @@ def test_prevent_async_await() -> None:
     # which is the ordering under test) with a stub backend awaiting a sleep --
     # a blocking sleep would hold the event loop and stop both the timer and
     # the disconnect from ever being observed.
-    rc.check_async_await(_DIR, snapshot(60))
+    # 84: server.py's stall-guarded streaming response bounds every client write
+    # and deterministically closes the backend stream (the SSE pool saturation
+    # fix), the same disconnect race now also guards the SSE backend handoff,
+    # and server_test.py's regression tests for both drive the real async
+    # response, ASGI channel stubs, and a stub SSE backend -- all of which is
+    # necessarily async/await code.
+    # 94: closing the backend stream when a client disconnect ties with the SSE
+    # handoff, plus the regression test for it -- which has to construct the tie
+    # deterministically (an asyncio.Barrier releasing the stub backend and the
+    # ASGI receive channel in the same event loop step), so it is async by
+    # construction.
+    # 97: the streaming response, rather than its body generator, now awaits the
+    # backend close, so it also runs on the one exit path a generator-owned
+    # close cannot cover (a stall on the response headers, before the generator
+    # is ever started); the regression test for that path drives the real async
+    # response against the async stub send channel.
+    # 104: the end-to-end test that pins the production wiring -- it drives the
+    # real handler against a real socket backend over a real one-connection pool
+    # and then re-uses that pool, none of which can be observed outside the
+    # event loop the streaming response runs in.
+    # 105: the tie test's stub backend yields the loop once before rendezvousing
+    # with the client's disconnect, which is what puts the disconnect at the
+    # rendezvous first and so leaves the handoff free to finish before the
+    # ``asyncio.wait`` waiter resumes -- the ordering the tie branch is about.
+    rc.check_async_await(_DIR, snapshot(105))
 
 
 # --- Hardcoded paths ---
@@ -289,7 +315,10 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # the per-instance in-memory SSLContext. It cannot be a pydantic model, and
     # setting the context from outside the class would evade this ratchet while
     # doing the same thing, so the __init__ stays.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(2))
+    # 3: _StallGuardedStreamingResponse subclasses starlette's StreamingResponse
+    # (a plain, non-model third-party class) and needs `__init__` to call
+    # super().__init__() and hold the typed body generator + send timeout.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
 
 
 def test_prevent_cast_usage() -> None:

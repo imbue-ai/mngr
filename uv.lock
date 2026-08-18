@@ -2012,6 +2012,7 @@ dependencies = [
     { name = "paramiko" },
     { name = "pluggy" },
     { name = "pydantic" },
+    { name = "starlette" },
     { name = "websockets" },
 ]
 
@@ -2032,6 +2033,7 @@ requires-dist = [
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "starlette" },
     { name = "websockets", specifier = ">=13" },
 ]
 
