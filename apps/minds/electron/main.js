@@ -13,6 +13,13 @@ const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink')
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { parseWorkspaceId } = require('./surface-routing');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
+// Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
+// unit-tested under plain node (main.js can't be required outside Electron).
+const {
+  shouldQuitOnWindowAllClosed,
+  shouldInterceptLastWindowClose,
+  shouldOpenWindowOnActivate,
+} = require('./lifecycle-policy');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
 // page is the minds SPA (titlebar + hub pages + the sandboxed workspace
@@ -412,10 +419,20 @@ function wireBundleWindowEvents(bundle) {
   win.on('move', () => scheduleSessionSave());
 
   win.on('close', (event) => {
-    // Closing the LAST window quits the app; route that close through the quit
-    // sequence so the local-mind shutdown prompt appears BEFORE the window
-    // disappears. If the user cancels, the window stays open.
-    if (!isShuttingDown && !isQuitSequenceRunning && getBackendProcess() && isLastLiveWindow(bundle)) {
+    // Off macOS, closing the LAST window quits the app; route that close
+    // through the quit sequence so the local-mind shutdown prompt appears
+    // BEFORE the window disappears. If the user cancels, the window stays open.
+    // On macOS the app keeps running with no windows, so the last close is an
+    // ordinary window close and the prompt fires only on an explicit Quit.
+    if (
+      shouldInterceptLastWindowClose({
+        isMac,
+        isShuttingDown,
+        isQuitSequenceRunning,
+        hasBackend: !!getBackendProcess(),
+        isLastLiveWindow: isLastLiveWindow(bundle),
+      })
+    ) {
       event.preventDefault();
       runQuitSequence();
       return;
@@ -1971,8 +1988,25 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 
 app.on('window-all-closed', () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
-  if (isShuttingDown || isQuitSequenceRunning) return;
+  // On macOS the app stays alive with no windows (the dock icon remains); the
+  // user re-opens a window from the dock (see 'activate' below) and quits with
+  // Cmd+Q. Other platforms quit when the last window closes.
+  if (!shouldQuitOnWindowAllClosed({ isMac, isShuttingDown, isQuitSequenceRunning })) return;
   runQuitSequence();
+});
+
+// macOS: activating the app (clicking the dock icon) with no open windows
+// re-opens a window on the backend home page. With a window already open the
+// OS just brings it forward, so we act only when none remain.
+app.on('activate', () => {
+  if (!shouldOpenWindowOnActivate({
+    isShuttingDown,
+    isQuitSequenceRunning,
+    hasLiveWindow: getMostRecentWindow() != null,
+  })) {
+    return;
+  }
+  openHomeInNewWindow();
 });
 
 app.on('before-quit', (event) => {
