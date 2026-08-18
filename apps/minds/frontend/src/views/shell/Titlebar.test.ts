@@ -70,7 +70,7 @@ describe("Titlebar right cluster", () => {
 describe("Titlebar workspace tab strip", () => {
   it("leads the strip with the Permissions tab", () => {
     const root = renderTitlebar("");
-    expect(tabStripIds(root)).toEqual(["ws-tab-permissions", "ws-tab-share", "ws-tab-settings"]);
+    expect(tabStripIds(root)).toEqual(["ws-tab-permissions", "ws-tab-settings", "ws-tab-share"]);
   });
 
   it("labels the Permissions tab with the key glyph, tooltipped like its neighbours", () => {

@@ -52,7 +52,7 @@ export interface MachineSharingResponse {
 }
 
 /** The options panel's tabs, in the order the tab strip shows them. */
-export const OPTIONS_TABS = ["permissions", "share", "settings"] as const;
+export const OPTIONS_TABS = ["permissions", "settings", "share"] as const;
 export type OptionsTab = (typeof OPTIONS_TABS)[number];
 
 /** The single ?tab parse. The options page and the titlebar's tab highlight

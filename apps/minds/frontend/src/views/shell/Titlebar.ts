@@ -141,22 +141,6 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                     m(
                       TitlebarButton,
                       {
-                        id: "ws-tab-share",
-                        "aria-label": "Share machine",
-                        "data-tooltip": "Share machine",
-                        tone: context.activeTab === "share" ? "default" : "muted",
-                        extra: isOptionsOverlayOpen
-                          ? "invisible"
-                          : context.activeTab === "share"
-                            ? "bg-fill-active"
-                            : "",
-                        onclick: () => toggleWorkspaceOptions(shell, routePath, context, "share"),
-                      },
-                      m(Icon16, { name: "share" }),
-                    ),
-                    m(
-                      TitlebarButton,
-                      {
                         id: "ws-tab-settings",
                         "aria-label": "Machine settings",
                         "data-tooltip": "Machine settings",
@@ -169,6 +153,22 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                         onclick: () => toggleWorkspaceOptions(shell, routePath, context, "settings"),
                       },
                       m(Icon16, { name: "settings" }),
+                    ),
+                    m(
+                      TitlebarButton,
+                      {
+                        id: "ws-tab-share",
+                        "aria-label": "Share machine",
+                        "data-tooltip": "Share machine",
+                        tone: context.activeTab === "share" ? "default" : "muted",
+                        extra: isOptionsOverlayOpen
+                          ? "invisible"
+                          : context.activeTab === "share"
+                            ? "bg-fill-active"
+                            : "",
+                        onclick: () => toggleWorkspaceOptions(shell, routePath, context, "share"),
+                      },
+                      m(Icon16, { name: "send" }),
                     ),
                   ]),
                 ]
