@@ -56,7 +56,7 @@ those constants:
 
 | Path | Where | Trigger |
 |---|---|---|
-| `just minds-start` | root `justfile` (inline) | every dev-app startup |
+| `just sync-vendor-mngr-live` | root `justfile` | every dev-app startup (`just minds-start` calls it), or on demand |
 | `sync_mngr_into_template` | `pool_bake.py` (the constants) | `mngr imbue_cloud admin pool create --mngr-source ...` / `minds pool create --mngr-source ...` |
 | `propagate_changes` | `apps/minds/scripts/propagate_changes` (`RSYNC_EXCLUDES`) | each dev-loop iteration into a running container |
 
@@ -65,6 +65,19 @@ those constants:
 
 The desktop client's Create flow performs a *separate* rsync -- the DEFAULT_WORKSPACE_TEMPLATE worktree
 over a shallow clone into `/home/user/workspace/` -- not a monorepo->`system/vendor/mngr` sync.
+
+### The rsync'd copy is meant to be uncommitted
+
+`just sync-vendor-mngr-live` deliberately leaves the DEFAULT_WORKSPACE_TEMPLATE worktree dirty; the
+code-guardian stop hook exempts `system/vendor/mngr` from its commit check
+(`stop_hook.uncommitted_exempt_paths`) for exactly this reason. Git does not
+honor that exemption, though: it refuses to merge over working-tree state the
+merge would overwrite, which is what happens whenever a release-time vendor
+refresh is in the incoming range. The hook reports that case on its own (`Merge blocked by uncommitted
+changes under an exempt path`) rather than as a merge conflict. Drop the copy,
+merge, and re-run `just sync-vendor-mngr-live` -- never commit it from the dev
+loop, and never resolve it as a conflict. See the mngr `CLAUDE.md` section
+"Vendored mngr in the default-workspace-template worktree" for the commands.
 
 ## `system/vendor/tk`
 
