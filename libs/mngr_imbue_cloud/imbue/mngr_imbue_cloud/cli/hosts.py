@@ -26,7 +26,6 @@ from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_provider_state_dir
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
-from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
 from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
@@ -37,6 +36,7 @@ from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
 from imbue.mngr_imbue_cloud.providers.adoption import load_adoption_marker
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_client_key
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_endpoint_host_key
+from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 
 
 @click.group(name="hosts")

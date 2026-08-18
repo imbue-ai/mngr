@@ -23,7 +23,7 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import handle_imbue_cloud_errors
 from imbue.mngr_imbue_cloud.cli._common import make_connector_client
-from imbue.mngr_imbue_cloud.data_types import PaidListEntry
+from imbue.mngr_imbue_cloud.wire_types import PaidListEntry
 
 _ADMIN_KEY_ENV_VAR: Final[str] = "MINDS_ADMIN_KEY"
 

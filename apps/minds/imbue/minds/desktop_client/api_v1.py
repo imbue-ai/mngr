@@ -171,6 +171,8 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRecord
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
+from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MESSAGE
+from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
 from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
 from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
@@ -1160,6 +1162,15 @@ def _handle_destroy_workspace(agent_id: str) -> tuple[OperationHandleResponse, i
         host_id = HostId(info.host_id)
     except ValueError:
         return _json_error(f"Cannot resolve a host to destroy for {agent_id}", 409)
+
+    # A record written by a newer app version is read-only here: destroying
+    # the workspace would require tombstoning semantics this version cannot
+    # interpret, so refuse with the remedy before touching the host.
+    session_store = get_state().session_store
+    if session_store is not None and session_store.record_store is not None:
+        found = session_store.record_store.find_active_record(str(parsed_id))
+        if found is not None and is_record_too_new(found[1]):
+            return _json_error(RECORD_TOO_NEW_MESSAGE, 409)
 
     # A destroy makes the machine unreachable on purpose, exactly as a stop
     # does: its interface dies within seconds and the probe loop reads that as a

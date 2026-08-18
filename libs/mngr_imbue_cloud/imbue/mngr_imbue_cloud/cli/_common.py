@@ -25,6 +25,7 @@ from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
@@ -234,6 +235,14 @@ def handle_imbue_cloud_errors(func):
                 error_class=type(exc).__name__,
                 code="email_not_verified",
                 email=exc.email,
+            )
+        except ImbueCloudClientTooOldError as exc:
+            fail_with_json(
+                str(exc),
+                error_class=type(exc).__name__,
+                code="client_too_old",
+                min_version=exc.min_version,
+                sunset_date=exc.sunset_date,
             )
         except ImbueCloudError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__)

@@ -44,22 +44,23 @@ from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
-from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
-from imbue.mngr_imbue_cloud.data_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
-from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
 from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.providers.instance import WORKSPACE_HOST_STATE_BY_STATUS
 from imbue.mngr_imbue_cloud.providers.instance import _read_first_existing_host_record
 from imbue.mngr_imbue_cloud.providers.instance import _read_workspace_start_outcome
 from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attributes
 from imbue.mngr_imbue_cloud.providers.instance import leased_info_from_workspace
+from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 
 
@@ -1328,6 +1329,22 @@ def test_workspace_host_state_mapping_shows_stopping_as_stopped() -> None:
     for status in WorkspaceStatus:
         if status != WorkspaceStatus.RUNNING:
             assert status in WORKSPACE_HOST_STATE_BY_STATUS
+
+
+def test_start_refuses_a_workspace_whose_status_this_client_does_not_recognize() -> None:
+    """A wire status coerced to UNKNOWN (a newer server) refuses the start with the update remedy.
+
+    The refusal fires before any account/token resolution, so a bare provider
+    suffices: driving a lifecycle transition from an unintelligible state
+    would act blindly, and the accurate remedy is updating the app.
+    """
+    provider = ImbueCloudProvider.model_construct(name=ProviderInstanceName("imbue-cloud-test"))
+    # "migrating" is not in this client's vocabulary; the WireEnum coerces it.
+    workspace = _make_workspace_info("migrating")
+    assert workspace.status is WorkspaceStatus.UNKNOWN
+
+    with pytest.raises(UnrecognizedWorkspaceStatusError, match="update the app"):
+        provider._start_workspace_and_wait(HostId.generate(), workspace)
 
 
 _VM_USER_KEY = "ssh-ed25519 AAAAVMUSER rotated-vm-host-key"

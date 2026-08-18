@@ -1,4 +1,6 @@
 import json
+from base64 import b64decode
+from base64 import b64encode
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -10,6 +12,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.secret_wrapping import decrypt_secrets
+from imbue.imbue_common.secret_wrapping import encrypt_secrets
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -19,6 +23,7 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.dek_store import ensure_dek
+from imbue.minds.desktop_client.dek_store import load_dek
 from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
@@ -27,6 +32,8 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import collect_ssh_key_material
 from imbue.minds.desktop_client.workspace_record_store import derive_openssh_public_key_line
+from imbue.minds.desktop_client.workspace_record_store import replica_record_from_wire
+from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.primitives import AgentId
@@ -163,6 +170,46 @@ def test_pull_keeps_dirty_local_rows(paths: WorkspacePaths) -> None:
 
     assert store.list_records(user_id)[0].display_name == "queued"
     assert store.list_records(user_id)[0].is_dirty
+
+
+@pytest.mark.witnesses(
+    "remote-compatibility.newer-records-read-only", partial="covers pull adoption of newer rows only"
+)
+def test_pull_adopts_a_newer_format_server_row_over_dirty_local_changes(paths: WorkspacePaths) -> None:
+    """A dirty row whose server counterpart is newer-format must not wedge: the server row wins.
+
+    This app can never push the pending local change (the connector's
+    terminal record_format_too_new refusal), so keeping the row dirty would
+    block every future pull of it and the read-only gates would never engage.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_sync_offline = True
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = _agent_id()
+    record = ReplicaRecord(host_id="host-1", agent_id=agent_id, display_name="queued", provider_kind="lima")
+    store.upsert_local_record(user_id, _EMAIL, record)
+    assert store.list_records(user_id)[0].is_dirty
+
+    cli.is_sync_offline = False
+    cli.sync_records_by_email[_EMAIL] = {
+        "host-1": {
+            "host_id": "host-1",
+            "agent_id": agent_id,
+            "display_name": "renamed by a newer client",
+            "provider_kind": "lima",
+            "state": RECORD_STATE_ACTIVE,
+            "revision": 7,
+            "record_format": 2,
+        }
+    }
+
+    assert store.pull(user_id, _EMAIL) is True
+
+    (pulled,) = store.list_records(user_id)
+    assert pulled.record_format == 2
+    assert pulled.display_name == "renamed by a newer client"
+    assert not pulled.is_dirty
 
 
 def test_associations_view_reflects_active_records_only(paths: WorkspacePaths) -> None:
@@ -833,3 +880,96 @@ def test_cloud_rows_are_never_tombstoned_as_definitively_absent(paths: Workspace
     assert pushed[cloud_host_id]["state"] == RECORD_STATE_ACTIVE
     replica_states = {record.host_id: record.state for record in store.list_records(user_id)}
     assert replica_states[cloud_host_id] == RECORD_STATE_ACTIVE
+
+
+@pytest.mark.witnesses("remote-compatibility.newer-record-push-refused")
+@pytest.mark.witnesses("remote-compatibility.newer-records-read-only", partial="covers pushes only")
+def test_upsert_refuses_a_record_with_a_newer_record_format(paths: WorkspacePaths) -> None:
+    store = _make_store(paths)
+    too_new = ReplicaRecord(host_id="host-1", agent_id=_agent_id(), provider_kind="lima", record_format=2)
+
+    with pytest.raises(WorkspaceRecordTooNewError, match="update the app"):
+        store.upsert_local_record(_user_id(), _EMAIL, too_new)
+
+
+@pytest.mark.witnesses(
+    "remote-compatibility.newer-records-read-only", partial="covers tombstone/disassociate/remove only"
+)
+def test_state_changing_operations_refuse_a_newer_format_record(paths: WorkspacePaths) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    user_id = _user_id()
+    agent_id = _agent_id()
+    # Seed via a pull of a server row written by a newer client: the pull
+    # itself must tolerate the newer record_format (the record stays readable).
+    cli.sync_records_by_email[_EMAIL] = {
+        "host-9": {
+            "host_id": "host-9",
+            "agent_id": agent_id,
+            "provider_kind": "lima",
+            "state": RECORD_STATE_ACTIVE,
+            "revision": 3,
+            "record_format": 2,
+        }
+    }
+    assert store.pull(user_id, _EMAIL) is True
+
+    with pytest.raises(WorkspaceRecordTooNewError):
+        store.tombstone_record(user_id, _EMAIL, agent_id)
+    with pytest.raises(WorkspaceRecordTooNewError):
+        store.disassociate_workspace_or_raise(user_id, _EMAIL, agent_id)
+    with pytest.raises(WorkspaceRecordTooNewError):
+        store.remove_record_or_raise(user_id, _EMAIL, "host-9")
+    # The record itself is untouched (still active, still present).
+    kept = store.list_records(user_id)
+    assert [r.state for r in kept] == [RECORD_STATE_ACTIVE]
+
+
+def test_replica_record_from_wire_defaults_and_carries_record_format() -> None:
+    defaulted = replica_record_from_wire({"host_id": "host-1", "agent_id": "a", "revision": 1})
+    assert defaulted.record_format == 1
+    carried = replica_record_from_wire({"host_id": "host-1", "agent_id": "a", "revision": 1, "record_format": 3})
+    assert carried.record_format == 3
+    assert carried.to_wire(2)["record_format"] == 3
+
+
+@pytest.mark.witnesses("remote-compatibility.newer-payloads-never-rewritten", partial="rewrite refusal only")
+def test_build_encrypted_secrets_refuses_a_newer_payload_format(paths: WorkspacePaths) -> None:
+    store = _make_store(paths)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    ensure_dek(paths, user_id)
+    write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=x\nRESTIC_PASSWORD=y\n")
+    dek = load_dek(paths, user_id)
+    assert dek is not None
+    newer_blob = b64encode(
+        encrypt_secrets(dek, json.dumps({"payload_format": 2, "from_the_future": "keep"}).encode("utf-8"))
+    ).decode("ascii")
+
+    built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", newer_blob)
+
+    assert built is None
+
+
+@pytest.mark.witnesses("remote-compatibility.newer-payloads-never-rewritten", partial="unknown-key round-trip only")
+def test_build_encrypted_secrets_round_trips_unknown_payload_keys(paths: WorkspacePaths) -> None:
+    store = _make_store(paths)
+    user_id = _user_id()
+    agent_id = AgentId.generate()
+    ensure_dek(paths, user_id)
+    env_text = "RESTIC_REPOSITORY=x\nRESTIC_PASSWORD=y\n"
+    write_canonical_env(paths, agent_id, env_text)
+    dek = load_dek(paths, user_id)
+    assert dek is not None
+    existing_payload = {"payload_format": 1, "restic_env": "old", "added_by_a_newer_client": "must-survive"}
+    existing_blob = b64encode(encrypt_secrets(dek, json.dumps(existing_payload).encode("utf-8"))).decode("ascii")
+
+    built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", existing_blob)
+
+    assert built is not None
+    rewritten = json.loads(decrypt_secrets(dek, b64decode(built.encrypted)))
+    # This client's own material overwrites the fields it owns...
+    assert rewritten["restic_env"] == env_text
+    # ...while a field a newer client added rides through verbatim.
+    assert rewritten["added_by_a_newer_client"] == "must-survive"
+    assert rewritten["payload_format"] == 1

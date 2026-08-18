@@ -13,7 +13,10 @@ Authentication semantics:
   session files itself.
 """
 
+import os
 import time
+from functools import cache
+from importlib import metadata
 from typing import Any
 from urllib.parse import quote
 
@@ -25,29 +28,9 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.errors import SwitchError
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr_imbue_cloud.data_types import AccountInfo
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
-from imbue.mngr_imbue_cloud.data_types import LeaseResult
-from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
-from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyInfo
-from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyMaterial
-from imbue.mngr_imbue_cloud.data_types import PaidListEntry
-from imbue.mngr_imbue_cloud.data_types import R2BucketCreateResult
-from imbue.mngr_imbue_cloud.data_types import R2BucketInfo
-from imbue.mngr_imbue_cloud.data_types import R2KeyInfo
-from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
-from imbue.mngr_imbue_cloud.data_types import RelayAdminInfo
-from imbue.mngr_imbue_cloud.data_types import ShareInfo
-from imbue.mngr_imbue_cloud.data_types import ShareRelayEndpoint
-from imbue.mngr_imbue_cloud.data_types import ShareRelayLogin
-from imbue.mngr_imbue_cloud.data_types import ShareRelayMap
-from imbue.mngr_imbue_cloud.data_types import StorageCleanupGrant
-from imbue.mngr_imbue_cloud.data_types import StorageRecheckResult
-from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
-from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
-from imbue.mngr_imbue_cloud.data_types import WorkspaceInfo
+from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
@@ -56,17 +39,42 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
-from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
+from imbue.mngr_imbue_cloud.wire import parse_wire_entries
+from imbue.mngr_imbue_cloud.wire import validate_wire
+from imbue.mngr_imbue_cloud.wire_types import AccountInfo
+from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
+from imbue.mngr_imbue_cloud.wire_types import LeaseResult
+from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
+from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import PaidListEntry
+from imbue.mngr_imbue_cloud.wire_types import R2BucketCreateResult
+from imbue.mngr_imbue_cloud.wire_types import R2BucketInfo
+from imbue.mngr_imbue_cloud.wire_types import R2KeyInfo
+from imbue.mngr_imbue_cloud.wire_types import R2KeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import RelayAdminInfo
+from imbue.mngr_imbue_cloud.wire_types import ShareInfo
+from imbue.mngr_imbue_cloud.wire_types import ShareRelayEndpoint
+from imbue.mngr_imbue_cloud.wire_types import ShareRelayLogin
+from imbue.mngr_imbue_cloud.wire_types import ShareRelayMap
+from imbue.mngr_imbue_cloud.wire_types import StorageCleanupGrant
+from imbue.mngr_imbue_cloud.wire_types import StorageRecheckResult
+from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
@@ -95,19 +103,32 @@ _TRANSPORT_RETRY_BASE_SLEEP_SECONDS = 0.5
 # (e.g. a read error after the server already acted) could double-allocate.
 _CONNECT_PHASE_TRANSPORT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
 
+# Canonical client-identification header. Every connector call carries it (the
+# Python client mirrors the same string into User-Agent), so the connector's
+# access log can attribute traffic to shipped client versions -- the input for
+# support-window decisions and, later, deprecation-by-date enforcement.
+CLIENT_ID_HEADER = "X-Imbue-Client"
 
-class AuthRawResponse(FrozenModel):
-    """Subset of ``/auth/*`` response that we care about.
+# Set by the minds desktop launcher; when present the identifier carries the
+# product version ahead of the plugin package version.
+_MINDS_RELEASE_ID_ENV_VAR = "MINDS_RELEASE_ID"
 
-    The connector's response shape is:
-    ``{status, message, user, tokens, needs_email_verification}``.
-    """
 
-    status: str
-    message: str | None = None
-    user: dict[str, Any] | None = None
-    tokens: dict[str, Any] | None = None
-    needs_email_verification: bool = False
+@cache
+def get_client_identifier() -> str:
+    """The ``X-Imbue-Client`` value: ``minds/<release> imbue-cloud-plugin/<version>`` (product half optional)."""
+    try:
+        plugin_version = metadata.version("imbue-mngr-imbue-cloud")
+    except metadata.PackageNotFoundError:
+        plugin_version = "unknown"
+    plugin_part = f"imbue-cloud-plugin/{plugin_version}"
+    minds_release = os.environ.get(_MINDS_RELEASE_ID_ENV_VAR, "")
+    return f"minds/{minds_release} {plugin_part}" if minds_release else plugin_part
+
+
+def _client_id_headers() -> dict[str, str]:
+    identifier = get_client_identifier()
+    return {CLIENT_ID_HEADER: identifier, "User-Agent": identifier}
 
 
 class ImbueCloudConnectorClient(MutableModel):
@@ -133,7 +154,22 @@ class ImbueCloudConnectorClient(MutableModel):
         return str(self.base_url).rstrip("/") + path
 
     def _bearer(self, access_token: SecretStr) -> dict[str, str]:
-        return {"Authorization": f"Bearer {access_token.get_secret_value()}"}
+        return {**_client_id_headers(), "Authorization": f"Bearer {access_token.get_secret_value()}"}
+
+    def _raise_if_client_too_old(self, response: httpx.Response) -> None:
+        """Raise the typed client-too-old error on the connector's structured HTTP 426 refusal."""
+        if response.status_code != 426:
+            return
+        detail = _detail_dict_from_response(response)
+        if detail is not None and detail.get("code") == "client_too_old":
+            min_version = detail.get("min_version")
+            sunset_date = detail.get("sunset_date")
+            raise ImbueCloudClientTooOldError(
+                str(detail.get("message", CLIENT_TOO_OLD_FALLBACK_MESSAGE)),
+                min_version=min_version if isinstance(min_version, str) else None,
+                sunset_date=sunset_date if isinstance(sunset_date, str) else None,
+            )
+        raise ImbueCloudClientTooOldError(CLIENT_TOO_OLD_FALLBACK_MESSAGE, min_version=None, sunset_date=None)
 
     def _raise_if_quota_exceeded(self, response: httpx.Response) -> None:
         """Raise the typed quota error when a 403 carries the connector's structured detail."""
@@ -194,6 +230,7 @@ class ImbueCloudConnectorClient(MutableModel):
         ImbueCloudAuthError so callers can treat them uniformly across all
         endpoints.
         """
+        self._raise_if_client_too_old(response)
         self._raise_if_quota_exceeded(response)
         self._raise_if_grant_budget_exhausted(response)
         self._raise_if_email_not_verified(response)
@@ -281,18 +318,20 @@ class ImbueCloudConnectorClient(MutableModel):
     def auth_signup(self, email: str, password: str) -> AuthRawResponse:
         response = httpx.post(
             self._url("/auth/signup"),
+            headers=_client_id_headers(),
             json={"email": email, "password": password},
             timeout=self.timeout_seconds,
         )
-        return AuthRawResponse.model_validate(self._check(response, ImbueCloudAuthError))
+        return validate_wire(AuthRawResponse, self._check(response, ImbueCloudAuthError))
 
     def auth_signin(self, email: str, password: str) -> AuthRawResponse:
         response = httpx.post(
             self._url("/auth/signin"),
+            headers=_client_id_headers(),
             json={"email": email, "password": password},
             timeout=self.timeout_seconds,
         )
-        return AuthRawResponse.model_validate(self._check(response, ImbueCloudAuthError))
+        return validate_wire(AuthRawResponse, self._check(response, ImbueCloudAuthError))
 
     def supports_browser_login(self) -> bool:
         """Whether the connector serves the hosted accounts surface (the browser login flow).
@@ -304,6 +343,7 @@ class ImbueCloudConnectorClient(MutableModel):
             "GET",
             self._url("/accounts/api/config"),
             exc_cls=ImbueCloudAuthError,
+            headers=_client_id_headers(),
             timeout=self.timeout_seconds,
         )
         if response.status_code == 404:
@@ -322,6 +362,7 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url("/auth/device/token"),
             exc_cls=ImbueCloudAuthError,
             idempotent=False,
+            headers=_client_id_headers(),
             json={"code": code, "code_verifier": code_verifier, "redirect_uri": redirect_uri},
             timeout=self.timeout_seconds,
         )
@@ -333,7 +374,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 "The connector does not serve the browser-login code exchange (it is too old). "
                 + CONNECTOR_TOO_OLD_REMEDY
             )
-        return AuthRawResponse.model_validate(self._check(response, ImbueCloudAuthError))
+        return validate_wire(AuthRawResponse, self._check(response, ImbueCloudAuthError))
 
     def auth_refresh_session(self, refresh_token: SecretStr) -> dict[str, Any]:
         """Returns ``{status, access_token, refresh_token}``.
@@ -348,6 +389,7 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url("/auth/session/refresh"),
             exc_cls=ImbueCloudAuthError,
             idempotent=False,
+            headers=_client_id_headers(),
             json={"refresh_token": refresh_token.get_secret_value()},
             timeout=self.timeout_seconds,
         )
@@ -445,6 +487,7 @@ class ImbueCloudConnectorClient(MutableModel):
     def auth_forgot_password(self, email: str) -> None:
         response = httpx.post(
             self._url("/auth/password/forgot"),
+            headers=_client_id_headers(),
             json={"email": email},
             timeout=self.timeout_seconds,
         )
@@ -453,6 +496,7 @@ class ImbueCloudConnectorClient(MutableModel):
     def auth_reset_password(self, token: str, new_password: str) -> None:
         response = httpx.post(
             self._url("/auth/password/reset"),
+            headers=_client_id_headers(),
             json={"token": token, "new_password": new_password},
             timeout=self.timeout_seconds,
         )
@@ -461,6 +505,7 @@ class ImbueCloudConnectorClient(MutableModel):
     def auth_get_user(self, user_id: str) -> dict[str, Any]:
         response = httpx.get(
             self._url(f"/auth/users/{user_id}"),
+            headers=_client_id_headers(),
             timeout=self.timeout_seconds,
         )
         return self._check(response, ImbueCloudAuthError)
@@ -500,7 +545,7 @@ class ImbueCloudConnectorClient(MutableModel):
                 detail = "No matching pool host available."
             raise ImbueCloudLeaseUnavailableError(detail)
         body_json = self._check(response, ImbueCloudConnectorError)
-        return LeaseResult.model_validate(body_json)
+        return validate_wire(LeaseResult, body_json)
 
     def release_host(self, access_token: SecretStr, host_db_id: str) -> None:
         """Release a leased host. Raises ``ImbueCloudConnectorError`` on any failure.
@@ -577,15 +622,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         body = self._check(response, ImbueCloudConnectorError)
         items = body.get("hosts") if isinstance(body, dict) else body
-        if not isinstance(items, list):
-            return []
-        result: list[LeasedHostInfo] = []
-        for entry in items:
-            try:
-                result.append(LeasedHostInfo.model_validate(entry))
-            except ValueError:
-                logger.debug("Skipped unparseable leased host entry: {}", entry)
-        return result
+        return parse_wire_entries(LeasedHostInfo, items, "GET /hosts", ImbueCloudConnectorError)
 
     # ------------------------------------------------------------------
     # Workspaces (full-lifecycle listing + stop/start)
@@ -625,15 +662,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check_workspaces_supported(response)
         body = self._check(response, ImbueCloudConnectorError)
-        if not isinstance(body, list):
-            return []
-        result: list[WorkspaceInfo] = []
-        for entry in body:
-            try:
-                result.append(WorkspaceInfo.model_validate(entry))
-            except ValueError:
-                logger.debug("Skipped unparseable workspace entry: {}", entry)
-        return result
+        return parse_wire_entries(WorkspaceInfo, body, "GET /workspaces", ImbueCloudConnectorError)
 
     def get_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceInfo:
         """One workspace's lifecycle view (the poll target during stop/start).
@@ -649,7 +678,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudConnectorError)
-        return WorkspaceInfo.model_validate(body)
+        return validate_wire(WorkspaceInfo, body)
 
     def stop_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceStatus:
         """Begin stopping a workspace (VM halt + upload + slot free); returns its status.
@@ -693,7 +722,7 @@ class ImbueCloudConnectorClient(MutableModel):
             "POST",
             self._url(f"/admin/workspaces/{host_db_id}/abandon"),
             exc_cls=ImbueCloudConnectorError,
-            headers={"Authorization": f"Bearer {admin_key.get_secret_value()}"},
+            headers=self._bearer(admin_key),
             json={"reason": reason},
             timeout=self.timeout_seconds,
         )
@@ -730,7 +759,7 @@ class ImbueCloudConnectorClient(MutableModel):
         except httpx.HTTPError as exc:
             raise ImbueCloudKeyError(f"Key creation HTTP request failed: {exc}") from exc
         body_json = self._check(response, ImbueCloudKeyError)
-        return LiteLLMKeyMaterial.model_validate(body_json)
+        return validate_wire(LiteLLMKeyMaterial, body_json)
 
     def list_litellm_keys(self, access_token: SecretStr) -> list[LiteLLMKeyInfo]:
         try:
@@ -742,15 +771,7 @@ class ImbueCloudConnectorClient(MutableModel):
         except httpx.HTTPError as exc:
             raise ImbueCloudKeyError(f"Key list HTTP request failed: {exc}") from exc
         body = self._check(response, ImbueCloudKeyError)
-        if not isinstance(body, list):
-            return []
-        result: list[LiteLLMKeyInfo] = []
-        for entry in body:
-            try:
-                result.append(LiteLLMKeyInfo.model_validate(entry))
-            except ValueError:
-                logger.debug("Skipped unparseable key entry: {}", entry)
-        return result
+        return parse_wire_entries(LiteLLMKeyInfo, body, "GET /keys", ImbueCloudKeyError)
 
     def get_litellm_key_info(self, access_token: SecretStr, key_id: str) -> LiteLLMKeyInfo:
         response = httpx.get(
@@ -759,7 +780,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         body = self._check(response, ImbueCloudKeyError)
-        return LiteLLMKeyInfo.model_validate(body)
+        return validate_wire(LiteLLMKeyInfo, body)
 
     def update_litellm_key_budget(
         self,
@@ -884,6 +905,7 @@ class ImbueCloudConnectorClient(MutableModel):
 
     def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""
+        self._raise_if_client_too_old(response)
         self._raise_if_quota_exceeded(response)
         if response.status_code in (200, 201, 204):
             if not response.content:
@@ -915,7 +937,7 @@ class ImbueCloudConnectorClient(MutableModel):
             json={"name": name, "access": access},
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return R2BucketCreateResult.model_validate(self._check_bucket(response))
+        return validate_wire(R2BucketCreateResult, self._check_bucket(response))
 
     def list_buckets(self, access_token: SecretStr) -> list[R2BucketInfo]:
         response = httpx.get(
@@ -924,9 +946,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check_bucket(response)
-        if not isinstance(body, list):
-            return []
-        return [R2BucketInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
+        return parse_wire_entries(R2BucketInfo, body, "GET /buckets", ImbueCloudBucketError)
 
     def get_bucket_info(self, access_token: SecretStr, name: str) -> R2BucketInfo:
         response = httpx.get(
@@ -934,7 +954,7 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
-        return R2BucketInfo.model_validate(self._check_bucket(response))
+        return validate_wire(R2BucketInfo, self._check_bucket(response))
 
     def destroy_bucket(self, access_token: SecretStr, name: str) -> None:
         response = httpx.delete(
@@ -951,7 +971,7 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return R2KeyMaterial.model_validate(self._check_bucket(response))
+        return validate_wire(R2KeyMaterial, self._check_bucket(response))
 
     def list_bucket_keys(self, access_token: SecretStr, name: str | None) -> list[R2KeyInfo]:
         """List keys for one bucket (``name`` set) or across all the caller's buckets (``name`` None)."""
@@ -962,9 +982,7 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check_bucket(response)
-        if not isinstance(body, list):
-            return []
-        return [R2KeyInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
+        return parse_wire_entries(R2KeyInfo, body, f"GET {path}", ImbueCloudBucketError)
 
     # ------------------------------------------------------------------
     # Account (plan + entitlements + usage)
@@ -981,7 +999,7 @@ class ImbueCloudConnectorClient(MutableModel):
             # the same generous budget as the other multi-upstream calls.
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
+        return validate_wire(AccountInfo, self._check(response, ImbueCloudAccountError))
 
     def set_account_plan(self, access_token: SecretStr, plan: str) -> dict[str, Any]:
         """Switch the account's plan; returns ``{plan_name, entitlements}``.
@@ -1030,7 +1048,7 @@ class ImbueCloudConnectorClient(MutableModel):
             # per bucket), like the other multi-upstream calls.
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return StorageCleanupGrant.model_validate(self._check(response, ImbueCloudAccountError))
+        return validate_wire(StorageCleanupGrant, self._check(response, ImbueCloudAccountError))
 
     def recheck_storage(self, access_token: SecretStr) -> StorageRecheckResult:
         """Re-measure live storage usage and apply enforcement immediately (settling any grant).
@@ -1045,7 +1063,7 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return StorageRecheckResult.model_validate(self._check(response, ImbueCloudAccountError))
+        return validate_wire(StorageRecheckResult, self._check(response, ImbueCloudAccountError))
 
     # ------------------------------------------------------------------
     # Relay fleet admin (MINDS_ADMIN_KEY authenticated)
@@ -1060,7 +1078,8 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudShareError)
-        return [RelayAdminInfo.model_validate(entry) for entry in body.get("relays", [])]
+        relays = body.get("relays", []) if isinstance(body, dict) else body
+        return parse_wire_entries(RelayAdminInfo, relays, "GET /admin/relays", ImbueCloudShareError)
 
     def admin_register_relay(
         self,
@@ -1090,7 +1109,7 @@ class ImbueCloudConnectorClient(MutableModel):
             json=body_json,
             timeout=self.timeout_seconds,
         )
-        return RelayAdminInfo.model_validate(self._check(response, ImbueCloudShareError))
+        return validate_wire(RelayAdminInfo, self._check(response, ImbueCloudShareError))
 
     def admin_retire_relay(self, admin_api_key: SecretStr, relay_id: str) -> dict[str, Any]:
         """Retire one relay (it leaves assignment, DNS, and frps auth); idempotent."""
@@ -1125,7 +1144,7 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(admin_api_key),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return AccountInfo.model_validate(self._check(response, ImbueCloudAccountError))
+        return validate_wire(AccountInfo, self._check(response, ImbueCloudAccountError))
 
     def admin_set_account_plan(self, admin_api_key: SecretStr, email: str, plan: str) -> dict[str, Any]:
         # Always resets to the plan's defaults, so a retried request lands in
@@ -1186,15 +1205,19 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         body = self._check(response, ImbueCloudSyncError)
-        records = body.get("records", [])
-        return [SyncWorkspaceRecord.model_validate(entry) for entry in records if isinstance(entry, dict)]
+        records = body.get("records", []) if isinstance(body, dict) else body
+        return parse_wire_entries(SyncWorkspaceRecord, records, "GET /sync/records", ImbueCloudSyncError)
 
     def put_sync_record(self, access_token: SecretStr, record: SyncWorkspaceRecord) -> SyncWorkspaceRecord:
         """Push one record (CAS on revision); returns the stored row after the write.
 
-        Raises :class:`ImbueCloudSyncConflictError` on a 409, carrying the
-        server's current row for a revision conflict so the caller can merge
-        and retry.
+        A 409 raises one of two typed errors: the structured
+        ``record_format_too_new`` refusal raises
+        :class:`ImbueCloudRecordFormatTooNewError` (terminal -- the stored row
+        was written at a newer record format, so retrying cannot succeed until
+        the client updates); any other 409 raises
+        :class:`ImbueCloudSyncConflictError`, carrying the server's current
+        row for a revision conflict so the caller can merge and retry.
         """
         response = self._send(
             "PUT",
@@ -1205,24 +1228,20 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         if response.status_code == 409:
-            detail = _detail_from_response(response)
-            stored = self._parse_conflict_stored_record(response)
-            raise ImbueCloudSyncConflictError(detail, stored)
+            detail_message = _detail_from_response(response)
+            detail = _detail_dict_from_response(response)
+            if detail is not None and detail.get("code") == "record_format_too_new":
+                # Prefer the structured human message over detail_message,
+                # which for a dict detail is the repr of the whole payload
+                # (embedded stored row included).
+                format_message = detail.get("message")
+                raise ImbueCloudRecordFormatTooNewError(
+                    format_message if isinstance(format_message, str) else detail_message
+                )
+            stored = detail.get("stored") if detail is not None else None
+            raise ImbueCloudSyncConflictError(detail_message, stored if isinstance(stored, dict) else None)
         body = self._check(response, ImbueCloudSyncError)
-        return SyncWorkspaceRecord.model_validate(body)
-
-    def _parse_conflict_stored_record(self, response: httpx.Response) -> dict[str, object] | None:
-        """Extract the ``detail.stored`` row from a 409 record-push response, if present."""
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            logger.warning("Could not parse the 409 conflict body as JSON: {}", exc)
-            return None
-        detail = payload.get("detail") if isinstance(payload, dict) else None
-        if not isinstance(detail, dict):
-            return None
-        stored = detail.get("stored")
-        return stored if isinstance(stored, dict) else None
+        return validate_wire(SyncWorkspaceRecord, body)
 
     def delete_sync_record(self, access_token: SecretStr, host_id: str) -> None:
         """Remove one workspace record outright (disassociation; idempotent)."""
@@ -1259,7 +1278,7 @@ class ImbueCloudConnectorClient(MutableModel):
         if response.status_code == 404:
             return None
         body = self._check(response, ImbueCloudSyncError)
-        return SyncKeyBundle.model_validate(body)
+        return validate_wire(SyncKeyBundle, body)
 
     def put_key_bundle(self, access_token: SecretStr, bundle: SyncKeyBundle) -> None:
         response = self._send(
@@ -1301,8 +1320,14 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         body = self._check(response, ImbueCloudPaidListError)
         if not isinstance(body, list):
-            return []
-        return [_parse_paid_list_entry(entry, value_key) for entry in body if isinstance(entry, dict)]
+            raise ImbueCloudPaidListError(f"GET {path}: expected a JSON list, got {type(body).__name__}")
+        entries: list[PaidListEntry] = []
+        for entry in body:
+            if not isinstance(entry, dict):
+                logger.warning("Skipped a non-object paid-list entry from GET {}: {!r}", path, entry)
+                continue
+            entries.append(_parse_paid_list_entry(entry, value_key))
+        return entries
 
     def _post_paid_entry(self, admin_api_key: SecretStr, path: str, value: str) -> dict[str, Any]:
         response = httpx.post(
@@ -1394,6 +1419,17 @@ def _detail_from_response(response: httpx.Response) -> str:
         if detail is not None:
             return str(detail)
     return response.text[:300]
+
+
+def _detail_dict_from_response(response: httpx.Response) -> dict[str, Any] | None:
+    """Extract the connector's structured ``detail`` dict, or None when the body has no such shape."""
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        logger.debug("Response body of {} is not JSON: {}", response.status_code, exc)
+        return None
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    return detail if isinstance(detail, dict) else None
 
 
 def _parse_paid_list_entry(raw: dict[str, Any], value_key: str) -> PaidListEntry:

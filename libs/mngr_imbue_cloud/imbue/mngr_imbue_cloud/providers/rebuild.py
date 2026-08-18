@@ -8,10 +8,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
-from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.instance import MinimalVpsProvider
 from imbue.mngr_vps.instance import VpsProvider

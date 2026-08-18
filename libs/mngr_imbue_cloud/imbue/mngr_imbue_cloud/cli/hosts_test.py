@@ -6,8 +6,8 @@ from click.testing import CliRunner
 from imbue.mngr_imbue_cloud.cli.hosts import _find_host_state_dirs
 from imbue.mngr_imbue_cloud.cli.hosts import _find_lease_by_ref
 from imbue.mngr_imbue_cloud.cli.hosts import hosts
-from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 
 _HOST_ID = "host-" + "a" * 32
 

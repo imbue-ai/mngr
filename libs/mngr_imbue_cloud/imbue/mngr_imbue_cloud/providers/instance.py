@@ -119,14 +119,12 @@ from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
-from imbue.mngr_imbue_cloud.data_types import LeaseResult
-from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
-from imbue.mngr_imbue_cloud.data_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
+from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartTimeoutError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
@@ -134,7 +132,6 @@ from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FAST_PATH_ADOPTABLE_START_ARGS
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
-from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
@@ -146,6 +143,10 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provide
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
+from imbue.mngr_imbue_cloud.wire_types import LeaseResult
+from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 from imbue.mngr_vps.container_setup import docker_inspect_running
 from imbue.mngr_vps.container_setup import start_container_sshd
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
@@ -305,6 +306,9 @@ WORKSPACE_HOST_STATE_BY_STATUS: Final[dict[WorkspaceStatus, HostState]] = {
     WorkspaceStatus.STOPPED: HostState.STOPPED,
     WorkspaceStatus.STARTING: HostState.STARTING,
     WorkspaceStatus.CRASHED: HostState.CRASHED,
+    # A wire status this client version does not recognize (a newer server):
+    # observed but not actionable, and never treated as absent.
+    WorkspaceStatus.UNKNOWN: HostState.UNKNOWN,
 }
 
 
@@ -2357,6 +2361,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         (e.g. "no capacity available right now, try again later"); the
         artifact is untouched and the start can simply be retried.
         """
+        if workspace.status == WorkspaceStatus.UNKNOWN:
+            # A lifecycle state this client version cannot interpret: driving a
+            # start from it would act blindly, so refuse with the remedy
+            # (before any account/token work -- the refusal needs neither).
+            raise UnrecognizedWorkspaceStatusError(
+                f"workspace {host_id} is in a state this app version does not recognize; update the app to manage it"
+            )
         account = self._require_account()
         token = self._get_access_token(account)
         host_db_id = str(workspace.host_db_id)

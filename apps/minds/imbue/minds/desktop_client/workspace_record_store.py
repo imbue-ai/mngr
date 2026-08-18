@@ -29,6 +29,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
@@ -56,6 +57,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.errors import MngrError
@@ -67,6 +69,7 @@ from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import load_current_host_key_pins
 from imbue.mngr.providers.host_key_store import pin_known_hosts_text
 from imbue.mngr.providers.host_key_store import render_pins_as_known_hosts_text
+from imbue.mngr_imbue_cloud.wire_types import SUPPORTED_RECORD_FORMAT
 
 _RECORDS_DIRNAME = "workspace_records"
 _LEGACY_ASSOCIATIONS_FILENAME = "workspace_associations.json"
@@ -111,9 +114,31 @@ class WorkspaceSecretsPayload(FrozenModel):
     # fields but everything, including the DR-critical restic env.
     model_config = ConfigDict(extra="ignore")
 
+    payload_format: int = Field(
+        default=1,
+        description=(
+            "Semantic format of this payload (missing = 1). A client whose SUPPORTED_PAYLOAD_FORMAT "
+            "is below this never rewrites the blob (a rewrite could drop meaning it cannot see)."
+        ),
+    )
     restic_env: str | None = Field(default=None, description="Canonical restic.env text (when backups configured)")
     ssh_private_key: str | None = Field(default=None, description="Private key that grants SSH access to the host")
     ssh_known_hosts: str | None = Field(default=None, description="known_hosts entries pinning the host's public key")
+
+
+# The newest encrypted-secrets payload format this app understands; a blob
+# stamped with a higher payload_format is never rewritten here.
+SUPPORTED_PAYLOAD_FORMAT: Final[int] = 1
+
+# The user-facing remedy for every record_format / payload_format write-lock.
+RECORD_TOO_NEW_MESSAGE: Final[str] = (
+    "This machine was managed by a newer version of the app; update the app to manage it."
+)
+
+
+def is_record_too_new(record: "ReplicaRecord") -> bool:
+    """Whether this app must treat the record as read-only (written by a newer app version)."""
+    return record.record_format > SUPPORTED_RECORD_FORMAT
 
 
 class BuiltRecordSecrets(FrozenModel):
@@ -131,7 +156,9 @@ def secrets_payload_content_hash(payload: WorkspaceSecretsPayload) -> str:
     change?" -- this plaintext digest is what producers track to decide when a
     re-push is warranted.
     """
-    return hashlib.sha256(payload.model_dump_json().encode("utf-8")).hexdigest()
+    # payload_format is versioning plumbing, not material: excluding it keeps
+    # every pre-existing stamped hash stable (no fleet-wide re-push wave).
+    return hashlib.sha256(payload.model_dump_json(exclude={"payload_format"}).encode("utf-8")).hexdigest()
 
 
 class ReplicaRecord(FrozenModel):
@@ -155,6 +182,13 @@ class ReplicaRecord(FrozenModel):
     restored_from_host_id: str | None = Field(default=None, description="Lineage link for restorations")
     encrypted_secrets: str | None = Field(default=None, description="Base64 AEAD blob under the account DEK")
     revision: int = Field(default=0, description="Last server-acknowledged revision (0 = never pushed)")
+    record_format: int = Field(
+        default=1,
+        description=(
+            "Semantic format of the record (missing = 1). Above SUPPORTED_RECORD_FORMAT the record "
+            "is read-only on this device: no pushes, no tombstone/destroy, no release, no removal."
+        ),
+    )
     is_dirty: bool = Field(default=False, description="Local changes not yet pushed")
     secrets_content_hash: str | None = Field(
         default=None,
@@ -186,6 +220,7 @@ class ReplicaRecord(FrozenModel):
             "restored_from_host_id": self.restored_from_host_id,
             "encrypted_secrets": self.encrypted_secrets,
             "revision": push_revision,
+            "record_format": self.record_format,
         }
 
 
@@ -206,6 +241,7 @@ def replica_record_from_wire(wire: dict[str, object]) -> ReplicaRecord:
         ),
         encrypted_secrets=(str(wire["encrypted_secrets"]) if wire.get("encrypted_secrets") is not None else None),
         revision=int(str(wire.get("revision", 0))),
+        record_format=int(str(wire.get("record_format", 1))),
         is_dirty=False,
     )
 
@@ -487,13 +523,26 @@ class WorkspaceRecordStore(MutableModel):
             restic_env=restic_env, ssh_private_key=ssh_private_key, ssh_known_hosts=ssh_known_hosts
         )
 
-    def build_encrypted_secrets(self, user_id: str, agent_id: str, host_id: str) -> BuiltRecordSecrets | None:
+    def build_encrypted_secrets(
+        self,
+        user_id: str,
+        agent_id: str,
+        host_id: str,
+        # The record's current blob, so a rewrite preserves payload keys a
+        # newer app version added (None when the record has no blob yet).
+        existing_encrypted: str | None,
+    ) -> BuiltRecordSecrets | None:
         """Assemble and encrypt the workspace's secret payload under the account's DEK.
 
-        Returns None when the account is locked on this device (no DEK) or
-        there is nothing to sync (no backup env and no SSH material). The
-        returned bundle pairs the ciphertext with its plaintext digest so
-        callers can stamp the record's local ``secrets_content_hash``.
+        Returns None when the account is locked on this device (no DEK), there
+        is nothing to sync (no backup env and no SSH material), or the
+        existing blob was written by a newer app version (its payload_format
+        exceeds SUPPORTED_PAYLOAD_FORMAT -- rewriting it could drop meaning
+        this version cannot see). The returned bundle pairs the ciphertext
+        with its plaintext digest so callers can stamp the record's local
+        ``secrets_content_hash``. Rewrites round-trip unknown payload keys
+        verbatim: the raw dict is the source of truth and the typed payload
+        model is only this version's view of it.
         """
         dek = dek_store.load_dek(self.paths, user_id)
         if dek is None:
@@ -501,11 +550,43 @@ class WorkspaceRecordStore(MutableModel):
         payload = self._collect_secrets_payload(user_id, agent_id, host_id)
         if payload is None:
             return None
-        blob = encrypt_secrets(dek, payload.model_dump_json().encode("utf-8"))
+        existing_raw = self._decrypt_secrets_raw(dek, existing_encrypted, agent_id)
+        if existing_raw is not None:
+            raw_format = existing_raw.get("payload_format")
+            if isinstance(raw_format, int) and raw_format > SUPPORTED_PAYLOAD_FORMAT:
+                logger.warning(
+                    "Leaving the secrets blob for machine {} untouched: it was written by a newer app version",
+                    agent_id,
+                )
+                return None
+        own_fields = json.loads(payload.model_dump_json())
+        merged = {**(existing_raw or {}), **own_fields}
+        blob = encrypt_secrets(dek, json.dumps(merged, sort_keys=True, separators=(",", ":")).encode("utf-8"))
         return BuiltRecordSecrets(
             encrypted=b64encode(blob).decode("ascii"),
             content_hash=secrets_payload_content_hash(payload),
         )
+
+    def _decrypt_secrets_raw(self, dek: bytes, encrypted: str | None, agent_id: str) -> dict[str, object] | None:
+        """Decrypt a blob to its raw JSON dict (unknown keys intact), or None when absent/undecryptable."""
+        if encrypted is None:
+            return None
+        try:
+            plaintext = decrypt_secrets(dek, b64decode(encrypted))
+        except (SecretWrappingError, ValueError) as e:
+            logger.warning("Could not decrypt the existing secrets for machine {}: {}", agent_id, e)
+            return None
+        try:
+            raw = json.loads(plaintext)
+        except ValueError as e:
+            logger.warning("Malformed existing secrets payload for machine {}: {}", agent_id, e)
+            return None
+        if not isinstance(raw, dict):
+            logger.warning(
+                "Existing secrets payload for machine {} is not a JSON object (got {})", agent_id, type(raw).__name__
+            )
+            return None
+        return raw
 
     def decrypt_record_secrets(self, user_id: str, record: ReplicaRecord) -> WorkspaceSecretsPayload | None:
         """Decrypt a record's secrets with the account's DEK; None when locked/absent/corrupt."""
@@ -542,7 +623,12 @@ class WorkspaceRecordStore(MutableModel):
         display_name = resolver.get_workspace_name(AgentId(agent_id)) or info.agent_name
         color = resolver.get_workspace_color(AgentId(agent_id))
         is_cloud_row = provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
-        built_secrets = self.build_encrypted_secrets(user_id, agent_id, info.host_id)
+        with self._lock:
+            self._load_unlocked()
+            previous = self._records_by_user_id.get(user_id, {}).get(info.host_id)
+        built_secrets = self.build_encrypted_secrets(
+            user_id, agent_id, info.host_id, previous.encrypted_secrets if previous is not None else None
+        )
         return ReplicaRecord(
             host_id=info.host_id,
             agent_id=str(agent_id),
@@ -569,6 +655,8 @@ class WorkspaceRecordStore(MutableModel):
         """
         if self.cli is None:
             raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
+        if is_record_too_new(record):
+            raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         # The metadata-only tier: while the account has no (non-empty) master
         # password, its secrets never leave this machine -- the wire copy is
         # stripped. (The next pull mirrors the secretless server row into the
@@ -609,6 +697,8 @@ class WorkspaceRecordStore(MutableModel):
         synchronous sites (associate/disassociate) call the ``*_or_raise``
         variants instead.
         """
+        if is_record_too_new(record):
+            raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         dirty = record.model_copy_update(to_update(record.field_ref().is_dirty, True))
         with self._lock:
             self._set_record_unlocked(user_id, dirty)
@@ -639,6 +729,8 @@ class WorkspaceRecordStore(MutableModel):
             self._load_unlocked()
             previous = self._records_by_user_id.get(user_id, {}).get(record.host_id)
         if previous is not None:
+            if is_record_too_new(previous):
+                raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
             record = record.model_copy_update(
                 to_update(record.field_ref().revision, previous.revision),
             )
@@ -653,6 +745,8 @@ class WorkspaceRecordStore(MutableModel):
         if found is None or found[0] != user_id:
             return
         _, record = found
+        if is_record_too_new(record):
+            raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         if self.cli is None:
             raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
         try:
@@ -673,6 +767,8 @@ class WorkspaceRecordStore(MutableModel):
         if found is None or found[0] != user_id:
             return
         _, record = found
+        if is_record_too_new(record):
+            raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         tombstoned = record.model_copy_update(
             to_update(record.field_ref().state, RECORD_STATE_DESTROYED),
             to_update(record.field_ref().destroyed_at, datetime.now(timezone.utc).isoformat()),
@@ -689,6 +785,11 @@ class WorkspaceRecordStore(MutableModel):
 
     def remove_record_or_raise(self, user_id: str, account_email: str, host_id: str) -> None:
         """Remove a record outright by host id (the manual remove-from-list escape hatch)."""
+        with self._lock:
+            self._load_unlocked()
+            existing = self._records_by_user_id.get(user_id, {}).get(host_id)
+        if existing is not None and is_record_too_new(existing):
+            raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         if self.cli is None:
             raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
         try:
@@ -722,7 +823,17 @@ class WorkspaceRecordStore(MutableModel):
                 server_host_ids.add(record.host_id)
                 local = by_host.get(record.host_id)
                 if local is not None and local.is_dirty:
-                    continue
+                    if not is_record_too_new(record):
+                        continue
+                    # The server row was written at a newer record format, so
+                    # this app can never push the pending local change (the
+                    # connector's terminal record_format_too_new refusal), and
+                    # keeping the row dirty would block every future pull of
+                    # it. The server row wins; the record becomes read-only
+                    # here per the write-lock gates.
+                    logger.warning(
+                        "Dropping unpushed local changes for machine {}: {}", record.agent_id, RECORD_TOO_NEW_MESSAGE
+                    )
                 # secrets_content_hash and last_applied_secrets_revision are
                 # local-only state ("the plaintext this device last
                 # contributed" / "the revision whose pins it last applied"),
@@ -752,6 +863,9 @@ class WorkspaceRecordStore(MutableModel):
         for record in self.list_records(user_id):
             if not record.is_dirty:
                 continue
+            if is_record_too_new(record):
+                logger.warning("Not pushing machine record {}: {}", record.agent_id, RECORD_TOO_NEW_MESSAGE)
+                continue
             try:
                 self._push_record(user_id, account_email, record)
             except (ImbueCloudCliError, WorkspaceSyncError) as e:
@@ -773,9 +887,11 @@ class WorkspaceRecordStore(MutableModel):
         for record in self.list_records(user_id):
             if record.state != RECORD_STATE_ACTIVE or record.agent_id not in known_ids:
                 continue
-            if record.encrypted_secrets is not None:
+            if record.encrypted_secrets is not None or is_record_too_new(record):
                 continue
-            built_secrets = self.build_encrypted_secrets(user_id, record.agent_id, record.host_id)
+            built_secrets = self.build_encrypted_secrets(
+                user_id, record.agent_id, record.host_id, record.encrypted_secrets
+            )
             if built_secrets is None:
                 continue
             updated = record.model_copy_update(
@@ -1284,6 +1400,8 @@ class WorkspaceRecordStore(MutableModel):
         for record in self.list_records(user_id):
             if record.state != RECORD_STATE_ACTIVE or record.agent_id not in known_ids:
                 continue
+            if is_record_too_new(record):
+                continue
             rebuilt = self.build_record_from_resolver(user_id, record.agent_id, resolver, state=record.state)
             if rebuilt is None:
                 continue
@@ -1355,6 +1473,8 @@ class WorkspaceRecordStore(MutableModel):
         for record in self.list_records(user_id):
             if record.state != RECORD_STATE_DESTROYED or record.hosting_device_id != self.device_id:
                 continue
+            if is_record_too_new(record):
+                continue
             if record.agent_id not in active_ids:
                 continue
             if has_destroying_marker(AgentId(record.agent_id), self.paths):
@@ -1397,6 +1517,8 @@ class WorkspaceRecordStore(MutableModel):
         errored_providers = {str(name) for name in resolver.get_provider_errors()}
         for record in self.list_records(user_id):
             if record.state != RECORD_STATE_ACTIVE or record.hosting_device_id != self.device_id:
+                continue
+            if is_record_too_new(record):
                 continue
             if not record.provider_kind:
                 continue

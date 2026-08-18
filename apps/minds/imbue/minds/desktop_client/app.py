@@ -123,6 +123,7 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.errors import SyncCryptoError
+from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.enablement import list_disabled_provider_names
 from imbue.minds.mngr_settings.imbue_cloud_accounts import is_imbue_cloud_provider_enabled_for_account
@@ -917,7 +918,14 @@ def _finalize_destroyed_workspace(
                 # counts against a quota measured in machines ever created,
                 # so it must go before the record that names it is tombstoned.
                 delete_share_for_host(imbue_cloud_cli, owner_email, record.host_id)
-                session_store.record_store.tombstone_record(owner_user_id, owner_email, str(agent_id))
+                try:
+                    session_store.record_store.tombstone_record(owner_user_id, owner_email, str(agent_id))
+                except WorkspaceRecordTooNewError as exc:
+                    # The destroy gate refuses this upfront; reaching here means
+                    # the host went away some other way. The record must not be
+                    # blindly tombstoned by an app that cannot read it -- a
+                    # newer install (or the server) retires it instead.
+                    logger.warning("Not tombstoning the record for destroyed agent {}: {}", agent_id, exc)
             else:
                 logger.warning(
                     "Skipping workspace-record tombstone for destroyed agent {}: owning account {} is not "

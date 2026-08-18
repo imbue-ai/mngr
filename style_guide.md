@@ -1474,6 +1474,17 @@ Persisted event records are cross-process, cross-version wire data: a shared app
 
 The `EventEnvelope` base class in `imbue_common` provides the tolerant config, and a repo-wide meta check (`test_meta_ratchets.py`) bans its subclasses from re-tightening `extra` to `"forbid"`.
 
+# Wire models (cross-version HTTP responses)
+
+HTTP responses from a continuously deployed service to shipped clients are cross-version wire data, exactly like persisted events: an already-released client routinely parses responses produced by a *newer* server. Every client-side model that validates such a response must therefore be forward compatible:
+
+- Inherit the service's tolerant wire bases instead of `FrozenModel` (for the remote_service_connector: `WireModel` / `WireEnum` in `mngr_imbue_cloud`'s `wire.py`, with parsing routed through `validate_wire` / `parse_wire_entries`). `WireModel` ignores unknown fields; required fields stay required, so removals still fail loudly.
+- Enums whose values arrive on the wire must subclass `WireEnum` and define an `UNKNOWN` member; unrecognized values coerce to it at the parse boundary. Consumers treat UNKNOWN as "shown but not actionable, never treated as absent, never a reason to delete".
+- Wire response models live in a dedicated `wire_types.py`, whose classes a repo-wide meta ratchet requires to be WireModels/WireEnums (and bans from re-forbidding extras).
+- List parsing must never let a schema break masquerade as an empty listing: skip a failed entry with a warning, but raise when a non-empty listing fails entirely (or the body is not a list).
+- Server-side, response-shape changes must be additive-with-defaults, proven by the service's golden compat test against vendored old-client model snapshots (see the connector's `wire_compat_test.py`). A breaking change waits for the affected snapshots to leave the support window. If data must ship to new clients before then, add a new endpoint (old clients never call it) rather than new fields on an existing response.
+- Fields that clients round-trip back to the server (e.g. sync records) additionally need server-side preserve-on-absent merge semantics, so an older client's push cannot reset a field it does not know about.
+
 # Configuration
 
 Always use .toml files for configuration

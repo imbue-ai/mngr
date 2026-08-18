@@ -138,23 +138,6 @@ class BareMetalServerStatus(NonEmptyStr):
         return super().__new__(cls, normalized)
 
 
-class WorkspaceStatus(LowerCaseStrEnum):
-    """Wire lifecycle status of a remote workspace (GET /workspaces).
-
-    ``running`` maps from the connector-internal ``leased``. ``stopping``
-    means the VM is halted and its upload is in flight (still restartable in
-    place); ``stopped`` means the artifact is in object storage and the
-    bare-metal slot is freed; ``starting`` means a supervisor is restoring
-    it; ``crashed`` means an operator abandoned it (recover from backup).
-    """
-
-    RUNNING = auto()
-    STOPPING = auto()
-    STOPPED = auto()
-    STARTING = auto()
-    CRASHED = auto()
-
-
 class ImbueCloudKeyType(UpperCaseStrEnum):
     """The class of secret being requested."""
 
@@ -222,23 +205,6 @@ FAST_PATH_ADOPTABLE_START_ARGS: Final[frozenset[str]] = frozenset(
         "--restart=unless-stopped",
     }
 )
-
-
-class InvalidR2BucketAccess(ValueError):
-    """Raised when an R2 key access scope is not 'read' or 'readwrite'."""
-
-
-_R2_ACCESS_VALUES: Final[tuple[str, ...]] = ("read", "readwrite")
-
-
-class R2BucketAccess(NonEmptyStr):
-    """Access scope for an R2 bucket key: 'read' or 'readwrite' (lowercase wire form)."""
-
-    def __new__(cls, value: str) -> Self:
-        normalized = value.strip().lower()
-        if normalized not in _R2_ACCESS_VALUES:
-            raise InvalidR2BucketAccess(f"access must be one of {_R2_ACCESS_VALUES}, got '{value}'")
-        return super().__new__(cls, normalized)
 
 
 class R2BucketShortName(NonEmptyStr):

@@ -71,6 +71,7 @@ from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
+from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MESSAGE
 from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
@@ -1086,6 +1087,42 @@ def test_destroying_a_machine_keeps_the_app_from_starting_it_back_up(tmp_path: P
     assert response.status_code == 202
     tracker.record_probe_success(agent_id)
     assert tracker.is_unattended_recovery_suppressed(agent_id) is True
+
+
+@pytest.mark.witnesses("remote-compatibility.newer-records-read-only", partial="covers the destroy API gate only")
+def test_destroy_refuses_a_record_written_by_a_newer_app_version(tmp_path: Path) -> None:
+    """The destroy route 409s with the update remedy when the workspace's record is too new.
+
+    Seeded through a pull (as a newer client's server row arrives in real
+    life), since the local write paths themselves refuse too-new records.
+    """
+    agent_id = AgentId()
+    email = "user@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.sync_records_by_email[email] = {
+        "host-too-new": {
+            "host_id": "host-too-new",
+            "agent_id": str(agent_id),
+            "provider_kind": "lima",
+            "state": "active",
+            "revision": 1,
+            "record_format": 2,
+        }
+    }
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    assert store.record_store is not None
+    assert store.record_store.pull("user-1", email) is True
+    client = _build_client(
+        tmp_path,
+        _ResolverOnAParseableHost(url_by_agent_and_service={str(agent_id): {}}),
+        mngr_binary=_write_fake_mngr(tmp_path / "bin"),
+        session_store=store,
+    )
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/destroy", headers=_auth_header())
+
+    assert response.status_code == 409
+    assert json.loads(response.data)["error"] == RECORD_TOO_NEW_MESSAGE
 
 
 def test_lifecycle_without_concurrency_group_returns_501(tmp_path: Path) -> None:

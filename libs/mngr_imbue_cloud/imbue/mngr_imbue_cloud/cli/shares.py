@@ -8,7 +8,7 @@ from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
-from imbue.mngr_imbue_cloud.data_types import ShareInfo
+from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 
 
 @click.group(name="shares")

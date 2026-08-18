@@ -120,6 +120,12 @@ one-time bring-up runbook in `apps/apt_mirror/README.md`.
 
 For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `imbue/minds/build_info.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the DEFAULT_WORKSPACE_TEMPLATE ref via `template_ref`, so the tag is only hit in step 8.
 
+Also maintain the connector's wire-compat snapshot corpus (`apps/remote_service_connector/imbue/remote_service_connector/compat/`):
+
+- **Append** a snapshot module for the release being cut (`wire_models_minds_<version>.py`, registered in `wire_compat_test.py`'s `_SNAPSHOTS`): a self-contained copy of the release's strict-parsed connector response models, stamped with `RELEASE_DATE` and a `SUPPORT_ENDS` of release date + the support window (~1 month today). While every client model is a tolerant `WireModel`, consecutive releases usually share a snapshot — only add a new module when the strictly-parsed surface actually changed; otherwise extend the newest snapshot's `SUPPORT_ENDS` to cover the new release.
+
+- **Prune** any snapshot whose `SUPPORT_ENDS` has passed (the compat test fails loudly until you do), after confirming via the connector access log's `imbue_client` field that no in-window clients of that release remain. Pruning is what un-freezes the response shapes that snapshot pins; also remove any server-side compat shims whose `CLEANUP` note keys off that release.
+
 ### 2. Traditional CI on both branches (parallel, not a serial gate)
 
 `ci.yml` runs only on PRs (any branch) and on push to `main` — **a bare branch push triggers nothing**, so open a branch as a PR when you want its CI. Gate on the **DEFAULT_WORKSPACE_TEMPLATE** PR's `test` job (`uv sync --all-packages` + root/`system_interface` pytest — exactly what a bad vendor refresh trips). The **mngr** branch's suites (`test-offload`, `test-docker`, `test-offload-acceptance`) are real signal only if it carries mngr/minds code; for a version-bump-only branch they're redundant with a green `main` (see "What actually gates a release"), so a PR there is optional. The release SHA — `GREEN_MNGR_SHA` — is the mngr release-branch HEAD (`main` + the bump commit) and doesn't depend on any of this finishing.

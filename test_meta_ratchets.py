@@ -908,13 +908,13 @@ def test_offload_version_pinned_consistently() -> None:
     )
 
 
-def _collect_class_defs_for_event_envelope_check() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
+def _collect_class_defs_for_model_config_checks() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
     """Collect, repo-wide, each class's base names and any extra="forbid" declarations in its body.
 
     Returns ``(base_names_by_class, forbid_locations_by_class)``. Classes are keyed
     by bare name; two same-named classes in different files have their bases merged,
-    which can only over-approximate the EventEnvelope subclass set (acceptable for a
-    guard that should match nothing).
+    which can only over-approximate a base's subclass set (acceptable for guards
+    that should match nothing).
     """
     base_names_by_class: dict[str, set[str]] = {}
     forbid_locations_by_class: dict[str, list[str]] = {}
@@ -937,6 +937,21 @@ def _collect_class_defs_for_event_envelope_check() -> tuple[dict[str, set[str]],
                     f"{py_path.relative_to(_REPO_ROOT)}:{node.lineno}"
                 )
     return base_names_by_class, forbid_locations_by_class
+
+
+def _transitive_subclass_names(base_names_by_class: dict[str, set[str]], seed_names: set[str]) -> set[str]:
+    """Every class name that (transitively, by bare name) inherits one of ``seed_names``, seeds included."""
+    subclass_names = set(seed_names)
+    is_growing = True
+    while is_growing:
+        newly_found = {
+            class_name
+            for class_name, base_names in base_names_by_class.items()
+            if class_name not in subclass_names and base_names & subclass_names
+        }
+        is_growing = bool(newly_found)
+        subclass_names.update(newly_found)
+    return subclass_names
 
 
 def _class_body_sets_extra_forbid(class_def: ast.ClassDef) -> bool:
@@ -993,19 +1008,8 @@ def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
     Subclass membership is computed transitively by class name across the whole
     repo (an over-approximation, which for this guard can only catch more).
     """
-    base_names_by_class, forbid_locations_by_class = _collect_class_defs_for_event_envelope_check()
-
-    # Transitive closure of subclasses, seeded from EventEnvelope itself.
-    envelope_class_names = {"EventEnvelope"}
-    is_growing = True
-    while is_growing:
-        newly_found = {
-            class_name
-            for class_name, base_names in base_names_by_class.items()
-            if class_name not in envelope_class_names and base_names & envelope_class_names
-        }
-        is_growing = bool(newly_found)
-        envelope_class_names.update(newly_found)
+    base_names_by_class, forbid_locations_by_class = _collect_class_defs_for_model_config_checks()
+    envelope_class_names = _transitive_subclass_names(base_names_by_class, {"EventEnvelope"})
 
     violations = [
         f"{class_name} at {location}"
@@ -1016,4 +1020,58 @@ def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
         'EventEnvelope subclasses must not set extra="forbid" (persisted event records must tolerate '
         "additive fields from other program versions; see mngr-internal#422):\n"
         + "\n".join(f"  - {v}" for v in violations)
+    )
+
+
+def test_wire_model_subclasses_never_re_forbid_extra() -> None:
+    """No WireModel subclass anywhere in the repo may set extra="forbid".
+
+    WireModel models parse remote_service_connector responses in shipped
+    clients (the minds desktop app bundles them), so they are cross-version
+    wire data exactly like EventEnvelope's persisted events: the base class
+    deliberately ignores unknown fields so one additive server field never
+    breaks an already-released client. A subclass re-tightening ``extra`` to
+    ``"forbid"`` silently reintroduces that break for its endpoint, so it is
+    banned outright. Subclass membership is computed transitively by class
+    name across the whole repo (an over-approximation, which for a guard that
+    should match nothing can only catch more).
+    """
+    base_names_by_class, forbid_locations_by_class = _collect_class_defs_for_model_config_checks()
+    wire_model_class_names = _transitive_subclass_names(base_names_by_class, {"WireModel"})
+
+    violations = [
+        f"{class_name} at {location}"
+        for class_name in sorted(wire_model_class_names)
+        for location in forbid_locations_by_class.get(class_name, [])
+    ]
+    assert len(violations) == 0, (
+        'WireModel subclasses must not set extra="forbid" (connector wire responses must tolerate '
+        "additive fields so a server deploy never breaks already-shipped clients; see "
+        "libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/wire.py):\n" + "\n".join(f"  - {v}" for v in violations)
+    )
+
+
+def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
+    """Every class in a wire_types.py must be (transitively) a WireModel or WireEnum.
+
+    ``wire_types.py`` files hold connector response shapes by contract (see
+    the module docstring in libs/mngr_imbue_cloud); a strict model or plain
+    enum slipped in there would silently opt an endpoint out of the
+    forward-compatibility guarantees. Bases are resolved transitively by
+    class name across the repo, so intermediate bases defined elsewhere work.
+    """
+    base_names_by_class, _forbid_locations = _collect_class_defs_for_model_config_checks()
+    tolerant_class_names = _transitive_subclass_names(base_names_by_class, {"WireModel", "WireEnum"})
+
+    violations = []
+    for wire_types_path in _REPO_ROOT.rglob("wire_types.py"):
+        if ".venv" in wire_types_path.parts or ".external_worktrees" in wire_types_path.parts:
+            continue
+        tree = ast.parse(wire_types_path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name not in tolerant_class_names:
+                violations.append(f"{node.name} at {wire_types_path.relative_to(_REPO_ROOT)}:{node.lineno}")
+    assert len(violations) == 0, (
+        "Every class in a wire_types.py must inherit WireModel or WireEnum (directly or transitively) "
+        "so connector response shapes stay forward compatible:\n" + "\n".join(f"  - {v}" for v in violations)
     )

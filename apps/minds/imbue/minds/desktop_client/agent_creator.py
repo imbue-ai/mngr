@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.labeled_hosts import ListedHost
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
@@ -2956,9 +2957,9 @@ class AgentCreator(MutableModel):
         """
 
         try:
-            # A structured quota refusal is deterministic (retrying cannot
-            # succeed), so it is excluded from the retry predicate and falls
-            # straight through to the notification below.
+            # Structured quota and client-too-old refusals are deterministic
+            # (retrying cannot succeed), so they are excluded from the retry
+            # predicate and fall straight through to the notification below.
             quota_evictor = (
                 self.backup_quota_evictor_factory(backup_request.account_email)
                 if self.backup_quota_evictor_factory is not None and backup_request.account_email
@@ -2966,7 +2967,7 @@ class AgentCreator(MutableModel):
             )
             for attempt in Retrying(
                 retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError))
-                & retry_if_not_exception_type(ImbueCloudQuotaExceededCliError),
+                & retry_if_not_exception_type((ImbueCloudQuotaExceededCliError, ImbueCloudClientTooOldCliError)),
                 stop=stop_after_delay(self.backup_setup_retry_budget_seconds),
                 wait=wait_fixed(self.backup_setup_retry_wait_seconds),
                 reraise=True,

@@ -20,9 +20,9 @@ from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
-from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
-from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
+from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
 
 
 def _read_json_payload(model_name: str, input_file: str | None) -> dict[str, object]:

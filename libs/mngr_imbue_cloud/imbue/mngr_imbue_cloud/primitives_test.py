@@ -4,23 +4,11 @@ from imbue.mngr_imbue_cloud.primitives import CI_TIER
 from imbue.mngr_imbue_cloud.primitives import DEV_TIER
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import InvalidImbueCloudAccount
-from imbue.mngr_imbue_cloud.primitives import InvalidR2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import PRODUCTION_TIER
-from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import STAGING_TIER
 from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 from imbue.mngr_imbue_cloud.primitives import slugify_account
 from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
-
-
-def test_r2_bucket_access_normalizes_case() -> None:
-    assert R2BucketAccess("ReadWrite") == "readwrite"
-    assert R2BucketAccess(" READ ") == "read"
-
-
-def test_r2_bucket_access_rejects_unknown() -> None:
-    with pytest.raises(InvalidR2BucketAccess):
-        R2BucketAccess("write")
 
 
 def test_account_lowercases_and_strips() -> None:

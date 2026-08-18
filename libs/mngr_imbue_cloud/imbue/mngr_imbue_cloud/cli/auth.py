@@ -26,7 +26,6 @@ from imbue.mngr_imbue_cloud.cli._common import parse_account
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import force_refresh
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
-from imbue.mngr_imbue_cloud.connector.client import AuthRawResponse
 from imbue.mngr_imbue_cloud.connector.client import CONNECTOR_TOO_OLD_REMEDY
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
@@ -35,6 +34,7 @@ from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
+from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 
 _LOGIN_LISTEN_TIMEOUT_SECONDS = 300.0
 _LOGIN_CALLBACK_PATH = "/callback"

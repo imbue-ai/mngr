@@ -36,6 +36,8 @@ from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
+from imbue.mngr_imbue_cloud.wire import WireModel
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _LEASE_TIMEOUT_SECONDS = 300.0
@@ -65,6 +67,11 @@ _QUOTA_ERROR_CLASS_SIGNAL = "ImbueCloudQuotaExceededError"
 # (``code: email_not_verified``), written by handle_imbue_cloud_errors.
 # Substring-matched like the quota signal.
 _EMAIL_NOT_VERIFIED_ERROR_CLASS_SIGNAL = "ImbueCloudEmailNotVerifiedError"
+
+# The plugin's error_class marker for the connector's structured HTTP 426
+# "client too old" refusal, written by handle_imbue_cloud_errors. Substring-
+# matched like the quota signal.
+_CLIENT_TOO_OLD_ERROR_CLASS_SIGNAL = "ImbueCloudClientTooOldError"
 
 # The plugin's error_class marker for a structured auth rejection, written by
 # ``_persist_auth_response`` in the plugin's auth CLI whenever the connector
@@ -116,6 +123,14 @@ class ImbueCloudEmailNotVerifiedCliError(ImbueCloudCliError):
     email: str | None = None
 
 
+class ImbueCloudClientTooOldCliError(ImbueCloudCliError):
+    """The connector refused the operation because this app version is no longer supported.
+
+    Deterministic -- retrying cannot succeed until the app updates -- so
+    callers surface an "update the app" prompt instead of a generic failure.
+    """
+
+
 class ImbueCloudAuthFailedCliError(ImbueCloudCliError):
     """The auth backend rejected an ``auth signin`` / ``signup`` / ``login`` attempt.
 
@@ -141,7 +156,7 @@ class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
     stored_record: dict[str, Any] | None = None
 
 
-class ImbueCloudAuthSession(FrozenModel):
+class ImbueCloudAuthSession(WireModel):
     """Result of a successful auth signin/signup/login invocation."""
 
     user_id: str
@@ -150,7 +165,7 @@ class ImbueCloudAuthSession(FrozenModel):
     needs_email_verification: bool = False
 
 
-class ImbueCloudAuthAccount(FrozenModel):
+class ImbueCloudAuthAccount(WireModel):
     """One entry from `mngr imbue_cloud auth list`."""
 
     user_id: str
@@ -159,7 +174,7 @@ class ImbueCloudAuthAccount(FrozenModel):
     is_active: bool = False
 
 
-class LeasedHost(FrozenModel):
+class LeasedHost(WireModel):
     """One row of `mngr imbue_cloud hosts list`."""
 
     host_db_id: str
@@ -173,28 +188,28 @@ class LeasedHost(FrozenModel):
     leased_at: str
 
 
-class LiteLLMKeyMaterial(FrozenModel):
+class LiteLLMKeyMaterial(WireModel):
     """Result of `mngr imbue_cloud keys litellm create`."""
 
     key: SecretStr
     base_url: AnyUrl
 
 
-class ShareCliRelayEndpoint(FrozenModel):
+class ShareCliRelayEndpoint(WireModel):
     """One relay a shared workspace tunnels to (from `shares create` / `shares status`)."""
 
     relay_id: str
     endpoint: str
 
 
-class ShareCliRelayLogin(FrozenModel):
+class ShareCliRelayLogin(WireModel):
     """One relay's last tunnel Login stamp for a share (from `shares status`)."""
 
     relay_id: str
     last_login_at: str | None = None
 
 
-class ShareCliInfo(FrozenModel):
+class ShareCliInfo(WireModel):
     """Result of `mngr imbue_cloud shares create` / `shares status`."""
 
     host_id: str
@@ -267,7 +282,7 @@ class ActiveShareCache(MutableModel):
             self._lookup_and_deadline_by_host_id.pop(host_id, None)
 
 
-class R2BucketKeyMaterial(FrozenModel):
+class R2BucketKeyMaterial(WireModel):
     """A bucket-scoped S3 credential, as emitted by `mngr imbue_cloud bucket ...`.
 
     Mirror of the plugin's ``R2KeyMaterial`` JSON shape; the secret is
@@ -281,14 +296,14 @@ class R2BucketKeyMaterial(FrozenModel):
     access: str
 
 
-class R2BucketInfo(FrozenModel):
+class R2BucketInfo(WireModel):
     """Metadata for an R2 bucket, as emitted by `mngr imbue_cloud bucket info`."""
 
     bucket_name: str
     s3_endpoint: AnyUrl
 
 
-class R2BucketCreateResult(FrozenModel):
+class R2BucketCreateResult(WireModel):
     """Result of `mngr imbue_cloud bucket create`: the bucket plus its default key."""
 
     bucket: R2BucketInfo
@@ -378,6 +393,15 @@ class ImbueCloudCli(MutableModel):
             exc.stdout = result.stdout
             exc.stderr = result.stderr
             raise exc
+        if _CLIENT_TOO_OLD_ERROR_CLASS_SIGNAL in result.stderr:
+            too_old_message = _parse_stderr_error_message(result.stderr)
+            too_old_exc = ImbueCloudClientTooOldCliError(
+                too_old_message if too_old_message else CLIENT_TOO_OLD_FALLBACK_MESSAGE
+            )
+            too_old_exc.exit_code = exit_code
+            too_old_exc.stdout = result.stdout
+            too_old_exc.stderr = result.stderr
+            raise too_old_exc
         if _QUOTA_ERROR_CLASS_SIGNAL in result.stderr:
             quota_message = _parse_stderr_error_message(result.stderr)
             quota_exc = ImbueCloudQuotaExceededCliError(

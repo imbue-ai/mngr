@@ -182,7 +182,7 @@ def _connector_web_chrome_dir() -> Path:
 _CONNECTOR_FRONTEND_BUILD_TIMEOUT_SECONDS: Final[float] = 600.0
 
 
-def _build_connector_frontends(parent_cg: ConcurrencyGroup) -> None:
+def _build_connector_frontends(parent_cg: ConcurrencyGroup, deploy_id: str) -> None:
     """Build both connector frontend bundles before ``modal deploy``.
 
     The accounts bundle (``frontend/dist``, served at ``/login`` / ``/signup``
@@ -190,15 +190,18 @@ def _build_connector_frontends(parent_cg: ConcurrencyGroup) -> None:
     ``/web``) are attached to the connector image by ``app.py``. Building here
     (rather than committing the bundles) keeps the artifacts out of git; the
     cost is that deploying machines need node + pnpm, which is checked up
-    front with a clear error.
+    front with a clear error. ``deploy_id`` is baked into each bundle (the
+    vite ``__MINDS_DEPLOY_ID__`` define) as the ``X-Imbue-Client`` build
+    stamp, directly comparable to the deployed connector's ``/version``
+    deploy_id -- which is how a stale open tab detects a newer deploy.
     """
-    _build_connector_bundle(parent_cg, _connector_frontend_dir(), "accounts-frontend")
+    _build_connector_bundle(parent_cg, _connector_frontend_dir(), "accounts-frontend", deploy_id)
     # The web-chrome SPA (the hosted minds web client) ships the same way,
     # attached at /root/web_chrome_frontend_dist and served under /web.
-    _build_connector_bundle(parent_cg, _connector_web_chrome_dir(), "web-chrome-frontend")
+    _build_connector_bundle(parent_cg, _connector_web_chrome_dir(), "web-chrome-frontend", deploy_id)
 
 
-def _build_connector_bundle(parent_cg: ConcurrencyGroup, frontend_dir: Path, label: str) -> None:
+def _build_connector_bundle(parent_cg: ConcurrencyGroup, frontend_dir: Path, label: str, deploy_id: str) -> None:
     """pnpm install + build one connector frontend bundle, verifying dist/index.html exists."""
     if not frontend_dir.is_dir():
         raise RepoLayoutError(f"Connector frontend not found: {frontend_dir}")
@@ -219,6 +222,7 @@ def _build_connector_bundle(parent_cg: ConcurrencyGroup, frontend_dir: Path, lab
                 timeout=_CONNECTOR_FRONTEND_BUILD_TIMEOUT_SECONDS,
                 is_checked_after=False,
                 cwd=frontend_dir,
+                env={**os.environ, MINDS_DEPLOY_ID_ENV_VAR: deploy_id},
             )
         if result.returncode != 0:
             stderr = result.stderr.strip() or result.stdout.strip()
@@ -644,7 +648,7 @@ def deploy_remote_service_connector(
     """
     _verify_image_requirements_fresh("remote-service-connector", parent_cg)
     with info_span("building the connector frontends (accounts + web chrome)"):
-        _build_connector_frontends(parent_cg)
+        _build_connector_frontends(parent_cg, deploy_id)
     extra_env = {
         CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers),
         CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),

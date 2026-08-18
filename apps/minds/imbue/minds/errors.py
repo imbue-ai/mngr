@@ -150,6 +150,17 @@ class WorkspaceSyncError(MindError):
     ...
 
 
+class WorkspaceRecordTooNewError(WorkspaceSyncError):
+    """Raised when a state-changing operation targets a record whose record_format postdates this app.
+
+    The record was written by a newer app version, so modifying it here could
+    corrupt semantics this version cannot see. The record stays readable; the
+    remedy is updating the app.
+    """
+
+    ...
+
+
 class LimaImageError(MindError):
     """Base exception for the pre-baked Lima image cache."""
 

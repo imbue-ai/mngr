@@ -15,9 +15,9 @@ from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
-from imbue.mngr_imbue_cloud.data_types import R2KeyMaterial
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.r2_objects import empty_bucket_for_destroy
+from imbue.mngr_imbue_cloud.wire_types import R2KeyMaterial
 
 
 def _key_material_to_json(material: R2KeyMaterial) -> dict[str, str]:

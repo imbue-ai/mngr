@@ -13,13 +13,10 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.mngr_imbue_cloud.connector.client import CLIENT_ID_HEADER
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_on_exists
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
-from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyInfo
-from imbue.mngr_imbue_cloud.data_types import LiteLLMKeyMaterial
-from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
-from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
@@ -27,15 +24,21 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotEmptyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
-from imbue.mngr_imbue_cloud.primitives import WorkspaceStatus
+from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
+from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 
 def _make_client(handler) -> tuple[ImbueCloudConnectorClient, httpx.MockTransport]:
@@ -1581,3 +1584,100 @@ def test_admin_abandon_workspace_posts_reason_with_admin_key(monkeypatch: pytest
     assert seen["path"] == "/admin/workspaces/00000000-0000-0000-0000-000000000042/abandon"
     assert seen["auth"] == "Bearer adminkey"
     assert seen["body"] == {"reason": "box died"}
+
+
+def test_every_request_carries_the_client_identification_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_headers: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_headers.append(request.headers)
+        return httpx.Response(200, json=[])
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    client.list_hosts(SecretStr("token"))
+    client.auth_forgot_password("a@b.com")
+
+    assert len(seen_headers) == 2
+    for headers in seen_headers:
+        identifier = headers.get(CLIENT_ID_HEADER)
+        assert identifier is not None and "imbue-cloud-plugin/" in identifier
+        assert headers.get("user-agent") == identifier
+
+
+def test_http_426_raises_the_typed_client_too_old_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            426,
+            json={
+                "detail": {
+                    "code": "client_too_old",
+                    "min_version": "0.4.0",
+                    "sunset_date": "2026-10-01",
+                    "message": "This app version is no longer supported; please update it.",
+                }
+            },
+        )
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+
+    with pytest.raises(ImbueCloudClientTooOldError) as exc_info:
+        client.get_account(SecretStr("token"))
+    assert exc_info.value.min_version == "0.4.0"
+    assert exc_info.value.sunset_date == "2026-10-01"
+
+
+def test_record_push_maps_the_format_conflict_to_its_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={"detail": {"code": "record_format_too_new", "message": "update the app to modify it", "stored": {}}},
+        )
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    record = SyncWorkspaceRecord(
+        host_id="host-1", agent_id="agent-1", provider_kind="lima", state="active", revision=2
+    )
+
+    with pytest.raises(ImbueCloudRecordFormatTooNewError) as exc_info:
+        client.put_sync_record(SecretStr("token"), record)
+    # The typed error carries the connector's human message alone, not the
+    # repr of the whole detail dict (stored row included).
+    assert str(exc_info.value) == "update the app to modify it"
+
+
+def test_listing_with_every_entry_unparseable_raises_instead_of_reporting_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"unrelated": 1}, {"unrelated": 2}])
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+
+    with pytest.raises(ImbueCloudConnectorError, match="refusing to report an empty listing"):
+        client.list_workspaces(SecretStr("token"))
+
+
+def test_workspace_with_unrecognized_status_coerces_to_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = {
+        "host_db_id": "00000000-0000-0000-0000-000000000001",
+        "status": "migrating",
+        "agent_id": "agent-1",
+        "host_id": "host-1",
+        "host_name": "ws",
+        "added_by_a_newer_server": True,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[entry])
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+
+    workspaces = client.list_workspaces(SecretStr("token"))
+
+    assert len(workspaces) == 1
+    assert workspaces[0].status is WorkspaceStatus.UNKNOWN

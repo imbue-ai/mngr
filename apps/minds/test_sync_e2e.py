@@ -62,9 +62,9 @@ from imbue.minds.testing import SyncE2EAccount
 from imbue.minds.testing import SyncE2EEnv
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
-from imbue.mngr_imbue_cloud.data_types import SyncKeyBundle
-from imbue.mngr_imbue_cloud.data_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
+from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
 
 _SENTINEL_FILENAME: Final[str] = "e2e-backup-sentinel.txt"
 # Where the export route writes its zip (backup_export._EXPORT_DIR).
