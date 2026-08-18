@@ -157,6 +157,45 @@ these automatically -- resolving the DSN / environment / bucket from its own
 Sentry settings and maintaining the consent file from the user's error-reporting
 settings.
 
+## Desktop egress
+
+Some destinations block the datacenter IP ranges a remote workspace's VPS sits
+in, so a request has to leave from the user's own machine to be accepted at all.
+Workspaces ask for that by *prefixing* the target URL, because latchkey's
+gateway routes on the request path alone -- a header cannot divert a request
+that already looks like `/gateway/<url>`.
+
+`prepare_agent_latchkey` publishes the prefix to use as `MINDS_VIA_DESKTOP_URL_PREFIX`
+in every workspace's env:
+
+| Workspace | Value | Why |
+|---|---|---|
+| VPS gateway | `https://latchkey-self.invalid/via-desktop` | `latchkey curl` recognizes the reserved `latchkey-self.invalid` host and rewrites such URLs onto the gateway's own origin, so the wrapped URL arrives as `/via-desktop/<target>` and the forwarding extension hands it to the desktop |
+| desktop gateway | `""` (empty) | the gateway already runs on the user's machine, so a plain request is already desktop egress and a prefix would only add a hop |
+
+In-workspace tooling therefore concatenates the value without branching on
+topology, and gets the right behavior in both. It is always set (empty rather
+than absent) so tooling can tell "minds configured no prefix" apart from "this
+workspace predates the feature".
+
+The name is `MINDS_*` rather than `LATCHKEY_*` even though the value is a
+latchkey URL. A workspace's env names each var after the tool that *reads* it
+(`LATCHKEY_GATEWAY` for latchkey, `MNGR_HOST_DIR` for the inner mngr), and
+latchkey never reads this one -- it only receives the concatenated result as a
+URL argument. With no single reader to name it after, it takes the name of the
+authority that decides the value: minds, which alone knows the topology.
+
+```sh
+latchkey curl "$MINDS_VIA_DESKTOP_URL_PREFIX/https://api.example.com/v1/thing"
+```
+
+This grants nothing: the agent baseline opens the *route*, and what may be
+reached through it is decided by the ordinary per-service, per-account rules,
+which the desktop evaluates against the real target URL after unwrapping. A
+service the user has granted is reachable both ways with one grant, and a
+service they have not granted is reachable neither way -- so desktop egress
+never appears as its own consent prompt.
+
 ## Permissions config
 
 The package owns the `latchkey_permissions.json` schema (a subset of
@@ -390,6 +429,18 @@ tunnel, preserving the gateway password and replacing any caller-supplied
 permissions override with a dedicated desktop-target JWT held by the proxy.
 Native VPS requests carry no override and are authorized by the gateway's
 synchronized default `~/.latchkey/permissions.json`.
+
+The same extension serves `/via-desktop/<absolute-target-url>`, which asks for a
+*third-party* request to leave from the user's machine rather than from the VPS
+-- some destinations block datacenter IP ranges outright. That family is
+forwarded with its prefix swapped for `/gateway/`, so it lands on the desktop
+gateway's own outbound proxy and the desktop needs no extension of its own; the
+target is required to be an absolute `http(s)` URL and is sliced off the raw
+request URL, so it reaches the third party byte-identical to what the caller
+sent. Credentials are injected, and the permission check runs, on the desktop
+against the same host permissions file the proxy already targets, so this route
+reaches nothing a direct request could not. See [Desktop
+egress](#desktop-egress) for how a workspace asks for it.
 
 The workspace therefore always has one gateway URL and one agent-side skill.
 If the user's computer is offline, third-party calls through the VPS gateway

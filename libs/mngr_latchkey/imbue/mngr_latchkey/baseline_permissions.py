@@ -95,6 +95,23 @@ _PERM_MINDS_APP_VERSION: Final[str] = "minds-app-version-read"
 _MINDS_API_TIMEZONE_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/v1/timezone"
 _PERM_MINDS_API_TIMEZONE: Final[str] = "minds-api-timezone-read"
 
+# Desktop egress: a remote workspace asks for a third-party request to leave
+# from the user's own machine (rather than from its VPS) by prefixing the target
+# URL with ``/via-desktop``, which the VPS gateway's forwarding extension
+# unwraps onto the desktop gateway's native ``/gateway/<url>`` endpoint. This
+# permission opens only the *route*; what may actually be reached through it is
+# decided by the ordinary per-service, per-account rules in this same file, which
+# the desktop evaluates against the real target URL after unwrapping. A service
+# the user has granted is therefore reachable both ways with one grant, and a
+# service they have not granted is reachable neither way -- so this is granted by
+# default and never appears as its own consent prompt.
+#
+# The path is required to continue with an absolute http(s) URL, matching what
+# the forwarding extension itself accepts, so the grant cannot be stretched to
+# some other gateway-self endpoint hidden behind the prefix.
+VIA_DESKTOP_PATH_PATTERN: Final[str] = r"^/via-desktop/https?://"
+_PERM_VIA_DESKTOP_EGRESS: Final[str] = "via-desktop-egress"
+
 # The minds desktop client's cross-workspace management API
 # (``/api/v1/workspaces/...``) attaches its per-verb permission schemas to the
 # ``latchkey-self`` scope, just like file-sharing and accounts. Those schemas are
@@ -125,6 +142,9 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
                 _PERM_MINDS_APP_VERSION,
                 # Every agent may read the (non-agent-scoped) host timezone.
                 _PERM_MINDS_API_TIMEZONE,
+                # Every agent may route an outbound request through the user's
+                # machine; the per-service rules still decide what it reaches.
+                _PERM_VIA_DESKTOP_EGRESS,
             ],
         },
     ),
@@ -221,6 +241,17 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
                 "path": {"const": _MINDS_API_TIMEZONE_INBOUND_PATH},
             },
             "required": ["method", "path"],
+        },
+        # Any method: the wrapped request keeps the caller's verb, and the
+        # desktop re-checks it against the target service's own rules.
+        _PERM_VIA_DESKTOP_EGRESS: {
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "pattern": VIA_DESKTOP_PATH_PATTERN,
+                },
+            },
+            "required": ["path"],
         },
     },
     # Every host file references the shared additional-services schemas file, so a

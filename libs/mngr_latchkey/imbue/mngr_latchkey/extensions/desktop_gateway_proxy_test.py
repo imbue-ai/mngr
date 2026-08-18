@@ -135,6 +135,56 @@ def test_proxy_matches_only_desktop_owned_route_families() -> None:
         assert [path for _method, path, _headers in upstream.received] == list(matched_paths)
 
 
+def test_via_desktop_is_unwrapped_onto_the_desktop_native_outbound_route() -> None:
+    """``/via-desktop/<url>`` reaches the desktop as ``/gateway/<url>``.
+
+    The desktop therefore needs no extension of its own: its built-in outbound
+    proxy injects the credentials and runs the real permission check.
+    """
+    with _recording_server() as (upstream_url, upstream), _node_proxy(upstream_url) as proxy_url:
+        status, body = _request(f"{proxy_url}/via-desktop/https://a.example.com/v1/x?y=z", method="POST")
+    assert status == 200
+    assert body == b"/gateway/https://a.example.com/v1/x?y=z"
+    method, path, headers = upstream.received[0]
+    assert method == "POST"
+    assert path == "/gateway/https://a.example.com/v1/x?y=z"
+    # The desktop-target JWT still replaces whatever the workspace sent, so the
+    # desktop evaluates the host permissions file rather than a caller-chosen one.
+    assert headers["x-latchkey-gateway-permissions-override"] == "desktop-override-jwt"
+
+
+def test_via_desktop_target_url_is_forwarded_byte_for_byte() -> None:
+    """The target is sliced off the raw URL, so nothing re-encodes or normalizes it."""
+    targets = (
+        "https://a.example.com/p%20q?y=a%2Fb",
+        "https://a.example.com/x?q=https://b.example.com/y",
+        "http://a.example.com/a/../b",
+    )
+    with _recording_server() as (upstream_url, upstream), _node_proxy(upstream_url) as proxy_url:
+        for target in targets:
+            status, _body = _request(f"{proxy_url}/via-desktop/{target}")
+            assert status == 200
+    assert [path for _method, path, _headers in upstream.received] == [f"/gateway/{t}" for t in targets]
+
+
+def test_via_desktop_rejects_a_target_that_is_not_an_absolute_http_url() -> None:
+    """A malformed target fails on the VPS rather than as an opaque 400 from the desktop."""
+    with _recording_server() as (upstream_url, upstream), _node_proxy(upstream_url) as proxy_url:
+        for path in ("/via-desktop/example.com/x", "/via-desktop//example.com", "/via-desktop/ftp://a.example.com"):
+            status, body = _request(f"{proxy_url}{path}")
+            assert status == 400
+            assert "absolute http:// or https:// URL" in json.loads(body)["error"]
+    assert upstream.received == []
+
+
+def test_bare_via_desktop_path_is_claimed_but_carries_no_target() -> None:
+    """``/via-desktop`` with nothing after it is a caller error, not a pass-through."""
+    with _recording_server() as (upstream_url, upstream), _node_proxy(upstream_url) as proxy_url:
+        status, _body = _request(f"{proxy_url}/via-desktop")
+    assert status == 400
+    assert upstream.received == []
+
+
 def test_proxy_preserves_path_query_method_and_gateway_headers() -> None:
     with _recording_server() as (upstream_url, upstream), _node_proxy(upstream_url) as proxy_url:
         status, body = _request(
