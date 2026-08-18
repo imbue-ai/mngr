@@ -1,12 +1,15 @@
 from datetime import datetime
 from datetime import timezone
 
+import pytest
+
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import seed_provider_snapshots
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import classify_host_state
+from imbue.minds.desktop_client.mind_liveness import compute_local_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.mind_liveness import provider_backend_supports_shutdown
@@ -83,6 +86,30 @@ def test_provider_backend_supports_shutdown_gates_on_capable_backends() -> None:
     assert provider_backend_supports_shutdown("ovh") is False
 
 
+def _resolver_with_a_cloud_and_a_local_mind(
+    cloud_agent: AgentId, local_agent: AgentId, cloud_backend: str, local_backend: str
+) -> MngrCliBackendResolver:
+    """One RUNNING cloud mind and one RUNNING local mind, on separate hosts."""
+    resolver = MngrCliBackendResolver()
+    seed_provider_snapshots(
+        resolver,
+        providers=(_provider("cloud", cloud_backend), _provider("local", local_backend)),
+        error_by_provider_name={},
+        last_snapshot_at=datetime.now(timezone.utc),
+    )
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(cloud_agent, local_agent),
+            discovered_agents=(
+                _workspace_agent(cloud_agent, "cloud"),
+                _workspace_agent(local_agent, "local", host=_HOST_B),
+            ),
+            host_state_by_host_id={str(_HOST_A): HostState.RUNNING, str(_HOST_B): HostState.RUNNING},
+        )
+    )
+    return resolver
+
+
 def test_compute_covers_cloud_and_local_minds_alike() -> None:
     resolver = MngrCliBackendResolver()
     cloud_agent = AgentId.generate()
@@ -108,6 +135,30 @@ def test_compute_covers_cloud_and_local_minds_alike() -> None:
 
     assert liveness == {
         str(cloud_agent): MindLiveness.STOPPED,
+        str(local_agent): MindLiveness.RUNNING,
+    }
+
+
+@pytest.mark.parametrize("local_backend", ["docker", "lima"])
+@pytest.mark.parametrize("cloud_backend", ["imbue_cloud", "aws", "gcp", "azure"])
+def test_local_liveness_drops_shutdown_capable_cloud_minds(cloud_backend: str, local_backend: str) -> None:
+    """Cloud minds are shutdown-capable but not local, so the quit prompt's map excludes them.
+
+    Every cloud backend that joined the shutdown gate is covered: each one is a
+    machine that keeps running (and keeps serving its agents) with the app
+    closed, so quitting has nothing to reclaim by stopping it.
+    """
+    cloud_agent = AgentId.generate()
+    local_agent = AgentId.generate()
+    resolver = _resolver_with_a_cloud_and_a_local_mind(
+        cloud_agent, local_agent, cloud_backend=cloud_backend, local_backend=local_backend
+    )
+
+    assert compute_local_mind_liveness_by_agent_id(resolver) == {str(local_agent): MindLiveness.RUNNING}
+    # The wider shutdown-capable map -- what the workspace list's Start/Stop
+    # controls read -- still carries both.
+    assert compute_mind_liveness_by_agent_id(resolver) == {
+        str(cloud_agent): MindLiveness.RUNNING,
         str(local_agent): MindLiveness.RUNNING,
     }
 

@@ -10,7 +10,7 @@ The system has two main components:
 
 The desktop client (`minds run`) provides:
 - Authentication via one-time codes and signed cookies
-- A landing page listing all accessible workspaces (or a creation form if none exist). Local (`docker` / `lima`) minds show a live container-status badge and a Start/Stop button (Stop asks for confirmation); the status comes from the discovery snapshot's host state (a user-issued Start/Stop flips it immediately via an optimistic override), and the same liveness drives the quit-time shutdown prompt (see `desktop-app.md`).
+- A landing page listing all accessible workspaces (or a creation form if none exist). Shutdown-capable minds (the local `docker` / `lima` backends and the cloud `aws` / `gcp` / `azure` / `imbue_cloud` ones) show a live container-status badge and a Start/Stop button (Stop asks for confirmation); the status comes from the discovery snapshot's host state (a user-issued Start/Stop flips it immediately via an optimistic override). The same liveness, narrowed to local minds, drives the quit-time shutdown prompt (see `desktop-app.md`).
 - Agent creation from git repositories or local paths via a web form or API
 - Byte-forwarding of HTTP and WebSocket traffic from `[<service>.]host-<hex>.localhost:8421/*` to the workspace's own backends: the bare origin reaches the system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), `<service>.` origins reach that registered service (optionally through an SSH tunnel for remote agents)
 

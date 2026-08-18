@@ -18,6 +18,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
+from imbue.minds.desktop_client.mind_liveness import compute_local_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
@@ -82,14 +83,12 @@ def set_provider_enabled(
     return changed
 
 
-def running_workspace_entries(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
-    """Return ``[{id, name}, ...]`` for every shutdown-capable workspace currently RUNNING.
-
-    Reads liveness from the in-memory discovery snapshot (plus any optimistic
-    override) -- no subprocess -- so callers are instant.
-    """
+def _running_entries(
+    backend_resolver: BackendResolverInterface, liveness_by_agent_id: dict[str, MindLiveness]
+) -> list[dict[str, str]]:
+    """Return ``[{id, name}, ...]`` for the RUNNING entries of a liveness map."""
     running: list[dict[str, str]] = []
-    for aid_str, state in compute_mind_liveness_by_agent_id(backend_resolver).items():
+    for aid_str, state in liveness_by_agent_id.items():
         if state != MindLiveness.RUNNING:
             continue
         aid = AgentId(aid_str)
@@ -99,6 +98,26 @@ def running_workspace_entries(backend_resolver: BackendResolverInterface) -> lis
             name = info.agent_name if info is not None else aid_str
         running.append({"id": aid_str, "name": name})
     return running
+
+
+def running_workspace_entries(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
+    """Return ``[{id, name}, ...]`` for every shutdown-capable workspace currently RUNNING.
+
+    Reads liveness from the in-memory discovery snapshot (plus any optimistic
+    override) -- no subprocess -- so callers are instant.
+    """
+    return _running_entries(backend_resolver, compute_mind_liveness_by_agent_id(backend_resolver))
+
+
+def running_local_workspace_entries(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
+    """Return ``[{id, name}, ...]`` for every local (docker / lima) workspace currently RUNNING.
+
+    The quit prompt's scope. A cloud workspace is shutdown-capable but is not
+    kept alive by the app: it goes on running its agents with the app closed, so
+    quitting is no reason to offer to stop it (its Start/Stop control is). Only
+    local workspaces hold the user's own machine, which is what quitting frees.
+    """
+    return _running_entries(backend_resolver, compute_local_mind_liveness_by_agent_id(backend_resolver))
 
 
 def build_stop_hosts_argv(mngr_binary: str, agent_ids: Sequence[AgentId]) -> list[str]:
