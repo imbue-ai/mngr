@@ -21,6 +21,15 @@ function appOverlay(root: AnyVnode): AnyVnode | undefined {
   return collectVnodes(root).find((vnode) => attrsOf(vnode).cardClass !== undefined);
 }
 
+/** Render a component vnode's own tree (the Shell's view returns it unrendered). */
+function renderComponent(vnode: AnyVnode): AnyVnode {
+  const component = (vnode.tag as unknown as () => m.Component)();
+  return (component.view as unknown as (v: unknown) => AnyVnode).call(component, {
+    attrs: vnode.attrs,
+    children: vnode.children,
+  });
+}
+
 interface FakeShell {
   state: ShellState;
 }
@@ -79,10 +88,16 @@ describe("Shell request popup layer", () => {
     expect(collectVnodes(root)).toContain(content);
   });
 
-  it("stacks the popup over the options panel without displacing it", () => {
+  it("keeps the options panel mounted under the popup, and hides it", () => {
     // The popup is a route (/inbox), so the panel is no longer the routed page:
     // it is the copy the router keeps painted, and it holds the SAME vtree slot
     // as the routed one, so its models are not torn down and rebuilt.
+    //
+    // It is hidden rather than painted: the popup resizes out of the panel's
+    // own box, so for the length of that resize the two cards sit on top of
+    // each other, each with its own close X -- which is what made one window
+    // read as two. `visibility` keeps it laid out, so the popup can still
+    // measure the box it is growing out of.
     const { state } = makeShell();
     const popupBody = m("div#request-popup");
     const panel = m("div#panel-content");
@@ -91,9 +106,79 @@ describe("Shell request popup layer", () => {
     expect(appOverlay(root)).toBeDefined();
     expect(collectVnodes(root)).toContain(popupBody);
     expect(collectVnodes(root)).toContain(panel);
+    const layer = collectVnodes(root).find((vnode) => vnode.attrs?.id === "ws-options-layer");
+    expect(String(attrsOf(layer as AnyVnode).style)).toContain("visibility: hidden");
     // ...over the live workspace, which stays mounted behind both.
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).workspaceAnyId).toBe(WORKSPACE_ID);
+  });
+
+  it("paints the options panel when it is the surface itself", () => {
+    // Nothing has taken the window over on the options route, so the panel is
+    // shown -- the hide is scoped to the popup that replaces it.
+    const { state } = makeShell();
+    const root = renderShell(state, OPTIONS_PATH, m("div#panel-content"));
+
+    const layer = collectVnodes(root).find((vnode) => vnode.attrs?.id === "ws-options-layer");
+    expect(String(attrsOf(layer as AnyVnode).style)).not.toContain("visibility: hidden");
+  });
+
+  it("draws all three option tabs, not just the one the popup is", () => {
+    // The popup covers the titlebar's icon-tabs, so drawing only its own key
+    // took Share and Machine settings off screen for as long as it was open.
+    const { state } = makeShell();
+    vi.stubGlobal("document", {
+      getElementById: (id: string) =>
+        id === "ws-tab-strip"
+          ? { getBoundingClientRect: () => ({ left: 331, top: 5, width: 92, height: 28 }) }
+          : null,
+    });
+    const root = renderShell(state, "/inbox", m("div#request-popup"), { workspaceParam: null });
+
+    const rendered = renderComponent(appOverlay(root) as AnyVnode);
+    const strip = collectVnodes(rendered).find((vnode) => attrsOf(vnode).id === "app-overlay-key-tab");
+    const tabs = collectVnodes(strip as AnyVnode)
+      .map((vnode) => attrsOf(vnode)["data-wsopt-tab"])
+      .filter((tab) => tab !== undefined);
+
+    expect(tabs).toEqual(["permissions", "share", "settings"]);
+  });
+
+  it("closes the popup from the key it hangs off, which covers the titlebar's own", () => {
+    // The raised key sits exactly over the titlebar tab it stands in for, and
+    // that tab is how the Permissions panel is put away -- so the same gesture
+    // has to put the popup away. Inert, the click did nothing and the next one
+    // (landing on the backdrop) made the popup look like it needed two.
+    const { state } = makeShell();
+    let dismissals = 0;
+    (state as unknown as { dismissAppOverlay: () => boolean }).dismissAppOverlay = () => {
+      dismissals += 1;
+      return true;
+    };
+    // The popup hangs off the titlebar key, so it only draws its own key when
+    // there is one on screen to measure and cover.
+    vi.stubGlobal("document", {
+      getElementById: (id: string) =>
+        id === "ws-tab-strip"
+          ? { getBoundingClientRect: () => ({ left: 331, top: 5, width: 92, height: 28 }) }
+          : null,
+    });
+    const root = renderShell(state, "/inbox", m("div#request-popup"), { workspaceParam: null });
+
+    // The Shell hands the popup off to its own component, so render that to
+    // reach the chrome it draws around the card.
+    const overlay = appOverlay(root) as AnyVnode;
+    const rendered = renderComponent(overlay);
+    const strip = collectVnodes(rendered).find((vnode) => attrsOf(vnode).id === "app-overlay-key-tab");
+    const keyTab = collectVnodes(strip as AnyVnode).find(
+      (vnode) => attrsOf(vnode)["data-wsopt-tab"] === "permissions",
+    );
+
+    expect(strip).toBeDefined();
+    expect(keyTab).toBeDefined();
+    (attrsOf(keyTab as AnyVnode).onclick as () => void)();
+
+    expect(dismissals).toBe(1);
   });
 
   it("gives the popup its own card width, not the settings modal's", () => {

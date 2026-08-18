@@ -15,6 +15,8 @@ import type { OptionsTab } from "../../models/workspaceOptions";
 import type { ShellState } from "./shell-state";
 import type { TitlebarContext } from "./classify";
 import { classifyRoute, isWorkspaceOverlayPath } from "./classify";
+import { defaultFetchJson } from "../../models/workspaceOptions";
+import { warmPermissionsOverview } from "../../models/permissionsPrefetch";
 
 export interface TitlebarAttrs {
   shell: ShellState;
@@ -39,8 +41,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       // box and the rect true) or the two would ghost through each other --
       // matching the legacy body.ws-options-open rule. The panel is still up,
       // frozen, while an app modal (a request popup) floats over it.
+      // Also while the request popup is up: it draws the same strip at this
+      // strip's measured rect, so leaving ours painted would ghost two strips
+      // through each other -- the reason the panel hides them in the first
+      // place. `/inbox` covers the popup opened from the in-chat card too,
+      // which names no panel.
       const isOptionsOverlayOpen =
-        isWorkspaceOverlayPath(routePath) || shell.panelRouteBehindOverlay !== null;
+        isWorkspaceOverlayPath(routePath) || routePath === "/inbox" || shell.panelRouteBehindOverlay !== null;
 
       return m(
         "div#minds-titlebar",
@@ -122,6 +129,11 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                           : context.activeTab === "permissions"
                             ? "bg-fill-active"
                             : "",
+                        // Pointing at the key starts the read the pane makes
+                        // on its first mount, so opening it usually lands on
+                        // an answer instead of on "Loading permissions...".
+                        onpointerenter: () => warmPermissionsFor(shell, context),
+                        onfocus: () => warmPermissionsFor(shell, context),
                         onclick: () => toggleWorkspaceOptions(shell, routePath, context, "permissions"),
                       },
                       m(Icon16, { name: "key" }),
@@ -260,4 +272,10 @@ function toggleWorkspaceOptions(
     return;
   }
   m.route.set(`/workspace/${agentScoped}/options?tab=${tab}`);
+}
+
+/** Start reading this machine's permissions, if the route names one. */
+function warmPermissionsFor(shell: ShellState, context: TitlebarContext): void {
+  if (context.workspaceAnyId === null || context.workspaceAnyId === undefined) return;
+  warmPermissionsOverview(shell.stores.workspaces.toAgentScopedId(context.workspaceAnyId), defaultFetchJson);
 }

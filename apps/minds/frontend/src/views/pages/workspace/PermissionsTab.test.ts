@@ -66,6 +66,7 @@ interface RenderResult {
   remove: () => void;
   model: PermissionsModel;
   selectedSections: string[];
+  /** The request ids the pane asked to open on their own page. */
   reviewedRequests: string[];
   requests: { url: string; body: unknown }[];
 }
@@ -208,36 +209,42 @@ describe("PermissionsTab waiting strip", () => {
     expect(allText(root)).not.toContain("Waiting on you");
   });
 
-  it("shows the first three oldest and folds the rest behind a reveal", async () => {
+  it("lists every waiting request, oldest first", async () => {
+    // No fold: the pane scrolls, which is why the list was moved into it.
     const { root } = await render(permissionsView({ waiting_requests: [0, 1, 2, 3, 4].map(waiting) }));
+
     const rows = withAttr(root, "data-perm-waiting-id");
-    expect(rows.map((row) => attrsOf(row)["data-perm-waiting-id"])).toEqual(["evt-0", "evt-1", "evt-2"]);
-    expect(allText(root)).toContain("+2 more");
+    expect(rows.map((row) => attrsOf(row)["data-perm-waiting-id"])).toEqual([
+      "evt-0",
+      "evt-1",
+      "evt-2",
+      "evt-3",
+      "evt-4",
+    ]);
     expect(allText(root)).toContain("because 0");
   });
 
-  it("reveals every row once '+N more' is clicked", async () => {
-    // The reveal button and the rows share the component's local state, so
-    // re-rendering the same instance is what shows the folded rows.
-    const { root, rerender } = await render(permissionsView({ waiting_requests: [0, 1, 2, 3].map(waiting) }));
-    const reveal = collectVnodes(root).find((node) => attrsOf(node).id === "ws-perm-waiting-more");
-    expect(reveal).toBeDefined();
+  it("leads the pane with the requests rather than a connection", async () => {
+    // Opening Permissions with something pending shows the thing that is
+    // waiting on an answer; the rest of the pane is what past answers built.
+    const { root } = await render(
+      permissionsView({ connections: [slackConnection()], waiting_requests: [waiting(1)] }),
+    );
 
-    (attrsOf(reveal as AnyVnode).onclick as () => void)();
-    const after = rerender();
-
-    expect(withAttr(root, "data-perm-waiting-id")).toHaveLength(3);
-    expect(withAttr(after, "data-perm-waiting-id")).toHaveLength(4);
-    expect(allText(after)).not.toContain("+1 more");
+    expect(withAttr(root, "data-perm-panel")[0]).toBeDefined();
+    expect(attrsOf(withAttr(root, "data-perm-panel")[0])["data-perm-panel"]).toBe("waiting");
   });
 
-  it("opens the review popup on the clicked request without navigating", async () => {
+
+
+  it("opens the clicked request on its own page, without navigating the pane", async () => {
+    // The pane stays mounted underneath the request page, with its scroll and
+    // its section intact, so opening one must not route the pane anywhere.
     const { root, reviewedRequests } = await render(permissionsView({ waiting_requests: [waiting(7)] }));
-    // Navigating would tear the panel down; the popup has to stack over it.
     const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
     try {
-      const row = withAttr(root, "data-perm-waiting-id")[0];
-      (attrsOf(row).onclick as () => void)();
+      (attrsOf(withAttr(root, "data-perm-waiting-id")[0]).onclick as () => void)();
+
       expect(reviewedRequests).toEqual(["evt-7"]);
       expect(routeSet).not.toHaveBeenCalled();
     } finally {

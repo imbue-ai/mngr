@@ -19,6 +19,7 @@ import m from "mithril";
 import type { UiPermissionConnection, UiServiceSignIn, UiWorkspacePermissions } from "../generated/ui";
 import type { FetchJson } from "./workspaceOptions";
 import { defaultFetchJson, errorMessageFromBody } from "./workspaceOptions";
+import { forgetWarmedPermissionsOverview, readWarmedPermissionsOverview } from "./permissionsPrefetch";
 
 export type PermissionsLoadStatus = "idle" | "loading" | "load_failed" | "ready";
 
@@ -27,11 +28,13 @@ export interface PermissionsModelOptions {
   redraw?: () => void;
 }
 
+export const WAITING_SECTION = "waiting";
 export const ADD_CONNECTION_SECTION = "add-connection";
 export const LOCAL_FILES_SECTION = "local-files";
 export const OTHER_MACHINES_SECTION = "other-machines";
 
 const FIXED_SECTIONS: readonly string[] = [
+  WAITING_SECTION,
   ADD_CONNECTION_SECTION,
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
@@ -50,9 +53,19 @@ export function resolvePermissionsSection(
   data: UiWorkspacePermissions | null,
   requested: string | null,
 ): string {
-  if (requested !== null && FIXED_SECTIONS.includes(requested)) return requested;
+  const hasWaiting = (data?.waiting_requests ?? []).length > 0;
+  // Waiting on you is only a place while something is waiting: answering the
+  // last one has to leave, not sit on an empty list.
+  if (requested === WAITING_SECTION && hasWaiting) return requested;
+  if (requested !== null && requested !== WAITING_SECTION && FIXED_SECTIONS.includes(requested)) {
+    return requested;
+  }
   const connectionIds = (data?.connections ?? []).map(connectionSectionId);
   if (requested !== null && connectionIds.includes(requested)) return requested;
+  // Nothing asked for in particular: lead with what is asking for an answer.
+  // Everything else in this pane is what past answers built, and none of it is
+  // waiting on the reader the way a pending request is.
+  if (hasWaiting) return WAITING_SECTION;
   return connectionIds[0] ?? ADD_CONNECTION_SECTION;
 }
 
@@ -178,7 +191,13 @@ export class PermissionsModel {
     this.status = "loading";
     this.errorMessage = "";
     this.redrawImpl();
-    const result = await this.fetchJsonImpl(this.apiBase());
+    // Started when the key was pointed at, so the first open usually spends a
+    // read that has already happened rather than watching one. Spent on use:
+    // what this shows changes as grants are made and requests arrive, so every
+    // later read is its own.
+    const warmed = readWarmedPermissionsOverview(this.agentId);
+    forgetWarmedPermissionsOverview();
+    const result = warmed !== null ? await warmed : await this.fetchJsonImpl(this.apiBase());
     if (!result.ok) {
       this.status = "load_failed";
       this.errorMessage = errorMessageFromBody(result.body, `HTTP ${result.status}`);
@@ -188,6 +207,30 @@ export class PermissionsModel {
     this.data = result.body as UiWorkspacePermissions;
     this.status = "ready";
     this.redrawImpl();
+  }
+
+  /** Drop a request from the pane the moment it is answered.
+   *
+   * What is pending is the server's to say, and it says so on the next read --
+   * but the answer was given HERE, and a row that sits there after it reads as
+   * an answer that did not take. So it goes at once, and the refresh that the
+   * resolution triggers anyway is what reconciles: if the server still has it
+   * pending, it comes back.
+   */
+  forgetWaitingRequest(requestId: string): void {
+    const data = this.data;
+    if (data === null) return;
+    const waiting = data.waiting_requests.filter((entry) => entry.id !== requestId);
+    if (waiting.length === data.waiting_requests.length) return;
+    this.data = { ...data, waiting_requests: waiting };
+    this.redrawImpl();
+  }
+
+  /** Whether anything is still waiting on this machine's reader. Read by the
+   * request page on the way out, to decide whether there is a list to go back
+   * to; a pane that has not loaded yet has nothing to offer either way. */
+  hasWaitingRequests(): boolean {
+    return (this.data?.waiting_requests.length ?? 0) > 0;
   }
 
   /** Re-read the pane when the set of pending requests changes.

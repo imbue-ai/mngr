@@ -2,14 +2,21 @@
 // grant/deny flow behind the request-review popup.
 //
 // Ports the legacy Inbox.jinja shell semantics onto the /ui/api inbox routes:
-// one request shown at a time, Approve busy states (progress -> granted/denied
-// / needs-manual-credentials / failed), fire-and-forget Deny, advancing to the
-// next pending request on resolution (closing when none remain), the
-// file-sharing path validation (home expansion + within-roots), and the
-// predefined dialog's wildcard-permission exclusivity. Grants/denies submit
-// the SAME form fields to the legacy /requests/<id>/grant|deny routes.
+// Approve busy states (progress -> granted/denied / needs-manual-credentials /
+// failed), fire-and-forget Deny, the file-sharing path validation (home
+// expansion + within-roots), and the predefined dialog's wildcard-permission
+// exclusivity. Grants/denies submit the SAME form fields to the legacy
+// /requests/<id>/grant|deny routes.
+//
+// ONE request per open, and answering it closes: the page is opened on the
+// request the reader picked -- a "Waiting on you" row, an in-chat card -- so
+// the review they asked for is over when that request has a verdict, and
+// swapping the next pending one in under the click that finished it would
+// answer a question nobody had asked yet. The list they picked from is where
+// closing takes them (see returnToPanelAfterRequest).
 
 import type { UiPermissionGrantGroup } from "../generated/ui";
+import { forgetWarmedRequestDetails, readWarmedRequestDetail, requestDetailUrl } from "./requestDetailPrefetch";
 
 export interface InboxCard {
   id: string;
@@ -208,12 +215,27 @@ export interface ResolvedRequest {
   verdict: RequestVerdict;
 }
 
+/** Shortest gap between two attempts at the pending list once one has failed.
+ * The page reconciles from the requests store on every redraw, and a failed
+ * load makes itself reconcilable again (there is nothing to say the set was
+ * handled), so without a floor the two close a loop: a machine whose gateway
+ * is down would be asked for its list as fast as the window redraws. */
+const LIST_RETRY_MS = 3000;
+
 export interface InboxModelOptions {
   /** Injected in tests; defaults to window.fetch. */
   fetcher?: FetchLike;
-  /** Called when nothing is left to review, so the popup should dismiss. */
+  /** Injected in tests; defaults to Date.now. */
+  nowMs?: () => number;
+  /** Called when the request under review turns out to be gone -- resolved in
+   * another window, or withdrawn by the agent -- so the list it was in can drop
+   * it without waiting for its own read. No verdict: this page did not give
+   * one, and nothing downstream should be told there was one. */
+  onGone?: (requestId: string) => void;
+  /** Called when the request under review has a verdict (or is gone), so the
+   * page should dismiss. Fires at most once. */
   onClose?: () => void;
-  /** Called the moment a request gets a verdict, before the queue advances. */
+  /** Called the moment a request gets a verdict, before the page closes. */
   onResolved?: (resolved: ResolvedRequest) => void;
   /** Injected in tests; defaults to m.redraw (loaded lazily to keep the model DOM-free). */
   redraw?: () => void;
@@ -242,7 +264,7 @@ export class InboxModel {
   manualCredentialValues: Record<string, string> = {};
   /** Name for the new account the manually-entered credentials belong to. */
   manualAccountName = "";
-  /** Ids whose deny POST is in flight, so advancing never lands back on one. */
+  /** Ids whose deny POST is in flight, so a re-selection never lands back on one. */
   denyingIds = new Set<string>();
 
   // Per-detail editable state (lives here so views stay stateless).
@@ -252,6 +274,16 @@ export class InboxModel {
   targetScope: "selected" | "all" = "selected";
   /** Whether the predefined dialog shows its full editor instead of the summary. */
   isPermissionEditorShown = false;
+
+  /** Whether a list load is in flight, so a reconciliation that lands while
+   * one is running joins it rather than starting a second. */
+  private isListLoading = false;
+  /** Earliest the list may be asked for again after a failure. */
+  private nextListRetryAtMs = 0;
+  /** The paced retry after a failure, so the promise the error notice makes
+   * ("they will be retried automatically") is kept without a redraw to drive
+   * it -- and cancelled with the page, so a closed one stops asking. */
+  private listRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
   private readonly options: InboxModelOptions;
   /** The pending set this model has already reflected, or null for "none yet".
@@ -274,7 +306,28 @@ export class InboxModel {
     this.options.redraw?.();
   }
 
+  private nowMs(): number {
+    return (this.options.nowMs ?? Date.now)();
+  }
+
+  /** Stop the retry timer. Called when the page closes and when it is torn
+   * down, so a timer never outlives the page that wanted the list. */
+  dispose(): void {
+    if (this.listRetryTimer === null) return;
+    clearTimeout(this.listRetryTimer);
+    this.listRetryTimer = null;
+  }
+
+  /** Whether the page has already been told to dismiss. The same resolution
+   * arrives twice -- once from the grant/deny that made it, and again from the
+   * pending-set reconciliation that the same verdict triggers -- and the second
+   * one would navigate a page that is already on its way out. */
+  private isClosed = false;
+
   private close(): void {
+    if (this.isClosed) return;
+    this.isClosed = true;
+    this.dispose();
     this.options.onClose?.();
   }
 
@@ -286,6 +339,10 @@ export class InboxModel {
    * `detail` out from under it. Attributing the verdict to whatever was on
    * screen would post one workspace's request id into another's page. */
   private announceResolved(requestId: string, verdict: RequestVerdict): void {
+    // A resolution can change what any pending request is offered (an account
+    // just signed in is one the next dialog can pick), so the warms are spent
+    // rather than trusted: the next open fetches afresh.
+    forgetWarmedRequestDetails();
     const card = this.cards.find((entry) => entry.id === requestId) ?? null;
     const agentId =
       card !== null && card.workspace_agent_id !== ""
@@ -295,6 +352,10 @@ export class InboxModel {
   }
 
   async loadList(): Promise<void> {
+    // One at a time. Every redraw reconciles, so without this a slow list would
+    // have a second attempt started on top of it before the first came back.
+    if (this.isListLoading) return;
+    this.isListLoading = true;
     try {
       const response = await this.fetcher()("/ui/api/inbox");
       if (!response.ok) {
@@ -306,6 +367,8 @@ export class InboxModel {
     } catch {
       this.markListLoadFailed();
       return;
+    } finally {
+      this.isListLoading = false;
     }
     this.listErrorMessage = null;
     this.isListLoaded = true;
@@ -327,6 +390,17 @@ export class InboxModel {
     // ...and the pending-set key must be forgotten so that reconciliation
     // actually retries the load instead of seeing an unchanged set.
     this.lastPendingKey = null;
+    // Paced, and driven by its own timer rather than by the redraw this
+    // failure is about to cause: reconciling is what asks for the list, and a
+    // failure that makes itself reconcilable again would otherwise ask for it
+    // once per redraw for as long as the machine stayed down.
+    this.nextListRetryAtMs = this.nowMs() + LIST_RETRY_MS;
+    if (this.listRetryTimer === null && !this.isClosed) {
+      this.listRetryTimer = setTimeout(() => {
+        this.listRetryTimer = null;
+        void this.loadList();
+      }, LIST_RETRY_MS);
+    }
     this.redraw();
   }
 
@@ -341,9 +415,22 @@ export class InboxModel {
     this.manualAccountName = "";
     this.isProgressShown = false;
     this.redraw();
-    const response = await this.fetcher()(
-      `/ui/api/inbox/${encodeURIComponent(id)}/detail`,
-    );
+    // Warmed on the way in (pointing at a "Waiting on you" row starts the
+    // fetch), so the common open spends a wait that has already happened.
+    const warmed = readWarmedRequestDetail(id);
+    if (warmed !== null) {
+      const detail = await warmed;
+      // A warm that failed says nothing about why; fall through and let the
+      // real fetch below report for itself.
+      if (detail !== null) {
+        this.isDetailLoading = false;
+        this.detail = detail;
+        this.seedEditableStateFromDetail(detail);
+        this.redraw();
+        return;
+      }
+    }
+    const response = await this.fetcher()(requestDetailUrl(id));
     this.isDetailLoading = false;
     if (!response.ok) {
       this.detail = { kind: "unavailable", message: "" };
@@ -551,7 +638,7 @@ export class InboxModel {
           resolvedId,
           data.outcome === "GRANTED" ? "granted" : "denied",
         );
-        await this.advanceAfterResolution(resolvedId);
+        this.close();
         return;
       }
       this.isProgressShown = false;
@@ -591,49 +678,7 @@ export class InboxModel {
       method: "POST",
       keepalive: true,
     }).catch(() => undefined);
-    void this.advanceAfterResolution(resolvedId);
-  }
-
-  /** Show the next pending request after `resolvedId`, or close when the queue
-   * is empty. The successor is chosen from the queue as it stood BEFORE the
-   * reload, so the order the user was reading survives the refresh. */
-  async advanceAfterResolution(resolvedId: string): Promise<void> {
-    const nextId = this.findNextPendingId(resolvedId);
-    await this.loadList();
-    const isSelectable = (id: string): boolean =>
-      this.cards.some(
-        (card) => card.id === id && !this.denyingIds.has(card.id),
-      );
-    const fallback = this.cards.find(
-      (card) => card.id !== resolvedId && !this.denyingIds.has(card.id),
-    );
-    const target =
-      nextId !== null && isSelectable(nextId) ? nextId : (fallback?.id ?? null);
-    if (target === null) {
-      this.close();
-      return;
-    }
-    await this.select(target);
-  }
-
-  /** The request that follows `resolvedId` in the queue, wrapping backwards
-   * when it was last, or null when nothing else is reviewable.
-   *
-   * Positions come from the WHOLE queue and the "is it reviewable" filter
-   * applies only to candidates. `deny` marks the resolved id as denying before
-   * it advances, so filtering first would drop the very card the successor is
-   * measured from and hand back the head of the queue -- sending a deny
-   * backwards to a request the user had already read past, while an approve on
-   * the same request went forwards. */
-  private findNextPendingId(resolvedId: string): string | null {
-    const isSelectable = (card: InboxCard): boolean =>
-      card.id !== resolvedId && !this.denyingIds.has(card.id);
-    const index = this.cards.findIndex((card) => card.id === resolvedId);
-    if (index === -1) return this.cards.find(isSelectable)?.id ?? null;
-    const after = this.cards.slice(index + 1).find(isSelectable);
-    if (after) return after.id;
-    const before = [...this.cards.slice(0, index)].reverse().find(isSelectable);
-    return before ? before.id : null;
+    this.close();
   }
 
   /** Record `requestIds` as the pending set already on screen, so the first
@@ -648,6 +693,10 @@ export class InboxModel {
     // sign-in -- and the key is left unconsumed so this reconciles once it
     // finishes.
     if (this.isApproveBusy) return;
+    // A failed attempt has its own retry running; asking again before it is due
+    // is the loop this paces. The key is left unconsumed, so the retry that
+    // does land still reconciles this set.
+    if (this.listErrorMessage !== null && this.nowMs() < this.nextListRetryAtMs) return;
     const key = requestIds.join(",");
     if (key === this.lastPendingKey) return;
     this.lastPendingKey = key;
@@ -662,8 +711,12 @@ export class InboxModel {
       selected !== null && this.cards.some((card) => card.id === selected);
     if (wasPending && !requestIds.includes(selected)) {
       // Resolved on another surface (another window, the agent giving up):
-      // advance rather than leave a form up that can no longer be submitted.
-      await this.advanceAfterResolution(selected);
+      // close rather than leave a form up that can no longer be submitted.
+      // The list it came from is told first -- it is what the closing page
+      // hands the reader back to, and a row for a request that is already gone
+      // is exactly what it must not hand them back to.
+      this.options.onGone?.(selected);
+      this.close();
       return;
     }
     await this.loadList();

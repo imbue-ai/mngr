@@ -2,6 +2,7 @@ import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { workspacesMessage } from "../../testing";
+import type { WaitingRequestList } from "./shell-state";
 import { ShellState } from "./shell-state";
 
 const AGENT = "agent-ab12";
@@ -49,7 +50,6 @@ function displaying(shell: ShellState, agentId: string): void {
 // Shell keeps it at a stable vtree position so dismissing the modal does not
 // remount it either. Keying off the frame is what covers those windows.
 const WORKSPACE_ID = "agent-ab12";
-const OPTIONS_ROUTE = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=local-files`;
 
 afterEach(() => {
   // restoreAllMocks does NOT undo vi.stubGlobal; only unstubAllGlobals does.
@@ -89,60 +89,153 @@ describe("ShellState.openInbox", () => {
     expect(routeSet).toHaveBeenCalledWith("/inbox", { selected: "evt-a", workspace: WORKSPACE_ID }, undefined);
   });
 
-  it("carries no workspace when it was opened from Home", () => {
+  it("remembers the Permissions pane it was opened from", () => {
+    // The pane stays mounted underneath, and is what the popup goes back to.
     const shell = makeShell();
-    land(shell, "/");
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-
-    shell.openInbox();
-
-    expect(routeSet).toHaveBeenCalledWith("/inbox", {}, undefined);
-  });
-
-  it("remembers the options panel it was opened over, and forgets it on the way out", () => {
-    const shell = makeShell();
-    land(shell, OPTIONS_ROUTE);
+    const optionsRoute = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
+    land(shell, optionsRoute);
     vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
     shell.openInbox({ selected: "evt-a" });
-    expect(shell.panelRouteBehindOverlay).toBe(OPTIONS_ROUTE);
 
-    // Still remembered while the popup is up, so the panel keeps rendering...
-    land(shell, `/inbox?workspace=${WORKSPACE_ID}&selected=evt-a`);
-    expect(shell.panelRouteBehindOverlay).toBe(OPTIONS_ROUTE);
-
-    // ...and dropped once the route is no longer a modal's.
-    land(shell, OPTIONS_ROUTE);
-    expect(shell.panelRouteBehindOverlay).toBeNull();
+    expect(shell.panelRouteBehindOverlay).toBe(optionsRoute);
   });
 
-  it("keeps the panel underneath when a second request opens over the popup", () => {
-    const shell = makeShell();
-    land(shell, OPTIONS_ROUTE);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-    shell.openInbox({ selected: "evt-a" });
-    land(shell, `/inbox?workspace=${WORKSPACE_ID}&selected=evt-a`);
-
-    shell.openInbox({ selected: "evt-b" });
-
-    expect(shell.panelRouteBehindOverlay).toBe(OPTIONS_ROUTE);
-    // ...and it swings the open popup over rather than stacking a second
-    // history entry, so one dismissal still lands back on the panel.
-    expect(routeSet).toHaveBeenLastCalledWith(
-      "/inbox",
-      { selected: "evt-b", workspace: WORKSPACE_ID },
-      { replace: true },
-    );
-  });
-
-  it("names no panel when the popup was opened over a bare workspace", () => {
+  it("names no pane when the popup was opened from the chat", () => {
     const shell = makeShell();
     land(shell, `/workspace/${WORKSPACE_ID}`);
     vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
-    shell.openInbox();
+    shell.openInbox({ selected: "evt-a" });
 
     expect(shell.panelRouteBehindOverlay).toBeNull();
+  });
+});
+
+describe("ShellState.closeAppOverlay", () => {
+  it("does not fire a second history.back() when Escape is held down", () => {
+    // history.back() does not land synchronously, and the router re-runs
+    // handleRouteChanged on every redraw -- so the guard must survive a redraw
+    // on the route being left. Key repeat is ~30ms; one back() too many
+    // carries the reader past the machine they opened the request from.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+
+    expect(shell.closeAppOverlay()).toBe(true);
+    // A redraw lands before the navigation does: same path, not a navigation.
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes again once the dismissal has actually landed", () => {
+    // The guard is not a one-way latch: arriving somewhere new clears it, so a
+    // later overlay still closes.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ShellState.returnToPanelAfterRequest", () => {
+  const PANEL_ROUTE = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
+
+  function listWith(count: number): WaitingRequestList {
+    return { forgetWaitingRequest: () => undefined, hasWaitingRequests: () => count > 0 };
+  }
+
+  it("hands the pane back on its own list while other requests are still waiting", () => {
+    // The reader picked this request off that list and the rest of it is still
+    // theirs to work through, so they land back on it, on the section they left.
+    const shell = makeShell();
+    shell.panelRouteBehindOverlay = PANEL_ROUTE;
+    shell.registerWaitingRequestList(listWith(1));
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    expect(shell.returnToPanelAfterRequest()).toBe(true);
+
+    expect(routeSet.mock.calls[0][0]).toBe(PANEL_ROUTE);
+  });
+
+  it("hands the pane back on Add connection once nothing is left to answer", () => {
+    // The list that led here has just emptied, so returning to it would be
+    // returning to nothing.
+    const shell = makeShell();
+    shell.panelRouteBehindOverlay = PANEL_ROUTE;
+    shell.registerWaitingRequestList(listWith(0));
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    expect(shell.returnToPanelAfterRequest()).toBe(true);
+
+    expect(routeSet.mock.calls[0][0]).toContain("section=add-connection");
+    expect(routeSet.mock.calls[0][0]).toContain("tab=permissions");
+  });
+
+  it("hands the pane back on Add connection when no pane list ever registered", () => {
+    // A panel that never reached its Permissions tab has no list to speak for
+    // it; Add connection is the safe landing, never a section that is gone.
+    const shell = makeShell();
+    shell.panelRouteBehindOverlay = PANEL_ROUTE;
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    expect(shell.returnToPanelAfterRequest()).toBe(true);
+
+    expect(routeSet.mock.calls[0][0]).toContain("section=add-connection");
+  });
+
+  it("reports no pane for a page opened from the chat", () => {
+    // Nothing to hand back to: that page simply closes.
+    const shell = makeShell();
+    shell.registerWaitingRequestList(listWith(3));
+
+    expect(shell.returnToPanelAfterRequest()).toBe(false);
+  });
+});
+
+describe("ShellState waiting-request list", () => {
+  it("drops an answered request from the pane behind the popup", () => {
+    // The popup answers it; the pane behind is what shows the list it was in.
+    const shell = makeShell();
+    const forgotten: string[] = [];
+    shell.registerWaitingRequestList({
+      forgetWaitingRequest: (id) => forgotten.push(id),
+      hasWaitingRequests: () => false,
+    });
+
+    shell.notifyRequestResolved({ requestId: "evt-a", agentId: "agent-other", verdict: "granted" });
+
+    // Unconditional, unlike the relay: the list is this window's own, whichever
+    // machine the request belongs to.
+    expect(forgotten).toEqual(["evt-a"]);
+  });
+
+  it("keeps the live list when a torn-down pane unregisters its own", () => {
+    const shell = makeShell();
+    const forgotten: string[] = [];
+    const live = {
+      forgetWaitingRequest: (id: string) => forgotten.push(id),
+      hasWaitingRequests: () => false,
+    };
+    shell.registerWaitingRequestList(live);
+
+    shell.unregisterWaitingRequestList({
+      forgetWaitingRequest: () => undefined,
+      hasWaitingRequests: () => false,
+    });
+    shell.notifyRequestResolved({ requestId: "evt-a", agentId: null, verdict: "denied" });
+
+    expect(forgotten).toEqual(["evt-a"]);
   });
 });
 
@@ -477,66 +570,3 @@ describe("ShellState.handleEscape", () => {
   });
 });
 
-describe("ShellState.handleEscape over the request popup", () => {
-  it("closes the popup first and leaves the options panel standing", () => {
-    const shell = makeShell();
-    vi.stubGlobal("window", { history: { length: 4, back: vi.fn() } });
-    land(shell, OPTIONS_ROUTE);
-    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-    shell.openInbox({ selected: "evt-a" });
-    land(shell, `/inbox?workspace=${WORKSPACE_ID}&selected=evt-a`);
-
-    // The popup goes back to the panel it was opened over, and nothing else.
-    expect(shell.handleEscape()).toBe(true);
-    expect(window.history.back).toHaveBeenCalledTimes(1);
-
-    // Only the NEXT Escape, once that navigation has landed, takes the panel down.
-    land(shell, OPTIONS_ROUTE);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-    expect(shell.handleEscape()).toBe(true);
-    expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
-  });
-
-  it("dismisses the popup once, however many times a single Escape reaches it", () => {
-    // Under Electron one keypress arrives twice (in-document listener + the
-    // main-process forward), and history.back() is not idempotent.
-    const shell = makeShell();
-    vi.stubGlobal("window", { history: { length: 4, back: vi.fn() } });
-    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
-
-    expect(shell.handleEscape()).toBe(true);
-    expect(shell.handleEscape()).toBe(true);
-
-    expect(window.history.back).toHaveBeenCalledTimes(1);
-  });
-
-  it("falls back to the workspace behind the popup on a cold-start deep link", () => {
-    const shell = makeShell();
-    vi.stubGlobal("window", { history: { length: 1, back: vi.fn() } });
-    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-
-    expect(shell.handleEscape()).toBe(true);
-
-    expect(window.history.back).not.toHaveBeenCalled();
-    expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
-  });
-
-  it("takes the switcher popover before the panel, and reports nothing left", () => {
-    const shell = makeShell();
-    land(shell, `/workspace/${WORKSPACE_ID}`);
-    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
-    shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
-
-    expect(shell.handleEscape()).toBe(true);
-    expect(shell.isSidebarOpen).toBe(false);
-    // Bare workspace surface: no panel to close either.
-    expect(shell.handleEscape()).toBe(false);
-  });
-
-  it("reports nothing dismissed on a plain hub page", () => {
-    const shell = makeShell();
-    land(shell, "/workspaces/destroyed");
-    expect(shell.handleEscape()).toBe(false);
-  });
-});

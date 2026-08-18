@@ -21,6 +21,15 @@ import {
  * contract endpoint; the shell only decides whether the message is due. */
 export type PermissionResolvedSender = (requestId: string, verdict: RequestVerdict) => void;
 
+/** The mounted Permissions pane's waiting list, as the shell addresses it. */
+export interface WaitingRequestList {
+  /** Drop an answered request from the list, at once. */
+  forgetWaitingRequest(requestId: string): void;
+  /** Whether the list still has anything on it (asked after an answer, so the
+   * request just answered is already gone from it). */
+  hasWaitingRequests(): boolean;
+}
+
 /** The mounted workspace content iframe, as the shell addresses it. */
 export interface WorkspaceFrameHandle {
   /** The workspace the frame is navigated to, or null before it is first armed. */
@@ -63,8 +72,15 @@ export class ShellState {
    * idempotent, and a repeated Escape can reach it again before the first
    * back() has landed. Cleared on the next route change. */
   private isAppOverlayClosing = false;
+  /** The path the last `handleRouteChanged` saw, so a redraw on the route the
+   * window is already on is not mistaken for a navigation to it. */
+  private lastHandledRoutePath: string | null = null;
 
   private permissionResolvedSender: PermissionResolvedSender | null = null;
+  /** The mounted Permissions pane's live list, registered while one is up. The
+   * popup answers a request; the pane behind it is what shows the list that
+   * request was in. */
+  private waitingRequestList: WaitingRequestList | null = null;
 
   constructor(stores: AppStores) {
     this.stores = stores;
@@ -121,6 +137,25 @@ export class ShellState {
     m.route.set("/inbox", query, path === "/inbox" ? { replace: true } : undefined);
   }
 
+  /** Register the mounted Permissions pane's list, and drop it on the way out
+   * (guarded like the frame's sender: a pane torn down after its successor
+   * registered must not clear the successor's). */
+  registerWaitingRequestList(list: WaitingRequestList): void {
+    this.waitingRequestList = list;
+  }
+
+  unregisterWaitingRequestList(list: WaitingRequestList): void {
+    if (this.waitingRequestList === list) this.waitingRequestList = null;
+  }
+
+  /** Drop a request from the mounted pane's list. Answering one goes through
+   * `notifyRequestResolved`; this is for the other way a request stops
+   * waiting -- answered in another window, or withdrawn by the agent -- where
+   * there is no verdict to relay but the row is just as gone. */
+  forgetWaitingRequest(requestId: string): void {
+    this.waitingRequestList?.forgetWaitingRequest(requestId);
+  }
+
   /** Register the mounted workspace frame's contract sender. */
   registerPermissionResolvedSender(sender: PermissionResolvedSender): void {
     this.permissionResolvedSender = sender;
@@ -150,6 +185,12 @@ export class ShellState {
    * the tile on screen -- which is why the card carries the workspace it
    * belongs to, resolved server-side by name. */
   notifyRequestResolved(resolved: ResolvedRequest): void {
+    // The pane behind this popup is showing the list the request was in, and
+    // the answer was just given: a row that sits there until the next read
+    // comes back reads as an answer that did not take. Unconditional, unlike
+    // the relay below -- the list is this window's own, whichever machine the
+    // request belongs to.
+    this.forgetWaitingRequest(resolved.requestId);
     const sender = this.permissionResolvedSender;
     const displayed = this.displayedWorkspaceAnyId;
     if (sender === null || displayed === null || resolved.agentId === null) return;
@@ -198,6 +239,83 @@ export class ShellState {
   }
 
   /**
+   * Go back up to the Permissions panel this popup was opened from, reporting
+   * whether there was one.
+   *
+   * The way OUT of the popup leaves the window (see `dismissAppOverlay`); this
+   * is the way BACK, for a reader who opened a request from the panel and wants
+   * the panel again. It restores the panel's own route, so the tab and section
+   * it was left on come back with it.
+   */
+  returnToPanelBehindOverlay(): boolean {
+    const panelRoute = this.panelRouteBehindOverlay;
+    if (panelRoute === null) return false;
+    // Left set: handleRouteChanged drops it on arrival, and until then the
+    // panel underneath keeps rendering rather than blinking out.
+    m.route.set(panelRoute);
+    return true;
+  }
+
+  /**
+   * Dismiss an app-level modal the way the person dismissing it means it,
+   * reporting whether there was one.
+   *
+   * Differs from `closeAppOverlay` for one surface: the request popup opened
+   * from a "Waiting on you" row. That popup takes the options panel's window
+   * over -- it hangs from the same key and resizes out of the panel's box -- so
+   * it reads as that window showing a request, not as a second card stacked on
+   * one. Clicking away from it therefore leaves the window, rather than
+   * uncovering a panel the reader has not thought of as still being there.
+   *
+   * Resolving the last request still goes through `closeAppOverlay`, which
+   * returns to the panel: finishing the review is what the panel is FOR, and
+   * landing back on it is how the new grant is seen.
+   */
+  dismissAppOverlay(): boolean {
+    const path = this.currentRoutePath();
+    if (path === "/inbox" && this.panelRouteBehindOverlay !== null) {
+      const behind = overlayBehindWorkspaceId(path, this.currentRouteSearch());
+      if (behind !== null) {
+        // Same re-entrancy guard as closeAppOverlay: one dismissal can arrive
+        // twice (the in-document Escape plus Electron's forward of it).
+        if (this.isAppOverlayClosing) return true;
+        this.isAppOverlayClosing = true;
+        // Straight to the machine rather than back through history: the panel
+        // is the history entry, and going back to it is the thing this avoids.
+        // handleRouteChanged forgets the remembered panel on the way.
+        m.route.set(`/workspace/${behind}`);
+        return true;
+      }
+    }
+    return this.closeAppOverlay();
+  }
+
+  /**
+   * Hand the Permissions panel back once the request it was opened from has
+   * been answered, reporting whether there was a panel to hand back. A request
+   * opened from the chat has none, and its page simply closes.
+   *
+   * Back to the panel's own route while other requests are still waiting: the
+   * list the reader picked from is still there, still theirs to work through,
+   * and it is the section they left. Once nothing is waiting that list is gone,
+   * so returning them to it would return them to nothing -- they land on Add
+   * connection instead, the next thing anyone is in that pane to do.
+   */
+  returnToPanelAfterRequest(): boolean {
+    const panelRoute = this.panelRouteBehindOverlay;
+    if (panelRoute === null) return false;
+    // Asked after the answer, and the pane drops an answered request the
+    // moment it is answered, so "any left" is already the list without it.
+    if (this.waitingRequestList?.hasWaitingRequests() === true) return this.returnToPanelBehindOverlay();
+    const [path, query = ""] = panelRoute.split("?");
+    const params = new URLSearchParams(query);
+    params.set("tab", "permissions");
+    params.set("section", "add-connection");
+    m.route.set(`${path}?${params.toString()}`);
+    return true;
+  }
+
+  /**
    * Dismiss the topmost dismissible surface, reporting whether there was one.
    *
    * The one place that knows what is stacked over what, so the precedence is a
@@ -217,16 +335,33 @@ export class ShellState {
       this.closeSidebar();
       return true;
     }
-    return this.closeOpenRecoveryModal() || this.closeWorkspaceOverlay() || this.closeAppOverlay();
+    return this.closeOpenRecoveryModal() || this.closeWorkspaceOverlay() || this.dismissAppOverlay();
   }
 
   /** Route-change hook: track displayed workspace, repaint accent, register. */
   handleRouteChanged(path: string, search = ""): void {
+    // The router runs this from its render, which is every redraw and not only
+    // every navigation -- so "the route is no longer a modal's" has to mean the
+    // route CHANGED to one, not merely that this draw is not on one.
+    //
+    // Opening the popup is exactly where that bites: `openInbox` remembers the
+    // panel and then asks for the route, and `m.route.set` lands a tick later.
+    // Mithril redraws as soon as the click handler returns, so a draw happens
+    // with the panel's own route still current -- and taking that for a
+    // navigation threw away the panel that had just been remembered, one
+    // instruction after it was written.
+    const isSameRoute = path === this.lastHandledRoutePath;
+    this.lastHandledRoutePath = path;
     // The dismissal navigation has landed; clear the closeAppOverlay guard.
-    this.isAppOverlayClosing = false;
+    // Gated on an actual navigation, like the panel below: history.back() does
+    // not land synchronously, so a redraw on the route still being left would
+    // otherwise drop the guard before the dismissal it guards -- and a held
+    // Escape (repeating every ~30ms) would fire a second back(), carrying the
+    // reader past the surface the popup was opened over.
+    if (!isSameRoute) this.isAppOverlayClosing = false;
     // The panel underneath belongs to the modal that was opened over it; once
     // the route is no longer a modal's, the panel is (or is not) the route.
-    if (!isAppOverlayPath(path)) this.panelRouteBehindOverlay = null;
+    if (!isSameRoute && !isAppOverlayPath(path)) this.panelRouteBehindOverlay = null;
     // Pass the query so an app modal opened over a workspace (/help?workspace=)
     // keeps that workspace's accent painting behind it.
     const accentSource = accentSourceForRoute(path, search);

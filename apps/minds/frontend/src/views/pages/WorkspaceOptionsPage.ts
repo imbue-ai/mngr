@@ -68,11 +68,21 @@ function requestedSection(): string | null {
  * long after it was started, and reviewing a Waiting-on-you request floats the
  * popup over the pane -- and writing that to the live route would move the
  * MODAL, leaving the panel to come back on its stale section. */
-export function rememberInUrl(param: string, value: string): void {
+export function rememberInUrl(changes: Record<string, string | null>): void {
   const [path, query = ""] = panelRoute().split("?");
   const params = new URLSearchParams(query);
-  if (params.get(param) === value) return;
-  params.set(param, value);
+  let isChanged = false;
+  // Every param in one write. Two writes in a row would each be computed from
+  // `panelRoute()`, and m.route.set does not land synchronously -- so the
+  // second would be built on the route the first replaced, and put back what
+  // it had just removed.
+  for (const [param, value] of Object.entries(changes)) {
+    if ((params.get(param) ?? null) === value) continue;
+    isChanged = true;
+    if (value === null) params.delete(param);
+    else params.set(param, value);
+  }
+  if (!isChanged) return;
   const next = `${path}?${params.toString()}`;
   if (!isPanelLiveRoute()) {
     getAppContext().shell.panelRouteBehindOverlay = next;
@@ -81,10 +91,10 @@ export function rememberInUrl(param: string, value: string): void {
   m.route.set(next, undefined, { replace: true });
 }
 
+
 export const WorkspaceOptionsPage: m.ClosureComponent = () => {
   let model: WorkspaceOptionsModel | null = null;
   let permissions: PermissionsModel | null = null;
-
   function ensureModelsForRouteAgent(): { model: WorkspaceOptionsModel; permissions: PermissionsModel } {
     const agentId = requestedAgentId();
     // Route param changes preserve this component instance, so a navigation
@@ -105,13 +115,18 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
     if (permissions === null) {
       // Constructed but not loaded: the Permissions tab reads on its first
       // mount, so opening Share or Settings never touches the gateway.
-      permissions = new PermissionsModel(agentId);
+      const created = new PermissionsModel(agentId);
+      permissions = created;
+      // The request popup answers a request; this pane is what shows the list
+      // it was in, so the popup reaches the list through the shell.
+      getAppContext().shell.registerWaitingRequestList(created);
     }
     return { model, permissions };
   }
 
   return {
     onremove() {
+      if (permissions !== null) getAppContext().shell.unregisterWaitingRequestList(permissions);
       model?.dispose();
       model = null;
       permissions = null;
@@ -131,11 +146,11 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
         tab: requestedTab(),
         group: requestedGroup(),
         section: requestedSection(),
-        onSelectTab: (nextTab: OptionsTab) => rememberInUrl("tab", nextTab),
-        onSelectGroup: (nextGroup: SettingsGroup) => rememberInUrl("group", nextGroup),
-        onSelectSection: (nextSection: string) => rememberInUrl("section", nextSection),
-        // Preselect the request in the popup that floats over this panel; the
-        // panel stays mounted beneath it (openInbox remembers this route).
+        onSelectTab: (nextTab: OptionsTab) => rememberInUrl({ tab: nextTab }),
+        onSelectGroup: (nextGroup: SettingsGroup) => rememberInUrl({ group: nextGroup }),
+        onSelectSection: (nextSection: string) => rememberInUrl({ section: nextSection }),
+        // The request opens as its own page over this panel, which stays
+        // mounted underneath (openInbox remembers this route).
         onReviewRequest: (requestId: string) => getAppContext().shell.openInbox({ selected: requestId }),
       });
     },

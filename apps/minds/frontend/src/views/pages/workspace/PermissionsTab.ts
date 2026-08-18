@@ -25,12 +25,14 @@ import type {
   UiPermissionConnection,
   UiSelfPermissionToggle,
   UiWaitingPermissionRequest,
+  UiWorkspacePermissions,
 } from "../../../generated/ui";
 import type { PermissionsModel } from "../../../models/workspacePermissions";
 import {
   ADD_CONNECTION_SECTION,
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
+  WAITING_SECTION,
   connectActionFor,
   connectServiceRowKey,
   connectionSectionId,
@@ -42,9 +44,7 @@ import {
   selfToggleRowKey,
 } from "../../../models/workspacePermissions";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
-
-/** Waiting rows shown before the "+N more" reveal. */
-const WAITING_PREVIEW_COUNT = 3;
+import { warmRequestDetail } from "../../../models/requestDetailPrefetch";
 
 /** How long a "Revoke all" stays armed after its first click. */
 const REVOKE_CONFIRM_WINDOW_MS = 4000;
@@ -83,13 +83,12 @@ export interface PermissionsTabAttrs {
   /** ?section from the URL, or null for "whatever is first". */
   requestedSection: string | null;
   onSelectSection: (section: string) => void;
-  /** Open the review popup on a waiting request. It opens OVER this panel,
-   * which keeps its scroll, selected section, and in-flight edits. */
+  /** Open a waiting request. It opens as its own page over this pane, which
+   * stays mounted underneath with its scroll and section intact. */
   onReviewRequest: (requestId: string) => void;
 }
 
 interface PermissionsTabLocalState {
-  isWaitingExpanded: boolean;
   /** Row key of the armed "Revoke all", if any: the second click fires it. */
   armedRevokeRowKey: string | null;
   disarmTimer: ReturnType<typeof setTimeout> | null;
@@ -101,7 +100,6 @@ interface PermissionsTabLocalState {
 
 export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
   const local: PermissionsTabLocalState = {
-    isWaitingExpanded: false,
     armedRevokeRowKey: null,
     disarmTimer: null,
     disconnectSectionId: null,
@@ -120,7 +118,6 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
     },
     view(vnode) {
       const { model, workspaceName, requestedSection, onSelectSection, onReviewRequest } = vnode.attrs;
-      const data = model.data;
       const machineName = workspaceName.trim();
 
       return m("div", { class: "flex flex-col flex-1 min-h-0" }, [
@@ -140,8 +137,7 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
               ]
             : "What agents in this machine can access. They can never reach beyond the permissions you grant them.",
         ),
-        renderWaitingStrip(data?.waiting_requests ?? [], local, onReviewRequest),
-        renderBody(model, local, machineName, requestedSection, onSelectSection),
+        renderBody(model, local, machineName, requestedSection, onSelectSection, onReviewRequest),
       ]);
     },
   };
@@ -160,6 +156,7 @@ function renderBody(
   machineName: string,
   requestedSection: string | null,
   onSelectSection: (section: string) => void,
+  onReviewRequest: (requestId: string) => void,
 ): m.Children {
   if (model.status === "idle" || model.status === "loading") {
     return m("p", { class: "mt-6 type-body text-secondary flex items-center gap-2 shrink-0" }, [
@@ -184,6 +181,8 @@ function renderBody(
     );
   }
 
+  // Waiting on you is a section like any other: what is selected is whatever
+  // the URL asks for.
   const selected = resolvePermissionsSection(data, requestedSection);
   const selectSection = (section: string): void => {
     disarmRevoke(local);
@@ -195,7 +194,7 @@ function renderBody(
   return [
     splitPane({
       navLabel: "Permission sections",
-      nav: renderNav(data.connections, selected, selectSection),
+      nav: renderNav(data.connections, data.waiting_requests, selected, selectSection),
       content: [
         model.errorMessage
           ? m(
@@ -204,7 +203,7 @@ function renderBody(
               model.errorMessage,
             )
           : null,
-        renderSelectedPanel(model, local, data.connections, machineName, selected, selectSection),
+        renderSelectedPanel(model, local, data, machineName, selected, selectSection, onReviewRequest),
       ],
       extra: "mt-8",
       // pb-8 keeps the panel foot (the Disconnect button) off the pane's
@@ -222,71 +221,34 @@ function renderBody(
 /** Pending permission requests from this machine's agents, oldest first (the
  * one the agent has been blocked on longest leads). Each row opens the review
  * popup on that request. Hidden entirely when nothing is pending. */
-function renderWaitingStrip(
+/** The requests this machine's agents are waiting on, oldest first (the one
+ * blocked longest leads). Each opens as its own page over this pane.
+ *
+ * The list lives in the pane -- so it scrolls with everything else, and sits
+ * beside the connections its answers create -- while the request itself is read
+ * on a page of its own, which is the room a dialog needs.
+ */
+function renderWaitingPanel(
   waitingRequests: UiWaitingPermissionRequest[],
-  local: PermissionsTabLocalState,
   onReviewRequest: (requestId: string) => void,
 ): m.Children {
-  if (waitingRequests.length === 0) return null;
-  const hiddenCount = waitingRequests.length - WAITING_PREVIEW_COUNT;
-  const visible =
-    local.isWaitingExpanded || hiddenCount <= 0
-      ? waitingRequests
-      : waitingRequests.slice(0, WAITING_PREVIEW_COUNT);
-
-  return m("section#ws-perm-waiting", { class: "mt-6 shrink-0 max-w-[760px]" }, [
-    m("h2", { class: "type-section text-tertiary flex items-center gap-1.5" }, [
+  return m("section", { "data-perm-panel": WAITING_SECTION }, [
+    m("h2", { class: "type-heading text-primary flex items-center gap-2 mb-1" }, [
       "Waiting on you",
       m(Badge, { count: waitingRequests.length }),
     ]),
     m(
-      "div",
-      { class: "mt-2 flex flex-col gap-0.5" },
-      visible.map((waiting) =>
-        m(
-          "button",
-          {
-            type: "button",
-            "data-perm-waiting-id": waiting.id,
-            class: "flex w-full items-center gap-2 rounded-md px-1 py-2 text-left cursor-pointer hover:bg-fill-hover",
-            onclick: () => onReviewRequest(waiting.id),
-          },
-          [
-            m(
-              "span",
-              { class: "flex h-5 w-5 shrink-0 items-center justify-center" },
-              serviceMark(
-                waiting.service_name,
-                "w-4 h-4",
-                "brand",
-                m(Icon16, { name: "key", extra: "text-primary" }),
-              ),
-            ),
-            m("span", { class: "min-w-0 flex-1" }, [
-              m("span", { class: "block truncate type-label text-primary" }, waiting.title),
-              waiting.reason
-                ? m("span", { class: "mt-0.5 block truncate type-helper text-secondary" }, waiting.reason)
-                : null,
-            ]),
-            m(Icon16, { name: "chevron-right", size: "sm", extra: "shrink-0 text-tertiary" }),
-          ],
-        ),
-      ),
+      "p",
+      { class: "type-body text-secondary mb-4" },
+      waitingRequests.length === 1
+        ? "An agent in this machine is waiting on an answer."
+        : "Agents in this machine are waiting on an answer. The one asked for longest is first.",
     ),
-    hiddenCount > 0 && !local.isWaitingExpanded
-      ? m(
-          "button",
-          {
-            type: "button",
-            id: "ws-perm-waiting-more",
-            class: "mt-1.5 ml-1 type-helper text-tertiary hover:text-secondary cursor-pointer",
-            onclick: () => {
-              local.isWaitingExpanded = true;
-            },
-          },
-          `+${hiddenCount} more`,
-        )
-      : null,
+    m(
+      "div",
+      { class: "flex flex-col gap-0.5" },
+      waitingRequests.map((waiting) => renderWaitingRow(waiting, onReviewRequest)),
+    ),
   ]);
 }
 
@@ -294,6 +256,7 @@ function renderWaitingStrip(
 
 function renderNav(
   connections: UiPermissionConnection[],
+  waitingRequests: UiWaitingPermissionRequest[],
   selected: string,
   selectSection: (section: string) => void,
 ): m.Children {
@@ -311,6 +274,25 @@ function renderNav(
     );
 
   return [
+    // Waiting requests lead the nav: they are the one thing here that is
+    // asking for an answer, and everything below is what past answers built.
+    waitingRequests.length === 0
+      ? null
+      : [
+          m(
+            "div",
+            { class: "flex flex-col gap-0.5" },
+            navEntry(
+              WAITING_SECTION,
+              m(Icon16, { name: "key", extra: "shrink-0" }),
+              m("span", { class: "flex min-w-0 flex-1 items-center gap-1.5" }, [
+                m("span", { class: "truncate" }, "Waiting on you"),
+                m(Badge, { count: waitingRequests.length }),
+              ]),
+            ),
+          ),
+          m("div", { class: "my-1.5 h-px bg-subtle" }),
+        ],
     m("div", { class: "flex flex-col gap-0.5" }, [
       ...connections.map((connection) =>
         navEntry(
@@ -363,11 +345,14 @@ function renderNav(
 function renderSelectedPanel(
   model: PermissionsModel,
   local: PermissionsTabLocalState,
-  connections: UiPermissionConnection[],
+  data: UiWorkspacePermissions,
   machineName: string,
   selected: string,
   selectSection: (section: string) => void,
+  onReviewRequest: (requestId: string) => void,
 ): m.Children {
+  const connections: UiPermissionConnection[] = data.connections;
+  if (selected === WAITING_SECTION) return renderWaitingPanel(data.waiting_requests, onReviewRequest);
   if (selected === LOCAL_FILES_SECTION) return renderLocalFilesPanel(model);
   if (selected === OTHER_MACHINES_SECTION) return renderOtherMachinesPanel(model);
   if (selected === ADD_CONNECTION_SECTION) return renderAddConnectionPanel(model, selectSection);
@@ -959,3 +944,38 @@ function renderSwitch(options: SwitchOptions): m.Children {
   });
 }
 
+
+/** One waiting request: a row that opens it. */
+function renderWaitingRow(
+  waiting: UiWaitingPermissionRequest,
+  onReviewRequest: (requestId: string) => void,
+): m.Children {
+  return m(
+    "button",
+    {
+      type: "button",
+      "data-perm-waiting-id": waiting.id,
+      class: "flex w-full items-center gap-2 rounded-md px-1 py-2 text-left cursor-pointer hover:bg-fill-hover",
+      // Pointing at the row starts fetching what opening it will show. The
+      // detail costs a latchkey probe server-side, so starting it on the way in
+      // is the difference between opening onto the request and onto a spinner.
+      onpointerenter: () => warmRequestDetail(waiting.id),
+      onfocus: () => warmRequestDetail(waiting.id),
+      onclick: () => onReviewRequest(waiting.id),
+    },
+    [
+      m(
+        "span",
+        { class: "flex h-5 w-5 shrink-0 items-center justify-center" },
+        serviceMark(waiting.service_name, "w-4 h-4", "brand", m(Icon16, { name: "key", extra: "text-primary" })),
+      ),
+      m("span", { class: "min-w-0 flex-1" }, [
+        m("span", { class: "block truncate type-label text-primary" }, waiting.title),
+        waiting.reason
+          ? m("span", { class: "mt-0.5 block truncate type-helper text-secondary" }, waiting.reason)
+          : null,
+      ]),
+      m(Icon16, { name: "chevron-right", size: "sm", extra: "shrink-0 text-tertiary" }),
+    ],
+  );
+}

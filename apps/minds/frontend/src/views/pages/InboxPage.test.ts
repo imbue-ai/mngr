@@ -7,7 +7,7 @@ import type { PredefinedPermissionDetail } from "../../models/inbox";
 import { jsonResponse, settle } from "../../testing";
 import { ShellState } from "../shell/shell-state";
 import { PredefinedPermissionDetailView } from "./inbox/PredefinedPermissionDetail";
-import { InboxPage, requestDetailView } from "./InboxPage";
+import { InboxPage } from "./InboxPage";
 import type { AnyVnode } from "../../testing";
 import { allText, attrsOf, collectVnodes } from "../../testing";
 
@@ -150,18 +150,6 @@ describe("the request popup's body", () => {
     expect(dialogs).toHaveLength(1);
     expect(allText(root)).not.toContain("beta");
     expect(allText(root)).not.toContain("Gmail");
-  });
-
-  it("dispatches each detail kind to its own dialog", () => {
-    const model = new InboxModel();
-    const unavailable = requestDetailView(model, {
-      kind: "unavailable",
-      message: "It has already been processed.",
-    });
-    expect(allText(unavailable)).toContain("This permission request is no longer available");
-    expect(allText(unavailable)).toContain("It has already been processed.");
-    const unsupported = requestDetailView(model, { kind: "unsupported", message: "no handler" });
-    expect(allText(unsupported)).toContain("no handler");
   });
 
   it("says the queue is empty rather than showing a blank card", async () => {

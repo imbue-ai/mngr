@@ -24,6 +24,8 @@ import { OverlayBackdrop } from "../../shell/OverlayBackdrop";
 import { DialogCloseButton } from "../../components/Modal";
 import { Icon16 } from "../../components/Icon";
 import { OptionsPanel } from "./OptionsPanel";
+import { defaultFetchJson } from "../../../models/workspaceOptions";
+import { warmPermissionsOverview } from "../../../models/permissionsPrefetch";
 
 interface StripAnchor {
   x: number;
@@ -44,7 +46,7 @@ export interface WorkspaceOptionsOverlayAttrs {
   onSelectTab: (tab: OptionsTab) => void;
   onSelectGroup: (group: SettingsGroup) => void;
   onSelectSection: (section: string) => void;
-  /** Open the review popup on a request the Permissions tab is waiting on. */
+  /** Open a waiting request on its own page over this pane. */
   onReviewRequest: (requestId: string) => void;
 }
 
@@ -112,6 +114,7 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
     currentTab: OptionsTab,
     onSelectTab: (tab: OptionsTab) => void,
     positionStyle: string,
+    agentId: string,
   ): m.Child {
     return m(
       "div",
@@ -132,6 +135,12 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
             "aria-selected": isSelected ? "true" : "false",
             "aria-label": entry.label,
             "data-tooltip": entry.label,
+            // Same warm the titlebar key does: switching to Permissions from
+            // Share or Settings reads the same overview, and pointing at the
+            // tab is the same head start.
+            onpointerenter: () => {
+              if (entry.id === "permissions") warmPermissionsOverview(agentId, defaultFetchJson);
+            },
             class:
               "inline-flex items-center justify-center p-1.5 rounded-md focus-visible:outline-2 focus-visible:outline-accent " +
               (isSelected
@@ -156,7 +165,16 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
       m(
         "div",
         { class: "flex-1 min-h-0 flex flex-col px-6 py-4" },
-        m(OptionsPanel, { model, permissions, tab, group, section, onSelectGroup, onSelectSection, onReviewRequest }),
+        m(OptionsPanel, {
+          model,
+          permissions,
+          tab,
+          group,
+          section,
+          onSelectGroup,
+          onSelectSection,
+          onReviewRequest,
+        }),
       ),
     ]);
   }
@@ -184,6 +202,7 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
                   tab,
                   onSelectTab,
                   `left: ${anchor.x}px; top: -${anchor.height}px; height: ${anchor.height}px`,
+                  agentId,
                 ),
                 renderCard(vnode.attrs),
               ],

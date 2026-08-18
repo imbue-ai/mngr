@@ -28,7 +28,7 @@ export interface OptionsPanelAttrs {
   section: string | null;
   onSelectGroup: (group: SettingsGroup) => void;
   onSelectSection: (section: string) => void;
-  /** Open the review popup on a request the Permissions tab is waiting on. */
+  /** Open a waiting request on its own page over this pane. */
   onReviewRequest: (requestId: string) => void;
 }
 

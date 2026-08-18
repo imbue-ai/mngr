@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { settle } from "../testing";
+import { forgetWarmedPermissionsOverview, warmPermissionsOverview } from "./permissionsPrefetch";
 import {
   BROWSER_SIGN_IN,
   awsAvailable,
@@ -10,6 +11,7 @@ import {
 } from "./workspacePermissions.testing";
 import {
   ADD_CONNECTION_SECTION,
+  WAITING_SECTION,
   LOCAL_FILES_SECTION,
   PermissionsModel,
   connectActionFor,
@@ -65,6 +67,39 @@ function okWith(body: unknown): StubResponse {
   return { ok: true, status: 200, body };
 }
 
+afterEach(() => {
+  forgetWarmedPermissionsOverview();
+});
+
+describe("resolvePermissionsSection", () => {
+  it("keeps Waiting on you selected while something is waiting", () => {
+    const view = permissionsView({
+      connections: [slackConnection()],
+      waiting_requests: [{ id: "evt-1", title: "Read messages", reason: "", service_name: "slack" }],
+    });
+
+    expect(resolvePermissionsSection(view, WAITING_SECTION)).toBe(WAITING_SECTION);
+  });
+
+  it("leads with it when nothing else was asked for", () => {
+    // A pending request is the one thing in the pane waiting on an answer.
+    const view = permissionsView({
+      connections: [slackConnection()],
+      waiting_requests: [{ id: "evt-1", title: "Read messages", reason: "", service_name: "slack" }],
+    });
+
+    expect(resolvePermissionsSection(view, null)).toBe(WAITING_SECTION);
+  });
+
+  it("gives it up once the last request has been answered", () => {
+    // Answering the last one has to leave, not sit on an empty list -- which
+    // is what a section that stayed valid with nothing in it would do.
+    const view = permissionsView({ connections: [slackConnection()], waiting_requests: [] });
+
+    expect(resolvePermissionsSection(view, WAITING_SECTION)).not.toBe(WAITING_SECTION);
+  });
+});
+
 describe("PermissionsModel loading", () => {
   it("reads the workspace's permissions and holds the view", async () => {
     const view = permissionsView();
@@ -77,6 +112,33 @@ describe("PermissionsModel loading", () => {
     expect(model.data).toEqual(view);
     expect(model.errorMessage).toBe("");
     expect(redrawCount()).toBeGreaterThan(0);
+  });
+
+  it("opens on a warmed overview without reading it again", async () => {
+    // Pointing at the key starts this read; the open spends it rather than
+    // starting a second one and watching "Loading permissions..." again.
+    const view = permissionsView();
+    const { model, requests } = makeModel(() => okWith(permissionsView()));
+    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: view }));
+
+    await model.load();
+
+    expect(model.status).toBe("ready");
+    expect(model.data).toEqual(view);
+    // No read of its own: the warm answered.
+    expect(requests).toEqual([]);
+  });
+
+  it("spends a warm once, so the next read is its own", async () => {
+    // What the pane shows changes as grants are made and requests arrive, so a
+    // warm answers the open it was started for and nothing after it.
+    const { model, requests } = makeModel(() => okWith(permissionsView()));
+    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: permissionsView() }));
+    await model.load();
+
+    await model.load();
+
+    expect(requests).toEqual([{ url: PERMISSIONS_URL, method: "GET", body: null }]);
   });
 
   it("surfaces the server's message and keeps no data when the read fails", async () => {
@@ -305,6 +367,36 @@ describe("PermissionsModel write serialization", () => {
 
     expect(model.isRowBusy(selfToggleRowKey("first"))).toBe(true);
     expect(model.isRowBusy(selfToggleRowKey("second"))).toBe(false);
+  });
+});
+
+describe("PermissionsModel.forgetWaitingRequest", () => {
+  const waiting = (id: string) => ({ id, title: `Request ${id}`, reason: "", service_name: "slack" });
+
+  it("drops an answered request from the pane at once", async () => {
+    // The answer was given in this pane; a row that outlives it reads as an
+    // answer that did not take.
+    const { model } = makeModel(() =>
+      okWith(permissionsView({ waiting_requests: [waiting("evt-1"), waiting("evt-2")] })),
+    );
+    await model.load();
+
+    model.forgetWaitingRequest("evt-1");
+
+    expect(model.data?.waiting_requests.map((entry) => entry.id)).toEqual(["evt-2"]);
+  });
+
+  it("leaves the pane alone for a request it is not showing", async () => {
+    const { model, redrawCount } = makeModel(() =>
+      okWith(permissionsView({ waiting_requests: [waiting("evt-1")] })),
+    );
+    await model.load();
+    const before = redrawCount();
+
+    model.forgetWaitingRequest("evt-other");
+
+    expect(model.data?.waiting_requests.map((entry) => entry.id)).toEqual(["evt-1"]);
+    expect(redrawCount()).toBe(before);
   });
 });
 

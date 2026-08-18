@@ -22,6 +22,8 @@ import { isAppOverlayPath, isWorkspaceOverlayPath, overlayBehindWorkspaceId } fr
 import { noticeBandFor } from "./notice-band";
 import { NoticeBand } from "./NoticeBand";
 import { OverlayBackdrop } from "./OverlayBackdrop";
+import type { CardBox } from "./card-resize";
+import { animateCardResize, holdSize, isContentPending, measureCardBox, releaseSize } from "./card-resize";
 import { SidebarMenu } from "./SidebarMenu";
 import { Titlebar } from "./Titlebar";
 import { WorkspaceFrame } from "./WorkspaceFrame";
@@ -29,6 +31,8 @@ import { LocalPageNotice } from "./LocalPageNotice";
 import { RecoveryModal } from "../recovery/RecoveryModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { DialogCloseButton } from "../components/Modal";
+import type { OptionsTab } from "../../models/workspaceOptions";
+import { DOCKED_TABS } from "../pages/workspace/WorkspaceOptionsOverlay";
 import { Icon16 } from "../components/Icon";
 import { electronBridge } from "../../electron-bridge";
 
@@ -50,7 +54,7 @@ function AppOverlay(): m.Component<AppOverlayAttrs> {
       const { shell, cardClass, bodyClass } = vnode.attrs;
       return m(
         OverlayBackdrop,
-        { backdropId: "app-overlay-backdrop", fullWindow: true, onDismiss: () => shell.closeAppOverlay() },
+        { backdropId: "app-overlay-backdrop", fullWindow: true, onDismiss: () => shell.dismissAppOverlay() },
         m(
           "div#app-overlay-panel",
           {
@@ -61,7 +65,7 @@ function AppOverlay(): m.Component<AppOverlayAttrs> {
               "rounded-xl border border-subtle bg-surface-primary shadow-overlay overflow-hidden",
           },
           [
-            m(DialogCloseButton, { onClose: () => shell.closeAppOverlay() }),
+            m(DialogCloseButton, { onClose: () => shell.dismissAppOverlay() }),
             m("div", { class: bodyClass }, vnode.children),
           ],
         ),
@@ -70,14 +74,15 @@ function AppOverlay(): m.Component<AppOverlayAttrs> {
   };
 }
 
-/** The #ws-tab-permissions (titlebar key tab) window rect, or null when no
- * workspace titlebar is mounted (a hub-context or cold-start open). The button
+/** The #ws-tab-strip (titlebar icon-tabs) window rect, or null when no
+ * workspace titlebar is mounted (a hub-context or cold-start open). The strip
  * keeps its box while hidden by visibility, so the rect stays true even while
- * the docked options panel has the titlebar's own tabs hidden. */
+ * the titlebar's own tabs are hidden under a panel or this popup. The strip's
+ * left edge is the key's, which is what the card hangs from. */
 function readKeyAnchor(): { x: number; y: number; height: number } | null {
-  const key = document.getElementById("ws-tab-permissions");
-  if (key === null) return null;
-  const rect = key.getBoundingClientRect();
+  const strip = document.getElementById("ws-tab-strip");
+  if (strip === null) return null;
+  const rect = strip.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return null;
   return { x: rect.left, y: rect.top, height: rect.height };
 }
@@ -101,6 +106,15 @@ const REQUEST_CARD_WIDTH_PX = 600;
  * hang from (a hub-context or cold-start open). */
 function RequestOverlay(): m.Component<AppOverlayAttrs> {
   let anchor = readKeyAnchor();
+  // The card's last settled size, so a change (the request landing after its
+  // spinner, the Adjust editor opening) grows out of what was on screen.
+  let lastBox: CardBox | null = null;
+  // The resize in flight, if any. Held so an interrupting change animates from
+  // where the card visually IS rather than from where it was headed.
+  let resize: Animation | null = null;
+  // The size the window is being held at while the request loads, or null when
+  // the card is sizing itself.
+  let held: CardBox | null = null;
 
   function remeasure(): void {
     const next = readKeyAnchor();
@@ -111,12 +125,85 @@ function RequestOverlay(): m.Component<AppOverlayAttrs> {
     }
   }
 
+  /** The card's box as drawn and as its content wants it -- the same box unless
+   * a resize is mid-flight, which is cancelled here so the content size can be
+   * measured (an animated element measures at its interpolated size).
+   * `wasResizing` says whether that happened, since the drawn box is then the
+   * only record of where the card visually was. */
+  function boxesOf(card: HTMLElement): { drawn: CardBox; content: CardBox; wasResizing: boolean } | null {
+    const drawn = measureCardBox(card);
+    if (drawn === null) return null;
+    if (resize === null) return { drawn, content: drawn, wasResizing: false };
+    resize.cancel();
+    resize = null;
+    const content = measureCardBox(card);
+    return content === null ? null : { drawn, content, wasResizing: true };
+  }
+
+  /** Take the card to whatever size its content now asks for, animating from
+   * `from` (the previous size, or the surface the popup was opened over). */
+  function resizeInto(from: CardBox | null): void {
+    // By id rather than through the vnode: this component's own dom is the
+    // backdrop, and the card is the panel nested inside it.
+    const card = document.getElementById("app-overlay-panel");
+    if (card === null) return;
+    const boxes = boxesOf(card);
+    if (boxes === null) return;
+    // A running resize was just cancelled to measure, and cancelling hands the
+    // card straight to its content size -- so the trip has to be picked up from
+    // where the card visually WAS, not from where the last one started. Without
+    // this, any redraw landing inside the 200ms (the list load resolving, a
+    // channel frame) ends the animation early and snaps the card to size:
+    // `from` would be the size the cancelled run was already headed for, which
+    // is no distance at all.
+    const previous = boxes.wasResizing ? boxes.drawn : from;
+    lastBox = boxes.content;
+    if (previous === null) return;
+    resize = animateCardResize(card, previous, boxes.content);
+    if (resize !== null) resize.addEventListener("finish", () => (resize = null));
+  }
+
   return {
     oncreate() {
       remeasure();
+      const card = document.getElementById("app-overlay-panel");
+      if (card === null) return;
+      // Opened over the options panel (a "Waiting on you" row), the popup takes
+      // that window over, so it starts at the panel's box and shrinks into its
+      // own -- the panel is still mounted behind, so it is there to measure.
+      // Opened from anywhere else there is no window to take over, and the
+      // popup simply appears at its size.
+      const panel = document.getElementById("ws-options-panel");
+      const openedFrom = panel === null ? null : measureCardBox(panel);
+      // Nothing to shrink INTO yet while the request is still loading: sizing
+      // to the spinner would shrink past the answer and grow back into it. The
+      // window holds the size it was opened at until the request lands, and
+      // then makes that trip once.
+      if (openedFrom !== null && isContentPending(card)) {
+        holdSize(card, openedFrom);
+        held = openedFrom;
+        return;
+      }
+      resizeInto(openedFrom);
     },
     onupdate() {
       remeasure();
+      const card = document.getElementById("app-overlay-panel");
+      if (card === null) return;
+      if (held !== null) {
+        if (isContentPending(card)) return;
+        const openedFrom = held;
+        held = null;
+        releaseSize(card);
+        resizeInto(openedFrom);
+        return;
+      }
+      resizeInto(lastBox);
+    },
+    onremove() {
+      if (resize !== null) resize.cancel();
+      resize = null;
+      held = null;
     },
     view(vnode) {
       const { shell, cardClass, bodyClass } = vnode.attrs;
@@ -130,7 +217,7 @@ function RequestOverlay(): m.Component<AppOverlayAttrs> {
       const gutterPx = Math.min(Math.max(REQUEST_MIN_GUTTER_PX, Math.round(anchor.x - REQUEST_KEY_OVERHANG_PX)), leftLimit);
       return m(
         OverlayBackdrop,
-        { backdropId: "app-overlay-backdrop", fullWindow: true, onDismiss: () => shell.closeAppOverlay() },
+        { backdropId: "app-overlay-backdrop", fullWindow: true, onDismiss: () => shell.dismissAppOverlay() },
         m(
           "div",
           {
@@ -140,17 +227,47 @@ function RequestOverlay(): m.Component<AppOverlayAttrs> {
           [
             // The raised key: the popup's own copy of the titlebar tab it hangs
             // from, drawn over the dimmed real one at its measured rect.
+            // The whole icon-tab strip, not just the key: the popup covers the
+            // titlebar's own tabs, and a window that shows one of three tabs
+            // while it is open has quietly taken the other two away. Same
+            // shape the docked panel draws, so the strip reads as one strip
+            // wherever you are.
             m(
               "div",
               {
                 id: "app-overlay-key-tab",
-                class:
-                  "pointer-events-auto absolute z-10 inline-flex items-center justify-center p-1.5 " +
-                  "rounded-md rounded-b-none bg-surface-primary text-primary",
+                role: "tablist",
+                "aria-label": "Machine options",
+                class: "pointer-events-auto absolute z-10 flex items-center gap-1",
                 style: `left: ${anchor.x}px; top: -${anchor.height}px; height: ${anchor.height}px`,
-                "aria-hidden": "true",
               },
-              m(Icon16, { name: "key" }),
+              DOCKED_TABS.map((entry) => {
+                const isSelected = entry.id === "permissions";
+                return m(
+                  "button",
+                  {
+                    type: "button",
+                    role: "tab",
+                    "data-wsopt-tab": entry.id,
+                    "aria-selected": isSelected ? "true" : "false",
+                    "aria-label": isSelected ? "Close permission request" : entry.label,
+                    "data-tooltip": isSelected ? "Close" : entry.label,
+                    class:
+                      "inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer " +
+                      "focus-visible:outline-2 focus-visible:outline-accent " +
+                      (isSelected
+                        ? "bg-surface-primary rounded-b-none text-primary"
+                        : "titlebar-surface text-secondary hover:bg-fill-hover active:bg-fill-active hover:text-primary"),
+                    // The key is the tab this window IS, so it puts the window
+                    // away, like the titlebar tab it stands in for. The other
+                    // two are different surfaces, so they go there -- leaving
+                    // the request behind, exactly as they would from the panel.
+                    onclick: () =>
+                      isSelected ? shell.dismissAppOverlay() : openOptionsTab(shell, entry.id),
+                  },
+                  m(Icon16, { name: entry.icon }),
+                );
+              }),
             ),
             m(
               "div#app-overlay-panel",
@@ -162,8 +279,21 @@ function RequestOverlay(): m.Component<AppOverlayAttrs> {
                   "rounded-xl bg-surface-primary shadow-overlay overflow-hidden",
               },
               [
-                m(DialogCloseButton, { onClose: () => shell.closeAppOverlay() }),
-                m("div", { class: bodyClass }, vnode.children),
+                m(DialogCloseButton, { onClose: () => shell.dismissAppOverlay() }),
+                // Laid out at the width the card settles at, not at the card's
+                // animating width: left to fill, every frame of the resize
+                // would re-wrap the request's text and re-flow its rows, which
+                // is what a smooth box change must not do. The card clips, so
+                // the wider frame simply shows more surface around it.
+                // The width is written out rather than built from
+                // REQUEST_CARD_WIDTH_PX: Tailwind generates classes by reading
+                // complete literals out of the source.
+                // Width only. The card is a COLUMN flex container, so a
+                // `shrink-0` here would refuse to shrink in HEIGHT -- the body
+                // would grow to its content instead of to the card, and its own
+                // overflow scroller would never engage (which is what stopped
+                // the Adjust editor's toggle list scrolling).
+                m("div", { class: bodyClass + " w-[600px] max-w-full" }, vnode.children),
               ],
             ),
           ],
@@ -171,6 +301,14 @@ function RequestOverlay(): m.Component<AppOverlayAttrs> {
       );
     },
   };
+}
+
+
+/** Leave the request popup for one of the machine's other option panes. */
+function openOptionsTab(shell: ShellState, tab: OptionsTab): void {
+  const behind = overlayBehindWorkspaceId("/inbox", shell.currentRouteSearch());
+  if (behind === null) return;
+  m.route.set(`/workspace/${behind}/options`, { tab });
 }
 
 /** Per-route sizing for the app modal card. Minds settings takes a definite
@@ -263,6 +401,16 @@ export function Shell(): m.Component<ShellAttrs> {
       // route while it IS the route and from the router's remembered copy while
       // a modal floats over it.
       const optionsLayer = isWorkspaceOverlayPath(routePath) ? content : optionsContent;
+      // The request popup does not float OVER the options panel, it takes that
+      // window over: it hangs from the same key and resizes out of the panel's
+      // box. So the panel is hidden while it is up -- left visible, the two
+      // cards overlap almost exactly for the length of the resize, each with
+      // its own close X, which is what made one window read as two. Hidden
+      // rather than unmounted: the panel keeps its scroll, its section and its
+      // in-flight edits for the return trip, and `visibility` (unlike
+      // `display`) leaves it laid out, so the popup can still measure the box
+      // it is resizing out of.
+      const isPanelTakenOver = routePath === "/inbox" && optionsLayer !== null;
 
       let overlay: m.Children = null;
       if (isAppOverlay) {
@@ -342,7 +490,19 @@ export function Shell(): m.Component<ShellAttrs> {
               "Reconnecting…",
             )
           : null,
-        m("div#local-page-root", { style: "display: contents" }, [base, optionsLayer, overlay]),
+        m("div#local-page-root", { style: "display: contents" }, [
+          base,
+          m(
+            "div#ws-options-layer",
+            {
+              // Always present so the panel keeps one vtree slot (and so one
+              // component instance) whether or not the popup is over it.
+              style: isPanelTakenOver ? "display: contents; visibility: hidden" : "display: contents",
+            },
+            optionsLayer,
+          ),
+          overlay,
+        ]),
       ]);
     },
   };

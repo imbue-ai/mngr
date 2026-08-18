@@ -31,7 +31,7 @@ describe("options panel param routing", () => {
     const { shell, routeSets } = withRoutes(PANEL_ROUTE, null);
     expect(panelRoute()).toBe(PANEL_ROUTE);
 
-    rememberInUrl("section", "conn:notion:");
+    rememberInUrl({ section: "conn:notion:" });
 
     expect(routeSets).toHaveLength(1);
     expect(routeSets[0]).toContain("/workspace/agent-ab12/options");
@@ -47,7 +47,7 @@ describe("options panel param routing", () => {
     const { shell, routeSets } = withRoutes("/inbox?workspace=agent-ab12&selected=evt-1", PANEL_ROUTE);
     expect(panelRoute()).toBe(PANEL_ROUTE);
 
-    rememberInUrl("section", "conn:notion:");
+    rememberInUrl({ section: "conn:notion:" });
 
     expect(routeSets).toEqual([]);
     expect(shell.panelRouteBehindOverlay).toContain("/workspace/agent-ab12/options");
@@ -55,9 +55,24 @@ describe("options panel param routing", () => {
     expect(shell.panelRouteBehindOverlay).not.toContain("/inbox");
   });
 
+  it("writes every change in one go, so one cannot undo another", () => {
+    // Choosing a section closes the open request, which is two params. Written
+    // one at a time they would each be computed from the route as it is NOW --
+    // and m.route.set does not land synchronously, so the second would be
+    // built on the route the first replaced and put the request back. That is
+    // what left the pane showing requests while the nav said otherwise.
+    const { routeSets } = withRoutes(`${PANEL_ROUTE}&request=evt-1`, null);
+
+    rememberInUrl({ section: "conn:notion:", request: null });
+
+    expect(routeSets).toHaveLength(1);
+    expect(routeSets[0]).toContain("section=conn%3Anotion%3A");
+    expect(routeSets[0]).not.toContain("request=");
+  });
+
   it("does nothing when the value is already what the route carries", () => {
     const { routeSets } = withRoutes(PANEL_ROUTE, null);
-    rememberInUrl("tab", "permissions");
+    rememberInUrl({ tab: "permissions" });
     expect(routeSets).toEqual([]);
   });
 });

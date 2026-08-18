@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { jsonResponse } from "../testing";
+import type { InboxModelOptions } from "./inbox";
+import { forgetWarmedRequestDetails, warmRequestDetail } from "./requestDetailPrefetch";
 import {
   InboxModel,
   expandSharePathHome,
@@ -34,10 +36,6 @@ const CARD_B = {
   workspace_agent_id: "agent-beta",
 };
 
-// Two more queue positions, so a successor picked by position can be told
-// apart from one picked off the head of the list.
-const CARD_C = { ...CARD_A, id: "evt-c", ws_name: "gamma" };
-const CARD_D = { ...CARD_A, id: "evt-d", ws_name: "delta" };
 
 const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -196,13 +194,27 @@ describe("wildcard exclusivity", () => {
 describe("InboxModel", () => {
   let calls: Array<{ url: string; init?: RequestInit }>;
 
+  /** A clock the model reads instead of Date.now, so the paced list retry can
+   * be moved through without waiting on it. */
+  function makeClock(): { nowMs: () => number; advance: (ms: number) => void } {
+    let now = 1_000;
+    return {
+      nowMs: () => now,
+      advance: (ms: number) => {
+        now += ms;
+      },
+    };
+  }
+
   function makeModel(
     responses: Record<string, () => Response>,
     onClose?: () => void,
     onResolved?: (resolved: ResolvedRequest) => void,
+    extra: Partial<InboxModelOptions> = {},
   ): InboxModel {
     calls = [];
     return new InboxModel({
+      ...extra,
       fetcher: (url, init) => {
         calls.push({ url, init });
         const key = `${init?.method ?? "GET"} ${url.split("?")[0]}`;
@@ -217,6 +229,39 @@ describe("InboxModel", () => {
 
   beforeEach(() => {
     calls = [];
+    forgetWarmedRequestDetails();
+  });
+
+  it("opens on a warmed detail without fetching it again", async () => {
+    // Pointing at a "Waiting on you" row starts this fetch; the click must
+    // spend that, not start a second one -- the server answers it by running
+    // the latchkey CLI, which is the whole reason it is warmed early.
+    const model = makeModel({
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_A] }),
+    });
+    warmRequestDetail("evt-a", async () => jsonResponse({ detail: PREDEFINED_DETAIL }));
+
+    await model.select("evt-a");
+
+    expect(model.detail?.kind).toBe("predefined");
+    expect([...model.checkedPermissions]).toEqual(["slack-read-all"]);
+    // No detail fetch of its own: the warm answered.
+    expect(calls.map((call) => call.url)).toEqual([]);
+    expect(model.isDetailLoading).toBe(false);
+  });
+
+  it("falls back to its own fetch when the warm failed", async () => {
+    // A warm that failed says nothing about why, so the open asks for real and
+    // reports whatever it finds rather than showing the warm's silence.
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+    });
+    warmRequestDetail("evt-a", async () => ({ ok: false }) as unknown as Response);
+
+    await model.select("evt-a");
+
+    expect(model.detail?.kind).toBe("predefined");
+    expect(calls.map((call) => call.url)).toEqual(["/ui/api/inbox/evt-a/detail"]);
   });
 
   it("loads the card list and seeds detail state on selection", async () => {
@@ -252,30 +297,62 @@ describe("InboxModel", () => {
     expect(model.isPermissionEditorShown).toBe(false);
   });
 
-  it("surfaces a failed list load and lets the pending-set reconciliation retry it", async () => {
+  it("surfaces a failed list load and retries it, but no faster than its own pace", async () => {
+    // The notice promises an automatic retry, and the page reconciles from the
+    // requests store on EVERY redraw -- so an unpaced retry is a machine whose
+    // gateway is down being asked for its list once per frame.
     let isServerUp = false;
-    const model = makeModel({
-      "GET /ui/api/inbox": () =>
-        isServerUp
-          ? jsonResponse({ cards: [CARD_A] })
-          : jsonResponse({ error: "boom" }, 503),
-    });
+    let listCalls = 0;
+    const clock = makeClock();
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () => {
+          listCalls += 1;
+          return isServerUp
+            ? jsonResponse({ cards: [CARD_A] })
+            : jsonResponse({ error: "boom" }, 503);
+        },
+      },
+      undefined,
+      undefined,
+      { nowMs: clock.nowMs },
+    );
 
     await model.loadList();
     expect(model.listErrorMessage).toContain("Could not load requests");
     // The load attempt completed, so the page's live-refresh gate must open.
     expect(model.isListLoaded).toBe(true);
+    expect(listCalls).toBe(1);
 
-    // Still down: the reconciliation retries (and fails) rather than treating
-    // the pending set as already handled.
+    // Redraw after redraw while it is still down: no further asking.
     await model.refreshIfPendingChanged(["evt-a"]);
+    await model.refreshIfPendingChanged(["evt-a"]);
+    await model.refreshIfPendingChanged(["evt-b"]);
+    expect(listCalls).toBe(1);
     expect(model.listErrorMessage).not.toBeNull();
 
-    // Back up: the SAME pending set retries again and clears the error.
+    // Once the pace allows it, the SAME pending set retries and clears the error.
+    clock.advance(5_000);
     isServerUp = true;
     await model.refreshIfPendingChanged(["evt-a"]);
+    expect(listCalls).toBe(2);
     expect(model.listErrorMessage).toBeNull();
     expect(model.cards.map((card) => card.id)).toEqual(["evt-a"]);
+    model.dispose();
+  });
+
+  it("joins a list load already in flight rather than starting a second", async () => {
+    let listCalls = 0;
+    const model = makeModel({
+      "GET /ui/api/inbox": () => {
+        listCalls += 1;
+        return jsonResponse({ cards: [CARD_A] });
+      },
+    });
+
+    await Promise.all([model.loadList(), model.loadList()]);
+
+    expect(listCalls).toBe(1);
   });
 
   it("marks the list load failed when the fetch itself throws", async () => {
@@ -307,15 +384,13 @@ describe("InboxModel", () => {
     expect(model.isSharePathHintShown()).toBe(false);
   });
 
-  it("submits the predefined grant form and advances to the next request", async () => {
+  it("submits the predefined grant form and closes, leaving the rest alone", async () => {
+    // The reader opened THIS request. Swapping the next pending one in under
+    // the click that answered it would answer a question nobody had asked yet.
     let closed = false;
     const model = makeModel(
       {
-        "GET /ui/api/inbox": () =>
-          jsonResponse({ cards: [CARD_B] }),
         "GET /ui/api/inbox/evt-a/detail": () =>
-          jsonResponse({ detail: PREDEFINED_DETAIL }),
-        "GET /ui/api/inbox/evt-b/detail": () =>
           jsonResponse({ detail: PREDEFINED_DETAIL }),
         "POST /requests/evt-a/grant": () =>
           jsonResponse({ outcome: "GRANTED", message: "done" }),
@@ -335,9 +410,10 @@ describe("InboxModel", () => {
     const form = grantCall?.init?.body as FormData;
     expect(form.getAll("permissions")).toEqual(["slack-read-all"]);
     expect(form.get("account")).toBe("");
-    // Advanced to the surviving request rather than closing.
-    expect(model.selectedId).toBe("evt-b");
-    expect(closed).toBe(false);
+    expect(closed).toBe(true);
+    // Never re-selected: evt-b has no detail response here, so reaching for it
+    // at all would throw rather than quietly show the wrong request.
+    expect(model.selectedId).toBe("evt-a");
   });
 
   it("submits only the wildcard when a specific permission was ticked before it", async () => {
@@ -585,7 +661,7 @@ describe("InboxModel", () => {
     expect(model.isApproveBusy).toBe(false);
   });
 
-  it("closes once the request it resolved was the last one pending", async () => {
+  it("closes on a verdict even when the list behind it is already empty", async () => {
     let closed = false;
     const model = makeModel(
       {
@@ -608,65 +684,62 @@ describe("InboxModel", () => {
     expect(closed).toBe(true);
   });
 
-  it("fires a keepalive deny, fades the card, and advances", async () => {
-    const model = makeModel({
-      "GET /ui/api/inbox": () =>
-        jsonResponse({ cards: [CARD_A, CARD_B] }),
-      "GET /ui/api/inbox/evt-b/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
-      "POST /requests/evt-a/deny": () => jsonResponse({ outcome: "DENIED" }),
-    });
+  it("fires a keepalive deny and closes", async () => {
+    let closed = false;
+    const model = makeModel(
+      {
+        "POST /requests/evt-a/deny": () => jsonResponse({ outcome: "DENIED" }),
+      },
+      () => {
+        closed = true;
+      },
+    );
     model.cards = [CARD_A, CARD_B];
     model.isListLoaded = true;
     model.selectedId = "evt-a";
 
     model.deny();
-    await vi.waitFor(() => {
-      expect(model.selectedId).toBe("evt-b");
-    });
 
+    expect(closed).toBe(true);
+    // The POST outlives the page it was fired from, which is what keepalive is
+    // for: closing must not cancel the deny it closes on.
     expect(model.denyingIds.has("evt-a")).toBe(true);
     const denyCall = calls.find((call) => call.url.includes("/deny"));
     expect(denyCall?.init?.keepalive).toBe(true);
   });
 
-  it("advances a deny forwards, the same way an approve goes", async () => {
-    // Deny marks the request as denying before it advances, so a successor
-    // picked from the already-filtered queue loses the position it is measured
-    // from and lands on the head of the queue -- sending the user backwards to
-    // a request they had read past, while an approve on that same request went
-    // forwards.
-    const cards = [CARD_A, CARD_B, CARD_C, CARD_D];
-    const model = makeModel({
-      "GET /ui/api/inbox": () => jsonResponse({ cards }),
-      "GET /ui/api/inbox/evt-d/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
-      "POST /requests/evt-c/deny": () => jsonResponse({ outcome: "DENIED" }),
-    });
-    model.cards = cards;
+  it("closes once per resolution, however many times the news arrives", async () => {
+    // The verdict comes back twice -- from the deny itself, and again from the
+    // pending-set reconciliation that same verdict triggers -- and the second
+    // would navigate a page already on its way out.
+    let closeCount = 0;
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+        "POST /requests/evt-a/deny": () => jsonResponse({ outcome: "DENIED" }),
+      },
+      () => {
+        closeCount += 1;
+      },
+    );
+    model.cards = [CARD_A];
     model.isListLoaded = true;
-    model.selectedId = "evt-c";
+    model.selectedId = "evt-a";
 
     model.deny();
+    await model.refreshIfPendingChanged([]);
 
-    await vi.waitFor(() => {
-      expect(model.selectedId).toBe("evt-d");
-    });
+    expect(closeCount).toBe(1);
   });
 
-  it("announces each verdict against the workspace the request belongs to", async () => {
+  it("announces the verdict against the workspace the request belongs to", async () => {
     const resolved: ResolvedRequest[] = [];
     const model = makeModel(
       {
-        "GET /ui/api/inbox": () =>
-          jsonResponse({ cards: [CARD_B] }),
         "GET /ui/api/inbox/evt-a/detail": () =>
-          jsonResponse({ detail: PREDEFINED_DETAIL }),
-        "GET /ui/api/inbox/evt-b/detail": () =>
           jsonResponse({ detail: PREDEFINED_DETAIL }),
         "POST /requests/evt-a/grant": () =>
           jsonResponse({ outcome: "GRANTED" }),
-        "POST /requests/evt-b/deny": () => jsonResponse({ outcome: "DENIED" }),
       },
       undefined,
       (announced) => resolved.push(announced),
@@ -676,15 +749,29 @@ describe("InboxModel", () => {
     await model.select("evt-a");
 
     await model.approve();
-    model.deny();
 
-    // Taken from each request's own card, not from whatever detail happens to
+    // Taken from the request's own card, not from whatever detail happens to
     // be on screen when the verdict lands: PREDEFINED_DETAIL names the filing
     // sibling ("agent-1"), which is never the workspace the user is looking at.
-    expect(resolved).toEqual([
-      { requestId: "evt-a", agentId: "agent-alpha", verdict: "granted" },
-      { requestId: "evt-b", agentId: "agent-beta", verdict: "denied" },
-    ]);
+    expect(resolved).toEqual([{ requestId: "evt-a", agentId: "agent-alpha", verdict: "granted" }]);
+  });
+
+  it("announces a deny against its own card too", async () => {
+    const resolved: ResolvedRequest[] = [];
+    const model = makeModel(
+      {
+        "POST /requests/evt-b/deny": () => jsonResponse({ outcome: "DENIED" }),
+      },
+      undefined,
+      (announced) => resolved.push(announced),
+    );
+    model.cards = [CARD_A, CARD_B];
+    model.isListLoaded = true;
+    model.selectedId = "evt-b";
+
+    model.deny();
+
+    expect(resolved).toEqual([{ requestId: "evt-b", agentId: "agent-beta", verdict: "denied" }]);
   });
 
   it("says nothing about a request the server left pending", async () => {
@@ -707,27 +794,49 @@ describe("InboxModel", () => {
     expect(resolved).toEqual([]);
   });
 
-  it("advances off a selection another window resolved, never leaving its form up", async () => {
-    let listCalls = 0;
-    const model = makeModel({
-      "GET /ui/api/inbox": () => {
-        listCalls += 1;
-        return jsonResponse({ cards: [CARD_B] });
+  it("closes on a selection another window resolved, never leaving its form up", async () => {
+    // The form can no longer be submitted, and the request the reader came for
+    // is answered -- by them, in another window -- so the page is done.
+    let closed = false;
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () => jsonResponse({ cards: [CARD_B] }),
       },
-      "GET /ui/api/inbox/evt-b/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
-    });
+      () => {
+        closed = true;
+      },
+    );
     model.cards = [CARD_A, CARD_B];
     model.isListLoaded = true;
     model.selectedId = "evt-a";
 
     await model.refreshIfPendingChanged(["evt-b"]);
-    // Same set again: no extra fetch.
-    await model.refreshIfPendingChanged(["evt-b"]);
 
-    expect(listCalls).toBe(1);
-    expect(model.selectedId).toBe("evt-b");
-    expect(model.detail?.kind).toBe("predefined");
+    expect(closed).toBe(true);
+    expect(model.selectedId).toBe("evt-a");
+  });
+
+  it("tells the list a request is gone before handing the reader back to it", async () => {
+    // No verdict was given here, so nothing is announced -- but the row is just
+    // as gone, and the list is what the closing page hands the reader back to.
+    const gone: string[] = [];
+    const resolved: ResolvedRequest[] = [];
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+      },
+      undefined,
+      (announced) => resolved.push(announced),
+      { onGone: (requestId) => gone.push(requestId) },
+    );
+    model.cards = [CARD_A];
+    model.isListLoaded = true;
+    model.selectedId = "evt-a";
+
+    await model.refreshIfPendingChanged([]);
+
+    expect(gone).toEqual(["evt-a"]);
+    expect(resolved).toEqual([]);
   });
 
   it("leaves a stale link on its notice when an unrelated request arrives", async () => {
@@ -770,14 +879,18 @@ describe("InboxModel", () => {
 
   it("leaves a running approval's dialog alone and reconciles once it finishes", async () => {
     let listCalls = 0;
-    const model = makeModel({
-      "GET /ui/api/inbox": () => {
-        listCalls += 1;
-        return jsonResponse({ cards: [CARD_B] });
+    let closed = false;
+    const model = makeModel(
+      {
+        "GET /ui/api/inbox": () => {
+          listCalls += 1;
+          return jsonResponse({ cards: [CARD_A, CARD_B] });
+        },
       },
-      "GET /ui/api/inbox/evt-b/detail": () =>
-        jsonResponse({ detail: PREDEFINED_DETAIL }),
-    });
+      () => {
+        closed = true;
+      },
+    );
     model.cards = [CARD_A, CARD_B];
     model.isListLoaded = true;
     model.selectedId = "evt-a";
@@ -785,13 +898,15 @@ describe("InboxModel", () => {
     // submitting swapped out from under it.
     model.isApproveBusy = true;
 
-    await model.refreshIfPendingChanged(["evt-b"]);
-    expect(model.selectedId).toBe("evt-a");
+    await model.refreshIfPendingChanged(["evt-a", "evt-b"]);
     expect(listCalls).toBe(0);
 
     model.isApproveBusy = false;
-    await model.refreshIfPendingChanged(["evt-b"]);
-    expect(model.selectedId).toBe("evt-b");
+    await model.refreshIfPendingChanged(["evt-a", "evt-b"]);
+    expect(listCalls).toBe(1);
+    // Still pending, so still under review: reconciling is not a reason to go.
+    expect(closed).toBe(false);
+    expect(model.selectedId).toBe("evt-a");
   });
 
   it("skips the redundant list load for the pending set an open already showed", async () => {
