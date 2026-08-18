@@ -21,15 +21,19 @@ the other end's file descriptor to the child at spawn time. There is no
 rendezvous file on disk and no listening/connecting handshake -- the connection
 is live from the moment the child is forked, so "the warm process is not ready
 yet" is handled for free: the parent's request simply buffers in the socket
-until the child finishes importing ``mngr`` and reads it.
+until the child finishes importing ``mngr`` and serves it.
 
-An idle warm process (blocked in ``recv``) already dies on its own when the
-parent goes away, since the closed socket then reports EOF. But once a request
-has been read the warm process stops reading the socket to run the (possibly
-slow or hung) ``mngr`` command, and during that window a socket EOF can no
-longer wake it. To cover that window the warm process also runs mngr's
-parent-death watcher: if the parent (the minds backend) dies while the warm
-process is busy, the watcher SIGTERMs it so no orphaned warm process lingers.
+A warm process watches for parent disconnect from the moment it boots: a
+dedicated receiver thread performs the single ``recv`` on the socket, started
+*before* the expensive ``imbue.mngr.main`` import, and exits the process
+immediately on socket EOF -- so a warm process whose parent goes away dies
+within milliseconds instead of first finishing a now-useless multi-second
+import. Once a request has been read the warm process stops reading the socket
+to run the (possibly slow or hung) ``mngr`` command, and during that window a
+socket EOF can no longer wake it. To cover that window the warm process also
+runs mngr's parent-death watcher: if the parent (the minds backend) dies while
+the warm process is busy, the watcher SIGTERMs it so no orphaned warm process
+lingers.
 
 This deliberately avoids the ``multiprocessing`` forkserver's fork-without-exec
 model, which is unreliable on macOS. Each warm process is a clean, freshly
@@ -75,6 +79,9 @@ _WARM_SERVER_MODULE: Final[str] = "imbue.minds.utils.mngr_caller"
 
 # Name of the throwaway warm process's concurrency group (used for its logs).
 _WARM_PROCESS_GROUP_NAME: Final[str] = "mngr-caller-warm-process"
+
+# One warm-server request as sent over the socket: (argv, env overrides, cwd).
+_WarmRequest = tuple[tuple[str, ...], dict[str, str], Path | None]
 
 _DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 60.0
 
@@ -163,33 +170,53 @@ def _execute_mngr_cli(
     return returncode, stdout_buffer.getvalue(), stderr_buffer.getvalue()
 
 
-def _serve_one_request(
+def _receive_request_or_exit(
+    connection: Connection, request_box: list[_WarmRequest], request_received: threading.Event
+) -> None:
+    """Receive the single CLI request off the socket, exiting on parent disconnect.
+
+    Runs in a dedicated thread started *before* the warm process's expensive
+    ``imbue.mngr.main`` warm-up, so a parent disconnect is observed within
+    milliseconds rather than only once the warm-up completes and the main
+    thread reaches its own ``recv``. On EOF -- the parent (minds backend) went away
+    without sending a request, e.g. it was killed without a chance to terminate
+    us -- the whole process exits immediately via ``os._exit``: the main thread
+    may be mid-import, where running cleanup would be unsafe, and there is
+    nothing to clean up, since the process exists solely to serve a request
+    that will now never come. Otherwise the request is handed to the main
+    thread via ``request_box``.
+    """
+    try:
+        request_box.append(connection.recv())
+    except EOFError:
+        # ``os._exit`` skips stack unwinding, so the ``finally`` below never runs here.
+        os._exit(0)
+    finally:
+        request_received.set()
+
+
+def _serve_request(
     connection: Connection,
     cli: click.Command,
     concurrency_group: ConcurrencyGroup,
+    argv: tuple[str, ...],
+    env_overrides: Mapping[str, str],
+    cwd: Path | None,
 ) -> None:
-    """Start the parent-death watcher, then serve exactly one CLI request.
+    """Run one already-received CLI request and send its result back.
 
     Split out from :func:`_run_warm_mngr_server` (which owns the concurrency
     group and supplies the real ``mngr`` CLI) so the watcher wiring can be
     exercised in tests with an inspectable concurrency group and a lightweight
     stand-in command.
 
-    The parent-death watcher is armed *before* the (blocking) ``recv`` so it also
-    covers the busy window after a request is read, when the socket is no longer
-    being watched for EOF -- if the parent dies then, the watcher SIGTERMs this
-    warm process so it does not linger as an orphan.
+    The parent-death watcher is armed *before* the (possibly slow or hung) mngr
+    command runs: once the request has been read off the socket, a socket EOF
+    can no longer wake this process, so only the watcher can dismiss it if the
+    parent dies mid-command.
     """
     start_parent_death_watcher(concurrency_group)
     try:
-        try:
-            argv, env_overrides, cwd = connection.recv()
-        except EOFError:
-            # The parent (minds backend) went away before sending a request --
-            # e.g. it was killed without a chance to terminate us. Exit cleanly
-            # rather than hanging on the socket or crashing with a traceback, so
-            # no orphaned warm process is left behind.
-            return
         returncode, stdout, stderr = _execute_mngr_cli(cli, argv, env_overrides, cwd)
         connection.send((returncode, stdout, stderr))
     finally:
@@ -197,25 +224,44 @@ def _serve_one_request(
 
 
 def _run_warm_mngr_server(connection_fd: int) -> None:
-    """Warm-process entry point: import mngr, then serve exactly one CLI request.
+    """Warm-process entry point: receive one CLI request, import mngr, serve it.
 
-    Imports ``imbue.mngr.main`` eagerly (this is the warm-up), then reads one
-    request off the inherited socket file descriptor, runs the CLI, and sends the
-    result back. Serves a single request and then returns, so each warm process
-    is single-use. A parent-death watcher is armed for the whole serve so a warm
-    process that is orphaned mid-request does not linger.
+    A dedicated receiver thread starts reading the single request off the
+    inherited socket file descriptor *before* the expensive ``imbue.mngr.main``
+    warm-up begins: if the parent disconnects during the warm-up (or before
+    ever sending a request), the receiver exits the process immediately instead
+    of letting it finish a now-useless warm-up. After the warm-up, the main
+    thread picks up the received request and serves it under an armed
+    parent-death watcher. Serves a single request and then returns, so each
+    warm process is single-use.
     """
-    # This inline import is the whole point of the warm process: it pays mngr's
-    # multi-second import cost here (in a throwaway interpreter), off the minds
-    # backend's request path. It is intentionally allow-listed by the
-    # inline-imports ratchet.
-    from imbue.mngr.main import cli
-
     connection = Connection(connection_fd)
-    # The concurrency group owns the parent-death watcher thread; it is a fresh,
-    # throwaway interpreter so a process-lifetime group is appropriate here.
+    # The concurrency group owns the receiver and parent-death watcher threads;
+    # it is a fresh, throwaway interpreter so a process-lifetime group is
+    # appropriate here.
     with ConcurrencyGroup(name=_WARM_PROCESS_GROUP_NAME) as concurrency_group:
-        _serve_one_request(connection, cli, concurrency_group)
+        request_box: list[_WarmRequest] = []
+        request_received = threading.Event()
+        concurrency_group.start_new_thread(
+            target=_receive_request_or_exit,
+            args=(connection, request_box, request_received),
+            name="warm-server-request-receiver",
+            is_checked=False,
+        )
+        # This inline import is the whole point of the warm process: it pays mngr's
+        # multi-second import cost here (in a throwaway interpreter), off the minds
+        # backend's request path. It is intentionally allow-listed by the
+        # inline-imports ratchet.
+        from imbue.mngr.main import cli
+
+        request_received.wait()
+        if not request_box:
+            # The receiver exits the process itself on a clean parent
+            # disconnect, so an empty box means the recv failed unexpectedly
+            # (already logged by the thread); there is no request to serve.
+            return
+        argv, env_overrides, cwd = request_box[0]
+        _serve_request(connection, cli, concurrency_group, argv, env_overrides, cwd)
 
 
 class _WarmMngrProcess(MutableModel):

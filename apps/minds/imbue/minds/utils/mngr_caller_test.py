@@ -1,4 +1,5 @@
 import os
+import threading
 from collections.abc import Iterator
 from multiprocessing.connection import Pipe
 from pathlib import Path
@@ -13,7 +14,7 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import MngrCallerNotInitializedError
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
 from imbue.minds.utils.mngr_caller import _execute_mngr_cli
-from imbue.minds.utils.mngr_caller import _serve_one_request
+from imbue.minds.utils.mngr_caller import _serve_request
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -162,29 +163,53 @@ def test_call_times_out_and_reports_timed_out(mngr_caller: MngrCaller) -> None:
     assert result.returncode != 0
 
 
-def test_serve_one_request_arms_parent_death_watcher() -> None:
-    """The warm-server serve path must start a parent-death watcher.
+def _make_gated_command(started: threading.Event, release: threading.Event) -> click.Command:
+    """Build a stand-in CLI that blocks until ``release`` is set.
+
+    Used to hold the serve path mid-command so a test can inspect the threads
+    that are armed while the warm process is busy.
+    """
+
+    @click.command()
+    def _command() -> None:
+        started.set()
+        release.wait(timeout=30.0)
+
+    return _command
+
+
+def test_serve_request_arms_parent_death_watcher() -> None:
+    """The warm-server serve path must run under an armed parent-death watcher.
 
     This is what protects a warm process that is orphaned *while busy*: once a
-    request is read the socket is no longer watched for EOF, so only the
-    parent-death watcher can dismiss it if the parent dies. The watcher must be
-    armed before the (blocking) ``recv``, so we assert the thread exists while
-    the serve is still blocked waiting for a request, then release it via EOF.
+    request has been read off the socket, a socket EOF can no longer wake it,
+    so only the parent-death watcher can dismiss it if the parent dies
+    mid-command. The watcher must be armed before the command runs, so we
+    assert the thread exists while a gated stand-in command is still blocked,
+    then release the command and check the result comes back.
 
     The watcher's actual firing-on-parent-death behavior is covered by
     ``parent_process_test.py``; here we only verify it is wired in.
     """
     parent_connection, child_connection = Pipe(duplex=True)
+    command_started = threading.Event()
+    release_command = threading.Event()
     with ConcurrencyGroup(name=f"test-{uuid4().hex}") as concurrency_group:
-        # No request is ever sent, so the stand-in command is never invoked; the
-        # serve blocks in ``recv`` until we close the parent end below.
         serve_thread = concurrency_group.start_new_thread(
-            target=_serve_one_request,
-            args=(child_connection, click.Command(name="noop"), concurrency_group),
-            name="serve-one-request",
+            target=_serve_request,
+            args=(
+                child_connection,
+                _make_gated_command(command_started, release_command),
+                concurrency_group,
+                (),
+                {},
+                None,
+            ),
+            name="serve-request",
             is_checked=False,
         )
         try:
+            assert command_started.wait(timeout=10.0)
             wait_for(
                 lambda: any(t.thread.name == "parent-death-watcher" for t in concurrency_group._threads),
                 timeout=10.0,
@@ -195,20 +220,23 @@ def test_serve_one_request_arms_parent_death_watcher() -> None:
             assert len(watchers) == 1
             assert watchers[0].thread.is_alive()
         finally:
-            # Closing the parent end makes the blocked ``recv`` see EOF so the
-            # serve returns and both threads can be joined on group exit.
-            parent_connection.close()
+            release_command.set()
             serve_thread.join(timeout=10.0)
+        assert parent_connection.poll(10.0)
+        returncode, _stdout, _stderr = parent_connection.recv()
+        assert returncode == 0
+        parent_connection.close()
 
 
-@pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_warm_process_exits_when_parent_disconnects(mngr_caller: MngrCaller) -> None:
-    """An idle warm process must not hang around once its parent socket is closed.
+    """A warm process must exit promptly once its parent socket is closed.
 
     Closing the parent end without sending a request simulates the minds backend
-    going away (e.g. a hard kill). The warm process should observe EOF on its
-    socket and exit on its own, leaving no orphan.
+    going away (e.g. a hard kill). The warm process's receiver thread observes
+    the socket EOF and exits the process on its own, leaving no orphan -- even
+    though the process is still paying the slow ``imbue.mngr.main`` import when
+    the disconnect happens (the test closes the socket immediately after spawn).
     """
     warm_process = mngr_caller._spawn_warm_process()
     warm_process.connection.close()
