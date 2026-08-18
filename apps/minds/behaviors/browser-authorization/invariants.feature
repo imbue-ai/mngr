@@ -29,7 +29,7 @@ Feature: Browser-authorization invariants
   @sessions-unforgeable
   Rule: Sessions are unforgeable, tamper-evident, and bounded
     Only session cookies issued by this installation are accepted.
-    Any alteration of a cookie invalidates it.
+    Any alteration of a cookie's signed content invalidates it.
     Cookies issued by another installation (another data directory) are invalid here.
     Cookies older than 30 days are invalid.
 

@@ -17,7 +17,11 @@ export function noticeVariantClass(variant: NoticeVariant): string {
 }
 
 export function noticeClass(variant: NoticeVariant): string {
-  return "px-3 py-2 rounded-md type-body my-2 " + noticeVariantClass(variant);
+  // wrap-anywhere, because what lands in a notice is usually an error verbatim
+  // from somewhere else: URLs, socket paths, command lines. Such a token has no
+  // break opportunity in it, so without this it sizes the box past its
+  // container and spills out of the coloured surface.
+  return "px-3 py-2 rounded-md type-body my-2 wrap-anywhere " + noticeVariantClass(variant);
 }
 
 interface NoticeAttrs extends m.Attributes {

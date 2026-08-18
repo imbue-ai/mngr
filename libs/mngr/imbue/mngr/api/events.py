@@ -205,13 +205,14 @@ def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> 
     # `@HOST.PROVIDER` target skips unrelated providers (the agent path gets
     # the same treatment via discover_by_address).
     provider_names: tuple[str, ...] | None = (str(address.provider),) if address.provider is not None else None
-    host_agents_by_host, _ = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
     )
+    host_agents_by_host = outcome.agents_by_host
     all_hosts = list(host_agents_by_host.keys())
     host_ref = filter_one_host(address, all_hosts)
 

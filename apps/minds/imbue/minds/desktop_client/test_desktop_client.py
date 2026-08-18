@@ -1,9 +1,11 @@
 import json
 import os
+import queue
 import subprocess
 import time
 from http.cookies import SimpleCookie
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -14,6 +16,7 @@ from itsdangerous import URLSafeTimedSerializer
 from pydantic import SecretStr
 from werkzeug.test import TestResponse
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
@@ -49,7 +52,12 @@ from imbue.minds.desktop_client.request_events import create_latchkey_predefined
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import build_resolver_with_system_services
+from imbue.minds.desktop_client.testing import drain_ui_channel_frames
+from imbue.minds.desktop_client.testing import record_provider_discovery_error
+from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
@@ -455,19 +463,24 @@ def test_session_survives_desktop_client_restart(tmp_path: Path) -> None:
 @pytest.mark.witnesses("browser-authorization.tampered-cookie")
 @pytest.mark.witnesses(
     "browser-authorization.sessions-unforgeable",
-    partial="only the any-alteration-invalidates clause, observed at the /post-login gate",
+    partial="only the signed-content-invalidates clause, observed at the /post-login gate",
 )
 def test_tampered_session_cookie_is_unauthenticated(tmp_path: Path) -> None:
-    """A session cookie altered in any way is treated as unauthenticated at the page gate."""
+    """A session cookie whose signed content is altered is treated as unauthenticated at the page gate."""
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
     )
     valid_cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
 
-    # Mutate the signature's FIRST character: its last carries only 4 significant bits, so several
-    # characters there decode to the same bytes and leave the cookie valid.
-    signature = valid_cookie.rsplit(".", 1)[-1]
-    tampered_cookie = valid_cookie[: -len(signature)] + ("A" if signature[0] != "A" else "B") + signature[1:]
+    # Alter the signed payload rather than the trailing signature character. The
+    # signature is 20 bytes in 27 base64 characters, so that last character
+    # carries only four significant bits and the two spare ones decode to
+    # nothing: about one cookie in sixteen ends in "A", where flipping it to "B"
+    # produces a different string that still decodes to the same signature and
+    # authenticates. The payload is covered byte for byte, so any change to it
+    # invalidates.
+    payload, _, signed_suffix = valid_cookie.partition(".")
+    tampered_cookie = payload[:-1] + ("A" if payload[-1] != "A" else "B") + "." + signed_suffix
     assert tampered_cookie != valid_cookie
     assert not verify_session_cookie(cookie_value=tampered_cookie, signing_key=auth_store.get_signing_key())
     client.set_cookie(SESSION_COOKIE_NAME, tampered_cookie)
@@ -1261,6 +1274,125 @@ def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
 
 
 # -- system-interface restart + recovery tests --
+
+
+def _await_workspaces_frame(client_queue: "queue.Queue[str | None]", timeout_seconds: float = 3.0) -> dict[str, Any]:
+    """Block for the next ``workspaces`` frame on one connection's queue.
+
+    The publish strand wakes on an event, so this returns in well under a
+    millisecond in practice; the budget is only there so a wake that never comes
+    fails the test with a sentence instead of hanging it, which is why it sits
+    well inside the suite's own per-test timeout. Frames of other types (the
+    health edge publishes its own) are skipped.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            raw = client_queue.get(timeout=deadline - time.monotonic())
+        except queue.Empty:
+            break
+        if raw is None:
+            continue
+        frame = json.loads(raw)
+        if frame.get("type") == "workspaces":
+            return frame
+    raise AssertionError("no workspaces frame was published within the timeout")
+
+
+def _await_health_frame(
+    client_queue: "queue.Queue[str | None]", status: AgentHealth, timeout_seconds: float = 3.0
+) -> dict[str, Any]:
+    """Block for the next ``health`` frame reporting ``status``, skipping other frames.
+
+    Health edges are broadcast directly rather than diffed, so this is how a test
+    waits on a transition a background strand makes (the unattended restart's)
+    instead of guessing at a sleep.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            raw = client_queue.get(timeout=deadline - time.monotonic())
+        except queue.Empty:
+            break
+        if raw is None:
+            continue
+        frame = json.loads(raw)
+        if frame.get("type") == "health" and frame.get("status") == status.value:
+            return frame
+    raise AssertionError(f"no health frame reporting {status.value} was published within the timeout")
+
+
+def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The band's backend verdict turns on the outage onset, so a health edge must re-derive the list.
+
+    ``is_backend_unreachable`` is withheld once the provider error behind it
+    predates the onset -- and the onset is recorded by the health tracker, whose
+    edges publish only the health frame. Without a workspace-list wake on that
+    edge the band would go on naming the backend from its pre-onset answer until
+    some unrelated producer happened to fire, which during an outage of the
+    machine's own provider can be a full poll interval away.
+
+    Wired the way the app wires it, unattended restart included: that dispatch
+    rides the same stuck edge and clears the probe-failure run, so a verdict
+    gated on the *run* would let the withheld error speak again a beat later --
+    and for the rest of the episode, since a new run only starts from HEALTHY.
+    """
+    workspace_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(
+        workspace_agent,
+        AgentId.generate(),
+        workspace_certified_data={"labels": {"workspace": "my-workspace", "is_primary": "true"}},
+    )
+    record_provider_discovery_error(resolver, "docker", "Docker Desktop is manually paused.")
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=None,
+        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        system_interface_health_tracker=tracker,
+        root_concurrency_group=root_concurrency_group,
+        # Fails the restart's ``mngr start`` outright, so the dispatch reaches a
+        # terminal state within the test instead of parking on the cold-boot
+        # readiness wait. RESTART_FAILED clears the failure run just as
+        # RESTARTING does, so it exercises the same thing.
+        mngr_binary=write_stub_mngr(tmp_path, "mngr", "exit 1"),
+    )
+    publisher = get_state(app).ui_publisher
+    assert publisher is not None
+    client_queue = publisher.broadcaster.register()
+
+    # With no outage of the machine's own yet, the errored poll is the freshest
+    # thing said about that backend, so the band may name it. Publishing here
+    # also records the frame the next pass diffs against.
+    publisher.publish_now()
+    published = [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "workspaces"]
+    assert published[-1]["workspaces"][0]["is_backend_unreachable"] is True
+
+    publisher.start(root_concurrency_group)
+    try:
+        # The machine now stops answering for reasons of its own, which records an
+        # onset the errored poll predates. This edge is the only producer that fires.
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+
+        frame = _await_workspaces_frame(client_queue)
+        assert frame["workspaces"][0]["is_backend_unreachable"] is False
+
+        # The unattended restart has by now run and cleared the failure run. The
+        # backend is still not something this episode has observed, so it still
+        # may not be named.
+        _await_health_frame(client_queue, AgentHealth.RESTART_FAILED)
+        publisher.publish_now()
+        after_restart = [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "workspaces"]
+        latest = after_restart[-1] if after_restart else frame
+        assert latest["workspaces"][0]["is_backend_unreachable"] is False
+    finally:
+        # The strand parks on its wake event, so the group's exit would time out
+        # waiting for it -- and that failure would mask a failing assertion above.
+        publisher.stop()
 
 
 def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:

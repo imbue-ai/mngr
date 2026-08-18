@@ -24,6 +24,7 @@ from imbue.mngr.errors import HostNotStoppedError
 from imbue.mngr.errors import ImageNotFoundError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ModalAuthError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
@@ -33,6 +34,7 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.errors import parse_provider_unavailable_reason
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -273,6 +275,66 @@ def test_provider_not_authorized_error_has_user_help_text() -> None:
     assert "mngr config set" in error.user_help_text
     assert "is_enabled" in error.user_help_text
     assert "enabled_backends" in error.user_help_text
+
+
+def test_provider_unavailable_reason_round_trips_through_subprocess_stderr() -> None:
+    """The reason survives the trip an out-of-process caller actually sees.
+
+    minds runs mngr as a subprocess and recovers this from stderr, which carries
+    Click's ``Error: `` prefix, the trailing ``user_help_text``, and a reason that
+    has its own ``: `` and sentence-final period. The parser must return exactly
+    the reason the error was constructed with, not a truncated or over-long slice.
+    """
+    provider = "imbue_cloud_someone-imbue-com"
+    reason = "could not reach Imbue Cloud: [Errno 8] nodename nor servname provided, or not known"
+    error = ProviderUnavailableError(ProviderInstanceName(provider), reason)
+    stderr = f"Error: {error}  [{error.user_help_text}]"
+
+    assert parse_provider_unavailable_reason(stderr, provider) == reason
+    assert parse_provider_unavailable_reason(stderr, None) == reason
+
+
+def test_provider_unavailable_reason_answers_for_the_named_provider_among_several() -> None:
+    """A provider the caller did not ask about answers for nothing, however many are named.
+
+    A command aborts on whichever provider it queried first turned out to be
+    unavailable, which need not be the one the caller is asking about -- so a
+    caller that named a provider must not be handed some other backend's outage
+    and go on to report it as theirs.
+
+    Text carrying more than one provider's message is what separates "answer for
+    the one asked about" from "answer with the first one there is": only then does
+    the parser have to walk past a foreign message to reach the caller's, and it
+    must do so whichever order they arrive in.
+    """
+    foreign = ProviderUnavailableError(ProviderInstanceName("imbue_cloud_someone-imbue-com"), "no route")
+    mine = ProviderUnavailableError(ProviderInstanceName("docker"), "Cannot connect to the Docker daemon")
+
+    assert parse_provider_unavailable_reason(f"Error: {foreign}", "docker") is None
+    assert (
+        parse_provider_unavailable_reason(f"Error: {foreign}\nError: {mine}", "docker")
+        == "Cannot connect to the Docker daemon"
+    )
+    assert (
+        parse_provider_unavailable_reason(f"Error: {mine}\nError: {foreign}", "docker")
+        == "Cannot connect to the Docker daemon"
+    )
+    # A caller with no provider to compare against takes whichever comes first.
+    assert parse_provider_unavailable_reason(f"Error: {foreign}\nError: {mine}", None) == "no route"
+
+
+def test_provider_unavailable_reason_is_none_for_non_matching_messages() -> None:
+    """Only the generic shape is recovered; anything else reads as no reason at all.
+
+    An unrelated failure must return None because a false positive would report a
+    real machine problem as a backend outage, which offers no restart.
+    ``ModalAuthError`` returns None for a different reason, and at a cost: it *is*
+    a ``ProviderUnavailableError``, but it keeps its own verbatim message, so it
+    carries no marker and its outage stays unrecovered. The parser stays pinned to
+    the one shape it can parse rather than guessing at per-subclass wording.
+    """
+    assert parse_provider_unavailable_reason(f"Error: {ModalAuthError()}", None) is None
+    assert parse_provider_unavailable_reason("exited 1: Error: Agent agent-abc not found", None) is None
 
 
 def test_mngr_error_displays_single_error_prefix_via_click() -> None:

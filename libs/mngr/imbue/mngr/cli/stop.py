@@ -81,13 +81,14 @@ def _live_discover_agents_for_resolution(mngr_ctx: MngrContext, identifiers: Seq
     back to a live discovery for an agent not yet in the event stream (e.g. just created),
     without ``discovery_events`` importing the live discovery path (which would be circular).
     """
-    agents_by_host, _providers = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,
         agent_identifiers=tuple(identifiers),
         include_destroyed=False,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
     return [agent for agent_refs in agents_by_host.values() for agent in agent_refs]
 
 

@@ -9,10 +9,13 @@ Three surfaces:
 - ``POST /ui/api/destroyed-workspaces/<agent_id>/delete-backup`` -- frees a
   destroyed workspace's backup quota now instead of waiting out retention.
 - ``GET /ui/api/workspaces/<workspace_id>/recovery-info`` -- everything the
-  Recovery page needs beyond the live channel health state: the resolved
+  Recovery card needs beyond the live channel health state: the resolved
   agent id (either workspace coordinate is accepted, since restored windows
   navigate host-keyed), the display name, the copy-pasteable SSH command,
-  and whether the host currently reads as offline.
+  whether the host currently reads as offline, and whether the machine's
+  backend is unreachable (with the provider's own reason). The card polls
+  this while it is open, so every field is a current reading rather than a
+  one-shot snapshot taken when it opened.
 
 This module is the single home of the destroyed-row derivation (moved here
 from ``app.py``'s deleted legacy page handlers).
@@ -47,8 +50,9 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
+from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
+from imbue.minds.desktop_client.workspace_recovery import read_host_state
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 _SECONDS_PER_DAY: float = 86400.0
@@ -88,6 +92,11 @@ class RecoveryInfoResponse(FrozenModel):
     )
     ssh_command: str = Field(description="Copy-pasteable SSH command for the host, empty when unknown")
     is_host_offline: bool = Field(description="Whether discovery currently reads the host as stopped/crashed")
+    is_backend_unreachable: bool = Field(
+        description="Whether the provider hosting this machine is unreachable or rejecting us"
+    )
+    provider_label: str = Field(description="Friendly provider name, empty unless the backend is unreachable")
+    unreachable_reason: str = Field(description="The provider's own error, empty unless the backend is unreachable")
 
 
 def _is_lifecycle_request_authenticated() -> bool:
@@ -269,13 +278,7 @@ def _is_host_offline(backend_resolver: BackendResolverInterface, agent_id: Agent
     display_info = backend_resolver.get_agent_display_info(agent_id)
     if display_info is None:
         return False
-    try:
-        host_state = backend_resolver.get_host_state(HostId(display_info.host_id))
-    except ValueError:
-        # Resolvers without discovery report a "localhost" placeholder that is
-        # not a parseable HostId; they carry no host state anyway.
-        return False
-    return host_state in (HostState.STOPPED, HostState.CRASHED)
+    return read_host_state(backend_resolver, display_info) in (HostState.STOPPED, HostState.CRASHED)
 
 
 def _handle_destroyed_workspaces() -> Response:
@@ -351,6 +354,10 @@ def _handle_recovery_info(workspace_id: str) -> Response:
     if not workspace_name:
         display_info = backend_resolver.get_agent_display_info(resolved_id)
         workspace_name = display_info.agent_name if display_info is not None else str(resolved_id)
+    # Read every poll, not just the first: a provider error can land (or clear)
+    # while the card is open, and it outranks whatever the machine's own health
+    # says -- no restart routed through an unreachable backend can help.
+    backend_verdict = read_backend_unreachable_verdict(resolved_id, backend_resolver=backend_resolver, tracker=tracker)
     response = RecoveryInfoResponse(
         agent_id=str(resolved_id),
         workspace_name=workspace_name or str(resolved_id),
@@ -359,6 +366,9 @@ def _handle_recovery_info(workspace_id: str) -> Response:
         is_restart_start_only=tracker.get_restart_is_start_only(resolved_id) if tracker is not None else None,
         ssh_command=_build_ssh_command(backend_resolver, resolved_id),
         is_host_offline=_is_host_offline(backend_resolver, resolved_id),
+        is_backend_unreachable=backend_verdict is not None,
+        provider_label=backend_verdict.provider_label if backend_verdict is not None else "",
+        unreachable_reason=backend_verdict.reason if backend_verdict is not None else "",
     )
     return _json_response(response, 200)
 

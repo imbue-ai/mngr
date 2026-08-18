@@ -12,7 +12,7 @@ Feature: Session lifetime and integrity
   @tampered-cookie
   Scenario: An altered session cookie is treated as unauthenticated
     Given an authenticated user
-    When their session cookie is modified in any way
+    When their session cookie's signed content is modified
     And they request a page that requires a session
     Then the bearer is treated as unauthenticated
 

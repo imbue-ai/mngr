@@ -40,7 +40,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 4
+UI_SCHEMA_VERSION: int = 5
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -63,8 +63,12 @@ class UiWorkspaceEntry(FrozenModel):
     host_id: str = Field(
         default="", description="Logical machine currently running the workspace; empty for rows without a live host"
     )
-    is_stale: bool = Field(
-        default=False, description="Provider's latest discovery poll errored; row retained but unverified"
+    is_backend_unreachable: bool = Field(
+        default=False,
+        description="This machine's backend is unreachable, by the same verdict the recovery card renders",
+    )
+    provider_label: str = Field(
+        default="", description="Friendly name of the provider hosting this workspace; empty when unknown"
     )
     supports_shutdown: bool = Field(default=False, description="Whether minds can stop/start this workspace's host")
     liveness: str = Field(default="", description="RUNNING / STOPPED / UNKNOWN when supports_shutdown, else empty")

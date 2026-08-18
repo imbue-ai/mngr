@@ -2,7 +2,7 @@
 
 Covers ``_build_providers_state_payload`` (combines resolver-tracked providers,
 errored providers, and disabled-on-disk providers into the SSE payload) and
-``_build_workspace_list`` (stale marking + color emission).
+``_build_workspace_list`` (backend-unreachable verdict + color emission).
 
 Provider enable/disable now lives on ``PATCH /api/v1/desktop/providers/<name>``
 and is tested in ``api_v1_test.py``.
@@ -206,7 +206,7 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
     assert payload["providers"][0]["status"] == "disabled"
 
 
-# -- _build_workspace_list stale marking --
+# -- _build_workspace_list backend-unreachable verdict --
 
 
 def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | None = None) -> DiscoveredAgent:
@@ -221,19 +221,26 @@ def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | Non
     )
 
 
-def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() -> None:
-    """A retained machine whose provider's last poll errored is flagged ``is_stale``; healthy ones are not."""
+def test_build_workspace_list_reports_backend_unreachable_when_its_provider_errored() -> None:
+    """A machine whose provider's last poll errored carries ``is_backend_unreachable``; healthy ones do not.
+
+    The row also names its provider, which is what lets the recovery band say
+    *which* backend it cannot reach rather than falling back to the generic
+    lost-connection copy. The label rides on every row, not just the unreachable
+    one: it describes where the machine lives, and the band pairs the two.
+    """
     resolver = MngrCliBackendResolver()
     provider_name = "imbue_cloud_acct"
     agent = _make_workspace_agent(provider_name)
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
-    # No provider error -> the workspace is not stale.
+    # No provider error -> the backend is not reported unreachable.
     healthy = _build_workspace_list(resolver)
     assert len(healthy) == 1
-    assert "is_stale" not in healthy[0]
+    assert "is_backend_unreachable" not in healthy[0]
+    assert healthy[0]["provider_label"] == "Imbue Cloud"
 
-    # Its provider's latest poll errored -> the retained workspace is stale.
+    # Its provider's latest poll errored -> the backend is unreachable.
     errored = ProviderInstanceName(provider_name)
     seed_provider_snapshots(
         resolver,
@@ -243,13 +250,14 @@ def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() 
         },
         last_snapshot_at=datetime.now(timezone.utc),
     )
-    stale = _build_workspace_list(resolver)
-    assert len(stale) == 1
-    assert stale[0]["is_stale"] == "true"
+    unreachable = _build_workspace_list(resolver)
+    assert len(unreachable) == 1
+    assert unreachable[0]["is_backend_unreachable"] == "true"
+    assert unreachable[0]["provider_label"] == "Imbue Cloud"
 
 
-def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error() -> None:
-    """An error on a different provider must not flag a healthy provider's machine stale."""
+def test_build_workspace_list_does_not_report_unreachable_for_unrelated_provider_error() -> None:
+    """An error on a different provider must not report a healthy provider's machine unreachable."""
     resolver = MngrCliBackendResolver()
     agent = _make_workspace_agent("imbue_cloud_acct")
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
@@ -263,7 +271,7 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     )
     workspaces = _build_workspace_list(resolver)
     assert len(workspaces) == 1
-    assert "is_stale" not in workspaces[0]
+    assert "is_backend_unreachable" not in workspaces[0]
 
 
 # -- _build_workspace_list color emission --

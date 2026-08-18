@@ -57,7 +57,6 @@ export interface CreateFormDefaults {
 }
 
 export interface LandingExtras {
-  provider_label_by_agent_id: Record<string, string>;
   destroying_status_by_agent_id: Record<string, string>;
   locked_account_emails: string[];
   is_discovery_complete: boolean;

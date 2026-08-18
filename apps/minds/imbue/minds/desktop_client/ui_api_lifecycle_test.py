@@ -12,6 +12,7 @@ from pydantic import Field
 
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -20,6 +21,9 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import build_resolver_with_system_services
+from imbue.minds.desktop_client.testing import record_provider_discovery_error
 from imbue.minds.desktop_client.ui_api_lifecycle import _build_ssh_command
 from imbue.minds.desktop_client.ui_api_lifecycle import _resolve_workspace_coordinate_to_agent_id
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
@@ -53,8 +57,15 @@ def _build_lifecycle_client(
     cli: FakeImbueCloudCli | None = None,
     is_authenticated: bool = True,
     is_reaper_wired: bool = False,
+    backend_resolver: BackendResolverInterface | None = None,
+    tracker: SystemInterfaceHealthTracker | None = None,
 ) -> tuple[FlaskClient, MultiAccountSessionStore]:
-    """A desktop-client test app with the stores the lifecycle routes read."""
+    """A desktop-client test app with the stores the lifecycle routes read.
+
+    ``backend_resolver`` and ``tracker`` are what the recovery-info route reads
+    its verdict off; the defaults are the empty resolver and no tracker, which is
+    what the routes that only resolve coordinates need.
+    """
     effective_cli = cli if cli is not None else make_fake_imbue_cloud_cli()
     session_store = make_session_store_for_test(tmp_path, cli=effective_cli)
     sync_scheduler = None
@@ -76,10 +87,13 @@ def _build_lifecycle_client(
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path,
         is_authenticated=is_authenticated,
-        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        backend_resolver=(
+            backend_resolver if backend_resolver is not None else StaticBackendResolver(url_by_agent_and_service={})
+        ),
         paths=WorkspacePaths(data_dir=tmp_path),
         session_store=session_store,
         sync_scheduler=sync_scheduler,
+        system_interface_health_tracker=tracker,
     )
     return client, session_store
 
@@ -219,6 +233,73 @@ def test_recovery_info_rejects_an_unknown_coordinate(tmp_path: Path) -> None:
     response = client.get("/ui/api/workspaces/host-00000000000000000000000000000abc/recovery-info")
 
     assert response.status_code == 404
+
+
+def test_recovery_info_carries_the_live_tracker_state_for_the_card(tmp_path: Path) -> None:
+    """The card renders its verdict and failure reason from this route's payload."""
+    tracker = SystemInterfaceHealthTracker()
+    agent_id = AgentId(_DESTROYED_AGENT_ID)
+    client, _ = _build_lifecycle_client(tmp_path, tracker=tracker)
+
+    tracker.mark_restarting(agent_id, start_only=False)
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+    assert payload["health"] == "restarting"
+
+    tracker.mark_restart_failed(agent_id, "Start step of host restart failed: exited 1")
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+    assert payload["health"] == "restart_failed"
+    assert payload["health_error"] == "Start step of host restart failed: exited 1"
+
+
+def test_recovery_info_picks_up_a_provider_error_that_lands_after_the_card_opened(tmp_path: Path) -> None:
+    """A backend outage that arrives mid-episode changes what the route reports.
+
+    This is the whole point of the card polling: the first read describes an
+    unresponsive machine, and when discovery then attributes the outage to the
+    provider, the route says so -- so the card can stop offering a restart that
+    would route through the very backend that is down.
+    """
+    resolver = build_resolver_with_system_services(AgentId(_DESTROYED_AGENT_ID), AgentId.generate())
+    client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+    assert payload["is_backend_unreachable"] is False
+    assert payload["unreachable_reason"] == ""
+
+    record_provider_discovery_error(
+        resolver, "docker", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+    )
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+    assert payload["is_backend_unreachable"] is True
+    assert payload["provider_label"] == "Docker"
+    assert payload["unreachable_reason"] == "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+
+
+def test_recovery_info_reports_the_backend_a_restart_was_already_rejected_at(tmp_path: Path) -> None:
+    """The card's very first read carries the verdict, because the restart already has it.
+
+    The card is raised by the restart-failed edge, so this route is called
+    moments after the restart that failed -- and long before the provider's next
+    poll. Discovery has surfaced nothing here, exactly as it had not when the
+    card opened; the reason comes from the restart mngr rejected at the backend.
+    """
+    agent_id = AgentId(_DESTROYED_AGENT_ID)
+    resolver = build_resolver_with_system_services(agent_id, AgentId.generate())
+    tracker = SystemInterfaceHealthTracker()
+    tracker.record_backend_outage(agent_id, "docker", "Docker Desktop is manually paused.")
+    tracker.mark_restart_failed(
+        agent_id,
+        "This machine's backend is unreachable, so the restart could not run: Docker Desktop is manually paused.",
+    )
+    client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, tracker=tracker)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+
+    assert payload["health"] == "restart_failed"
+    assert payload["is_backend_unreachable"] is True
+    assert payload["provider_label"] == "Docker"
+    assert payload["unreachable_reason"] == "Docker Desktop is manually paused."
 
 
 def test_build_ssh_command_renders_the_resolvers_ssh_info() -> None:

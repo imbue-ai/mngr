@@ -30,6 +30,28 @@ describe("noticeBandFor", () => {
     expect(noticeBandFor("restart_failed", "healthy", true)?.message).toBe("This machine stopped responding.");
   });
 
+  it("names the backend it cannot reach instead of the machine that reads stuck because of it", () => {
+    // The machine is unreachable because its provider is, and a restart routes
+    // through that same provider -- so the band explains the condition rather
+    // than repeating the symptom. It keeps the recovering key: this is still
+    // "lost contact, still trying", only better explained, and rewriting the
+    // strip as a provider error lands and clears would only interrupt a read.
+    const band = noticeBandFor("stuck", "healthy", true, true, "Imbue Cloud");
+    expect(band?.key).toBe("workspace-recovering");
+    // The cause, and nothing else: the band is one line, and the card behind
+    // the action is where what it means for this machine belongs.
+    expect(band?.message).toBe("Can't connect to Imbue Cloud");
+    expect(band?.action?.kind).toBe("open-recovery");
+    // The card behind it carries the provider's own error verbatim.
+    expect(noticeBandFor("restart_failed", "healthy", true, true, "Imbue Cloud")?.message).toBe(band?.message);
+  });
+
+  it("leaves a healthy machine unbanded even while its provider is erroring", () => {
+    // A stale row is not a broken machine: the workspace keeps answering
+    // through the forward whatever discovery last managed to poll.
+    expect(noticeBandFor("healthy", "healthy", true, true, "Imbue Cloud")).toBeNull();
+  });
+
   it("names the dead consumer instead of the stuck machine it produces", () => {
     // Every machine reads stuck while the consumer is dead, and restarting
     // one would not help -- only the app restart does.

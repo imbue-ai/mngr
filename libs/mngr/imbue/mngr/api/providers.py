@@ -182,6 +182,15 @@ class SkippedProviderConstruction(FrozenModel):
     provider_name: ProviderInstanceName = Field(description="Name of the skipped provider instance")
     error_type_name: str = Field(description="The type name of the construction exception")
     error_message: str = Field(description="The construction exception's message")
+    user_help_text: str | None = Field(
+        default=None,
+        description=(
+            "The construction exception's curated remediation, or None if it carried none. Held "
+            "because a caller that turns the skip back into an error (see "
+            "``_raise_for_unmatched_identifiers``) would otherwise fall back to the generic "
+            "'start Docker' guidance, which the cloud backends curate this text precisely to avoid."
+        ),
+    )
     is_empty: bool = Field(
         description="True when the provider was reached and is known-empty, False when unavailable/unauthorized"
     )
@@ -235,6 +244,7 @@ def get_all_provider_instances_and_skipped(
                     provider_name=name,
                     error_type_name=type(e).__name__,
                     error_message=str(e),
+                    user_help_text=e.user_help_text,
                     is_empty=True,
                 )
             )
@@ -246,6 +256,7 @@ def get_all_provider_instances_and_skipped(
                     provider_name=name,
                     error_type_name=type(e).__name__,
                     error_message=str(e),
+                    user_help_text=e.user_help_text,
                     is_empty=False,
                 )
             )

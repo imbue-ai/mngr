@@ -144,6 +144,37 @@ def test_failure_run_wall_onset_is_recorded_then_cleared() -> None:
     assert tracker.get_failure_run_started_wall_at(aid) is None
 
 
+def test_outage_onset_spans_the_episode_rather_than_the_failure_run() -> None:
+    """The outage onset survives the restart attempts made during the outage.
+
+    Recovery compares discovery snapshots against this to decide whether what
+    the resolver reports describes the current outage or the world before it.
+    The unattended restart fires on the stuck edge, within a second of the
+    machine wedging, and clears the failure *run* -- so a gate reading the run
+    would go unguarded for the rest of the episode, since a new run only ever
+    starts from HEALTHY. Only the machine answering again ends it.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+
+    assert tracker.get_outage_started_wall_at(aid) is None
+
+    _drive_to_stuck(tracker, aid)
+    onset = tracker.get_outage_started_wall_at(aid)
+    assert onset is not None
+    assert onset == tracker.get_failure_run_started_wall_at(aid)
+
+    # Neither restart outcome ends the outage: the machine still is not answering.
+    tracker.mark_restarting(aid, start_only=True)
+    assert tracker.get_outage_started_wall_at(aid) == onset
+    tracker.mark_restart_failed(aid, "the start step failed")
+    assert tracker.get_outage_started_wall_at(aid) == onset
+
+    # The machine answering does.
+    tracker.record_probe_success(aid)
+    assert tracker.get_outage_started_wall_at(aid) is None
+
+
 def test_probe_failure_without_record_is_ignored() -> None:
     """A probe failure for an agent that was never enrolled does nothing.
 
@@ -359,6 +390,42 @@ def test_mark_restarting_clears_prior_restart_error() -> None:
 def test_get_last_restart_error_is_none_for_untracked_agent() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     assert tracker.get_last_restart_error(AgentId.generate()) is None
+
+
+def test_a_recorded_backend_outage_outlives_the_attempt_but_not_the_episode() -> None:
+    """A rejected command's backend outage survives the next attempt and dies with the record.
+
+    The recovery verdict reads this one *without* a freshness gate, and what makes
+    that safe is this lifecycle. It must survive a fresh restart attempt, unlike
+    the restart error beside it: it describes the backend rather than the attempt,
+    and the next attempt is routed through that same backend. And it must not
+    survive the machine answering, or a machine that later wedges for reasons of
+    its own would be blamed on a backend that is, by then, fine.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    before = datetime.now(timezone.utc)
+
+    tracker.record_backend_outage(aid, "docker", "Docker Desktop is manually paused.")
+    tracker.mark_restart_failed(aid, "This machine's backend is unreachable, so the restart could not run: paused")
+
+    outage = tracker.get_backend_outage(aid)
+    assert outage is not None
+    assert outage.provider_name == "docker"
+    assert outage.reason == "Docker Desktop is manually paused."
+    # The stamp is what bounds the record's authority (the reader drops it once
+    # the provider has a snapshot newer than this), so it has to be the moment
+    # the rejection was observed.
+    assert outage.observed_at >= before
+
+    # The user retries: the attempt's own reason is superseded, the backend's is not.
+    tracker.mark_restarting(aid, start_only=False)
+    assert tracker.get_last_restart_error(aid) is None
+    assert tracker.get_backend_outage(aid) == outage
+
+    # Dropped with the record itself, which is also the untracked-agent read.
+    tracker.record_probe_success(aid)
+    assert tracker.get_backend_outage(aid) is None
 
 
 def test_get_restart_is_start_only_reflects_flavor_and_is_scoped_to_restarting() -> None:

@@ -421,6 +421,9 @@ describe("RecoveryModel", () => {
     health_error: "",
     ssh_command: "ssh -p 22 user@host",
     is_host_offline: false,
+    is_backend_unreachable: false,
+    provider_label: "",
+    unreachable_reason: "",
   };
 
   it("loads recovery info and dispatches a manual host restart to success", async () => {
@@ -538,6 +541,29 @@ describe("RecoveryModel", () => {
     await model.load();
     expect(model.isRestartRunning).toBe(true);
     expect(deps.sources).toHaveLength(1);
+  });
+
+  it("follows the machine's state for as long as the card is open", async () => {
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+    expect(model.info?.is_backend_unreachable).toBe(false);
+
+    // The outage lands after the card opened -- the case the whole poll exists
+    // for. The verdict must replace the machine-level one, not wait for a reopen.
+    deps.recoveryInfoResponses.push({
+      ...info,
+      is_backend_unreachable: true,
+      provider_label: "Docker",
+      unreachable_reason: "Cannot connect to the Docker daemon",
+    });
+    deps.runScheduled();
+    await settle();
+
+    expect(model.info?.is_backend_unreachable).toBe(true);
+    expect(model.info?.provider_label).toBe("Docker");
+    expect(model.info?.unreachable_reason).toBe("Cannot connect to the Docker daemon");
   });
 
   it("keeps the last good state when a poll cannot be read, and keeps polling", async () => {

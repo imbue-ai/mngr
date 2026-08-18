@@ -385,13 +385,14 @@ def _find_hosts_to_destroy(
     never destroyable and is rejected outright. Results are deduplicated by
     host id (the same host may be matched by several addresses).
     """
-    agents_by_host, _ = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
     all_hosts = list(agents_by_host.keys())
 
     hosts_to_destroy: list[_OfflineHostToDestroy] = []

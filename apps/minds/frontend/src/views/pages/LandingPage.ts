@@ -1,9 +1,9 @@
 // The Machines home screen: workspace rows, create-attempt rows, remote
 // records, the sync-unlock banner, the collapsed providers panel, and the
 // bottom-left app launchers. Live state comes from the channel stores; the
-// facts that do not ride the channel (provider labels, destroy statuses,
-// locked accounts) are fetched from /ui/api/create/landing-extras and
-// refetched whenever the workspace list changes.
+// facts that do not ride the channel (destroy statuses, locked accounts) are
+// fetched from /ui/api/create/landing-extras and refetched whenever the
+// workspace list changes.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -255,7 +255,7 @@ export const LandingPage: m.ClosureComponent = () => {
         ? state.tracker.displayedLiveness(entry.id, entry.liveness ?? "")
         : ("UNKNOWN" as MindLiveness);
     const controls = mindControlsFor(entry, liveness, discoveryHealth);
-    const providerLabel = extras?.provider_label_by_agent_id[entry.id] ?? "";
+    const providerLabel = entry.provider_label ?? "";
     return m(
       Card,
       {

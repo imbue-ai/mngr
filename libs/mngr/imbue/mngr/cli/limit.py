@@ -189,13 +189,14 @@ def _apply_activity_config_to_host(
 
 def _build_host_references(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
     """Build a deduplicated list of DiscoveredHosts from all known agents."""
-    agents_by_host, _ = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
     return list(agents_by_host.keys())
 
 

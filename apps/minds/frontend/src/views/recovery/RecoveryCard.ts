@@ -70,6 +70,17 @@ export function recoverySubheading(health: string, isHostOffline: boolean): stri
   );
 }
 
+/**
+ * What an unreachable backend means for the machine, and what happens next.
+ *
+ * Deliberately provider-agnostic -- no "check your internet", since a local
+ * docker daemon is independent of the network. The actual cause comes from the
+ * provider itself and is shown verbatim below this, so minds never has to
+ * hand-author a sentence per provider failure mode.
+ */
+const BACKEND_UNREACHABLE_EXPLANATION =
+  "This issue may be transient. Minds will reconnect you to your machine as soon as it can be reached again.";
+
 export interface RecoveryCardAttrs {
   model: RecoveryModel;
   /** Whether this surface dismisses itself once the machine is confirmed
@@ -93,6 +104,36 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       const { model, isSelfDismissing = false } = vnode.attrs;
       const info = model.info;
       if (info === null) return null;
+      // The backend being unreachable outranks whatever else the machine's
+      // health reads, because it explains it: a machine minds cannot reach
+      // through its provider reads stuck either way, and only one of the two
+      // conditions can be acted on. Rendered without a restart button at all --
+      // the restart routes through the same backend.
+      //
+      // Except over a machine that is answering. A provider's poll can error
+      // while its machines keep answering through the forward, and a machine
+      // minds is in contact with is not unreachable whatever that poll did --
+      // so the band withholds this same verdict on a healthy machine, and the
+      // card owes the user the ending it stayed up to deliver instead.
+      if (info.is_backend_unreachable && info.health !== "healthy") {
+        return m("div", { class: "flex flex-col gap-3" }, [
+          // Both halves of the verdict: which machine is affected, and why. The
+          // card can be opened from a list or a stale tab, so the machine it
+          // speaks for is never assumed to be obvious.
+          m(
+            "div",
+            { class: "type-heading pr-10" },
+            `${info.workspace_name} unreachable: Can't connect to ${info.provider_label}`,
+          ),
+          m("p", { class: "type-helper text-tertiary" }, BACKEND_UNREACHABLE_EXPLANATION),
+          info.unreachable_reason ? m(Notice, { variant: "error" }, info.unreachable_reason) : null,
+          m(
+            "div",
+            { class: "flex items-center gap-2" },
+            m(Button, { variant: "secondary", onclick: () => reportProblem(info.agent_id) }, "Report a problem"),
+          ),
+        ]);
+      }
       // On a surface that dismisses itself, a finished restart is still waiting
       // on the confirmation that dismisses it. Reading as idle in that window
       // would offer a Restart button for the restart that just ran.

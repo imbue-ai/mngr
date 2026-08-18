@@ -107,7 +107,6 @@ def test_landing_extras_render_empty_state_for_a_minimal_app(tmp_path: Path) -> 
 
     assert response.status_code == 200
     payload = json.loads(response.get_data(as_text=True))
-    assert payload["provider_label_by_agent_id"] == {}
     assert payload["destroying_status_by_agent_id"] == {}
     assert payload["locked_account_emails"] == []
     assert isinstance(payload["is_discovery_complete"], bool)

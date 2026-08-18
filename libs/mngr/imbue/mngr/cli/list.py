@@ -1158,14 +1158,15 @@ def _emit_hosts_view(
     still gets a row (with empty labels) so a broken tag file never hides the
     host itself.
     """
-    agents_by_host, providers = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
         agent_identifiers=None,
         include_destroyed=True,
         reset_caches=False,
     )
-    provider_by_name = {str(provider.name): provider for provider in providers}
+    agents_by_host = outcome.agents_by_host
+    provider_by_name = {str(provider.name): provider for provider in outcome.providers}
 
     host_rows: list[dict[str, Any]] = []
     sorted_host_items = sorted(

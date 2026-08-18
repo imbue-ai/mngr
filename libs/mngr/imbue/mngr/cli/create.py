@@ -148,7 +148,7 @@ class _CachedAgentHostLoader(MutableModel):
                 agent_identifiers=None,
                 include_destroyed=False,
                 reset_caches=False,
-            )[0]
+            ).agents_by_host
         return self.cached_result
 
 

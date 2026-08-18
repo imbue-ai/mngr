@@ -439,11 +439,19 @@ export function Shell(): m.Component<ShellAttrs> {
       const agentScoped =
         surfaceWorkspaceId === null ? null : shell.stores.workspaces.toAgentScopedId(surfaceWorkspaceId);
       const health = agentScoped === null ? "healthy" : shell.stores.health.statusFor(agentScoped);
+      // A machine the recovery verdict reads as unreachable through its own
+      // backend is unreachable for a reason the band can state, which is why it
+      // reads unhealthy at all. The list frame already carries the verdict and
+      // the backend's name per row, so the band can name it without a poll of
+      // its own -- and says the same thing the card behind "Open recovery" will.
+      const entry = agentScoped === null ? null : shell.stores.workspaces.entryByAnyId(agentScoped);
+      const unreachableProviderLabel = entry?.is_backend_unreachable ? entry.provider_label || null : null;
       const band = noticeBandFor(
         health,
         shell.stores.health.discoveryHealth,
         surfaceWorkspaceId !== null,
         electronBridge.isDesktop,
+        unreachableProviderLabel,
       );
       // The card is a modal of its own, so it is raised only where it can sit
       // on top: the machine's own route. It out-z-indexes the docked options

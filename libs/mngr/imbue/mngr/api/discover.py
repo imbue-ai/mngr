@@ -7,13 +7,17 @@ from threading import Lock
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
-from imbue.mngr.api.providers import get_all_provider_instances
+from imbue.mngr.api.providers import SkippedProviderConstruction
+from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -34,6 +38,37 @@ from imbue.mngr.utils.thread_cleanup import mngr_executor
 # blocked on so a hang is visible by name instead of only inferable from silence.
 _SLOW_PROVIDER_DISCOVERY_WARN_SECONDS: Final[float] = 10.0
 _PENDING_PROVIDER_WARN_INTERVAL_SECONDS: Final[float] = 15.0
+
+
+class DiscoveryOutcome(FrozenModel):
+    """What one discovery pass saw, including the providers it could not ask.
+
+    A model rather than a tuple because the third field is the whole point: a
+    provider that failed to construct is absent from ``agents_by_host`` in
+    exactly the same way as a provider that genuinely holds no agents, so a
+    caller that reads only the first two fields cannot tell "this agent does not
+    exist" from "the backend hosting it could not be reached". ``mngr exec`` on a
+    machine whose Docker daemon is down took the first reading and reported the
+    agent as missing.
+    """
+
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = Field(
+        description="Agents discovered per host, across every provider that answered"
+    )
+    providers: list[BaseProviderInstance] = Field(description="The provider instances that were successfully queried")
+    skipped_providers: list[SkippedProviderConstruction] = Field(
+        description="Providers that could not be constructed (empty, or unreachable) and so were never queried"
+    )
+
+    @property
+    def unavailable_providers(self) -> list[SkippedProviderConstruction]:
+        """The skips that mean "unknown", not "nothing here".
+
+        A provider that declared itself *empty* is a positive answer -- it was
+        reached and holds nothing -- so it says nothing about a missing agent.
+        Only the unreachable ones leave a gap in what discovery can claim.
+        """
+        return [skipped for skipped in self.skipped_providers if not skipped.is_empty]
 
 
 def warn_on_duplicate_host_names(
@@ -135,13 +170,24 @@ def _run_discovery(
     provider_names: tuple[str, ...] | None,
     include_destroyed: bool,
     reset_caches: bool,
-) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
+) -> DiscoveryOutcome:
     """Run the actual discovery against providers. Shared implementation for discover_hosts_and_agents."""
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
     results_lock = Lock()
 
-    providers = get_all_provider_instances(mngr_ctx, provider_names)
-    logger.trace("Found {} provider instances", len(providers))
+    providers, skipped_providers = get_all_provider_instances_and_skipped(mngr_ctx, provider_names)
+    logger.trace("Found {} provider instances ({} skipped)", len(providers), len(skipped_providers))
+    # A provider that could not be constructed is queried by nobody, so it
+    # contributes no hosts and no agents -- indistinguishable, downstream, from a
+    # provider that holds none. Name it here so the gap is at least visible in
+    # the logs even for callers that ignore the outcome's skipped list.
+    for skipped in skipped_providers:
+        if not skipped.is_empty:
+            logger.warning(
+                "Discovery could not reach provider {}, so its hosts and agents are absent from this snapshot: {}",
+                skipped.provider_name,
+                skipped.error_message,
+            )
 
     if reset_caches:
         logger.debug("Resetting provider caches before discovery")
@@ -175,7 +221,7 @@ def _run_discovery(
     # Warn if any host names are duplicated within the same provider
     warn_on_duplicate_host_names(agents_by_host)
 
-    return (agents_by_host, providers)
+    return DiscoveryOutcome(agents_by_host=agents_by_host, providers=providers, skipped_providers=skipped_providers)
 
 
 @pure
@@ -201,11 +247,13 @@ def discover_hosts_and_agents(
     agent_identifiers: Sequence[str] | None,
     include_destroyed: bool,
     reset_caches: bool,
-) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
+) -> DiscoveryOutcome:
     """Discover hosts and agents from providers.
 
     Uses ConcurrencyGroup to query providers in parallel for better performance.
-    Returns lightweight DiscoveredHost/DiscoveredAgent data without connecting to hosts.
+    Returns lightweight DiscoveredHost/DiscoveredAgent data without connecting to hosts,
+    alongside the providers that could not be constructed -- see
+    :class:`DiscoveryOutcome` for why a caller resolving an identifier needs those.
 
     When agent_identifiers is provided and provider_names is None, uses the discovery
     event stream to resolve identifiers to provider names and queries only those providers.
@@ -232,11 +280,11 @@ def discover_hosts_and_agents(
         )
 
         # Run discovery with only the resolved providers
-        agents_by_host, providers = _run_discovery(mngr_ctx, resolved_providers, include_destroyed, reset_caches)
+        outcome = _run_discovery(mngr_ctx, resolved_providers, include_destroyed, reset_caches)
 
         # Verify all identifiers were found; if not, the event stream was stale
-        if _all_identifiers_found(agent_identifiers, agents_by_host):
-            return agents_by_host, providers
+        if _all_identifiers_found(agent_identifiers, outcome.agents_by_host):
+            return outcome
 
         # Fall back to a full scan. Provider instances are cached so this
         # does not leak resources even though get_all_provider_instances is called again.
@@ -249,7 +297,7 @@ def discover_by_address(
     mngr_ctx: MngrContext,
     include_destroyed: bool = False,
     reset_caches: bool = False,
-) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
+) -> DiscoveryOutcome:
     """Discover hosts and agents scoped by a single :class:`AgentAddress`.
 
     The address's provider (if any) narrows discovery so we skip irrelevant
@@ -261,7 +309,7 @@ def discover_by_address(
     if address.host is not None and address.host.provider is not None:
         provider_names = (str(address.host.provider),)
 
-    agents_by_host, providers = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
         agent_identifiers=(str(address.agent),),
@@ -270,12 +318,12 @@ def discover_by_address(
     )
 
     if address.host is None:
-        return dict(agents_by_host), providers
+        return outcome
 
     constraint: HostAddress = address.host
     filtered = {
         host_ref: agent_refs
-        for host_ref, agent_refs in agents_by_host.items()
+        for host_ref, agent_refs in outcome.agents_by_host.items()
         if constraint.matches_host(host_ref.host_id, host_ref.host_name, host_ref.provider_name)
     }
-    return filtered, providers
+    return outcome.model_copy_update(to_update(outcome.field_ref().agents_by_host, filtered))

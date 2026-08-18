@@ -705,6 +705,9 @@ export interface RecoveryInfo {
   health_error: string;
   ssh_command: string;
   is_host_offline: boolean;
+  is_backend_unreachable: boolean;
+  provider_label: string;
+  unreachable_reason: string;
 }
 
 interface RestartStatusPayload {

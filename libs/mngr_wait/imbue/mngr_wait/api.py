@@ -64,13 +64,14 @@ def _build_agent_resolved_target(address: AgentAddress, mngr_ctx: MngrContext) -
 
 
 def _build_host_resolved_target(address: HostAddress, mngr_ctx: MngrContext) -> ResolvedTarget:
-    agents_by_host, _ = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
     all_hosts = list(agents_by_host.keys())
     host_ref = filter_one_host(address, all_hosts)
     provider = get_provider_instance(host_ref.provider_name, mngr_ctx)

@@ -43,7 +43,7 @@ export function workspacesMessage(overrides: Partial<UiWorkspacesMessage> = {}):
         name: "alpha",
         accent: "#aabbcc",
         host_id: "host-bb22",
-        is_stale: false,
+        is_backend_unreachable: false,
         supports_shutdown: true,
         liveness: "RUNNING",
         account: "",

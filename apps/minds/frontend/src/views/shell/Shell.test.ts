@@ -44,7 +44,7 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     currentRouteSearch: () => `workspace=${WORKSPACE_ID}`,
     closeAppOverlay: () => true,
     stores: {
-      workspaces: { toAgentScopedId: (anyId: string) => anyId },
+      workspaces: { toAgentScopedId: (anyId: string) => anyId, entryByAnyId: () => null },
       health: { statusFor: () => "healthy", discoveryHealth: "healthy" },
     },
     isRecoveryModalOpenFor: () => false,

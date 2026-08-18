@@ -2,7 +2,6 @@ import json
 import os
 import threading
 from collections.abc import Callable
-from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
@@ -44,7 +43,6 @@ from imbue.minds.desktop_client.assist_chat import AssistSupport
 from imbue.minds.desktop_client.assist_chat import check_assist_support
 from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
 from imbue.minds.desktop_client.auth import AuthStoreInterface
-from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
@@ -76,6 +74,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_works
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -122,6 +121,7 @@ from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
+from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
@@ -269,18 +269,6 @@ def _handle_authenticate() -> Response:
         samesite="lax",
     )
     return response
-
-
-def _is_workspace_provider_errored(info: AgentDisplayInfo | None, errored_provider_names: Collection[str]) -> bool:
-    """True when the agent's provider's most recent discovery poll errored.
-
-    Such a workspace is "stale": it was retained from prior state, so its
-    host is unreachable (or at least unverified) until the provider
-    recovers. Callers build ``errored_provider_names`` once from
-    ``backend_resolver.get_provider_errors()`` -- as a set when checking
-    many agents -- and reuse it across calls.
-    """
-    return info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
 
 
 def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
@@ -1076,6 +1064,10 @@ def _create_attempt_row_entry(row: CreateAttemptRow) -> dict[str, str]:
 def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
+    # Supplies each workspace's outage onset, which is what the backend-unreachable
+    # verdict is freshness-gated against. Optional so this builder stays callable
+    # without a tracker; without one the verdict falls back to absolute snapshot age.
+    tracker: SystemInterfaceHealthTracker | None = None,
     # In-flight / interrupted / failed create attempt rows to merge into the list
     # (see ``_visible_create_attempt_rows``). A parameter -- not read from the app
     # state here -- so this builder stays callable outside a request context.
@@ -1091,9 +1083,15 @@ def _build_workspace_list(
     workspace color. The contrasting titlebar foreground is no longer sent --
     the chrome derives it from the accent in pure CSS (``.titlebar-surface``).
 
-    Entries whose provider's latest discovery poll errored carry
-    ``is_stale="true"`` so the UI can flag them as
-    retained-but-unverified (they remain fully interactive).
+    Entries whose backend the recovery verdict reads as unreachable carry
+    ``is_backend_unreachable="true"``, which is how the recovery band knows it
+    may name the backend instead of reporting a generic loss of contact. It is
+    the card's own verdict (``read_backend_unreachable_verdict``), not a raw
+    "this provider's last poll errored" flag, so the band and the card cannot
+    disagree -- in particular a provider error latched from an earlier episode
+    does not get to explain a fresh outage. An entry whose provider discovery has
+    named also carries that provider's friendly name as ``provider_label``, which
+    is what the band renders and what the machines list badges on its own.
 
     Shutdown-capable minds (those on a provider whose host minds can stop/start,
     see :func:`provider_backend_supports_shutdown`) additionally carry
@@ -1102,7 +1100,6 @@ def _build_workspace_list(
     a liveness change makes the entry differ, so the existing ``workspaces``
     diff pushes it. Non-capable minds carry neither field.
     """
-    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
     agent_ids = backend_resolver.list_active_workspace_ids()
     workspaces: list[dict[str, str]] = []
@@ -1122,11 +1119,14 @@ def _build_workspace_list(
             "name": ws_name,
             "accent": accent,
         }
-        # Mark the workspace stale when its provider's most recent discovery
-        # poll errored: it was retained from prior state, so its liveness is
-        # unverified rather than confirmed healthy.
-        if _is_workspace_provider_errored(info, errored_provider_names):
-            entry["is_stale"] = "true"
+        # The recovery card's verdict, run per row so the band reports the same
+        # thing the card behind "Open recovery" will. Read here rather than
+        # derived from the error map directly because the verdict is
+        # freshness-gated, and the gate needs this workspace's outage onset.
+        if read_backend_unreachable_verdict(aid, backend_resolver=backend_resolver, tracker=tracker) is not None:
+            entry["is_backend_unreachable"] = "true"
+        if info is not None and info.provider_name is not None:
+            entry["provider_label"] = friendly_provider_label(info.provider_name)
         liveness = liveness_by_agent_id.get(str(aid))
         if liveness is not None:
             entry["supports_shutdown"] = "true"
@@ -1825,7 +1825,8 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         name=entry["name"],
         accent=entry["accent"],
         host_id=entry.get("host_id", ""),
-        is_stale=entry.get("is_stale") == "true",
+        is_backend_unreachable=entry.get("is_backend_unreachable") == "true",
+        provider_label=entry.get("provider_label", ""),
         supports_shutdown=entry.get("supports_shutdown") == "true",
         liveness=entry.get("liveness", ""),
         account=entry.get("account", ""),
@@ -1858,7 +1859,10 @@ def _derive_ui_workspaces_message(
 ) -> UiWorkspacesMessage:
     with app.app_context():
         rows = _build_workspace_list(
-            backend_resolver, session_store, create_attempt_rows=_visible_create_attempt_rows(backend_resolver)
+            backend_resolver,
+            session_store,
+            tracker=get_state().system_interface_health_tracker,
+            create_attempt_rows=_visible_create_attempt_rows(backend_resolver),
         )
         restorable_ids = [str(aid) for aid in backend_resolver.list_restorable_workspace_ids()] + [
             str(hid) for hid in backend_resolver.list_restorable_workspace_host_ids()
@@ -2155,6 +2159,15 @@ def create_desktop_client(
 
         def _publish_ui_health_edge(agent_id: AgentId, status: AgentHealth) -> None:
             ui_publisher.publish_health(_ui_health_message(_health_tracker_for_ui, str(agent_id), status))
+            # A health edge also records (or clears) the outage onset, which is
+            # what the workspace list's freshness-gated is_backend_unreachable is
+            # measured against -- so the row can change with no resolver event
+            # behind it. Without this wake the list would keep its pre-onset
+            # answer until some unrelated producer fired, which during an outage
+            # of the workspace's own provider may be a full poll interval away.
+            # The publisher diffs, so an edge that changes no row broadcasts
+            # nothing.
+            ui_publisher.notify_change()
 
         _health_tracker_for_ui.add_on_change_callback(_publish_ui_health_edge)
 

@@ -49,16 +49,33 @@ function discoveryBlockedNotice(isRestartAppAvailable: boolean): NoticePayload {
  *
  * Discovery death outranks the machine's own health because it explains it:
  * while the consumer is dead every machine reads stuck, and only one of the
- * two conditions has an action that helps.
+ * two conditions has an action that helps. An unreachable backend is the same
+ * shape one scale down: this machine reads stuck because minds cannot reach the
+ * provider that hosts it, so the band names the provider rather than the
+ * machine. It keeps the recovering notice's key -- the condition is still "we
+ * have lost contact and are still trying", only better explained -- so the
+ * strip is not rewritten as a provider error lands and clears.
  */
 export function noticeBandFor(
   workspaceHealth: WorkspaceHealth,
   discoveryHealth: DiscoveryHealth,
   isWorkspaceDisplayed: boolean,
   isRestartAppAvailable = true,
+  unreachableProviderLabel: string | null = null,
 ): NoticePayload | null {
   if (!isWorkspaceDisplayed) return null;
   if (discoveryHealth === "blocked") return discoveryBlockedNotice(isRestartAppAvailable);
+  if (workspaceHealth !== "healthy" && unreachableProviderLabel !== null) {
+    return {
+      key: "workspace-recovering",
+      variant: "warn",
+      // The cause alone. One line over the machine's own screen has room for
+      // the condition, not for what it means for this machine or what minds is
+      // doing about it -- the card behind "Open recovery" says both.
+      message: `Can't connect to ${unreachableProviderLabel}`,
+      action: { label: "Open recovery", kind: "open-recovery" },
+    };
+  }
   if (workspaceHealth === "restart_failed") {
     return {
       key: "workspace-restart-failed",

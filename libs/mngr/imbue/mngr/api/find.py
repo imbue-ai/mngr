@@ -1,6 +1,8 @@
+from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 from typing import assert_never
 
 from loguru import logger
@@ -10,6 +12,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discover import DiscoveryOutcome
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.providers import get_local_host
@@ -18,7 +21,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStateInconsistencyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.errors import parse_provider_unavailable_reason
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -296,13 +301,14 @@ def resolve_host_location(
     agent_identifiers: tuple[str, ...] | None = None
     if parsed.agent is not None:
         agent_identifiers = (str(parsed.agent),)
-    agents_by_host, _providers = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
         agent_identifiers=agent_identifiers,
         include_destroyed=False,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
     return resolve_host_location_address(
         parsed,
         agents_by_host,
@@ -452,6 +458,64 @@ class AgentMatch(FrozenModel):
     provider_name: ProviderInstanceName = Field(description="Name of the provider instance that owns the host")
 
 
+def _raise_for_unmatched_identifiers(
+    unmatched_identifiers: Collection[AgentNameOrId],
+    outcome: DiscoveryOutcome,
+) -> NoReturn:
+    """Fail a lookup whose identifiers matched nothing, naming the reason we have.
+
+    "Not found" is only honest when discovery could actually see everywhere the
+    agent might be. A provider that failed to construct -- a Docker daemon that
+    is not running, a cloud provider we cannot reach -- is silently absent from
+    the snapshot, so an agent living on it looks exactly like an agent that does
+    not exist. Reporting that as "not found" sends the reader looking for a
+    deleted machine when the real problem is a backend that is down, and it is
+    the one case where the *provider's* error is the useful message.
+
+    Note this deliberately reports an outage even when the unreachable provider
+    is not known to be the agent's: with the provider unreachable, which agents
+    it holds is exactly what cannot be established.
+    """
+    unmatched_list = ", ".join(sorted(str(i) for i in unmatched_identifiers))
+    # Name what discovery DID return before failing: "not found" can also be a
+    # gap within a provider that *did* answer (a host whose record reads failed
+    # reports its agents as absent), and this summary is what tells those apart
+    # after the fact.
+    discovered_summary = (
+        "; ".join(
+            f"{host_ref.provider_name}/{host_ref.host_name} ({host_ref.host_id}, "
+            f"state={host_ref.host_state.value if host_ref.host_state is not None else 'unknown'}): "
+            f"{len(agent_refs)} agent(s)"
+            for host_ref, agent_refs in sorted(outcome.agents_by_host.items(), key=lambda kv: str(kv[0].host_id))
+        )
+        or "no hosts"
+    )
+    logger.warning("Agent lookup failed for {}; discovery returned: {}", unmatched_list, discovered_summary)
+    unavailable_providers = outcome.unavailable_providers
+    if unavailable_providers:
+        unreachable = unavailable_providers[0]
+        # The skip carries the provider's *rendered* error, not its bare reason,
+        # so it is unwrapped before being wrapped again -- otherwise the provider
+        # is named twice and mngr's marker sentence trails the message twice.
+        # A subclass with its own message shape carries no marker, and keeps it.
+        reason = (
+            parse_provider_unavailable_reason(unreachable.error_message, str(unreachable.provider_name))
+            or unreachable.error_message
+        )
+        # The provider's own remediation rides along, because the default this
+        # constructor would otherwise supply tells the user to start Docker --
+        # wrong advice for the cloud credential failures that curate their own.
+        # The exception's *class* does not survive the skip (a name is all it
+        # holds), so a ProviderNotAuthorizedError arrives as its base here; no
+        # caller on this path branches on that, and the text is what is read.
+        raise ProviderUnavailableError(
+            unreachable.provider_name,
+            f"{reason} (so mngr cannot tell whether {unmatched_list} exists)",
+            user_help_text=unreachable.user_help_text,
+        )
+    raise AgentNotFoundError(f"No agent(s) found matching: {unmatched_list}")
+
+
 def _find_agents_by_identifiers_or_state(
     agent_identifiers: Sequence[AgentNameOrId],
     filter_all: bool,
@@ -468,15 +532,18 @@ def _find_agents_by_identifiers_or_state(
 
     When provider_names is set, only those providers are queried during discovery.
 
-    Raises AgentNotFoundError if any identifier does not match an agent.
+    Raises AgentNotFoundError if any identifier does not match an agent, or
+    ProviderUnavailableError if a provider that could have hosted it was
+    unreachable (see :func:`_raise_for_unmatched_identifiers`).
     """
-    agents_by_host, _ = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
         agent_identifiers=tuple(str(i) for i in agent_identifiers) if not filter_all and agent_identifiers else None,
         include_destroyed=include_destroyed,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
 
     candidates: list[AgentMatch] = []
     matched_identifiers: set[AgentNameOrId] = set()
@@ -514,22 +581,7 @@ def _find_agents_by_identifiers_or_state(
     if agent_identifiers:
         unmatched_identifiers = set(agent_identifiers) - matched_identifiers
         if unmatched_identifiers:
-            unmatched_list = ", ".join(sorted(str(i) for i in unmatched_identifiers))
-            # Name what discovery DID return before failing: "not found" can be
-            # a discovery gap (a provider whose record reads failed reports its
-            # hosts/agents as absent) rather than a truly-absent agent, and this
-            # summary is what tells the two apart after the fact.
-            discovered_summary = (
-                "; ".join(
-                    f"{host_ref.provider_name}/{host_ref.host_name} ({host_ref.host_id}, "
-                    f"state={host_ref.host_state.value if host_ref.host_state is not None else 'unknown'}): "
-                    f"{len(agent_refs)} agent(s)"
-                    for host_ref, agent_refs in sorted(agents_by_host.items(), key=lambda kv: str(kv[0].host_id))
-                )
-                or "no hosts"
-            )
-            logger.warning("Agent lookup failed for {}; discovery returned: {}", unmatched_list, discovered_summary)
-            raise AgentNotFoundError(f"No agent(s) found matching: {unmatched_list}")
+            _raise_for_unmatched_identifiers(unmatched_identifiers, outcome)
 
     if not filter_all or target_state is None:
         return candidates
@@ -695,9 +747,20 @@ def find_one_agent_and_agents_by_host(
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
-    agent cannot be resolved (see :func:`filter_one_agent`).
+    agent cannot be resolved (see :func:`filter_one_agent`), or
+    :class:`ProviderUnavailableError` in place of either when a provider that
+    could have held the agent was unreachable (see
+    :func:`_raise_for_unmatched_identifiers`).
     """
-    agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
+    outcome = discover_by_address(address, mngr_ctx, include_destroyed=False)
+    agents_by_host = outcome.agents_by_host
+    # An agent on a provider discovery could not reach is absent from the
+    # snapshot in exactly the way a deleted one is, so neither "not found" nor
+    # "no hosts matching" is honest until every provider has answered. Checked
+    # on nothing-matched only: an ambiguous name is a complete answer, and a
+    # backend that happens to be down does not make it less complete.
+    if outcome.unavailable_providers and not _filter_all_agents(address.agent, agents_by_host):
+        _raise_for_unmatched_identifiers((address.agent,), outcome)
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 

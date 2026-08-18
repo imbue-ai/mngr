@@ -11,9 +11,9 @@ renders:
   color), plus the ``?retry=<create_attempt_id>`` pre-fill from a pending
   record.
 - ``GET /ui/api/create/landing-extras`` -- landing-page facts that do not ride
-  the ``workspaces`` channel message (per-workspace provider labels, destroy
-  run/failed statuses, locked-account emails for the sync-unlock banner, and
-  the discovery-completeness flag driving the empty-state choice).
+  the ``workspaces`` channel message (destroy run/failed statuses,
+  locked-account emails for the sync-unlock banner, and the
+  discovery-completeness flag driving the empty-state choice).
 - ``GET /ui/api/create/attempts/<create_attempt_id>`` -- the Creating page's
   detail: the live in-flight attempt, the record-backed interrupted/failed
   view, or "gone".
@@ -143,7 +143,6 @@ class CreateFormDefaultsResponse(FrozenModel):
 class LandingExtrasResponse(FrozenModel):
     """Landing-page facts that do not ride the ``workspaces`` channel message."""
 
-    provider_label_by_agent_id: dict[str, str] = Field(description="Friendly compute-provider label per workspace")
     destroying_status_by_agent_id: dict[str, str] = Field(description="agent id -> running | failed destroys")
     locked_account_emails: tuple[str, ...] = Field(description="Accounts with synced secrets but no local key")
     is_discovery_complete: bool = Field(description="Whether initial discovery has completed")
@@ -356,10 +355,6 @@ def _handle_landing_extras() -> Response:
         return _unauthenticated_response()
     state = get_state()
     backend_resolver = state.backend_resolver
-    provider_labels: dict[str, str] = {}
-    for agent_id in backend_resolver.list_active_workspace_ids():
-        info = backend_resolver.get_agent_display_info(agent_id)
-        provider_labels[str(agent_id)] = friendly_provider_label(info.provider_name if info else None)
     session_store = state.session_store
     locked_emails: tuple[str, ...] = ()
     if session_store is not None and session_store.record_store is not None and state.api_v1_paths is not None:
@@ -369,7 +364,6 @@ def _handle_landing_extras() -> Response:
         )
         locked_emails = tuple(str(account.email) for account in accounts if str(account.user_id) in locked_user_ids)
     response = LandingExtrasResponse(
-        provider_label_by_agent_id=provider_labels,
         destroying_status_by_agent_id=_destroying_statuses(backend_resolver),
         locked_account_emails=locked_emails,
         is_discovery_complete=backend_resolver.has_completed_initial_discovery(),

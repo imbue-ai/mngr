@@ -63,6 +63,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
@@ -128,6 +129,21 @@ OnRecoveryCallback = Callable[[AgentId], None]
 OnStuckEdgeCallback = Callable[[AgentId], None]
 
 
+class BackendOutageObservation(FrozenModel):
+    """A backend outage observed in-band, by a command mngr rejected at the provider.
+
+    Held by the tracker so the recovery surfaces can read it, because such a
+    rejection is the *first* observation of an outage anywhere: it comes from a
+    live command, whereas the discovery snapshot that would otherwise carry the
+    same outage is up to a provider poll interval away. ``observed_at`` is what
+    bounds its authority -- see ``get_backend_outage``.
+    """
+
+    provider_name: str = Field(description="Provider instance the command was rejected at")
+    reason: str = Field(description="That provider's own account of why it is unavailable")
+    observed_at: datetime = Field(description="Wall-clock (UTC) moment the rejection was observed")
+
+
 class _AgentRecord(MutableModel):
     """Per-agent mutable state owned by the tracker. Not exposed to callers."""
 
@@ -158,9 +174,31 @@ class _AgentRecord(MutableModel):
             "timestamps. None whenever ``failure_run_started_at`` is None."
         ),
     )
+    outage_started_wall_at: datetime | None = Field(
+        default=None,
+        description=(
+            "Wall-clock (UTC) start of this whole unhealthy episode, captured with the first "
+            "probe failure that opened it. Unlike ``failure_run_started_wall_at`` it survives "
+            "the restart attempts made during the episode -- those clear the failure *run* "
+            "because the machine is already known-bad, but the outage they are responding to "
+            "began when the machine stopped answering, and evidence gathered before that "
+            "moment describes the world before it. Cleared with the record when a probe "
+            "observes the machine answering again."
+        ),
+    )
     last_restart_error: str | None = Field(
         default=None,
         description="Failure reason carried while health is RESTART_FAILED, for the recovery page to render.",
+    )
+    backend_outage: BackendOutageObservation | None = Field(
+        default=None,
+        description=(
+            "The machine's backend reported unavailable by a command mngr rejected at the "
+            "provider during this episode. Unlike ``last_restart_error`` a fresh restart attempt "
+            "does not supersede it: it describes the backend rather than the attempt, and the "
+            "next attempt is routed through that same backend. Cleared with the record when a "
+            "probe observes the machine answering again."
+        ),
     )
     restart_is_start_only: bool | None = Field(
         default=None,
@@ -427,6 +465,11 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.failure_run_started_at is None:
                 record.failure_run_started_at = now
                 record.failure_run_started_wall_at = datetime.now(timezone.utc)
+                # Opens the episode too, if this is the run that started it. A
+                # later run within the same episode cannot reach here (this
+                # branch needs HEALTHY), so the earliest failure keeps the mark.
+                if record.outage_started_wall_at is None:
+                    record.outage_started_wall_at = record.failure_run_started_wall_at
             elapsed = now - record.failure_run_started_at
             if elapsed + 1e-6 >= self.stuck_threshold_seconds:
                 record.health = AgentHealth.STUCK
@@ -568,6 +611,35 @@ class SystemInterfaceHealthTracker(MutableModel):
                 return None
             return record.last_restart_error
 
+    def record_backend_outage(self, agent_id: AgentId, provider_name: str, reason: str) -> None:
+        """Record that ``provider_name`` rejected a command for ``agent_id`` as unavailable.
+
+        Called from the restart worker, which is where minds first runs a command
+        against a machine whose backend has gone down. Recording it is what lets
+        the recovery surfaces name the backend on the same edge that raises them,
+        rather than a provider poll later.
+        """
+        with self._lock:
+            record = self._records.setdefault(str(agent_id), _AgentRecord())
+            record.backend_outage = BackendOutageObservation(
+                provider_name=provider_name, reason=reason, observed_at=datetime.now(timezone.utc)
+            )
+
+    def get_backend_outage(self, agent_id: AgentId) -> BackendOutageObservation | None:
+        """Return the backend outage observed in-band for ``agent_id``, or None.
+
+        Returned as observed, with the moment attached: this is the tracker
+        remembering what a command reported, not a verdict. A caller deciding
+        whether it still describes the backend *now* must weigh it against what
+        discovery has reported since -- see ``_recorded_backend_outage_reason``
+        in ``workspace_recovery``, which is the one place that does.
+        """
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None:
+                return None
+            return record.backend_outage
+
     def get_restart_is_start_only(self, agent_id: AgentId) -> bool | None:
         """Return whether the in-flight restart is start-only, or None if not RESTARTING.
 
@@ -586,17 +658,34 @@ class SystemInterfaceHealthTracker(MutableModel):
     def get_failure_run_started_wall_at(self, agent_id: AgentId) -> datetime | None:
         """Return the wall-clock (UTC) start of the current probe-failure run, or None.
 
-        Approximates the outage onset -- the run begins on the first failed probe,
-        which is when the workspace stopped answering. The recovery redirect uses
-        this to require a discovery snapshot taken *after* the outage began before
-        it trusts the snapshot's host state. None when no probe-failure run is
-        active (the agent is healthy, or was force-marked STUCK without a run).
+        The run begins on the first failed probe and ends at the next restart
+        attempt, which clears it: the machine is already known-bad, so the run
+        has nothing left to decide. A caller asking when the *outage* began wants
+        :meth:`get_outage_started_wall_at`, which spans those attempts.
         """
         with self._lock:
             record = self._records.get(str(agent_id))
             if record is None:
                 return None
             return record.failure_run_started_wall_at
+
+    def get_outage_started_wall_at(self, agent_id: AgentId) -> datetime | None:
+        """Return the wall-clock (UTC) moment this machine stopped answering, or None.
+
+        The outage onset: the first probe failure of the current unhealthy
+        episode, held until a probe observes the machine answering again. Recovery
+        compares discovery snapshots against it to decide whether what the
+        resolver reports describes *this* outage or the world before it, so it
+        must span the episode -- a restart attempt part-way through does not make
+        pre-outage evidence current, and the failure *run* is cleared by exactly
+        that. None when the machine is healthy, or was force-marked STUCK with no
+        probe-failure run behind it.
+        """
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None:
+                return None
+            return record.outage_started_wall_at
 
     def snapshot_all(self) -> dict[AgentId, AgentHealth]:
         """Return a copy of all currently-tracked non-HEALTHY agents.

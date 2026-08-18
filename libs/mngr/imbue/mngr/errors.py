@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -279,6 +280,47 @@ class ProviderError(MngrError):
         super().__init__(message)
 
 
+# Marker sentence every generic ``ProviderUnavailableError`` message ends with.
+# Private: out-of-process callers go through ``parse_provider_unavailable_reason``
+# below rather than matching this themselves, so the message shape is known in
+# exactly one place. Subclasses that bypass the generic shape -- ``ModalAuthError``
+# preserves its own verbatim message -- do NOT carry this marker.
+_PROVIDER_UNAVAILABLE_MESSAGE: Final[str] = "Any agents managed by this provider could not be reached."
+
+# Extracts the provider name and the ``{reason}`` half of the generic message
+# built below. Lives next to the format string it mirrors so the two cannot
+# drift; ``.+?`` is non-greedy so a reason containing its own sentence breaks
+# still ends at the marker. A provider instance name cannot contain a quote, so
+# the quoted name is captured up to the next one.
+_PROVIDER_UNAVAILABLE_REASON_REGEX: Final[re.Pattern[str]] = re.compile(
+    r"Provider '(?P<provider>[^']*)' is not available: (?P<reason>.+?)\.\s+"
+    + re.escape(_PROVIDER_UNAVAILABLE_MESSAGE),
+    re.DOTALL,
+)
+
+
+def parse_provider_unavailable_reason(text: str, provider_name: str | None) -> str | None:
+    """Return ``provider_name``'s own failure reason if ``text`` carries its ``ProviderUnavailableError``.
+
+    ``text`` is whatever an out-of-process caller captured (typically an mngr
+    subprocess's stderr, which wraps the message in ``Error: ...`` and may append
+    the help text), so the marker is searched for rather than matched against the
+    whole string. Returns None when the text is not a provider-unavailable
+    failure -- including the subclasses that preserve their own message shape.
+
+    ``provider_name`` is the provider the caller is asking about, and only a
+    message naming that provider answers: a command aborts on whichever provider
+    it queried first turned out to be unavailable, which need not be the one the
+    caller cares about, and reporting some other backend's outage as theirs is
+    worse than reporting nothing. Pass None to take whichever provider the text
+    names, for a caller with no provider to compare against.
+    """
+    for match in _PROVIDER_UNAVAILABLE_REASON_REGEX.finditer(text):
+        if provider_name is None or match.group("provider") == provider_name:
+            return match.group("reason").strip()
+    return None
+
+
 class ProviderUnavailableError(ProviderError):
     """Provider backend is not reachable (e.g. Docker daemon not running).
 
@@ -312,8 +354,7 @@ class ProviderUnavailableError(ProviderError):
         self.short_remediation = short_remediation
         super().__init__(
             provider_name,
-            f"Provider '{provider_name}' is not available: {reason}. "
-            f"Any agents managed by this provider could not be reached.",
+            f"Provider '{provider_name}' is not available: {reason}. {_PROVIDER_UNAVAILABLE_MESSAGE}",
         )
         # Providers whose "unavailable" cause is not a local daemon (e.g. a cloud
         # provider failing on credentials/subscription) pass curated guidance so

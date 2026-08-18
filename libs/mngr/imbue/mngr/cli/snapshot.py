@@ -155,13 +155,14 @@ def _find_snapshot_targets(
     if provider_names is None:
         agent_identifiers = _agent_identifiers_for_targets(addresses)
 
-    agents_by_host, _ = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=tuple(str(p) for p in provider_names) if provider_names is not None else None,
         agent_identifiers=agent_identifiers,
         include_destroyed=False,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
 
     all_hosts = list(agents_by_host.keys())
     result: dict[DiscoveredHost, list[AgentName]] = {}

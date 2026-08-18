@@ -1647,13 +1647,13 @@ def test_replay_window_reaches_last_healthy_snapshot_when_provider_is_errored(te
 
 def _live_discovery_fallback(mngr_ctx: MngrContext, identifiers: Sequence[str]) -> list[DiscoveredAgent]:
     """Test stand-in for the live-discovery fallback the stop CLI injects into resolution."""
-    agents_by_host, _providers = discover_hosts_and_agents(
+    agents_by_host = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,
         agent_identifiers=tuple(identifiers),
         include_destroyed=False,
         reset_caches=False,
-    )
+    ).agents_by_host
     return [agent for agent_refs in agents_by_host.values() for agent in agent_refs]
 
 

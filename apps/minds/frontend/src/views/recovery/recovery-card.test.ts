@@ -21,6 +21,9 @@ const UNRESPONSIVE: RecoveryInfo = {
   health_error: "",
   ssh_command: "",
   is_host_offline: false,
+  is_backend_unreachable: false,
+  provider_label: "",
+  unreachable_reason: "",
 };
 
 /** A model holding a given reading, with no poller running behind it. */
@@ -63,6 +66,43 @@ describe("RecoveryCardBody", () => {
     const text = renderCard({ ...UNRESPONSIVE, health: "stuck" });
     expect(text).toContain("my-machine isn't responding yet.");
     expect(text).toContain("Minds is still checking what's wrong.");
+    expect(text).toContain("Restart Machine");
+  });
+
+  it("names the backend and withholds the restart when the backend is unreachable", () => {
+    // The restart is dispatched through the same provider, so offering it here
+    // would be offering an action that cannot work. The provider's own error is
+    // shown verbatim rather than collapsed into copy minds authored.
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      is_backend_unreachable: true,
+      provider_label: "Docker",
+      unreachable_reason: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+    });
+
+    expect(text).toContain("my-machine unreachable: Can't connect to Docker");
+    expect(text).toContain("Minds will reconnect you to your machine as soon as it can be reached again.");
+    expect(text).toContain("Cannot connect to the Docker daemon at unix:///var/run/docker.sock");
+    expect(text).not.toContain("Restart Machine");
+    // A card with no remedy still has to let the user say something about it.
+    expect(text).toContain("Report a problem");
+  });
+
+  it("still reports a machine that is answering, whatever its provider's last poll did", () => {
+    // A provider poll can error while its machines keep answering through the
+    // forward, so an erroring provider is not by itself a machine minds cannot
+    // reach. The band withholds the same verdict on a healthy machine; the card
+    // has to agree, and it is the surface that owes the user the ending.
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      health: "healthy",
+      is_backend_unreachable: true,
+      provider_label: "Imbue Cloud",
+      unreachable_reason: "could not reach Imbue Cloud",
+    });
+
+    expect(text).toContain("my-machine is responding again.");
+    expect(text).not.toContain("Can't connect to Imbue Cloud");
     expect(text).toContain("Restart Machine");
   });
 

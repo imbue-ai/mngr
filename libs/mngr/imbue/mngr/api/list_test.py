@@ -1,5 +1,7 @@
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -16,9 +18,12 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
 from imbue.mngr.api.discover import _discover_provider_hosts_and_agents
+from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
+from imbue.mngr.api.find import find_all_agents
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import AgentErrorInfo
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import HostErrorInfo
@@ -38,11 +43,14 @@ from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.errors import UserInputError
+from imbue.mngr.errors import parse_provider_unavailable_reason
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -52,6 +60,7 @@ from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -60,6 +69,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -67,6 +77,7 @@ from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 from imbue.mngr.providers.registry import _backend_registry
@@ -1020,17 +1031,17 @@ def test_discover_hosts_and_agents_returns_empty_for_no_agents(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """discover_hosts_and_agents should return empty dict when no agents exist."""
-    agents_by_host, providers = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         temp_mngr_ctx,
         provider_names=None,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
     )
-    assert isinstance(agents_by_host, dict)
-    assert isinstance(providers, list)
+    assert isinstance(outcome.agents_by_host, dict)
+    assert isinstance(outcome.providers, list)
     # At least the local provider should be present
-    assert len(providers) > 0
+    assert len(outcome.providers) > 0
 
 
 def test_discover_hosts_and_agents_full_discovery_skips_optimization(
@@ -1045,7 +1056,7 @@ def test_discover_hosts_and_agents_full_discovery_skips_optimization(
     # If it tried the optimization with a bogus identifier, it would either
     # error or return filtered results -- but with full discovery it just
     # does a normal scan and returns everything.
-    agents_by_host, providers = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         safe_ctx,
         provider_names=None,
         agent_identifiers=("nonexistent-agent-xyz",),
@@ -1053,8 +1064,41 @@ def test_discover_hosts_and_agents_full_discovery_skips_optimization(
         reset_caches=False,
     )
     # Should succeed (full scan) rather than fail trying to resolve the identifier
-    assert isinstance(agents_by_host, dict)
-    assert len(providers) > 0
+    assert isinstance(outcome.agents_by_host, dict)
+    assert len(outcome.providers) > 0
+
+
+def test_discover_by_address_narrows_to_the_constrained_host(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A host constraint drops the hosts it excludes while the rest of the outcome survives.
+
+    The constrained result is a rebuild of the unconstrained one, so it has two
+    ways to go wrong that both read as success at the call site: the hosts the
+    constraint excludes come back anyway, or the outcome's other fields (the
+    providers that answered, and the ones that could not be reached) are lost on
+    the way through. ``mngr pair --source-host`` resolves its source through
+    exactly this path.
+    """
+    unconstrained = discover_by_address(
+        AgentAddress(agent=AgentName("no-such-agent")),
+        temp_mngr_ctx,
+    )
+    assert HostName(LOCAL_HOST_NAME) in {host_ref.host_name for host_ref in unconstrained.agents_by_host}
+
+    excluded = discover_by_address(
+        AgentAddress(agent=AgentName("no-such-agent"), host=HostAddress(host=HostName("no-such-host"))),
+        temp_mngr_ctx,
+    )
+    assert excluded.agents_by_host == {}
+    assert excluded.providers == unconstrained.providers
+    assert excluded.skipped_providers == unconstrained.skipped_providers
+
+    kept = discover_by_address(
+        AgentAddress(agent=AgentName("no-such-agent"), host=HostAddress(host=HostName(LOCAL_HOST_NAME))),
+        temp_mngr_ctx,
+    )
+    assert {host_ref.host_name for host_ref in kept.agents_by_host} == {HostName(LOCAL_HOST_NAME)}
 
 
 # =============================================================================
@@ -1322,7 +1366,7 @@ def test_discover_hosts_and_agents_groups_agents_by_host(
         ),
     )
 
-    agents_by_host, providers = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         temp_mngr_ctx,
         provider_names=None,
         agent_identifiers=None,
@@ -1333,12 +1377,12 @@ def test_discover_hosts_and_agents_groups_agents_by_host(
     local_host.destroy_agent(agent)
 
     # There should be at least one host with agents
-    non_empty_hosts = {k: v for k, v in agents_by_host.items() if v}
+    non_empty_hosts = {k: v for k, v in outcome.agents_by_host.items() if v}
     assert len(non_empty_hosts) >= 1
 
     # Find our agent in the results
     found_agent = False
-    for _host_ref, agent_refs in agents_by_host.items():
+    for _host_ref, agent_refs in outcome.agents_by_host.items():
         for ref in agent_refs:
             if str(ref.agent_name) == "grouped-test":
                 found_agent = True
@@ -2663,3 +2707,168 @@ def test_process_host_with_error_handling_abort_mode_propagates_error(
         )
 
     assert result.errors == []
+
+
+_UNCONSTRUCTABLE_BACKEND_NAME = ProviderBackendName("test-unconstructable-backend")
+_UNCONSTRUCTABLE_REASON = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+# Stands in for the guidance the cloud backends curate (``run `modal token new``,
+# the AWS credential-chain checklist): text that is only right for this provider,
+# and that the constructor's generic default would replace with "start Docker".
+_UNCONSTRUCTABLE_HELP_TEXT = "Start the test daemon, or run `mngr config set ...` to disable this provider."
+
+
+class _UnconstructableProviderBackend(ProviderBackendInterface):
+    """Backend that reports itself unreachable while being *constructed*.
+
+    The shape the real Docker backend has: a dead daemon is detected in
+    ``build_provider_instance`` (via its state-container check), not on a later
+    discovery call, so the provider never becomes an instance that discovery can
+    query.
+    """
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNCONSTRUCTABLE_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that cannot be constructed because its daemon is down"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        raise ProviderUnavailableError(name, _UNCONSTRUCTABLE_REASON, user_help_text=_UNCONSTRUCTABLE_HELP_TEXT)
+
+
+@contextmanager
+def _registered_unconstructable_backend() -> Iterator[None]:
+    _backend_registry[_UNCONSTRUCTABLE_BACKEND_NAME] = _UnconstructableProviderBackend
+    _provider_config_registry[_UNCONSTRUCTABLE_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        yield
+    finally:
+        del _backend_registry[_UNCONSTRUCTABLE_BACKEND_NAME]
+        del _provider_config_registry[_UNCONSTRUCTABLE_BACKEND_NAME]
+
+
+@pytest.mark.allow_warnings
+def test_discovery_reports_a_provider_it_could_not_construct(temp_mngr_ctx: MngrContext) -> None:
+    """A provider that failed to construct is carried on the outcome, not silently dropped.
+
+    Discovery cannot query it, so its agents are absent from the snapshot exactly
+    as if it held none. Recording the skip is what lets a caller tell those apart.
+    """
+    with _registered_unconstructable_backend():
+        outcome = discover_hosts_and_agents(
+            temp_mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=False,
+            reset_caches=False,
+        )
+
+    assert [str(skipped.provider_name) for skipped in outcome.unavailable_providers] == [
+        str(_UNCONSTRUCTABLE_BACKEND_NAME)
+    ]
+    assert _UNCONSTRUCTABLE_REASON in outcome.unavailable_providers[0].error_message
+    # The providers that *did* answer still came through -- one unreachable
+    # backend must not cost the user the rest of their machines.
+    assert len(outcome.providers) > 0
+
+
+@pytest.mark.allow_warnings
+def test_an_agent_lookup_blames_the_unreachable_backend_rather_than_the_agent(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Looking up an agent while a provider is unreachable is an outage, not a missing agent.
+
+    This is the whole point of carrying the skips: the agent may well live on the
+    provider that is down, so "no agent found" states something discovery is in
+    no position to know. Reporting it that way sends the reader looking for a
+    machine they think they deleted, when the real problem is a backend that is
+    not answering -- and it hides the provider's own explanation, which is the
+    one useful thing anybody has.
+    """
+    with _registered_unconstructable_backend():
+        with pytest.raises(ProviderUnavailableError) as exc_info:
+            find_all_agents(
+                addresses=[AgentAddress(agent=AgentName("some-machine"))],
+                filter_all=False,
+                target_state=None,
+                mngr_ctx=temp_mngr_ctx,
+            )
+
+    message = str(exc_info.value)
+    assert _UNCONSTRUCTABLE_REASON in message
+    assert "some-machine" in message
+    # The skip carries the provider's already-rendered error, so re-wrapping it
+    # unaltered would nest a whole ProviderUnavailableError inside another one:
+    # the provider named twice, mngr's marker sentence trailing twice, and a
+    # reason that the in-band parser then hands to minds with mngr's own wrapper
+    # still on the front of it.
+    assert message.count(f"Provider '{_UNCONSTRUCTABLE_BACKEND_NAME}' is not available") == 1
+    assert parse_provider_unavailable_reason(message, str(_UNCONSTRUCTABLE_BACKEND_NAME)) == (
+        f"{_UNCONSTRUCTABLE_REASON} (so mngr cannot tell whether some-machine exists)"
+    )
+    # The provider's own remediation is the other half of "the useful thing
+    # anybody has", and it is what the CLI prints after the message. Rebuilding
+    # the error from the skip's message alone would swap it for the generic
+    # "start Docker" default -- the advice a cloud credential failure curates
+    # its own text precisely to avoid giving.
+    assert exc_info.value.user_help_text == _UNCONSTRUCTABLE_HELP_TEXT
+
+
+@pytest.mark.allow_warnings
+def test_an_agent_lookup_still_reports_a_genuinely_missing_agent_as_not_found(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With every provider reachable, an absent agent is still plainly absent.
+
+    The outage verdict must not swallow the ordinary case: when discovery could
+    see everywhere, "not found" is the honest answer and the one the user needs.
+    """
+    with pytest.raises(AgentNotFoundError):
+        find_all_agents(
+            addresses=[AgentAddress(agent=AgentName("some-machine"))],
+            filter_all=False,
+            target_state=None,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+
+@pytest.mark.allow_warnings
+def test_the_single_agent_lookup_blames_the_unreachable_backend_too(temp_mngr_ctx: MngrContext) -> None:
+    """The other agent-lookup entry point has to give the same answer.
+
+    ``mngr wait`` / ``transcript`` / ``rename`` / ``file`` and the interactive
+    picker resolve through :func:`find_one_agent`, not :func:`find_all_agents`.
+    A user whose Docker daemon is stopped would otherwise be told the honest
+    thing by ``mngr stop`` and "could not find agent" by ``mngr wait`` on the
+    same machine a second later.
+    """
+    address = AgentAddress(agent=AgentName("some-machine"))
+
+    with _registered_unconstructable_backend():
+        with pytest.raises(ProviderUnavailableError) as exc_info:
+            find_one_agent(address, temp_mngr_ctx)
+
+    assert _UNCONSTRUCTABLE_REASON in str(exc_info.value)
+
+    # With every provider reachable this stays the ordinary bad-input answer.
+    with pytest.raises(UserInputError):
+        find_one_agent(address, temp_mngr_ctx)

@@ -110,13 +110,14 @@ def resolve_file_target(
             f"--relative-to {relative_to.value.lower()} is only valid for agent targets. "
             f"Host targets always use MNGR_HOST_DIR as the base path."
         )
-    agents_by_host, _ = discover_hosts_and_agents(
+    outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
     )
+    agents_by_host = outcome.agents_by_host
     host_ref = filter_one_host(target, list(agents_by_host.keys()))
     return _resolve_host_target(
         discovered_host=host_ref,
