@@ -1,7 +1,7 @@
 """Operator fleet sweep repairing slice SSH-key damage from the cidata authorized_keys wipe.
 
 Slices carved before the lima fix (see
-``apps/minds/docs/slice-restart-wipes-owner-ssh-key.md``) carry a truncating
+``apps/minds/docs/deploy/slice-restart-wipes-owner-ssh-key.md``) carry a truncating
 ``cat > /root/.ssh/authorized_keys`` step in their stored ``lima.yaml``, so
 every VM start wipes the owner's lease-injected key. This sweep, box by box:
 

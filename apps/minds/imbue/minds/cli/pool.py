@@ -296,7 +296,7 @@ def read_pool_private_key_from_vault(
     if not private_key:
         raise click.ClickException(
             f"Vault entry {vault_prefix}/pool-ssh is missing {_POOL_MGMT_PRIVATE_KEY_VAULT_FIELD!r}; "
-            "see apps/minds/docs/host-pool-setup.md step 2 for the schema."
+            "see apps/minds/docs/deploy/host-pool-setup.md step 2 for the schema."
         )
     return private_key
 
@@ -355,7 +355,7 @@ def resolve_host_pool_dsn(
     if not dsn:
         raise click.ClickException(
             f"Vault entry {vault_prefix}/neon is missing {_POOL_DSN_VAULT_FIELD!r}; "
-            "see apps/minds/docs/host-pool-setup.md step 3 for the schema."
+            "see apps/minds/docs/deploy/host-pool-setup.md step 3 for the schema."
         )
     return dsn
 

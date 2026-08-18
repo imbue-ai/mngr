@@ -3,7 +3,7 @@
 The merged installer (default-workspace-template ``.mngr/settings.toml``,
 ``post_host_create_outer_command__extend``) only runs at host create, so slices
 baked before the reboot-resilience fixes keep the old racy oneshot until an
-operator re-applies it (see minds' ``docs/reboot-resilience-rollout.md`` Step
+operator re-applies it (see minds' ``docs/deploy/reboot-resilience-rollout.md`` Step
 2). This module is that sweep: box by box, it applies the installer to every
 ``mngr-slice-*`` VM through the box's lima user (``limactl shell``).
 

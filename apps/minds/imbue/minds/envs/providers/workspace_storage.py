@@ -1,7 +1,7 @@
 """Delete an env's workspace stop/start artifacts from the tier's storage bucket.
 
 Stopped imbue_cloud workspaces live as encrypted objects in the tier's OVH
-S3-compatible bucket (see docs/workspace-stop-start.md). Per-env-Modal-env
+S3-compatible bucket (see docs/deploy/workspace-stop-start.md). Per-env-Modal-env
 tiers (dev / ci) share their tier's bucket under a per-env key prefix
 (``<env>/``, stamped into the ``storage-<env>`` Modal secret at deploy);
 shared tiers own the whole bucket. ``minds env destroy`` uses this module

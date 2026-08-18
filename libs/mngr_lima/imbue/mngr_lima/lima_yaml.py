@@ -306,7 +306,7 @@ def build_root_authorized_keys_block(root_authorized_public_key: str | None) -> 
     the VM as new and replays every per-instance module. A truncating write here
     therefore silently dropped the owner's key on the first restart after their
     lease, leaving the VM reachable but rejecting them -- with no way back except
-    recreating the machine (see apps/minds/docs/slice-restart-wipes-owner-ssh-key.md).
+    recreating the machine (see apps/minds/docs/deploy/slice-restart-wipes-owner-ssh-key.md).
 
     Public (not ``_``-prefixed) because the imbue_cloud ``admin repair-keys``
     sweep renders this same block when patching existing slices' lima.yaml.

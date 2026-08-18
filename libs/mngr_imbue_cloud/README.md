@@ -117,7 +117,7 @@ mngr imbue_cloud hosts rotate <host-id|host-db-id|name>
 ```
 
 Operators repair slices hit by the historical cidata `authorized_keys` wipe
-(see `apps/minds/docs/slice-restart-wipes-owner-ssh-key.md`) with the fleet
+(see `apps/minds/docs/deploy/slice-restart-wipes-owner-ssh-key.md`) with the fleet
 sweep, which patches each slice's stored `lima.yaml` and restores wiped VM
 roots from the workspace container's own `authorized_keys` (copies only --
 it never injects new material):

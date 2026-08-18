@@ -14,8 +14,10 @@ from datetime import datetime
 from datetime import timezone
 from io import StringIO
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
@@ -71,6 +73,7 @@ from imbue.mngr_modal.instance import _build_modal_volumes
 from imbue.mngr_modal.instance import _parse_volume_spec
 from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
 from imbue.mngr_modal.routes.deployment import deploy_function
+from imbue.mngr_modal.routes.deployment import get_function_url
 from imbue.mngr_modal.testing import make_host_record
 from imbue.mngr_modal.testing import make_sandbox_with_tags
 from imbue.mngr_modal.testing import make_snapshot
@@ -86,6 +89,7 @@ from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.interface import FunctionInterface
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.testing import FakeModalInterface
@@ -2272,6 +2276,56 @@ def test_deploy_function(
         testing_provider._modal_interface,
     )
     assert "snapshot_and_shutdown" in url
+
+
+class _TransientNotFoundModalInterface(FakeModalInterface):
+    """FakeModalInterface whose function lookups transiently answer not-found.
+
+    Simulates Modal's post-deploy read inconsistency: the first
+    ``not_found_remaining`` lookups raise ModalProxyNotFoundError, after which
+    lookups behave normally.
+    """
+
+    not_found_remaining: int = Field(default=0, description="Number of lookups left that answer not-found")
+
+    def function_from_name(
+        self,
+        name: str,
+        *,
+        app_name: str,
+        environment_name: str | None = None,
+    ) -> FunctionInterface:
+        if self.not_found_remaining > 0:
+            self.not_found_remaining = self.not_found_remaining - 1
+            raise ModalProxyNotFoundError(f"Function not found: {name} in app {app_name}")
+        return super().function_from_name(name=name, app_name=app_name, environment_name=environment_name)
+
+
+def test_deploy_function_retries_transient_post_deploy_not_found(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    interface = _TransientNotFoundModalInterface(
+        root_dir=tmp_path / "modal_transient", concurrency_group=cg, not_found_remaining=1
+    )
+    url = deploy_function("snapshot_and_shutdown", f"test-app-{uuid4().hex}", None, interface)
+
+    assert "snapshot_and_shutdown" in url
+    assert interface.not_found_remaining == 0
+
+
+def test_get_function_url_without_deploy_fails_fast_on_not_found(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    interface = _TransientNotFoundModalInterface(
+        root_dir=tmp_path / "modal_transient", concurrency_group=cg, not_found_remaining=5
+    )
+    with pytest.raises(ModalProxyNotFoundError):
+        get_function_url("snapshot_and_shutdown", f"test-app-{uuid4().hex}", None, interface)
+
+    # Exactly one lookup happened: the bare (non-post-deploy) path never retries.
+    assert interface.not_found_remaining == 4
 
 
 # ---------------------------------------------------------------------------

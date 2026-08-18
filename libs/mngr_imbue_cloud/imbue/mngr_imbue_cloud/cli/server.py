@@ -506,7 +506,7 @@ def backfill_autostart(database_url: str | None, server_ids: tuple[str, ...], is
     """Backfill the volume-gated minds-autostart units onto existing slice VMs.
 
     The fleet half of the reboot-resilience rollout (minds
-    docs/reboot-resilience-rollout.md Step 2): slices baked before the merged
+    docs/deploy/reboot-resilience-rollout.md Step 2): slices baked before the merged
     installer keep the old racy oneshot until this sweep re-applies it. The
     installer is idempotent and safe on running workspaces, fires the
     workspace start immediately, and the sweep only reports a VM as
@@ -1621,7 +1621,7 @@ def assert_box_is_exclusive_to_tier(
 ) -> None:
     """Refuse to bake unless this box belongs solely to the activated env's tier.
 
-    Tier isolation is a stated invariant (``apps/minds/docs/environments.md``:
+    Tier isolation is a stated invariant (``apps/minds/docs/deploy/environments.md``:
     "There is zero cross-tier reach"), but nothing used to enforce it at the moment
     it matters. Two independent ways a box drifts across tiers, both caught here
     before a single slice is carved:

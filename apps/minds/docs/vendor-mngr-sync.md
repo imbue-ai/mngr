@@ -29,7 +29,7 @@ replaces `system/vendor/mngr/` with the snapshot, and commits in DEFAULT_WORKSPA
 committed content, so position your mngr checkout at the exact commit you want
 to vendor first. The full release procedure -- including the vendor-match
 invariant (DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` must be the `git archive` of the exact mngr SHA it
-is tagged with) -- is in `apps/minds/docs/release.md`.
+is tagged with) -- is in `apps/minds/docs/deploy/release.md`.
 
 ## `rsync` -- the dev / bake sync
 

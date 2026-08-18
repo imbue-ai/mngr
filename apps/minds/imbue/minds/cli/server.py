@@ -209,7 +209,7 @@ def server_backfill_autostart(server_ids: tuple[str, ...], database_url: str | N
     """Backfill the volume-gated minds-autostart units onto existing slice VMs.
 
     The fleet half of the reboot-resilience rollout
-    (docs/reboot-resilience-rollout.md Step 2). Forwards to
+    (docs/deploy/reboot-resilience-rollout.md Step 2). Forwards to
     ``mngr imbue_cloud admin server backfill-autostart``, resolving the
     host_pool DSN from the activated env and injecting the tier's
     POOL_SSH_PRIVATE_KEY from Vault, mirroring ``minds server prep``.

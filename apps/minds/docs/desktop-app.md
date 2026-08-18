@@ -134,7 +134,7 @@ Dev mode reaches the same pinned binaries: it prepends the `git` and `lima` dire
 
 `uv` is the deliberate exception. Dev runs the monorepo workspace through `uv run --package minds`, against the same `.venv` and `uv.lock` the developer's shell drives, so it uses *their* uv rather than risking lockfile-format skew against shared state from a second pinned one. It is therefore the one bundled binary dev neither downloads nor resolves (`BINARIES[].usedInDev`).
 
-There is deliberately no bundled `qemu-img`. The pre-baked image is published, downloaded, and consumed as a **raw** image end to end, so nothing converts it. See [lima-image.md](./lima-image.md) for the whole pipeline, and "Why the image is raw" below.
+There is deliberately no bundled `qemu-img`. The pre-baked image is published, downloaded, and consumed as a **raw** image end to end, so nothing converts it. See [lima-image.md](./deploy/lima-image.md) for the whole pipeline, and "Why the image is raw" below.
 
 ### How the shipped binaries are chosen
 
@@ -227,8 +227,8 @@ The packaged Electron app embeds a `client.toml` + `MINDS_ROOT_NAME`
 pair at build time via `MINDS_CLIENT_CONFIG_BUNDLE` and
 `MINDS_ROOT_NAME_BUNDLE`, and the Electron startup exports the env
 vars + passes `--config-file` explicitly -- end users never have to
-activate anything. See `apps/minds/docs/environments.md` for the full
-operator workflow and `apps/minds/docs/vault-setup.md` for how
+activate anything. See `apps/minds/docs/deploy/environments.md` for the full
+operator workflow and `apps/minds/docs/deploy/vault-setup.md` for how
 deploy-time secrets flow through HCP Vault.
 
 ### Configuration file
