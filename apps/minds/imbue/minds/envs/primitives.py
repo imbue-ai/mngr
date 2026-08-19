@@ -68,7 +68,7 @@ DYNAMIC_ENV_PREFIXES: Final[tuple[str, ...]] = ("dev", "ci")
 DEV_ENV_NAME_PATTERN: Final[str] = DYNAMIC_ENV_NAME_PATTERN
 
 # Reserved tier names that bypass the ``<tier>-`` prefix requirement.
-# Mirrors the reserved set in :mod:`imbue.minds_admin.cli.env`. Kept here so
+# Mirrors the reserved set the operator env CLI accepts. Kept here so
 # :class:`DevEnvName` (the canonical "name of an activated env" type
 # threaded through ``deploy_env`` / ``destroy_env``) can also wrap a
 # tier name without forcing every call site to special-case the dispatch.

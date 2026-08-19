@@ -107,8 +107,8 @@ The accent is a **pure function of the window's current route**, not a remembere
 ### Environment variables
 
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
-- `MINDS_ROOT_NAME`: Selects the data root for the running backend. Default `minds` (i.e. production at `~/.minds/`). Must match `minds(-<env-name>)?`. Activated by `minds env activate <name>`; legacy values like `devminds` are silently treated as unset with a warning.
-- `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load. Set by `minds env activate`; passing `--config-file` to `minds run` overrides it. The backend refuses to start when neither is set.
+- `MINDS_ROOT_NAME`: Selects the data root for the running backend. Default `minds` (i.e. production at `~/.minds/`). Must match `minds(-<env-name>)?`. Activated by `minds-admin env activate <name>`; legacy values like `devminds` are silently treated as unset with a warning.
+- `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load. Set by `minds-admin env activate`; passing `--config-file` to `minds run` overrides it. The backend refuses to start when neither is set.
 
 ## Output and logging conventions
 
@@ -202,7 +202,7 @@ same shape:
 ```
 
 `MINDS_ROOT_NAME` selects which data root the backend uses. Activation
-(`minds env activate <name>`) sets it to `minds-<env-name>` (or just
+(`minds-admin env activate <name>`) sets it to `minds-<env-name>` (or just
 `minds` for production) and exports the derived `MNGR_HOST_DIR` /
 `MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` alongside. Two envs
 activated in parallel shells (or by two Electron instances pointed at
@@ -214,7 +214,7 @@ invocations ignore `MINDS_ROOT_NAME`.
 The desktop client picks the env it talks to via shell activation:
 
 ```bash
-eval "$(uv run minds env activate <name>)"
+eval "$(uv run minds-admin env activate <name>)"
 minds run                                  # or `just minds-start`
 ```
 

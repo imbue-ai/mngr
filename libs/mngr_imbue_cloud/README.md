@@ -27,7 +27,7 @@ mngr imbue_cloud auth login
 mngr imbue_cloud auth signin --account alice@imbue.com
 ```
 
-`auth login` requires a connector that serves the hosted accounts pages. Against an older connector (e.g. a stale dev/CI env) it fails immediately with an actionable error -- redeploy the env with `minds env deploy`, or fall back to `auth signin`.
+`auth login` requires a connector that serves the hosted accounts pages. Against an older connector (e.g. a stale dev/CI env) it fails immediately with an actionable error -- redeploy the env (Imbue-internal: `minds-admin env deploy`), or fall back to `auth signin`.
 
 Account **creation** from the CLI (`mngr imbue_cloud auth signup`) works only on dev/CI tiers: production and staging refuse it (status `SIGNUP_DISABLED`) so every new account goes through the browser flow (`auth login`), which carries the bot-mitigation gate. Signing in headlessly to an existing account works on every tier.
 
@@ -48,7 +48,7 @@ mngr imbue_cloud account show
 mngr imbue_cloud account set-plan ally
 ```
 
-Operators manage individual accounts by email with `mngr imbue_cloud admin account show|set-plan|set-quota` (authenticated by `$MINDS_ADMIN_KEY`, like `admin paid`). `set-plan` resets the account to the plan's defaults; `set-quota` bumps one entitlement value. `mngr imbue_cloud admin sweep r2 [--email <email>]` runs one R2 storage-quota sweep pass on demand (enforcement, grant settlement, key invariants) instead of waiting for the hourly cron.
+Operator-side account management (plan resets, quota bumps, on-demand storage sweeps) lives in Imbue's internal operator CLI, not in this plugin.
 
 ## Create an agent on a leased host
 
@@ -117,14 +117,10 @@ mngr imbue_cloud hosts rotate <host-id|host-db-id|name>
 ```
 
 Operators repair slices hit by the historical cidata `authorized_keys` wipe
-(see `apps/minds/docs/deploy/slice-restart-wipes-owner-ssh-key.md`) with the fleet
-sweep, which patches each slice's stored `lima.yaml` and restores wiped VM
-roots from the workspace container's own `authorized_keys` (copies only --
-it never injects new material):
-
-```bash
-mngr imbue_cloud admin repair-keys [--dry-run] [--server-id <id>] [--vm-name <name>]
-```
+(see `apps/minds/docs/deploy/slice-restart-wipes-owner-ssh-key.md`) with a fleet
+sweep in Imbue's internal operator CLI, which patches each slice's stored
+`lima.yaml` and restores wiped VM roots from the workspace container's own
+`authorized_keys` (copies only -- it never injects new material).
 
 ## Buckets
 

@@ -58,7 +58,7 @@ run. By area:
 
 An importable helper package, excluded from all offload runs and `test-quick`;
 driven only by `just minds-test-deployment` and siblings (orchestrator
-`apps/minds/scripts/test_deployments.py`). Every test here carries
+`apps/minds_admin/scripts/test_deployments.py`). Every test here carries
 `@pytest.mark.release` (so it is part of the shared release suite, discoverable
 by tag) in addition to its capability mark; all minds release tests run from the
 minds jobs (`test-minds-release`), never from the mngr release workflow, which

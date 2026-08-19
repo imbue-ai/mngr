@@ -12,7 +12,7 @@ Before running `just minds-start` (or invoking `minds run` directly
 from source), **activate an env in your shell**:
 
 ```bash
-eval "$(uv run minds env activate dev-<your-user>)"   # or `staging`, `production`
+eval "$(uv run minds-admin env activate dev-<your-user>)"   # or `staging`, `production`
 just minds-start
 ```
 
@@ -58,7 +58,7 @@ After creation, the agent is accessible at:
 ## Environment variables and config
 
 The remote service connector URL is taken from the per-env
-`client.toml` that `minds env activate` pointed `MINDS_CLIENT_CONFIG_PATH`
+`client.toml` that `minds-admin env activate` pointed `MINDS_CLIENT_CONFIG_PATH`
 at (see `apps/minds/docs/deploy/environments.md`). That URL hosts both the
 share endpoints and the `/auth/*` routes the desktop client uses
 for sign-in. Every share request authenticates with the signed-in
@@ -69,28 +69,28 @@ credentials (API key, OAuth client secrets) live in HCP Vault (see
 `apps/minds/docs/deploy/vault-setup.md`) and are pushed into Modal Secrets at
 deploy time; they never need to be set on the client.
 
-To switch envs, run `minds env activate <name>` in your shell. The
+To switch envs, run `minds-admin env activate <name>` in your shell. The
 activation sets `MINDS_CLIENT_CONFIG_PATH` for you -- you don't need
 to pass `--config-file` manually:
 
 ```bash
 # Activate a tier (staging or production):
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds-admin env activate staging)"
 just minds-start
 
 # Or a per-developer dev env:
-eval "$(uv run minds env activate dev-<your-user>)"
+eval "$(uv run minds-admin env activate dev-<your-user>)"
 just minds-start
 
 # Backend-only invocation (no Electron):
-eval "$(uv run minds env activate dev-<your-user>)"
+eval "$(uv run minds-admin env activate dev-<your-user>)"
 minds run
 ```
 
 To deactivate (clear the env vars from your shell):
 
 ```bash
-eval "$(uv run minds env deactivate)"
+eval "$(uv run minds-admin env deactivate)"
 ```
 
 For agent-specific secrets (API keys, telegram credentials), set them in the template repo's `.env` file and ensure they're listed in `pass_env` in `.mngr/settings.toml`.

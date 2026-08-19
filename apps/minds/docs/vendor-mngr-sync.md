@@ -57,7 +57,7 @@ those constants:
 | Path | Where | Trigger |
 |---|---|---|
 | `just sync-vendor-mngr-live` | root `justfile` | every dev-app startup (`just minds-start` calls it), or on demand |
-| `sync_mngr_into_template` | `pool_bake.py` (the constants) | `mngr imbue_cloud admin pool create --mngr-source ...` / `minds pool create --mngr-source ...` |
+| `sync_mngr_into_template` | `pool_bake.py` (the constants) | `minds-admin pool create --mngr-source ...` / `minds-admin pool create --mngr-source ...` |
 | `propagate_changes` | `apps/minds/scripts/propagate_changes` (`RSYNC_EXCLUDES`) | each dev-loop iteration into a running container |
 
 `propagate_changes` additionally protects `data/`, `.mngr/`, and

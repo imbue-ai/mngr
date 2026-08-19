@@ -1,6 +1,6 @@
 [project]
 name = "imbue-mngr-imbue-cloud"
-version = "0.1.6"
+version = "0.2.0"
 description = "Imbue Cloud provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"

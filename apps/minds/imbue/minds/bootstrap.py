@@ -15,7 +15,7 @@ MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
 _MINDS_PREFIX: Final[str] = "minds"
 # Legal env-name suffixes after ``minds-``.
-# Mirrors the rules in :mod:`imbue.minds.envs.primitives` and the reserved tier names in :mod:`imbue.minds_admin.cli.env`:
+# Mirrors the rules in :mod:`imbue.minds.envs.primitives` and the reserved tier names the operator env CLI accepts:
 #
 #   * ``staging`` -- the reserved staging tier name.
 #   * ``dev-<rest>`` / ``ci-<rest>`` -- any dynamic env (developer dev env or CI ephemeral env, respectively).

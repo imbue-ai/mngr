@@ -98,7 +98,7 @@ test-apt-mirror-worker:
 # Render one relay's on-disk config (frps.toml, nftables.conf, the :80
 # redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see
 # apps/share_relay/README.md. RELAY_ID comes from `just register-share-relay`
-# (or `mngr imbue_cloud admin relays list`); CONTENT_DOMAIN is the env's content
+# (or `minds-admin relays list`); CONTENT_DOMAIN is the env's content
 # apex (imbueminds.com / minds-staging.com / minds-dev.com); PLUGIN_AUTH_URL is
 # the connector's /frps/auth endpoint for that env.
 [group("share-relay ops")]
@@ -130,7 +130,7 @@ deregister-share-relay connector_url relay_id:
 
 # Install/refresh a relay host's software + config (pinned frps, nftables,
 # :80 redirector, healthcheck) and restart its services. relay_id comes from
-# `just register-share-relay` (or `mngr imbue_cloud admin relays list`);
+# `just register-share-relay` (or `minds-admin relays list`);
 # plugin_auth_url must include the shared-secret path segment:
 # https://<connector>/frps/auth/<secret>
 # (the secret lives in Vault under secrets/minds/<tier>/sharing/FRPS_AUTH_SECRET).
@@ -166,7 +166,7 @@ test-share-relay:
 # Regenerate the committed hash-locked image_requirements.txt exports that the
 # Modal service images (remote_service_connector, modal_litellm) install from.
 # Run after changing an app's [dependency-groups] image pins or relocking
-# uv.lock; per-app drift tests and the `minds env deploy` preflight fail until
+# uv.lock; per-app drift tests and the `minds-admin env deploy` preflight fail until
 # the committed exports match uv.lock again.
 [group("mngr dev")]
 export-image-requirements:
