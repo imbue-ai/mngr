@@ -1,7 +1,6 @@
 import json
 import os
 import time
-from pathlib import Path
 
 import pytest
 
@@ -216,38 +215,35 @@ def test_parse_baked_host_raises_when_host_id_missing() -> None:
         parse_baked_host(json.dumps({"agent_id": "a"}), host_name="x")
 
 
-def test_ephemeral_bake_namespace_is_deleted_on_clean_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+# The namespace/sweep tests below rely on the package's autouse setup_test_mngr_env
+# fixture (see conftest.py), which points HOME at a fresh per-test temp dir -- so
+# bake_namespace_parent_dir() (derived from Path.home()) is always test-isolated.
+
+
+def test_ephemeral_bake_namespace_is_deleted_on_clean_exit() -> None:
     with ephemeral_bake_namespace() as namespace:
         assert namespace.host_dir.is_dir()
         assert namespace.namespace_dir.parent == bake_namespace_parent_dir()
     assert not namespace.namespace_dir.exists()
 
 
-def test_ephemeral_bake_namespace_is_retained_when_body_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_ephemeral_bake_namespace_is_retained_when_body_raises() -> None:
     with pytest.raises(PoolBakeError):
         with ephemeral_bake_namespace() as namespace:
             raise PoolBakeError("bake failed")
     assert namespace.namespace_dir.is_dir()
 
 
-def test_ephemeral_bake_namespace_is_retained_on_system_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ephemeral_bake_namespace_is_retained_on_system_exit() -> None:
     # A partial failure exits via `raise SystemExit(1)` inside the block (see
     # allocate_slices); retention must cover it even though it is a BaseException.
-    monkeypatch.setenv("HOME", str(tmp_path))
     with pytest.raises(SystemExit):
         with ephemeral_bake_namespace() as namespace:
             raise SystemExit(1)
     assert namespace.namespace_dir.is_dir()
 
 
-def test_ephemeral_bake_namespace_env_points_inner_mngr_at_the_namespace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_ephemeral_bake_namespace_env_points_inner_mngr_at_the_namespace() -> None:
     with ephemeral_bake_namespace() as namespace:
         env = namespace.to_subprocess_env()
     # Exactly the two namespace vars: MNGR_HOST_DIR relocates all local mngr state,
@@ -260,10 +256,9 @@ def test_ephemeral_bake_namespace_env_points_inner_mngr_at_the_namespace(
     assert not EPHEMERAL_BAKE_MNGR_PREFIX.startswith("minds")
 
 
-def test_ephemeral_bake_namespace_dirs_are_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ephemeral_bake_namespace_dirs_are_private() -> None:
     # The namespace accumulates baked containers' SSH private keys, so it must not
     # be group/world readable.
-    monkeypatch.setenv("HOME", str(tmp_path))
     with pytest.raises(PoolBakeError):
         with ephemeral_bake_namespace() as namespace:
             assert namespace.namespace_dir.stat().st_mode & 0o777 == 0o700
@@ -272,10 +267,7 @@ def test_ephemeral_bake_namespace_dirs_are_private(tmp_path: Path, monkeypatch: 
     assert namespace.namespace_dir.stat().st_mode & 0o777 == 0o700
 
 
-def test_sweep_stale_bake_namespaces_removes_only_dirs_past_the_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_sweep_stale_bake_namespaces_removes_only_dirs_past_the_window() -> None:
     parent = bake_namespace_parent_dir()
     parent.mkdir(parents=True)
     stale_dir = parent / "stale-namespace"
@@ -296,10 +288,7 @@ def test_sweep_stale_bake_namespaces_removes_only_dirs_past_the_window(
     assert stray_file.exists()
 
 
-def test_sweep_stale_bake_namespaces_tolerates_a_missing_parent_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_sweep_stale_bake_namespaces_tolerates_a_missing_parent_dir() -> None:
     assert not bake_namespace_parent_dir().exists()
     sweep_stale_bake_namespaces()
     assert not bake_namespace_parent_dir().exists()
