@@ -516,5 +516,5 @@ def find_server_capacity_by_id(
         if capacity.server.id == server_id:
             return capacity
     raise SliceCapacityError(
-        f"no bare-metal server with id {server_id}; run `mngr imbue_cloud admin server list` to see the fleet"
+        f"no bare-metal server with id {server_id}; run the operator CLI's `minds-admin server list` to see the fleet"
     )

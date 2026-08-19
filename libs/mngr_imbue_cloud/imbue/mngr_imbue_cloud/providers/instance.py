@@ -1702,7 +1702,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             if not lease_result.outer_host_public_key or not lease_result.container_host_public_key:
                 raise MngrError(
                     f"lease of host {host_id} returned no pinned SSH host keys; upgrade the connector and run the "
-                    "one-time `mngr imbue_cloud admin` host-key backfill"
+                    "one-time operator host-key backfill (`minds-admin pool backfill-host-keys`)"
                 )
             self._record_host_key(
                 host_id, lease_result.vps_address, lease_result.ssh_port, lease_result.outer_host_public_key

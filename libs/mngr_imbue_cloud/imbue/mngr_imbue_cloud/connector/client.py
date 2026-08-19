@@ -83,7 +83,7 @@ KEY_OP_TIMEOUT_SECONDS = 90.0
 # surface (browser sign-in). Shared by the login command's up-front probe and
 # the device-token exchange's 404 safety net.
 CONNECTOR_TOO_OLD_REMEDY = (
-    "If this is your own dev/CI env, update it by running `minds env deploy`; "
+    "If this is your own dev/CI env, update it by running `minds-admin env deploy` (Imbue-internal); "
     "otherwise sign in headlessly with `mngr imbue_cloud auth signin --account <email>`."
 )
 
@@ -645,7 +645,7 @@ class ImbueCloudConnectorClient(MutableModel):
         detail = body.get("detail") if isinstance(body, dict) else None
         if detail is None or detail in ("Not Found", "Method Not Allowed"):
             raise WorkspacesEndpointUnavailableError(
-                "This connector does not serve /workspaces yet; redeploy it (minds env deploy) "
+                "This connector does not serve /workspaces yet; redeploy it (Imbue-internal: `minds-admin env deploy`) "
                 "or fall back to the leased-only listing."
             )
 

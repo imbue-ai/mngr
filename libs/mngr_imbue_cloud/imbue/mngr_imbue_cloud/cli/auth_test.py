@@ -244,7 +244,7 @@ def test_login_fails_fast_against_a_connector_without_the_accounts_surface(
         _ensure_connector_supports_browser_login(client)
     stderr = capsys.readouterr().err
     assert "too old" in stderr
-    assert "minds env deploy" in stderr
+    assert "minds-admin env deploy" in stderr
 
 
 def _store_with_stale_session(tmp_path: Path) -> tuple[ImbueCloudSessionStore, ImbueCloudAccount]:

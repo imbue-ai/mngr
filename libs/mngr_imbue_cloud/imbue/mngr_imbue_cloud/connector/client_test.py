@@ -1395,7 +1395,7 @@ def test_auth_device_token_maps_404_to_a_too_old_connector_error() -> None:
         return httpx.Response(404, json={"detail": "Not Found"})
 
     client = _make_transport_client(handler)
-    with pytest.raises(ImbueCloudAuthError, match="minds env deploy"):
+    with pytest.raises(ImbueCloudAuthError, match="minds-admin env deploy"):
         client.auth_device_token(code="c", code_verifier="v", redirect_uri="http://127.0.0.1:1/callback")
 
 
