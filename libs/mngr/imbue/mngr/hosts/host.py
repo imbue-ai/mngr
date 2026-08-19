@@ -3517,6 +3517,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         (SIP restriction), so this is a best-effort no-op there -- the tree walk
         handles the typical macOS case where the pane process is still alive.
 
+        The shared tmux server (comm ``tmux: server``) is exempt from the scan even
+        when its environ carries the marker. The server hosts *every* agent's session
+        on the host, so it is never a legitimate member of one agent's process tree --
+        but it inherits the environment of whichever process happens to fork it, and
+        when that was an agent-context ``mngr start`` (e.g. the workspace template's
+        boot units, which source the system-services agent's env before relaunching
+        it), the marker brands the server as that agent's. Sweeping it up then kills
+        every agent on the host, and when the sweep was requested from inside one of
+        those sessions (an in-container ``mngr start --restart``), the caller dies
+        mid-operation and the restart's start half never runs. The accepted trade-off:
+        an agent-private tmux server on a separate socket now outlives its agent as an
+        idle process instead of being reaped -- strictly better than the shared server
+        being killed. (``_build_start_agent_shell_command`` also unsets the marker
+        before ``tmux new-session``, so mngr-forked servers are not branded at all.)
+
         Why an env-marker scan instead of a process-group / setsid mechanism: prior
         attempts to manage the agent process tree via process groups have been
         deliberately retired. setsid-wrapping the pane command was removed in
@@ -3561,7 +3576,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             'if [ "$(uname -s)" = "Linux" ]; then '
             '  for f in $(grep -lza "^MNGR_AGENT_ID=$AGENT_ID" /proc/[0-9]*/environ 2>/dev/null); do '
             "    pid=${f#/proc/}; pid=${pid%/environ}; "
-            '    [ "$pid" = "$SELF" ] || echo "$pid"; '
+            '    [ "$pid" = "$SELF" ] && continue; '
+            # The shared tmux server must survive a single agent's stop even when its
+            # environ carries the marker (see the docstring). Matches are few, so a
+            # read per matched pid stays off the hot path the single-grep design
+            # above protects.
+            '    case "$(cat "/proc/$pid/comm" 2>/dev/null)" in "tmux: server") continue ;; esac; '
+            '    echo "$pid"; '
             "  done; "
             "fi; true"
         )
@@ -3950,6 +3971,17 @@ def _build_start_agent_shell_command(
     # Unset environment variables
     for var_name in unset_vars:
         steps.append(f"unset {shlex.quote(var_name)}")
+
+    # When no tmux server is running yet, the new-session below forks one, and the
+    # server inherits this shell's environment. An MNGR_AGENT_ID inherited from the
+    # invoking context (a boot unit that sources the agent's env before calling
+    # ``mngr start``, or an in-container mngr run from another agent's shell) would
+    # brand the shared server as belonging to that one agent, and the stop-time env
+    # sweep would then treat the server -- and with it every agent's session on the
+    # host -- as that agent's process tree. The pane does not need this variable from
+    # the environment: its command sources the agent's own env file. (The sweep also
+    # exempts the server by comm; see _collect_pids_by_agent_id_env.)
+    steps.append("unset MNGR_AGENT_ID")
 
     # Create a detached tmux session with env vars sourced.
     # Explicitly set -x/-y to force tmux to initialize the PTY dimensions

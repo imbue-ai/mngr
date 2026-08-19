@@ -7,6 +7,7 @@ import datetime as dt
 import fcntl
 import json
 import os
+import shlex
 import stat
 import subprocess
 import threading
@@ -1260,6 +1261,233 @@ def test_stop_agent_kills_orphaned_processes_by_env_marker(
             # since it has no parent to reap it and is invisible to the
             # pane-descendant walk that tmux_session_cleanup performs.
             host._run_shell_command(StringCommand(f"kill -KILL {orphan_pid} 2>/dev/null || true"))
+
+
+def _make_local_host_for_tmux_isolation(
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Host:
+    """Build a local Host whose tmux commands hit a private, empty server socket.
+
+    ``TMUX_TMPDIR`` moves the default tmux socket directory, and host commands
+    inherit this process's environment, so every tmux invocation in the test (the
+    host's and the test's own) shares one fresh server that no other test touches.
+    ``TMUX`` is cleared so a test runner started inside a tmux client cannot
+    redirect commands to that outer server.
+    """
+    tmux_tmpdir = tmp_path / "tmux-isolated"
+    tmux_tmpdir.mkdir()
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmpdir))
+    monkeypatch.delenv("TMUX", raising=False)
+    config = MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix)
+    mngr_ctx = MngrContext(
+        config=config, pm=plugin_manager, profile_dir=temp_profile_dir, concurrency_group=active_concurrency_group
+    )
+    provider = LocalProviderInstance(
+        name=ProviderInstanceName("local"),
+        host_dir=per_host_dir,
+        mngr_ctx=mngr_ctx,
+    )
+    host = provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+    return host
+
+
+def _isolated_tmux_server_pid(host: Host) -> str:
+    """Return the pid of the (isolated) tmux server the host's commands talk to."""
+    success, output = host._run_shell_command(StringCommand('tmux display-message -p "#{pid}"'))
+    assert success, "Could not query the isolated tmux server for its pid"
+    server_pid = output.stdout.strip()
+    assert server_pid.isdigit(), f"Expected numeric tmux server pid, got {server_pid!r}"
+    return server_pid
+
+
+@pytest.mark.tmux
+@pytest.mark.skipif(
+    is_macos(),
+    reason="the MNGR_AGENT_ID env sweep reads /proc and is Linux-only by design, "
+    "so on macOS a branded server is never at risk",
+)
+def test_stop_agents_spares_shared_tmux_server_branded_with_agent_env(
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    temp_work_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """stop_agents must not kill a shared tmux server whose environ carries the agent's marker.
+
+    The tmux server inherits the environment of whichever process forks it. When that
+    was an agent-context ``mngr start`` (the workspace template's boot units source the
+    system-services agent's env before relaunching it), the server's environ carries
+    that agent's MNGR_AGENT_ID -- and the env sweep in stop_agents then swept up the
+    server, killing every agent session on the host at once (observed fleet-wide on
+    production imbue_cloud workspaces, 2026-08). The sweep must exempt the server while
+    still reaping ordinary marked processes.
+    """
+    host = _make_local_host_for_tmux_isolation(
+        temp_host_dir,
+        per_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        mngr_test_prefix,
+        active_concurrency_group,
+        monkeypatch,
+        tmp_path,
+    )
+
+    options = CreateAgentOptions(
+        name=AgentName("branded-server-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1000"),
+    )
+    agent = host.create_agent_state(work_dir_path=temp_work_dir, options=options)
+    host.provision_agent(agent, options, host.mngr_ctx)
+    session_name = f"{mngr_test_prefix}{agent.name}"
+    anchor_session = f"{mngr_test_prefix}server-anchor"
+
+    try:
+        # Fork the isolated server from a shell that carries the agent's marker --
+        # the exact shape the boot units produce. The anchor session stands in for
+        # another agent's session that must survive this agent's stop; its pane
+        # command strips the marker because a pane forked by the branded server
+        # inherits the server's environ, whereas a real sibling agent's pane
+        # re-execs through its own env file and so carries its *own* id, not the
+        # stopped agent's.
+        success, _ = host._run_shell_command(
+            StringCommand(
+                f"MNGR_AGENT_ID={agent.id} tmux new-session -d -s {shlex.quote(anchor_session)} "
+                f"'env -u MNGR_AGENT_ID sleep 1000'"
+            )
+        )
+        assert success, "Could not fork the branded tmux server"
+        server_pid = _isolated_tmux_server_pid(host)
+
+        # Validate the load-bearing setup: the server really is branded, and really
+        # is the shared server by process name (the exemption keys on comm).
+        success, _ = host._run_shell_command(
+            StringCommand(f"grep -qza '^MNGR_AGENT_ID={agent.id}' /proc/{server_pid}/environ")
+        )
+        assert success, f"Server {server_pid} is not branded with MNGR_AGENT_ID; test setup is broken"
+        success, output = host._run_shell_command(StringCommand(f"cat /proc/{server_pid}/comm"))
+        assert success and output.stdout.strip() == "tmux: server", (
+            f"Expected comm 'tmux: server' for pid {server_pid}, got {output.stdout.strip()!r}; "
+            f"the comm-based exemption cannot work on this tmux build"
+        )
+
+        host.start_agents([agent.id])
+        wait_for(
+            lambda: host._run_shell_command(
+                StringCommand(f"tmux has-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}")
+            )[0],
+            timeout=15.0,
+            error_message="Agent session did not appear on the shared server",
+        )
+
+        host.stop_agents([agent.id], timeout_seconds=3.0)
+
+        # The agent's own session must be gone...
+        success, _ = host._run_shell_command(
+            StringCommand(
+                f"tmux has-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null"
+            )
+        )
+        assert not success, "Stopped agent's tmux session should be gone"
+        # ...while the branded server, and every other session on it, survives.
+        success, _ = host._run_shell_command(StringCommand(f"kill -0 {server_pid} 2>/dev/null"))
+        assert success, (
+            f"Shared tmux server {server_pid} was killed by stop_agents -- the env sweep "
+            f"swept up the server and took every agent session with it"
+        )
+        success, _ = host._run_shell_command(
+            StringCommand(
+                f"tmux has-session -t {TmuxSessionTarget(session_name=anchor_session).as_shell_arg()} 2>/dev/null"
+            )
+        )
+        assert success, "Bystander session on the shared server did not survive the stop"
+    finally:
+        # The whole server is private to this test (TMUX_TMPDIR), so kill-server is
+        # both safe and the only teardown that also reaps the anchor session's sleep.
+        host._run_shell_command(StringCommand("tmux kill-server 2>/dev/null || true"))
+
+
+@pytest.mark.tmux
+@pytest.mark.skipif(
+    is_macos(),
+    reason="asserting on the server's environ requires /proc; the sweep this guards is Linux-only by design",
+)
+def test_start_agent_does_not_brand_forked_tmux_server_with_agent_env(
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    temp_work_dir: Path,
+    temp_profile_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
+    active_concurrency_group: ConcurrencyGroup,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A tmux server forked by start_agents must not inherit MNGR_AGENT_ID from mngr's env.
+
+    Simulates the boot-unit path: mngr itself runs with the agent's env exported
+    (``set -a; . <agent env>; mngr start ...``). The launch command unsets the marker
+    before ``tmux new-session``, so a server it forks is never branded as one agent's
+    process -- the prevention half of the exemption tested above.
+    """
+    host = _make_local_host_for_tmux_isolation(
+        temp_host_dir,
+        per_host_dir,
+        temp_profile_dir,
+        plugin_manager,
+        mngr_test_prefix,
+        active_concurrency_group,
+        monkeypatch,
+        tmp_path,
+    )
+
+    options = CreateAgentOptions(
+        name=AgentName("unbranded-server-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1000"),
+    )
+    agent = host.create_agent_state(work_dir_path=temp_work_dir, options=options)
+    host.provision_agent(agent, options, host.mngr_ctx)
+    session_name = f"{mngr_test_prefix}{agent.name}"
+
+    # From here on, mngr's own process env carries the marker, exactly as under the
+    # boot units. The host's shell commands inherit it.
+    monkeypatch.setenv("MNGR_AGENT_ID", str(agent.id))
+
+    with tmux_session_cleanup(session_name):
+        host.start_agents([agent.id])
+        wait_for(
+            lambda: host._run_shell_command(
+                StringCommand(f"tmux has-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}")
+            )[0],
+            timeout=15.0,
+            error_message="Agent session did not appear",
+        )
+        try:
+            server_pid = _isolated_tmux_server_pid(host)
+            success, _ = host._run_shell_command(
+                StringCommand(f"grep -qza '^MNGR_AGENT_ID=' /proc/{server_pid}/environ")
+            )
+            assert not success, (
+                f"Freshly-forked tmux server {server_pid} inherited MNGR_AGENT_ID from "
+                f"mngr's environment; a later stop of this agent would kill the server"
+            )
+        finally:
+            host._run_shell_command(StringCommand("tmux kill-server 2>/dev/null || true"))
 
 
 @pytest.mark.tmux

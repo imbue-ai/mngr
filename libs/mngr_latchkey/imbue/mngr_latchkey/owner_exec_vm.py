@@ -75,8 +75,13 @@ def _build_install_script(version: str) -> str:
             "esac",
             '_asset="owner-exec-${_triple}"',
             '_tmp="$(mktemp -d)"',
-            f'curl -fsSL --retry 3 --retry-delay 2 -o "${{_tmp}}/${{_asset}}" "{base_url}/${{_asset}}"',
-            f'curl -fsSL --retry 2 -o "${{_tmp}}/${{_asset}}.sha256" "{base_url}/${{_asset}}.sha256"',
+            # --retry-all-errors: curl's --retry alone only covers "transient"
+            # failures (timeouts, 5xx), not protocol-level ones like HTTP/2
+            # PROTOCOL_ERROR (exit 92), which GitHub's CDN produces
+            # intermittently. Retrying on any error is safe here because the
+            # sha256 check below guards integrity.
+            f'curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors -o "${{_tmp}}/${{_asset}}" "{base_url}/${{_asset}}"',
+            f'curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors -o "${{_tmp}}/${{_asset}}.sha256" "{base_url}/${{_asset}}.sha256"',
             '(cd "$_tmp" && sha256sum -c "${_asset}.sha256" >/dev/null)',
             f'install -m 0755 "${{_tmp}}/${{_asset}}" "{_INSTALL_PATH}.new"',
             f'mv -f "{_INSTALL_PATH}.new" {_INSTALL_PATH}',
