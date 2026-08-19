@@ -13,3 +13,4 @@ from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair as re
 from imbue.mngr.providers.ssh_utils import resolve_per_host_host_keypair as resolve_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair as save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd as wait_for_sshd
+from imbue.mngr.providers.ssh_utils import wait_for_sshd_with_retry as wait_for_sshd_with_retry
