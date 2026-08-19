@@ -127,7 +127,7 @@ class VerifiedUserHandle(FrozenModel):
 class EphemeralEnvHandle(FrozenModel):
     """What the ``ephemeral_env`` fixture yields to a test.
 
-    The fixture shells out to ``minds env deploy`` for a fresh
+    The fixture shells out to ``minds-admin env deploy`` for a fresh
     ``ci-<timestamp>-<short-uuid>`` env, yields this handle, then
     unconditionally tears the env down (idempotent against an
     already-destroyed env, so a test that destroys the env itself does
