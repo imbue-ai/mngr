@@ -186,7 +186,7 @@ function getBundledMindsRootName() {
  *      packaged-build case. Always wins so a user with a stale
  *      MINDS_ROOT_NAME export from a parent shell can't accidentally
  *      misdirect a packaged build.
- *   2. The process env MINDS_ROOT_NAME (the dev-mode `minds env activate`
+ *   2. The process env MINDS_ROOT_NAME (the dev-mode `minds-admin env activate`
  *      case). Validated against the runtime regex.
  *   3. Default to 'minds' (production) for the case where dev mode
  *      runs without activation (the Python backend will then refuse to
@@ -202,7 +202,7 @@ function getMindsRootName() {
     if (!/^minds(-[a-z0-9][a-z0-9_-]{0,38}[a-z0-9])?$/.test(fromEnv)) {
       throw new Error(
         `MINDS_ROOT_NAME=${JSON.stringify(fromEnv)} does not match \`minds(-<env-name>)?\`. ` +
-          'Activate a valid env via `eval "$(minds env activate <name>)"` or unset the var.'
+          'Activate a valid env via `eval "$(minds-admin env activate <name>)"` or unset the var.'
       );
     }
     return fromEnv;
