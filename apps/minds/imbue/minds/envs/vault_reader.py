@@ -343,3 +343,38 @@ def _read_leaf_value(
             "single-`value` leaf."
         )
     return value
+
+
+# Vault field (under a tier's ``<vault_prefix>/supertokens`` entry) holding the
+# connector admin API key, and its deprecated spelling from when the key only
+# guarded the paid-list CRUD. The deprecated field is still read (with a
+# warning) while Vault entries migrate.
+_ADMIN_KEY_VAULT_FIELD: Final[str] = "MINDS_ADMIN_KEY"
+_LEGACY_ADMIN_KEY_VAULT_FIELD: Final[str] = "MINDS_PAID_ADMIN_KEY"
+
+
+def admin_key_from_supertokens_secret(secret: Mapping[str, str], vault_prefix: str) -> str:
+    """Pick the connector admin API key out of a tier's ``<vault_prefix>/supertokens`` secret.
+
+    Prefers the ``MINDS_ADMIN_KEY`` field, falling back (with a warning) to the
+    deprecated ``MINDS_PAID_ADMIN_KEY`` spelling while Vault entries migrate.
+    ``vault_prefix`` is only used in the warning / error messages. Raises
+    ``VaultReadError`` when neither field is populated (the admin API is not
+    enabled for the tier).
+    """
+    admin_key = secret.get(_ADMIN_KEY_VAULT_FIELD, "")
+    if admin_key:
+        return admin_key
+    legacy_admin_key = secret.get(_LEGACY_ADMIN_KEY_VAULT_FIELD, "")
+    if legacy_admin_key:
+        logger.warning(
+            "Admin API key found under deprecated Vault field {}; rename it to {} in {}/supertokens",
+            _LEGACY_ADMIN_KEY_VAULT_FIELD,
+            _ADMIN_KEY_VAULT_FIELD,
+            vault_prefix,
+        )
+        return legacy_admin_key
+    raise VaultReadError(
+        f"Vault entry {vault_prefix}/supertokens is missing {_ADMIN_KEY_VAULT_FIELD!r}; "
+        "the admin API is not enabled for this tier (add the key and redeploy)."
+    )

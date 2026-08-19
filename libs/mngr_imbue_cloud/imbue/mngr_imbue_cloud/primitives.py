@@ -65,7 +65,7 @@ def tier_for_env_name(env_name: str) -> str:
     ``production`` and ``staging`` are each their own tier; a ``ci-`` prefix marks
     the CI orchestrator's ephemeral envs; every other name (by convention
     ``dev-<user>``) is a dev env. This is the canonical definition --
-    ``imbue.minds.cli._activated_env`` re-exports it rather than keeping a second
+    ``imbue.minds_admin.cli._activated_env`` re-exports it rather than keeping a second
     copy, so the box-exclusivity guard and the minds CLI can never disagree about
     which tier an env belongs to.
     """

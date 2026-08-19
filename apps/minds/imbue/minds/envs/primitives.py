@@ -62,13 +62,13 @@ DYNAMIC_ENV_PREFIXES: Final[tuple[str, ...]] = ("dev", "ci")
 # everywhere it surfaces (mngr prefix, env root dir, Modal env name,
 # etc). The pattern is enforced strictly so a typo
 # can't accidentally land state in a place that won't be cleaned up by
-# ``minds env destroy``. The shape itself is defined once, in the bootstrap
+# ``minds-admin env destroy``. The shape itself is defined once, in the bootstrap
 # module (which also embeds it in MINDS_ROOT_NAME_PATTERN); this is just
 # the same pattern under the env-layer name.
 DEV_ENV_NAME_PATTERN: Final[str] = DYNAMIC_ENV_NAME_PATTERN
 
 # Reserved tier names that bypass the ``<tier>-`` prefix requirement.
-# Mirrors the reserved set in :mod:`imbue.minds.cli.env`. Kept here so
+# Mirrors the reserved set in :mod:`imbue.minds_admin.cli.env`. Kept here so
 # :class:`DevEnvName` (the canonical "name of an activated env" type
 # threaded through ``deploy_env`` / ``destroy_env``) can also wrap a
 # tier name without forcing every call site to special-case the dispatch.
@@ -123,11 +123,11 @@ class DevEnvNotFoundError(MindError):
 
 
 class DevEnvAlreadyExistsError(MindError):
-    """Raised when ``minds env create`` is invoked for an existing name."""
+    """Raised when ``minds-admin env create`` is invoked for an existing name."""
 
 
 class DevEnvProvisioningError(MindError):
-    """Raised when ``minds env create`` fails partway through, after rollback."""
+    """Raised when ``minds-admin env create`` fails partway through, after rollback."""
 
 
 class VaultReadError(MindError):

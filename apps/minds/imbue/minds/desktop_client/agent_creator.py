@@ -1179,7 +1179,7 @@ def _build_mngr_create_command(
         case LaunchMode.IMBUE_CLOUD:
             # The pool host already has a baked ``system-services`` agent
             # (per ``_BAKED_SERVICES_AGENT_NAME`` in
-            # ``mngr_imbue_cloud/cli/admin.py``) which the lease/adopt path
+            # ``minds_admin/cli/pool.py``) which the lease/adopt path
             # in ``ImbueCloudHost.create_agent_state`` will hydrate in
             # place. mngr's core create flow runs an "agent already
             # exists on this host" pre-flight that fires before the

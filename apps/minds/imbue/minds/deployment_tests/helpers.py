@@ -28,10 +28,10 @@ from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
-from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
-from imbue.minds.cli._activated_env import modal_profile_for_tier_or_none
-from imbue.minds.cli._activated_env import tier_for_env_name
-from imbue.minds.cli.paid import admin_key_from_supertokens_secret
+from imbue.minds.config.modal_profile import MODAL_PROFILE_ENV_VAR
+from imbue.minds.config.modal_profile import modal_profile_for_tier_or_none
+from imbue.minds.envs.vault_reader import admin_key_from_supertokens_secret
+from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.paths import client_config_file

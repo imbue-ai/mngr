@@ -2,7 +2,7 @@
 
 Every minds env owns one data root: ``~/.minds/`` for production,
 ``~/.minds-<env-name>/`` for every other env. Activation
-(``minds env activate <name>``) exports ``MINDS_ROOT_NAME`` /
+(``minds-admin env activate <name>``) exports ``MINDS_ROOT_NAME`` /
 ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` / ``MINDS_CLIENT_CONFIG_PATH`` so
 the rest of the stack picks up the right root without per-call
 plumbing.
@@ -10,13 +10,13 @@ plumbing.
 Per-env on-disk state is split into two files under the env root:
 
 * ``client.toml`` -- non-secret config (connector URL, LiteLLM proxy
-  URL). For dev envs, written by ``minds env deploy``. For staging /
+  URL). For dev envs, written by ``minds-admin env deploy``. For staging /
   production, the same shape lives in-repo at
   ``apps/minds/imbue/minds/config/envs/<tier>/client.toml`` (committed
-  to the repo) and ``minds env activate`` points
+  to the repo) and ``minds-admin env activate`` points
   ``MINDS_CLIENT_CONFIG_PATH`` at that path instead.
 * ``secrets.toml`` -- chmod-0600 dev-env-only file holding the values
-  ``minds env deploy`` generated (Neon DSN, SuperTokens connection URI,
+  ``minds-admin env deploy`` generated (Neon DSN, SuperTokens connection URI,
   SuperTokens API key). Staging / production fetch those values from
   Vault at deploy time instead, so they never have a local secrets file.
 """
@@ -73,7 +73,7 @@ def list_env_root_dirs() -> tuple[Path, ...]:
     """Glob the user's home for every ``~/.minds*/`` directory.
 
     Returns each existing root in sorted order, with ``~/.minds/``
-    (production) first if it exists. Used by ``minds env list`` to
+    (production) first if it exists. Used by ``minds-admin env list`` to
     enumerate every env on disk -- including ones the user manually
     ``mkdir``'d. Callers that need to filter by "has a real
     ``client.toml``" do so themselves.
@@ -134,7 +134,7 @@ def active_env_name_or_none() -> str | None:
     Returns ``production`` for ``MINDS_ROOT_NAME=minds``, the env name
     for ``MINDS_ROOT_NAME=minds-<env>``, and ``None`` for unset or
     invalid values (i.e. the caller has not activated any env). Used
-    by ``minds env deploy`` / ``destroy`` to refuse without explicit
+    by ``minds-admin env deploy`` / ``destroy`` to refuse without explicit
     activation.
     """
     if not is_env_activated():

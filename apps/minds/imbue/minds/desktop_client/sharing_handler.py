@@ -415,7 +415,7 @@ def _enable_sharing_with_cli(
         connector_url=_connector_base_url(client_env_config),
         broker_url=_broker_base_url(client_env_config),
         # The hosted chrome is path-served on the connector origin, which is
-        # also what `minds env deploy` pushes as the connector's own
+        # also what `minds-admin env deploy` pushes as the connector's own
         # SHARE_CHROME_ORIGIN -- so desktop-shared workspaces are embeddable
         # and health-probeable from /web exactly like connector-shared ones.
         chrome_origin=_connector_base_url(client_env_config),

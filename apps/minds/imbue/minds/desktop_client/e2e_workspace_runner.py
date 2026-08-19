@@ -76,7 +76,7 @@ _AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
 # Default env identity when nothing is activated: a dedicated, inert
 # ``ci-snapshot`` tier (committed under
 # apps/minds/imbue/minds/config/envs/ci-snapshot/) so callers can boot the
-# backend without an explicit ``minds env activate`` step and without pointing
+# backend without an explicit ``minds-admin env activate`` step and without pointing
 # at any real environment.
 _DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds-ci-snapshot"
 _DEFAULT_MINDS_TIER: Final[str] = "ci-snapshot"

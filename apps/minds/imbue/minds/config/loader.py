@@ -4,13 +4,13 @@ Per-env on-disk layout (see ``apps/minds/imbue/minds/envs/paths.py``
 and the per-env-data-roots spec):
 
 * Dev envs: ``~/.minds-<env-name>/client.toml`` -- non-secret config
-  written by ``minds env deploy``. Read via ``load_client_config(path)``
+  written by ``minds-admin env deploy``. Read via ``load_client_config(path)``
   with the path coming from ``MINDS_CLIENT_CONFIG_PATH`` (or
-  ``--config-file``); ``minds env activate`` sets the env var to this
+  ``--config-file``); ``minds-admin env activate`` sets the env var to this
   path.
 * Staging / production: ``apps/minds/imbue/minds/config/envs/<tier>/client.toml``
   is committed to the repo and read directly via
-  :func:`repo_tier_client_config_path`. ``minds env activate``
+  :func:`repo_tier_client_config_path`. ``minds-admin env activate``
   points ``MINDS_CLIENT_CONFIG_PATH`` at the in-repo path; the deploy
   writer for these tiers never touches disk-local files (the values are
   computable from the tier's Modal workspace + app names).
@@ -101,3 +101,28 @@ def load_deploy_config(tier: str) -> DeployEnvConfig:
         return DeployEnvConfig.model_validate(raw)
     except ValidationError as exc:
         raise EnvConfigError(f"Invalid deploy config at {path}: {exc}") from exc
+
+
+# Services that need a per-env Modal Secret backed by a Vault entry.
+# Each name corresponds to an entry under ``.minds/template/<name>.sh``
+# and produces a Modal Secret named ``<name>-<tier>-<deploy_id>`` via the
+# deploy's ``build_per_env_secret_values``. The ``litellm-connector`` Modal
+# Secret is NOT in this list -- it's a code-driven secret (no Vault entry
+# exists or is expected) pushed by the deploy directly. Lives here (rather
+# than in the operator-only deploy machinery) because every tier's committed
+# ``deploy.toml`` must declare exactly this set in ``[secrets].services`` --
+# the config tests pin that invariant.
+_PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
+    "litellm",
+    "supertokens",
+    "cloudflare",
+    "neon",
+    "pool-ssh",
+    "sharing",
+    "storage",
+)
+
+
+def per_env_secret_services() -> tuple[str, ...]:
+    """Public accessor for the list of services that need per-env Modal Secrets."""
+    return _PER_ENV_SECRET_SERVICES

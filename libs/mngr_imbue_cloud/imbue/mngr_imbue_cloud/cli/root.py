@@ -3,35 +3,17 @@
 import click
 
 from imbue.mngr_imbue_cloud.cli.account import account
-from imbue.mngr_imbue_cloud.cli.accounts_admin import account_admin
-from imbue.mngr_imbue_cloud.cli.admin import admin
 from imbue.mngr_imbue_cloud.cli.auth import auth
 from imbue.mngr_imbue_cloud.cli.buckets import bucket
 from imbue.mngr_imbue_cloud.cli.hosts import hosts
 from imbue.mngr_imbue_cloud.cli.keys import keys
-from imbue.mngr_imbue_cloud.cli.paid import paid
-from imbue.mngr_imbue_cloud.cli.relays_admin import relays_admin
-from imbue.mngr_imbue_cloud.cli.repair_keys_admin import repair_keys
-from imbue.mngr_imbue_cloud.cli.server import server
 from imbue.mngr_imbue_cloud.cli.shares import shares
-from imbue.mngr_imbue_cloud.cli.sweep_admin import sweep_admin
 from imbue.mngr_imbue_cloud.cli.sync import sync
-from imbue.mngr_imbue_cloud.cli.workspaces_admin import workspaces_admin
-
-# Operator-only paid-list, account-entitlements, on-demand sweep, and
-# bare-metal server/slice management live under the existing `admin` group.
-admin.add_command(paid)
-admin.add_command(account_admin)
-admin.add_command(workspaces_admin)
-admin.add_command(sweep_admin)
-admin.add_command(relays_admin)
-admin.add_command(server)
-admin.add_command(repair_keys)
 
 
 @click.group(name="imbue_cloud")
 def imbue_cloud() -> None:
-    """Imbue Cloud (auth, account plans/quotas, host leasing, keys, buckets, shares, pool admin)."""
+    """Imbue Cloud (auth, account plans/quotas, host leasing, keys, buckets, shares)."""
 
 
 imbue_cloud.add_command(auth)
@@ -41,4 +23,3 @@ imbue_cloud.add_command(keys)
 imbue_cloud.add_command(bucket)
 imbue_cloud.add_command(shares)
 imbue_cloud.add_command(sync)
-imbue_cloud.add_command(admin)

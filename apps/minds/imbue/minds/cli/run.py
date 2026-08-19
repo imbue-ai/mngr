@@ -183,9 +183,9 @@ MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
     envvar="MINDS_CLIENT_CONFIG_PATH",
     help=(
         "Path to the per-env client config TOML. Falls back to the "
-        "MINDS_CLIENT_CONFIG_PATH env var (set by `minds env activate <name>`); "
+        "MINDS_CLIENT_CONFIG_PATH env var (set by `minds-admin env activate <name>`); "
         "no implicit default beyond that. Refuses to start when neither is set "
-        '-- run `eval "$(minds env activate <name>)"` first. Bundled Electron '
+        '-- run `eval "$(minds-admin env activate <name>)"` first. Bundled Electron '
         "builds pass this flag explicitly from MINDS_CLIENT_CONFIG_BUNDLE."
     ),
 )
@@ -201,7 +201,7 @@ def run(
     if config_file is None:
         raise click.ClickException(
             "No client config file is set. Activate an env first: "
-            '`eval "$(uv run minds env activate <name>)"` (e.g. '
+            '`eval "$(uv run minds-admin env activate <name>)"` (e.g. '
             "`dev-<your-user>`, `staging`, or `production`), then re-run."
         )
     root_name = resolve_minds_root_name()
@@ -219,7 +219,7 @@ def run(
     # read live, so a change takes effect without restarting. Manual bug reports are always sent (with
     # full diagnostics) regardless of ``report_unexpected_errors``.
     #
-    # The activated minds env (from `minds env activate`) selects the Sentry DSN and, for
+    # The activated minds env (from `minds-admin env activate`) selects the Sentry DSN and, for
     # production/staging, which S3 attachment bucket: production and staging each get their own, while
     # every other env (dev-*, ci-*, or no activated env) reports to the dev project. We treat "not
     # activated" as dev so an un-activated `minds run` never accidentally reports to the production
