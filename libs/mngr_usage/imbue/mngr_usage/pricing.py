@@ -4,14 +4,16 @@
 token-only writer (e.g. Codex, or pi for a provider where it has no client-side
 cost) just emits ``tokens`` + ``model`` and the reader prices it.
 
-The numbers are **human-curated**, mirrored from litellm's
-``model_prices_and_context_window`` map -- not read from litellm at runtime --
-matching the established posture in ``apps/modal_litellm/app.py`` (inline pricing
-so cost stays correct even on a litellm version whose bundled map predates a
-model). The Anthropic entries below are byte-for-byte the modal_litellm values,
-which a live pi session independently confirmed to the digit;
-``apps/modal_litellm/mngr_usage_pricing_drift_test.py`` enforces that they stay
-in sync (changing a price on either side without the other fails that test).
+The numbers are litellm's, copied here rather than read at runtime: this table is
+consulted on agent machines that never import litellm (it ships in the ``mngr``
+wheel, litellm does not). ``litellm_pricing_test`` pins every entry -- OpenAI and
+Anthropic alike -- against litellm's ``model_prices_and_context_window`` map, so
+the copy cannot drift from the source that the LiteLLM proxy actually bills from.
+
+This table is a *fallback*, not the main cost path: ``api.py`` prefers a
+harness-reported ``total_cost_usd`` and only prices tokens when the harness does
+not report dollars. Claude Code reports its own cost, so in practice these
+entries serve the token-only sources (codex, pi).
 
 Cost is ``input*p_in + cache_read*p_cr + cache_creation*p_cw + output*p_out``,
 relying on ``TokenSnapshot``'s non-overlapping buckets (see its docstring). An
@@ -138,9 +140,8 @@ _O4_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 )
 
 # Canonical pricing key is "<provider>/<model>" (the provider qualifier
-# disambiguates multi-provider harnesses like pi). Anthropic stays in sync with
-# apps/modal_litellm (drift test); OpenAI stays in sync with litellm directly
-# (litellm_pricing_test).
+# disambiguates multi-provider harnesses like pi). Every entry stays in sync with
+# litellm's map directly (litellm_pricing_test).
 MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
     "anthropic/claude-fable-5": _FABLE_PRICES,
     "anthropic/claude-opus-5": _OPUS_PRICES,
