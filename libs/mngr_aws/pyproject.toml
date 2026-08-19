@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.entry-points.mngr]
-aws = "imbue.mngr_aws.backend"
+aws = "imbue.mngr_aws.plugin"
 
 [build-system]
 requires = ["hatchling"]

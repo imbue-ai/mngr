@@ -303,7 +303,11 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
+    # 4: LazyProviderCliGroup (utils/click_utils.py) is a click.Group subclass whose
+    # __init__ stores the lazy loader that defers a provider's operator CLI (and its cloud
+    # SDK) off `mngr`'s startup path (MIND-179). A click.Group cannot be a pydantic model,
+    # so an __init__ is required here.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(4))
 
 
 def test_prevent_cast_usage() -> None:

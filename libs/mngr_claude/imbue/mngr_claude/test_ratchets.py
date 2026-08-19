@@ -98,7 +98,11 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(0))
+    # The single deferred import lives in stream_json.py's _impl() accessor: it lazily loads
+    # stream_json_impl (which pulls the ~900-module anthropic SDK) only when a Claude stream is
+    # produced/consumed, keeping anthropic off the mngr cold-start path (MIND-179). This is the
+    # same intentional pattern as mngr's help_formatter lazy rich import.
+    rc.check_inline_imports(_DIR, snapshot(1))
 
 
 def test_prevent_relative_imports() -> None:

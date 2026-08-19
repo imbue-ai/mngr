@@ -5,7 +5,6 @@ from functools import cached_property
 from typing import Any
 from typing import Final
 
-import click
 from botocore.exceptions import BotoCoreError
 from loguru import logger
 from pydantic import ConfigDict
@@ -21,10 +20,11 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_aws import hookimpl
-from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.plugin import AWS_BACKEND_NAME
+from imbue.mngr_aws.plugin import AWS_BUILD_ARGS_HELP
+from imbue.mngr_aws.plugin import AWS_START_ARGS_HELP
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
@@ -37,8 +37,6 @@ from imbue.mngr_vps.host_state_store import HostStateStore
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
 from imbue.mngr_vps.primitives import VpsInstanceId
-
-AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
 # EC2 states in which the host OS is down (so the SSH-based sweep can't see the
 # host) but the instance still exists and must be reconstructed offline.
@@ -387,29 +385,11 @@ class AwsProviderBackend(ProviderBackendInterface):
 
     @staticmethod
     def get_build_args_help() -> str:
-        return (
-            "EC2-specific args (consumed by provider, not passed to docker):\n"
-            "  --aws-region=REGION         Must match the provider config's default_region;\n"
-            "                              the client is bound to one region at construction\n"
-            "                              and refuses cross-region creates. To target multiple\n"
-            "                              regions, define one [providers.aws-<region>] block\n"
-            "                              per region (see mngr_aws README 'Multiple regions').\n"
-            "  --aws-instance-type=TYPE    EC2 instance type (default: t3.small)\n"
-            "  --aws-ami=AMI-ID            Override the per-host AMI for this create only\n"
-            "                              (default: provider config's default_ami_id, or the\n"
-            "                              pinned per-region default for the chosen region)\n"
-            "  --aws-spot                  Run on EC2 spot capacity (presence-only flag).\n"
-            "                              AWS may reclaim with ~2 min notice; the host is\n"
-            "                              terminated, not stopped, on reclaim. Opt-in only.\n"
-            "  --git-depth=N               Shallow-clone build context to depth N before upload\n"
-            "\n"
-            "All other build args are passed to 'docker build' on the EC2 instance.\n"
-            "Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .\n"
-        )
+        return AWS_BUILD_ARGS_HELP
 
     @staticmethod
     def get_start_args_help() -> str:
-        return "Start args are passed directly to 'docker run'. Run 'docker run --help' for details."
+        return AWS_START_ARGS_HELP
 
     @staticmethod
     def build_provider_instance(
@@ -465,15 +445,3 @@ class AwsProviderBackend(ProviderBackendInterface):
             aws_client=aws_client,
             aws_config=config,
         )
-
-
-@hookimpl
-def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
-    """Register the AWS provider backend."""
-    return (AwsProviderBackend, AwsProviderConfig)
-
-
-@hookimpl
-def register_cli_commands() -> Sequence[click.Command]:
-    """Register the ``mngr aws ...`` operator command group."""
-    return [aws_cli_group]

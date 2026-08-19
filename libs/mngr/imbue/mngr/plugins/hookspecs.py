@@ -20,6 +20,7 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import NewHostOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_backend import LazyProviderBackend
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
@@ -29,14 +30,25 @@ hookspec = pluggy.HookspecMarker("mngr")
 
 
 @hookspec
-def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]] | None:
+def register_provider_backend() -> (
+    tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]] | LazyProviderBackend | None
+):
     """Register a provider backend with mngr.
 
     Plugins should implement this hook to register provider backends along with
     their configuration class.
 
-    Return a tuple of (backend_class, config_class) to register a backend,
-    or None if not registering a backend.
+    Return one of:
+
+    - a tuple of ``(backend_class, config_class)`` to register a backend eagerly
+      (fine for lightweight backends with no heavy imports), or
+    - a ``LazyProviderBackend`` to register only the backend's lightweight
+      metadata (name, config class, CLI help text) and defer importing the heavy
+      backend implementation -- and its cloud SDK -- until the backend is first
+      used. Backends whose module pulls in a large cloud SDK should prefer this
+      form so that provider-independent commands (``mngr config``, ``mngr list``,
+      ``mngr --help``) do not pay that import cost at startup.
+    - ``None`` if not registering a backend.
 
     The config_class should be a subclass of ProviderInstanceConfig that defines
     the configuration options for this backend.

@@ -6,7 +6,6 @@ from functools import cached_property
 from typing import Any
 from typing import Final
 
-import click
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.credentials import Credentials
 from loguru import logger
@@ -28,14 +27,15 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
-from imbue.mngr_gcp import hookimpl
-from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.client import HOST_ID_METADATA_KEY
 from imbue.mngr_gcp.client import HOST_NAME_METADATA_KEY
 from imbue.mngr_gcp.client import ISOLATION_METADATA_KEY
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.config import get_gcloud_compute_zone
+from imbue.mngr_gcp.plugin import GCP_BACKEND_NAME
+from imbue.mngr_gcp.plugin import GCP_BUILD_ARGS_HELP
+from imbue.mngr_gcp.plugin import GCP_START_ARGS_HELP
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
 from imbue.mngr_gcp.state_bucket import GcsStateBucket
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
@@ -50,8 +50,6 @@ from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
 from imbue.mngr_vps.instance_offline import host_name_from_prefixed_value
 from imbue.mngr_vps.primitives import VpsInstanceId
-
-GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
 # GCP has no object-storage state bucket; the offline mirror lives in the
 # instance's own GCE *metadata*, which is large and permissive (256 KB per value,
@@ -635,27 +633,11 @@ class GcpProviderBackend(ProviderBackendInterface):
 
     @staticmethod
     def get_build_args_help() -> str:
-        return (
-            "GCE-specific args (consumed by provider, not passed to docker):\n"
-            "  --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal\n"
-            "                           the provider's configured zone; defaults to the config's\n"
-            "                           default_zone, the active gcloud compute/zone, or us-west1-a)\n"
-            "  --gcp-machine-type=TYPE  GCE machine type (default: e2-small)\n"
-            "  --gcp-image=IMAGE        GCE boot-disk source image for this host, overriding the\n"
-            "                           config's default_source_image (a full image / family URL)\n"
-            "  --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).\n"
-            "  --git-depth=N            Shallow-clone build context to depth N before upload\n"
-            "\n"
-            "When --gcp-image is omitted the VM image is taken from the provider config\n"
-            "(default_source_image).\n"
-            "\n"
-            "All other build args are passed to 'docker build' on the GCE instance.\n"
-            "Example: -b --gcp-machine-type=e2-medium -b --file=Dockerfile -b .\n"
-        )
+        return GCP_BUILD_ARGS_HELP
 
     @staticmethod
     def get_start_args_help() -> str:
-        return "Start args are passed directly to 'docker run'. Run 'docker run --help' for details."
+        return GCP_START_ARGS_HELP
 
     @staticmethod
     def build_provider_instance(
@@ -706,15 +688,3 @@ class GcpProviderBackend(ProviderBackendInterface):
             gcp_client=gcp_client,
             gcp_config=config,
         )
-
-
-@hookimpl
-def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
-    """Register the GCP provider backend."""
-    return (GcpProviderBackend, GcpProviderConfig)
-
-
-@hookimpl
-def register_cli_commands() -> Sequence[click.Command]:
-    """Register the ``mngr gcp ...`` operator command group."""
-    return [gcp_cli_group]

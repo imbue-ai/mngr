@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.entry-points.mngr]
-modal = "imbue.mngr_modal.backend"
+modal = "imbue.mngr_modal.plugin"
 
 [build-system]
 requires = ["hatchling"]

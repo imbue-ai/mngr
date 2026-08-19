@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
-import click
 from azure.core.exceptions import AzureError
 from loguru import logger
 from pydantic import ConfigDict
@@ -27,11 +26,12 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_azure import hookimpl
-from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.plugin import AZURE_BACKEND_NAME
+from imbue.mngr_azure.plugin import AZURE_BUILD_ARGS_HELP
+from imbue.mngr_azure.plugin import AZURE_START_ARGS_HELP
 from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
@@ -46,9 +46,6 @@ from imbue.mngr_vps.instance_offline import OfflineCapableVpsProvider
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 from imbue.mngr_vps.systemd import render_systemd_unit
-
-AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
-
 
 # The self-stopping idle watcher (in-container sentinel + host-side systemd
 # ``.path``/``.service``) is shared by the base ``OfflineCapableVpsProvider``.
@@ -547,22 +544,11 @@ class AzureProviderBackend(ProviderBackendInterface):
 
     @staticmethod
     def get_build_args_help() -> str:
-        return (
-            "Azure-specific args (consumed by provider, not passed to docker):\n"
-            "  --azure-region=REGION       Azure region / location (default: westus)\n"
-            "  --azure-vm-size=SIZE        Azure VM size (default: Standard_B2s)\n"
-            "  --azure-spot                Run on Azure Spot capacity (presence-only flag).\n"
-            "                              Azure may reclaim on capacity pressure; the host is\n"
-            "                              deleted, not stopped, on eviction. Opt-in only.\n"
-            "  --git-depth=N               Shallow-clone build context to depth N before upload\n"
-            "\n"
-            "All other build args are passed to 'docker build' on the VM.\n"
-            "Example: -b --azure-vm-size=Standard_D2s_v5 -b --file=Dockerfile -b .\n"
-        )
+        return AZURE_BUILD_ARGS_HELP
 
     @staticmethod
     def get_start_args_help() -> str:
-        return "Start args are passed directly to 'docker run'. Run 'docker run --help' for details."
+        return AZURE_START_ARGS_HELP
 
     @staticmethod
     def build_provider_instance(
@@ -637,15 +623,3 @@ class AzureProviderBackend(ProviderBackendInterface):
             azure_client=azure_client,
             azure_config=config,
         )
-
-
-@hookimpl
-def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
-    """Register the Azure provider backend."""
-    return (AzureProviderBackend, AzureProviderConfig)
-
-
-@hookimpl
-def register_cli_commands() -> Sequence[click.Command]:
-    """Register the ``mngr azure ...`` operator command group."""
-    return [azure_cli_group]

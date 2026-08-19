@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.entry-points.mngr]
-gcp = "imbue.mngr_gcp.backend"
+gcp = "imbue.mngr_gcp.plugin"
 
 [build-system]
 requires = ["hatchling"]

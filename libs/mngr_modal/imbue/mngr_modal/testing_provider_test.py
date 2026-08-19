@@ -55,7 +55,6 @@ from imbue.mngr_modal.backend import _create_environment
 from imbue.mngr_modal.backend import _enter_ephemeral_app_context_with_env_retry
 from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
-from imbue.mngr_modal.backend import register_provider_backend
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
@@ -72,6 +71,7 @@ from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _build_modal_volumes
 from imbue.mngr_modal.instance import _parse_volume_spec
 from imbue.mngr_modal.instance import _substitute_dockerfile_build_args
+from imbue.mngr_modal.plugin import register_provider_backend
 from imbue.mngr_modal.routes.deployment import deploy_function
 from imbue.mngr_modal.routes.deployment import get_function_url
 from imbue.mngr_modal.testing import make_host_record
@@ -2623,9 +2623,10 @@ def test_get_host_resources_fractional_cpu(testing_provider: ModalProviderInstan
 
 
 def test_register_provider_backend_hook() -> None:
-    backend_cls, config_cls = register_provider_backend()
-    assert backend_cls is ModalProviderBackend
-    assert config_cls is ModalProviderConfig
+    registration = register_provider_backend()
+    assert registration.name == ModalProviderBackend.get_name()
+    assert registration.config_class is ModalProviderConfig
+    assert registration.load() is ModalProviderBackend
 
 
 # ---------------------------------------------------------------------------

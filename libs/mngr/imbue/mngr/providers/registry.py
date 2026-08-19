@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import pluggy
 
 import imbue.mngr.providers.docker.backend as docker_backend_module
@@ -11,13 +13,21 @@ from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import UnknownBackendError
+from imbue.mngr.interfaces.provider_backend import LazyProviderBackend
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 
-# Cache for registered backends
+# Cache for registered (or already-materialized) backend classes.
 _backend_registry: dict[ProviderBackendName, type[ProviderBackendInterface]] = {}
+# Backends registered lazily: name -> loader that imports and returns the class. The
+# loader is called (and its result cached into _backend_registry) only when get_backend
+# first needs the class, so a plain `mngr config`/`list`/`--help` never imports it.
+_backend_loader_registry: dict[ProviderBackendName, Callable[[], type[ProviderBackendInterface]]] = {}
+# Build/start CLI help text for lazily-registered backends, so create's --help can
+# render provider args without importing the (heavy) backend class.
+_backend_help_registry: dict[ProviderBackendName, tuple[str, str]] = {}
 # Use a mutable container to track state without 'global' keyword
 _registry_state: dict[str, bool] = {"backends_loaded": False}
 
@@ -40,6 +50,8 @@ def reset_backend_registry() -> None:
     This is primarily used for test isolation to ensure a clean state between tests.
     """
     _backend_registry.clear()
+    _backend_loader_registry.clear()
+    _backend_help_registry.clear()
     reset_provider_config_registry()
     _registry_state["backends_loaded"] = False
 
@@ -73,7 +85,18 @@ def _load_backends(pm: pluggy.PluginManager, *, include_docker: bool, include_re
     registrations = pm.hook.register_provider_backend()
 
     for registration in registrations:
-        if registration is not None:
+        if registration is None:
+            continue
+        if isinstance(registration, LazyProviderBackend):
+            # Lazy: register only the lightweight metadata now; defer importing the
+            # backend class (and its cloud SDK) until get_backend first needs it.
+            backend_name = registration.name
+            if not include_remote and str(backend_name) in _REMOTE_BACKEND_NAMES:
+                continue
+            _backend_loader_registry[backend_name] = registration.load
+            _backend_help_registry[backend_name] = (registration.build_args_help, registration.start_args_help)
+            register_provider_config(str(backend_name), registration.config_class)
+        else:
             backend_class, config_class = registration
             backend_name = backend_class.get_name()
             if not include_remote and str(backend_name) in _REMOTE_BACKEND_NAMES:
@@ -99,16 +122,27 @@ def load_backends_from_plugins(pm: pluggy.PluginManager) -> None:
     _load_backends(pm, include_docker=True, include_remote=True)
 
 
+def _all_backend_names() -> set[ProviderBackendName]:
+    """Every registered backend name -- eagerly registered plus lazily registered."""
+    return set(_backend_registry) | set(_backend_loader_registry)
+
+
 def get_backend(name: str | ProviderBackendName) -> type[ProviderBackendInterface]:
     """Get a provider backend class by name.
 
-    Backends are loaded from plugins via the plugin manager.
+    Backends are loaded from plugins via the plugin manager. A backend registered
+    lazily (``LazyProviderBackend``) is imported on first access here and cached.
     """
     key = ProviderBackendName(name) if isinstance(name, str) else name
-    if key not in _backend_registry:
-        available = sorted(str(k) for k in _backend_registry.keys())
-        raise UnknownBackendError(str(key), available)
-    return _backend_registry[key]
+    if key in _backend_registry:
+        return _backend_registry[key]
+    loader = _backend_loader_registry.get(key)
+    if loader is not None:
+        backend_class = loader()
+        _backend_registry[key] = backend_class
+        return backend_class
+    available = sorted(str(k) for k in _all_backend_names())
+    raise UnknownBackendError(str(key), available)
 
 
 def get_config_class(name: str | ProviderBackendName) -> type[ProviderInstanceConfig]:
@@ -121,8 +155,8 @@ def get_config_class(name: str | ProviderBackendName) -> type[ProviderInstanceCo
 
 
 def list_backends() -> list[str]:
-    """List all registered backend names."""
-    return sorted(str(k) for k in _backend_registry.keys())
+    """List all registered backend names (eager and lazy)."""
+    return sorted(str(k) for k in _all_backend_names())
 
 
 def resolve_backend_and_config(
@@ -187,17 +221,32 @@ def _indent_text(text: str, indent: str) -> str:
     return "\n".join(indent + line if line.strip() else "" for line in text.split("\n"))
 
 
+def _get_backend_args_help(backend_name: ProviderBackendName) -> tuple[str, str]:
+    """Return ``(build_args_help, start_args_help)`` for a backend.
+
+    A lazily-registered backend's help text was captured at registration time, so
+    it is served from the metadata registry without importing the backend class.
+    """
+    help_texts = _backend_help_registry.get(backend_name)
+    if help_texts is not None:
+        return help_texts
+    backend_class = _backend_registry[backend_name]
+    return backend_class.get_build_args_help(), backend_class.get_start_args_help()
+
+
 def get_all_provider_args_help_sections() -> tuple[tuple[str, str], ...]:
     """Generate help sections for build/start args from all registered backends.
 
     Returns a tuple of (title, content) pairs suitable for use as additional
-    sections in CommandHelpMetadata.
+    sections in CommandHelpMetadata. Lazily-registered backends contribute their
+    help text from the registration metadata, so this does not import them (and
+    therefore does not pull their cloud SDKs into a plain ``mngr --help``).
     """
     lines: list[str] = []
-    for backend_name in sorted(_backend_registry.keys()):
-        backend_class = _backend_registry[backend_name]
-        build_help = backend_class.get_build_args_help().strip()
-        start_help = backend_class.get_start_args_help().strip()
+    for backend_name in sorted(_all_backend_names()):
+        build_help, start_help = _get_backend_args_help(backend_name)
+        build_help = build_help.strip()
+        start_help = start_help.strip()
         lines.append(f"Provider: {backend_name}")
         lines.append(_indent_text(build_help, "  "))
         if start_help != build_help:

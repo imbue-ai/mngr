@@ -1,6 +1,8 @@
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Callable
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -88,3 +90,26 @@ class ProviderBackendInterface(MutableModel, ABC):
         """
         # Default no-op; overrides exist on backends with one-time resources.
         del name, config, mngr_ctx
+
+
+class LazyProviderBackend(FrozenModel):
+    """A deferred provider-backend registration returned by ``register_provider_backend``.
+
+    Lets a plugin register a backend's lightweight metadata -- name, config class,
+    and CLI help text -- at ``mngr`` startup while deferring the import of the heavy
+    backend implementation (and its cloud SDK) until the backend is actually used.
+    ``load`` imports and returns the backend class on demand; the registry calls it
+    the first time ``get_backend`` is asked for this name.
+
+    Config validation only ever needs the config schema, and ``mngr create --help``
+    only needs the build/start help text -- so registering those eagerly here lets a
+    plain ``mngr config`` / ``mngr list`` / ``mngr --help`` invocation skip importing
+    the backend class (and its cloud SDK) entirely, which is the bulk of CLI
+    cold-start latency.
+    """
+
+    name: ProviderBackendName
+    config_class: type[ProviderInstanceConfig]
+    load: Callable[[], type[ProviderBackendInterface]]
+    build_args_help: str
+    start_args_help: str

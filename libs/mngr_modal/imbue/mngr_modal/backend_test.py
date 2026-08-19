@@ -4,9 +4,9 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_modal.backend import ModalProviderBackend
-from imbue.mngr_modal.backend import get_files_for_deploy
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
+from imbue.mngr_modal.plugin import get_files_for_deploy
 from imbue.modal_proxy.direct import DirectModalInterface
 
 # =============================================================================

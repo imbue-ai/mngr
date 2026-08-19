@@ -4,9 +4,13 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.registry import _backend_help_registry
+from imbue.mngr.providers.registry import _backend_loader_registry
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.providers.registry import _indent_text
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
+from imbue.mngr.providers.registry import get_backend
+from imbue.mngr.providers.registry import list_backends
 
 _TEST_BACKEND_NAME = ProviderBackendName("test-same-help")
 
@@ -115,3 +119,40 @@ def test_get_all_provider_args_help_sections_omits_start_help_when_same_as_build
         assert test_backend_section.count("No arguments supported.") == 1
     finally:
         del _backend_registry[_TEST_BACKEND_NAME]
+
+
+def test_lazy_backend_registration_defers_loading_until_get_backend() -> None:
+    """A lazily-registered backend is listed and contributes CLI help text without
+    importing its class; get_backend materializes (and caches) the class on first
+    access. This is the mechanism that keeps a plain ``mngr config``/``list``/``--help``
+    from importing heavy provider SDKs at startup (MIND-179)."""
+    lazy_name = ProviderBackendName("test-lazy-backend")
+    load_calls: list[int] = []
+
+    def _load() -> type[ProviderBackendInterface]:
+        load_calls.append(1)
+        return _TestBackendWithSameHelp
+
+    _backend_loader_registry[lazy_name] = _load
+    _backend_help_registry[lazy_name] = ("lazy build help", "lazy start help")
+    try:
+        # Listed without being materialized.
+        assert str(lazy_name) in list_backends()
+        assert lazy_name not in _backend_registry
+        # Help text is served from the registration metadata -- the loader is NOT called.
+        _title, content = get_all_provider_args_help_sections()[0]
+        assert f"Provider: {lazy_name}" in content
+        assert "lazy build help" in content
+        assert "lazy start help" in content
+        assert load_calls == []
+        # get_backend materializes on first access and caches the class.
+        assert get_backend(lazy_name) is _TestBackendWithSameHelp
+        assert load_calls == [1]
+        assert _backend_registry[lazy_name] is _TestBackendWithSameHelp
+        # A second access is served from the cache -- the loader is not called again.
+        assert get_backend(lazy_name) is _TestBackendWithSameHelp
+        assert load_calls == [1]
+    finally:
+        _backend_loader_registry.pop(lazy_name, None)
+        _backend_help_registry.pop(lazy_name, None)
+        _backend_registry.pop(lazy_name, None)

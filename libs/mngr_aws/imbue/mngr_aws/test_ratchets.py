@@ -68,7 +68,10 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(0))
+    # 1: the lazy provider-backend loader in plugin.py imports the backend module inside a
+    # function to keep the heavy AWS/boto SDK off `mngr`'s startup path (MIND-179). This is
+    # the intended lazy-import pattern, not an anti-pattern to remove.
+    rc.check_inline_imports(_DIR, snapshot(2))
 
 
 def test_prevent_relative_imports() -> None:
