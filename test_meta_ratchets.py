@@ -169,6 +169,18 @@ def test_no_import_layer_violations() -> None:
 
 @pytest.mark.flaky
 @pytest.mark.timeout(60)
+def test_no_import_layer_violations_minds_admin() -> None:
+    """Ensure minds_admin production code has zero import layer violations.
+
+    Enforces the ``minds_admin layers contract`` (main > cli > envs > bake >
+    slices). See ``test_no_import_layer_violations`` for the flaky/timeout
+    rationale.
+    """
+    check_no_import_lint_errors(_REPO_ROOT, contract_name="minds_admin layers contract")
+
+
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_no_import_layer_violations_mngr_imbue_cloud() -> None:
     """Ensure mngr_imbue_cloud production code has zero import layer violations.
 

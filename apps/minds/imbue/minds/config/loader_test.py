@@ -9,8 +9,8 @@ from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import bundled_client_config_path_or_none
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
-from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.config.loader import per_env_secret_services
+from imbue.minds.config.loader import repo_tier_client_config_path
 
 _VALID_CLIENT_TOML = (
     'connector_url = "https://connector.example.com/"\nlitellm_proxy_url = "https://litellm.example.com/"\n'

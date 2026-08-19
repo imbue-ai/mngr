@@ -8,6 +8,7 @@ import pytest
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.vault_reader import VaultPath
+from imbue.minds.envs.vault_reader import admin_key_from_supertokens_secret
 from imbue.minds.envs.vault_reader import read_vault_kv
 
 
@@ -190,3 +191,18 @@ def test_read_vault_kv_still_rejects_dataless_leaf_without_metadata(tmp_path: Pa
     )
     with pytest.raises(VaultReadError, match="no data.data dict"):
         read_vault_kv(VaultPath("secrets/minds/dev/cloudflare"), vault_binary=str(fake))
+
+
+def test_admin_key_from_secret_prefers_new_field_over_deprecated() -> None:
+    secret = {"MINDS_ADMIN_KEY": "new-key", "MINDS_PAID_ADMIN_KEY": "legacy-key"}
+    assert admin_key_from_supertokens_secret(secret, "secret/minds/dev") == "new-key"
+
+
+def test_admin_key_from_secret_falls_back_to_deprecated_field() -> None:
+    secret = {"MINDS_ADMIN_KEY": "", "MINDS_PAID_ADMIN_KEY": "legacy-key"}
+    assert admin_key_from_supertokens_secret(secret, "secret/minds/dev") == "legacy-key"
+
+
+def test_admin_key_from_secret_raises_when_neither_field_set() -> None:
+    with pytest.raises(VaultReadError, match="missing 'MINDS_ADMIN_KEY'"):
+        admin_key_from_supertokens_secret({"MINDS_PAID_ADMIN_KEY": ""}, "secret/minds/dev")

@@ -30,17 +30,17 @@ from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.config.modal_profile import MODAL_PROFILE_ENV_VAR
 from imbue.minds.config.modal_profile import modal_profile_for_tier_or_none
-from imbue.minds.envs.vault_reader import admin_key_from_supertokens_secret
-from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 from imbue.minds.deployment_tests.data_types import SharedEnvHandle
 from imbue.minds.deployment_tests.primitives import SharedEnvRole
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.vault_reader import VaultPath
+from imbue.minds.envs.vault_reader import admin_key_from_supertokens_secret
 from imbue.minds.envs.vault_reader import delete_vault_kv
 from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.envs.vault_reader import write_vault_kv
 from imbue.minds.errors import MindError
+from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 
 _SUPERTOKENS_TENANT_ID: Final[str] = "public"
 _CONNECTOR_HTTP_TIMEOUT_SECONDS: Final[float] = 60.0

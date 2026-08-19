@@ -34,4 +34,3 @@ def isolate_mind_tests(
 
     with isolate_git(monkeypatch), isolate_tmux_server(monkeypatch):
         yield
-

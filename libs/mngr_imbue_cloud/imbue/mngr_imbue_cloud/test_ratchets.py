@@ -38,7 +38,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(1))
+    rc.check_bare_print(_DIR, snapshot(0))
 
 
 # --- Exception handling ---
@@ -118,7 +118,7 @@ def test_prevent_yaml_usage() -> None:
     # necessary lima usage, not a config-file anti-pattern (mngr_lima itself
     # allows YAML for the same reason); most matches are the literal substring
     # in "lima.yaml" strings and comments.
-    rc.check_yaml_usage(_DIR, snapshot(96))
+    rc.check_yaml_usage(_DIR, snapshot(40))
 
 
 def test_prevent_functools_partial() -> None:
