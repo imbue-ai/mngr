@@ -450,6 +450,71 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
     raise MngrError(f"SSH server not ready after {timeout_seconds}s at {hostname}:{port}")
 
 
+def _can_authenticate_to_server(
+    hostname: str,
+    port: int,
+    private_key_path: Path,
+    timeout_seconds: float = 5.0,
+) -> bool:
+    """Check if we can authenticate and open a session to the SSH server.
+
+    A full SSH connection with session open verifies the server is ready to
+    handle requests, not just accepting TCP connections.
+    """
+    client = None
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=hostname,
+            port=port,
+            key_filename=str(private_key_path),
+            timeout=timeout_seconds,
+            auth_timeout=timeout_seconds,
+            banner_timeout=timeout_seconds,
+        )
+        transport = client.get_transport()
+        if transport is None:
+            return False
+        transport.open_session(timeout=timeout_seconds)
+        return True
+    except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError):
+        return False
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except (OSError, paramiko.SSHException):
+                pass
+
+
+def wait_for_sshd_with_retry(
+    hostname: str,
+    port: int,
+    timeout_seconds: float = 60.0,
+    private_key_path: Path | None = None,
+) -> None:
+    """Wait for sshd to be ready, optionally verifying it can open sessions.
+
+    First waits for the SSH transport handshake, then optionally verifies
+    the server can actually open authenticated sessions. This absorbs
+    cold-start latency where the tunnel is available but sshd is still
+    initializing.
+    """
+    wait_for_sshd(hostname, port, timeout_seconds)
+
+    if private_key_path is not None:
+        if not poll_until(
+            lambda: _can_authenticate_to_server(hostname, port, private_key_path, 5.0),
+            timeout=timeout_seconds,
+            poll_interval=0.5,
+        ):
+            raise MngrError(
+                f"SSH server at {hostname}:{port} accepted connections but could not open sessions "
+                f"after {timeout_seconds}s (sshd may still be initializing)"
+            )
+
+
 def parse_openssh_public_key_blob(public_key: str) -> tuple[str, str]:
     """Split an OpenSSH public key line into its (key_type, base64_blob).
 

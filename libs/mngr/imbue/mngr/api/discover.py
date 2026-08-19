@@ -16,7 +16,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
-from imbue.mngr.api.providers import SkippedProviderConstruction
 from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderDiscoveryError
@@ -40,35 +39,54 @@ _SLOW_PROVIDER_DISCOVERY_WARN_SECONDS: Final[float] = 10.0
 _PENDING_PROVIDER_WARN_INTERVAL_SECONDS: Final[float] = 15.0
 
 
-class DiscoveryOutcome(FrozenModel):
-    """What one discovery pass saw, including the providers it could not ask.
+class Unreachable(FrozenModel):
+    """Why a provider could not be reached: it failed to construct, so it was never queried.
 
-    A model rather than a tuple because the third field is the whole point: a
-    provider that failed to construct is absent from ``agents_by_host`` in
+    Carries the provider's own error and curated remediation, which is what a
+    caller that turns this back into a user-facing failure needs (see
+    :func:`_raise_for_unmatched_identifiers`).
+    """
+
+    provider_name: ProviderInstanceName = Field(description="Name of the provider that could not be reached")
+    error_type_name: str = Field(description="The type name of the construction exception")
+    error_message: str = Field(description="The construction exception's message")
+    user_help_text: str | None = Field(default=None, description="The exception's curated remediation, or None")
+
+
+class DiscoveryOutcome(FrozenModel):
+    """What one discovery pass saw, including the providers it could not reach.
+
+    A provider that could not be reached is absent from ``agents_by_host`` in
     exactly the same way as a provider that genuinely holds no agents, so a
-    caller that reads only the first two fields cannot tell "this agent does not
-    exist" from "the backend hosting it could not be reached". ``mngr exec`` on a
-    machine whose Docker daemon is down took the first reading and reported the
-    agent as missing.
+    caller that reads only the hosts cannot tell "this agent does not exist" from
+    "the backend hosting it could not be reached". ``results_by_provider`` closes
+    that gap.
     """
 
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = Field(
         description="Agents discovered per host, across every provider that answered"
     )
-    providers: list[BaseProviderInstance] = Field(description="The provider instances that were successfully queried")
-    skipped_providers: list[SkippedProviderConstruction] = Field(
-        description="Providers that could not be constructed (empty, or unreachable) and so were never queried"
+    results_by_provider: dict[ProviderInstanceName, BaseProviderInstance | Unreachable] = Field(
+        description=(
+            "Each provider mapped to the instance that answered, or to why it could not be reached. A "
+            "provider that answered but holds nothing simply contributes no hosts -- that is the empty "
+            "case, and it needs no entry of its own."
+        )
     )
 
     @property
-    def unavailable_providers(self) -> list[SkippedProviderConstruction]:
-        """The skips that mean "unknown", not "nothing here".
+    def providers(self) -> list[BaseProviderInstance]:
+        """The provider instances that answered (the reachable ones)."""
+        return [result for result in self.results_by_provider.values() if not isinstance(result, Unreachable)]
 
-        A provider that declared itself *empty* is a positive answer -- it was
-        reached and holds nothing -- so it says nothing about a missing agent.
-        Only the unreachable ones leave a gap in what discovery can claim.
+    @property
+    def unavailable_providers(self) -> list[Unreachable]:
+        """The providers discovery could not reach, each leaving a gap in what it can claim.
+
+        This is why "not found" is not always honest: an agent on an unreachable
+        provider is absent from the snapshot exactly as a deleted one is.
         """
-        return [skipped for skipped in self.skipped_providers if not skipped.is_empty]
+        return [result for result in self.results_by_provider.values() if isinstance(result, Unreachable)]
 
 
 def warn_on_duplicate_host_names(
@@ -177,17 +195,29 @@ def _run_discovery(
 
     providers, skipped_providers = get_all_provider_instances_and_skipped(mngr_ctx, provider_names)
     logger.trace("Found {} provider instances ({} skipped)", len(providers), len(skipped_providers))
-    # A provider that could not be constructed is queried by nobody, so it
-    # contributes no hosts and no agents -- indistinguishable, downstream, from a
-    # provider that holds none. Name it here so the gap is at least visible in
-    # the logs even for callers that ignore the outcome's skipped list.
+    # One entry per provider: the instance that answered, or why it could not be
+    # reached. An unreachable provider is queried by nobody, so it contributes no
+    # hosts and no agents -- indistinguishable, from the hosts alone, from a
+    # provider that holds none. Recording why (and logging it) is what lets a
+    # caller resolving an identifier tell the two apart. An empty provider
+    # answered and holds nothing, so it is simply left out.
+    results_by_provider: dict[ProviderInstanceName, BaseProviderInstance | Unreachable] = {
+        provider.name: provider for provider in providers
+    }
     for skipped in skipped_providers:
-        if not skipped.is_empty:
-            logger.warning(
-                "Discovery could not reach provider {}, so its hosts and agents are absent from this snapshot: {}",
-                skipped.provider_name,
-                skipped.error_message,
-            )
+        if skipped.is_empty:
+            continue
+        results_by_provider[skipped.provider_name] = Unreachable(
+            provider_name=skipped.provider_name,
+            error_type_name=skipped.error_type_name,
+            error_message=skipped.error_message,
+            user_help_text=skipped.user_help_text,
+        )
+        logger.warning(
+            "Discovery could not reach provider {}, so its hosts and agents are absent from this snapshot: {}",
+            skipped.provider_name,
+            skipped.error_message,
+        )
 
     if reset_caches:
         logger.debug("Resetting provider caches before discovery")
@@ -221,7 +251,7 @@ def _run_discovery(
     # Warn if any host names are duplicated within the same provider
     warn_on_duplicate_host_names(agents_by_host)
 
-    return DiscoveryOutcome(agents_by_host=agents_by_host, providers=providers, skipped_providers=skipped_providers)
+    return DiscoveryOutcome(agents_by_host=agents_by_host, results_by_provider=results_by_provider)
 
 
 @pure

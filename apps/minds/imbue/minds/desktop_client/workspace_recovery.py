@@ -265,12 +265,8 @@ def _report_restart_step_failure(
     That reason is also *recorded* on the tracker, because this is the first
     observation of the outage anywhere: the rejection is a live one, while the
     discovery snapshot that carries the same outage is up to a provider poll
-    interval behind it. The recovery card is raised by the RESTART_FAILED
-    transition below, so without this it opens on the one verdict this failure
-    has already ruled out -- an unresponsive machine, with a Restart button
-    routed through the backend that just refused one -- and corrects itself a
-    poll later. Recorded before the transition, so the surfaces that re-derive
-    on that edge already see it.
+    interval behind it. Recorded before the RESTART_FAILED transition below, so
+    the surfaces that re-derive on that edge already see it.
     """
     display_info = backend_resolver.get_agent_display_info(workspace_agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
