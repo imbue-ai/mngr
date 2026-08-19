@@ -335,7 +335,7 @@ function bakeBuildInfo() {
  *
  * When both are unset, leaves _bundled/ empty -- this is the
  * `uv run minds run` / dev-mode case where the user is expected to
- * activate an env in their shell (`minds env activate <name>`) before
+ * activate an env in their shell (`minds-admin env activate <name>`) before
  * invoking the backend. The packaged Electron startup refuses to run
  * without a bundled config if it was built without these vars set,
  * which surfaces the missing build-time config loudly instead of

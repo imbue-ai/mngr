@@ -296,7 +296,7 @@ set -u
 # 'runsc install -- --overlay2=none'; see apps/minds/docs/wsl.md).
 export MINDS_DOCKER_RUNTIME_DEFAULT="\${MINDS_DOCKER_RUNTIME_DEFAULT:-runc}"
 cd "$INSTALL_DIR"
-eval "\$(uv run minds env activate "$ENV_NAME")"
+eval "\$(uv run minds-admin env activate "$ENV_NAME")"
 $launch_command
 LAUNCHER
 chmod +x "$HOME/.local/bin/minds-wsl-start"
