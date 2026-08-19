@@ -49,7 +49,7 @@ rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock SRC/
   install context regenerates its own).
 
 The exclude set is defined once in code, in
-`libs/mngr_imbue_cloud/.../bake/pool_bake.py`
+`apps/minds_admin/imbue/minds_admin/bake/pool_bake.py`
 (`_VENDOR_RSYNC_MANUAL_EXCLUDES` and `_GITIGNORE_RSYNC_FILTER`). Three paths
 populate `system/vendor/mngr/` from the monorepo with this form; keep them in step with
 those constants:
@@ -57,7 +57,7 @@ those constants:
 | Path | Where | Trigger |
 |---|---|---|
 | `just sync-vendor-mngr-live` | root `justfile` | every dev-app startup (`just minds-start` calls it), or on demand |
-| `sync_mngr_into_template` | `pool_bake.py` (the constants) | `minds-admin pool create --mngr-source ...` / `minds-admin pool create --mngr-source ...` |
+| `sync_mngr_into_template` | `pool_bake.py` (the constants) | `minds-admin pool create --mngr-source ...` |
 | `propagate_changes` | `apps/minds/scripts/propagate_changes` (`RSYNC_EXCLUDES`) | each dev-loop iteration into a running container |
 
 `propagate_changes` additionally protects `data/`, `.mngr/`, and
