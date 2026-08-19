@@ -288,7 +288,6 @@ type = "layers"
 layers = [
     "imbue.mngr_imbue_cloud.plugin",
     "imbue.mngr_imbue_cloud.cli",
-    "imbue.mngr_imbue_cloud.bake",
     "imbue.mngr_imbue_cloud.providers",
     "imbue.mngr_imbue_cloud.hosts",
     "imbue.mngr_imbue_cloud.slices",
