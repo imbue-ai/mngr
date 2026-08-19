@@ -44,10 +44,7 @@ def test_list_with_no_agents(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# No @pytest.mark.modal, matching test_list_active_filter: with no agents the
-# Modal environment does not exist yet, so `mngr list` skips the modal provider
-# (ProviderEmptyError) and never invokes the `modal` CLI -- the only Modal usage
-# the resource guard can observe across the e2e subprocess boundary.
+@pytest.mark.modal
 def test_list_json_with_no_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # output all objects as one big JSON array when complete  (useful for scripting)

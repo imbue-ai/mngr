@@ -19,13 +19,18 @@ provider exposes one -- the outer/management sshd port), so there is no second
 import json
 import os
 import shlex
+import shutil
 import sys
+import time
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Final
+from uuid import uuid4
 
 from loguru import logger
 from pydantic import Field
@@ -100,6 +105,19 @@ _DEFERRED_INSTALL_SATISFIED_TEST: Final[str] = "test -x /opt/fortress/tilion-for
 # download) to finish; on timeout the bake proceeds and the install retries on lease.
 _DEFERRED_INSTALL_WAIT_TIMEOUT_SECONDS: Final[int] = 900
 
+# The MNGR_PREFIX every inner bake ``mngr`` subprocess runs under. Deliberately
+# NOT an extension of any user-facing prefix (e.g. ``minds-``), so no consumer
+# that matches resources by its own prefix can ever mistake bake-time resources
+# for its own. The baked remote state is prefix-independent (the lease-time
+# adopt template forwards the *adopting user's* prefix onto the host), so this
+# value never reaches a leased workspace.
+EPHEMERAL_BAKE_MNGR_PREFIX: Final[str] = "mngr-bake-"
+
+# How long a retained (failed-bake) ephemeral namespace survives before the
+# next bake invocation sweeps it: long enough to debug a failure from last
+# week, short enough that the parent dir stays bounded.
+_STALE_BAKE_NAMESPACE_MAX_AGE_SECONDS: Final[int] = 7 * 24 * 60 * 60
+
 
 class PoolBakeError(RuntimeError):
     """Raised when a required pool-bake step fails irrecoverably."""
@@ -130,6 +148,96 @@ class BakedPoolHost(FrozenModel):
     container_host_public_key: str | None = Field(
         default=None, description="the container sshd host public key (baked, deterministic), to pin"
     )
+
+
+class EphemeralBakeNamespace(FrozenModel):
+    """A throwaway mngr namespace for one bake invocation's inner ``mngr`` subprocesses.
+
+    Bakes are a pure function of (bake source, box, tier credentials): their inner
+    ``mngr create`` invocations need no state from -- and must leave no state in --
+    the operator's own mngr data root. Without this isolation, bake-time hosts,
+    agents, and discovery events land in whatever ``MNGR_HOST_DIR`` the operator's
+    shell carries (e.g. the minds desktop app's data root, where the ``is_primary``
+    label makes every bake render as a phantom workspace).
+    """
+
+    namespace_dir: Path = Field(
+        description="Root of the throwaway namespace (deleted on success, retained on failure)"
+    )
+    host_dir: Path = Field(description="The MNGR_HOST_DIR the inner mngr subprocesses run against")
+
+    def to_subprocess_env(self) -> dict[str, str]:
+        """The env overrides pointing an inner ``mngr`` subprocess at this namespace (they win over inherited values)."""
+        return {
+            "MNGR_HOST_DIR": str(self.host_dir),
+            "MNGR_PREFIX": EPHEMERAL_BAKE_MNGR_PREFIX,
+        }
+
+
+def bake_namespace_parent_dir() -> Path:
+    """The directory holding every ephemeral bake namespace (active and retained-on-failure alike)."""
+    return Path.home() / ".cache" / "mngr-bake"
+
+
+def sweep_stale_bake_namespaces() -> None:
+    """Remove retained failed-bake namespaces older than the retention window.
+
+    A failed bake retains its namespace for debugging (see
+    :func:`ephemeral_bake_namespace`); this keeps the parent dir bounded by
+    sweeping retained dirs whose mtime is past the window. Called at the start of
+    each bake invocation. The invocation's own namespace is created afterwards,
+    so it can never be swept out from under the bake.
+    """
+    parent = bake_namespace_parent_dir()
+    if not parent.is_dir():
+        return
+    now = time.time()
+    for entry in parent.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            age_seconds = now - entry.stat().st_mtime
+        except OSError as exc:
+            logger.debug("Skipped unreadable bake namespace entry {}: {}", entry, exc)
+            continue
+        if age_seconds <= _STALE_BAKE_NAMESPACE_MAX_AGE_SECONDS:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+        logger.info("Swept stale retained bake namespace {} ({:.0f}h old)", entry, age_seconds / 3600)
+
+
+@contextmanager
+def ephemeral_bake_namespace() -> Iterator[EphemeralBakeNamespace]:
+    """Create a fresh bake namespace: deleted on clean exit, retained (path logged) when the body raises.
+
+    Retention covers every raising exit -- errors, ``SystemExit`` from a failed
+    report, ``KeyboardInterrupt`` -- since the namespace's local records and SSH
+    keys are the only client-side debugging artifact of a failed bake. Callers
+    signal a non-exception failure by raising before leaving the block.
+    """
+    parent = bake_namespace_parent_dir()
+    parent.mkdir(parents=True, exist_ok=True)
+    # 0700 like the pool-key temp dir: the namespace accumulates the baked
+    # containers' SSH private keys while the bake runs (and after, if retained).
+    namespace_dir = parent / uuid4().hex
+    namespace_dir.mkdir(mode=0o700)
+    host_dir = namespace_dir / "host_dir"
+    host_dir.mkdir(mode=0o700)
+    namespace = EphemeralBakeNamespace(namespace_dir=namespace_dir, host_dir=host_dir)
+    is_clean_exit = False
+    try:
+        yield namespace
+        is_clean_exit = True
+    finally:
+        if is_clean_exit:
+            shutil.rmtree(namespace_dir, ignore_errors=True)
+        else:
+            logger.warning(
+                "Retaining the failed bake's ephemeral mngr namespace for debugging: {} "
+                "(swept automatically after {} days)",
+                namespace_dir,
+                _STALE_BAKE_NAMESPACE_MAX_AGE_SECONDS // (24 * 60 * 60),
+            )
 
 
 def _stream_subprocess_line(line: str, is_stdout: bool) -> None:

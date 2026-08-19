@@ -1092,7 +1092,7 @@ def test_discover_by_address_narrows_to_the_constrained_host(
     )
     assert excluded.agents_by_host == {}
     assert excluded.providers == unconstrained.providers
-    assert excluded.unavailable_providers == unconstrained.unavailable_providers
+    assert excluded.skipped_providers == unconstrained.skipped_providers
 
     kept = discover_by_address(
         AgentAddress(agent=AgentName("no-such-agent"), host=HostAddress(host=HostName(LOCAL_HOST_NAME))),

@@ -54,7 +54,9 @@ from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_CHECKOUT_PATH
 from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
 from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.bake.pool_bake import bake_pool_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import ephemeral_bake_namespace
 from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import sweep_stale_bake_namespaces
 from imbue.mngr_imbue_cloud.bake.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.bake.pool_bake import wait_for_deferred_install
 from imbue.mngr_imbue_cloud.cli._common import emit_json
@@ -908,6 +910,9 @@ def _bake_one_slice(
     port_range_end: int,
     is_deferred_install_wait_skipped: bool,
     default_workspace_template_cache_tag: str | None,
+    # The invocation's ephemeral bake namespace overrides (MNGR_HOST_DIR / MNGR_PREFIX),
+    # so the inner ``mngr create`` never touches the operator's own mngr data root.
+    extra_create_env: Mapping[str, str],
 ) -> SliceBakeOutcome:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
@@ -943,6 +948,7 @@ def _bake_one_slice(
                 port_range_end=port_range_end,
                 default_workspace_template_cache_tag=default_workspace_template_cache_tag,
             ),
+            extra_create_env=extra_create_env,
             mngr_create_timeout_seconds=_SLICE_MNGR_CREATE_TIMEOUT_SECONDS,
         )
         # The VM now exists; any failure in the post-create steps or the insert must
@@ -1829,137 +1835,149 @@ def allocate_slices(
             )
             return
 
-        # Resolve which mngr tree (if any) to vendor into the DEFAULT_WORKSPACE_TEMPLATE workspace's
-        # system/vendor/mngr (the baked container builds its mngr from there). For a
-        # --from-tag bake we keep the mngr already vendored at the pinned tag so the
-        # slice is byte-for-byte tag content; only --workspace-dir (dev) or an
-        # explicit --mngr-source overrides it. See _resolve_vendored_mngr_source.
-        repo_root = Path(__file__).resolve().parents[5]
-        mngr_source_to_vendor = _resolve_vendored_mngr_source(
-            mngr_source=mngr_source, repo_root=repo_root, is_from_tag=is_from_tag
-        )
-        if mngr_source_to_vendor is not None:
-            sync_mngr_into_template(mngr_source_to_vendor, workspace_dir)
-
-        pool_public_key = _derive_public_key(private_key_path)
-        # Enable the per-box default-workspace-template image cache only for production (--from-tag) bakes, whose
-        # content is an immutable tag: the first slice builds + seeds a box-local tar
-        # (tagged default-workspace-template:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
-        # mutable content under a branch label, so they always build (default_workspace_template_cache_tag=None).
-        repo_branch_or_tag = lease_attributes.get("repo_branch_or_tag")
-        default_workspace_template_cache_tag = (
-            f"default-workspace-template:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
-        )
-        # Seed-first: a cache-tag bake onto a box that does not hold this tag's tar
-        # yet runs a seed phase -- one slice baked alone -- before the fan-out. The
-        # seeder builds + publishes the box tar (its bounded retries absorb transient
-        # build failures), every later slice takes the warm docker-load path, and a
-        # build that keeps failing aborts the whole bake up front with one clear
-        # error instead of consuming one requested slice per failed build.
-        is_seed_phase_needed = default_workspace_template_cache_tag is not None and not LimaBoxImageCache(
-            slice_client=occupancy_client,
-            cache_dir=box_default_workspace_template_cache_dir(ssh_user),
-        ).has_tar(default_workspace_template_cache_tag)
-        # One worker per slice, capped at ``max_concurrency`` at once by the shared
-        # fan-out: each bake blocks on the semaphore before its ``mngr create``, so
-        # the box is never contended by more than K simultaneous carves+builds
-        # (which would push each create past its timeout). Every bake is handed the
-        # FULL box port range: the on-box reservation lock makes concurrent carves
-        # (this env's and other envs') pick distinct free ports from it.
-        bake_worker_kwargs = dict(
-            server=server,
-            sizing=sizing,
-            lease_attributes=lease_attributes,
-            region=region,
-            env_name=env_name,
-            workspace_dir=workspace_dir,
-            pool_public_key=pool_public_key,
-            private_key_path=private_key_path,
-            database_url=database_url,
-            port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
-            port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
-            is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-            default_workspace_template_cache_tag=default_workspace_template_cache_tag,
-        )
-        logger.info("Baking {} slice(s) on {} ({} at a time)", count, server.public_address, max_concurrency)
-
-        # ``signal.signal`` only works on the main thread; the admin CLI always runs
-        # allocate_slices there, but guard so an off-main-thread caller falls back to
-        # the finally reap rather than crashing on install.
-        is_main_thread = threading.current_thread() is threading.main_thread()
-        # Set by the join-interruption handler so the per-slice retry loops return
-        # their (kill-induced) failures instead of spawning replacement bakes.
-        bake_termination_event = threading.Event()
-        previous_sigterm = signal.signal(signal.SIGTERM, _raise_on_bake_termination_signal) if is_main_thread else None
-        previous_sigint = signal.signal(signal.SIGINT, _raise_on_bake_termination_signal) if is_main_thread else None
-        try:
-            if is_seed_phase_needed:
-                logger.info(
-                    "Box {} has no cached image tar for {}; seeding it with one slice before the fan-out",
-                    server.public_address,
-                    default_workspace_template_cache_tag,
-                )
-            seed_outcomes = (
-                _run_bake_fan_out(
-                    bake_worker_kwargs=bake_worker_kwargs,
-                    slice_count=1,
-                    max_concurrency=1,
-                    progress_noun="Seed slice bake",
-                    is_main_thread=is_main_thread,
-                    termination_event=bake_termination_event,
-                )
-                if is_seed_phase_needed
-                else []
+        # Every inner ``mngr create`` below runs in a throwaway mngr namespace so
+        # bake-time hosts/agents/discovery-events never land in the operator's own
+        # mngr data root (where e.g. the minds desktop app would render each bake as
+        # a phantom workspace). Deleted on success; retained (path logged) on any
+        # failure, including a partial one, and swept after the retention window.
+        sweep_stale_bake_namespaces()
+        with ephemeral_bake_namespace() as bake_namespace:
+            # Resolve which mngr tree (if any) to vendor into the DEFAULT_WORKSPACE_TEMPLATE workspace's
+            # system/vendor/mngr (the baked container builds its mngr from there). For a
+            # --from-tag bake we keep the mngr already vendored at the pinned tag so the
+            # slice is byte-for-byte tag content; only --workspace-dir (dev) or an
+            # explicit --mngr-source overrides it. See _resolve_vendored_mngr_source.
+            repo_root = Path(__file__).resolve().parents[5]
+            mngr_source_to_vendor = _resolve_vendored_mngr_source(
+                mngr_source=mngr_source, repo_root=repo_root, is_from_tag=is_from_tag
             )
-            is_seed_failed = any(outcome.status == SliceBakeOutcomeStatus.FAILED for outcome in seed_outcomes)
-            if is_seed_failed:
-                logger.error(
-                    "Aborting the bake: the seed slice failed all {} attempts (its error is in the report); "
-                    "not attempting the remaining {} slice(s)",
-                    _SLICE_BAKE_ATTEMPT_COUNT,
-                    count - 1,
-                )
-            fill_count = 0 if is_seed_failed else count - len(seed_outcomes)
-            fill_outcomes = (
-                _run_bake_fan_out(
-                    bake_worker_kwargs=bake_worker_kwargs,
-                    slice_count=fill_count,
-                    max_concurrency=max_concurrency,
-                    progress_noun="Slice bake",
-                    is_main_thread=is_main_thread,
-                    termination_event=bake_termination_event,
-                )
-                if fill_count > 0
-                else []
-            )
-            outcomes = seed_outcomes + fill_outcomes
-        except SliceBakeTerminatedError:
-            # Top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us).
-            # The fan-out's on_join_interrupted hook has already ignored further
-            # signals, killed the in-flight workers (so no new VM is carved), and let
-            # their threads settle; the finally reaps the orphans. Exit non-zero so
-            # the caller sees the failure.
-            raise SystemExit(1) from None
-        finally:
-            # Reap VMs left orphaned by a killed/timed-out create (carved but never
-            # inserted, so the provider's rollback never ran). Runs after all threads
-            # join -- an individual-create timeout (already a 'failed' outcome by now)
-            # is cleaned here; the except above handles a top-level kill. Restore the
-            # signal handlers last so the reap itself isn't interrupted.
-            _reap_orphan_slice_resources(
-                server=server, private_key_path=private_key_path, database_url=database_url, env_name=env_name
-            )
-            if is_main_thread:
-                signal.signal(signal.SIGTERM, previous_sigterm)
-                signal.signal(signal.SIGINT, previous_sigint)
+            if mngr_source_to_vendor is not None:
+                sync_mngr_into_template(mngr_source_to_vendor, workspace_dir)
 
-    succeeded = [outcome for outcome in outcomes if outcome.status == SliceBakeOutcomeStatus.SUCCEEDED]
-    report = SliceBakeReport(
-        requested=count, succeeded=len(succeeded), failed=count - len(succeeded), slices=tuple(outcomes)
-    )
-    emit_json(report.model_dump(mode="json", exclude_none=True))
-    if report.failed:
-        raise SystemExit(1)
+            pool_public_key = _derive_public_key(private_key_path)
+            # Enable the per-box default-workspace-template image cache only for production (--from-tag) bakes, whose
+            # content is an immutable tag: the first slice builds + seeds a box-local tar
+            # (tagged default-workspace-template:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
+            # mutable content under a branch label, so they always build (default_workspace_template_cache_tag=None).
+            repo_branch_or_tag = lease_attributes.get("repo_branch_or_tag")
+            default_workspace_template_cache_tag = (
+                f"default-workspace-template:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
+            )
+            # Seed-first: a cache-tag bake onto a box that does not hold this tag's tar
+            # yet runs a seed phase -- one slice baked alone -- before the fan-out. The
+            # seeder builds + publishes the box tar (its bounded retries absorb transient
+            # build failures), every later slice takes the warm docker-load path, and a
+            # build that keeps failing aborts the whole bake up front with one clear
+            # error instead of consuming one requested slice per failed build.
+            is_seed_phase_needed = default_workspace_template_cache_tag is not None and not LimaBoxImageCache(
+                slice_client=occupancy_client,
+                cache_dir=box_default_workspace_template_cache_dir(ssh_user),
+            ).has_tar(default_workspace_template_cache_tag)
+            # One worker per slice, capped at ``max_concurrency`` at once by the shared
+            # fan-out: each bake blocks on the semaphore before its ``mngr create``, so
+            # the box is never contended by more than K simultaneous carves+builds
+            # (which would push each create past its timeout). Every bake is handed the
+            # FULL box port range: the on-box reservation lock makes concurrent carves
+            # (this env's and other envs') pick distinct free ports from it.
+            bake_worker_kwargs = dict(
+                server=server,
+                sizing=sizing,
+                lease_attributes=lease_attributes,
+                region=region,
+                env_name=env_name,
+                workspace_dir=workspace_dir,
+                pool_public_key=pool_public_key,
+                private_key_path=private_key_path,
+                database_url=database_url,
+                port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
+                port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
+                is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
+                default_workspace_template_cache_tag=default_workspace_template_cache_tag,
+                extra_create_env=bake_namespace.to_subprocess_env(),
+            )
+            logger.info("Baking {} slice(s) on {} ({} at a time)", count, server.public_address, max_concurrency)
+
+            # ``signal.signal`` only works on the main thread; the admin CLI always runs
+            # allocate_slices there, but guard so an off-main-thread caller falls back to
+            # the finally reap rather than crashing on install.
+            is_main_thread = threading.current_thread() is threading.main_thread()
+            # Set by the join-interruption handler so the per-slice retry loops return
+            # their (kill-induced) failures instead of spawning replacement bakes.
+            bake_termination_event = threading.Event()
+            previous_sigterm = (
+                signal.signal(signal.SIGTERM, _raise_on_bake_termination_signal) if is_main_thread else None
+            )
+            previous_sigint = (
+                signal.signal(signal.SIGINT, _raise_on_bake_termination_signal) if is_main_thread else None
+            )
+            try:
+                if is_seed_phase_needed:
+                    logger.info(
+                        "Box {} has no cached image tar for {}; seeding it with one slice before the fan-out",
+                        server.public_address,
+                        default_workspace_template_cache_tag,
+                    )
+                seed_outcomes = (
+                    _run_bake_fan_out(
+                        bake_worker_kwargs=bake_worker_kwargs,
+                        slice_count=1,
+                        max_concurrency=1,
+                        progress_noun="Seed slice bake",
+                        is_main_thread=is_main_thread,
+                        termination_event=bake_termination_event,
+                    )
+                    if is_seed_phase_needed
+                    else []
+                )
+                is_seed_failed = any(outcome.status == SliceBakeOutcomeStatus.FAILED for outcome in seed_outcomes)
+                if is_seed_failed:
+                    logger.error(
+                        "Aborting the bake: the seed slice failed all {} attempts (its error is in the report); "
+                        "not attempting the remaining {} slice(s)",
+                        _SLICE_BAKE_ATTEMPT_COUNT,
+                        count - 1,
+                    )
+                fill_count = 0 if is_seed_failed else count - len(seed_outcomes)
+                fill_outcomes = (
+                    _run_bake_fan_out(
+                        bake_worker_kwargs=bake_worker_kwargs,
+                        slice_count=fill_count,
+                        max_concurrency=max_concurrency,
+                        progress_noun="Slice bake",
+                        is_main_thread=is_main_thread,
+                        termination_event=bake_termination_event,
+                    )
+                    if fill_count > 0
+                    else []
+                )
+                outcomes = seed_outcomes + fill_outcomes
+            except SliceBakeTerminatedError:
+                # Top-level kill (e.g. the minds wrapper's subprocess timeout SIGTERMs us).
+                # The fan-out's on_join_interrupted hook has already ignored further
+                # signals, killed the in-flight workers (so no new VM is carved), and let
+                # their threads settle; the finally reaps the orphans. Exit non-zero so
+                # the caller sees the failure.
+                raise SystemExit(1) from None
+            finally:
+                # Reap VMs left orphaned by a killed/timed-out create (carved but never
+                # inserted, so the provider's rollback never ran). Runs after all threads
+                # join -- an individual-create timeout (already a 'failed' outcome by now)
+                # is cleaned here; the except above handles a top-level kill. Restore the
+                # signal handlers last so the reap itself isn't interrupted.
+                _reap_orphan_slice_resources(
+                    server=server, private_key_path=private_key_path, database_url=database_url, env_name=env_name
+                )
+                if is_main_thread:
+                    signal.signal(signal.SIGTERM, previous_sigterm)
+                    signal.signal(signal.SIGINT, previous_sigint)
+
+            succeeded = [outcome for outcome in outcomes if outcome.status == SliceBakeOutcomeStatus.SUCCEEDED]
+            report = SliceBakeReport(
+                requested=count, succeeded=len(succeeded), failed=count - len(succeeded), slices=tuple(outcomes)
+            )
+            emit_json(report.model_dump(mode="json", exclude_none=True))
+            if report.failed:
+                raise SystemExit(1)
 
 
 @server.command(name="set-status")

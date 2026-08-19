@@ -69,22 +69,6 @@ def workspace_options_pane_html(html: str, pane: str) -> str:
     return html[start:] if next_pane == -1 else html[start:next_pane]
 
 
-def tamper_session_cookie_signed_content(cookie_value: str) -> str:
-    """Return a copy of a session cookie altered so it can never re-verify.
-
-    A session cookie is an itsdangerous ``signed-content.signature`` token whose
-    signature is an HMAC over the signed-content string; the signature is the
-    only segment a verifier base64-decodes, so a flip in its base64 tail can be
-    absorbed by the tail's spare bits and still verify. Altering the signed
-    content instead -- anything left of the final "." -- always changes the HMAC
-    input, so it is rejected whatever the payload.
-    """
-    signed_content, separator, signature = cookie_value.rpartition(".")
-    assert separator, f"not a signed token: {cookie_value!r}"
-    flipped_head = ("A" if signed_content[0] != "A" else "B") + signed_content[1:]
-    return flipped_head + separator + signature
-
-
 @contextmanager
 def capture_error_logs() -> Iterator[list[str]]:
     """Capture loguru ERROR-level records (a loguru sink; caplog can't hook loguru).

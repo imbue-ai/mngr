@@ -26,10 +26,6 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import ValidationError
 from pyinfra.api import Host as PyinfraHost
-from tenacity import retry
-from tenacity import retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
@@ -123,7 +119,7 @@ from imbue.mngr_modal.ssh_utils import load_or_create_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import per_host_key_dir
 from imbue.mngr_modal.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr_modal.ssh_utils import resolve_per_host_host_keypair
-from imbue.mngr_modal.ssh_utils import wait_for_sshd_with_retry
+from imbue.mngr_modal.ssh_utils import wait_for_sshd
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.errors import ModalProxyAuthError
@@ -1055,20 +1051,12 @@ class ModalProviderInstance(BaseProviderInstance):
                 stderr=StreamType.DEVNULL,
             )
 
-    @retry(
-        wait=wait_exponential(min=1, max=5),
-        stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(ModalProxyError),
-        reraise=True,
-    )
     def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface, *, tunnel_timeout: int = 50) -> tuple[str, int]:
         """Extract SSH connection info from a running sandbox.
 
         ``tunnel_timeout`` is forwarded to the Modal SDK's ``tunnels()`` call
         and controls how many seconds the backend will wait for the sandbox to
         be ready before raising ``SandboxTimeoutError``.
-
-        Retries on ModalProxyError to absorb cold-start latency.
         """
         try:
             tunnels = sandbox.tunnels(timeout=tunnel_timeout)
@@ -1079,12 +1067,9 @@ class ModalProviderInstance(BaseProviderInstance):
         ssh_tunnel = tunnels[CONTAINER_SSH_PORT]
         return ssh_tunnel.tcp_socket
 
-    def _wait_for_sshd(
-        self, hostname: str, port: int, host_id: HostId, timeout_seconds: float = SSH_CONNECT_TIMEOUT
-    ) -> None:
+    def _wait_for_sshd(self, hostname: str, port: int, timeout_seconds: float = SSH_CONNECT_TIMEOUT) -> None:
         """Wait for sshd to be ready to accept connections."""
-        private_key_path, _ = self._get_ssh_keypair(host_id)
-        wait_for_sshd_with_retry(hostname, port, timeout_seconds, private_key_path)
+        wait_for_sshd(hostname, port, timeout_seconds)
 
     def _create_pyinfra_host(self, hostname: str, port: int, private_key_path: Path) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""
@@ -1204,7 +1189,7 @@ class ModalProviderInstance(BaseProviderInstance):
 
             # Wait for sshd to be ready
             with info_span("Waiting for sshd to be ready..."):
-                self._wait_for_sshd(ssh_host, ssh_port, host_id, self.config.ssh_connect_timeout)
+                self._wait_for_sshd(ssh_host, ssh_port, self.config.ssh_connect_timeout)
 
             with log_span("Executing post-ssh operations"):
                 # Create pyinfra host and connector
@@ -3151,7 +3136,7 @@ log "=== Shutdown script completed ==="
             # same window.
             ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
             with log_span("Waiting for the SSH tunnel to recover after the snapshot"):
-                self._wait_for_sshd(ssh_host, ssh_port, host_id, self.config.ssh_connect_timeout)
+                self._wait_for_sshd(ssh_host, ssh_port, self.config.ssh_connect_timeout)
         host.set_certified_data(updated_certified_data)
         logger.debug(
             "Created snapshot: id={}, name={}",
