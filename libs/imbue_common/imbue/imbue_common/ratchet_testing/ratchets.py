@@ -580,7 +580,7 @@ def check_no_import_lint_errors(project_root: Path, contract_name: str = "mngr l
 # from the strict-mode ratchet because they are not runnable scripts.
 # ``.minds/template/`` holds declarative secret-schema templates -- commented
 # ``export KEY=`` files sourced by the deploy tooling
-# (``scripts/push_vault_from_file.py``, ``minds env deploy``) and copied
+# (``scripts/push_vault_from_file.py``, ``minds-admin env deploy``) and copied
 # per-tier, never executed standalone -- so ``set -euo pipefail`` is meaningless
 # for them and they are not the class of script this ratchet guards.
 _STRICT_MODE_EXEMPT_DIR_PREFIXES: Final[tuple[str, ...]] = (".minds/template/",)

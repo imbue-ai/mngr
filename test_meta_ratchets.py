@@ -276,7 +276,7 @@ def test_prevent_bash_without_strict_mode() -> None:
     The secret-file templates at ``.minds/template/*.sh`` are excluded entirely
     by ``find_bash_scripts_without_strict_mode`` (not merely accommodated in the
     count): they are shell-sourceable env declarations (commented ``export KEY=``
-    files consumed by ``scripts/push_vault_from_file.py`` and ``minds env
+    files consumed by ``scripts/push_vault_from_file.py`` and ``minds-admin env
     deploy`` when seeding HCP Vault / Modal secrets), not executable scripts, so
     ``set -euo pipefail`` is meaningless for them and would only leak strict mode
     into whatever shell sources them.

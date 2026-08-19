@@ -1,4 +1,4 @@
-# CI tier deploy config -- read by `minds env deploy` for any ci env.
+# CI tier deploy config -- read by `minds-admin env deploy` for any ci env.
 #
 # Mirrors the dev tier today: every CI env is dynamic (a per-test
 # ``ci-<timestamp>-<uuid>`` env stood up by the deployment-tests
@@ -25,7 +25,7 @@ services = [
     "storage",
 ]
 
-# Tier-shape flags consumed by `minds env deploy` / `destroy`. Matches
+# Tier-shape flags consumed by `minds-admin env deploy` / `destroy`. Matches
 # the dev tier: every CI env is dynamic, creates its own resources,
 # writes per-env local state, and does not track a per-tier generation
 # id (each env is independent).

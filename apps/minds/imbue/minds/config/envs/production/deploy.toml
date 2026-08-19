@@ -25,7 +25,7 @@ services = [
     "storage",
 ]
 
-# Tier-shape flags consumed by `minds env deploy` / `destroy`. Production
+# Tier-shape flags consumed by `minds-admin env deploy` / `destroy`. Production
 # tracks generation for parity with staging (production destroy is hard-
 # refused at the CLI today, so the id is effectively immutable for the
 # lifetime of the tier).

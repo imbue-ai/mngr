@@ -7,10 +7,12 @@ below renders it (with transitive pins and sha256 hashes) to a committed
 ``image_requirements.txt`` next to the app, which is what the image installs.
 Regenerate the committed exports with ``just export-image-requirements``.
 
-This module holds only the pure pieces (constants, paths, the command) so
-that public consumers -- ``minds env deploy``'s freshness preflight lives in
-the public mirror -- do not need the private ``modal_app_kit`` package, which
-holds the modal-SDK side (the digest-pinned base and ``pinned_image``).
+This module holds only the pure pieces (constants, paths, the command),
+kept in the public ``imbue_common`` even though its remaining consumers
+(``minds-admin env deploy``'s freshness preflight and the private Modal
+apps' drift tests) are private, so the mirror's ``imbue_common`` stays
+self-contained without the private ``modal_app_kit`` package, which holds
+the modal-SDK side (the digest-pinned base and ``pinned_image``).
 """
 
 from pathlib import Path

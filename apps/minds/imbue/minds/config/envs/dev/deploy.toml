@@ -1,10 +1,10 @@
-# Dev tier deploy config -- read by `minds env deploy` for any dev env.
+# Dev tier deploy config -- read by `minds-admin env deploy` for any dev env.
 #
 # `modal_workspace` is the dev tier's Modal workspace. The dev tier has
 # no shared Modal environment of its own -- every dev iterates against
 # a *per-developer* Modal environment that takes the activated dev env's
 # name. The `modal_env` field below is unused for dev-tier deploys:
-# `minds env deploy` (with a dev env activated) always pins the Modal
+# `minds-admin env deploy` (with a dev env activated) always pins the Modal
 # env to the activated dev env name. Staging / production deploys are
 # the ones that consume `modal_env`; we leave it at its default ("main")
 # for shape consistency.
@@ -42,7 +42,7 @@ services = [
 connector = 600
 litellm_proxy = 600
 
-# Tier-shape flags consumed by `minds env deploy` / `destroy`. All four
+# Tier-shape flags consumed by `minds-admin env deploy` / `destroy`. All four
 # are required (no defaults) so a misconfigured tier fails fast on load.
 [lifecycle]
 creates_resources = true
@@ -86,6 +86,6 @@ max_active_synced_workspaces = 200
 # goes stale the moment the dev pool is re-baked at a newer version. Every
 # dev-tier deploy must instead state the ref explicitly, matching what the
 # dev pool is baked at (see `just bake-slice-dev` / `bake-slice-prod`):
-#   MINDS_WEB_TEMPLATE_REF=<branch-or-tag> uv run minds env deploy
+#   MINDS_WEB_TEMPLATE_REF=<branch-or-tag> uv run minds-admin env deploy
 [web_workspaces]
 template_repo = "github.com/imbue-ai/default-workspace-template"
