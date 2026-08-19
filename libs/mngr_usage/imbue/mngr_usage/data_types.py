@@ -148,8 +148,11 @@ class TokenSnapshot(FrozenModel):
     input: int | None = Field(default=None, description="Non-cached input tokens (cache buckets are separate).")
     output: int | None = Field(default=None, description="Output tokens, inclusive of reasoning tokens.")
     cache_read: int | None = Field(default=None, description="Input tokens served from the prompt cache (read).")
+    # One bucket regardless of cache TTL, which is a known imprecision: Anthropic
+    # charges a 1-hour cache write 2x an input token against 1.25x for a 5-minute
+    # one, and pricing applies the 5-minute rate to everything here.
     cache_creation: int | None = Field(
-        default=None, description="Input tokens written to the prompt cache (creation/write)."
+        default=None, description="Input tokens written to the prompt cache (creation/write), at any cache TTL."
     )
 
 

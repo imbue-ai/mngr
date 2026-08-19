@@ -59,6 +59,7 @@ def _exec_on_agent(
     )
 
 
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 # Fresh Modal sandboxes transiently accept TCP before sshd answers the SSH

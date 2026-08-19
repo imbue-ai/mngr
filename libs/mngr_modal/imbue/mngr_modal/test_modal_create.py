@@ -378,6 +378,7 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
     )
 
 
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 # Flaky for the same Modal-service reasons as its already-marked siblings in
