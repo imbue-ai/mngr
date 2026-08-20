@@ -245,17 +245,36 @@ SLICE_LIMA_INSTANCE_PREFIX: Final[str] = "mngr-slice-"
 # Suffix appended to a slice's instance name to name its btrfs data disk.
 SLICE_LIMA_DISK_SUFFIX: Final[str] = "-data"
 
-# limactl rejects any instance/disk identifier longer than this (its
-# `identifier greater than maximum length (76 characters)` fatal). The longest
-# name a slice produces is the data disk: prefix + env stamp + "-" + 32-hex
-# host id + the disk suffix -- so the env stamp gets whatever budget remains.
+# How much of the host id's 32-char uuid hex is embedded in slice lima names.
+# Truncated (not the full hex) because the name budget is tight -- see
+# MAX_SLICE_INSTANCE_NAME_LENGTH below -- and 16 hex chars (64 bits) is far
+# beyond collision range for the <=14 slices a box holds. Slices baked before
+# the truncation carry the full 32 hex; the owner parse accepts both.
+SLICE_HOST_ID_HEX_LENGTH: Final[int] = 16
+
+# Two limactl limits bound a slice's lima names; both derivations live here so
+# the fail-fast guard below can never drift from what limactl enforces:
+#
+# 1. The ssh control socket path must fit a unix socket address: limactl
+#    validates ``<lima-home>/<instance>/ssh.sock.<16-digit-suffix>`` against
+#    UNIX_PATH_MAX (108, "must be less than"), reserving 16 digits for the
+#    suffix. With the fleet's standard lima home (``/home/limahost/.lima/``)
+#    that caps the INSTANCE name at 60 chars -- the binding constraint.
+# 2. Any instance/disk identifier must be at most 76 chars (its ``identifier
+#    greater than maximum length`` fatal); the data disk (instance + "-data")
+#    is the longest, and at instance <= 60 it is 65 -- never binding, kept in
+#    the derivation as a min() so a future re-balance cannot silently break it.
+_UNIX_PATH_MAX: Final[int] = 108
+_LIMA_SSH_SOCK_RESERVED_SUFFIX_LENGTH: Final[int] = len("/ssh.sock.") + 16
+_STANDARD_LIMA_HOME_PREFIX: Final[str] = "/home/limahost/.lima/"
 _LIMA_MAX_IDENTIFIER_LENGTH: Final[int] = 76
+MAX_SLICE_INSTANCE_NAME_LENGTH: Final[int] = min(
+    _UNIX_PATH_MAX - 1 - len(_STANDARD_LIMA_HOME_PREFIX) - _LIMA_SSH_SOCK_RESERVED_SUFFIX_LENGTH,
+    _LIMA_MAX_IDENTIFIER_LENGTH - len(SLICE_LIMA_DISK_SUFFIX),
+)
+# The extra 1 is the "-" between the env stamp and the host id hex.
 MAX_SLICE_ENV_NAME_LENGTH: Final[int] = (
-    _LIMA_MAX_IDENTIFIER_LENGTH
-    - len(SLICE_LIMA_INSTANCE_PREFIX)
-    - 1  # the "-" between the env stamp and the host id hex
-    - 32  # the hyphen-free uuid hex of the host id
-    - len(SLICE_LIMA_DISK_SUFFIX)
+    MAX_SLICE_INSTANCE_NAME_LENGTH - len(SLICE_LIMA_INSTANCE_PREFIX) - 1 - SLICE_HOST_ID_HEX_LENGTH
 )
 
 
@@ -263,23 +282,27 @@ MAX_SLICE_ENV_NAME_LENGTH: Final[int] = (
 def assert_env_name_fits_slice_names(env_name: str) -> None:
     """Raise ``SliceCapacityError`` when ``env_name`` is too long to stamp into slice lima names.
 
-    Checked before anything is carved: limactl only rejects the over-long
-    identifier at reserve time, deep inside the bake, with a message that says
-    nothing about the env name being the variable part. CI env names
+    Checked before anything is carved: limactl only rejects the over-long name
+    at reserve time, deep inside the bake, with a message that says nothing
+    about the env name being the variable part. CI env names
     (``ci-<timestamp>-<short>``) sit near the cap, which is how this was found.
     """
     if len(env_name) > MAX_SLICE_ENV_NAME_LENGTH:
         raise SliceCapacityError(
             f"env name {env_name!r} is {len(env_name)} chars; at most {MAX_SLICE_ENV_NAME_LENGTH} fit into a "
-            f"slice's lima disk name (limactl caps identifiers at {_LIMA_MAX_IDENTIFIER_LENGTH} chars). "
-            "Use a shorter env name."
+            f"slice's lima instance name (limactl caps the instance name at {MAX_SLICE_INSTANCE_NAME_LENGTH} "
+            "chars -- its ssh socket path must fit UNIX_PATH_MAX). Use a shorter env name."
         )
 
 
-# A slice's host id is a uuid hex (exactly 32 lowercase hex chars, no hyphens), so
-# it cleanly delimits the optional env stamp that precedes it in a stamped name.
-_SLICE_HOST_ID_PATTERN: Final[str] = r"[0-9a-f]{32}"
-_STAMPED_SLICE_CORE_RE: Final[re.Pattern[str]] = re.compile(rf"^(?P<env>.+)-(?P<host>{_SLICE_HOST_ID_PATTERN})$")
+# A slice's host id stamp is uuid hex with no hyphens: SLICE_HOST_ID_HEX_LENGTH
+# chars on current slices, the full 32 on slices baked before truncation. Tried
+# longest-first so a (wildly implausible) legacy env ending in "-<16 hex>"
+# still parses as the legacy 32-hex shape rather than donating hex to its env.
+_STAMPED_SLICE_CORE_RES: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"^(?P<env>.+)-(?P<host>[0-9a-f]{32})$"),
+    re.compile(rf"^(?P<env>.+)-(?P<host>[0-9a-f]{{{SLICE_HOST_ID_HEX_LENGTH}}})$"),
+)
 
 
 @pure
@@ -290,9 +313,12 @@ def slice_lima_instance_name(host_id: HostId, env_name: str | None = None) -> st
     (``mngr-slice-<env>-<host-hex>``) so the box can attribute the slice to an
     environment and reconciliation can scope itself to one env's slices. Without it
     the legacy un-stamped name (``mngr-slice-<host-hex>``) is produced, for
-    backwards compatibility with slices baked before env stamping.
+    backwards compatibility with slices baked before env stamping. The host hex is
+    truncated (see :data:`SLICE_HOST_ID_HEX_LENGTH`) so long env names fit
+    limactl's instance-name budget; existing slices keep their stored full-hex
+    names (teardown always reads the recorded name, never re-derives it).
     """
-    host_hex = host_id.get_uuid().hex
+    host_hex = host_id.get_uuid().hex[:SLICE_HOST_ID_HEX_LENGTH]
     if env_name is None:
         return f"{SLICE_LIMA_INSTANCE_PREFIX}{host_hex}"
     return f"{SLICE_LIMA_INSTANCE_PREFIX}{env_name}-{host_hex}"
@@ -325,14 +351,18 @@ def slice_name_env_owner(name: str) -> str | None:
 
     A stamped name is ``mngr-slice-<env>-<host-hex>``; a legacy name
     (``mngr-slice-<host-hex>``) and any non-slice name both return None. The host
-    hex is a hyphen-free uuid, so the env is everything between the prefix and the
-    trailing ``-<host-hex>``.
+    hex is a hyphen-free uuid (truncated on current slices, full 32 on older
+    ones), so the env is everything between the prefix and the trailing
+    ``-<host-hex>``.
     """
     core = _slice_resource_core(name)
     if core is None:
         return None
-    match = _STAMPED_SLICE_CORE_RE.match(core)
-    return match.group("env") if match else None
+    for pattern in _STAMPED_SLICE_CORE_RES:
+        match = pattern.match(core)
+        if match is not None:
+            return match.group("env")
+    return None
 
 
 @pure

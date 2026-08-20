@@ -3,6 +3,7 @@ import pytest
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_HOST_ID_HEX_LENGTH
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -183,8 +184,9 @@ def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chos
     # The ports come from the box reservation, and the instance/disk names are env-stamped.
     assert result.vm_ssh_host_port == 22001
     assert result.container_ssh_host_port == 22002
-    assert result.instance_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}"
-    assert result.disk_name == f"mngr-slice-dev-josh-{host_id.get_uuid().hex}-data"
+    host_hex = host_id.get_uuid().hex[:SLICE_HOST_ID_HEX_LENGTH]
+    assert result.instance_name == f"mngr-slice-dev-josh-{host_hex}"
+    assert result.disk_name == f"mngr-slice-dev-josh-{host_hex}-data"
     # The reserve happened before the boot, and the boot was a separate command.
     reserve_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "base64 -d | bash" in cmd)
     start_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "limactl --log-level=info start" in cmd)

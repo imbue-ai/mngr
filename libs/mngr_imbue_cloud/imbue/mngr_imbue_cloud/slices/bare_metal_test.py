@@ -16,8 +16,10 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import MAX_SLICE_ENV_NAME_LENGTH
+from imbue.mngr_imbue_cloud.slices.bare_metal import MAX_SLICE_INSTANCE_NAME_LENGTH
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_CONTAINER_MEMORY_RESERVE_MIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_HOST_ID_HEX_LENGTH
 from imbue.mngr_imbue_cloud.slices.bare_metal import assert_env_name_fits_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import build_slice_container_memory_start_args
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
@@ -163,18 +165,28 @@ def test_slice_lima_names_are_deterministic_and_distinct() -> None:
     assert slice_lima_instance_name(host_id) == slice_lima_instance_name(host_id)
     assert slice_lima_instance_name(host_id) != slice_lima_instance_name(other_id)
     assert slice_lima_disk_name(host_id) != slice_lima_instance_name(host_id)
-    assert host_id.get_uuid().hex in slice_lima_instance_name(host_id)
+    assert host_id.get_uuid().hex[:SLICE_HOST_ID_HEX_LENGTH] in slice_lima_instance_name(host_id)
 
 
-def test_slice_lima_names_stamp_the_env_and_keep_the_host_hex() -> None:
+def test_slice_lima_names_stamp_the_env_and_keep_the_truncated_host_hex() -> None:
     host_id = HostId.generate()
+    host_hex = host_id.get_uuid().hex[:SLICE_HOST_ID_HEX_LENGTH]
     stamped = slice_lima_instance_name(host_id, "dev-josh-foo")
     legacy = slice_lima_instance_name(host_id)
-    assert stamped == f"mngr-slice-dev-josh-foo-{host_id.get_uuid().hex}"
-    assert legacy == f"mngr-slice-{host_id.get_uuid().hex}"
+    assert stamped == f"mngr-slice-dev-josh-foo-{host_hex}"
+    assert legacy == f"mngr-slice-{host_hex}"
     # The disk name is the instance name plus the data suffix, for both forms.
     assert slice_lima_disk_name(host_id, "dev-josh-foo") == f"{stamped}-data"
     assert slice_lima_disk_name(host_id) == f"{legacy}-data"
+
+
+def test_slice_name_env_owner_parses_pre_truncation_full_hex_names() -> None:
+    # Slices baked before the hex truncation carry the full 32-char host hex;
+    # every parser must keep attributing them correctly.
+    full_hex = HostId.generate().get_uuid().hex
+    assert slice_name_env_owner(f"mngr-slice-dev-josh-foo-{full_hex}") == "dev-josh-foo"
+    assert slice_name_env_owner(f"mngr-slice-dev-josh-foo-{full_hex}-data") == "dev-josh-foo"
+    assert slice_name_env_owner(f"mngr-slice-{full_hex}") is None
 
 
 def test_slice_name_env_owner_distinguishes_stamped_legacy_and_non_slice() -> None:
@@ -447,19 +459,22 @@ def test_parse_raw_swap_devices_ignores_md_backed_swap_and_empty_input() -> None
     assert parse_raw_swap_devices("") == []
 
 
-def test_env_names_at_the_slice_identifier_cap_pass_and_longer_ones_fail() -> None:
-    # The longest slice identifier is the data disk; an env at the cap must
-    # yield a disk name exactly at limactl's 76-char maximum.
+def test_env_names_at_the_slice_name_cap_pass_and_longer_ones_fail() -> None:
+    # The binding constraint is limactl's instance-name budget (its ssh socket
+    # path must fit UNIX_PATH_MAX); an env at the cap must land exactly on it.
     host_id = HostId.generate()
     at_cap = "c" * MAX_SLICE_ENV_NAME_LENGTH
     assert_env_name_fits_slice_names(at_cap)
-    assert len(slice_lima_disk_name(host_id, at_cap)) == 76
+    assert len(slice_lima_instance_name(host_id, at_cap)) == MAX_SLICE_INSTANCE_NAME_LENGTH
+    # The secondary 76-char identifier cap must also hold for the disk name.
+    assert len(slice_lima_disk_name(host_id, at_cap)) <= 76
 
-    with pytest.raises(SliceCapacityError, match="76 chars"):
+    with pytest.raises(SliceCapacityError, match="instance name"):
         assert_env_name_fits_slice_names("c" * (MAX_SLICE_ENV_NAME_LENGTH + 1))
 
 
-def test_orchestrator_style_ci_env_names_fit_the_slice_identifier_cap() -> None:
-    # The CI orchestrator mints ``ci-<16-char-timestamp>-<6-hex>`` names; the
-    # 77-char disk-name incident came from an 8-hex suffix, one char over.
+def test_orchestrator_style_ci_env_names_fit_the_slice_name_cap() -> None:
+    # The CI orchestrator mints ``ci-<16-char-timestamp>-<6-hex>`` names (26
+    # chars); both real incidents -- the 77-char disk identifier and the
+    # UNIX_PATH_MAX ssh.sock overflow -- must stay fixed for that shape.
     assert_env_name_fits_slice_names("ci-20260820t171706z-b0c869")
