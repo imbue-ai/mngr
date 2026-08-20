@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
 from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
@@ -138,11 +139,7 @@ def test_unauthenticated_arrival_at_post_login_is_sent_to_authenticate_not_a_des
 def test_tampered_session_cookie_is_treated_as_unauthenticated(tmp_path: Path) -> None:
     client, auth_store = _empty_client(tmp_path)
     valid_cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
-    # Flip a character mid-token (not in the base64 tail, whose spare bits a
-    # verifier ignores) so the signature no longer matches the payload.
-    midpoint = len(valid_cookie) // 2
-    original = valid_cookie[midpoint]
-    tampered = valid_cookie[:midpoint] + ("a" if original != "a" else "b") + valid_cookie[midpoint + 1 :]
+    tampered = tamper_session_cookie_signed_content(valid_cookie)
 
     client.set_cookie(SESSION_COOKIE_NAME, tampered)
     assert _is_treated_as_unauthenticated(client)
