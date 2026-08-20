@@ -60,7 +60,12 @@ async function pickContentWindow(app, { timeoutMs = 60 * 1000 } = {}) {
 }
 
 const test = base.test.extend({
-  mindsApp: async ({}, use, testInfo) => {
+  // Extra env for the launched app, layered over the runner's own. Override
+  // per-file or per-describe with `test.use({ mindsAppEnv: { ... } })` -- how
+  // macos-lifecycle.spec.js forces a deterministic startup failure.
+  mindsAppEnv: [{}, { option: true }],
+
+  mindsApp: async ({ mindsAppEnv }, use, testInfo) => {
     const execPath = process.env.MINDS_APP_PATH || DEFAULT_APP_PATH;
     if (!fs.existsSync(execPath)) {
       throw new Error(
@@ -71,7 +76,7 @@ const test = base.test.extend({
 
     const app = await electron.launch({
       executablePath: execPath,
-      env: { ...process.env },
+      env: { ...process.env, ...mindsAppEnv },
       timeout: 5 * 60 * 1000,
     });
 
@@ -138,4 +143,81 @@ const test = base.test.extend({
   },
 });
 
-module.exports = { test, expect: base.expect };
+// -- Lifecycle helpers (macos-lifecycle.spec.js) --
+//
+// These reach into the app's MAIN process via electronApplication.evaluate,
+// which is what makes the windowless states testable at all: window closes and
+// dock activations are main-process lifecycle events with no renderer to drive.
+
+// Close every window the way the red traffic-light button does, and wait for
+// main to settle on zero. Resolves the window count main itself sees, so a
+// window that refuses to close (a quit-sequence interception) fails loudly
+// rather than being papered over by a stale app.windows() snapshot.
+async function closeAllWindows(app, { timeoutMs = 30 * 1000 } = {}) {
+  await app.evaluate(({ BrowserWindow }) => {
+    for (const win of BrowserWindow.getAllWindows()) win.close();
+  });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const count = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length);
+    if (count === 0) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`Windows still open after ${timeoutMs}ms`);
+}
+
+// Fire a lifecycle event into main and return the window it opens. The
+// listener is armed BEFORE the emit so a window that opens synchronously
+// isn't missed.
+async function windowOpenedBy(app, emit, { timeoutMs = 60 * 1000 } = {}) {
+  const opened = app.waitForEvent('window', { timeout: timeoutMs });
+  await emit();
+  return opened;
+}
+
+// macOS dock-icon click (applicationShouldHandleReopen:).
+function emitActivate(app) {
+  return app.evaluate(({ app: electronApp }) => electronApp.emit('activate'));
+}
+
+// A minds:// URL delivered to an already-running app (application:openURLs:).
+// main's handler calls event.preventDefault(), hence the stub event.
+function emitOpenUrl(app, url) {
+  return app.evaluate(({ app: electronApp }, deeplink) => {
+    electronApp.emit('open-url', { preventDefault() {} }, deeplink);
+  }, url);
+}
+
+// Buffer the app's console output (logger.js tees main-process console.* to
+// stdout) so a test can wait on a startup milestone with no window to observe.
+// Scoped to this launch, so a prior run's lines can't satisfy the wait.
+function captureAppOutput(app) {
+  let buffered = '';
+  const proc = app.process();
+  for (const stream of [proc.stdout, proc.stderr]) {
+    if (stream) stream.on('data', (chunk) => { buffered += chunk.toString(); });
+  }
+  return {
+    text: () => buffered,
+    async waitForLine(pattern, { timeoutMs = 5 * 60 * 1000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const match = buffered.match(pattern);
+        if (match) return match;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      throw new Error(`Never saw ${pattern} in the app's output within ${timeoutMs}ms`);
+    },
+  };
+}
+
+module.exports = {
+  test,
+  expect: base.expect,
+  liveUrl,
+  closeAllWindows,
+  windowOpenedBy,
+  emitActivate,
+  emitOpenUrl,
+  captureAppOutput,
+};

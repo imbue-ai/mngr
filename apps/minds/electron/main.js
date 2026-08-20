@@ -19,6 +19,7 @@ const {
   shouldQuitOnWindowAllClosed,
   shouldInterceptLastWindowClose,
   shouldOpenWindowOnActivate,
+  decideNewWindowTarget,
 } = require('./lifecycle-policy');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
@@ -106,6 +107,16 @@ const systemInterfaceStatusByAgent = new Map();
 let isShuttingDown = false;
 let initialBundle = null;
 let hasCompletedInitialStart = false;
+// The app's FIRST-window route (session restore / welcome / consent) has not
+// landed on a window yet: either it is still being computed, or the window it
+// was for was closed mid-startup. Set once per launch and cleared by
+// applyStartupRouting, which IS that landing.
+let isStartupRoutingPending = false;
+// The launch's own computation of that route, while it is still running.
+// startBackendWithRetry lands its result on the most recent window -- including
+// one opened while it runs -- so such a window must not compute a route for
+// itself as well (see openStartupRoutedWindow).
+let isStartupRoutingBeingComputed = false;
 // A minds:// URL that arrived before the app could act on it.
 let pendingDeeplinkUrl = null;
 let canApplyDeeplinks = false;
@@ -630,7 +641,7 @@ function registerShortcutsFor(bundle, wc) {
     }
     if (modifier && !input.shift && !input.alt && key === 'n') {
       event.preventDefault();
-      openHomeInNewWindow();
+      openOrFocusWindow();
       return;
     }
   });
@@ -705,21 +716,106 @@ function openNewWindow(url, { showInactive = false } = {}) {
   return bundle;
 }
 
-function openHomeInNewWindow() {
-  if (!backendBaseUrl) {
-    const target = getMostRecentWindow();
-    if (target) focusBundle(target);
-    return target;
+// Open a window on the shell.html takeover screen: the recorded error, whose
+// Retry button restarts the backend, when one is current; else the loading
+// screen the startup sequence broadcasts into. This is what makes a windowless
+// app recoverable -- an app whose backend failed or died has no page to load
+// and no window to focus, so without this it could never open a window again.
+function openTakeoverWindow() {
+  const bundle = createBundle();
+  const takeover = lastErrorTakeover;
+  bundle.isErrorState = !!takeover;
+  bundle.isLoadingState = !takeover;
+  const wc = bundle.window.webContents;
+  wc.loadFile(path.join(__dirname, 'shell.html')).catch(() => {});
+  wc.once('did-finish-load', () => {
+    if (wc.isDestroyed()) return;
+    if (takeover) wc.send('error-details', takeover);
+  });
+  return bundle;
+}
+
+// Open a window and land the app's first-window route on it: the launch that
+// computed it lost its window (closed mid-startup), or the route has not been
+// computed yet. The route is recomputed here rather than replayed from a
+// snapshot taken at startup, so a session restored an hour later reflects the
+// workspaces that exist NOW.
+function openStartupRoutedWindow() {
+  const bundle = openTakeoverWindow(); // the loading screen, while we ask
+  // The launch is already computing that route and lands it on the most recent
+  // window, which is this one. Computing a second here would apply two routes
+  // to it -- duplicating every window of a multi-window session restore -- off
+  // an app-status read before the one-time login code is consumed, which
+  // answers "signed out".
+  if (isStartupRoutingBeingComputed) return bundle;
+  computeStartupRouting()
+    .then((routing) => {
+      // Closed while we were asking: leave the route pending so the next
+      // window the user opens still gets it.
+      if (bundle.window.isDestroyed()) return;
+      // Likewise for the states this request was decided against but that
+      // arrived while we asked. Both have already taken this window over --
+      // the error screen after a crash, the quitting screen after a committed
+      // quit -- and landing the route now would navigate it off that, for a
+      // crash onto the dead port the error screen exists to replace.
+      if (lastErrorTakeover || isShuttingDown || isQuitSequenceRunning) return;
+      applyStartupRouting(bundle, routing);
+      // A deeplink that arrived while this window sat on the loading screen was
+      // held for a window ready to take it, and this is the only loading state
+      // the backend start does not itself flush.
+      flushPendingDeeplink();
+    })
+    .catch((err) => {
+      console.warn('[startup] could not compute the first-window route:', err);
+    });
+  return bundle;
+}
+
+// Every "give me a window" request (dock activate, Cmd+N, File > New Window,
+// the dock menu, a second launch, a deeplink with nothing open) lands here, and
+// always resolves to a window unless a quit has committed. See
+// decideNewWindowTarget for what each state produces.
+function openOrFocusWindow() {
+  const target = decideNewWindowTarget({
+    hasBackendUrl: !!backendBaseUrl,
+    hasErrorTakeover: !!lastErrorTakeover,
+    hasLiveWindow: getMostRecentWindow() != null,
+    isStartupRoutingPending,
+    isShuttingDown,
+    isQuitSequenceRunning,
+  });
+  if (target === 'none') return null;
+  if (target === 'focus-existing') {
+    const existing = getMostRecentWindow();
+    focusBundle(existing);
+    return existing;
   }
-  return openNewWindow(backendBaseUrl + '/');
+  if (target === 'home') return openNewWindow(backendBaseUrl + '/');
+  if (target === 'startup-route') return openStartupRoutedWindow();
+  return openTakeoverWindow();
 }
 
 // -- Error / retry flow --
 
+// The error currently taking every window over, replayed into any window
+// opened afterwards. Cleared once a backend start succeeds.
+//
+// It is deliberately load-bearing beyond the error screen. After a crash
+// backendBaseUrl is knowingly left naming the DEAD port -- windows record their
+// content URL relative to it and toPersistedContentUrl needs that URL absolute
+// to recognize a workspace, so nulling it would persist every open window as
+// plain home and lose the workspace it was on -- and this flag is what stops
+// the app routing there anyway. So the pair reads: backendBaseUrl = "the port
+// the backend last served on"; lastErrorTakeover = "and it is not serving".
+// The consumers that must read it are the ones that can fire with no live
+// backend behind them -- a window request (decideNewWindowTarget) and a
+// deeplink (handleDeeplink); every other navigation to backendBaseUrl runs off
+// a live backend's events, or off a start that just succeeded and cleared this.
 let lastErrorTakeover = null;
 
 function showErrorInAllWindows(message, details, actionLabel) {
-  lastErrorTakeover = { message, details };
+  const takeover = { message, details, actionLabel };
+  lastErrorTakeover = takeover;
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isErrorState = true;
@@ -730,11 +826,11 @@ function showErrorInAllWindows(message, details, actionLabel) {
       wc.loadFile(path.join(__dirname, 'shell.html'));
       wc.once('did-finish-load', () => {
         if (!wc.isDestroyed()) {
-          wc.send('error-details', { message, details, actionLabel });
+          wc.send('error-details', takeover);
         }
       });
     } else {
-      wc.send('error-details', { message, details, actionLabel });
+      wc.send('error-details', takeover);
     }
   }
 }
@@ -754,6 +850,10 @@ function reloadAllWindowsAfterRetry() {
     if (bundle.window.isDestroyed()) continue;
     bundle.isErrorState = false;
     bundle.isLoadingState = false;
+    // A window is landing on real content, so the first-window route no longer
+    // describes anything. Inside the loop because with no live window nothing
+    // lands and the route is still owed.
+    isStartupRoutingPending = false;
     const target = bundle.preErrorUrl || (backendBaseUrl ? backendBaseUrl + '/' : null);
     if (target) navigateBundle(bundle, target);
   }
@@ -1374,8 +1474,14 @@ if (!gotLock) {
       handleDeeplink(url);
       return;
     }
+    // Launching the app again brings the app forward, so focus the window it
+    // has. With none open there is nothing to focus, so open one rather than
+    // dropping the launch. (Not openOrFocusWindow() unconditionally: with the
+    // backend serving that opens a SECOND window, which is right for Cmd+N and
+    // wrong for a re-launch.)
     const mru = getMostRecentWindow();
     if (mru) focusBundle(mru);
+    else openOrFocusWindow();
   });
   const coldStartDeeplinkUrl = extractDeeplinkUrlFromArgv(process.argv);
   if (coldStartDeeplinkUrl) handleDeeplink(coldStartDeeplinkUrl);
@@ -1470,7 +1576,7 @@ function installApplicationMenu() {
         {
           label: 'New Window',
           accelerator: 'CmdOrCtrl+N',
-          click: () => openHomeInNewWindow(),
+          click: () => openOrFocusWindow(),
         },
         { type: 'separator' },
         {
@@ -1517,7 +1623,7 @@ function installDockMenu() {
   app.dock.setMenu(Menu.buildFromTemplate([
     {
       label: 'New Window',
-      click: () => openHomeInNewWindow(),
+      click: () => openOrFocusWindow(),
     },
   ]));
 }
@@ -1535,11 +1641,7 @@ async function runStartupSequence(bundle) {
   console.log('[startup] shell.html loaded');
 
   try {
-    await runEnvSetup((status) => {
-      if (!bundle.window.isDestroyed() && !bundle.window.webContents.isDestroyed()) {
-        bundle.window.webContents.send('status-update', status);
-      }
-    });
+    await runEnvSetup((status) => broadcastStatusToLoadingWindows(status));
   } catch (err) {
     console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
@@ -1562,6 +1664,111 @@ function broadcastStatusToLoadingWindows(status) {
   }
 }
 
+// Consume the backend's one-time login code so the default session -- used by
+// every window's SPA page (including its /ui/ws channel) and by main's own
+// net.request calls -- gets the minds_session cookie.
+function consumeOneTimeLoginCode(loginUrl) {
+  return new Promise((resolve) => {
+    const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
+    console.log('[startup] Consuming one-time code via', authenticateUrl);
+    const req = net.request({ url: authenticateUrl, method: 'GET', useSessionCookies: true });
+    req.on('response', (resp) => {
+      console.log('[startup] /authenticate response status:', resp.statusCode);
+      resp.on('data', () => {});
+      resp.on('end', () => resolve());
+    });
+    req.on('error', (err) => {
+      console.warn('[startup] /authenticate request failed:', err);
+      resolve();
+    });
+    req.end();
+  });
+}
+
+// Where the app's first window should land, from the backend's app-status and
+// the saved session. Deliberately independent of having a window to put it in,
+// and cheap enough to re-run: openStartupRoutedWindow calls it again when the
+// route is claimed later, so a session restored well after launch reflects the
+// workspaces that exist then rather than a snapshot from startup.
+async function computeStartupRouting() {
+  const savedState = loadSessionState();
+  const appStatus = await fetchAppStatus();
+  const authenticated = appStatus && appStatus.authenticated;
+  const hasAccounts = !!(appStatus && appStatus.hasAccounts);
+
+  const restorableWorkspaceIds = (authenticated && appStatus.restorableWorkspaceIds) || [];
+  const knownAgentIdsSet = restorableWorkspaceIds.length > 0
+    ? new Set(restorableWorkspaceIds.map(String))
+    : null;
+  const restorable = authenticated
+    ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
+    : [];
+
+  const workspaceCount = appStatus ? appStatus.workspaceCount : 0;
+  const needsConsent = !!(appStatus && appStatus.needsErrorReportingConsent);
+  const route = decideStartupRoute({
+    authenticated,
+    hasAccounts,
+    workspaceCount,
+    restorableCount: restorable.length,
+    needsConsent,
+  });
+  console.log(
+    `[startup] route=${route} authenticated=${authenticated} hasAccounts=${hasAccounts} workspaceCount=${workspaceCount} restorableCount=${restorable.length} needsConsent=${needsConsent}`,
+  );
+  return { route, restorable, savedState };
+}
+
+// Land ``bundle`` on a computed startup route, opening the extra windows a
+// multi-window session restore needs. ``boundsAlreadyApplied`` is set for the
+// window onReady already sized from the saved state, so its bounds are only
+// re-applied when the route picked a different entry.
+function applyStartupRouting(bundle, { route, restorable, savedState }, { boundsAlreadyApplied = false } = {}) {
+  // The window is leaving the takeover for real content. Clearing the error
+  // flag matters when this window IS the takeover a Retry restarted the backend
+  // from (a first start that only succeeded on the retry lands here rather than
+  // in reloadAllWindowsAfterRetry): while it is set, navigation bookkeeping,
+  // session persistence, deeplink delivery and load-failure recovery are all
+  // suppressed for the window.
+  bundle.isErrorState = false;
+  bundle.isLoadingState = false;
+  // This IS the first-window route landing, so nothing is owed any more.
+  isStartupRoutingPending = false;
+  const wc = bundle.window.webContents;
+  if (route === 'welcome') {
+    wc.loadURL(backendBaseUrl + '/welcome').catch(() => {});
+    return;
+  }
+  if (route === 'consent') {
+    wc.loadURL(backendBaseUrl + '/consent').catch(() => {});
+    return;
+  }
+  if (route === 'create') {
+    wc.loadURL(backendBaseUrl + '/').catch(() => {});
+    return;
+  }
+  const [first, ...rest] = restorable;
+  if (!boundsAlreadyApplied || !isSameSavedWindow(first, savedState.windows[0])) {
+    restoreWindowBounds(bundle, first);
+  }
+  wc.loadURL(toRestoredContentUrl(first)).catch(() => {});
+  const restoredBundles = [];
+  for (const entry of rest) {
+    const restored = openNewWindow(toRestoredContentUrl(entry), { showInactive: true });
+    restoreWindowBounds(restored, entry);
+    restoredBundles.push(restored);
+  }
+  mruWindows.length = 0;
+  mruWindows.push(bundle, ...restoredBundles);
+  const raiseFirst = () => {
+    if (!bundle.window.isDestroyed()) bundle.window.focus();
+  };
+  for (const restored of restoredBundles) {
+    if (restored.window.isVisible()) raiseFirst();
+    else restored.window.once('show', raiseFirst);
+  }
+}
+
 async function startBackendWithRetry() {
   broadcastStatusToLoadingWindows('Starting Minds...');
 
@@ -1578,84 +1785,43 @@ async function startBackendWithRetry() {
     backendBaseUrl = `http://localhost:${port}`;
 
     console.log('[startup] Backend ready at', backendBaseUrl);
+    // The backend is serving again, so any recorded failure is stale: a window
+    // opened from here on gets the app, not a replay of the old error screen.
+    lastErrorTakeover = null;
 
     const isFirstStart = !hasCompletedInitialStart;
     hasCompletedInitialStart = true;
 
-    if (isFirstStart && initialBundle && !initialBundle.window.isDestroyed()) {
-      const savedState = loadSessionState();
-
-      // Consume the one-time login code via net.request so the default
-      // session (used by every window's SPA page -- including its /ui/ws
-      // channel -- and by main's own net.request calls) gets the
-      // minds_session cookie.
-      await new Promise((resolve) => {
-        const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
-        console.log('[startup] Consuming one-time code via', authenticateUrl);
-        const req = net.request({ url: authenticateUrl, method: 'GET', useSessionCookies: true });
-        req.on('response', (resp) => {
-          console.log('[startup] /authenticate response status:', resp.statusCode);
-          resp.on('data', () => {});
-          resp.on('end', () => resolve());
-        });
-        req.on('error', (err) => {
-          console.warn('[startup] /authenticate request failed:', err);
-          resolve();
-        });
-        req.end();
-      });
-
-      const appStatus = await fetchAppStatus();
-      const authenticated = appStatus && appStatus.authenticated;
-
-      const restorableWorkspaceIds = (authenticated && appStatus.restorableWorkspaceIds) || [];
-      const knownAgentIdsSet = restorableWorkspaceIds.length > 0
-        ? new Set(restorableWorkspaceIds.map(String))
-        : null;
-      const restorable = authenticated
-        ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
-        : [];
-
-      initialBundle.isLoadingState = false;
-
-      const workspaceCount = appStatus ? appStatus.workspaceCount : 0;
-      const needsConsent = !!(appStatus && appStatus.needsErrorReportingConsent);
-      const startupRoute = decideStartupRoute({
-        authenticated,
-        hasAccounts: !!(appStatus && appStatus.hasAccounts),
-        workspaceCount,
-        restorableCount: restorable.length,
-        needsConsent,
-      });
-      console.log(
-        `[startup] route=${startupRoute} authenticated=${authenticated} hasAccounts=${!!(appStatus && appStatus.hasAccounts)} workspaceCount=${workspaceCount} restorableCount=${restorable.length} needsConsent=${needsConsent}`,
-      );
-
-      if (startupRoute === 'welcome') {
-        initialBundle.window.webContents.loadURL(backendBaseUrl + '/welcome').catch(() => {});
-      } else if (startupRoute === 'consent') {
-        initialBundle.window.webContents.loadURL(backendBaseUrl + '/consent').catch(() => {});
-      } else if (startupRoute === 'create') {
-        initialBundle.window.webContents.loadURL(backendBaseUrl + '/').catch(() => {});
+    if (isFirstStart) {
+      // The first-window route is now owed. Marked BEFORE the awaits below so a
+      // window requested while they run waits on the loading screen instead of
+      // landing on home and being yanked off it a moment later.
+      isStartupRoutingPending = true;
+      isStartupRoutingBeingComputed = true;
+      let routing;
+      try {
+        // Unconditional, and deliberately NOT inside the window guard below:
+        // this is the only place the one-time code is consumed and a fresh one
+        // is minted per backend run, so skipping it because the startup window
+        // was closed strands the app on /login for the rest of the run.
+        await consumeOneTimeLoginCode(loginUrl);
+        routing = await computeStartupRouting();
+      } finally {
+        isStartupRoutingBeingComputed = false;
+      }
+      // Not necessarily the window startup began in: the user may have closed
+      // that one and re-opened another (which is sitting on the loading
+      // takeover waiting for exactly this).
+      const isInitialAlive = initialBundle && !initialBundle.window.isDestroyed();
+      const target = isInitialAlive ? initialBundle : getMostRecentWindow();
+      if (target) {
+        applyStartupRouting(target, routing, { boundsAlreadyApplied: isInitialAlive });
       } else {
-        const [first, ...rest] = restorable;
-        if (!isSameSavedWindow(first, savedState.windows[0])) restoreWindowBounds(initialBundle, first);
-        initialBundle.window.webContents.loadURL(toRestoredContentUrl(first)).catch(() => {});
-        const restoredBundles = [];
-        for (const entry of rest) {
-          const bundle = openNewWindow(toRestoredContentUrl(entry), { showInactive: true });
-          restoreWindowBounds(bundle, entry);
-          restoredBundles.push(bundle);
-        }
-        mruWindows.length = 0;
-        mruWindows.push(initialBundle, ...restoredBundles);
-        const raiseInitial = () => {
-          if (initialBundle && !initialBundle.window.isDestroyed()) initialBundle.window.focus();
-        };
-        for (const bundle of restoredBundles) {
-          if (bundle.window.isVisible()) raiseInitial();
-          else bundle.window.once('show', raiseInitial);
-        }
+        // Nothing is open at all. macOS keeps the app alive, so leave the route
+        // owed rather than popping windows up unprompted a minute after the
+        // user deliberately closed one: the next window they ask for is routed
+        // (against a freshly computed session, not this stale one).
+        console.log('[startup] no window survived startup; holding the route for the next one');
       }
     } else {
       reloadAllWindowsAfterRetry();
@@ -1666,13 +1832,27 @@ async function startBackendWithRetry() {
     const proc = getBackendProcess();
     if (proc) {
       proc.on('exit', (code) => {
-        if (code !== 0 && code !== null && bundles.size > 0) {
-          const logContent = readLastLogLines(50);
-          showErrorInAllWindows(
-            'Minds stopped unexpectedly',
-            logContent || `Process exited with code ${code}`,
-          );
-        }
+        // The direct child is `uv run`, which traps SIGTERM (forwarding it on)
+        // and reports the backend's death as a plain exit status: a graceful
+        // stop is 0, a backend killed out from under us is uv's nonzero 128+n.
+        // So shutdown()'s SIGTERM on a quit or a retry arrives as 0, and the
+        // one thing that arrives as null -- a real signal death -- is its
+        // SIGKILL escalation, SIGKILL being the signal uv cannot trap. Not
+        // airtight (any SIGKILL of uv reads the same), but treating that as a
+        // crash would pop the error screen over an escalated teardown.
+        if (code === 0 || code === null) return;
+        console.error(
+          `[backend] exited unexpectedly with code ${code} (${bundles.size} window(s) open)`,
+        );
+        // Deliberately NOT gated on there being a window. Recording the
+        // takeover is what makes the crash recoverable: with none open it is
+        // replayed into the next window the user opens, so they get the error
+        // screen and its Retry instead of a fresh window loaded at the dead
+        // port -- whose own Reload button only re-loads that same dead port.
+        showErrorInAllWindows(
+          'Minds stopped unexpectedly',
+          readLastLogLines(50) || `Process exited with code ${code}`,
+        );
       });
     }
   } catch (err) {
@@ -1685,18 +1865,48 @@ async function startBackendWithRetry() {
 function handleDeeplink(rawUrl) {
   console.log(`[deeplink] received: ${String(rawUrl).slice(0, 256)}`);
   const mru = getMostRecentWindow();
-  if (!canApplyDeeplinks || !backendBaseUrl || (mru && (mru.isLoadingState || mru.isErrorState))) {
+  // A current error takeover counts as not-ready even with no window to read it
+  // off: after a crash backendBaseUrl still names the dead port, and navigating
+  // a window there is the failure this app's error screen exists to replace.
+  if (
+    !canApplyDeeplinks
+    || !backendBaseUrl
+    || lastErrorTakeover
+    || (mru && (mru.isLoadingState || mru.isErrorState))
+  ) {
+    // Not ready to act on it yet: hold it for flushPendingDeeplink(). With no
+    // window there is nothing to focus, so open one on whatever takeover
+    // screen the app's state warrants instead of dropping the URL silently.
     pendingDeeplinkUrl = rawUrl;
     if (mru) focusBundle(mru);
+    // A cold-start argv deeplink reaches here during module evaluation, before
+    // app.whenReady() -- no BrowserWindow can be constructed yet, and none is
+    // needed: onReady opens the startup window and flushPendingDeeplink()
+    // applies the URL to it.
+    else if (app.isReady()) openOrFocusWindow();
     return;
   }
-  if (!mru) return;
-  focusBundle(mru);
   // A Template link always navigates to the SPA's Create from
   // Template page: it carries both legacy branches (create a new machine,
   // or add the Template to an existing one), so the old in-machine modal
   // variant is gone.
   const targetPath = deeplinkTargetPath(rawUrl);
+  if (!mru) {
+    // macOS hands a URL to an already-running app via application:openURLs:,
+    // which need not fire 'activate', so nothing else will open a window for
+    // it. A focus-only link (bare minds://, what the browser sign-in success
+    // page's "Open app" uses) opens the home page: opening the app IS the
+    // documented contract for it.
+    //
+    // An explicit deeplink outranks a first-window route still owed (the docs'
+    // rule: a deeplink wins over the welcome screen), and settles it -- this
+    // window is where the launch landed, so a later Cmd+N must not still pop
+    // the restored session open.
+    isStartupRoutingPending = false;
+    openNewWindow(toAbsoluteUrl(targetPath || '/'));
+    return;
+  }
+  focusBundle(mru);
   if (!targetPath) return;
   navigateBundle(mru, targetPath);
 }
@@ -1996,8 +2206,9 @@ app.on('window-all-closed', () => {
 });
 
 // macOS: activating the app (clicking the dock icon) with no open windows
-// re-opens a window on the backend home page. With a window already open the
-// OS just brings it forward, so we act only when none remain.
+// re-opens one on whatever the app's state warrants -- the home page, the
+// loading screen, or the error takeover. With a window already open the OS
+// just brings it forward, so we act only when none remain.
 app.on('activate', () => {
   if (!shouldOpenWindowOnActivate({
     isShuttingDown,
@@ -2006,7 +2217,7 @@ app.on('activate', () => {
   })) {
     return;
   }
-  openHomeInNewWindow();
+  openOrFocusWindow();
 });
 
 app.on('before-quit', (event) => {
