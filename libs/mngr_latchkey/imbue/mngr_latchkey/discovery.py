@@ -28,6 +28,7 @@ existing tunnel and exit.
 
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -68,12 +69,14 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import LATCHKEY_RENEWABLE_CREDENTIAL_TYPES
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.remote_gateway import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
 from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.remote_gateway import provision_remote_gateway
+from imbue.mngr_latchkey.remote_gateway import services_granted_to_any_host
 from imbue.mngr_latchkey.remote_gateway import sync_credentials
 from imbue.mngr_latchkey.remote_gateway import sync_permissions
 from imbue.mngr_latchkey.store import hosts_dir
@@ -82,6 +85,22 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 # How long to wait for the watchdog observer to wind down on shutdown before
 # giving up (it is a daemon thread, so the process can exit regardless).
 _OBSERVER_STOP_TIMEOUT_SECONDS: float = 5.0
+
+# How much wall-clock passes between two credential-refresh probes. latchkey
+# only refreshes a token that has *already* expired, so this is also the
+# worst-case window in which a remote workspace's calls fail as expired before
+# the desktop renews them -- traded against one validation round-trip per
+# renewable-credential service per probe.
+_CREDENTIAL_REFRESH_INTERVAL_SECONDS: Final[float] = 300.0
+
+# How often the refresh loop wakes to ask whether its interval has elapsed.
+# Much shorter than the interval itself because neither clock alone can answer
+# that: macOS does not advance the monotonic clock while the machine sleeps, so
+# a laptop waking hours later would otherwise wait out a full further interval,
+# while a wall clock alone stalls for however far back an NTP correction steps
+# it. Elapsed time is therefore whichever clock reports more (see
+# ``_seconds_since``), which no single wait timeout can express.
+_CREDENTIAL_REFRESH_POLL_SECONDS: Final[float] = 5.0
 
 # The only watchdog event types that represent an actual mutation of a file
 # (its content or its presence). This is an allowlist rather than a blocklist
@@ -104,6 +123,42 @@ _MUTATION_EVENT_TYPES: Final[tuple[type[FileSystemEvent], ...]] = (
     FileModifiedEvent,
     FileMovedEvent,
 )
+
+
+def _seconds_since(monotonic_reading: float, wall_clock_reading: float) -> float:
+    """Seconds elapsed since a moment captured on both clocks, per whichever advanced further.
+
+    Each clock has a failure mode the other does not: the monotonic clock stops
+    while a macOS machine sleeps, and the wall clock jumps backward when it is
+    corrected. Taking the larger reading means a deadline built on this is
+    immune to both, at the cost of firing early rather than late.
+    """
+    return max(time.monotonic() - monotonic_reading, time.time() - wall_clock_reading)
+
+
+def _is_renewal_pass_due(
+    is_any_remote_host_known: bool, probed_at_monotonic_and_wall: tuple[float, float] | None
+) -> bool:
+    """Whether the credential-refresh loop should run a pass on this poll.
+
+    A pass is due as soon as a remote host is known and none has run yet, and
+    every :data:`_CREDENTIAL_REFRESH_INTERVAL_SECONDS` thereafter. Waiting out
+    an interval before the *first* pass would strand a freshly-started
+    supervisor: nothing renewed the credentials while it was down, so its
+    remote workspaces start out holding a copy that has almost certainly
+    expired.
+
+    Knowing no remote host is not a pass -- it leaves the interval unstarted
+    rather than consuming it. The supervisor starts this loop before it starts
+    the discovery consumer that registers hosts, so a pass that merely observed
+    the empty startup registry must not push the first real pass a full
+    interval past the moment a remote workspace actually appeared.
+    """
+    if not is_any_remote_host_known:
+        return False
+    if probed_at_monotonic_and_wall is None:
+        return True
+    return _seconds_since(*probed_at_monotonic_and_wall) >= _CREDENTIAL_REFRESH_INTERVAL_SECONDS
 
 
 class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
@@ -792,6 +847,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
         provisioned hosts get their initial sync inline in the provisioning
         path.)
 
+        Also starts the credential-refresh loop
+        (:meth:`_refresh_remote_credentials_until_shutdown`), which keeps the
+        expiring credentials those syncs copy from actually current.
+
         The observer's health is supervised on a *checked* CG strand: if it
         stops for any reason other than ``shutdown_event`` being set, that is a
         loud failure (the strand raises, the CG surfaces it, and the supervisor
@@ -835,6 +894,19 @@ class LatchkeyDiscoveryHandler(MutableModel):
             is_checked=True,
             on_failure=lambda _exception: shutdown_event.set(),
         )
+        # Renew the expiring credentials the synced copies are made from. The
+        # VPS gateways run with refresh disabled, so nothing out there can do it.
+        # Unchecked, unlike the sentinel above: an unexpected failure here must
+        # cost the renewal loop alone, and a *checked* strand costs far more --
+        # it poisons this group, so every later tunnel setup and the gateway
+        # health check's respawn would raise. ObservableThread logs whatever
+        # escapes at error level, so the failure is still loud.
+        concurrency_group.start_new_thread(
+            target=self._refresh_remote_credentials_until_shutdown,
+            args=(shutdown_event,),
+            name="latchkey-remote-credential-refresh",
+            is_checked=False,
+        )
 
     def _stop_observer_on_shutdown(self, observer: BaseObserver, shutdown_event: threading.Event) -> None:
         """Block until shutdown is signalled, then stop the watchdog observer."""
@@ -855,6 +927,95 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 "Latchkey remote-state watcher (watchdog observer) stopped unexpectedly; remote agents' "
                 "credentials and permissions are no longer being synced"
             )
+
+    def _refresh_remote_credentials_until_shutdown(self, shutdown_event: threading.Event) -> None:
+        """Re-probe the remote workspaces' expiring credentials until shutdown is signalled.
+
+        Remote workspaces call third parties from their VPS-resident gateway,
+        which runs with ``LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`` so it never
+        races the desktop to rotate a shared OAuth refresh token. That leaves
+        the desktop as the only party able to renew one -- and the desktop
+        latchkey only renews lazily, when a request happens to pass through it.
+        A service used *only* by remote workspaces therefore has no reason to
+        ever be renewed, and its access token dies an hour after whatever last
+        touched it. This loop supplies that reason.
+
+        The first pass runs as soon as a remote host is known rather than an
+        interval later (see :func:`_is_renewal_pass_due`). Elapsed time
+        thereafter is read from both clocks and the larger reading wins, so
+        neither a machine sleeping through several intervals nor a backward
+        clock step can stall renewal (see :data:`_CREDENTIAL_REFRESH_POLL_SECONDS`).
+        """
+        probed_at_monotonic_and_wall: tuple[float, float] | None = None
+        while not shutdown_event.wait(_CREDENTIAL_REFRESH_POLL_SECONDS):
+            if not _is_renewal_pass_due(bool(self._known_remote_host_ids()), probed_at_monotonic_and_wall):
+                continue
+            self._refresh_remote_credentials_once()
+            probed_at_monotonic_and_wall = (time.monotonic(), time.time())
+
+    def _refresh_remote_credentials_once(self) -> None:
+        """Run one renewal pass, reporting rather than propagating a latchkey failure.
+
+        A latchkey that cannot answer right now (an unreadable encryption key,
+        an I/O failure against the store) is a transient condition the next pass
+        may well get past, so it costs only this pass and is reported. A
+        malformed permissions file never gets this far: it costs its own host
+        inside :func:`services_granted_to_any_host`, and the pass carries on
+        with every other host's grants. Programming errors are deliberately left
+        to propagate, ending the renewal strand with a loud error log; the
+        gateway, the reverse tunnels and the remote-state watcher are
+        unaffected, since renewal is a best effort on top of a system that works
+        without it.
+        """
+        try:
+            self._probe_expiring_credentials_for_remote_hosts()
+        except (LatchkeyError, OSError) as e:
+            logger.opt(exception=e).error("Could not renew remote workspaces' credentials this pass: {}", e)
+
+    def _probe_expiring_credentials_for_remote_hosts(self) -> None:
+        """Probe every renewable credential some remote host holds a copy of, renewing what has expired.
+
+        Narrowed twice before anything touches the network: to the services a
+        known remote host is actually granted, and then -- via a single offline
+        ``auth list``, which is a local read of the store -- to those whose
+        stored accounts are of a kind latchkey can renew
+        (:data:`LATCHKEY_RENEWABLE_CREDENTIAL_TYPES`). Everything else is a
+        static token that never expires, so probing it would be a third-party
+        round-trip that could not change any outcome.
+
+        The probe itself is a non-offline ``services info``: that is what makes
+        the desktop latchkey renew an expired token and rewrite the credential
+        store. Nothing is synced here -- the store rewrite is a mutation of a
+        watched file, so the remote-state watcher ships the fresh copy to every
+        known remote host on its own.
+
+        A granted service with no stored account is simply not probed. That is a
+        supported state, not a fault: a grant is independent of a credential (it
+        can be made before the account is ever connected, and it outlives the
+        account being disconnected -- see
+        ``_services_with_stored_credentials``), so it must not be reported. A
+        latchkey that could not answer at all is a separate matter, and
+        ``auth_list`` has already named the cause at warning level by the time
+        its empty mapping reaches here.
+        """
+        remote_host_ids = self._known_remote_host_ids()
+        if not remote_host_ids:
+            return
+        granted_service_names = services_granted_to_any_host(
+            self.latchkey.latchkey_directory, tuple(HostId(host_id_str) for host_id_str in remote_host_ids)
+        )
+        if not granted_service_names:
+            return
+        accounts_by_service = self.latchkey.auth_list(is_offline=True)
+        for service_name in sorted(granted_service_names):
+            accounts = accounts_by_service.get(service_name, ())
+            if not any(account.credential_type in LATCHKEY_RENEWABLE_CREDENTIAL_TYPES for account in accounts):
+                continue
+            # Debug, not trace: the supervisor's structured log (the only record
+            # of a detached daemon's behaviour) is written at debug level, so a
+            # trace line would leave renewal with no evidence it ever ran.
+            logger.debug("Probing {} so the desktop renews it for remote workspaces", service_name)
+            self.latchkey.services_info(service_name)
 
     def _known_remote_host_ids(self) -> frozenset[str]:
         with self._remote_hosts_lock:

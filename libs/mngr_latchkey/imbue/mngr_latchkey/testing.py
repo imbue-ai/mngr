@@ -34,6 +34,17 @@ class FakeLatchkey(Latchkey):
     _jwt: str | None = PrivateAttr(default=None)
     _jwt_error: BaseException | None = PrivateAttr(default=None)
     _is_stopped: bool = PrivateAttr(default=False)
+    # Every ``services_info`` call as ``(service_name, is_offline)``, in order, so
+    # tests can assert which services a caller probed and whether it hit the
+    # network -- the difference between a probe that renews a credential and one
+    # that only reads the store.
+    _services_info_calls: list[tuple[str, bool]] = PrivateAttr(default_factory=list)
+    # Every ``auth_list`` call's ``is_offline``, in order, for the same reason:
+    # an offline list is a local read of the store, a non-offline one validates
+    # (and may refresh) every stored account against its third party.
+    _auth_list_calls: list[bool] = PrivateAttr(default_factory=list)
+    _accounts_by_service: dict[str, tuple[ServiceAccountCredential, ...]] = PrivateAttr(default_factory=dict)
+    _auth_list_error: BaseException | None = PrivateAttr(default=None)
 
     # Auth / services-info doubles. The credential-grant flow now lives in the
     # real ``Latchkey.auth_browser`` (tested against a fake binary in
@@ -57,25 +68,56 @@ class FakeLatchkey(Latchkey):
         jwt: str | None = None,
         jwt_error: BaseException | None = None,
         service_info: LatchkeyServiceInfo | None = None,
+        accounts_by_service: dict[str, tuple[ServiceAccountCredential, ...]] | None = None,
+        auth_list_error: BaseException | None = None,
     ) -> None:
-        self._gateway_url = gateway_url
-        self._gateway_error = gateway_error
-        self._password = password
-        self._password_error = password_error
-        self._jwt = jwt
-        self._jwt_error = jwt_error
+        """Install the given doubles, leaving everything not passed as it was.
+
+        Additive rather than wholesale, so a fake built by
+        :func:`make_full_fake_latchkey` can have one more behaviour layered on
+        without losing the ones it was built with.
+        """
+        if gateway_url is not None:
+            self._gateway_url = gateway_url
+        if gateway_error is not None:
+            self._gateway_error = gateway_error
+        if password is not None:
+            self._password = password
+        if password_error is not None:
+            self._password_error = password_error
+        if jwt is not None:
+            self._jwt = jwt
+        if jwt_error is not None:
+            self._jwt_error = jwt_error
+        if auth_list_error is not None:
+            self._auth_list_error = auth_list_error
         if service_info is not None:
             # What every ``services_info`` call reports, including the stored
             # accounts the per-account permission dialog offers.
             self._service_info = service_info
+        if accounts_by_service is not None:
+            # What ``auth_list`` reports: the stored accounts per service.
+            self._accounts_by_service = accounts_by_service
+
+    @property
+    def services_info_calls(self) -> tuple[tuple[str, bool], ...]:
+        """Every ``services_info`` call so far, as ``(service_name, is_offline)``."""
+        return tuple(self._services_info_calls)
+
+    @property
+    def auth_list_calls(self) -> tuple[bool, ...]:
+        """Every ``auth_list`` call so far, as its ``is_offline``."""
+        return tuple(self._auth_list_calls)
 
     def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
-        del service_name, is_offline
+        self._services_info_calls.append((service_name, is_offline))
         return self._service_info
 
     def auth_list(self, *, is_offline: bool = False) -> dict[str, tuple[ServiceAccountCredential, ...]]:
-        del is_offline
-        return {}
+        self._auth_list_calls.append(is_offline)
+        if self._auth_list_error is not None:
+            raise self._auth_list_error
+        return dict(self._accounts_by_service)
 
     def auth_prepare(self, service_name: str, client_id: str, client_secret: str) -> tuple[bool, str]:
         del service_name, client_id, client_secret
