@@ -1,4 +1,5 @@
 import re
+from collections.abc import Mapping
 from enum import auto
 from typing import Final
 from typing import Self
@@ -30,16 +31,20 @@ CI_TIER: Final[str] = "ci"
 # was added out of band.
 EXPECTED_AUTHORIZED_KEY_COUNT: Final[int] = 1
 
-# OVH-US datacenters the imbue_cloud host pool can land VPSes in. Used to
-# validate the ``region`` create-path knob client-side (the connector itself
-# accepts any string and simply matches the column). Kept small and explicit on
-# purpose; extend when the pool gains new datacenters.
-KNOWN_OVH_US_REGIONS: Final[frozenset[str]] = frozenset({"US-EAST-VA", "US-WEST-OR"})
+# The OVH-US regions the imbue_cloud host pool can land hosts in (the lease-region
+# labels stamped on pool rows), each mapped to the OVH datacenter code serving it,
+# as used by the OVH order/catalog and ``/dedicated/server/datacenter/availabilities``
+# APIs and stored in ``bare_metal_servers.region``: ``vin`` = Vint Hill,
+# ``hil`` = Hillsboro. The single source for the pairing -- the region/datacenter
+# collections below derive from it. Kept small and explicit on purpose; extend
+# when the pool gains new datacenters.
+OVH_DATACENTER_CODE_BY_US_REGION: Final[Mapping[str, str]] = {"US-EAST-VA": "vin", "US-WEST-OR": "hil"}
 
-# The OVH datacenter codes for those US regions, as used by the OVH order/catalog and
-# ``/dedicated/server/datacenter/availabilities`` APIs and stored in ``bare_metal_servers.region``:
-# ``vin`` = Vint Hill (US-EAST-VA), ``hil`` = Hillsboro (US-WEST-OR).
-OVH_US_DATACENTER_CODES: Final[frozenset[str]] = frozenset({"vin", "hil"})
+# Used to validate the ``region`` create-path knob client-side (the connector
+# itself accepts any string and simply matches the column).
+KNOWN_OVH_US_REGIONS: Final[frozenset[str]] = frozenset(OVH_DATACENTER_CODE_BY_US_REGION)
+
+OVH_US_DATACENTER_CODES: Final[frozenset[str]] = frozenset(OVH_DATACENTER_CODE_BY_US_REGION.values())
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
