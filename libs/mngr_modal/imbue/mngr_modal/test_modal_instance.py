@@ -751,6 +751,12 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
 _UPLOAD_BUDGET_SECONDS: Final[float] = 60.0
 
 
+# Flaky: the fresh sandbox this test creates can accept TCP before sshd answers
+# the handshake, so the connection fails outright ("No existing session") before
+# the upload under test even starts -- the same fresh-sandbox sshd boot race its
+# already-marked neighbours were marked for. The retry is a workaround for the
+# race, not for the upload path this test guards.
+@pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.rsync
 @pytest.mark.timeout(150)
