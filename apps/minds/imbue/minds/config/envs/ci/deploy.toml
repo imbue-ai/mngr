@@ -23,6 +23,7 @@ services = [
     "supertokens",
     "sharing",
     "storage",
+    "sentry",
 ]
 
 # Tier-shape flags consumed by `minds-admin env deploy` / `destroy`. Matches

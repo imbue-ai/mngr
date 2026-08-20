@@ -120,6 +120,7 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "pool-ssh",
     "sharing",
     "storage",
+    "sentry",
 )
 
 

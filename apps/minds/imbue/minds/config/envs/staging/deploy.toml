@@ -17,6 +17,7 @@ services = [
     "supertokens",
     "sharing",
     "storage",
+    "sentry",
 ]
 
 [lifecycle]

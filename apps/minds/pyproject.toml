@@ -36,7 +36,7 @@ dependencies = [
     "telethon>=1.40.0",
     "werkzeug>=3.0",
     "wsgidav>=4.3",
-    "sentry-sdk>=2.59.0",
+    "sentry-sdk>=2.63.0",
     "simple-websocket>=1.0",
     "traceback-with-variables>=2.0",
 ]
