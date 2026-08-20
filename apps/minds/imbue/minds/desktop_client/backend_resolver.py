@@ -506,6 +506,12 @@ def parse_service_log_record(raw: dict[str, object]) -> ServiceLogRecord | Servi
     url = raw.get("url")
     if not url:
         raise ServiceLogParseError(f"Service log record missing required fields (service={service!r}, url={url!r})")
+    # CLEANUP: make 'label' required (and drop every downstream fall-back-to-
+    # the-service-name path keyed on an empty label) once no supported
+    # workspace's services event log predates minds-v0.3.12, the first release
+    # whose forward_port.py mints `<name>-<rand>` origin labels -- services
+    # re-register (and mint) on boot, so any workspace booted on >=0.3.12 is
+    # labeled.
     label = raw.get("label")
     return ServiceLogRecord(service=ServiceName(str(service)), url=str(url), label=str(label) if label else "")
 
