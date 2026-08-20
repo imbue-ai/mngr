@@ -308,8 +308,9 @@ def build_root_authorized_keys_block(root_authorized_public_key: str | None) -> 
     lease, leaving the VM reachable but rejecting them -- with no way back except
     recreating the machine (see apps/minds/docs/deploy/slice-restart-wipes-owner-ssh-key.md).
 
-    Public (not ``_``-prefixed) because the imbue_cloud ``admin repair-keys``
-    sweep renders this same block when patching existing slices' lima.yaml.
+    Public (not ``_``-prefixed) because the operator key-repair sweep
+    (``minds-admin repair-keys``) renders this same block when patching
+    existing slices' lima.yaml.
     """
     if root_authorized_public_key is None:
         return "# (no client key to authorize for root)"
@@ -350,8 +351,9 @@ def patch_root_authorized_keys_block_in_lima_yaml(lima_yaml_text: str) -> str | 
     was created after the generator fix, or a previous patch already ran). The
     provision scripts are edited inside the parsed config and re-dumped with the
     same settings :func:`write_lima_yaml` uses, so ``limactl`` keeps reading a
-    well-formed file. Used by the imbue_cloud ``admin repair-keys`` sweep to fix
-    existing slices' stored configs in place.
+    well-formed file. Used by the operator key-repair sweep
+    (``minds-admin repair-keys``) to fix existing slices' stored configs in
+    place.
     """
     parsed = yaml.safe_load(lima_yaml_text)
     if not isinstance(parsed, dict):

@@ -1,0 +1,1 @@
+Doc-only: two `lima_yaml.py` docstrings now attribute the slice key-repair sweep to `minds-admin repair-keys` (the sweep moved from `mngr imbue_cloud admin repair-keys` to the private minds-admin operator CLI). No behavior change.

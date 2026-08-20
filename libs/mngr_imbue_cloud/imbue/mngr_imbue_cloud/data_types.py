@@ -71,7 +71,7 @@ class SliceBakeOutcome(FrozenModel):
 
 
 class SliceBakeReport(FrozenModel):
-    """The summary ``admin pool create`` emits: per-slice outcomes plus counts."""
+    """The summary the operator pool bake (``minds-admin pool create``) emits: per-slice outcomes plus counts."""
 
     requested: int = Field(description="Number of slices the invocation tried to bake")
     succeeded: int = Field(description="Slices baked and inserted into the pool")
@@ -82,7 +82,7 @@ class SliceBakeReport(FrozenModel):
 class BoxTierAudit(FrozenModel):
     """What one bare-metal box actually carries, read over SSH rather than from the DB.
 
-    The slot accounting in ``admin server list`` counts only the querying env's own
+    The slot accounting in ``minds-admin server list`` counts only the querying env's own
     ``pool_hosts`` rows, so another env's slices -- and in particular another
     *tier's* -- are invisible to it. This is the on-box truth: every env's slices,
     plus the two ways a box drifts across tiers.
@@ -130,7 +130,7 @@ class UnauditedBox(FrozenModel):
 
 
 class BoxTierAuditReport(FrozenModel):
-    """The summary ``admin server list --verify-occupancy`` emits: per-box audits plus counts."""
+    """The summary ``minds-admin server list --verify-occupancy`` emits: per-box audits plus counts."""
 
     env_name: str | None = Field(description="Env whose tier the boxes were audited against (None when not given)")
     is_foreign_tier_checked: bool = Field(

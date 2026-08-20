@@ -68,7 +68,7 @@ DEFAULT_MEMORY_PER_SLICE_GB: Final[int] = 8
 SLICE_CONTAINER_MEMORY_RESERVE_MIB: Final[int] = 1024
 
 # Default CPU overcommit factor used to size each slice's vCPUs (vCPUs/slice =
-# floor(threads * ratio / slots)). Overridable per box at ``admin server
+# floor(threads * ratio / slots)). Overridable per box at ``minds-admin server
 # register --cpu-overcommit``; RAM is never overcommitted.
 DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO: Final[float] = 2.0
 
