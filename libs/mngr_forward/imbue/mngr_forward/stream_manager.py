@@ -609,6 +609,11 @@ class ForwardStreamManager(MutableModel):
                     services[service] = url
                 # The origin label routes ``<label>.host-<hex>`` to this
                 # service; fall back to the name when a (legacy) event omits it.
+                # CLEANUP: drop the bare-name fallback (require the label) once
+                # no supported workspace's services event log predates
+                # minds-v0.3.12, the first release whose forward_port.py mints
+                # ``<name>-<rand>`` origin labels -- services re-register (and
+                # mint) on boot, so any workspace booted on >=0.3.12 is labeled.
                 label = raw.get("label")
                 labels[service] = label if isinstance(label, str) and label else service
             services_snapshot = dict(services)
