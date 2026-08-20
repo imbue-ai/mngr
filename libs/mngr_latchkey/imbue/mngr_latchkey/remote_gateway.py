@@ -28,7 +28,6 @@ stays down until the next provisioning pass re-writes the secrets.
 import shlex
 import tempfile
 import time
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
@@ -494,30 +493,6 @@ def _services_allowed_for_host(latchkey_directory: Path, host_id: HostId) -> fro
         return ServicesCatalog().services_for_permissions(config)
     except (LatchkeyStoreError, ServiceCatalogError) as e:
         raise RemoteGatewayError(f"Failed to resolve allowed services for host {host_id}: {e}") from e
-
-
-def services_granted_to_any_host(latchkey_directory: Path, host_ids: Iterable[HostId]) -> frozenset[str]:
-    """Union the canonical service names granted by any of ``host_ids``.
-
-    A service reaches a VPS only because some host's permissions grant it, so
-    this is the set whose credentials remote workspaces actually depend on.
-    Resolved per host through the same permissions-to-services mapping
-    :func:`sync_credentials` uses, so the two cannot disagree about what a host
-    is entitled to. A host with no permissions file contributes nothing.
-
-    A host whose permissions cannot be resolved at all is logged and skipped
-    rather than failing the union, so one corrupt permissions file costs only
-    its own host instead of every other host's answer (the same per-host
-    degradation ``LatchkeyDiscoveryHandler._sync_state_to_host`` gives the sync
-    path).
-    """
-    granted: set[str] = set()
-    for host_id in host_ids:
-        try:
-            granted |= _services_allowed_for_host(latchkey_directory, host_id)
-        except RemoteGatewayError as e:
-            logger.opt(exception=e).error("Skipping host {} while resolving granted services: {}", host_id, e)
-    return frozenset(granted)
 
 
 def _services_with_stored_credentials(latchkey: Latchkey, service_names: frozenset[str]) -> frozenset[str]:

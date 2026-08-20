@@ -52,14 +52,9 @@ function discoveryBlockedNotice(isRestartAppAvailable: boolean): NoticePayload {
  * two conditions has an action that helps. An unreachable backend is the same
  * shape one scale down: this machine reads stuck because minds cannot reach the
  * provider that hosts it, so the band names the provider rather than the
- * machine. A connection that failed on this device is the same shape again,
- * and the narrowest of the three: this one machine reads stuck because the app
- * could not build a connection to it, not because anything is wrong with it.
- * Both explanations keep the recovering notice's key -- the condition is still
- * "we have lost contact and are still trying", only better explained -- so the
- * strip is not rewritten as an explanation lands and clears. Discovery death
- * does not: it is not this machine's condition at all, and its notice carries
- * its own key and its own action.
+ * machine. It keeps the recovering notice's key -- the condition is still "we
+ * have lost contact and are still trying", only better explained -- so the
+ * strip is not rewritten as a provider error lands and clears.
  */
 export function noticeBandFor(
   workspaceHealth: WorkspaceHealth,
@@ -67,7 +62,6 @@ export function noticeBandFor(
   isWorkspaceDisplayed: boolean,
   isRestartAppAvailable = true,
   unreachableProviderLabel: string | null = null,
-  isDeviceCannotConnect = false,
 ): NoticePayload | null {
   if (!isWorkspaceDisplayed) return null;
   if (discoveryHealth === "blocked") return discoveryBlockedNotice(isRestartAppAvailable);
@@ -79,17 +73,6 @@ export function noticeBandFor(
       // the condition, not for what it means for this machine or what minds is
       // doing about it -- the card behind "Open recovery" says both.
       message: `Can't connect to ${unreachableProviderLabel}`,
-      action: { label: "Open recovery", kind: "open-recovery" },
-    };
-  }
-  if (workspaceHealth !== "healthy" && isDeviceCannotConnect) {
-    return {
-      key: "workspace-recovering",
-      variant: "warn",
-      // Says whose fault it is and nothing else. The remedy is an app restart,
-      // which is a real interruption -- so it is offered from the card, next to
-      // the error that justifies it, rather than from a one-line strip.
-      message: "Can't connect to this machine from this device",
       action: { label: "Open recovery", kind: "open-recovery" },
     };
   }

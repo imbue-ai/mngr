@@ -221,21 +221,10 @@ def _shutdown_popen(process: subprocess.Popen[bytes], shutdown_timeout_sec: floa
 
 
 def _is_timeout(timeout_time: float | None = None) -> bool:
-    """Whether a deadline stamped by :func:`run_local_command_modern_version` has passed.
-
-    Read off the monotonic clock, which does not advance while the machine is
-    suspended -- so a laptop that sleeps mid-command spends none of the budget
-    it was frozen for. Wall clock would: the process cannot notice its own
-    deadline while it is not running, so two fifteen-minute sleeps would burn a
-    twenty-one minute budget in a couple of hundred seconds of running time and
-    the command would be killed and reported as timed out at the wake. True on
-    both platforms this runs on -- Darwin's ``mach_absolute_time`` and Linux's
-    ``CLOCK_MONOTONIC`` both exclude suspend.
-    """
     if timeout_time is None:
         return False
     else:
-        return time.monotonic() > timeout_time
+        return time.time() > timeout_time
 
 
 def run_local_command_modern_version(
@@ -320,7 +309,7 @@ def run_local_command_modern_version(
             is_output_accumulated=is_output_accumulated,
         )
 
-        timeout_time = time.monotonic() + timeout if timeout is not None else None
+        timeout_time = time.time() + timeout if timeout is not None else None
 
         while not shutdown_event.wait(poll_time) and not _is_timeout(timeout_time):
             maybe_exit_code = process.poll()

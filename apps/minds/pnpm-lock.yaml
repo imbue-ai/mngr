@@ -14,15 +14,9 @@ importers:
       '@todesktop/runtime':
         specifier: ^1.6.0
         version: 1.6.4
-      electron-updater:
-        specifier: 6.8.9
-        version: 6.8.9
       latchkey:
         specifier: ^3.5.0
         version: 3.5.0
-      semver:
-        specifier: ^7.6.3
-        version: 7.7.4
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
@@ -1061,10 +1055,6 @@ packages:
     resolution: {integrity: sha512-rhuKm5vh7E0aAmT6i8aoSfEjxzdYEFX7zDApK+eNgOhjofnWb74d9SRJv0H/8nsgOkos0TZ4zxW0P8J4N7xQ2A==}
     engines: {node: '>=12.0.0'}
 
-  builder-util-runtime@9.7.0:
-    resolution: {integrity: sha512-g/kR520giAFYkSXTzcmF3kqQq7wi8F6N6SzeDgZrqTBN+VHdmgWOyTdD1yD7AATDId/yXLvuP34CxW46/BwCdw==}
-    engines: {node: '>=12.0.0'}
-
   bunyan@1.8.15:
     resolution: {integrity: sha512-0tECWShh6wUysgucJcBAoYegf3JJoZWibxdqhTm7OHPeT42qdjkZ29QCMcKwbgU1kiH+auSIasNRXMLWXafXig==}
     engines: {'0': node >=0.10.0}
@@ -1290,9 +1280,6 @@ packages:
 
   electron-updater@4.6.5:
     resolution: {integrity: sha512-kdTly8O9mSZfm9fslc1mnCY+mYOeaYRy7ERa2Fed240u01BKll3aiupzkd07qKw69KvhBSzuHroIW3mF0D8DWA==}
-
-  electron-updater@6.8.9:
-    resolution: {integrity: sha512-ZhVxM9iGONUpZGI1FxdMRgJjUFXi7AYGVa5PwKlO1tV1/4zDxQmfKpXOHVztKrd6L9rLcFjERvi1Mf2vxyTkig==}
 
   electron@40.10.1:
     resolution: {integrity: sha512-F2Iy16vLBV4NodRVf2dGRESUW03AdFlCmOjaF1fhc3FupmTwEGWmKsYXvORkUYLPBSrKP7r08e8PHiImoe8woQ==}
@@ -2411,9 +2398,6 @@ packages:
 
   text-decoder@1.2.7:
     resolution: {integrity: sha512-vlLytXkeP4xvEq2otHeJfSQIRyWxo/oZGEbXrtEEF9Hnmrdly59sUbzZ/QgyWuLYHctCHxFF4tRQZNQ9k60ExQ==}
-
-  tiny-typed-emitter@2.1.0:
-    resolution: {integrity: sha512-qVtvMxeXbVej0cQWKqVSSAHmKZEHAvxdF8HEUBFWts8h+xEo5m/lEiPakuyZ3BnCBjOD8i24kzNOiOLLgsSxhA==}
 
   tinycolor2@1.6.0:
     resolution: {integrity: sha512-XPaBkWQJdsf3pLKJV9p4qN/S+fm2Oj8AIPo1BTUhg5oxkvm9+SVEGFdhyOz7tTdUTfvxMiAs4sp6/eZO2Ew+pw==}
@@ -3851,13 +3835,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  builder-util-runtime@9.7.0:
-    dependencies:
-      debug: 4.4.3
-      sax: 1.6.0
-    transitivePeerDependencies:
-      - supports-color
-
   bunyan@1.8.15:
     optionalDependencies:
       dtrace-provider: 0.8.8
@@ -4105,19 +4082,6 @@ snapshots:
       lodash.escaperegexp: 4.1.2
       lodash.isequal: 4.5.0
       semver: 7.7.4
-    transitivePeerDependencies:
-      - supports-color
-
-  electron-updater@6.8.9:
-    dependencies:
-      builder-util-runtime: 9.7.0
-      fs-extra: 10.1.0
-      js-yaml: 4.1.1
-      lazy-val: 1.0.5
-      lodash.escaperegexp: 4.1.2
-      lodash.isequal: 4.5.0
-      semver: 7.7.4
-      tiny-typed-emitter: 2.1.0
     transitivePeerDependencies:
       - supports-color
 
@@ -5311,8 +5275,6 @@ snapshots:
       b4a: 1.8.0
     transitivePeerDependencies:
       - react-native-b4a
-
-  tiny-typed-emitter@2.1.0: {}
 
   tinycolor2@1.6.0: {}
 

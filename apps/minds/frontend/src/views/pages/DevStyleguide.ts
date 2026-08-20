@@ -22,7 +22,6 @@ import {
   type StatusBadgeVariant,
 } from "../components/StatusBadge";
 import { TitlebarButton } from "../components/TitlebarButton";
-import { UpdateReadyCard } from "../shell/UpdateReadyCard";
 import type { ButtonVariant } from "../components/constants";
 
 const BUTTON_VARIANTS: ButtonVariant[] = [
@@ -543,20 +542,6 @@ export function DevStyleguide(): m.Component {
                 m(Badge, { count: 12 }),
                 m(Badge, { count: 120 }),
               ]),
-            },
-            {
-              id: "update-ready-card",
-              toc: "Update ready",
-              title: "Update ready card",
-              body: m(
-                "div",
-                { class: "inline-flex" },
-                m(UpdateReadyCard, {
-                  version: "0.4.2",
-                  onRestart: () => {},
-                  onDismiss: () => {},
-                }),
-              ),
             },
             {
               id: "form-controls",

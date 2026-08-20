@@ -6,7 +6,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from enum import auto
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
@@ -17,7 +16,6 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_forward.relay import relay_data
@@ -106,39 +104,10 @@ class RemoteSSHInfo(FrozenModel):
     )
 
 
-class SSHTunnelPhase(UpperCaseStrEnum):
-    """Which step of tunnel setup an :class:`SSHTunnelError` was raised from.
-
-    Carried on the exception so a caller classifies the failure from what the
-    tunnel layer knows rather than from the exception type, which cannot tell
-    these apart: paramiko raises the same ``SSHException`` for a host that
-    vanished and for trust material this machine is missing.
-
-    - ``LOCAL_SETUP``: this device could not build its own end of the tunnel --
-      no known_hosts file to pin the host key against, no private key to
-      authenticate with, a Unix socket it could not create or bind. Every one
-      is raised against this device's own filesystem or socket table, so
-      nothing was learned about the agent's host and no restart of it can help.
-      (Not all of them precede a packet: the socket is built after the SSH
-      connection is up. What they share is what they are raised *against*.)
-    - ``HOST_CONNECT``: the SSH connection to the agent's host is what failed
-      (it was dialed and did not answer, or an established transport has since
-      gone inactive). Evidence about the host.
-    """
-
-    LOCAL_SETUP = auto()
-    HOST_CONNECT = auto()
-
-
 class SSHTunnelError(Exception):
-    """Raised when an SSH tunnel operation fails.
+    """Raised when an SSH tunnel operation fails."""
 
-    ``phase`` says which side of the tunnel failed; see :class:`SSHTunnelPhase`.
-    """
-
-    def __init__(self, message: str, phase: SSHTunnelPhase) -> None:
-        super().__init__(message)
-        self.phase = phase
+    ...
 
 
 def _ssh_connection_is_active(client: paramiko.SSHClient) -> bool:
@@ -151,7 +120,7 @@ def _ssh_connection_transport(client: paramiko.SSHClient) -> paramiko.Transport:
     """Get the SSH client's transport, raising if not active."""
     transport = client.get_transport()
     if transport is None or not transport.is_active():
-        raise SSHTunnelError("SSH transport is not active", SSHTunnelPhase.HOST_CONNECT)
+        raise SSHTunnelError("SSH transport is not active")
     return transport
 
 
@@ -206,18 +175,6 @@ class _TunnelFailureState(MutableModel):
             "tunnel. Tunnels whose ``next_attempt_at`` is in the future are skipped this tick."
         ),
     )
-
-
-def _forward_tunnel_key(ssh_info: RemoteSSHInfo, remote_host: str, remote_port: int) -> str:
-    """Identify one forward tunnel: an SSH connection, plus the endpoint inside it.
-
-    A function rather than the format repeated at each use, because a refusal is
-    recorded under this key by the relay thread and read back under it by a
-    request, from two different methods. Were the two ever to disagree the count
-    would read zero forever and ``BACKEND_NOT_LISTENING`` would silently stop
-    firing, which nothing observes.
-    """
-    return f"{ssh_info.host}:{ssh_info.port}->{remote_host}:{remote_port}"
 
 
 class SSHTunnelManager(MutableModel):
@@ -279,18 +236,6 @@ class SSHTunnelManager(MutableModel):
     # health-check loop. Created lazily on first failure for a given tunnel
     # key and removed on success or when the tunnel itself is dropped.
     _failure_state: dict[tuple[str, int], _TunnelFailureState] = PrivateAttr(default_factory=dict)
-    # Monotonically increasing count of ``direct-tcpip`` opens the remote sshd
-    # refused while its transport stayed healthy, per forward-tunnel key. Read
-    # by :meth:`get_backend_refusal_count`; never reset, so a reader only ever
-    # compares two of its own readings.
-    _backend_refusal_counts: dict[str, int] = PrivateAttr(default_factory=dict)
-    # Guards ``_backend_refusal_counts`` alone, deliberately not ``_lock``. The
-    # counter is read from the proxy's event loop on every request, while
-    # ``_lock`` is held across the blocking SSH connect in
-    # ``get_tunnel_socket_path`` -- sharing it would park the whole proxy behind
-    # any tunnel that is being established. The counter shares no invariant with
-    # the connection/tunnel maps, so it needs nothing that lock provides.
-    _backend_refusal_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def _get_tmpdir(self) -> Path:
         """Get or create the secure temporary directory for Unix sockets.
@@ -344,33 +289,6 @@ class SSHTunnelManager(MutableModel):
         except (OSError, paramiko.SSHException) as e:
             logger.trace("Error closing invalidated SSH connection: {}", e)
 
-    def _record_backend_refusal(self, tunnel_key: str) -> None:
-        """Count one ``direct-tcpip`` open the remote sshd refused over a healthy transport."""
-        with self._backend_refusal_lock:
-            self._backend_refusal_counts[tunnel_key] = self._backend_refusal_counts.get(tunnel_key, 0) + 1
-
-    def get_backend_refusal_count(self, ssh_info: RemoteSSHInfo, remote_host: str, remote_port: int) -> int:
-        """How many opens this tunnel's remote sshd has refused, over the manager's lifetime.
-
-        Only the *difference* between two readings means anything: a caller reads
-        it before dialing and again after its dial failed, and an increase says
-        the host answered and refused the inner port rather than being
-        unreachable. The absolute value is arbitrary, and the count is never
-        reset, so a reader can only ever be comparing its own two readings.
-
-        Concurrent requests over the same tunnel can attribute one refusal to
-        each other, since the count is per tunnel rather than per connection.
-        That is harmless: it takes two dials to the same port failing at the same
-        instant, which is one condition, not two.
-
-        Free to call from an event loop: it takes ``_backend_refusal_lock``, held
-        only across this dict lookup, and never ``_lock``, which a tunnel being
-        established holds across a blocking SSH connect.
-        """
-        tunnel_key = _forward_tunnel_key(ssh_info, remote_host, remote_port)
-        with self._backend_refusal_lock:
-            return self._backend_refusal_counts.get(tunnel_key, 0)
-
     def get_tunnel_socket_path(
         self,
         ssh_info: RemoteSSHInfo,
@@ -384,7 +302,7 @@ class SSHTunnelManager(MutableModel):
         on the remote host identified by ssh_info.
         """
         conn_key = f"{ssh_info.host}:{ssh_info.port}"
-        tunnel_key = _forward_tunnel_key(ssh_info, remote_host, remote_port)
+        tunnel_key = f"{conn_key}->{remote_host}:{remote_port}"
 
         with self._lock:
             existing_path = self._tunnel_socket_paths.get(tunnel_key)
@@ -401,7 +319,6 @@ class SSHTunnelManager(MutableModel):
                 client=client,
                 stop_event=stop_event,
             )
-            on_backend_refused = _BackendRefusalHandler(manager=self, tunnel_key=tunnel_key)
 
             # Use a short hash of tunnel_key for the filename. Encoding the full
             # tunnel_key produces paths that can exceed AF_UNIX's 104-byte
@@ -409,18 +326,10 @@ class SSHTunnelManager(MutableModel):
             # addresses. 12 hex chars (48 bits) is ample to avoid collisions
             # between tunnels within a single manager instance.
             tunnel_id = hashlib.blake2b(tunnel_key.encode(), digest_size=6).hexdigest()
-            # Tagged LOCAL_SETUP for the same reason the listener below is: the
-            # SSH connection above already answered, so a directory that cannot
-            # be created or a stale socket file that cannot be removed is this
-            # device's own end failing, and says nothing about the agent's host.
-            try:
-                socket_path = self._get_tmpdir() / f"t-{tunnel_id}.sock"
-                if socket_path.exists():
-                    socket_path.unlink()
-            except OSError as e:
-                raise SSHTunnelError(
-                    f"Could not prepare the tunnel socket directory: {e}", SSHTunnelPhase.LOCAL_SETUP
-                ) from e
+            socket_path = self._get_tmpdir() / f"t-{tunnel_id}.sock"
+
+            if socket_path.exists():
+                socket_path.unlink()
 
             # Bound and listening before the path is handed back, so a caller
             # that connects immediately cannot land in the window between the
@@ -438,7 +347,6 @@ class SSHTunnelManager(MutableModel):
                     self._shutdown_event,
                     stop_event,
                     on_transport_failure,
-                    on_backend_refused,
                 ),
                 daemon=True,
                 name=f"ssh-tunnel-{tunnel_key}",
@@ -805,11 +713,6 @@ class SSHTunnelManager(MutableModel):
                 logger.trace("Error cancelling reverse port forward: {}", e)
         self._reverse_tunnels.clear()
         self._failure_state.clear()
-        # Safe to drop only here, where every tunnel is being retired: a probe
-        # armed against a live tunnel compares two readings of its own, and
-        # resetting under one would read a later refusal as no refusal at all.
-        with self._backend_refusal_lock:
-            self._backend_refusal_counts.clear()
 
         # Emptied under the lock, because a relay thread whose channel open is
         # still in flight outlives the accept loops joined above and invalidates
@@ -863,45 +766,17 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     back to trust-on-first-use would silently pin whatever key an interposer
     presents, defeating strict host-key checking everywhere else.
 
-    Raises ``SSHTunnelError`` tagged ``LOCAL_SETUP`` when either piece of trust
-    material this device is supposed to hold -- the known_hosts file or the
-    private key -- is not on disk. Both are checked before connecting, which is
-    what earns them that phase: paramiko would otherwise report the missing key
-    only during authentication, after the host has answered, where it is
-    indistinguishable from the host rejecting us and would be read as the
-    workspace's fault. A key that is present but no longer accepted (rotated
-    out) cannot be told from a rejection without asking the host, so it stays
-    ``CONNECT_ERROR``.
+    Raises SSHTunnelError when no known_hosts file can be found.
     """
     client = paramiko.SSHClient()
-
-    # ``is_file`` rather than ``exists``: a host record with no key at all
-    # reaches here as ``Path("")``, which pathlib normalises to ``.`` and which
-    # ``exists()`` reports as present. paramiko would then fail on the directory
-    # with an ``IsADirectoryError`` -- an ``OSError``, so it escapes the
-    # ``SSHException`` arm of paramiko's key loop and lands back here untagged.
-    if not ssh_info.key_path.is_file():
-        raise SSHTunnelError(
-            f"No SSH key file at {ssh_info.key_path}; this device is missing the material to authenticate with",
-            SSHTunnelPhase.LOCAL_SETUP,
-        )
 
     known_hosts_path = _resolve_known_hosts_path(ssh_info)
     if known_hosts_path is None:
         sibling_path = ssh_info.key_path.parent / "known_hosts"
-        # Deduplicated because the two candidates routinely coincide: a producer
-        # that stores known_hosts beside the key and also names it explicitly
-        # (the docker provider does both) would otherwise have this read "at X or
-        # X" -- verbatim, in the details the device-side recovery card expands.
         checked_paths = (
-            f"{ssh_info.known_hosts_path} or {sibling_path}"
-            if ssh_info.known_hosts_path is not None and ssh_info.known_hosts_path != sibling_path
-            else sibling_path
+            f"{ssh_info.known_hosts_path} or {sibling_path}" if ssh_info.known_hosts_path is not None else sibling_path
         )
-        raise SSHTunnelError(
-            f"No known_hosts file at {checked_paths}; refusing to connect without a pinned host key",
-            SSHTunnelPhase.LOCAL_SETUP,
-        )
+        raise SSHTunnelError(f"No known_hosts file at {checked_paths}; refusing to connect without a pinned host key")
     client.load_host_keys(str(known_hosts_path))
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
@@ -941,20 +816,13 @@ def _create_tunnel_listener(socket_path: Path) -> socket.socket:
     Done on the caller's thread rather than inside the accept loop so that the
     socket is connectable the moment the path is handed out, and so a bind
     failure raises here instead of surfacing on a background thread.
-
-    Every failure here is ``LOCAL_SETUP``: this runs against the local socket
-    table and the local filesystem only, so what it can report is that this
-    device could not build its own end -- never anything about the agent's host.
     """
-    try:
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    except OSError as e:
-        raise SSHTunnelError(f"Could not create tunnel socket {socket_path}: {e}", SSHTunnelPhase.LOCAL_SETUP) from e
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         server.bind(str(socket_path))
     except OSError as e:
         server.close()
-        raise SSHTunnelError(f"Could not bind tunnel socket {socket_path}: {e}", SSHTunnelPhase.LOCAL_SETUP) from e
+        raise SSHTunnelError(f"Could not bind tunnel socket {socket_path}: {e}") from e
     try:
         os.chmod(str(socket_path), 0o600)
         server.listen(_TUNNEL_LISTEN_BACKLOG)
@@ -965,9 +833,7 @@ def _create_tunnel_listener(socket_path: Path) -> socket.socket:
         # not remove it. Only this arm may unlink: a path that failed to bind
         # is one we do not own.
         socket_path.unlink(missing_ok=True)
-        raise SSHTunnelError(
-            f"Could not listen on tunnel socket {socket_path}: {e}", SSHTunnelPhase.LOCAL_SETUP
-        ) from e
+        raise SSHTunnelError(f"Could not listen on tunnel socket {socket_path}: {e}") from e
     return server
 
 
@@ -992,24 +858,6 @@ class _TransportFailureHandler(FrozenModel):
     def __call__(self) -> None:
         self.manager._invalidate_connection(self.conn_key, self.client)
         self.stop_event.set()
-
-
-class _BackendRefusalHandler(FrozenModel):
-    """Counts one tunnel's refused ``direct-tcpip`` opens, for a caller to read back.
-
-    A refusal is only observable to the proxy as the tunnel socket closing under
-    it, which is the same thing every other connect failure looks like. Counting
-    it here is what lets the proxy tell the two apart -- see
-    :meth:`SSHTunnelManager.get_backend_refusal_count`.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
-
-    manager: "SSHTunnelManager" = Field(description="Manager holding the per-tunnel refusal counts")
-    tunnel_key: str = Field(description="Key of the tunnel whose count this bumps")
-
-    def __call__(self) -> None:
-        self.manager._record_backend_refusal(self.tunnel_key)
 
 
 def _is_transport_unusable(transport: paramiko.Transport, open_seconds: float) -> bool:
@@ -1041,7 +889,6 @@ def _open_and_relay(
     remote_host: str,
     remote_port: int,
     on_transport_failure: Callable[[], None],
-    on_backend_refused: Callable[[], None],
 ) -> None:
     """Open a direct-tcpip channel for one accepted connection, then relay it.
 
@@ -1052,16 +899,8 @@ def _open_and_relay(
     A failed open is either the target port not listening -- a workspace still
     booting refuses every open until its service comes up -- or the SSH
     connection underneath having stopped answering. The two call for opposite
-    responses, and :func:`_is_transport_unusable` is what tells them apart: the
-    second retires the connection via ``on_transport_failure``, while the first
-    reports the refusal via ``on_backend_refused``.
-
-    That report is the only trace of the refusal a caller can see. All this
-    function can do to the connection is close it, which reaches the proxy as an
-    indistinguishable connect-time error -- so without the callback a reachable
-    host with a dead service is indistinguishable from a host that is gone. It
-    fires *before* the close, so a caller that reads the count after observing
-    its own failure is guaranteed to see this one.
+    responses, and :func:`_is_transport_unusable` is what tells them apart: only
+    the second retires the connection via ``on_transport_failure``.
 
     ``EOFError`` is caught alongside paramiko's own exceptions because paramiko
     re-raises a bare one from an open that was in flight when the peer closed;
@@ -1077,13 +916,11 @@ def _open_and_relay(
             timeout=_CHANNEL_OPEN_TIMEOUT_SECONDS,
         )
     except (paramiko.SSHException, EOFError, OSError) as e:
+        client_sock.close()
         open_seconds = max(time.monotonic() - started_at, time.time() - started_at_wall)
         if not _is_transport_unusable(transport, open_seconds):
-            on_backend_refused()
-            client_sock.close()
             logger.debug("Failed to open an SSH channel to {}:{}: {}", remote_host, remote_port, e)
             return
-        client_sock.close()
         logger.warning(
             "Failed to open an SSH channel to {}:{} at the transport level; dropped the connection so "
             "the next request reconnects: {}",
@@ -1116,7 +953,6 @@ def _tunnel_accept_loop(
     shutdown_event: threading.Event,
     stop_event: threading.Event,
     on_transport_failure: Callable[[], None],
-    on_backend_refused: Callable[[], None],
 ) -> None:
     """Accept connections on an already-listening Unix socket and forward them via SSH.
 
@@ -1125,8 +961,7 @@ def _tunnel_accept_loop(
     thread, which opens the direct-tcpip channel and relays it.
     ``shutdown_event`` retires every tunnel (manager cleanup); ``stop_event``
     retires just this one, which is how a transport failure gets the tunnel
-    rebuilt on the next request. ``on_backend_refused`` is passed straight to
-    :func:`_open_and_relay`; see there for what it reports.
+    rebuilt on the next request.
     """
     try:
         while not shutdown_event.is_set() and not stop_event.is_set():
@@ -1140,14 +975,7 @@ def _tunnel_accept_loop(
 
             threading.Thread(
                 target=_open_and_relay,
-                args=(
-                    client_sock,
-                    transport,
-                    remote_host,
-                    remote_port,
-                    on_transport_failure,
-                    on_backend_refused,
-                ),
+                args=(client_sock, transport, remote_host, remote_port, on_transport_failure),
                 daemon=True,
                 name=f"ssh-relay-{remote_host}:{remote_port}",
             ).start()

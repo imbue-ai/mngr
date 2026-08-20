@@ -1,4 +1,5 @@
 const { BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
+const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
 const paths = require('./paths');
@@ -12,7 +13,6 @@ const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink')
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { parseWorkspaceId } = require('./surface-routing');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
-const updater = require('./updater');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
@@ -44,11 +44,17 @@ if (process.env.MINDS_REMOTE_DEBUGGING_PORT) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.MINDS_REMOTE_DEBUGGING_PORT);
 }
 
-// Imported for ToDesktop's smoke test, which the import itself arms when
-// TODESKTOP_SMOKE_TEST is set. Never `init()`ed: that builds an updater agent
-// whose constructor sets `allowDowngrade = true` on the shared electron-updater
-// singleton, and electron/updater.js drives updates instead.
-require('@todesktop/runtime');
+// Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
+// is undefined on macOS, so todesktop's constructor throws.
+if (app.isPackaged) {
+  todesktop.init({
+    updateReadyAction: {
+      showInstallAndRestartPrompt: 'always',
+    },
+  });
+} else {
+  console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
+}
 
 // Surface the git SHA the build was cut from in the standard macOS About panel.
 if (app.isPackaged) {
@@ -1499,33 +1505,45 @@ async function onReady() {
   if (initialSavedState.windows.length > 0) {
     restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
   }
-  updater.init({ onStatus: broadcastUpdateStatus });
   await runStartupSequence(initialBundle);
 }
 
-function broadcastUpdateStatus(status) {
-  for (const bundle of bundles) {
-    if (!bundle.window.isDestroyed() && !bundle.window.webContents.isDestroyed()) {
-      bundle.window.webContents.send('update-status', status);
-    }
-  }
-}
-
-/**
- * The menu bar's "Check for Updates...".
- *
- * Opens the panel and runs a check, rather than answering in dialogs of its
- * own: the panel already reports the result, the version each channel serves,
- * and when the check ran. Two surfaces answering the same question is how they
- * drift apart.
- */
 async function triggerUpdateCheck() {
-  const target = getMostRecentWindow();
-  if (target) {
-    focusBundle(target);
-    navigateBundle(target, '/settings?section=updates');
+  const autoUpdater = todesktop.autoUpdater;
+  if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update check unavailable.',
+      detail: app.isPackaged
+        ? 'The auto-updater is disabled until this build is released to the latest channel.'
+        : 'Updates are only available in installed builds.',
+    });
+    return;
   }
-  await updater.check();
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const updateInfo = result && result.updateInfo;
+    if (updateInfo) {
+      const v = updateInfo.version || updateInfo.releaseName;
+      dialog.showMessageBox({
+        type: 'info',
+        message: v ? `Update ${v} found.` : 'Update found.',
+        detail: 'Downloading in the background. You will be prompted to restart when it is ready.',
+      });
+    } else {
+      dialog.showMessageBox({
+        type: 'info',
+        message: "You're up to date.",
+        detail: 'No newer version is available.',
+      });
+    }
+  } catch (err) {
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  }
 }
 
 function installApplicationMenu() {
@@ -2009,24 +2027,6 @@ function handleAuthEvent(event) {
 }
 
 // -- IPC handlers --
-
-ipcMain.handle('get-update-state', () => updater.describe());
-
-// Returns what each channel currently serves, for the switch confirmation.
-ipcMain.handle('peek-update-channels', () => updater.peekChannels());
-
-ipcMain.handle('set-update-channel', async (_event, channel) => {
-  await updater.setChannel(channel);
-  return updater.describe();
-});
-
-ipcMain.handle('check-for-updates', async () => {
-  await updater.check();
-  return updater.describe();
-});
-
-// The "Restart" control on the update card. Quits, so it returns nothing.
-ipcMain.handle('install-update', () => updater.installNow());
 
 ipcMain.on('bring-app-to-front', (event) => {
   const bundle = getBundleFromEvent(event);

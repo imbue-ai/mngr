@@ -703,17 +703,11 @@ export interface RecoveryInfo {
   workspace_name: string;
   health: string;
   health_error: string;
-  /** Whether an in-flight restart skips the stop step. A full stop+start bounce
-   * is only ever dispatched by the user's own click, so `false` is what makes
-   * "Restarting" an honest claim rather than a guess. Null outside a restart. */
-  is_restart_start_only: boolean | null;
   ssh_command: string;
   is_host_offline: boolean;
   is_backend_unreachable: boolean;
   provider_label: string;
   unreachable_reason: string;
-  is_device_cannot_connect: boolean;
-  device_error_detail: string;
 }
 
 interface RestartStatusPayload {
@@ -739,12 +733,6 @@ export class RecoveryModel {
   info: RecoveryInfo | null = null;
   loadError: string | null = null;
   isRestartRunning = false;
-  /** The shape of a restart *this model dispatched*, or null when the restart
-   * it is following was dispatched elsewhere and only attached to. A surface
-   * describing a restart in flight needs the difference: its own click is known
-   * from the click, while an unattended or other-window dispatch is only ever
-   * as good as what the tracker publishes about it. */
-  dispatchedRestartIsStartOnly: boolean | null = null;
   restartError: string | null = null;
   isRestartSucceeded = false;
   logLines: string[] = [];
@@ -824,9 +812,6 @@ export class RecoveryModel {
     }
     if (this.isRestartRunning || this.isRestartFollowAbandoned || this.isStopped) return;
     this.isRestartRunning = true;
-    // Attached, not dispatched: this model has no first-hand account of what
-    // was run, so a surface must take the tracker's word for its shape.
-    this.dispatchedRestartIsStartOnly = null;
     this.isRestartSucceeded = false;
     this.restartError = null;
     this.logLines = [];
@@ -884,7 +869,6 @@ export class RecoveryModel {
     const agentId = this.agentId;
     if (agentId === null || this.isRestartRunning) return;
     this.isRestartRunning = true;
-    this.dispatchedRestartIsStartOnly = isStartOnly;
     this.restartError = null;
     this.isRestartSucceeded = false;
     this.consecutiveRestartPollFailures = 0;

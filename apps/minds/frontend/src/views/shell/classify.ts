@@ -47,12 +47,6 @@ export function workspaceSurfaceIdFromPath(path: string): string | null {
   return match ? match[1] : null;
 }
 
-/** The machine a recovery page (/agents/<id>/recovery) speaks for, else null. */
-export function recoveryWorkspaceIdFromPath(path: string): string | null {
-  const match = path.match(new RegExp(`^/agents/${ID_SEGMENT}/recovery$`, "i"));
-  return match ? match[1] : null;
-}
-
 /** Whether `path` is the options overlay route (share + machine-settings
  * panel floating over the still-mounted workspace surface). */
 export function isWorkspaceOverlayPath(path: string): boolean {
@@ -109,8 +103,8 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (match) return workspaceContext(match[1], "settings");
   match = path.match(new RegExp(`^/destroying/${ID_SEGMENT}$`, "i"));
   if (match) return workspaceContext(match[1], null);
-  const recoveryId = recoveryWorkspaceIdFromPath(path);
-  if (recoveryId !== null) return workspaceContext(recoveryId, null);
+  match = path.match(new RegExp(`^/agents/${ID_SEGMENT}/recovery$`, "i"));
+  if (match) return workspaceContext(match[1], null);
   if (path === "/create/template") {
     // Over a machine the template stepper is a modal floating on that
     // machine's surface (its context + accent); with no machine it redirects to

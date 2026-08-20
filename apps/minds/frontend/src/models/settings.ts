@@ -4,19 +4,11 @@
 // password; the new If-Match-guarded /ui/api endpoint for the
 // error-reporting toggle).
 //
-// It also holds the release-channel state behind the Updates panel
-// (updateState, peekedChannels, pendingChannelSwitch). That comes from the
-// Electron main process over the electronBridge IPC, not from the settings
-// payload, and is null in the browser build.
-//
 // The response interfaces are hand-written mirrors of the pydantic models in
 // ui_api_settings.py (the generated schema currently covers only channel
 // frames; see the tranche report).
 
 import m from "mithril";
-
-import { electronBridge } from "../electron-bridge";
-import type { PeekedChannel, UpdateChannel, UpdateState, UpdateStatus } from "../electron-bridge";
 
 export interface GrantedPermission {
   label: string;
@@ -98,7 +90,6 @@ export type SettingsSection =
   | "file-sharing"
   | "workspace-delegation"
   | "error-reporting"
-  | "updates"
   | "backups";
 
 export const SETTINGS_SECTIONS: {
@@ -110,50 +101,8 @@ export const SETTINGS_SECTIONS: {
   { name: "file-sharing", label: "Local files", group: "Permissions" },
   { name: "workspace-delegation", label: "Machines", group: "Permissions" },
   { name: "error-reporting", label: "Error reporting", group: "Other" },
-  { name: "updates", label: "Updates", group: "Other" },
   { name: "backups", label: "Master password", group: "Other" },
 ];
-
-/**
- * Slowest to fastest, which is the order the list is rendered in.
- *
- * Blurbs say what a channel *is*, never how often it ships: a cadence printed
- * in the UI is a promise the release process has not made.
- *
- */
-export const CHANNEL_COPY: {
-  name: UpdateChannel;
-  label: string;
-  blurb: string;
-}[] = [
-  {
-    name: "stable",
-    label: "Stable",
-    blurb: "Ready for everyday use.",
-  },
-  {
-    name: "beta",
-    label: "Beta",
-    blurb: "Test new features early.",
-  },
-  {
-    name: "alpha",
-    label: "Alpha",
-    blurb: "Internal development builds.",
-  },
-];
-
-// electronBridge.onUpdateStatus has no unregister, so the preload callback is
-// registered ONCE at module scope and forwards to whichever model last loaded;
-// SettingsPage is re-created on every visit to the page.
-let activeUpdateStatusForwarder: ((status: UpdateStatus) => void) | null = null;
-let isUpdateStatusRegistered = false;
-
-function ensureUpdateStatusRegistered(): void {
-  if (isUpdateStatusRegistered) return;
-  isUpdateStatusRegistered = true;
-  electronBridge.onUpdateStatus((status) => activeUpdateStatusForwarder?.(status));
-}
 
 export interface PendingRevoke {
   title: string;
@@ -179,14 +128,6 @@ export class SettingsModel {
   revokeError = "";
   isRevokeBusy = false;
   addAccountBusyService = "";
-
-  // -- Release channels (desktop only) --
-  updateState: UpdateState | null = null;
-  peekedChannels: Record<string, PeekedChannel> = {};
-  /** Set when a switch would park the user; cleared by confirm or cancel. */
-  pendingChannelSwitch: { channel: UpdateChannel; targetVersion: string | null } | null = null;
-  isUpdateBusy = false;
-  updateError = "";
   errorReportingError = "";
   masterPasswordError = "";
   masterPasswordResults: MasterPasswordResult[] | null = null;
@@ -387,167 +328,5 @@ export class SettingsModel {
     }
     this.isMasterPasswordBusy = false;
     this.redraw();
-  }
-
-  /** The nav entries this build can actually service. */
-  get visibleSections(): typeof SETTINGS_SECTIONS {
-    return SETTINGS_SECTIONS.filter(
-      (section) => section.name !== "updates" || electronBridge.isDesktop,
-    );
-  }
-
-  async loadUpdateState(): Promise<void> {
-    // Registered before the first await: a main process that cannot describe
-    // its updater must not also cost this session its status listener.
-    activeUpdateStatusForwarder = (status) => this.receiveUpdateStatus(status);
-    ensureUpdateStatusRegistered();
-    try {
-      this.updateState = await electronBridge.getUpdateState();
-    } catch (error) {
-      // A desktop build whose updater failed to describe itself is not the
-      // browser build, and the panel says so rather than showing the browser
-      // copy with no version, no channel, and no reason.
-      this.updateError = error instanceof Error ? error.message : String(error);
-      this.redraw();
-      return;
-    }
-    this.redraw();
-    if (this.updateState === null) return;
-    // Peeked after the first paint: the panel states what every channel serves,
-    // and a channel whose manifest does not resolve is not selectable.
-    await this.refreshPeekedChannels();
-  }
-
-  /**
-   * Re-read what every channel serves, without holding the panel.
-   *
-   * Never awaited under `isUpdateBusy`. The main process runs one updater task
-   * at a time, so a peek issued after a check that found an update is queued
-   * behind the download that check started -- minutes, for a build of this
-   * size. Holding the button across that turns a finished check into a panel
-   * that reads as still checking for the whole transfer.
-   */
-  private async refreshPeekedChannels(): Promise<void> {
-    try {
-      this.peekedChannels = await electronBridge.peekUpdateChannels();
-    } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
-    }
-    this.redraw();
-  }
-
-  /**
-   * Take the channel the status was produced for, not just the status.
-   *
-   * Main checks whatever `currentChannel()` says, so a pushed status names the
-   * app's channel. Only the window that called `setUpdateChannel` learns about a
-   * switch from its return value; another window with this panel open would go on
-   * showing the channel it was on -- and since its radio is already checked,
-   * clicking it fires no `onchange`, so there is no way to act on it from there
-   * either.
-   */
-  receiveUpdateStatus(status: UpdateStatus): void {
-    if (this.updateState === null) return;
-    // `disabled` and a check that rejected outright carry no channel.
-    const channel = status.channel ?? this.updateState.channel;
-    // Statuses that are not a settled check (`checking`, `disabled`) carry no
-    // time, and must not erase the one the last real check reported.
-    const lastCheckedAt = status.lastCheckedAt ?? this.updateState.lastCheckedAt;
-    this.updateState = { ...this.updateState, channel, status, lastCheckedAt };
-    this.redraw();
-  }
-
-  /**
-   * Start a channel switch, stopping to confirm when it would park the user.
-   *
-   * The cost has to be stated before it is paid: moving to a slower channel
-   * means receiving nothing until that channel catches up, and there is no way
-   * back down -- nothing in the data directory has a down-migration.
-   *
-   * A channel whose manifest could not be read has no version to compare, so it
-   * cannot park and cannot be switched to either: the preference would stick and
-   * every check from then on would fail against a feed that serves nothing.
-   */
-  async requestChannel(channel: UpdateChannel): Promise<void> {
-    if (this.updateState === null || channel === this.updateState.channel) return;
-    this.isUpdateBusy = true;
-    this.updateError = "";
-    this.redraw();
-    try {
-      this.peekedChannels = await electronBridge.peekUpdateChannels();
-      const target = this.peekedChannels[channel];
-      if (target !== undefined && target.version === null) {
-        this.updateError = `The ${channel} channel is unavailable right now, so Minds stayed on ${this.updateState.channel}.`;
-        return;
-      }
-      if (target !== undefined && target.wouldPark) {
-        this.pendingChannelSwitch = { channel, targetVersion: target.version };
-        return;
-      }
-      await this.applyChannel(channel);
-    } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
-    } finally {
-      this.isUpdateBusy = false;
-      this.redraw();
-    }
-  }
-
-  async confirmChannelSwitch(): Promise<void> {
-    const pending = this.pendingChannelSwitch;
-    if (pending === null) return;
-    this.pendingChannelSwitch = null;
-    this.isUpdateBusy = true;
-    this.redraw();
-    try {
-      await this.applyChannel(pending.channel);
-    } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
-    } finally {
-      this.isUpdateBusy = false;
-      this.redraw();
-    }
-  }
-
-  cancelChannelSwitch(): void {
-    this.pendingChannelSwitch = null;
-    this.redraw();
-  }
-
-  private async applyChannel(channel: UpdateChannel): Promise<void> {
-    const next = await electronBridge.setUpdateChannel(channel);
-    if (next !== null) this.updateState = next;
-  }
-
-  /**
-   * Restart into the staged update.
-   *
-   * No busy flag and no redraw: the app is quitting, so there is no later state
-   * to render, and a spinner that never resolves is what a failed quit would
-   * leave behind.
-   */
-  async installUpdateNow(): Promise<void> {
-    await electronBridge.installUpdate();
-  }
-
-  async checkForUpdatesNow(): Promise<void> {
-    this.isUpdateBusy = true;
-    this.updateError = "";
-    this.redraw();
-    try {
-      // `describe()` carries the time the check just settled, so there is
-      // nothing to stamp here.
-      const next = await electronBridge.checkForUpdates();
-      if (next !== null) this.updateState = next;
-    } catch (error) {
-      this.updateError = error instanceof Error ? error.message : String(error);
-    } finally {
-      this.isUpdateBusy = false;
-      this.redraw();
-    }
-    // Deliberately after the button is released and not awaited by the caller:
-    // the check has already answered, and this only refines what each channel
-    // is reported to serve.
-    void this.refreshPeekedChannels();
   }
 }

@@ -1,1 +1,0 @@
-No user-visible change. `SSHTunnelError` now requires the tunnel phase it was raised from (so a caller can tell a failure on this device from one that reached the agent's host), and latchkey's reverse-tunnel test constructs one, so it passes the new argument.

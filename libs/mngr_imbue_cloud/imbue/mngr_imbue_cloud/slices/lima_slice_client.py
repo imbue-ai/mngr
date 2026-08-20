@@ -49,13 +49,6 @@ _DISK_NAME_SUFFIX: Final[str] = "-data"
 _BOX_PATH_PREFIX: Final[str] = "PATH=/usr/local/bin:$HOME/.local/bin:$PATH"
 # A slice VM boots in a few minutes; give limactl start a generous cap.
 _LIMA_START_TIMEOUT_SECONDS: Final[float] = 1800.0
-# lima's own instance-running deadline for ``limactl start``. Without an
-# explicit ``--timeout`` lima defaults to 10 minutes, which a fresh slice's
-# first boot to sshd exceeds on a box already running many VMs (~8-12 minutes
-# under CPU/IO contention), killing starts that were seconds from ready
-# (mngr-internal#469). Kept under _LIMA_START_TIMEOUT_SECONDS so the SSH exec
-# cap remains the outer bound.
-_LIMA_START_DEADLINE: Final[str] = "25m"
 _LIMA_SHORT_TIMEOUT_SECONDS: Final[float] = 120.0
 # The reservation (under the box lock) is short but includes ``limactl create``,
 # which materializes the instance's boot disk from the staged base image -- give it
@@ -280,7 +273,7 @@ class LimaSliceVpsClient(VpsClientInterface):
         # Phase 2: boot the reserved VM (the long step), with the lock already released.
         try:
             start_rc, _start_out, start_err = self.run_on_box(
-                f"limactl --log-level=info start --timeout {_LIMA_START_DEADLINE} {shlex.quote(instance_name)}",
+                f"limactl --log-level=info start {shlex.quote(instance_name)}",
                 timeout=_LIMA_START_TIMEOUT_SECONDS,
                 label=f"start:{instance_name}",
                 is_streaming=True,

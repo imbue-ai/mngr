@@ -7,17 +7,10 @@
 // When the machine IS on screen the same card renders as a modal instead
 // (RecoveryModal). The card is shared wholesale; this page supplies no corner
 // control where the modal supplies its X, and nothing else differs. There is
-// nothing for a corner control to do here: the page is reached only because the
-// machine would not load, so a dismissal would leave the reader on a machine
-// that is not there.
-//
-// Once the machine IS answering, though, the page is the only thing between the
-// reader and it, and it supplies the card's "Open machine" button. That is the
-// same moment the ?return_to below fires, and deliberately so: the redirect is
-// the path, and the button is what is left when there is no ?return_to to
-// follow (a hand-typed or stale URL) or when the redirect is held back -- and
-// it costs nothing when the redirect does fire, since the two land in the same
-// place and the reader never sees the card again either way.
+// nothing for one to do here: the page is reached only because the machine
+// would not load, so a button back to it would name the destination that is
+// known not to work, and the way onward once the machine does answer is the
+// click-through's own ?return_to, honored below.
 //
 // NEVER auto-navigated to, and never linked to by the shell's band, which
 // raises the modal instead. Unattended recovery is dispatched by the server's
@@ -37,33 +30,9 @@ import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
 
 interface RecoveryState {
   model: RecoveryModel;
-  /** Validated same-app ?return_to destination, honored once the machine answers. */
+  /** Validated same-app ?return_to destination, honored on restart success. */
   returnTo: string | null;
   hasReturned: boolean;
-  /** Whether the click-through's own restart has been asked for (immediately
-   * true when it carried no ?intent). Until it has, the machine's health is a
-   * reading of the state that restart was meant to change, so returning on it
-   * would leave without doing the thing the click-through came to do. */
-  isDispatchSettled: boolean;
-}
-
-/**
- * Whether the machine is answering again, and this page is therefore done.
- *
- * Deliberately NOT "the restart succeeded". A restart can fail while the
- * machine comes back anyway -- the failure and the recovery have separate
- * causes, and this page's own state poll is what reports the second one. Read
- * the other way, a page whose restart errored parked the reader on a card
- * saying "nothing further is needed here" with no way into the machine it was
- * saying it about.
- */
-function isMachineAnswering(model: RecoveryModel): boolean {
-  if (model.isRestartRunning) return false;
-  if (model.isRestartSucceeded) return true;
-  const info = model.info;
-  // A stopped machine reads healthy (there is nothing wrong with it); it is
-  // simply not somewhere anyone can be sent.
-  return info !== null && info.health === "healthy" && !info.is_host_offline;
 }
 
 /** Follow a validated in-app return_to; /goto/ URLs enter the workspace
@@ -75,19 +44,6 @@ function followReturnTo(returnTo: string): void {
     return;
   }
   m.route.set(returnTo);
-}
-
-/** Leave for the machine: where the click-through was headed, or the machine
- * itself when it carried nowhere. One path for the automatic return and the
- * button, so a reader who clicks rather than waiting lands in the same place. */
-function leaveForMachine(state: RecoveryState): void {
-  state.hasReturned = true;
-  if (state.returnTo !== null) {
-    followReturnTo(state.returnTo);
-    return;
-  }
-  const agentId = state.model.agentId;
-  if (agentId !== null) getAppContext().shell.enterWorkspace(agentId);
 }
 
 export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
@@ -103,33 +59,27 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     // crafted deeplink cannot turn the return into an open redirect.
     vnode.state.returnTo = rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//") ? rawReturnTo : null;
     vnode.state.hasReturned = false;
-    const isDispatchingIntent = intent === "start" || intent === "restart";
-    vnode.state.isDispatchSettled = !isDispatchingIntent;
     const model = new RecoveryModel(workspaceAnyId, browserLifecycleDeps(() => m.redraw()));
     vnode.state.model = model;
-    void model.load().then(async () => {
+    void model.load().then(() => {
       // load() already re-attached if a restart is in flight, and
       // dispatchRestart is a no-op while one is running.
-      if (isDispatchingIntent && model.loadError === null) {
-        await model.dispatchRestart(intent === "start");
+      if ((intent === "start" || intent === "restart") && model.loadError === null) {
+        void model.dispatchRestart(intent === "start");
       }
-      vnode.state.isDispatchSettled = true;
     });
   },
   onremove(vnode) {
     vnode.state.model.stop();
   },
   onupdate(vnode) {
-    // The click-through carried where the user was headed; once the machine
-    // answers, take them there instead of parking them on the card.
+    // The click-through carried where the user was headed; once the restart
+    // lands, take them there instead of parking them on the success notice.
     const { model, returnTo } = vnode.state;
-    if (returnTo === null || vnode.state.hasReturned || !vnode.state.isDispatchSettled) return;
-    // Not out from under a bug report opened over this page: the reader is
-    // mid-sentence in a form about this machine, and this page is what the
-    // form is floating on.
-    if (getAppContext().shell.pageRouteBehindOverlay !== null) return;
-    if (!isMachineAnswering(model)) return;
-    leaveForMachine(vnode.state);
+    if (model.isRestartSucceeded && returnTo !== null && !vnode.state.hasReturned) {
+      vnode.state.hasReturned = true;
+      followReturnTo(returnTo);
+    }
   },
   view(vnode) {
     const { model } = vnode.state;
@@ -151,14 +101,7 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     return m(
       "div",
       { class: "flex justify-center px-4 pt-10 pb-10" },
-      m(RecoveryPanel, {
-        panelId: "recovery-page-panel",
-        model,
-        // Withheld until the machine answers, for the reason the module
-        // comment gives: before that, this button would name a destination
-        // known not to work.
-        onEnterMachine: isMachineAnswering(model) ? () => leaveForMachine(vnode.state) : null,
-      }),
+      m(RecoveryPanel, { panelId: "recovery-page-panel", model }),
     );
   },
 };

@@ -52,29 +52,6 @@ describe("noticeBandFor", () => {
     expect(noticeBandFor("healthy", "healthy", true, true, "Imbue Cloud")).toBeNull();
   });
 
-  it("blames this device when that is what could not connect, and only while the machine reads unhealthy", () => {
-    // A machine the app could not build a connection to reads stuck like any
-    // other, and the band would otherwise report a generic loss of contact for
-    // a machine that is very likely running fine. It keeps the recovering key,
-    // so the strip is not rewritten as the explanation lands.
-    const band = noticeBandFor("stuck", "healthy", true, true, null, true);
-    expect(band?.message).toBe("Can't connect to this machine from this device");
-    expect(band?.key).toBe("workspace-recovering");
-    expect(band?.action?.kind).toBe("open-recovery");
-    // The terminal state is the same condition better explained, so it reads alike.
-    expect(noticeBandFor("restart_failed", "healthy", true, true, null, true)?.message).toBe(band?.message);
-    // A machine that is answering is not one this device cannot reach.
-    expect(noticeBandFor("healthy", "healthy", true, true, null, true)).toBeNull();
-  });
-
-  it("prefers the provider's outage over this device's when both are reported", () => {
-    // A whole backend being down is the larger fact, and the one with a name
-    // to give; the device-side line would say less about the same outage.
-    expect(noticeBandFor("stuck", "healthy", true, true, "Imbue Cloud", true)?.message).toBe(
-      "Can't connect to Imbue Cloud",
-    );
-  });
-
   it("names the dead consumer instead of the stuck machine it produces", () => {
     // Every machine reads stuck while the consumer is dead, and restarting
     // one would not help -- only the app restart does.

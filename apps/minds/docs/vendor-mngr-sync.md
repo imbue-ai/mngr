@@ -27,18 +27,7 @@ working tree).
 `just sync-vendor-mngr [default-workspace-template-path]` (root `justfile`) archives mngr `HEAD`,
 replaces `system/vendor/mngr/` with the snapshot, and commits in DEFAULT_WORKSPACE_TEMPLATE. It carries only
 committed content, so position your mngr checkout at the exact commit you want
-to vendor first.
-
-Both archive callers -- this recipe and the `sync_vendor` job in
-`.github/workflows/minds-launch-to-msg.yml` -- also run `uv lock` in the DEFAULT_WORKSPACE_TEMPLATE root
-and commit the result with the snapshot. DEFAULT_WORKSPACE_TEMPLATE's root `uv.lock` pins the vendored
-mngr libraries as editable path deps (`imbue-mngr`, `imbue-common`, `overlay`,
-`resource-guards`, `concurrency-group`, `mngr_claude`) and records their resolved
-`requires-dist`, so a snapshot that moves any of their dependencies strands it.
-That lock is the DEFAULT_WORKSPACE_TEMPLATE root's own, not the `system/vendor/mngr/uv.lock` inside the
-snapshot, which the relock leaves untouched -- so the vendor-match invariant
-(`system/vendor/mngr` equals the archive of its mngr SHA, blob for blob) still
-holds. The full release procedure -- including the vendor-match
+to vendor first. The full release procedure -- including the vendor-match
 invariant (DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` must be the `git archive` of the exact mngr SHA it
 is tagged with) -- is in `apps/minds/docs/deploy/release.md`.
 

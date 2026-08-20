@@ -252,24 +252,18 @@ class ImbueCloudConnectorClient(MutableModel):
         cached reference) so tests that monkeypatch those functions still
         intercept the request. When an explicit ``transport`` is injected
         (the preferred test seam), the call goes through it instead.
-
-        Redirects are always followed: the connector is a Modal web function,
-        and when a synchronous request runs long Modal answers ``303 See
-        Other`` pointing at an attempt-token URL the client must GET to fetch
-        the eventual result (``curl -L`` semantics). Without following it, a
-        slow-but-successful operation reads as a failure.
         """
         if self.transport is not None:
             with httpx.Client(transport=self.transport) as injected_client:
-                return injected_client.request(method, url, follow_redirects=True, **kwargs)
+                return injected_client.request(method, url, **kwargs)
         if method == "GET":
-            return httpx.get(url, follow_redirects=True, **kwargs)
+            return httpx.get(url, **kwargs)
         if method == "POST":
-            return httpx.post(url, follow_redirects=True, **kwargs)
+            return httpx.post(url, **kwargs)
         if method == "PUT":
-            return httpx.put(url, follow_redirects=True, **kwargs)
+            return httpx.put(url, **kwargs)
         if method == "DELETE":
-            return httpx.delete(url, follow_redirects=True, **kwargs)
+            return httpx.delete(url, **kwargs)
         raise SwitchError(f"Unsupported HTTP method: {method}")
 
     def _send(
@@ -327,7 +321,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=_client_id_headers(),
             json={"email": email, "password": password},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return validate_wire(AuthRawResponse, self._check(response, ImbueCloudAuthError))
 
@@ -337,7 +330,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=_client_id_headers(),
             json={"email": email, "password": password},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return validate_wire(AuthRawResponse, self._check(response, ImbueCloudAuthError))
 
@@ -498,7 +490,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=_client_id_headers(),
             json={"email": email},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         self._check(response, ImbueCloudAuthError)
 
@@ -508,7 +499,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=_client_id_headers(),
             json={"token": token, "new_password": new_password},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         self._check(response, ImbueCloudAuthError)
 
@@ -517,7 +507,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url(f"/auth/users/{user_id}"),
             headers=_client_id_headers(),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return self._check(response, ImbueCloudAuthError)
 
@@ -548,7 +537,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(access_token),
             json=body,
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         if response.status_code == 503:
             try:
@@ -575,7 +563,6 @@ class ImbueCloudConnectorClient(MutableModel):
                 self._url(f"/hosts/{host_db_id}/release"),
                 headers=self._bearer(access_token),
                 timeout=self.timeout_seconds,
-                follow_redirects=True,
             )
         except httpx.HTTPError as exc:
             raise ImbueCloudConnectorError(
@@ -600,7 +587,6 @@ class ImbueCloudConnectorClient(MutableModel):
                 headers=self._bearer(access_token),
                 json={"host_name": host_name},
                 timeout=self.timeout_seconds,
-                follow_redirects=True,
             )
         except httpx.HTTPError as exc:
             raise ImbueCloudConnectorError(
@@ -621,7 +607,6 @@ class ImbueCloudConnectorClient(MutableModel):
                 self._url(f"/hosts/{host_db_id}/enable-sharing"),
                 headers=self._bearer(access_token),
                 timeout=self.timeout_seconds,
-                follow_redirects=True,
             )
         except httpx.HTTPError as exc:
             raise ImbueCloudConnectorError(
@@ -634,7 +619,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url("/hosts"),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         body = self._check(response, ImbueCloudConnectorError)
         items = body.get("hosts") if isinstance(body, dict) else body
@@ -675,7 +659,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url("/workspaces"),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         self._check_workspaces_supported(response)
         body = self._check(response, ImbueCloudConnectorError)
@@ -772,7 +755,6 @@ class ImbueCloudConnectorClient(MutableModel):
                 headers=self._bearer(access_token),
                 json=body,
                 timeout=KEY_OP_TIMEOUT_SECONDS,
-                follow_redirects=True,
             )
         except httpx.HTTPError as exc:
             raise ImbueCloudKeyError(f"Key creation HTTP request failed: {exc}") from exc
@@ -785,7 +767,6 @@ class ImbueCloudConnectorClient(MutableModel):
                 self._url("/keys"),
                 headers=self._bearer(access_token),
                 timeout=KEY_OP_TIMEOUT_SECONDS,
-                follow_redirects=True,
             )
         except httpx.HTTPError as exc:
             raise ImbueCloudKeyError(f"Key list HTTP request failed: {exc}") from exc
@@ -797,7 +778,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url(f"/keys/{key_id}"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
-            follow_redirects=True,
         )
         body = self._check(response, ImbueCloudKeyError)
         return validate_wire(LiteLLMKeyInfo, body)
@@ -817,7 +797,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(access_token),
             json=body,
             timeout=KEY_OP_TIMEOUT_SECONDS,
-            follow_redirects=True,
         )
         self._check(response, ImbueCloudKeyError)
 
@@ -826,7 +805,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url(f"/keys/{key_id}"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
-            follow_redirects=True,
         )
         self._check(response, ImbueCloudKeyError)
 
@@ -958,7 +936,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(access_token),
             json={"name": name, "access": access},
             timeout=KEY_OP_TIMEOUT_SECONDS,
-            follow_redirects=True,
         )
         return validate_wire(R2BucketCreateResult, self._check_bucket(response))
 
@@ -967,7 +944,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url("/buckets"),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         body = self._check_bucket(response)
         return parse_wire_entries(R2BucketInfo, body, "GET /buckets", ImbueCloudBucketError)
@@ -977,7 +953,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url(f"/buckets/{name}"),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return validate_wire(R2BucketInfo, self._check_bucket(response))
 
@@ -986,7 +961,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url(f"/buckets/{name}"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
-            follow_redirects=True,
         )
         self._check_bucket(response)
 
@@ -996,7 +970,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url(f"/buckets/{name}/roll-key"),
             headers=self._bearer(access_token),
             timeout=KEY_OP_TIMEOUT_SECONDS,
-            follow_redirects=True,
         )
         return validate_wire(R2KeyMaterial, self._check_bucket(response))
 
@@ -1007,7 +980,6 @@ class ImbueCloudConnectorClient(MutableModel):
             self._url(path),
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         body = self._check_bucket(response)
         return parse_wire_entries(R2KeyInfo, body, f"GET {path}", ImbueCloudBucketError)
@@ -1345,7 +1317,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(admin_api_key),
             params={"paid_only": "true" if paid_only else "false"},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         body = self._check(response, ImbueCloudPaidListError)
         if not isinstance(body, list):
@@ -1364,7 +1335,6 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(admin_api_key),
             json={"value": value},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return self._check(response, ImbueCloudPaidListError)
 

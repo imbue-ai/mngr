@@ -13,7 +13,6 @@ import {
   isAppOverlayPath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
-  recoveryWorkspaceIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
 
@@ -53,19 +52,6 @@ export class ShellState {
    * the modal's, which carries none of the panel's params. Null whenever no
    * modal floats over the panel. */
   panelRouteBehindOverlay: string | null = null;
-  /**
-   * The hub PAGE an app-level modal was opened over, so the Shell keeps that
-   * page painted (and mounted) beneath it. Null whenever no modal floats over
-   * one.
-   *
-   * Only the machine-recovery page needs this, and needs it badly: it names a
-   * machine in its own path, so the Get help modal it opens (which forwards
-   * ?workspace= to report against the right machine) would otherwise put that
-   * machine's surface behind the backdrop -- the surface the recovery page
-   * exists precisely because nobody could load. The reader would watch the
-   * card they were reading get replaced by the thing that would not open.
-   */
-  pageRouteBehindOverlay: string | null = null;
   /**
    * The one piece of recovery-card state: which machine's card is up, and
    * whether the shell raised it or the user did.
@@ -149,20 +135,6 @@ export class ShellState {
     // rather than stacking a second one, so one dismissal still lands back on
     // the surface the popup was opened over instead of on the request before it.
     m.route.set("/inbox", query, path === "/inbox" ? { replace: true } : undefined);
-  }
-
-  /**
-   * Remember the current route as the page an app-level modal is about to
-   * float over, when it is one that must stay painted behind it.
-   *
-   * Called by the surface opening the modal, before it routes: the modal's own
-   * route carries nothing of where it was opened from, and the surfaces that
-   * need this are the ones an ordinary backdrop would replace with something
-   * worse (see `pageRouteBehindOverlay`).
-   */
-  rememberPageBehindOverlay(): void {
-    const route = m.route.get() ?? "";
-    this.pageRouteBehindOverlay = recoveryWorkspaceIdFromPath(route.split("?")[0]) !== null ? route : null;
   }
 
   /** Register the mounted Permissions pane's list, and drop it on the way out
@@ -259,15 +231,6 @@ export class ShellState {
     this.isAppOverlayClosing = true;
     if (window.history.length > 1) {
       window.history.back();
-      return true;
-    }
-    // No history to go back through: land on the surface the modal was opened
-    // over. The remembered page comes first -- it was opened over that page
-    // BECAUSE the machine it names would not load, so the machine ?workspace=
-    // forwards is the one place not to send anyone.
-    const behindPage = this.pageRouteBehindOverlay;
-    if (behindPage !== null) {
-      m.route.set(behindPage);
       return true;
     }
     const behind = overlayBehindWorkspaceId(path, search);
@@ -396,12 +359,9 @@ export class ShellState {
     // Escape (repeating every ~30ms) would fire a second back(), carrying the
     // reader past the surface the popup was opened over.
     if (!isSameRoute) this.isAppOverlayClosing = false;
-    // The panel (or page) underneath belongs to the modal that was opened over
-    // it; once the route is no longer a modal's, it is (or is not) the route.
-    if (!isSameRoute && !isAppOverlayPath(path)) {
-      this.panelRouteBehindOverlay = null;
-      this.pageRouteBehindOverlay = null;
-    }
+    // The panel underneath belongs to the modal that was opened over it; once
+    // the route is no longer a modal's, the panel is (or is not) the route.
+    if (!isSameRoute && !isAppOverlayPath(path)) this.panelRouteBehindOverlay = null;
     // Pass the query so an app modal opened over a workspace (/help?workspace=)
     // keeps that workspace's accent painting behind it.
     const accentSource = accentSourceForRoute(path, search);

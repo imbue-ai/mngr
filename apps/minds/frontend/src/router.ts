@@ -9,7 +9,6 @@ import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { Shell } from "./views/shell/Shell";
 import {
   isWorkspaceOverlayPath,
-  recoveryWorkspaceIdFromPath,
   workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./views/shell/classify";
@@ -85,12 +84,6 @@ export function mountRouter(root: Element, shell: ShellState): void {
       // the routed one on the options route, so the Shell's single slot for it
       // keeps one component instance (and its loaded models) across the open.
       const panelPath = (shell.panelRouteBehindOverlay ?? "").split("?")[0];
-      // The hub page an app-level modal was opened over, for the pages that
-      // must stay painted behind it rather than be replaced by Home or by the
-      // machine ?workspace= names (see ShellState.pageRouteBehindOverlay). It
-      // renders in the same slot the routed page holds, so the page keeps one
-      // component instance -- and its polling models -- across the open.
-      const pagePath = (shell.pageRouteBehindOverlay ?? "").split("?")[0];
       return m(Shell, {
         shell,
         routePath: path,
@@ -99,7 +92,6 @@ export function mountRouter(root: Element, shell: ShellState): void {
         // The Home surface an app-level modal (settings/accounts/help) floats
         // over when no workspace is behind it; the router owns page identity.
         homeContent: m(LandingPage),
-        behindContent: recoveryWorkspaceIdFromPath(pagePath) !== null ? m(RecoveryPage) : null,
         optionsContent: isWorkspaceOverlayPath(panelPath) ? m(WorkspaceOptionsPage) : null,
       });
     },

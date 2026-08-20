@@ -18,7 +18,7 @@ import { Icon16 } from "../components/Icon";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
 import { routeLinkAttrs } from "../components/route-link";
-import { healthBadgeLabelFor, isMachineStateKnown, mindControlsFor, rowClickActionFor } from "./landing-controls";
+import { isMachineStateKnown, mindControlsFor, rowClickActionFor } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
 
@@ -218,14 +218,10 @@ export const LandingPage: m.ClosureComponent = () => {
     // is the app's, not theirs. The page's notice names it once instead of
     // every row repeating a symptom.
     if (!isMachineStateKnown(getAppContext().stores.health.discoveryHealth)) return null;
-    const healthStore = getAppContext().stores.health;
-    const label = healthBadgeLabelFor(
-      healthStore.statusFor(entry.id),
-      healthStore.isRestartANoOpFor(entry.id),
-      healthStore.isRestartStartOnlyFor(entry.id),
-      entry.is_device_cannot_connect ?? false,
-    );
-    if (label === null) return null;
+    const health = getAppContext().stores.health.statusFor(entry.id);
+    if (health === "healthy") return null;
+    const label =
+      health === "stuck" ? "Server not responding" : health === "restarting" ? "Restarting..." : "Restart failed";
     return m("span", { class: `${BADGE_CLASS} bg-warning/15 text-warning landing-health-badge` }, label);
   }
 

@@ -180,17 +180,12 @@ function getBundledMindsRootName() {
 /**
  * Resolve the MINDS_ROOT_NAME the runtime should run as.
  *
- * This is the tier -- which infrastructure the app talks to and which data
- * directory it owns -- and has nothing to do with the release channel. A build
- * is stamped with one tier for its whole life; switching channel moves which
- * build you are offered, never where your data lives.
- *
  * Precedence:
  *   1. The bundled root_name file (built into the app via
- *      MINDS_ROOT_NAME_BUNDLE) -- any packaged build, which today means
- *      production ("minds") or staging ("minds-staging"). Always wins so a
- *      user with a stale MINDS_ROOT_NAME export from a parent shell can't
- *      accidentally misdirect a packaged build.
+ *      MINDS_ROOT_NAME_BUNDLE) -- the production / staging / beta
+ *      packaged-build case. Always wins so a user with a stale
+ *      MINDS_ROOT_NAME export from a parent shell can't accidentally
+ *      misdirect a packaged build.
  *   2. The process env MINDS_ROOT_NAME (the dev-mode `minds-admin env activate`
  *      case). Validated against the runtime regex.
  *   3. Default to 'minds' (production) for the case where dev mode

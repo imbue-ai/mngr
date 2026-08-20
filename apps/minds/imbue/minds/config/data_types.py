@@ -63,10 +63,11 @@ class ClientEnvConfig(FrozenModel):
     The non-secret half of an env's on-disk state. Used in two places:
 
     * Staging / production: ``apps/minds/imbue/minds/config/envs/<tier>/client.toml``
-      is committed to the repo, so it must never carry a secret. What keeps
-      it that way is ``write_client_config`` in ``envs/local_store.py``:
-      it names every key it emits, one at a time, rather than serializing
-      whatever this model happens to hold.
+      is committed to the repo. The deploy writer is forbidden from ever
+      adding fields beyond the URLs declared here -- a separate
+      :class:`PublicClientEnvConfig` type and a runtime guard in
+      ``envs/local_store.py`` make sure no secret can sneak into a
+      committed file.
     * Dev envs: ``~/.minds-<env-name>/client.toml`` (chmod 0644) is
       written by ``minds-admin env deploy <name>``; secrets land in a separate
       chmod-0600 ``secrets.toml`` next to it (see :class:`DevEnvSecretsModel`
@@ -97,16 +98,6 @@ class ClientEnvConfig(FrozenModel):
         description=(
             "Minisign public key (single-line 'RW...' form) the pre-baked image's signed root manifest "
             "is verified against. Required alongside `lima_image_base_url`."
-        ),
-    )
-    update_feed_base_url: AnyUrl | None = Field(
-        default=None,
-        description=(
-            "Root URL serving the release-channel manifests for this env, every channel "
-            "including stable. A build carrying no value here falls back to ToDesktop's own "
-            "feed and offers stable only; production always sets one, so that fallback is a "
-            "guard rather than a path anything takes. Set together with the promotion job "
-            "that writes those manifests; see specs/minds-release-channels/spec.md."
         ),
     )
     accounts_base_url: AnyUrl | None = Field(

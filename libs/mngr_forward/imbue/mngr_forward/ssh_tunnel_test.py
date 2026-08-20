@@ -1,14 +1,10 @@
 """Unit tests for the shared :class:`SSHTunnelManager`.
 
-Most of the SSH I/O paths (reverse port forward, a live agent's container) need
-a real host and are exercised by the acceptance / release tests. These unit
-tests cover the deterministic surfaces that don't need one: the URL-parsing
-helper, the data shapes, and the bits of the manager's repair / setup loops that
-can be driven against fakes.
-
-The one exception is the direct-tcpip refusal classification at the bottom of
-this file, which runs an sshd of its own on loopback. What it settles cannot be
-settled against a fake by construction -- see the comment there.
+The actual SSH I/O paths (paramiko transport, direct-tcpip, reverse port
+forward) require a live sshd and are exercised by the acceptance / release
+tests. These unit tests cover the deterministic surfaces that don't need a
+real network: the URL-parsing helper, the data shapes, and the bits of the
+manager's repair / setup loops that can be driven against fakes.
 
 The manager is the single SSH tunneling implementation in the monorepo:
 ``mngr forward --service`` uses its forward (direct-tcpip) path, and both
@@ -30,8 +26,6 @@ from typing import cast
 
 import paramiko
 import pytest
-from paramiko.common import AUTH_SUCCESSFUL
-from paramiko.common import OPEN_FAILED_CONNECT_FAILED
 from pydantic import PrivateAttr
 from pydantic import ValidationError
 
@@ -43,7 +37,6 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import ReverseTunnelInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
-from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_forward.ssh_tunnel import _CHANNEL_OPEN_TIMEOUT_SECONDS
 from imbue.mngr_forward.ssh_tunnel import _ForwardedTunnelHandler
 from imbue.mngr_forward.ssh_tunnel import _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS
@@ -217,61 +210,13 @@ def test_parse_url_host_port_localhost_normalization() -> None:
 
 
 def test_create_ssh_client_refuses_to_connect_without_a_known_hosts_file(tmp_path: Path) -> None:
-    """A missing known_hosts file must be a hard error, never trust-on-first-use.
-
-    Tagged ``LOCAL_SETUP``, and that is the load-bearing half: the raise happens
-    before a packet is sent, so it is evidence about this device and nothing at
-    all about the agent's host. A consumer reads the phase to decide whether to
-    blame -- and restart -- the workspace, so tagging this one ``HOST_CONNECT``
-    would blame a machine that was never contacted, with nothing else in the
-    suite noticing.
-    """
+    """A missing known_hosts file must be a hard error, never trust-on-first-use."""
     key_path = tmp_path / "ssh_key"
     key_path.write_text("irrelevant-key-material")
     ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
 
-    with pytest.raises(SSHTunnelError, match="known_hosts") as exc_info:
+    with pytest.raises(SSHTunnelError, match="known_hosts"):
         _create_ssh_client(ssh_info)
-    assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
-
-
-def test_create_ssh_client_refuses_to_connect_without_the_private_key(tmp_path: Path) -> None:
-    """A key this device does not have must be caught before the host is asked.
-
-    The plan's own #427 case names key material alongside known_hosts, and it is
-    only device-side if it is checked here: paramiko opens the key during
-    authentication, after the host has answered, where a missing file is
-    indistinguishable from the host rejecting the key we offered -- so it would
-    surface as CONNECT_ERROR and get a machine restarted over trust material
-    that never left this laptop.
-    """
-    key_path = tmp_path / "ssh_key"
-    (tmp_path / "known_hosts").write_text("")
-    ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
-
-    with pytest.raises(SSHTunnelError, match="No SSH key") as exc_info:
-        _create_ssh_client(ssh_info)
-    assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
-
-
-def test_create_ssh_client_refuses_a_key_path_that_is_not_a_file(tmp_path: Path) -> None:
-    """A host record carrying no key at all reaches here as a directory, not as an absent path.
-
-    ``OuterHost.get_ssh_connection_info`` falls back to ``Path("")`` when the
-    record has no ``ssh_key`` -- an ssh-provider host registered without
-    ``key_file``, which is optional -- and pathlib normalises that to ``.``,
-    which exists. An existence check therefore lets it through to paramiko,
-    which raises ``IsADirectoryError``: an ``OSError``, so it escapes the
-    ``SSHException`` arm of paramiko's key loop and arrives untagged, read as
-    CONNECT_ERROR. That blames the workspace for a key this device never had.
-    """
-    (tmp_path / "known_hosts").write_text("")
-
-    for key_path in (tmp_path, Path("")):
-        ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=key_path)
-        with pytest.raises(SSHTunnelError, match="No SSH key file") as exc_info:
-            _create_ssh_client(ssh_info)
-        assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
 
 
 def test_create_ssh_client_refusal_names_both_candidate_paths(tmp_path: Path) -> None:
@@ -285,26 +230,6 @@ def test_create_ssh_client_refusal_names_both_candidate_paths(tmp_path: Path) ->
 
     with pytest.raises(SSHTunnelError, match=rf"{explicit_path}.*{key_path.parent / 'known_hosts'}"):
         _create_ssh_client(ssh_info)
-
-
-def test_create_ssh_client_refusal_names_one_path_when_the_candidates_coincide(tmp_path: Path) -> None:
-    """A producer may store known_hosts beside the key *and* name it explicitly.
-
-    The docker provider does exactly that, so listing both candidates
-    unconditionally renders "at X or X" -- and this text is quoted verbatim
-    behind the recovery card's "Error details", where a path repeated back to the
-    user reads as two places checked when only one was.
-    """
-    key_path = tmp_path / "ssh_key"
-    key_path.write_text("irrelevant-key-material")
-    sibling_path = key_path.parent / "known_hosts"
-    ssh_info = RemoteSSHInfo(
-        user="root", host="203.0.113.5", port=22, key_path=key_path, known_hosts_path=sibling_path
-    )
-
-    with pytest.raises(SSHTunnelError) as exc_info:
-        _create_ssh_client(ssh_info)
-    assert str(exc_info.value).count(str(sibling_path)) == 1
 
 
 def test_resolve_known_hosts_path_prefers_the_explicit_path_when_it_exists(tmp_path: Path) -> None:
@@ -462,7 +387,7 @@ class _FakeReverseTunnelManager(SSHTunnelManager):
 
     _setup_calls: list[tuple[RemoteSSHInfo, int, int, str | None]] = PrivateAttr(default_factory=list)
     _setup_port: int = PrivateAttr(default=9999)
-    _setup_raise: Exception | None = PrivateAttr(default=None)
+    _setup_raise: type[Exception] | None = PrivateAttr(default=None)
 
     def setup_reverse_tunnel(
         self,
@@ -473,13 +398,13 @@ class _FakeReverseTunnelManager(SSHTunnelManager):
     ) -> int:
         self._setup_calls.append((ssh_info, local_port, remote_port, agent_id))
         if self._setup_raise is not None:
-            raise self._setup_raise
+            raise self._setup_raise("simulated failure")
         return self._setup_port
 
 
 def _make_fake_reverse_tunnel_manager(
     remote_port: int = 9999,
-    raise_on_setup: Exception | None = None,
+    raise_on_setup: type[Exception] | None = None,
 ) -> _FakeReverseTunnelManager:
     mgr = _FakeReverseTunnelManager()
     mgr._setup_port = remote_port
@@ -523,9 +448,7 @@ def test_check_and_repair_tunnels_no_op_then_repairs_with_requested_port(tmp_pat
 
 def test_check_and_repair_tunnels_handles_setup_error(tmp_path: Path) -> None:
     """When ``setup_reverse_tunnel`` raises ``SSHTunnelError``, the error is logged and not propagated."""
-    manager = _make_fake_reverse_tunnel_manager(
-        raise_on_setup=SSHTunnelError("simulated failure", SSHTunnelPhase.HOST_CONNECT)
-    )
+    manager = _make_fake_reverse_tunnel_manager(raise_on_setup=SSHTunnelError)
     ssh_info = _sample_ssh_info(tmp_path)
     conn_key = "192.0.2.1:22"
     tunnel_info = ReverseTunnelInfo(
@@ -618,9 +541,7 @@ def test_check_and_repair_tunnels_fires_on_repaired_callback(tmp_path: Path) -> 
 def test_repair_failure_arms_backoff_and_skips_within_window(tmp_path: Path) -> None:
     """First failure arms the backoff state with a future ``next_attempt_at``,
     and a second tick during that window does not retry."""
-    manager = _make_fake_reverse_tunnel_manager(
-        raise_on_setup=SSHTunnelError("simulated failure", SSHTunnelPhase.HOST_CONNECT)
-    )
+    manager = _make_fake_reverse_tunnel_manager(raise_on_setup=SSHTunnelError)
     ssh_info = _sample_ssh_info(tmp_path)
     conn_key = "192.0.2.1:22"
     tunnel_key = (conn_key, 8420)
@@ -648,9 +569,7 @@ def test_repair_failure_arms_backoff_and_skips_within_window(tmp_path: Path) -> 
 
 def test_repair_failure_backoff_is_capped(tmp_path: Path) -> None:
     """Once the exponential schedule reaches the cap, the counter stops growing."""
-    manager = _make_fake_reverse_tunnel_manager(
-        raise_on_setup=SSHTunnelError("simulated failure", SSHTunnelPhase.HOST_CONNECT)
-    )
+    manager = _make_fake_reverse_tunnel_manager(raise_on_setup=SSHTunnelError)
     ssh_info = _sample_ssh_info(tmp_path)
     conn_key = "192.0.2.1:22"
     tunnel_key = (conn_key, 8420)
@@ -662,9 +581,7 @@ def test_repair_failure_backoff_is_capped(tmp_path: Path) -> None:
     # saturated. We bypass the backoff-window skip by directly calling the
     # bookkeeping helper instead of waiting between ticks.
     for _ in range(20):
-        manager._record_repair_failure(
-            tunnel_key, conn_key, tunnel_info, SSHTunnelError("x", SSHTunnelPhase.HOST_CONNECT)
-        )
+        manager._record_repair_failure(tunnel_key, conn_key, tunnel_info, SSHTunnelError("x"))
 
     with manager._lock:
         failure_state = manager._failure_state.get(tunnel_key)
@@ -687,7 +604,7 @@ def test_successful_setup_clears_failure_state(tmp_path: Path) -> None:
         manager._reverse_tunnels[tunnel_key] = tunnel_info
 
     # Simulate a prior failure.
-    manager._record_repair_failure(tunnel_key, conn_key, tunnel_info, SSHTunnelError("x", SSHTunnelPhase.HOST_CONNECT))
+    manager._record_repair_failure(tunnel_key, conn_key, tunnel_info, SSHTunnelError("x"))
     with manager._lock:
         assert tunnel_key in manager._failure_state
 
@@ -718,7 +635,7 @@ def test_alive_sibling_clears_stale_failure_state(tmp_path: Path) -> None:
         manager._connections[conn_key] = FakeSSHClient.create(active=True)
 
     # Stale backoff entry from a previous failure cycle.
-    manager._record_repair_failure(tunnel_key, conn_key, tunnel_info, SSHTunnelError("x", SSHTunnelPhase.HOST_CONNECT))
+    manager._record_repair_failure(tunnel_key, conn_key, tunnel_info, SSHTunnelError("x"))
     with manager._lock:
         assert tunnel_key in manager._failure_state
 
@@ -1133,11 +1050,7 @@ class _OpenChannelRecorder:
         self._entered.release()
         if self._blocker is not None:
             self._blocker.wait(timeout=_BLOCKED_OPEN_HOLD_SECONDS)
-        raise (
-            self._error
-            if self._error is not None
-            else SSHTunnelError("no channel configured", SSHTunnelPhase.HOST_CONNECT)
-        )
+        raise self._error if self._error is not None else SSHTunnelError("no channel configured")
 
     def is_active(self) -> bool:
         return self._active
@@ -1200,7 +1113,6 @@ def _running_accept_loop(transport: _OpenChannelRecorder) -> Iterator[tuple[Path
                 shutdown_event,
                 stop_event,
                 lambda: None,
-                lambda: None,
             ),
             daemon=True,
         )
@@ -1247,9 +1159,7 @@ def test_channel_open_carries_the_configured_bound() -> None:
     transport = _OpenChannelRecorder.create(error=paramiko.ChannelException(2, "Connect failed"))
 
     with _accepted_connection() as (client_sock, _peer):
-        _open_and_relay(
-            client_sock, cast(paramiko.Transport, transport), "127.0.0.1", 8000, lambda: None, lambda: None
-        )
+        _open_and_relay(client_sock, cast(paramiko.Transport, transport), "127.0.0.1", 8000, lambda: None)
 
     assert transport._calls[0]["timeout"] == _CHANNEL_OPEN_TIMEOUT_SECONDS
 
@@ -1297,7 +1207,6 @@ def test_only_a_transport_level_open_failure_invalidates_the_connection(
     """
     transport = _OpenChannelRecorder.create(error=error, active=is_active)
     invalidated = threading.Event()
-    refused = threading.Event()
 
     with _accepted_connection() as (client_sock, peer):
         _open_and_relay(
@@ -1306,15 +1215,9 @@ def test_only_a_transport_level_open_failure_invalidates_the_connection(
             "127.0.0.1",
             8000,
             invalidated.set,
-            refused.set,
         )
 
         assert invalidated.is_set() is expected_invalidated
-        # The two reports are exclusive: an open that failed is evidence about
-        # the inner port or about the SSH connection, never about both. The
-        # refusal report is the only trace of a reachable host with nothing
-        # listening -- all the proxy sees is the socket closing below.
-        assert refused.is_set() is (not expected_invalidated)
         # An empty read means our end is closed.
         peer.settimeout(5.0)
         assert peer.recv(1) == b""
@@ -1461,11 +1364,8 @@ def test_tunnel_listener_bind_failure_leaves_the_existing_socket_alone() -> None
             incumbent.bind(str(socket_path))
             incumbent.listen(1)
 
-            # A socket this device could not bind is raised against this
-            # device's own socket table, so it carries the same phase.
-            with pytest.raises(SSHTunnelError) as exc_info:
+            with pytest.raises(SSHTunnelError):
                 _create_tunnel_listener(socket_path)
-            assert exc_info.value.phase is SSHTunnelPhase.LOCAL_SETUP
 
             # Connectable, not merely present: a path that was unlinked and
             # re-created would still pass an ``exists()`` check.
@@ -1540,178 +1440,3 @@ def test_a_tunnel_over_a_dead_transport_is_rebuilt_on_the_next_request(tmp_path:
         assert manager._connections[conn_key] is replacement_client
     finally:
         manager.cleanup()
-
-
-def test_reading_the_refusal_count_does_not_wait_on_a_tunnel_being_established(tmp_path: Path) -> None:
-    """The refusal count must be readable while another tunnel is mid-setup.
-
-    The proxy reads it on its event loop, once per request, to tell a refused
-    inner port from an unreachable host. ``_lock`` is held for the whole of
-    ``get_tunnel_socket_path`` -- including a ``paramiko`` connect that runs to
-    its 10s timeout against a host that has gone away, which is exactly the
-    situation this count exists to classify. Sharing that lock would park every
-    request the proxy is serving behind it, so the counter keeps its own.
-    """
-    manager = SSHTunnelManager()
-    ssh_info = _sample_ssh_info(tmp_path)
-    manager._record_backend_refusal(f"{ssh_info.host}:{ssh_info.port}->127.0.0.1:8000")
-
-    with manager._lock:
-        read_count: list[int] = []
-        reader = threading.Thread(
-            target=lambda: read_count.append(manager.get_backend_refusal_count(ssh_info, "127.0.0.1", 8000))
-        )
-        reader.start()
-        reader.join(timeout=5.0)
-        assert not reader.is_alive(), "get_backend_refusal_count blocked on the tunnel manager's setup lock"
-
-    assert read_count == [1]
-
-
-# -- Refusal classification against a real sshd ----------------------------
-#
-# ``BACKEND_NOT_LISTENING`` rests on one judgement no fake can make for it:
-# whether a real sshd refusing a ``direct-tcpip`` open leaves the transport in
-# the state ``_is_transport_unusable`` reads as still usable. Every test above
-# supplies that state itself, so all of them would keep passing if the real
-# thing landed on the other side of the line -- and the refusal count would then
-# never move, silently, with the reason simply never firing. These two run the
-# real client against a real server so the judgement is made rather than
-# assumed. The seam above them (a count that moved becoming the reason on the
-# envelope) is covered in ``server_test.py``.
-
-# How long the fake sshd's accept loop waits before re-checking for shutdown.
-_SSHD_ACCEPT_POLL_SECONDS: Final[float] = 0.2
-
-
-class _InnerPortRefusingServer(paramiko.ServerInterface):
-    """An sshd that admits anyone and refuses every forward to a port behind it.
-
-    The shape of a live container whose service has died: the host answers, its
-    transport stays healthy, and nothing is listening on the inner port.
-    """
-
-    def get_allowed_auths(self, username: str) -> str:
-        return "publickey"
-
-    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
-        return AUTH_SUCCESSFUL
-
-    def check_channel_direct_tcpip_request(
-        self, chanid: int, origin: tuple[str, int], destination: tuple[str, int]
-    ) -> int:
-        return OPEN_FAILED_CONNECT_FAILED
-
-
-@contextmanager
-def _refusing_sshd(tmp_path: Path) -> Iterator[tuple[RemoteSSHInfo, list[paramiko.Transport]]]:
-    """Run an sshd on loopback that refuses every ``direct-tcpip`` open.
-
-    Yields the ``RemoteSSHInfo`` that addresses it -- real key material, and a
-    known_hosts pinning this server's key, so ``_create_ssh_client`` performs a
-    real handshake rather than being handed a connection -- along with the
-    server-side transports it has accepted, which a caller closes to make the
-    host go away mid-test.
-    """
-    host_key = paramiko.ECDSAKey.generate()
-    key_path = tmp_path / "id_ecdsa"
-    paramiko.ECDSAKey.generate().write_private_key_file(str(key_path))
-
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(4)
-    listener.settimeout(_SSHD_ACCEPT_POLL_SECONDS)
-    port = listener.getsockname()[1]
-    # Pinned under OpenSSH's non-default-port spelling, which is what paramiko
-    # looks the host up by. Written beside the key, the placement
-    # ``_resolve_known_hosts_path`` falls back to.
-    (tmp_path / "known_hosts").write_text(f"[127.0.0.1]:{port} {host_key.get_name()} {host_key.get_base64()}\n")
-
-    served: list[paramiko.Transport] = []
-    stop_event = threading.Event()
-
-    def accept_loop() -> None:
-        while not stop_event.is_set():
-            try:
-                connection, _ = listener.accept()
-            except TimeoutError:
-                continue
-            except OSError:
-                return
-            transport = paramiko.Transport(connection)
-            transport.add_server_key(host_key)
-            transport.start_server(server=_InnerPortRefusingServer())
-            served.append(transport)
-
-    thread = threading.Thread(target=accept_loop, daemon=True, name="test-refusing-sshd")
-    thread.start()
-    try:
-        yield RemoteSSHInfo(user="root", host="127.0.0.1", port=port, key_path=key_path), served
-    finally:
-        stop_event.set()
-        thread.join(timeout=5.0)
-        for transport in served:
-            transport.close()
-        listener.close()
-
-
-@pytest.mark.timeout(60)
-def test_a_real_sshd_refusing_the_inner_port_counts_a_refusal_and_keeps_the_connection(tmp_path: Path) -> None:
-    """A refused ``direct-tcpip`` open must be counted, and must not retire the SSH connection.
-
-    The two halves are one judgement. The refusal is only tellable from an
-    unreachable host because the transport survives it, so a run that retired
-    the connection would also have counted nothing -- and every request against
-    a container with a dead service would rebuild the tunnel to learn the same
-    thing again.
-
-    The count is read straight after the failed request rather than polled for,
-    because the ordering is the contract: the refusal is recorded before the
-    accepted socket is closed, precisely so a caller that has observed its own
-    failure is guaranteed to see it. A poll here would pass either way.
-    """
-    with _refusing_sshd(tmp_path) as (ssh_info, _served):
-        manager = SSHTunnelManager()
-        try:
-            socket_path = manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
-            tunnel_key = f"{ssh_info.host}:{ssh_info.port}->127.0.0.1:8000"
-            assert manager.get_backend_refusal_count(ssh_info, "127.0.0.1", 8000) == 0
-
-            _connect_and_read_until_closed(socket_path)
-
-            assert manager.get_backend_refusal_count(ssh_info, "127.0.0.1", 8000) == 1
-            assert f"{ssh_info.host}:{ssh_info.port}" in manager._connections
-            assert manager._tunnel_threads[tunnel_key].is_alive()
-        finally:
-            manager.cleanup()
-
-
-@pytest.mark.timeout(60)
-def test_a_real_ssh_host_that_goes_away_counts_no_refusal(tmp_path: Path) -> None:
-    """A host that stopped answering must not be read as a refused inner port.
-
-    The negative half, and the reason the count cannot simply be "an open
-    failed": both failures reach the proxy as nothing but the tunnel socket
-    closing. Here the same server, refusing the same way, has had its transport
-    taken out from under it -- and that alone has to flip the classification, or
-    a vanished machine would be reported as reachable-with-a-dead-service and
-    the restart that fixes it withheld.
-    """
-    with _refusing_sshd(tmp_path) as (ssh_info, served):
-        manager = SSHTunnelManager()
-        conn_key = f"{ssh_info.host}:{ssh_info.port}"
-        try:
-            socket_path = manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
-            assert poll_until(lambda: len(served) == 1), "the sshd never accepted the manager's connection"
-
-            served[0].close()
-            client_transport = manager._connections[conn_key].get_transport()
-            assert client_transport is not None
-            assert poll_until(lambda: not client_transport.is_active()), "the client never noticed the host go away"
-
-            _connect_and_read_until_closed(socket_path)
-
-            assert poll_until(lambda: conn_key not in manager._connections), "the dead connection was not retired"
-            assert manager.get_backend_refusal_count(ssh_info, "127.0.0.1", 8000) == 0
-        finally:
-            manager.cleanup()

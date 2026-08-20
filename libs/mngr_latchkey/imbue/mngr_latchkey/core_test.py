@@ -32,14 +32,12 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
-from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import HIDDEN_BUILTIN_SERVICES
-from imbue.mngr_latchkey.core import LATCHKEY_CREDENTIAL_TYPE_OAUTH
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyBinaryNotFoundError
@@ -1147,7 +1145,7 @@ class _RaisingTunnelManager(SSHTunnelManager):
         remote_port: int = 0,
         agent_id: str | None = None,
     ) -> int:
-        raise SSHTunnelError("simulated reverse-tunnel failure", SSHTunnelPhase.HOST_CONNECT)
+        raise SSHTunnelError("simulated reverse-tunnel failure")
 
     def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
         return 0
@@ -2305,30 +2303,6 @@ def test_auth_list_parses_accounts_keyed_by_service(tmp_path: Path) -> None:
     assert [a.account for a in result["github"]] == [""]
     # ``--offline`` is forwarded (and omitted when not requested).
     assert json.loads((tmp_path / "argv_report").read_text()) == ["auth", "list", "--offline"]
-
-
-def test_auth_list_reports_the_credential_kind_so_callers_can_find_expiring_ones(tmp_path: Path) -> None:
-    """Only an OAuth credential can expire, so the kind has to survive parsing."""
-    payload = json.dumps(
-        {
-            "google-gmail": {"someone@example.com": {"credentialType": "oauth", "credentialStatus": "unknown"}},
-            "github": {"": {"credentialType": "authorizationBearer", "credentialStatus": "unknown"}},
-            # A kind this parser has never heard of, and one latchkey omitted entirely.
-            "newthing": {"": {"credentialType": "somethingNew", "credentialStatus": "unknown"}},
-            "typeless": {"": {"credentialStatus": "unknown"}},
-        }
-    )
-    binary = _make_auth_list_binary(tmp_path, payload_json=payload)
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    result = latchkey.auth_list(is_offline=True)
-
-    assert result["google-gmail"][0].credential_type == LATCHKEY_CREDENTIAL_TYPE_OAUTH
-    assert result["github"][0].credential_type == "authorizationBearer"
-    # An unrecognized kind reads through unchanged rather than being flattened,
-    # so it is simply "not OAuth" instead of needing a parser update first.
-    assert result["newthing"][0].credential_type == "somethingNew"
-    assert result["typeless"][0].credential_type is None
 
 
 def test_auth_list_without_offline_omits_flag(tmp_path: Path) -> None:

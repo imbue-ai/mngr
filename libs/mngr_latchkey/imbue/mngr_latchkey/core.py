@@ -241,22 +241,6 @@ _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
 LATCHKEY_AUTH_OPTION_BROWSER: Final[str] = "browser"
 LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
 
-# Values latchkey reports as an account's ``credentialType``
-# (upstream's stored ``objectType``) for the two credential kinds it can renew:
-# those whose access token expires *and* whose service implements
-# ``refreshCredentials``. Everything else is a static token that never has to be
-# renewed. ``oauth`` covers the refresh-token services (Google, Dropbox, Notion
-# MCP, Ramp); Zoom's server-to-server credential carries no refresh token and
-# instead mints a fresh access token from the app's client id and secret, but
-# expires and is renewed the same way. A future latchkey credential kind that
-# gains ``refreshCredentials`` has to be added here, or it will never be renewed
-# for remote workspaces.
-LATCHKEY_CREDENTIAL_TYPE_OAUTH: Final[str] = "oauth"
-LATCHKEY_CREDENTIAL_TYPE_ZOOM_SERVER_TO_SERVER: Final[str] = "zoomServerToServer"
-LATCHKEY_RENEWABLE_CREDENTIAL_TYPES: Final[frozenset[str]] = frozenset(
-    {LATCHKEY_CREDENTIAL_TYPE_OAUTH, LATCHKEY_CREDENTIAL_TYPE_ZOOM_SERVER_TO_SERVER}
-)
-
 # Env var the upstream ``latchkey`` CLI (>= 3.0.0) reads to run browser auth
 # flows without persisting or reusing any saved browser session state. We set
 # it for the "Add account" flow so the user always lands on a fresh sign-in
@@ -310,14 +294,6 @@ class ServiceAccountCredential(FrozenModel):
 
     account: str = Field(description='Account name (an e-mail, workspace handle, ...); ``""`` for the default.')
     credential_status: CredentialStatus = Field(description="Credential state latchkey reports for this account.")
-    credential_type: str | None = Field(
-        default=None,
-        description=(
-            "Credential kind latchkey reports for this account (e.g. "
-            ":data:`LATCHKEY_CREDENTIAL_TYPE_OAUTH`); ``None`` when latchkey omits it. Left as a "
-            "plain string rather than an enum so an unrecognized kind reads through unchanged."
-        ),
-    )
 
 
 class LatchkeyServiceInfo(FrozenModel):
@@ -427,8 +403,8 @@ def _parse_one_credential_status(raw_status: object, service_name: str) -> Crede
     return status
 
 
-def _extract_account_entry_value(entry: object, key_name: str) -> object:
-    """Pull one named value out of a single account entry, or ``None``.
+def _extract_credential_status_value(entry: object) -> object:
+    """Pull the ``credentialStatus`` value out of one account entry, or ``None``.
 
     Scans ``entry.items()`` rather than indexing so the untyped JSON mapping
     (whose key/value types are unknown) is handled without an escape hatch.
@@ -436,19 +412,9 @@ def _extract_account_entry_value(entry: object, key_name: str) -> object:
     if not isinstance(entry, Mapping):
         return None
     for key, value in entry.items():
-        if key == key_name:
+        if key == "credentialStatus":
             return value
     return None
-
-
-def _parse_credential_type(raw_type: object) -> str | None:
-    """Map an account entry's ``credentialType`` to a string, or ``None`` when absent.
-
-    Unrecognized kinds pass through verbatim: callers ask whether a credential
-    is a specific kind, so a new latchkey credential type simply reads as "not
-    that one" instead of needing this parser to know about it first.
-    """
-    return raw_type if isinstance(raw_type, str) else None
 
 
 def _parse_account_map(raw_account_map: object, service_name: str) -> tuple[ServiceAccountCredential, ...]:
@@ -471,13 +437,11 @@ def _parse_account_map(raw_account_map: object, service_name: str) -> tuple[Serv
         return ()
     accounts: list[ServiceAccountCredential] = []
     for account, entry in raw_account_map.items():
-        raw_status = _extract_account_entry_value(entry, "credentialStatus")
-        raw_type = _extract_account_entry_value(entry, "credentialType")
+        raw_status = _extract_credential_status_value(entry)
         accounts.append(
             ServiceAccountCredential(
                 account=str(account),
                 credential_status=_parse_one_credential_status(raw_status, service_name),
-                credential_type=_parse_credential_type(raw_type),
             )
         )
     return tuple(accounts)

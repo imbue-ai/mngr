@@ -28,7 +28,6 @@ from imbue.minds.desktop_client.ui_api_lifecycle import _build_ssh_command
 from imbue.minds.desktop_client.ui_api_lifecycle import _resolve_workspace_coordinate_to_agent_id
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.mngr.primitives import AgentId
-from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _DESTROYED_AGENT_ID = "agent-" + "9" * 32
@@ -301,50 +300,6 @@ def test_recovery_info_reports_the_backend_a_restart_was_already_rejected_at(tmp
     assert payload["is_backend_unreachable"] is True
     assert payload["provider_label"] == "Docker"
     assert payload["unreachable_reason"] == "Docker Desktop is manually paused."
-
-
-def test_recovery_info_reports_a_connection_this_device_could_not_make(tmp_path: Path) -> None:
-    """The card's verdict when the failure never left this device, with the error that proves it.
-
-    The machine is very likely running fine, so the card must stop offering to
-    restart it -- and the verbatim error is the only thing that makes a broken
-    local install (a missing known_hosts, say) diagnosable from inside the app.
-    """
-    agent_id = AgentId(_DESTROYED_AGENT_ID)
-    resolver = build_resolver_with_system_services(agent_id, AgentId.generate())
-    tracker = SystemInterfaceHealthTracker()
-    tracker.record_connection_failure(
-        agent_id,
-        SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED,
-        "No known_hosts file at /keys/known_hosts; refusing to connect without a pinned host key",
-    )
-    tracker.mark_stuck(agent_id)
-    client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, tracker=tracker)
-
-    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
-
-    assert payload["is_device_cannot_connect"] is True
-    assert "No known_hosts file" in payload["device_error_detail"]
-    # The machine's backend is a separate question, and nothing here answers it.
-    assert payload["is_backend_unreachable"] is False
-
-
-def test_recovery_info_stops_blaming_this_device_once_the_machine_answers(tmp_path: Path) -> None:
-    """A probe that reaches the machine ends the episode, and the verdict with it."""
-    agent_id = AgentId(_DESTROYED_AGENT_ID)
-    resolver = build_resolver_with_system_services(agent_id, AgentId.generate())
-    tracker = SystemInterfaceHealthTracker()
-    tracker.record_connection_failure(agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, "pool timeout")
-    client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, tracker=tracker)
-    assert json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)[
-        "is_device_cannot_connect"
-    ]
-
-    tracker.record_probe_success(agent_id)
-
-    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
-    assert payload["is_device_cannot_connect"] is False
-    assert payload["device_error_detail"] == ""
 
 
 def test_build_ssh_command_renders_the_resolvers_ssh_info() -> None:

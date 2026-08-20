@@ -94,20 +94,6 @@ deploy-apt-mirror:
 test-apt-mirror-worker:
   cd apps/apt_mirror/worker && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm test
 
-# Run the minds JS suites (Electron shell node:test units + SPA frontend vitest).
-[group("minds test")]
-test-minds-js:
-  # --ignore-scripts: the units load `semver`, read `electron-updater`'s
-  # AppUpdater.js off disk, and are otherwise node builtins -- so the packages
-  # are needed but their postinstalls are not, and a plain install fetches the
-  # Electron binary and Playwright's browsers to run neither.
-  cd apps/minds && pnpm install --frozen-lockfile --ignore-scripts && pnpm test:unit
-  # `generate` before `check`: src/generated/ is gitignored, so a fresh checkout
-  # has no ui.ts and tsc would otherwise fail on the missing import rather than
-  # on anything real. `check` at all because vitest transpiles TypeScript
-  # without typechecking it, so the suites alone never see a type error.
-  cd apps/minds/frontend && pnpm install --frozen-lockfile && pnpm run generate && pnpm run check && pnpm test
-
 
 # Render one relay's on-disk config (frps.toml, nftables.conf, the :80
 # redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see

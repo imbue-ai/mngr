@@ -3,7 +3,6 @@
 
 import m from "mithril";
 import type { UiWorkspacesMessage } from "./channel/messages";
-import type { SettingsOverview } from "./models/settings";
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -60,20 +59,6 @@ export function workspacesMessage(overrides: Partial<UiWorkspacesMessage> = {}):
   };
 }
 
-/** The `/ui/api/settings` payload, with every permission surface empty. */
-export function settingsOverview(overrides: Partial<SettingsOverview> = {}): SettingsOverview {
-  return {
-    services_overview: [],
-    file_sharing_grants: [],
-    workspace_delegation_grants: [],
-    permissions_unavailable: false,
-    is_master_password_set: false,
-    report_unexpected_errors: true,
-    version: "v-one",
-    ...overrides,
-  };
-}
-
 /** A JSON Response carrying the given payload with the given status. */
 export function jsonResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -107,27 +92,6 @@ export async function settle(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
-}
-
-/** Run `run` with `window.mindsNative` set to `surface`, or with a `window`
- * carrying no bridge at all when it is null -- which is the browser build.
- *
- * The bridge resolves `window.mindsNative` on every call, so a plain
- * assignment is enough; vitest runs in the node environment, where `window`
- * is otherwise absent and every bridge call would throw on the bare global. */
-export async function withMindsNative(
-  surface: Record<string, unknown> | null,
-  run: () => Promise<void>,
-): Promise<void> {
-  const globals = globalThis as { window?: unknown };
-  const original = globals.window;
-  globals.window = surface === null ? {} : { mindsNative: surface };
-  try {
-    await run();
-  } finally {
-    if (original === undefined) delete globals.window;
-    else globals.window = original;
-  }
 }
 
 // -- Walking a rendered vnode tree ------------------------------------------

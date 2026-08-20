@@ -1,4 +1,3 @@
-import json
 import subprocess
 from pathlib import Path
 
@@ -420,7 +419,7 @@ def test_stop_host_recovers_container_with_dead_sshd(
 
     # mngr start brings up a fresh container with a fresh sshd, recovering the agent.
     start_result = subprocess.run(
-        ["uv", "run", "mngr", "start", agent_name, "--no-connect", "--format", "json"],
+        ["uv", "run", "mngr", "start", agent_name, "--no-connect"],
         capture_output=True,
         text=True,
         timeout=540,
@@ -429,10 +428,6 @@ def test_stop_host_recovers_container_with_dead_sshd(
     assert start_result.returncode == 0, (
         f"start after --stop-host failed with stderr: {start_result.stderr}\nstdout: {start_result.stdout}"
     )
-    # The one arm a local host cannot produce: a host that really was brought up
-    # from stopped. A caller reads this to tell a cold boot from a start that
-    # found everything already running and did nothing.
-    assert json.loads(start_result.stdout.strip())["was_host_started"] is True
 
 
 @pytest.mark.timeout(900)

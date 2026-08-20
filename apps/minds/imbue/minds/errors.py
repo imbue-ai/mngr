@@ -46,10 +46,9 @@ class MngrCommandTimeoutError(MngrCommandError):
 
     A distinct subclass so callers can tell "the command ran and failed" (still
     a ``MngrCommandError``, with a body to inspect) apart from "the command
-    never completed". The difference matters wherever a failure is read as
-    evidence about the host: a command that ran and failed says something about
-    the host it reached, while one that never returned says only that the
-    provider or the network did not answer in time.
+    never completed". The recovery host-health probe keys on this: a listing
+    that times out is evidence the provider/network is unreachable, not that the
+    host is reachable-but-wedged, so it must not offer a destructive restart.
     """
 
     ...

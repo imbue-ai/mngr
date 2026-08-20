@@ -189,9 +189,6 @@ def test_provision_slice_vm_reserves_under_lock_then_starts_and_returns_box_chos
     reserve_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "base64 -d | bash" in cmd)
     start_idx = next(i for i, cmd in enumerate(client.recorded_commands) if "limactl --log-level=info start" in cmd)
     assert reserve_idx < start_idx
-    # The boot must override lima's default 10-minute instance-running deadline:
-    # first boots on a loaded box legitimately take longer (mngr-internal#469).
-    assert "--timeout 25m" in client.recorded_commands[start_idx]
 
 
 def test_provision_slice_vm_raises_slice_capacity_error_when_box_is_full() -> None:

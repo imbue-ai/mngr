@@ -80,6 +80,22 @@ class DefaultWorkspaceTemplateRef(FrozenModel):
         return f"{self.test_remote}#{self.test_branch}"
 
 
+class PoolProvisionInfo(FrozenModel):
+    """What the orchestrator's pool pre-bake stage stamped onto the run's slices.
+
+    Present only when the bake stage ran (the CI release flow and the local
+    ``bake-pool`` iterate mode); absent for runs without pool capacity. Tests
+    that lease fast-path use ``repo_branch_or_tag`` so they can only ever adopt
+    this run's own bake. See specs/remote-workspaces-in-ci.md.
+    """
+
+    repo_branch_or_tag: NonEmptyStr = Field(
+        description="The lease attribute stamped on every baked row (the resolved template SHA/ref)."
+    )
+    region: NonEmptyStr = Field(description="The lease-region label the rows were stamped with.")
+    slice_count: int = Field(description="How many slices the bake stage provisioned for this run.")
+
+
 class DeploymentEnvsConfig(FrozenModel):
     """The full JSON blob the orchestrator writes for each pytest invocation.
 
@@ -95,6 +111,10 @@ class DeploymentEnvsConfig(FrozenModel):
         description="How tests can reach the default-workspace-template content the orchestrator prepared."
     )
     run_id: RunId = Field(description="The run id stamped into every CI-created resource this run.")
+    pool: PoolProvisionInfo | None = Field(
+        default=None,
+        description="Pre-baked pool-slice info when the pool bake stage ran for this run; None otherwise.",
+    )
 
 
 class SharedEnvHandle(FrozenModel):

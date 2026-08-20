@@ -232,27 +232,13 @@ def test_is_timeout_returns_false_when_timeout_is_none() -> None:
 
 
 def test_is_timeout_returns_true_when_time_has_passed() -> None:
-    past_time = time.monotonic() - 10.0
+    past_time = time.time() - 10.0
     assert _is_timeout(past_time) is True
 
 
 def test_is_timeout_returns_false_when_time_has_not_passed() -> None:
-    future_time = time.monotonic() + 100.0
+    future_time = time.time() + 100.0
     assert _is_timeout(future_time) is False
-
-
-def test_is_timeout_reads_the_clock_a_suspended_machine_does_not_advance() -> None:
-    """The deadline is monotonic, so time the machine was suspended for is not spent.
-
-    A process cannot notice its own deadline while it is frozen, so a wall-clock
-    deadline hands the whole budget to a sleep: two fifteen-minute suspends burn
-    a twenty-one minute cap in a couple of hundred seconds of running time, and
-    the command is killed and reported as timed out at the wake. Only a
-    monotonic reading answers False for a monotonic deadline still in the
-    future -- wall clock is epoch seconds, far past any uptime reading, so it
-    would call this one expired.
-    """
-    assert _is_timeout(time.monotonic() + 100.0) is False
 
 
 def test_shutdown_popen_terminates_with_sigterm_and_returns_signal_returncode() -> None:

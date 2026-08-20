@@ -144,6 +144,7 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.responses import make_file_response
+from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import EmptyGrantsError
@@ -174,6 +175,7 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MES
 from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
 from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
+from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
@@ -1389,7 +1391,48 @@ def _handle_workspace_rename(agent_id: str) -> Response:
     return _apply_workspace_display_label(parsed_id, raw_name, str(new_slug), parent_cg)
 
 
-# -- Workspace recovery routes (restart) --
+# -- Workspace recovery routes (health probe + restart) --
+
+
+@require_api_or_cookie_auth
+def _handle_workspace_health(agent_id: str) -> Response:
+    """Return the workspace's host-health diagnostics (probes + dispatch tier).
+
+    Mirrors the old ``/api/agents/<id>/host-health`` route: a flat
+    ``HostHealthResponse`` -- a list of named probes plus a derived
+    ``dispatch_tier`` -- that the recovery page renders. 404 if the workspace is
+    unknown; 503 if no concurrency group is wired to run the in-container probe.
+    """
+    parsed_id = AgentId(agent_id)
+    state = get_state()
+    backend_resolver = state.backend_resolver
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return _json_error(f"Unknown workspace {agent_id}", 404)
+    parent_cg = state.root_concurrency_group
+    if parent_cg is None:
+        return _json_error("Machine health probe is unavailable in this configuration", 503)
+    response = probe_workspace_health(
+        parsed_id,
+        backend_resolver=backend_resolver,
+        tracker=state.system_interface_health_tracker,
+        mngr_binary=state.mngr_binary,
+        mngr_host_dir=state.mngr_host_dir,
+        concurrency_group=parent_cg,
+        envelope_stream_consumer=state.envelope_stream_consumer,
+    )
+    # The reason is only populated on BACKEND_UNREACHABLE; logging it makes a
+    # transient provider error diagnosable after the fact (the tier alone says
+    # nothing about WHICH provider failure produced the verdict).
+    if response.unreachable_reason:
+        logger.info(
+            "Machine health probe for {}: dispatch_tier={} (reason: {})",
+            parsed_id,
+            response.dispatch_tier.value,
+            response.unreachable_reason,
+        )
+    else:
+        logger.info("Machine health probe for {}: dispatch_tier={}", parsed_id, response.dispatch_tier.value)
+    return make_response(content=response.model_dump_json(), media_type="application/json")
 
 
 @require_api_or_cookie_auth
@@ -3119,8 +3162,9 @@ def create_api_v1_blueprint() -> Blueprint:
         endpoint="workspace_stop",
         methods=["POST"],
     )
-    # Workspace recovery (restart). Gated by ``minds-workspaces-recover``
-    # at the gateway.
+    # Workspace recovery (health probe + restart). Gated by
+    # ``minds-workspaces-recover`` at the gateway.
+    blueprint.add_url_rule("/workspaces/<agent_id>/health", view_func=_handle_workspace_health, methods=["GET"])
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
 
     # Backup service verification + management. The per-workspace health read
