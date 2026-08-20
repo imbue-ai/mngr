@@ -39,7 +39,6 @@ from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
 from imbue.minds.desktop_client.cookie_manager import _SESSION_PAYLOAD
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
@@ -57,6 +56,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
+from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
 from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.primitives import CookieSigningKey
@@ -471,18 +471,7 @@ def test_tampered_session_cookie_is_unauthenticated(tmp_path: Path) -> None:
         tmp_path=tmp_path, backend_resolver=StaticBackendResolver(url_by_agent_and_service={}), http_client=None
     )
     valid_cookie = create_session_cookie(signing_key=auth_store.get_signing_key())
-
-    # Alter the signed payload rather than the trailing signature character. The
-    # signature is 20 bytes in 27 base64 characters, so that last character
-    # carries only four significant bits and the two spare ones decode to
-    # nothing: about one cookie in sixteen ends in "A", where flipping it to "B"
-    # produces a different string that still decodes to the same signature and
-    # authenticates. The payload is covered byte for byte, so any change to it
-    # invalidates.
-    payload, _, signed_suffix = valid_cookie.partition(".")
-    tampered_cookie = payload[:-1] + ("A" if payload[-1] != "A" else "B") + "." + signed_suffix
-    assert tampered_cookie != valid_cookie
-    assert not verify_session_cookie(cookie_value=tampered_cookie, signing_key=auth_store.get_signing_key())
+    tampered_cookie = tamper_session_cookie_signed_content(valid_cookie)
     client.set_cookie(SESSION_COOKIE_NAME, tampered_cookie)
 
     response = client.get("/post-login", follow_redirects=False)
