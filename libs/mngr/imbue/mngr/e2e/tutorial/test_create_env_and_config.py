@@ -424,10 +424,11 @@ def test_config_set_default_provider(e2e: E2eSession, project_config_dir: Path) 
     expect(get_result.stdout).to_contain("modal")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
+# No @pytest.mark.rsync: this creates a local agent, which never shells out to
+# rsync (only the remote providers' transfer path does).
 def test_create_with_label(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can add labels to organize your agents and tags for host metadata:

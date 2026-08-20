@@ -85,9 +85,13 @@ def test_create_docker_default_image(e2e: E2eSession) -> None:
     ).to_succeed()
 
     # Confirm the agent really landed on the docker provider, not just that the
-    # command exited 0.
+    # command exited 0. Scope with `--provider docker` rather than filtering the
+    # output with `--include`: `mngr list` defaults to --on-error abort and
+    # discovers across every enabled provider, so an enabled-but-unreachable one
+    # aborts the whole listing with exit 6 before any agent is reported.
+    # `--include` cannot prevent that -- it only filters what discovery returned.
     docker_agents = e2e.run(
-        "mngr list --include 'host.provider == \"docker\"'",
+        "mngr list --provider docker",
         comment="confirm the agent is running on the docker provider",
     )
     expect(docker_agents).to_succeed()
@@ -98,7 +102,7 @@ def test_create_docker_default_image(e2e: E2eSession) -> None:
     # container's /etc/os-release to prove the default image was used -- this is
     # how a human would verify it interactively.
     os_release = e2e.run(
-        "mngr exec my-task cat /etc/os-release",
+        'mngr exec my-task "cat /etc/os-release"',
         comment="verify the default image (debian:bookworm-slim) is in use",
     )
     expect(os_release).to_succeed()
@@ -113,9 +117,9 @@ def test_create_docker_custom_dockerfile(e2e: E2eSession) -> None:
     """Tutorial block:
         # use a custom Dockerfile for the container image. One strange thing is that you probably want to pass "-b ." because
         # that's just how docker works (it takes the context dir as the last arg)
-        mngr create my-task --provider docker -b file=./Dockerfile.dev -b .
+        mngr create my-task --provider docker -b --file=./Dockerfile.dev -b .
 
-    Scope: `-b file=./Dockerfile.dev -b .` builds the container image from the
+    Scope: `-b --file=./Dockerfile.dev -b .` builds the container image from the
     given custom Dockerfile, with the trailing `.` as the build context dir. A
     marker file baked only into that Dockerfile is readable inside the container,
     proving the custom image was used rather than mngr's default.
@@ -142,7 +146,7 @@ def test_create_docker_custom_dockerfile(e2e: E2eSession) -> None:
             # tutorial assumes a default agent type is configured; the e2e
             # environment has none, so an explicit type is required).
             "mngr create my-task --provider docker --type command "
-            "-b file=./Dockerfile.dev -b . --no-connect --no-ensure-clean -- sleep 100930",
+            "--build-arg=--file=./Dockerfile.dev -b . --no-connect --no-ensure-clean -- sleep 100930",
             comment="use a custom Dockerfile for the container image",
             timeout=_BUILD_TIMEOUT,
         )
@@ -153,7 +157,7 @@ def test_create_docker_custom_dockerfile(e2e: E2eSession) -> None:
     # it, so this distinguishes "custom Dockerfile was used" from "create just
     # happened to succeed against the default image".
     marker_result = e2e.run(
-        "mngr exec my-task cat /dockerfile-marker.txt",
+        'mngr exec my-task "cat /dockerfile-marker.txt"',
         comment="verify the custom Dockerfile was used to build the image",
         timeout=_REMOTE_TIMEOUT,
     )
@@ -200,7 +204,7 @@ def test_create_docker_volume_start_arg(e2e: E2eSession) -> None:
     # written on the host must be readable from inside the container at the
     # mount target.
     read_result = e2e.run(
-        "mngr exec my-task cat /container/data/sentinel.txt",
+        'mngr exec my-task "cat /container/data/sentinel.txt"',
         comment="verify the host volume is mounted inside the container",
     )
     expect(read_result).to_succeed()
@@ -239,9 +243,8 @@ def test_create_docker_cpus_start_arg(e2e: E2eSession) -> None:
     # at cpu.max ("200000 100000") and cgroup v1 at cpu.cfs_quota_us ("200000").
     # Both forms contain "200000".
     cpu_limit_result = e2e.run(
-        "mngr exec my-task -- sh -c "
-        "'cat /sys/fs/cgroup/cpu.max 2>/dev/null "
-        "|| cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null'",
+        'mngr exec my-task "cat /sys/fs/cgroup/cpu.max 2>/dev/null '
+        '|| cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null"',
         comment="verify the CPU limit was applied to the container",
     )
     expect(cpu_limit_result).to_succeed()
