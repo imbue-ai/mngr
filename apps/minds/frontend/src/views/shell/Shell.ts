@@ -28,6 +28,8 @@ import { SidebarMenu } from "./SidebarMenu";
 import { Titlebar } from "./Titlebar";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
+import { dismissUpdateReady, updateReadyVersion, watchUpdateStatus } from "./update-ready";
+import { UpdateReadyCard } from "./UpdateReadyCard";
 import { RecoveryModal } from "../recovery/RecoveryModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { DialogCloseButton } from "../components/Modal";
@@ -357,12 +359,16 @@ export function Shell(): m.Component<ShellAttrs> {
   // which routes through ShellState.handleEscape -- not here, so the Shell
   // never competes with it for the same keypress.
   return {
+    oncreate() {
+      watchUpdateStatus(() => m.redraw());
+    },
     view(vnode) {
       const { shell, routePath, workspaceParam, content, homeContent, optionsContent } = vnode.attrs;
       // The visual-diff harness captures with ?visual-diff=1 and no live
       // channel; suppress the indicator so screenshots stay deterministic.
       const isCaptureMode = new URLSearchParams(window.location.search).has("visual-diff");
       const isReconnecting = (shell.channel?.isVisiblyReconnecting ?? false) && !isCaptureMode;
+      const updateReady = updateReadyVersion();
 
       const routeSearch = shell.currentRouteSearch();
       const isAppOverlay = isAppOverlayPath(routePath);
@@ -496,6 +502,19 @@ export function Shell(): m.Component<ShellAttrs> {
                   "fixed top-[42px] right-2 z-[150] type-helper text-secondary bg-surface-primary border border-subtle rounded-md px-2 py-1 shadow-raised",
               },
               "Reconnecting…",
+            )
+          : null,
+        // Bottom right, out of the way: the update is not urgent, and the app
+        // stays fully usable with it on screen.
+        updateReady !== null && !isCaptureMode
+          ? m(
+              "div",
+              { class: "fixed bottom-4 right-4 z-[150] max-w-[calc(100vw-2rem)]" },
+              m(UpdateReadyCard, {
+                version: updateReady,
+                onRestart: () => void electronBridge.installUpdate(),
+                onDismiss: () => dismissUpdateReady(),
+              }),
             )
           : null,
         m("div#local-page-root", { style: "display: contents" }, [

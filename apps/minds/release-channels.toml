@@ -1,0 +1,30 @@
+# Which ToDesktop build each release channel serves.
+#
+# THIS FILE IS THE PROMOTION MECHANISM. Editing it and landing the PR is how a
+# channel moves; CI publishes the manifests from it, and nothing else writes them.
+#
+# To promote:
+#   1. Find the build id (the `build` job's summary in minds-launch-to-msg, or
+#      the ToDesktop dashboard).
+#   2. Edit the channel below.
+#   3. Open a PR. CI dry-runs every gate against it, so review sees whether it
+#      would actually publish.
+#   4. Merge. CI publishes.
+#
+# Removing an entry withdraws nothing: no manifest is ever deleted, so the
+# channel keeps serving its last build and the run reports that rather than a
+# promotion. See scripts/release_channel/publish.py for the gates each entry has
+# to pass, and the Release channels section of apps/minds/docs/deploy/release.md
+# for withdrawing a build.
+#
+# `beta` is publishable but has no entry yet.
+
+[channels.stable]
+build_id = "26081836c9ajpkh"
+version = "0.4.1"
+fallback_branch = "minds-v0.4.1"
+
+[channels.alpha]
+build_id = "26081836c9ajpkh"
+version = "0.4.1"
+fallback_branch = "minds-v0.4.1"

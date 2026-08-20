@@ -15,6 +15,49 @@ export interface FilePickerOptions {
   properties?: string[];
 }
 
+/** Slowest to fastest; mirrors CHANNELS in electron/update-channel.js. */
+export type UpdateChannel = "stable" | "beta" | "alpha";
+
+export interface UpdateStatus {
+  type: "idle" | "checking" | "up-to-date" | "parked" | "update-available" | "update-downloaded" | "error" | "disabled";
+  channel?: UpdateChannel;
+  currentVersion?: string;
+  /** What the channel serves. Below currentVersion exactly when parked. */
+  feedVersion?: string | null;
+  version?: string;
+  message?: string;
+  reason?: string;
+  /** ISO-8601, carried on every status a settled check publishes. */
+  lastCheckedAt?: string | null;
+}
+
+export interface PeekedChannel {
+  /** What this channel serves right now; null when it is unreachable. */
+  version: string | null;
+  /** Whether moving here would stop updates until the channel catches up. */
+  wouldPark: boolean;
+  error?: string;
+}
+
+export interface UpdateState {
+  channel: UpdateChannel;
+  currentVersion: string;
+  /** Just ["stable"] when the tier configures no channel manifest host. */
+  available: UpdateChannel[];
+  status: UpdateStatus;
+  /** ISO-8601 when a check last settled, null before the first one. */
+  lastCheckedAt?: string | null;
+  /**
+   * The version staged for the next restart, null when nothing is.
+   *
+   * Read this rather than the status to answer "is an update waiting": a
+   * completed download is handed to the OS installer and goes in on the next
+   * launch, but the status it published is transient and any later check
+   * replaces it.
+   */
+  downloadedVersion?: string | null;
+}
+
 interface MindsNativeSurface {
   platform: string;
   minimize(): void;
@@ -33,6 +76,14 @@ interface MindsNativeSurface {
   // Renderer -> main shell-event relay (workspace_stopped, focus requests).
   // Added alongside the SPA shell; older preloads lack it, hence optional.
   sendShellEvent?(event: { type: string } & Record<string, unknown>): void;
+  // Release channels. Optional: a preload from before channels shipped lacks
+  // them, and the browser build has no binary to update at all.
+  getUpdateState?(): Promise<UpdateState>;
+  peekUpdateChannels?(): Promise<Record<string, PeekedChannel>>;
+  setUpdateChannel?(channel: UpdateChannel): Promise<UpdateState>;
+  checkForUpdates?(): Promise<UpdateState>;
+  installUpdate?(): Promise<void>;
+  onUpdateStatus?(callback: (status: UpdateStatus) => void): void;
 }
 
 declare global {
@@ -91,5 +142,25 @@ export const electronBridge = {
   },
   sendShellEvent(event: { type: string } & Record<string, unknown>): void {
     native()?.sendShellEvent?.(event);
+  },
+
+  /** Null in the browser, and on a desktop build older than release channels. */
+  async getUpdateState(): Promise<UpdateState | null> {
+    return (await native()?.getUpdateState?.()) ?? null;
+  },
+  async peekUpdateChannels(): Promise<Record<string, PeekedChannel>> {
+    return (await native()?.peekUpdateChannels?.()) ?? {};
+  },
+  async setUpdateChannel(channel: UpdateChannel): Promise<UpdateState | null> {
+    return (await native()?.setUpdateChannel?.(channel)) ?? null;
+  },
+  async checkForUpdates(): Promise<UpdateState | null> {
+    return (await native()?.checkForUpdates?.()) ?? null;
+  },
+  async installUpdate(): Promise<void> {
+    await native()?.installUpdate?.();
+  },
+  onUpdateStatus(callback: (status: UpdateStatus) => void): void {
+    native()?.onUpdateStatus?.(callback);
   },
 };

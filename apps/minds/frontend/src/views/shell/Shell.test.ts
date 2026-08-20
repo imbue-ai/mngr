@@ -141,7 +141,7 @@ describe("Shell request popup layer", () => {
       .map((vnode) => attrsOf(vnode)["data-wsopt-tab"])
       .filter((tab) => tab !== undefined);
 
-    expect(tabs).toEqual(["permissions", "share", "settings"]);
+    expect(tabs).toEqual(["permissions", "settings", "share"]);
   });
 
   it("closes the popup from the key it hangs off, which covers the titlebar's own", () => {
