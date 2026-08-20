@@ -275,6 +275,7 @@ def assert_env_name_fits_slice_names(env_name: str) -> None:
             "Use a shorter env name."
         )
 
+
 # A slice's host id is a uuid hex (exactly 32 lowercase hex chars, no hyphens), so
 # it cleanly delimits the optional env stamp that precedes it in a stamped name.
 _SLICE_HOST_ID_PATTERN: Final[str] = r"[0-9a-f]{32}"

@@ -16,9 +16,9 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import MAX_SLICE_ENV_NAME_LENGTH
-from imbue.mngr_imbue_cloud.slices.bare_metal import assert_env_name_fits_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_CONTAINER_MEMORY_RESERVE_MIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import assert_env_name_fits_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import build_slice_container_memory_start_args
 from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
