@@ -119,8 +119,8 @@ def write_vault_kv(
 ) -> None:
     """Write each ``{key: value}`` pair as a single-``value`` leaf under ``path``.
 
-    Used by :mod:`imbue.minds.envs.generation` to write the tier
-    generation ID. Each key becomes its own leaf ``path/<key>`` holding
+    Used by the operator env tooling's generation-id lifecycle to write
+    the tier generation ID. Each key becomes its own leaf ``path/<key>`` holding
     ``{"value": <value>}``. Refuses to pass any value containing the ``@``
     sigil since ``vault kv put`` would interpret it as a file-path
     reference -- callers that need to write such values should add a
