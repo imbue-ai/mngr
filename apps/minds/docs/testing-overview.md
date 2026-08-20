@@ -69,7 +69,11 @@ excludes the whole `apps/minds` tree by path.
   `test_deploy_then_destroy_round_trip`.
 - `@pytest.mark.minds_services` (run against a pre-stood-up shared env):
   `test_logged_in_smoke`, `test_litellm_spend_tracking_via_local_workspace`
-  (currently `skip`).
+  (currently `skip`), plus the remote-workspace pool tests
+  (`test_pool_lease`, `test_pool_fast_path_create`,
+  `test_workspace_stop_start`), which lease real pre-baked bare-metal
+  slices -- the release dispatch pre-bakes them onto the standing CI boxes
+  (see `specs/remote-workspaces-in-ci.md`).
 
 ### 1.4 JS / Electron tests (`apps/minds/test/`)
 
@@ -291,8 +295,11 @@ cross-component behavior.
 ### 2.4 Remote / account-bound (NOT for the snapshot stage)
 
 These need a remote host and/or a logged-in account, so they belong in
-release/deployment suites, not the snapshot stage, and cannot run in this
-environment today:
+release/deployment suites, not the snapshot stage. The release tier now has
+real remote-workspace capacity (standing CI bare-metal boxes + a per-run
+slice pre-bake stage -- `specs/remote-workspaces-in-ci.md`), which is where
+the pool lease/create/stop-start tests run; the entries below are the
+remaining ideas:
 
 14. **SSH remote->remote establish + connect** [release] -- create two remote
     workspaces, grant SSH from one to the other, and actually `ssh`/`git pull`

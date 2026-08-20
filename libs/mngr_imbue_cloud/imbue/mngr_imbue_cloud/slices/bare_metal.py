@@ -245,6 +245,36 @@ SLICE_LIMA_INSTANCE_PREFIX: Final[str] = "mngr-slice-"
 # Suffix appended to a slice's instance name to name its btrfs data disk.
 SLICE_LIMA_DISK_SUFFIX: Final[str] = "-data"
 
+# limactl rejects any instance/disk identifier longer than this (its
+# `identifier greater than maximum length (76 characters)` fatal). The longest
+# name a slice produces is the data disk: prefix + env stamp + "-" + 32-hex
+# host id + the disk suffix -- so the env stamp gets whatever budget remains.
+_LIMA_MAX_IDENTIFIER_LENGTH: Final[int] = 76
+MAX_SLICE_ENV_NAME_LENGTH: Final[int] = (
+    _LIMA_MAX_IDENTIFIER_LENGTH
+    - len(SLICE_LIMA_INSTANCE_PREFIX)
+    - 1  # the "-" between the env stamp and the host id hex
+    - 32  # the hyphen-free uuid hex of the host id
+    - len(SLICE_LIMA_DISK_SUFFIX)
+)
+
+
+@pure
+def assert_env_name_fits_slice_names(env_name: str) -> None:
+    """Raise ``SliceCapacityError`` when ``env_name`` is too long to stamp into slice lima names.
+
+    Checked before anything is carved: limactl only rejects the over-long
+    identifier at reserve time, deep inside the bake, with a message that says
+    nothing about the env name being the variable part. CI env names
+    (``ci-<timestamp>-<short>``) sit near the cap, which is how this was found.
+    """
+    if len(env_name) > MAX_SLICE_ENV_NAME_LENGTH:
+        raise SliceCapacityError(
+            f"env name {env_name!r} is {len(env_name)} chars; at most {MAX_SLICE_ENV_NAME_LENGTH} fit into a "
+            f"slice's lima disk name (limactl caps identifiers at {_LIMA_MAX_IDENTIFIER_LENGTH} chars). "
+            "Use a shorter env name."
+        )
+
 # A slice's host id is a uuid hex (exactly 32 lowercase hex chars, no hyphens), so
 # it cleanly delimits the optional env stamp that precedes it in a stamped name.
 _SLICE_HOST_ID_PATTERN: Final[str] = r"[0-9a-f]{32}"

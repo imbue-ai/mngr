@@ -15,6 +15,8 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
+from imbue.mngr_imbue_cloud.slices.bare_metal import MAX_SLICE_ENV_NAME_LENGTH
+from imbue.mngr_imbue_cloud.slices.bare_metal import assert_env_name_fits_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_CONTAINER_MEMORY_RESERVE_MIB
 from imbue.mngr_imbue_cloud.slices.bare_metal import build_slice_container_memory_start_args
@@ -443,3 +445,21 @@ def test_parse_raw_swap_devices_ignores_md_backed_swap_and_empty_input() -> None
     md_swap = "Filename\tType\tSize\tUsed\tPriority\n/dev/md1 partition 524284 0 -2\n"
     assert parse_raw_swap_devices(md_swap) == []
     assert parse_raw_swap_devices("") == []
+
+
+def test_env_names_at_the_slice_identifier_cap_pass_and_longer_ones_fail() -> None:
+    # The longest slice identifier is the data disk; an env at the cap must
+    # yield a disk name exactly at limactl's 76-char maximum.
+    host_id = HostId.generate()
+    at_cap = "c" * MAX_SLICE_ENV_NAME_LENGTH
+    assert_env_name_fits_slice_names(at_cap)
+    assert len(slice_lima_disk_name(host_id, at_cap)) == 76
+
+    with pytest.raises(SliceCapacityError, match="76 chars"):
+        assert_env_name_fits_slice_names("c" * (MAX_SLICE_ENV_NAME_LENGTH + 1))
+
+
+def test_orchestrator_style_ci_env_names_fit_the_slice_identifier_cap() -> None:
+    # The CI orchestrator mints ``ci-<16-char-timestamp>-<6-hex>`` names; the
+    # 77-char disk-name incident came from an 8-hex suffix, one char over.
+    assert_env_name_fits_slice_names("ci-20260820t171706z-b0c869")
