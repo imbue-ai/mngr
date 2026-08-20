@@ -474,7 +474,8 @@ def test_env_names_at_the_slice_name_cap_pass_and_longer_ones_fail() -> None:
 
 
 def test_orchestrator_style_ci_env_names_fit_the_slice_name_cap() -> None:
-    # The CI orchestrator mints ``ci-<16-char-timestamp>-<6-hex>`` names (26
-    # chars); both real incidents -- the 77-char disk identifier and the
-    # UNIX_PATH_MAX ssh.sock overflow -- must stay fixed for that shape.
-    assert_env_name_fits_slice_names("ci-20260820t171706z-b0c869")
+    # The CI orchestrator mints ``ci-<16-char-timestamp>-<8-hex>`` names (28
+    # chars, see _mint_shared_env_name); both real incidents -- the 77-char disk
+    # identifier and the UNIX_PATH_MAX ssh.sock overflow -- must stay fixed for
+    # that shape.
+    assert_env_name_fits_slice_names("ci-20260820t171706z-b0c869d1")
