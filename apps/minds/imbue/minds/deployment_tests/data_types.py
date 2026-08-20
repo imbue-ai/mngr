@@ -89,6 +89,12 @@ class PoolProvisionInfo(FrozenModel):
     this run's own bake. See specs/remote-workspaces-in-ci.md.
     """
 
+    repo_url: NonEmptyStr = Field(
+        description=(
+            "The canonical repo identity stamped on every baked row. Fast-path leases must "
+            "request BOTH repo_url and repo_branch_or_tag, so tests read the pair from here."
+        )
+    )
     repo_branch_or_tag: NonEmptyStr = Field(
         description="The lease attribute stamped on every baked row (the resolved template SHA/ref)."
     )
