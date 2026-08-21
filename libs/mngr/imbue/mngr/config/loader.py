@@ -675,19 +675,29 @@ def _parse_providers(
         except UnknownBackendError as e:
             msg = f"Provider '{name}' references unknown backend '{backend}'."
             if backend in disabled_plugins:
+                # The backend maps directly to an installed-but-disabled plugin, so
+                # enabling it (or opting out with `plugin =`) is the actionable fix.
                 msg += (
                     f" The '{backend}' plugin is currently disabled. Either enable"
                     f' the plugin or add `plugin = "{backend}"` to this provider'
                     f" block so it is skipped when the plugin is disabled."
                 )
-            elif disabled_plugins:
-                msg += (
-                    f" If this backend is provided by a disabled plugin, either enable"
-                    f' the plugin or add `plugin = "<plugin-name>"` to this provider'
-                    f" block. Currently disabled plugins: {', '.join(sorted(disabled_plugins))}"
-                )
             else:
+                # The backend is not registered at all, so the primary fix is to
+                # install the plugin that provides it. Suggesting `plugin = "<name>"`
+                # here would be wrong: that field only skips a provider when its
+                # named plugin is installed-but-disabled, and an uninstalled backend
+                # stays unresolved no matter what `plugin` is set to.
                 msg += f" {get_plugin_install_hint(backend, kind=PluginKind.PROVIDER)}"
+                if disabled_plugins:
+                    # A disabled plugin whose name differs from the backend could
+                    # still be the provider, so offer that path as a secondary fix.
+                    msg += (
+                        f" If instead this backend is provided by one of the"
+                        f" currently disabled plugins"
+                        f" ({', '.join(sorted(disabled_plugins))}), enable that plugin"
+                        f' or add `plugin = "<plugin-name>"` to this provider block.'
+                    )
             if strict:
                 raise ConfigParseError(msg) from e
             if not silent:
