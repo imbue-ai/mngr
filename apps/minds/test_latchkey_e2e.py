@@ -88,12 +88,15 @@ from imbue.mngr_latchkey.store import save_permissions
 # Opt-in gate; see the module docstring for why this is not enabled by default.
 _OPT_IN_ENV_VAR: Final[str] = "MNGR_LATCHKEY_E2E_TESTS"
 
-# NOTE: the ``rsync`` mark is for the latchkey state-sync phase, not the
-# create: the source checkout handed to ``mngr create`` is a *git repo*, so
-# that transfer resolves to GIT_MIRROR (git push), but the forward
-# supervisor's state sync -- the "state_sync" this test exercises end to end
-# -- ships the latchkey state to the VPS via rsync on every run (observed by
-# the resource guard on the first CI run to reach that phase).
+# NOTE: the ``rsync`` mark is for mngr's host provisioning, not the source
+# transfer or the latchkey state sync: the source checkout handed to
+# ``mngr create`` is a *git repo*, so the work-dir transfer resolves to
+# GIT_MIRROR (git push), and the state sync ships the latchkey state to the
+# VPS over SFTP (``write_file``) -- but creating the workspace's *new remote
+# docker host* uploads the collected deploy files (the isolated profile's
+# config/settings) with one rsync (``on_host_created`` ->
+# ``provision_mngr_on_host`` -> ``upload_files_in_bulk``), which the
+# resource guard observes on every run.
 pytestmark = [
     pytest.mark.release,
     pytest.mark.docker,
