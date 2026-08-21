@@ -2,6 +2,7 @@ import io
 import tarfile
 from typing import Final
 from typing import Mapping
+from uuid import uuid4
 
 import docker
 import docker.errors
@@ -215,7 +216,17 @@ class DockerVolume(BaseVolume):
             raise MngrError(f"Failed to remove directory '{path}' from volume: {output}")
 
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
-        """Write files to the volume using docker put_archive for binary safety."""
+        """Write files to the volume using docker put_archive for binary safety.
+
+        Each file is extracted under a temporary dot-prefixed name and then
+        renamed into place: put_archive streams the extraction, so a reader
+        catting the final path mid-extraction would otherwise observe an
+        empty or partial file (the torn host-record read behind the
+        HostNotFoundError flake in test_create_snapshot). rename(2) within
+        one directory is atomic, so readers see the old content or the new
+        content, never a torn write. The dot prefix plus non-.json suffix
+        keeps in-flight temp files out of the host store's listings.
+        """
         # Ensure parent directories exist
         for file_path in file_contents_by_path:
             resolved = self._resolve(file_path)
@@ -223,12 +234,18 @@ class DockerVolume(BaseVolume):
             if parent:
                 self._exec(f"mkdir -p '{parent}'")
 
-        # Build a tar archive containing all files and extract at /
+        # Build a tar archive of the files under their temporary names and
+        # extract at /
+        nonce = uuid4().hex
+        temp_path_by_final_path: dict[str, str] = {}
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
             for file_path, data in file_contents_by_path.items():
                 resolved = self._resolve(file_path)
-                info = tarfile.TarInfo(name=resolved.lstrip("/"))
+                parent, _, basename = resolved.rpartition("/")
+                temp_path = f"{parent}/.{basename}.tmp-{nonce}"
+                temp_path_by_final_path[resolved] = temp_path
+                info = tarfile.TarInfo(name=temp_path.lstrip("/"))
                 info.size = len(data)
                 tar.addfile(info, io.BytesIO(data))
 
@@ -236,3 +253,11 @@ class DockerVolume(BaseVolume):
         success = self.container.put_archive("/", tar_buffer)
         if not success:
             raise MngrError("Failed to write files to Docker volume")
+
+        # Atomically move every fully-extracted file into place
+        move_command = " && ".join(
+            f"mv -f '{temp_path}' '{final_path}'" for final_path, temp_path in temp_path_by_final_path.items()
+        )
+        exit_code, output = self._exec(move_command)
+        if exit_code != 0:
+            raise MngrError(f"Failed to finalize volume write (mv exited {exit_code}): {output.strip()[:200]}")

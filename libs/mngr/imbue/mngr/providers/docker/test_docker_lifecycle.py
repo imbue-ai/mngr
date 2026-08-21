@@ -259,9 +259,10 @@ def test_discover_hosts_includes_created_host(
 # and the caller into HostNotFoundError, which is why the failure names a
 # missing host rather than a bad file.
 #
-# The mark buys retries; it does not fix the race. The underlying repair is to
-# make the host-record write atomic (write a sibling temp file and rename over
-# it), which belongs with the store rather than in a UI branch's PR.
+# The underlying repair landed: DockerVolume.write_files now extracts under a
+# temporary name and renames into place, so a concurrent reader can no longer
+# observe a partially-extracted record. The mark is retained until the
+# scheduled flake sweep confirms a green streak and retires it.
 @pytest.mark.flaky
 @pytest.mark.docker
 @pytest.mark.docker_sdk
