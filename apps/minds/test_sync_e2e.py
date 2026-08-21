@@ -5,11 +5,14 @@ Playwright / Xvfb / Docker toolchain) against a REAL deployed connector env
 whose coordinates arrive via the ``MINDS_SYNC_E2E_*`` env vars -- forwarded
 into the sandbox only on ``run_minds_release_tests`` CI runs (the
 ``sync_e2e_env`` fixture skips otherwise). Everything after per-test setup is
-driven through the real Electron UI over Playwright/CDP: sign-in, workspace
-association, backup configuration, the master-password settings panel, the
-landing unlock banner, and the backup download link. Direct connector reads
-(via the plugin client) are used only to *wait* for server-side convergence,
-never to mutate.
+driven through the real Electron app over Playwright/CDP: sign-in, workspace
+association, the master-password settings panel, the landing unlock banner,
+and the backups page's snapshot table and download control. The one exception
+is backup configuration, which posts the product's own /api/v1
+backup-service/configure request from the page because the SPA's Machine
+settings Backup group is still a placeholder (see _configure_backups_via_app).
+Direct connector reads (via the plugin client) are used only to *wait* for
+server-side convergence, never to mutate.
 
 Isolation model: every test gets its own minds root name
 (``minds-ci-e2e<rand>``), so the app derives a private data root + mngr host
@@ -78,12 +81,12 @@ _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 # budget nobody re-derived.
 # Headless `auth signin` + the app's account poll listing it on /accounts.
 _SIGN_IN_TIMEOUT_SECONDS: Final[int] = 90
-# The account reaching the associate form's picker: measured ~7s.
+# The account reaching the Account group's "Link to <email>" button: measured ~7s.
 _ACCOUNT_VISIBLE_TIMEOUT_SECONDS: Final[int] = 90
 # A real R2 bucket + scoped key + restic init: measured ~31s.
 _BACKUP_CONFIGURE_TIMEOUT_SECONDS: Final[int] = 180
-# The first backup reaching the landing badge: measured ~10s, with two full
-# status-fetch cycles of headroom.
+# The first backup reaching the backups page's snapshot table: measured ~10s,
+# with two full status-fetch cycles of headroom.
 _FIRST_BACKUP_TIMEOUT_SECONDS: Final[int] = 420
 # Server-side convergence: the sync scheduler ticks every 60s, so >= 2 ticks.
 _SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[int] = 180
@@ -91,7 +94,7 @@ _SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[int] = 180
 _UNLOCK_BANNER_TIMEOUT_SECONDS: Final[int] = 180
 # The download link un-hiding, gated on one settled status fetch.
 _DOWNLOAD_LINK_TIMEOUT_SECONDS: Final[int] = 240
-# One landing load's backup-status fetch (measured ~10s; see imbue-ai/mngr issue 2470).
+# One backups-page load's history fetch (measured ~10s; see imbue-ai/mngr issue 2470).
 _STATUS_FETCH_SETTLE_SECONDS: Final[int] = 120
 # The sync scheduler reconciles every 60s; two full ticks with margin is
 # enough to observe "the revision did NOT advance". This one is a
@@ -443,56 +446,97 @@ def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password
     return origin
 
 
+def _account_group_url(origin: str, agent_id: str) -> str:
+    """The options overlay's Machine settings Account group (SettingsGroups.ts)."""
+    return f"{origin}/workspace/{agent_id}/options?tab=settings&group=account"
+
+
+def _account_section_text(page: Page) -> str:
+    """The Account group's section text once the options data has loaded.
+
+    The SPA renders `#account-section` only after its /ui/api options fetch
+    resolves; the short in-page wait covers that load, and its timeout raises
+    a PlaywrightError the surrounding ``_wait_until`` probes treat as "not
+    yet" (they re-navigate, restarting a hung fetch).
+    """
+    page.wait_for_selector("#account-section", timeout=10_000)
+    return page.inner_text("#account-section")
+
+
 def _associate_workspace_via_ui(page: Page, origin: str, agent_id: str, email: str) -> None:
-    """Associate the workspace with the signed-in account from its settings page."""
-    settings_url = f"{origin}/workspace/{agent_id}/settings"
+    """Associate the workspace with the signed-in account from its Machine settings.
 
-    def account_option_ready() -> bool | None:
-        page.goto(settings_url, wait_until="domcontentloaded")
-        if page.query_selector("#associate-form") is None:
-            return None
-        option_labels = page.eval_on_selector_all(
-            '#associate-form select[name="user_id"] option', "els => els.map(e => e.textContent.trim())"
-        )
-        return True if email in option_labels else None
+    The Account group offers one "Link to <email>" button per signed-in
+    account (SettingsGroups.renderAssociatePrompt); linking swaps the prompt
+    for a "Linked to <email>." line with an Unlink control.
+    """
+    account_url = _account_group_url(origin, agent_id)
+    link_button_selector = f'#account-section button:has-text("Link to {email}")'
 
-    _wait_until(f"the associate form to offer {email}", _ACCOUNT_VISIBLE_TIMEOUT_SECONDS, account_option_ready)
-    page.select_option('#associate-form select[name="user_id"]', label=email)
-    page.click('#associate-form button[type="submit"]')
+    def account_link_ready() -> bool | None:
+        page.goto(account_url, wait_until="domcontentloaded")
+        _account_section_text(page)
+        return True if page.query_selector(link_button_selector) is not None else None
+
+    _wait_until(f"the Account group to offer linking to {email}", _ACCOUNT_VISIBLE_TIMEOUT_SECONDS, account_link_ready)
+    page.click(link_button_selector)
+    # The link click PATCHes the association from the page itself; navigating
+    # away immediately would abort that in-flight request, so wait for the
+    # same page to flip to the linked state first.
+    page.wait_for_selector('#account-section:has-text("Linked to")', timeout=60_000)
 
     def associated() -> bool | None:
-        page.goto(settings_url, wait_until="domcontentloaded")
-        if page.query_selector("#associate-form") is not None:
-            return None
-        return True if email in page.inner_text("body") else None
+        page.goto(account_url, wait_until="domcontentloaded")
+        section_text = _account_section_text(page)
+        return True if ("Linked to" in section_text and email in section_text) else None
 
-    _wait_until(f"the settings page to show {email} as the account", 60, associated)
+    _wait_until(f"the Account group to show {email} as the linked account", 60, associated)
     logger.info("Associated {} with {}", agent_id, email)
 
 
-def _configure_backups_via_ui(
+def _configure_backups_via_app(
     page: Page, origin: str, agent_id: str, provider: str, api_key_env: str | None = None
 ) -> None:
-    """Configure backups through the workspace settings form and wait for provisioning."""
-    page.goto(f"{origin}/workspace/{agent_id}/settings", wait_until="domcontentloaded")
-    page.wait_for_selector("#backup-configure-toggle-btn", state="visible", timeout=30_000)
-    page.click("#backup-configure-toggle-btn")
-    page.wait_for_selector("#backup-provider-select", state="visible", timeout=10_000)
-    page.select_option("#backup-provider-select", provider)
+    """Configure backups through the app's backup-service API and wait for provisioning.
+
+    The SPA's Machine settings Backup group is still the placeholder from the
+    frontend port (BackupGroupSlot.ts: "The backups section is being rebuilt"),
+    so there is no in-app configure form to drive yet. Until that tranche
+    lands, this posts the same ``/api/v1/.../backup-service/configure`` request
+    the form will send -- from the app's own page, on its real session cookies
+    -- and then polls the dispatched ``backup_configure`` operation the same
+    way the backups page's operation strip does.
+    """
+    page.goto(f"{origin}/", wait_until="domcontentloaded")
+    body: dict[str, str] = {"backup_provider": provider}
     if api_key_env is not None:
-        page.wait_for_selector("#backup-api-key-row", state="visible", timeout=10_000)
-        page.fill("#backup-api-key-env-input", api_key_env)
-    page.click("#backup-configure-submit-btn")
+        body["api_key_env"] = api_key_env
+    dispatch = page.evaluate(
+        """(args) => fetch(`/api/v1/workspaces/${encodeURIComponent(args.agentId)}/backup-service/configure`, {
+               method: 'POST',
+               credentials: 'same-origin',
+               headers: {'Content-Type': 'application/json'},
+               body: JSON.stringify(args.body),
+           }).then((resp) => resp.text().then((text) => ({status: resp.status, body: text.slice(0, 1000)})))""",
+        {"agentId": agent_id, "body": body},
+    )
+    assert dispatch["status"] == 202, f"Backup configure dispatch for {agent_id} failed: {dispatch}"
 
     def provisioned() -> bool | None:
-        error_text = page.inner_text("#backup-error") if page.query_selector("#backup-error") else ""
-        if error_text.strip():
-            raise AssertionError(f"Backup configuration surfaced an error: {error_text.strip()}")
-        status = page.inner_text("#backup-status-line") if page.query_selector("#backup-status-line") else ""
-        lowered = status.strip().lower()
-        if lowered and "not configured" not in lowered and "loading" not in lowered:
-            return True
-        return None
+        payload = page.evaluate(
+            """(aid) => fetch(`/api/v1/workspaces/operations/backup/${encodeURIComponent(aid)}`, {
+                   credentials: 'same-origin',
+               }).then((resp) => resp.json().then((body) => ({status: resp.status, body})))""",
+            agent_id,
+        )
+        if payload["status"] != 200:
+            return None
+        operation = payload["body"]
+        if operation.get("status") == "RUNNING":
+            return None
+        if operation.get("is_done") is not True:
+            raise AssertionError(f"Backup configuration failed for {agent_id}: {operation}")
+        return True
 
     _wait_until(
         f"backup provisioning ({provider}) to finish for {agent_id}",
@@ -503,27 +547,32 @@ def _configure_backups_via_ui(
 
 
 def _set_master_password_via_ui(page: Page, origin: str, new_password: str) -> None:
-    """Change (or clear, with an empty string) the master password on /settings."""
-    page.goto(f"{origin}/settings", wait_until="domcontentloaded")
-    page.wait_for_selector('[data-settings-nav="backups"]', state="visible", timeout=15_000)
-    page.click('[data-settings-nav="backups"]')
-    page.wait_for_selector("#backup-new-password", state="visible", timeout=10_000)
+    """Change (or clear, with an empty string) the master password on /settings.
+
+    ``?section=backups`` opens the Master password panel directly (the same
+    deep link the menu bar uses; SettingsPage.selectRequestedSection). The
+    panel has no result-element ids, so the probe reads the panel's error
+    alert and per-account results list (SettingsSections.masterPasswordPanel).
+    """
+    panel_scope = "section:has(#backup-new-password)"
+    page.goto(f"{origin}/settings?section=backups", wait_until="domcontentloaded")
+    page.wait_for_selector("#backup-new-password", state="visible", timeout=15_000)
     page.fill("#backup-new-password", new_password)
     page.fill("#backup-new-password-confirm", new_password)
     page.click("#backup-change-password-btn")
 
     def change_reported() -> bool | None:
-        error_text = page.inner_text("#backup-change-error") if page.query_selector("#backup-change-error") else ""
+        error_element = page.query_selector(f'{panel_scope} p[role="alert"]')
+        error_text = error_element.inner_text() if error_element is not None else ""
         if error_text.strip():
             raise AssertionError(f"Master password change surfaced an error: {error_text.strip()}")
-        results = page.query_selector("#backup-change-results")
+        results = page.query_selector(f'{panel_scope} ul[aria-live="polite"]')
         if results is None:
             return None
-        results_class = results.get_attribute("class") or ""
-        if "hidden" in results_class.split():
-            return None
         results_text = results.inner_text()
-        assert "FAILED" not in results_text, f"Master password change reported a failure: {results_text}"
+        # Failure shapes: "<account>: FAILED - ...", "The master password
+        # change failed.", "Re-run the change to retry the failed accounts."
+        assert "failed" not in results_text.lower(), f"Master password change reported a failure: {results_text}"
         return True
 
     _wait_until("the master password change to report success", 120, change_reported)
@@ -546,34 +595,31 @@ def _goto_landing(page: Page, origin: str) -> None:
         page.goto(f"{origin}/", wait_until="domcontentloaded")
 
 
-def _landing_backup_badge_text(page: Page, agent_id: str) -> str | None:
-    selector = f'[data-agent-id="{agent_id}"] .landing-backup-badge'
-    if page.query_selector(selector) is None:
-        return None
-    return page.inner_text(selector).strip()
+# The snapshot table's per-row Download control (SnapshotTable.ts; the rows
+# are newest-first, so the first match is the latest snapshot).
+_DOWNLOAD_BUTTON_SELECTOR: Final[str] = 'button:text-is("Download")'
 
 
-def _read_settled_badge(page: Page, origin: str, agent_id: str) -> str | None:
-    """One landing load, waited on until the badge leaves its loading state.
+def _read_settled_backups_listing(page: Page, origin: str, agent_id: str) -> str:
+    """One backups-page load, waited on until its history fetch settles; returns the body text.
 
-    The badge populates from a one-shot per-workspace status fetch on page
-    load, and that fetch blocks on BOTH the restic snapshot listing and the
-    backup-service verification exec into the workspace before the route
-    responds (imbue-ai/mngr issue 2470). Reloading before it resolves aborts and
-    restarts it, so this reads WITHOUT navigating until the badge settles.
-    The window is generous against the measured ~10s fetch but deliberately
-    well below that route's 360s worst case: if that latency ever regresses
-    this fails in minutes rather than hanging.
+    The page loads its snapshot listing once on mount, and that fetch runs
+    restic against the (possibly remote) repository before the route responds
+    (imbue-ai/mngr issue 2470). Reloading before it resolves aborts and
+    restarts it, so this reads WITHOUT navigating until the "Loading backup
+    history..." status leaves. The window is generous against the measured
+    ~10s fetch but deliberately well below that route's worst case: if that
+    latency ever regresses this fails in minutes rather than hanging.
     """
-    _goto_landing(page, origin)
+    page.goto(f"{origin}/workspace/{agent_id}/backups", wait_until="domcontentloaded")
     deadline = time.monotonic() + _STATUS_FETCH_SETTLE_SECONDS
-    badge = _landing_backup_badge_text(page, agent_id)
+    body_text = page.inner_text("body")
     while time.monotonic() < deadline:
-        if badge is not None and badge and "Checking backups" not in badge:
-            return badge
+        if "Loading backup history" not in body_text and "Backups" in body_text:
+            return body_text
         page.wait_for_timeout(3_000)
-        badge = _landing_backup_badge_text(page, agent_id)
-    return badge
+        body_text = page.inner_text("body")
+    return body_text
 
 
 def _timed_status_fetch(page: Page, agent_id: str) -> str:
@@ -611,17 +657,25 @@ def _container_backup_diagnostics(container_name: str) -> str:
     return " | ".join(parts)
 
 
-def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str, container_name: str) -> None:
-    """Reload the landing page until this workspace's badge reports a completed backup."""
+def _wait_for_first_backup_listed(page: Page, origin: str, agent_id: str, container_name: str) -> None:
+    """Reload the workspace backups page until its snapshot table lists a completed backup.
+
+    The SPA landing rows carry only an unwired badge slot for backup status
+    (LandingPage.ts: "Slot for the backup badge"), so the observable "first
+    backup finished" product surface is the /workspace/<id>/backups snapshot
+    table gaining its first row.
+    """
 
     def backed_up() -> bool | None:
-        badge = _read_settled_badge(page, origin, agent_id)
-        logger.info("Backup badge for {}: {!r}", agent_id, badge)
-        return True if badge is not None and badge.startswith("Backed up") else None
+        body_text = _read_settled_backups_listing(page, origin, agent_id)
+        if page.query_selector(_DOWNLOAD_BUTTON_SELECTOR) is not None:
+            return True
+        logger.info("Backups page for {} has no snapshot rows yet: {!r}", agent_id, " ".join(body_text.split())[:200])
+        return None
 
     try:
         _wait_until(
-            f"the landing badge to report a completed backup for {agent_id}",
+            f"the backups page to list a completed backup for {agent_id}",
             _FIRST_BACKUP_TIMEOUT_SECONDS,
             backed_up,
         )
@@ -631,8 +685,8 @@ def _wait_for_backed_up_badge(page: Page, origin: str, agent_id: str, container_
         except (subprocess.SubprocessError, OSError) as diag_error:
             container_state = f"(container diagnostics unavailable: {diag_error})"
         fetch_timing = _timed_status_fetch(page, agent_id)
-        raise AssertionError(f"{e}; {_landing_state_snapshot(page)}; {container_state}; {fetch_timing}") from None
-    logger.info("Landing badge reports a completed backup for {}", agent_id)
+        raise AssertionError(f"{e}; {container_state}; {fetch_timing}") from None
+    logger.info("The backups page lists a completed backup for {}", agent_id)
 
 
 def _landing_state_snapshot(page: Page) -> str:
@@ -661,20 +715,27 @@ def _wait_for_unlock_banner(page: Page, origin: str) -> None:
 
 
 def _unlock_via_banner(page: Page, origin: str, password: str, expect_success: bool = True) -> None:
-    """Drive the landing unlock banner; asserts the expected outcome."""
+    """Drive the landing unlock banner; asserts the expected outcome.
+
+    The unlock POST runs from the page itself, so both outcomes are awaited
+    in place first (navigating away would abort the in-flight request): on
+    success the banner unmounts once the reloaded extras drop the locked
+    account, on failure its inline alert appears (LandingPage.ts).
+    """
     _wait_for_unlock_banner(page, origin)
     page.fill("#sync-unlock-password", password)
     page.click("#sync-unlock-btn")
     if expect_success:
+        page.wait_for_selector("#sync-unlock-banner", state="detached", timeout=60_000)
 
         def banner_gone() -> bool | None:
             _goto_landing(page, origin)
             return True if page.query_selector("#sync-unlock-banner") is None else None
 
-        _wait_until("the unlock banner to clear after unlocking", 60, banner_gone)
+        _wait_until("the unlock banner to stay cleared after unlocking", 60, banner_gone)
         logger.info("Unlocked synced workspaces via the banner")
     else:
-        page.wait_for_selector("#sync-unlock-error:not(.hidden)", state="visible", timeout=30_000)
+        page.wait_for_selector('#sync-unlock-banner p[role="alert"]', state="visible", timeout=30_000)
         logger.info("Wrong password was refused by the unlock banner, as expected")
 
 
@@ -686,7 +747,7 @@ def _assert_remote_row_visible(page: Page, origin: str, agent_id: str) -> None:
         card = page.query_selector(f'[data-agent-id="{agent_id}"]')
         if card is None:
             return None
-        remove_button = card.query_selector("[data-remove-host-id]")
+        remove_button = card.query_selector('[aria-label="Remove from this list"]')
         return True if remove_button is not None else None
 
     try:
@@ -696,36 +757,29 @@ def _assert_remote_row_visible(page: Page, origin: str, agent_id: str) -> None:
 
 
 def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path) -> Path:
-    """Click Download on the workspace settings Recent backups table and return the zip path.
+    """Click Download on the workspace backups page's snapshot table and return the zip path.
 
     Electron's content view does not surface Playwright download events over
-    CDP (the click lands in Electron's own download handling), and the export
-    is ~100 MB -- far too large to pull back through the renderer. So the
+    CDP (the click lands in the renderer's own blob-save handling), and the
+    export is ~100 MB -- far too large to verify through the renderer. So the
     click is the real product action, and the artifact we verify is the file
     the export route itself produced for that click: ``export_zip_path_for_host``
     names it deterministically, and the route streams exactly those bytes to
     the browser. Waiting for it to appear (fresh mtime) proves the click ran
     the whole restore-and-zip path.
     """
-    settings_url = f"{origin}/workspace/{agent_id}/settings"
-    download_selector = "#backup-history a"
-
-    # Navigate ONCE, then poll the selector without reloading: the Recent
-    # backups rows only render after the page's async /backups fetch (restic
-    # against the remote repository, seconds), so a goto inside the poll loop
-    # would restart that fetch on every iteration and starve the very state
-    # being waited on (the same reload-polling trap _read_settled_badge
-    # documents for the landing badge).
-    page.goto(settings_url, wait_until="domcontentloaded")
 
     def download_visible() -> bool | None:
-        # The first Download is the newest snapshot (same data the Landing
-        # badge used to gate on).
-        link = page.query_selector(download_selector)
-        return True if link is not None else None
+        # One settled listing per attempt (the listing only loads on mount,
+        # so a fresh navigation is what re-checks for rows). The first
+        # Download is the newest snapshot.
+        _read_settled_backups_listing(page, origin, agent_id)
+        return True if page.query_selector(_DOWNLOAD_BUTTON_SELECTOR) is not None else None
 
     _wait_until(
-        f"the backup Download link for {agent_id} on settings", _DOWNLOAD_LINK_TIMEOUT_SECONDS, download_visible
+        f"the backup Download control for {agent_id} on the backups page",
+        _DOWNLOAD_LINK_TIMEOUT_SECONDS,
+        download_visible,
     )
 
     # The route keys the zip by the workspace's host id, falling back to the
@@ -734,8 +788,8 @@ def _download_backup_zip(page: Page, origin: str, agent_id: str, dest_dir: Path)
     candidate_paths = (export_zip_path_for_host(agent_id), *sorted(_EXPORT_ZIP_DIR.glob("minds-backup-export-*.zip")))
     stale_mtimes = {path: path.stat().st_mtime for path in candidate_paths if path.exists()}
     clicked_at = time.time()
-    page.click(download_selector)
-    logger.info("Clicked the backup Download link for {} on settings", agent_id)
+    page.click(_DOWNLOAD_BUTTON_SELECTOR)
+    logger.info("Clicked the backup Download control for {} on the backups page", agent_id)
 
     def exported() -> Path | None:
         for path in (export_zip_path_for_host(agent_id), *_EXPORT_ZIP_DIR.glob("minds-backup-export-*.zip")):
@@ -797,9 +851,9 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
     sync converge. Then simulate losing the machine (quit the app, delete the
     entire local data root and mngr host dir, remove the docker containers),
     reinstall (fresh app), sign back in, unlock with the master password via
-    the landing banner, and download the old workspace's backup from Workspace
-    Settings (per-snapshot Download) -- verifying a sentinel file round-tripped
-    byte-for-byte through R2.
+    the landing banner, and download the old workspace's backup from its
+    Backups page (per-snapshot Download) -- verifying a sentinel file
+    round-tripped byte-for-byte through R2.
     """
     runtime = _prepare_runtime(tmp_path, monkeypatch, sync_e2e_env)
     # The landing badge's status listing and the backup export both run restic
@@ -822,9 +876,9 @@ def test_amnesia_and_recover_full_lifecycle_via_electron(
                 runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
             )
             _associate_workspace_via_ui(page, origin, agent_id, sync_e2e_account.email)
-            _configure_backups_via_ui(page, origin, agent_id, "IMBUE_CLOUD")
+            _configure_backups_via_app(page, origin, agent_id, "IMBUE_CLOUD")
             _set_master_password_via_ui(page, origin, master_password)
-            _wait_for_backed_up_badge(page, origin, agent_id, container_name)
+            _wait_for_first_backup_listed(page, origin, agent_id, container_name)
 
         # Convergence gates before pulling the plug: the record's secrets and
         # the wrapped key are on the server (read-only connector waits).
@@ -917,10 +971,26 @@ def test_legacy_association_files_migrate_into_synced_records(
             assert not (runtime.data_root / "backup_password_hash").exists()
             assert (runtime.data_root / "backup_password_hash.pre-sync").exists()
 
-            # The workspace shows as associated in the real settings UI.
-            page.goto(f"{origin}/workspace/{agent_id}/settings", wait_until="domcontentloaded")
-            assert page.query_selector("#associate-form") is None, "The associate form should be gone post-migration"
-            assert sync_e2e_account.email in page.inner_text("body")
+            # The workspace shows as associated in the real settings UI: the
+            # Account group renders the linked state (never the associate
+            # prompt) once the migration landed. Polled, not asserted on the
+            # first paint: the SPA fills `#account-section` only after its
+            # asynchronous options fetch resolves.
+            def migration_shown_as_linked() -> bool | None:
+                page.goto(_account_group_url(origin, agent_id), wait_until="domcontentloaded")
+                section_text = _account_section_text(page)
+                if "Linked to" in section_text and sync_e2e_account.email in section_text:
+                    return True
+                return None
+
+            _wait_until(
+                f"the Account group to show {sync_e2e_account.email} as linked post-migration",
+                60,
+                migration_shown_as_linked,
+            )
+            assert "Link to" not in page.inner_text("#account-section"), (
+                "The associate prompt should be gone post-migration"
+            )
 
             # Reconcile settles: the revision must not creep while we watch.
             settled_revision = record.revision
@@ -989,7 +1059,7 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
                 runtime, page, sync_e2e_account.email, sync_e2e_account.password.get_secret_value()
             )
             _associate_workspace_via_ui(page, origin, agent_id, sync_e2e_account.email)
-            _configure_backups_via_ui(
+            _configure_backups_via_app(
                 page, origin, agent_id, "API_KEY", api_key_env=f"RESTIC_REPOSITORY={tmp_path / 'pw-repo'}"
             )
             _set_master_password_via_ui(page, origin, password_one)
