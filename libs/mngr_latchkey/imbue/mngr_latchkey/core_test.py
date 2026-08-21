@@ -32,6 +32,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.cli import _run_gateway_health_check_loop
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -1146,7 +1147,7 @@ class _RaisingTunnelManager(SSHTunnelManager):
         remote_port: int = 0,
         agent_id: str | None = None,
     ) -> int:
-        raise SSHTunnelError("simulated reverse-tunnel failure")
+        raise SSHTunnelError("simulated reverse-tunnel failure", SSHTunnelPhase.HOST_CONNECT)
 
     def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
         return 0

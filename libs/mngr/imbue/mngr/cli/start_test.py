@@ -114,23 +114,30 @@ def test_output_result_human_with_restarted_agents(capsys: pytest.CaptureFixture
 
 
 def test_output_result_json_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _output_result in JSON format."""
+    """Test _output_result in JSON format, including that a booted host is reported."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _output_result(["agent-x"], output_opts)
+    _output_result(["agent-x"], output_opts, was_host_started=True)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["started_agents"] == ["agent-x"]
     assert data["count"] == 1
+    assert data["was_host_started"] is True
 
 
 def test_output_result_jsonl_format(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test _output_result in JSONL format."""
+    """Test _output_result in JSONL format, including the no-host-booted reading.
+
+    A caller that dispatched a start to revive an unresponsive machine acts on
+    the false arm, so the field has to reach both structured formats -- its
+    absence reads as "no answer" rather than "nothing booted".
+    """
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
     _output_result(["agent-a", "agent-b"], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "start_result"
     assert data["count"] == 2
+    assert data["was_host_started"] is False
 
 
 def test_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:

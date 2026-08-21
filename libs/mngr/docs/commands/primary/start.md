@@ -27,6 +27,10 @@ Use '-' in place of agent names to read them from stdin, one per line.
 
 Supports custom format templates via --format. Available fields: name.
 
+With --format json or --format jsonl the result also carries was_host_started,
+which says whether a host was actually brought up rather than found already
+running.
+
 **Usage:**
 
 ```text

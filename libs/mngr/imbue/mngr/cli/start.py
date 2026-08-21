@@ -65,13 +65,32 @@ def _output(message: str, output_opts: OutputOptions) -> None:
         write_human_line(message)
 
 
-def _output_result(started_agents: Sequence[str], output_opts: OutputOptions, *, is_restart: bool = False) -> None:
-    """Output the final result."""
+def _output_result(
+    started_agents: Sequence[str],
+    output_opts: OutputOptions,
+    *,
+    is_restart: bool = False,
+    was_host_started: bool = False,
+) -> None:
+    """Output the final result.
+
+    ``was_host_started`` reports whether this invocation actually brought a host
+    up, as opposed to finding every host it needed already running. ``mngr start``
+    is idempotent and starts a named agent whatever state it is in, so that
+    difference is invisible in the agent list beside it -- and it is exactly what
+    a caller that dispatched a start to revive an unresponsive workspace needs,
+    since a start that booted nothing cannot be the explanation for what happens
+    next.
+    """
     if output_opts.format_template is not None:
         items = [{"name": name} for name in started_agents]
         emit_format_template_lines(output_opts.format_template, items)
         return
-    result_data = {"started_agents": started_agents, "count": len(started_agents)}
+    result_data = {
+        "started_agents": started_agents,
+        "count": len(started_agents),
+        "was_host_started": was_host_started,
+    }
     match output_opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)
@@ -233,6 +252,7 @@ def _start_agents(
     started_agents: list[str] = []
     last_started_agent = None
     last_started_host = None
+    was_host_started = False
 
     # Group agents by host to avoid starting the same host multiple times
     agents_by_host = group_agents_by_host(matched_agents)
@@ -248,7 +268,8 @@ def _start_agents(
         # Ensure host is started (always start since this is the start command).
         # start_host is idempotent (returns early if the host is already running),
         # so concurrent starts do not need to coordinate around this step.
-        online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
+        online_host, was_this_host_started = ensure_host_started(host, is_start_desired=True, provider=provider)
+        was_host_started = was_host_started or was_this_host_started
 
         agent_ids = [match.agent_id for match in agent_list]
 
@@ -275,7 +296,7 @@ def _start_agents(
                     break
 
     # Output final result
-    _output_result(started_agents, output_opts, is_restart=is_restart)
+    _output_result(started_agents, output_opts, is_restart=is_restart, was_host_started=was_host_started)
 
     # Connect if requested and we started exactly one agent
     _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
@@ -330,7 +351,11 @@ any resume message stored on the agent (cannot be combined with --no-resume).
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
-Supports custom format templates via --format. Available fields: name.""",
+Supports custom format templates via --format. Available fields: name.
+
+With --format json or --format jsonl the result also carries was_host_started,
+which says whether a host was actually brought up rather than found already
+running.""",
     aliases=(),
     examples=(
         ("Start an agent by name", "mngr start my-agent"),

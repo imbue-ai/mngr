@@ -1,21 +1,21 @@
-"""Workspace recovery: host-health probe + restart worker.
+"""Workspace recovery: the passive backend verdict + the restart worker.
 
 These are the engine behind the recovery flow (the recovery card's state and its
 host restart action). They are extracted here -- away from :mod:`app` -- so the
 versioned ``/api/v1`` surface (:mod:`api_v1`) can drive them without importing
 :mod:`app` (which would form an import cycle, since ``app`` imports ``api_v1``).
 
-``probe_workspace_health`` composes a :class:`HostHealthResponse` from the
-passive discovery resolver plus a batched in-container ``mngr exec`` probe.
-``run_restart_sequence`` is the background worker body (``mngr stop`` + ``mngr
-start``, then await recovery) that drives both the
+``read_backend_unreachable_verdict`` answers "can minds reach the provider that
+hosts this machine at all?" from evidence already in hand, so a polling surface
+pays nothing for it. ``run_restart_sequence`` is the background worker body
+(``mngr stop`` + ``mngr start``, then await recovery) that drives both the
 :class:`SystemInterfaceHealthTracker` (so the recovery surfaces re-label) and a
 :class:`WorkspaceOperationRegistryInterface` (so the v1
 ``/workspaces/operations/restart/<id>`` resource can report restart status + logs).
 """
 
+import json
 import os
-import shlex
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -40,12 +40,7 @@ from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plu
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
-from imbue.minds.desktop_client.recovery_probe import DispatchTier
-from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
-from imbue.minds.desktop_client.recovery_probe import build_host_health_response
-from imbue.minds.desktop_client.recovery_probe import build_probe_argv
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_lifecycle import HOST_START_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.workspace_lifecycle import HOST_STOP_TIMEOUT_SECONDS
@@ -61,10 +56,17 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 # Stand-in provider name for the "Can't connect to ..." headline, for a provider
 # discovery has not named yet (or does not recognise).
 _DEFAULT_PROVIDER_LABEL: Final[str] = "the machine backend"
+# Reason shown for the UNAUTHENTICATED host state. Discovery carries only the
+# host state (``DiscoveredHost`` has no failure_reason field), so there is no
+# provider error to show verbatim; this covers the class of causes instead.
+HOST_ACCESS_REJECTED_REASON: Final[str] = (
+    "This machine's access to the machine host was rejected. You may need to recreate the machine or contact support."
+)
 # How long a single workspace probe through the plugin is allowed to hang.
 # Short and snappy so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
@@ -75,12 +77,6 @@ _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 # restore a workspace from object storage (imbue_cloud), so those steps pass
 # the shared ``workspace_lifecycle`` budgets explicitly.
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
-# Hard timeout for the recovery host-health probe's in-container ``mngr exec``.
-# Far shorter than the default ceiling: this is a *diagnostic* that gates the
-# recovery UI. The exec touches the provider (``get_host`` -> the connector's
-# ~30s httpx) before reaching the container, so it must carry its own 30s-class
-# cap rather than inheriting the 120s default.
-_HOST_HEALTH_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 # How long we wait for the system interface to answer again after a restart.
 # ``mngr start`` cold-boots the container, so this waits for exactly the event
 # the create flow's readiness wait already measures -- a cold-booted workspace's
@@ -297,8 +293,46 @@ def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
 
 
 def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
-    """Build the argv for ``mngr start`` on ``agent_id`` (also starts the host if it is stopped)."""
-    return [mngr_binary, "start", str(agent_id), "--quiet"]
+    """Build the argv for ``mngr start`` on ``agent_id`` (also starts the host if it is stopped).
+
+    Structured output because the restart needs one thing the human output does
+    not carry: whether a host was actually booted. ``--quiet`` only silences
+    mngr's stderr logging, so stdout is exactly the one JSON result line.
+    """
+    return [mngr_binary, "start", str(agent_id), "--quiet", "--format", "json"]
+
+
+def _did_start_boot_a_host(stdout: str) -> bool | None:
+    """Read ``was_host_started`` out of ``mngr start --format json``'s result line, or None.
+
+    ``--format json`` writes exactly one result object to stdout (its logging
+    goes to stderr), so the last non-empty line is the whole contract.
+
+    None means the output did not answer, which is not the same as answering
+    "nothing booted": an ``mngr`` on PATH too old to report the field leaves the
+    question open, and a caller must keep its restart framing rather than
+    reading silence as a no-op. Because that silently disables the no-op
+    detection for every restart, it is logged rather than passed over.
+    """
+    last_line = next((line for line in reversed(stdout.splitlines()) if line.strip()), "")
+    try:
+        parsed = json.loads(last_line)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Could not read `mngr start`'s result line, so a start that booted nothing cannot be told "
+            "from one that did ({}): {!r}",
+            exc,
+            last_line[:200],
+        )
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("was_host_started"), bool):
+        logger.warning(
+            "`mngr start` reported no was_host_started, so a start that booted nothing cannot be told "
+            "from one that did: {!r}",
+            last_line[:200],
+        )
+        return None
+    return bool(parsed["was_host_started"])
 
 
 def _run_mngr(
@@ -675,7 +709,7 @@ def run_restart_sequence(
 
     registry.append_log(workspace_agent_id, "Starting the system-services agent.")
     try:
-        _run_mngr(
+        start_stdout = _run_mngr(
             concurrency_group,
             _build_mngr_start_argv(mngr_binary, services_agent_id),
             env,
@@ -691,6 +725,17 @@ def run_restart_sequence(
             registry=registry,
         )
         return
+
+    # A start that booted no host is the whole reason this reads its output. It
+    # is not a failure -- the start is idempotent by design, and a host that was
+    # already running needed nothing -- and it means the machine never went down
+    # and came back, so the surfaces must stop describing this episode as a
+    # restart of it. (It does not mean the start did nothing: an agent whose
+    # session had died is relaunched either way. Only the host is in question.)
+    if _did_start_boot_a_host(start_stdout) is False:
+        logger.info("Start step of host restart for {} booted nothing; the host was already up", workspace_agent_id)
+        registry.append_log(workspace_agent_id, "The machine was already running; it was not restarted.")
+        tracker.record_restart_started_nothing(workspace_agent_id)
 
     # Without a plugin route there is no way to probe for recovery, so treat a
     # clean dispatch as success (mirrors the background probe loop being a no-op).
@@ -869,26 +914,19 @@ def read_backend_unreachable_verdict(
     """Return the backend-unreachable verdict reachable without running a command, or None.
 
     The recovery card polls, so it needs this verdict at a poll's cost: no
-    ``mngr exec`` round trip is made for it. It is the same classifier
-    ``probe_workspace_health`` runs, handed only the evidence already in hand --
-    so the two agree on the sources of BACKEND_UNREACHABLE (a surfaced provider
-    error and an UNAUTHENTICATED host state, both freshness-gated because both
-    are properties of one snapshot; and the backend outage a restart already ran
-    into, held by the tracker) by construction rather than by restating the
-    rules here.
+    ``mngr`` round trip is made for it. Two sources answer, and both are already
+    in hand -- a surfaced provider error and an UNAUTHENTICATED host state, both
+    freshness-gated because both are properties of one snapshot, plus the backend
+    outage a restart already ran into, which the tracker holds.
 
     That last one is why this does not trail an outage by a provider poll. The
     machine minds is asked to recover is one it has just tried to restart, and a
     restart mngr rejected at the provider names the backend on the spot; only an
-    outage no command has run into yet waits for discovery. The one source out
-    of reach is the exec the probe fires itself, which is bought with the round
-    trip this read exists to avoid.
+    outage no command has run into yet waits for discovery.
 
-    The reverse does not hold either: the tiers that need the in-container probe,
-    such as a wedged but reachable container, are invisible here -- with no exec
-    attempted the classifier renders them INDETERMINATE. So this answers only "is
-    the backend unreachable?", and a None means "not by this evidence", not "the
-    machine is fine".
+    This answers only "is the backend unreachable?". A None means "not by this
+    evidence", not "the machine is fine": a wedged but reachable container looks
+    identical here, and it is the probe loop, not this read, that settles it.
     """
     display_info = backend_resolver.get_agent_display_info(agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
@@ -900,21 +938,70 @@ def read_backend_unreachable_verdict(
     provider_error_message = _passive_provider_error_message(
         backend_resolver, tracker, agent_id, provider_name, classification_is_trustworthy
     )
-    # No exec was attempted and none is going to be, so the probe rows the
-    # response also carries are unused here (they are pure string assembly over
-    # values already in hand, which is what keeps this a poll-cheap read).
-    response = build_host_health_response(
-        host_state=host_state_enum.value if host_state_enum is not None else "",
-        services_agent_id=None,
-        in_container_stdout=None,
-        plugin_resolver_services={},
-        provider_error_message=provider_error_message,
-        provider_label=friendly_provider_label(provider_name) or _DEFAULT_PROVIDER_LABEL,
-        classification_is_trustworthy=classification_is_trustworthy,
-    )
-    if response.dispatch_tier is not DispatchTier.BACKEND_UNREACHABLE:
+    if provider_error_message is not None:
+        reason = provider_error_message
+    elif classification_is_trustworthy and host_state_enum is HostState.UNAUTHENTICATED:
+        # Discovery carries only the host state (``DiscoveredHost`` has no
+        # failure_reason), so there is no verbatim error to show here -- the
+        # canned text covers the class of causes instead.
+        reason = HOST_ACCESS_REJECTED_REASON
+    else:
         return None
-    return BackendUnreachableVerdict(provider_label=response.provider_label, reason=response.unreachable_reason)
+    return BackendUnreachableVerdict(
+        provider_label=friendly_provider_label(provider_name) or _DEFAULT_PROVIDER_LABEL,
+        reason=reason,
+    )
+
+
+# The classified causes that mean the failure is on this device, not the
+# workspace: a tunnel this machine could not build, and the forward's own
+# connection pool running out. Both are raised without the backend ever being
+# dialed, so neither says anything about whether the workspace is answering --
+# and both are fixed by restarting the app, never by restarting the machine.
+_DEVICE_SIDE_FAILURE_REASONS: Final[frozenset[SystemInterfaceBackendFailureReason]] = frozenset(
+    {
+        SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED,
+        SystemInterfaceBackendFailureReason.POOL_EXHAUSTED,
+    }
+)
+
+
+class DeviceCannotConnectVerdict(FrozenModel):
+    """This device cannot reach the workspace, whatever the workspace is doing."""
+
+    detail: str = Field(description="The forward's verbatim error text, empty when it quoted none")
+
+
+def read_device_cannot_connect_verdict(
+    agent_id: AgentId,
+    *,
+    tracker: SystemInterfaceHealthTracker | None,
+) -> DeviceCannotConnectVerdict | None:
+    """Return the this-device-cannot-connect verdict, or None when the evidence does not say so.
+
+    Read off the cause the forward classified for this episode (see
+    ``SystemInterfaceHealthTracker.record_connection_failure``). Only the two
+    causes raised before the backend is ever dialed qualify; a failure that
+    reached the network leaves the workspace implicated and is not this.
+
+    Like the backend-unreachable verdict, this outranks whatever the restart
+    episode concluded, because it explains it: a machine this device cannot
+    reach goes STUCK and gets restarted whether or not anything is wrong with
+    it, and the restart is what produces the RESTART_FAILED the surfaces would
+    otherwise report. It clears the moment a probe succeeds, which drops the
+    tracker's record for the episode along with it.
+
+    Pool exhaustion and a broken tunnel are not separated for the user: both are
+    fixed by restarting the app and by nothing else the user can do, so a second
+    card would be a distinction without an action. The recorded cause keeps them
+    apart in the log and in Sentry, where the difference is measurable.
+    """
+    if tracker is None:
+        return None
+    observation = tracker.get_connection_failure(agent_id)
+    if observation is None or observation.reason not in _DEVICE_SIDE_FAILURE_REASONS:
+        return None
+    return DeviceCannotConnectVerdict(detail=observation.detail or "")
 
 
 def read_host_state(backend_resolver: BackendResolverInterface, display_info: AgentDisplayInfo) -> HostState | None:
@@ -929,196 +1016,3 @@ def read_host_state(backend_resolver: BackendResolverInterface, display_info: Ag
     except ValueError:
         return None
     return backend_resolver.get_host_state(host_id)
-
-
-def probe_workspace_health(
-    agent_id: AgentId,
-    *,
-    backend_resolver: BackendResolverInterface,
-    tracker: SystemInterfaceHealthTracker | None,
-    mngr_binary: str,
-    mngr_host_dir: Path,
-    concurrency_group: ConcurrencyGroup,
-    envelope_stream_consumer: EnvelopeStreamConsumer | None,
-) -> HostHealthResponse:
-    """Compose the host-health response from the passive resolver + an in-container probe.
-
-    Provider reachability and host lifecycle are read from the
-    ``backend_resolver`` -- the single passive-discovery sampler shared with the
-    rest of minds -- not re-sampled with a synchronous ``mngr list``. The reason
-    the inner interface isn't answering comes from the batched in-container ``mngr
-    exec`` probe, which is fired when the provider is reachable and the passive
-    layer cannot already answer: either the host is observed RUNNING (so the
-    container should be reachable and the exec tests the inner interface), or the
-    resolver's host state is not trustworthy yet (a stale pre-onset snapshot, or a
-    dead/stalled discovery producer whose freshness gate can never open). When
-    the passive layer cannot
-    answer, the exec's own outcome is the only direct evidence available; a fresh,
-    trustworthy, actionable state is left to the classifier so an outage never
-    pays a doomed provider round-trip. The plugin's resolver-snapshot mirror
-    supplies the last probe.
-
-    The recovery page can be reached before discovery has re-observed the host
-    after an outage (the STUCK redirect is no longer gated on freshness -- that
-    gate moved here), so this checks freshness itself: ``tracker`` supplies the
-    outage onset and ``is_recovery_classification_trustworthy`` decides whether a
-    negative verdict off the resolver's host state can be trusted yet. When it
-    cannot (a pre-outage snapshot), or the in-container probe timed out (observed
-    nothing), the classifier yields INDETERMINATE rather than a verdict -- unless
-    the probe returned direct evidence: a live GET / 200 is trusted regardless of
-    freshness, and an exec that completed without reaching the container is
-    likewise direct (fresh) evidence for the consent-gated HOST_UNRESPONSIVE.
-
-    Both passive reads that feed the classifier -- the host state and the
-    provider error -- are re-read after the exec, at the same instant the
-    trustworthiness check runs, so the freshness gate always certifies the values
-    that are actually classified (a snapshot landing during the slow exec would
-    otherwise open the gate for a pre-snapshot reading). The exec's own in-band
-    provider reason is not one of them: it is a live observation, so it is held
-    apart and preferred over the resolver's.
-    """
-    env = dict(os.environ)
-    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-    services_agent_id = backend_resolver.get_system_services_agent_id(agent_id)
-    display_info = backend_resolver.get_agent_display_info(agent_id)
-    provider_name = display_info.provider_name if display_info is not None else None
-    # Friendly provider name for the "Can't connect to ..." page title.
-    provider_label = friendly_provider_label(provider_name) or _DEFAULT_PROVIDER_LABEL
-
-    # Read host/provider state from the passive discovery resolver.
-    host_state_enum = read_host_state(backend_resolver, display_info) if display_info is not None else None
-    host_state = host_state_enum.value if host_state_enum is not None else ""
-
-    # Whether the resolver's host state can be trusted for a verdict yet (a
-    # snapshot taken at/after the outage onset has landed). Computed here to gate
-    # the exec; re-read after the exec for the actual classification (see below).
-    state_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
-    provider_error_message = _passive_provider_error_message(
-        backend_resolver, tracker, agent_id, provider_name, state_is_trustworthy
-    )
-
-    # In-container exec probe, fired only when the provider is reachable (no
-    # surfaced error that the freshness gate lets speak -- a gated-off one is
-    # left to the exec to settle in-band, sooner and from a live observation --
-    # and no outage a restart has already been rejected with, which would send
-    # this exec through the same backend to be rejected the same way)
-    # and the passive layer will not already answer with a
-    # verdict: the host is observed RUNNING (verify the interface), or its state
-    # is UNKNOWN (observed up but unreadable from inside, or otherwise
-    # indeterminate -- the passive layer carries no verdict, so the exec is the
-    # only direct evidence), or its state is not trustworthy yet (a stale
-    # pre-onset snapshot, or a dead/stalled discovery producer whose freshness
-    # gate can never open). A fresh, trusted state that *does* carry a verdict
-    # (STOPPED/CRASHED -> offline, FAILED/UNAUTHENTICATED, or a transitional
-    # STOPPING) is left to the classifier rather than execced, so an outage never
-    # pays a doomed provider round-trip. The exec SSHes to the container via
-    # ``get_host`` (the connector's ~30s httpx), so it carries an explicit
-    # 30s-class cap; its outcome is the only direct evidence available when the
-    # passive layer is silent, resolving the page to HEALTHY or a consent-gated
-    # HOST_UNRESPONSIVE instead of an indefinite INDETERMINATE. A non-clean
-    # outcome leaves ``in_container_stdout`` None.
-    in_container_stdout: str | None = None
-    probe_timed_out = False
-    probe_exec_attempted = False
-    in_band_provider_error: str | None = None
-    if (
-        services_agent_id is not None
-        and provider_error_message is None
-        and (host_state_enum in (HostState.RUNNING, HostState.UNKNOWN) or not state_is_trustworthy)
-    ):
-        probe_exec_attempted = True
-        try:
-            in_container_stdout = _run_mngr(
-                concurrency_group,
-                build_probe_argv(mngr_binary, services_agent_id),
-                env,
-                timeout_seconds=_HOST_HEALTH_PROBE_TIMEOUT_SECONDS,
-            )
-        except MngrCommandTimeoutError as exc:
-            # A timeout observed nothing -- distinct from a clean exit with no
-            # sentinel (ssh dead, a real HOST_UNRESPONSIVE signal). Flag it so the
-            # classifier surfaces INDETERMINATE (keep checking) rather than
-            # rendering a verdict off non-evidence. Ordered before MngrCommandError
-            # because the timeout error is a subclass of it.
-            probe_timed_out = True
-            logger.debug("in-container probe for host-health of {} timed out: {}", agent_id, exc)
-        except MngrCommandError as exc:
-            # The exec can fail *at the provider*, before it ever reaches the
-            # container, and a provider that reports itself unavailable while
-            # being queried says so in-band as a ProviderUnavailableError.
-            # Trusting only the resolver's surfaced error would misclassify that
-            # for up to a full provider poll interval (30s for imbue_cloud): the
-            # classifier reads a completed-but-empty exec as direct evidence the
-            # container is unreachable, so an outage the exec never got past
-            # would be reported as a wedged machine. The in-band reason is the
-            # same class of evidence, only sooner. An outage that carries no
-            # such reason reads as that completed-but-empty exec until the
-            # discovery poll names it. It is kept apart from the resolver's own
-            # error rather than overwriting it because only the resolver's is
-            # freshness-gated: this one is a live observation, so it must
-            # survive a gate that is closed (and it is preferred below when both
-            # are in hand, being the more recent of the two). Only this
-            # workspace's own provider answers, and only when it is known: an
-            # unrelated backend's outage says nothing about whether this
-            # container can be reached.
-            in_band_provider_error = _in_band_provider_outage_reason(exc, provider_name)
-            logger.debug("in-container probe for host-health of {} did not exit cleanly: {}", agent_id, exc)
-    plugin_resolver_services: dict[str, str] = (
-        envelope_stream_consumer.get_resolver_snapshot_for_agent(agent_id)
-        if envelope_stream_consumer is not None
-        else {}
-    )
-    if services_agent_id is not None:
-        exec_command = shlex.join(build_probe_argv(mngr_binary, services_agent_id))
-    else:
-        exec_command = "(mngr exec <system-services-agent>) -- no services agent id known"
-    # Re-read the host state here, paired with the trustworthiness check below, so
-    # the freshness gate certifies the state that is actually classified. The exec
-    # above can take tens of seconds; a discovery snapshot landing mid-exec bumps
-    # the per-provider snapshot time past the outage onset (making the
-    # classification trustworthy) while the pre-exec read still holds the
-    # pre-snapshot state -- classifying e.g. HOST_UNRESPONSIVE off a stale RUNNING
-    # when the snapshot that opened the gate already reads STOPPED. The pre-exec
-    # read above only decides whether to attempt the exec.
-    if display_info is not None:
-        host_state_enum = read_host_state(backend_resolver, display_info)
-        host_state = host_state_enum.value if host_state_enum is not None else ""
-    classification_is_trustworthy = is_recovery_classification_trustworthy(backend_resolver, tracker, agent_id)
-    # The provider error is re-read for the same reason the host state is: a
-    # snapshot landing mid-exec can open the freshness gate, and the read that is
-    # classified must be the one this check certifies. The recorded outage is
-    # re-read too, since such a snapshot is also what ends its authority. The
-    # exec's own in-band reason wins over both when it produced one -- it was
-    # observed after this poll's snapshot, so it is the latest account of the
-    # same backend.
-    provider_error_message = in_band_provider_error or _passive_provider_error_message(
-        backend_resolver, tracker, agent_id, provider_name, classification_is_trustworthy
-    )
-    response = build_host_health_response(
-        host_state=host_state,
-        services_agent_id=services_agent_id,
-        in_container_stdout=in_container_stdout,
-        plugin_resolver_services=plugin_resolver_services,
-        mngr_exec_command=exec_command,
-        mngr_binary=mngr_binary,
-        provider_error_message=provider_error_message,
-        provider_label=provider_label,
-        probe_timed_out=probe_timed_out,
-        probe_exec_attempted=probe_exec_attempted,
-        classification_is_trustworthy=classification_is_trustworthy,
-    )
-    # One line per probe with the classifier's inputs: the tier alone (logged at
-    # the route) cannot explain WHY a verdict fired -- reconstructing a
-    # multi-probe sequence (e.g. unresponsive -> indeterminate -> offline at app
-    # startup) needs the host state, trust, and exec outcome that produced each.
-    logger.info(
-        "Host-health probe inputs for {}: host_state={!r} trusted={} exec_attempted={} timed_out={} provider_error={} -> {}",
-        agent_id,
-        host_state,
-        classification_is_trustworthy,
-        probe_exec_attempted,
-        probe_timed_out,
-        provider_error_message is not None,
-        response.dispatch_tier.value,
-    )
-    return response

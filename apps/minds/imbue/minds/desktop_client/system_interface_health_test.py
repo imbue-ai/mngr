@@ -8,9 +8,11 @@ from datetime import timezone
 import pytest
 
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 # Short STUCK threshold so the probe-failure-run tests don't have to sleep 5s.
@@ -23,6 +25,14 @@ _FAST_THRESHOLD: float = 0.05
         # Connection-level failure (no HTTP status) enrolls.
         (SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, True),
         (SystemInterfaceBackendFailureReason.SSE_EOF, None, True),
+        # The causes split out of CONNECT_ERROR enroll exactly as it does. Two
+        # are provably this device's fault and one says the host answered, but
+        # none of them establishes whether the workspace itself is reachable --
+        # only a probe does, so declining to enroll would trade a wrong label
+        # for a machine minds never looks at again.
+        (SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, None, True),
+        (SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, True),
+        (SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING, None, True),
         # Infrastructure 5xx: the backend is unreachable / not serving.
         (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 502, True),
         (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503, True),
@@ -765,3 +775,265 @@ def test_probe_success_clears_create_attempt_grace() -> None:
 def test_end_create_attempt_grace_is_idempotent_for_unknown_agent() -> None:
     tracker = SystemInterfaceHealthTracker()
     tracker.end_create_attempt_grace(AgentId.generate())
+
+
+# -- the classified cause of an episode's connection failures --
+
+
+def test_repeated_envelopes_record_one_cause_per_episode() -> None:
+    """The forward re-emits on every retry; the tracker holds one observation per cause.
+
+    Roughly one envelope a second arrives for as long as a page keeps polling.
+    What each repeat contributes is only that the cause is still happening, so it
+    moves the last-seen mark and nothing else -- the detail the card renders must
+    not be rewritten once a second for text that says the same thing.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, "no known_hosts")
+    first = tracker.get_connection_failure(aid)
+    assert first is not None
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, "still no file")
+
+    repeated = tracker.get_connection_failure(aid)
+    assert repeated is not None
+    assert repeated.reason == first.reason
+    assert repeated.detail == "no known_hosts"
+    # Strictly later, not merely not-earlier: the mark moving is the whole of
+    # what a repeat contributes, and it is what decides how long the residual
+    # cause defers to this one. A ``>=`` here would pass with the refresh gone.
+    assert repeated.last_observed_at > first.last_observed_at
+
+
+def test_a_changed_cause_replaces_the_recorded_one() -> None:
+    """What is wrong can change mid-episode, and the surfaces must follow it.
+
+    A tunnel that starts working while the pool stays exhausted is still a
+    machine this device cannot reach, but a record pinned to the first cause
+    would keep naming a fault that has been fixed.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, "no known_hosts")
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, "pool timeout")
+
+    observation = tracker.get_connection_failure(aid)
+    assert observation is not None
+    assert observation.reason == SystemInterfaceBackendFailureReason.POOL_EXHAUSTED
+    assert observation.detail == "pool timeout"
+
+
+def test_the_residual_cause_does_not_displace_a_cause_that_is_still_happening() -> None:
+    """An episode produces envelopes from several request paths at once.
+
+    A pooled HTTP request reporting POOL_EXHAUSTED and a websocket handshake
+    reporting the residual CONNECT_ERROR against the same machine arrive
+    interleaved at the forward's retry cadence. If the residual one won, the
+    device-side card would appear and disappear once a second. It is residual
+    precisely because it establishes nothing, so it yields.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, "pool timeout")
+
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.CONNECT_ERROR, "connection refused")
+
+    observation = tracker.get_connection_failure(aid)
+    assert observation is not None
+    assert observation.reason == SystemInterfaceBackendFailureReason.POOL_EXHAUSTED
+    # A different *established* cause still replaces it: that is a real change
+    # in what is wrong, not an absence of information.
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING, "refused")
+    replaced = tracker.get_connection_failure(aid)
+    assert replaced is not None
+    assert replaced.reason == SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING
+
+
+def test_the_residual_cause_takes_over_from_a_cause_that_has_fallen_silent() -> None:
+    """A device-side fault that stops happening must stop explaining the outage.
+
+    Both device-side causes are momentary: a pool refills, a socket that would
+    not bind binds on the next try. If such a cause deferred forever, one blip
+    during a machine outage would leave the card telling the user their machine
+    is probably fine and withholding the restart that would fix it -- the same
+    misdiagnosis this decomposition exists to end, only pointed the other way.
+    The forward keeps reporting a cause that is still happening, so silence for
+    the deference window is what says it has stopped.
+    """
+    tracker = SystemInterfaceHealthTracker(established_cause_deference_seconds=0.0)
+    aid = AgentId()
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, "pool timeout")
+
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.CONNECT_ERROR, "connection refused")
+
+    observation = tracker.get_connection_failure(aid)
+    assert observation is not None
+    assert observation.reason == SystemInterfaceBackendFailureReason.CONNECT_ERROR
+    assert observation.detail == "connection refused"
+
+
+def test_the_recorded_cause_clears_when_the_machine_answers() -> None:
+    """The cause describes one episode, so a probe that ends the episode ends it too."""
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, "pool timeout")
+
+    tracker.record_probe_success(aid)
+
+    assert tracker.get_connection_failure(aid) is None
+
+
+def test_a_cause_that_outlives_its_episodes_is_logged_once_per_interval() -> None:
+    """A failure that is not the system interface's own repeats across probe successes.
+
+    The forward emits one envelope per *agent*, so any service on a healthy
+    machine that stops listening reports a connection failure at the retry
+    cadence while the machine answers every probe. Each success drops the
+    episode's record, so the per-episode dedup above never engages and, without
+    an interval, this logs (and breadcrumbs) once every couple of seconds for as
+    long as the tab stays open -- burying the device-side incident the line
+    exists to mark.
+    """
+    tracker = SystemInterfaceHealthTracker(connection_failure_log_interval_seconds=3600.0)
+    aid = AgentId()
+
+    with capture_loguru(level="INFO") as log_output:
+        for _ in range(5):
+            tracker.record_connection_failure(
+                aid, SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING, "refused"
+            )
+            tracker.record_probe_success(aid)
+
+    assert log_output.getvalue().count("classified as BACKEND_NOT_LISTENING") == 1
+    # Rationing the log must not ration the evidence: the surfaces read the
+    # record, and it is written on every envelope exactly as before.
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING, "refused")
+    observation = tracker.get_connection_failure(aid)
+    assert observation is not None
+    assert observation.reason == SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING
+
+
+def test_a_different_cause_is_logged_at_once_however_recently_the_last_one_was() -> None:
+    """The interval rations repetition, not news.
+
+    Which of the causes it is decides whether the user's machine is implicated
+    at all, so the transition between them is the one thing in this stream worth
+    seeing immediately -- and it must not be swallowed by an interval that a
+    preceding repeat happened to open.
+    """
+    tracker = SystemInterfaceHealthTracker(connection_failure_log_interval_seconds=3600.0)
+    aid = AgentId()
+
+    with capture_loguru(level="INFO") as log_output:
+        tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING, "refused")
+        tracker.record_probe_success(aid)
+        tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, "no file")
+
+    assert "classified as BACKEND_NOT_LISTENING" in log_output.getvalue()
+    assert "classified as TUNNEL_SETUP_FAILED" in log_output.getvalue()
+
+
+def test_recording_a_cause_does_not_move_health() -> None:
+    """Same contract as ``record_failure``: the probe loop is the only authority.
+
+    An envelope is a hint. Letting the classified cause change health would
+    make a single failed request enough to mark a machine STUCK, which is
+    exactly what the probe threshold exists to prevent.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+
+    tracker.record_connection_failure(aid, SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, "boom")
+
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+
+
+def test_a_no_op_start_is_recorded_and_superseded_by_the_next_attempt() -> None:
+    """A start that booted nothing is remembered until something else is tried.
+
+    It is what stops the terminal state from claiming a failed restart. A fresh
+    attempt has to clear it, or a real cold boot after a no-op would still be
+    reported as one.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+    assert tracker.is_restart_a_no_op(aid) is False
+
+    tracker.record_restart_started_nothing(aid)
+    assert tracker.is_restart_a_no_op(aid) is True
+
+    tracker.mark_restarting(aid, start_only=False)
+    assert tracker.is_restart_a_no_op(aid) is False
+
+
+# -- the envelope-to-tracker policy --
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        SystemInterfaceBackendFailureReason.CONNECT_ERROR,
+        SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED,
+        SystemInterfaceBackendFailureReason.POOL_EXHAUSTED,
+        SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING,
+    ],
+)
+def test_every_connection_class_envelope_both_enrolls_and_names_its_cause(
+    reason: SystemInterfaceBackendFailureReason,
+) -> None:
+    """The four reasons that report a connection which never carried a response.
+
+    They enroll identically -- none of them establishes whether the workspace is
+    reachable, and only a probe does -- while each records a distinct cause, so
+    what the surfaces claim can differ without what minds *checks* differing.
+    ``BACKEND_NOT_LISTENING`` in particular changes no copy at all today; it is
+    recorded so a log or a bug report can tell a dead service inside a reachable
+    container from a container nothing could reach.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+
+    BackendFailureRecorder(tracker=tracker)(aid, reason, None, "the error")
+
+    assert aid in tracker.snapshot_probe_targets()
+    observation = tracker.get_connection_failure(aid)
+    assert observation is not None
+    assert observation.reason == reason
+
+
+@pytest.mark.parametrize(
+    "reason, status_code",
+    [
+        # Mid-response: the connection demonstrably worked, so there is no
+        # connection failure to attribute.
+        (SystemInterfaceBackendFailureReason.SSE_EOF, None),
+        # Still in flight -- it has not failed at all.
+        (SystemInterfaceBackendFailureReason.STALLED, None),
+        # The backend answered, so nothing here is about reaching it.
+        (SystemInterfaceBackendFailureReason.ERROR_RESPONSE, 503),
+    ],
+)
+def test_an_envelope_that_reached_the_backend_enrolls_without_naming_a_cause(
+    reason: SystemInterfaceBackendFailureReason, status_code: int | None
+) -> None:
+    """Enrollment and cause-recording are separate questions, and answer separately here."""
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+
+    BackendFailureRecorder(tracker=tracker)(aid, reason, status_code, None)
+
+    assert aid in tracker.snapshot_probe_targets()
+    assert tracker.get_connection_failure(aid) is None
+
+
+def test_an_envelope_minds_ignores_never_touches_the_tracker() -> None:
+    """``UNRESOLVED`` is a routeless warm-up a restart cannot help; it must change nothing."""
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId()
+
+    BackendFailureRecorder(tracker=tracker)(aid, SystemInterfaceBackendFailureReason.UNRESOLVED, None, None)
+
+    assert tracker.snapshot_probe_targets() == frozenset()
+    assert tracker.get_connection_failure(aid) is None

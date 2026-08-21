@@ -74,8 +74,29 @@ _PREAUTH_TOKEN_LENGTH: Final[int] = 64
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
-OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
+OnSystemInterfaceBackendFailureCallback = Callable[
+    [AgentId, SystemInterfaceBackendFailureReason, int | None, str | None], None
+]
 OnUnexpectedExitCallback = Callable[[int], None]
+
+
+def _parse_backend_failure_reason(raw_reason: str) -> SystemInterfaceBackendFailureReason:
+    """Map an envelope's ``reason`` string to the enum, falling back to ``CONNECT_ERROR``.
+
+    A reason this build does not know is still a report that the plugin could
+    not reach a backend, so it is read as the generic connection-class failure
+    rather than dropped. Producer and consumer ship pinned to the same commit,
+    so this should never fire -- it exists so that if the pinning ever slips,
+    the cost is a coarser verdict rather than a workspace whose outage minds
+    never hears about at all.
+    """
+    try:
+        return SystemInterfaceBackendFailureReason(raw_reason)
+    except ValueError:
+        logger.warning(
+            "Unknown system_interface_backend_failure reason {!r}; treating it as a connection failure", raw_reason
+        )
+        return SystemInterfaceBackendFailureReason.CONNECT_ERROR
 
 
 class ForwardSubprocessConfig(FrozenModel):
@@ -253,11 +274,6 @@ class EnvelopeStreamConsumer(MutableModel):
     # blocks on the event so `minds run` can learn the port at startup.
     _listening_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _listening_port: int | None = PrivateAttr(default=None)
-    # Mirror of the plugin's per-agent ``ForwardResolver`` service map, fed by
-    # ``resolver_snapshot`` envelopes. Used by minds' recovery-diagnostics path
-    # to render Q7 (whether the plugin has seen the agent's system_interface).
-    # Empty dict on a fresh / restarted plugin until the first envelope arrives.
-    _resolver_snapshot_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
 
     # -- Public callback registration -------------------------------------
 
@@ -276,14 +292,14 @@ class EnvelopeStreamConsumer(MutableModel):
     ) -> None:
         """Register a callback fired for each ``system_interface_backend_failure`` forward-stream envelope.
 
-        The callback receives ``(agent_id, reason, status_code)``. ``reason``
-        is a ``SystemInterfaceBackendFailureReason`` enum value (CONNECT_ERROR /
-        SSE_EOF / ERROR_RESPONSE / UNRESOLVED / STALLED); ``status_code`` is set
-        when ``reason`` is ``ERROR_RESPONSE`` (the backend's non-2xx status) and
-        ``None`` otherwise. ``STALLED`` is the one reason that does not report a
-        failed request: it means the backend has not answered yet, and the
-        request may still succeed.
-        Used by minds to feed its ``SystemInterfaceHealthTracker``.
+        The callback receives ``(agent_id, reason, status_code, detail)``.
+        ``reason`` is a ``SystemInterfaceBackendFailureReason`` enum value;
+        ``status_code`` is set when ``reason`` is ``ERROR_RESPONSE`` (the
+        backend's non-2xx status) and ``None`` otherwise; ``detail`` is the
+        verbatim error text when the plugin had an exception to quote.
+        ``STALLED`` is the one reason that does not report a failed request: it
+        means the backend has not answered yet, and the request may still
+        succeed. Used by minds to feed its ``SystemInterfaceHealthTracker``.
         """
         with self._lock:
             self._on_system_interface_backend_failure_callbacks.append(callback)
@@ -700,72 +716,30 @@ class EnvelopeStreamConsumer(MutableModel):
 
     # -- Forward-stream payloads ------------------------------------------
 
-    def get_resolver_snapshot_for_agent(self, agent_id: AgentId) -> dict[str, str]:
-        """Return the latest plugin-side service map for ``agent_id``.
-
-        Returns an empty dict if no ``resolver_snapshot`` envelope has been
-        seen for this agent yet (plugin restarted, or agent not yet
-        published its services). The caller should treat the empty case
-        as "no entry yet" -- it is not evidence of failure.
-        """
-        with self._lock:
-            return dict(self._resolver_snapshot_by_agent.get(str(agent_id), {}))
-
-    def _handle_resolver_snapshot(self, payload: dict[str, Any]) -> None:
-        """Record the latest per-agent service map from a ``resolver_snapshot`` envelope."""
-        services_by_agent = payload.get("services_by_agent")
-        if not isinstance(services_by_agent, dict):
-            logger.warning("Malformed resolver_snapshot envelope: {}", payload)
-            return
-        new_snapshot: dict[str, dict[str, str]] = {}
-        for aid, services in services_by_agent.items():
-            if not isinstance(aid, str) or not isinstance(services, dict):
-                continue
-            # The plugin keys its map by agent *instance* (``<agent_id>@<host_id>``;
-            # agent ids are only unique per host); minds' consumer view stays
-            # keyed by the bare agent id until its workspace-level duplicate
-            # policy lands, so normalize the key (tolerating the older bare-id
-            # form) and surface a collision instead of silently overwriting.
-            # CLEANUP: drop this bare-id normalization (consume the instance-keyed
-            # map directly) once minds' workspace-level duplicate policy lands --
-            # see specs/allow-duplicate-agent-ids.md, follow-up item 7.
-            bare_agent_id = aid.partition("@")[0]
-            entry: dict[str, str] = {}
-            for service_name, url in services.items():
-                if isinstance(service_name, str) and isinstance(url, str):
-                    entry[service_name] = url
-            if bare_agent_id in new_snapshot:
-                logger.warning(
-                    "resolver_snapshot has service maps for agent {} on multiple hosts; keeping the last one",
-                    bare_agent_id,
-                )
-            new_snapshot[bare_agent_id] = entry
-        with self._lock:
-            self._resolver_snapshot_by_agent = new_snapshot
-
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
         if payload_type == "reverse_tunnel_established":
             logger.trace("Ignoring reverse_tunnel_established envelope: {}", payload)
-        elif payload_type == "resolver_snapshot":
-            self._handle_resolver_snapshot(payload)
         elif payload_type == "system_interface_backend_failure":
             try:
                 agent_id = AgentId(str(payload["agent_id"]))
-                reason = SystemInterfaceBackendFailureReason(str(payload["reason"]))
+                raw_reason = str(payload["reason"])
             except (KeyError, ValueError, TypeError) as e:
                 logger.warning("Could not parse system_interface_backend_failure payload: {}", e)
                 return
+            reason = _parse_backend_failure_reason(raw_reason)
             raw_status_code = payload.get("status_code")
             try:
                 status_code: int | None = int(raw_status_code) if raw_status_code is not None else None
             except (ValueError, TypeError):
                 status_code = None
+            raw_detail = payload.get("detail")
+            detail = str(raw_detail) if raw_detail is not None else None
             with self._lock:
                 callbacks = list(self._on_system_interface_backend_failure_callbacks)
             for callback in callbacks:
                 try:
-                    callback(agent_id, reason, status_code)
+                    callback(agent_id, reason, status_code, detail)
                 except (OSError, RuntimeError, ValueError) as e:
                     logger.warning("system_interface_backend_failure callback failed for {}: {}", agent_id, e)
         elif payload_type == "listening":

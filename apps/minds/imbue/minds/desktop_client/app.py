@@ -122,6 +122,7 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
+from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
@@ -1093,6 +1094,12 @@ def _build_workspace_list(
     named also carries that provider's friendly name as ``provider_label``, which
     is what the band renders and what the machines list badges on its own.
 
+    Entries the forward could not reach from *this device* -- a tunnel it could
+    not build, its own connection pool exhausted -- carry
+    ``is_device_cannot_connect="true"``, from the card's other verdict and for
+    the same reason: the band would otherwise report a machine that is probably
+    running fine as lost.
+
     Shutdown-capable minds (those on a provider whose host minds can stop/start,
     see :func:`provider_backend_supports_shutdown`) additionally carry
     ``supports_shutdown="true"`` and a ``liveness`` of RUNNING / STOPPED /
@@ -1125,6 +1132,11 @@ def _build_workspace_list(
         # freshness-gated, and the gate needs this workspace's outage onset.
         if read_backend_unreachable_verdict(aid, backend_resolver=backend_resolver, tracker=tracker) is not None:
             entry["is_backend_unreachable"] = "true"
+        # The other verdict that explains the row's health instead of restating
+        # it, carried for the same reason: the band must not report a generic
+        # loss of contact for a machine that is very likely fine.
+        if read_device_cannot_connect_verdict(aid, tracker=tracker) is not None:
+            entry["is_device_cannot_connect"] = "true"
         if info is not None and info.provider_name is not None:
             entry["provider_label"] = friendly_provider_label(info.provider_name)
         liveness = liveness_by_agent_id.get(str(aid))
@@ -1218,12 +1230,14 @@ def _build_requests_payload(
     return {"count": len(request_ids), "request_ids": request_ids}
 
 
-# -- System-interface recovery page --
+# -- System-interface health probing --
 #
-# The recovery page's data calls (host-health probe + the two restart tiers) are
-# served by the versioned surface now (GET /api/v1/workspaces/<id>/health, POST
-# /api/v1/workspaces/<id>/restart with a ``scope``), whose engine lives in
-# ``workspace_recovery.py``. Only the page route and its helpers remain here.
+# The probe loop's own timeout is all that lives here. The recovery page's route
+# is registered with the rest of the SPA routes further down, and its data calls
+# are served elsewhere: the restart tiers by the versioned surface (POST
+# /api/v1/workspaces/<id>/restart with a ``scope``), and the polled verdicts the
+# card renders by ``ui_api_lifecycle``'s recovery-info read. Both run off
+# ``workspace_recovery.py`` and the health tracker, with no command of their own.
 
 # How long a single workspace probe through the plugin is allowed to hang.
 # Used by the background system-interface-health probe loop -- we want a short,
@@ -1826,6 +1840,7 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         accent=entry["accent"],
         host_id=entry.get("host_id", ""),
         is_backend_unreachable=entry.get("is_backend_unreachable") == "true",
+        is_device_cannot_connect=entry.get("is_device_cannot_connect") == "true",
         provider_label=entry.get("provider_label", ""),
         supports_shutdown=entry.get("supports_shutdown") == "true",
         liveness=entry.get("liveness", ""),
@@ -2004,9 +2019,27 @@ def _create_ui_state_publisher(
 def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, status: AgentHealth) -> UiHealthMessage:
     """The channel twin of ``_system_interface_status_payload``."""
     error: str | None = None
+    is_restart_a_no_op = False
+    is_restart_start_only: bool | None = None
     if status == AgentHealth.RESTART_FAILED:
         error = tracker.get_last_restart_error(AgentId(agent_id))
-    return UiHealthMessage(agent_id=agent_id, status=status, error=error)
+        # Only read on the terminal state, which is the only one whose copy
+        # turns on it -- everywhere else the episode is still in progress and
+        # the start may yet report.
+        is_restart_a_no_op = tracker.is_restart_a_no_op(AgentId(agent_id))
+    if status == AgentHealth.RESTARTING:
+        # The shape of a restart is news only while one is running, which is the
+        # only state whose copy turns on it. The tracker gates it the same way,
+        # so a frame that raced the episode's end reads None and the surfaces
+        # fall back to the weaker claim rather than to a stale one.
+        is_restart_start_only = tracker.get_restart_is_start_only(AgentId(agent_id))
+    return UiHealthMessage(
+        agent_id=agent_id,
+        status=status,
+        error=error,
+        is_restart_a_no_op=is_restart_a_no_op,
+        is_restart_start_only=is_restart_start_only,
+    )
 
 
 # -- App factory --

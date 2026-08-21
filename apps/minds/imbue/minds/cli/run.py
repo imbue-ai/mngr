@@ -93,8 +93,8 @@ from imbue.minds.desktop_client.startup_reconcile import StartupHostReconciler
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
@@ -502,11 +502,11 @@ def run(
     # 5xx, enroll a suspect -- application errors (and UNRESOLVED, a routeless
     # warm-up) are left alone. STALLED enrolls despite not reporting a failed
     # request at all: a wedged backend and a slow one look identical until the
-    # probe adjudicates.
+    # probe adjudicates. The connection-class ones additionally record which
+    # cause the plugin classified, which is what the recovery surfaces read to
+    # avoid blaming the workspace for a failure on this device's side.
     consumer.add_on_system_interface_backend_failure_callback(
-        lambda agent_id, reason, status_code: system_interface_health_tracker.record_failure(agent_id)
-        if should_enroll_suspect_for_backend_failure(reason, status_code)
-        else None
+        BackendFailureRecorder(tracker=system_interface_health_tracker)
     )
 
     # All callbacks registered -- now safe to start the envelope reader

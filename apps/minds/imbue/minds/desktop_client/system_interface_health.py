@@ -88,10 +88,18 @@ def should_enroll_suspect_for_backend_failure(
     ``STALLED`` -- for a request still in flight that the backend has not
     answered within the plugin's stall window. Minds acts only on the ones that
     suggest the backend is unreachable: anything without a status code
-    (``CONNECT_ERROR`` / ``SSE_EOF`` / ``STALLED``) or an infrastructure 5xx
-    (502/503/504). Application errors (app 500s, ordinary 4xx) mean the backend
-    is alive and responding, so they are left alone; the background probe still
-    catches a genuinely-wrong or wedged backend.
+    (``CONNECT_ERROR`` / ``TUNNEL_SETUP_FAILED`` / ``POOL_EXHAUSTED`` /
+    ``BACKEND_NOT_LISTENING`` / ``SSE_EOF`` / ``STALLED``) or an infrastructure
+    5xx (502/503/504). Application errors (app 500s, ordinary 4xx) mean the
+    backend is alive and responding, so they are left alone; the background probe
+    still catches a genuinely-wrong or wedged backend.
+
+    The three causes split out of ``CONNECT_ERROR`` enroll exactly as it does,
+    deliberately. What they change is what the surfaces *claim* while the probe
+    runs, not whether the probe runs: even a failure that is provably this
+    device's fault leaves the workspace's own reachability unestablished, and a
+    probe is what establishes it. Declining to enroll on them would trade a
+    wrong label for a blind spot.
 
     ``STALLED`` is deliberately treated the same as a hard failure even though
     the request may still succeed: a wedged backend is indistinguishable from a
@@ -113,6 +121,53 @@ def should_enroll_suspect_for_backend_failure(
     if reason == SystemInterfaceBackendFailureReason.UNRESOLVED:
         return False
     return status_code is None or status_code in _BACKEND_UNREACHABLE_STATUSES
+
+
+# The reasons that report a connection which never carried a response: the
+# backend was not reached at all. Each names a different cause, and which one it
+# was decides whether the workspace is implicated -- so these are the reasons
+# whose cause is worth recording. ``SSE_EOF`` is excluded because the connection
+# demonstrably worked (the response had started), and ``STALLED`` because the
+# request has not failed at all.
+_CONNECTION_CLASS_REASONS: Final[frozenset[SystemInterfaceBackendFailureReason]] = frozenset(
+    {
+        SystemInterfaceBackendFailureReason.CONNECT_ERROR,
+        SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED,
+        SystemInterfaceBackendFailureReason.POOL_EXHAUSTED,
+        SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING,
+    }
+)
+
+# How long an established cause keeps outranking the residual ``CONNECT_ERROR``
+# without being reported again (see ``record_connection_failure``). The forward
+# re-emits a cause that is still happening at roughly 1 Hz, so this is more than
+# an order of magnitude of headroom against flapping -- while a cause that has
+# stopped happening (a pool that refilled, a socket bind that succeeded on the
+# next try) stops speaking for the machine on the next envelope after the
+# window, before a user reads a card that would otherwise blame their device for
+# an outage that has since become the machine's.
+#
+# It is a rule about the next envelope, not a timer: nothing ages the recorded
+# cause out on its own. So it does not fire across a stretch where nothing goes
+# through the forward at all -- notably while a restart worker is running its
+# ``mngr stop`` / ``mngr start``, since the probe loop excludes RESTARTING
+# agents and the readiness probes only begin once the start returns. A cause
+# recorded just before a restart therefore keeps speaking for the length of
+# those commands, and is displaced by the first readiness probe after them.
+_DEFAULT_ESTABLISHED_CAUSE_DEFERENCE_SECONDS: Final[float] = 15.0
+
+# How long one cause may go unlogged for an agent while it keeps being reported
+# (see ``record_connection_failure``). Needed because the recorded observation is
+# dropped with the rest of the episode on every probe success, and a failure that
+# is not the system interface's own can repeat indefinitely across those
+# successes: the forward emits one envelope per *agent*, so any registered
+# service that stops listening -- a dev server the user shut down, say -- reports
+# a connection failure at the forward's retry cadence while the machine itself
+# answers every probe. Measured against a healthy workspace with one dead
+# service, that is a line every two seconds for as long as the tab stays open.
+# The interval keeps the cause on the record where the surfaces read it and only
+# rations the log, so the breadcrumb still marks the incident without burying it.
+_DEFAULT_CONNECTION_FAILURE_LOG_INTERVAL_SECONDS: Final[float] = 300.0
 
 
 class AgentHealth(str, Enum):
@@ -142,6 +197,26 @@ class BackendOutageObservation(FrozenModel):
     provider_name: str = Field(description="Provider instance the command was rejected at")
     reason: str = Field(description="That provider's own account of why it is unavailable")
     observed_at: datetime = Field(description="Wall-clock (UTC) moment the rejection was observed")
+
+
+class ConnectionFailureObservation(FrozenModel):
+    """The classified cause of the connection-class failures this episode is made of.
+
+    The forward tells three unreachable-backend causes apart that used to arrive
+    as one, and two of them are not about the workspace at all: a tunnel this
+    device could not build, and the forward's own pool running out. Holding the
+    cause here is what lets the recovery surfaces stop blaming the machine for
+    them, and what makes the split measurable in a bug report.
+    """
+
+    reason: SystemInterfaceBackendFailureReason = Field(description="What the forward classified the failure as")
+    detail: str | None = Field(default=None, description="The forward's verbatim error text, when it quoted one")
+    last_observed_at: datetime = Field(
+        description=(
+            "Wall-clock (UTC) moment the forward last reported this cause. Refreshed on every repeat, "
+            "which is what tells a cause that is still happening from one that has stopped."
+        )
+    )
 
 
 class _AgentRecord(MutableModel):
@@ -200,6 +275,26 @@ class _AgentRecord(MutableModel):
             "probe observes the machine answering again."
         ),
     )
+    connection_failure: ConnectionFailureObservation | None = Field(
+        default=None,
+        description=(
+            "The cause the forward classified for this episode's connection-class failures. Envelopes "
+            "repeat at the forward's retry cadence, so this holds one observation per cause rather than "
+            "one per envelope; a cause that changes replaces it, except that the residual CONNECT_ERROR "
+            "waits for an established cause to fall silent first. Cleared with the record when a probe "
+            "observes the machine answering again."
+        ),
+    )
+    is_restart_a_no_op: bool = Field(
+        default=False,
+        description=(
+            "Whether the start this episode's restart dispatched reported it booted no host "
+            "(``mngr start``'s was_host_started). The machine was up throughout, so it never went "
+            "down and came back -- which is why the terminal state reads as the machine not "
+            "responding rather than as a restart that failed. Reset by the next restart attempt "
+            "and cleared with the record on recovery."
+        ),
+    )
     restart_is_start_only: bool | None = Field(
         default=None,
         description=(
@@ -228,6 +323,21 @@ class SystemInterfaceHealthTracker(MutableModel):
         default=_DEFAULT_STUCK_THRESHOLD_SECONDS,
         description="Seconds of continuous probe failures before HEALTHY -> STUCK fires.",
     )
+    established_cause_deference_seconds: float = Field(
+        default=_DEFAULT_ESTABLISHED_CAUSE_DEFERENCE_SECONDS,
+        description=(
+            "Seconds a classified connection-failure cause keeps outranking the residual "
+            "CONNECT_ERROR without the forward reporting it again (see record_connection_failure)."
+        ),
+    )
+    connection_failure_log_interval_seconds: float = Field(
+        default=_DEFAULT_CONNECTION_FAILURE_LOG_INTERVAL_SECONDS,
+        description=(
+            "Seconds one cause may go unlogged for an agent while it keeps being reported. A "
+            "cause that differs from the one last logged is never rationed (see "
+            "record_connection_failure)."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _records: dict[str, _AgentRecord] = PrivateAttr(default_factory=dict)
@@ -248,6 +358,13 @@ class SystemInterfaceHealthTracker(MutableModel):
     # is still answering, so a probe success is the stop in progress rather than
     # the machine back, and must not drop the mark above.
     _in_flight_intentional_stop_agents: set[str] = PrivateAttr(default_factory=set)
+    # agent_id_str -> the connection-failure cause last logged for it, and when.
+    # Deliberately outside ``_records``: it has to survive the probe success that
+    # drops the episode, which is the only thing standing between a repeating
+    # failure and one log line per envelope (see record_connection_failure).
+    _last_logged_connection_failure: dict[str, tuple[SystemInterfaceBackendFailureReason, datetime]] = PrivateAttr(
+        default_factory=dict
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -269,8 +386,7 @@ class SystemInterfaceHealthTracker(MutableModel):
 
         Distinct from ``add_on_change_callback`` so consumers that only care
         about successful recoveries don't have to filter the firehose of
-        every state change. The recovery-diagnostics path uses this to
-        write the final probe results at INFO via loguru.
+        every state change.
         """
         with self._lock:
             self._on_recovery_callbacks.append(callback)
@@ -437,6 +553,109 @@ class SystemInterfaceHealthTracker(MutableModel):
         if not was_suspect:
             logger.debug("Enrolled {} as a system-interface probe suspect (backend-failure envelope)", agent_id)
 
+    def record_connection_failure(
+        self,
+        agent_id: AgentId,
+        reason: SystemInterfaceBackendFailureReason,
+        detail: str | None,
+    ) -> None:
+        """Record what the forward classified this episode's connection failures as.
+
+        Called alongside :meth:`record_failure` for every connection-class
+        envelope, which the forward re-emits on each retry -- roughly once a
+        second for as long as the page keeps polling. So this holds one
+        observation per *cause*: a repeat of the cause already held only
+        refreshes when it was last seen, and a different cause replaces it,
+        which is the only case worth a log line.
+
+        With one exception: ``CONNECT_ERROR`` is the residual class -- it means
+        the cause was not established -- so it does not displace a cause that
+        still is. Without that rule the surfaces flap, because an episode
+        produces envelopes from several request paths at once: a pooled HTTP
+        request can report ``POOL_EXHAUSTED`` while a websocket handshake
+        against the same machine reports ``CONNECT_ERROR``, and at ~1 Hz the
+        device-side card would appear and disappear once a second.
+
+        "Still is" is the whole of that exception, and why the held cause carries
+        when it was last reported. The forward keeps reporting a cause that is
+        still happening, so one that has gone quiet for
+        ``established_cause_deference_seconds`` has stopped happening -- and
+        both device-side causes are things that stop: a pool refills, a socket
+        that would not bind binds on the next try. Deferring to such a cause
+        indefinitely would pin a momentary fault on this device over an outage
+        that has since become the machine's, telling the user their machine is
+        probably fine and withholding the restart that would fix it. That is the
+        misdiagnosis this whole decomposition exists to end, only inverted, so
+        the residual reason takes over once the specific one falls silent.
+
+        That log line is also the Sentry breadcrumb: a bug report from a user
+        whose device could not reach a healthy workspace has to carry which of
+        the three causes it was, or the split is unmeasurable in the field. Which
+        is why it is rationed separately from the record, against a mark that a
+        probe success does not drop: the record holds one observation per cause
+        per *episode*, and a failure that is not the system interface's own
+        outlives any number of episodes -- the machine answers every probe while
+        some other service on it refuses every request. A repeat of the cause
+        last logged waits out ``connection_failure_log_interval_seconds``; a
+        different cause is logged at once, because that is the transition worth
+        seeing.
+
+        Does not change health, exactly as :meth:`record_failure` does not -- the
+        probe loop remains the only authority on whether the workspace is
+        reachable. The record is dropped with the rest of the episode's state
+        when a probe finds the machine answering again.
+        """
+        aid_str = str(agent_id)
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            record = self._records.setdefault(aid_str, _AgentRecord())
+            existing = record.connection_failure
+            if existing is not None and existing.reason == reason:
+                # The same cause, again. Its first ``detail`` is kept: repeats of
+                # one cause quote near-identical text, and rewriting it every
+                # second would churn what the card shows for no new information.
+                record.connection_failure = ConnectionFailureObservation(
+                    reason=existing.reason, detail=existing.detail, last_observed_at=now
+                )
+                return
+            if (
+                existing is not None
+                and reason == SystemInterfaceBackendFailureReason.CONNECT_ERROR
+                and (now - existing.last_observed_at).total_seconds() < self.established_cause_deference_seconds
+            ):
+                return
+            record.connection_failure = ConnectionFailureObservation(
+                reason=reason, detail=detail, last_observed_at=now
+            )
+            last_logged = self._last_logged_connection_failure.get(aid_str)
+            is_worth_logging = (
+                last_logged is None
+                or last_logged[0] != reason
+                or (now - last_logged[1]).total_seconds() >= self.connection_failure_log_interval_seconds
+            )
+            if is_worth_logging:
+                self._last_logged_connection_failure[aid_str] = (reason, now)
+        if is_worth_logging:
+            logger.info(
+                "System-interface connection failure for {} classified as {}{}",
+                agent_id,
+                reason.value,
+                f": {detail}" if detail else "",
+            )
+
+    def get_connection_failure(self, agent_id: AgentId) -> ConnectionFailureObservation | None:
+        """Return this episode's classified connection-failure cause for ``agent_id``, or None.
+
+        Returned as observed, not as a verdict: it says what the forward saw, and
+        a caller deciding what to show the user weighs it against everything else
+        the episode has produced.
+        """
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            if record is None:
+                return None
+            return record.connection_failure
+
     def record_probe_failure(self, agent_id: AgentId) -> None:
         """Record that a background probe observed ``agent_id`` as unreachable.
 
@@ -566,8 +785,10 @@ class SystemInterfaceHealthTracker(MutableModel):
             record = self._records.setdefault(aid_str, _AgentRecord())
             record.failure_run_started_at = None
             record.failure_run_started_wall_at = None
-            # A fresh restart attempt supersedes any prior failure reason.
+            # A fresh restart attempt supersedes any prior failure reason, and
+            # any prior attempt's account of whether it booted anything.
             record.last_restart_error = None
+            record.is_restart_a_no_op = False
             if record.health != AgentHealth.RESTARTING:
                 record.health = AgentHealth.RESTARTING
                 record.restart_is_start_only = start_only
@@ -610,6 +831,34 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None:
                 return None
             return record.last_restart_error
+
+    def record_restart_started_nothing(self, agent_id: AgentId) -> None:
+        """Record that this episode's dispatched ``mngr start`` reported it booted no host.
+
+        ``mngr start`` is idempotent, so a start against a host that was already
+        running leaves it alone -- and that is affirmative evidence about what
+        the user saw: the machine stayed up throughout, so whatever is still
+        wrong with it, it was not taken down and brought back. The surfaces read
+        this to say the machine is not responding instead of claiming a failed
+        restart of it.
+
+        Says nothing about the agent the start named: one whose session had died
+        is relaunched whether or not a host was booted. Only the host is settled
+        here, which is the half the copy turns on.
+        """
+        with self._lock:
+            self._records.setdefault(str(agent_id), _AgentRecord()).is_restart_a_no_op = True
+
+    def is_restart_a_no_op(self, agent_id: AgentId) -> bool:
+        """Whether this episode's dispatched start reported it booted nothing.
+
+        False when no start has reported yet, which is also the honest default:
+        without a report there is no evidence either way, and the restart framing
+        is what the surfaces already use.
+        """
+        with self._lock:
+            record = self._records.get(str(agent_id))
+            return record is not None and record.is_restart_a_no_op
 
     def record_backend_outage(self, agent_id: AgentId, provider_name: str, reason: str) -> None:
         """Record that ``provider_name`` rejected a command for ``agent_id`` as unavailable.
@@ -757,3 +1006,34 @@ class SystemInterfaceHealthTracker(MutableModel):
                 callback(agent_id)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("SystemInterfaceHealthTracker stuck-edge callback failed for {}: {}", agent_id, e)
+
+
+class BackendFailureRecorder(FrozenModel):
+    """Routes one ``system_interface_backend_failure`` envelope into the tracker.
+
+    The plugin observes; this is the whole of minds' policy on what to do with
+    an observation, in one place so the enrollment decision and the cause record
+    cannot drift apart. Registered as the consumer's failure callback in
+    ``minds run``.
+
+    Enrollment and cause-recording are independent questions and are asked
+    separately: a 503 enrolls but names no cause, and a connection-class failure
+    does both.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    tracker: SystemInterfaceHealthTracker = Field(description="Tracker the observation is recorded on")
+
+    def __call__(
+        self,
+        agent_id: AgentId,
+        reason: SystemInterfaceBackendFailureReason,
+        status_code: int | None,
+        detail: str | None,
+    ) -> None:
+        if not should_enroll_suspect_for_backend_failure(reason, status_code):
+            return
+        if reason in _CONNECTION_CLASS_REASONS:
+            self.tracker.record_connection_failure(agent_id, reason, detail)
+        self.tracker.record_failure(agent_id)

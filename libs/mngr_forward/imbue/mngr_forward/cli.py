@@ -345,7 +345,6 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
     strategy = _build_strategy(opts)
     resolver = ForwardResolver(
         strategy=strategy,
-        envelope_writer=envelope_writer,
         service_map_cache=service_map_cache,
     )
     tunnel_manager = SSHTunnelManager()

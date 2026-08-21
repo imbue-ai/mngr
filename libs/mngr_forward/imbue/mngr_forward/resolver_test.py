@@ -1,5 +1,3 @@
-import io
-import json
 from pathlib import Path
 
 import pytest
@@ -7,7 +5,6 @@ import pytest
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
-from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -240,119 +237,48 @@ def test_remove_known_agent_drops_services() -> None:
     assert resolver.resolve(TEST_INSTANCE_1) is None
 
 
-def test_update_services_emits_resolver_snapshot_envelope() -> None:
-    buf = io.StringIO()
-    writer = EnvelopeWriter(output=buf)
+def test_update_known_agents_persists_a_bulk_drop_to_cache(tmp_path: Path) -> None:
+    """A bulk drop must reach the cache, not just the in-memory map.
+
+    ``update_known_agents`` is the one mutation point that drops several
+    instances at once (a destruction sweep), and it persists a single snapshot
+    for the batch rather than one per instance -- so a cache left out of that
+    one call would seed the next run with agents that no longer exist.
+    """
+    cache = ServiceMapCache(cache_path=tmp_path / "service_map.json")
     resolver = ForwardResolver(
         strategy=ForwardServiceStrategy(service_name="system_interface"),
-        envelope_writer=writer,
-    )
-    resolver.add_known_agent(TEST_INSTANCE_1)
-    resolver.update_services(TEST_INSTANCE_1, {"system_interface": "http://127.0.0.1:9100"})
-    lines = [json.loads(line) for line in buf.getvalue().splitlines() if line]
-    assert any(
-        line["stream"] == "forward"
-        and line["payload"].get("type") == "resolver_snapshot"
-        and line["payload"]["services_by_agent"]
-        == {str(TEST_INSTANCE_1): {"system_interface": "http://127.0.0.1:9100"}}
-        for line in lines
-    )
-
-
-def test_update_services_without_envelope_writer_is_silent() -> None:
-    # No envelope writer => no emission, no failure. Tested for the path used by
-    # existing resolver-only tests and any code path that doesn't need the snapshot.
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    resolver.add_known_agent(TEST_INSTANCE_1)
-    resolver.update_services(TEST_INSTANCE_1, {"system_interface": "http://127.0.0.1:9100"})
-
-
-def _resolver_snapshot_payloads(buf: io.StringIO) -> list[dict[str, dict[str, str]]]:
-    """Extract the ``services_by_agent`` map from each emitted ``resolver_snapshot`` envelope."""
-    payloads: list[dict[str, dict[str, str]]] = []
-    for line in buf.getvalue().splitlines():
-        if not line:
-            continue
-        envelope = json.loads(line)
-        payload = envelope.get("payload", {})
-        if payload.get("type") == "resolver_snapshot":
-            payloads.append(payload["services_by_agent"])
-    return payloads
-
-
-def test_remove_known_agent_emits_resolver_snapshot_when_services_were_dropped() -> None:
-    """Removing an agent that had a services entry emits a resolver_snapshot
-    so the consumer-side mirror does not retain a stale entry."""
-    buf = io.StringIO()
-    writer = EnvelopeWriter(output=buf)
-    resolver = ForwardResolver(
-        strategy=ForwardServiceStrategy(service_name="system_interface"),
-        envelope_writer=writer,
-    )
-    resolver.add_known_agent(TEST_INSTANCE_1)
-    resolver.update_services(TEST_INSTANCE_1, {"system_interface": "http://127.0.0.1:9100"})
-    # The update_services call already emitted one snapshot; the remove must emit another.
-    resolver.remove_known_agent(TEST_INSTANCE_1)
-
-    snapshots = _resolver_snapshot_payloads(buf)
-    assert len(snapshots) == 2
-    assert snapshots[0] == {str(TEST_INSTANCE_1): {"system_interface": "http://127.0.0.1:9100"}}
-    # The post-remove snapshot no longer contains the dropped agent.
-    assert snapshots[1] == {}
-
-
-def test_remove_known_agent_skips_emission_when_no_services_were_dropped() -> None:
-    """Removing an agent with no services entry doesn't fire a spurious empty envelope."""
-    buf = io.StringIO()
-    writer = EnvelopeWriter(output=buf)
-    resolver = ForwardResolver(
-        strategy=ForwardServiceStrategy(service_name="system_interface"),
-        envelope_writer=writer,
-    )
-    resolver.add_known_agent(TEST_INSTANCE_1)
-    # No update_services for TEST_INSTANCE_1 -- so removing it is a metadata-only
-    # change. The mirror has nothing to drop, so no envelope should fire.
-    resolver.remove_known_agent(TEST_INSTANCE_1)
-
-    assert _resolver_snapshot_payloads(buf) == []
-
-
-def test_update_known_agents_emits_resolver_snapshot_for_bulk_drops() -> None:
-    """update_known_agents drops services for agents missing from the new set
-    and must emit a single snapshot so consumers stay in sync."""
-    buf = io.StringIO()
-    writer = EnvelopeWriter(output=buf)
-    resolver = ForwardResolver(
-        strategy=ForwardServiceStrategy(service_name="system_interface"),
-        envelope_writer=writer,
+        service_map_cache=cache,
     )
     resolver.add_known_agent(TEST_INSTANCE_1)
     resolver.add_known_agent(TEST_INSTANCE_2)
     resolver.update_services(TEST_INSTANCE_1, {"system_interface": "http://127.0.0.1:9100"})
     resolver.update_services(TEST_INSTANCE_2, {"system_interface": "http://127.0.0.1:9101"})
 
-    # Drop TEST_INSTANCE_1 from the known set; TEST_INSTANCE_2 stays.
     resolver.update_known_agents((TEST_INSTANCE_2,))
 
-    snapshots = _resolver_snapshot_payloads(buf)
-    # 2 from the two update_services calls + 1 from the bulk drop.
-    assert len(snapshots) == 3
-    assert snapshots[-1] == {str(TEST_INSTANCE_2): {"system_interface": "http://127.0.0.1:9101"}}
+    assert cache.load() == {str(TEST_INSTANCE_2): {"system_interface": "http://127.0.0.1:9101"}}
 
 
-def test_update_known_agents_skips_emission_when_no_services_dropped() -> None:
-    """A bulk update that doesn't actually drop any services entries is silent."""
-    buf = io.StringIO()
-    writer = EnvelopeWriter(output=buf)
+def test_update_known_agents_does_not_persist_when_it_dropped_no_services(tmp_path: Path) -> None:
+    """A bulk update that drops no services entry must not touch the cache.
+
+    ``update_known_agents`` runs on every full-discovery envelope, so persisting
+    unconditionally would rewrite the whole cache file once per poll for a map
+    that did not change. Asserted as "the file was never created", which a
+    spurious persist cannot satisfy: ``persist`` writes through ``atomic_write``.
+    """
+    cache_path = tmp_path / "service_map.json"
     resolver = ForwardResolver(
         strategy=ForwardServiceStrategy(service_name="system_interface"),
-        envelope_writer=writer,
+        service_map_cache=ServiceMapCache(cache_path=cache_path),
     )
-    # No services -- only known-agent metadata.
+
+    # Known-agent metadata only, so neither call has a services entry to drop.
     resolver.update_known_agents((TEST_INSTANCE_1, TEST_INSTANCE_2))
     resolver.update_known_agents((TEST_INSTANCE_2,))
 
-    assert _resolver_snapshot_payloads(buf) == []
+    assert not cache_path.exists()
 
 
 def test_initial_discovery_flag() -> None:

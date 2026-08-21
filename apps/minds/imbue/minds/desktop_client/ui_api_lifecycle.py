@@ -51,6 +51,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
+from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_host_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
@@ -97,6 +98,12 @@ class RecoveryInfoResponse(FrozenModel):
     )
     provider_label: str = Field(description="Friendly provider name, empty unless the backend is unreachable")
     unreachable_reason: str = Field(description="The provider's own error, empty unless the backend is unreachable")
+    is_device_cannot_connect: bool = Field(
+        description="Whether this device, rather than the machine, is what cannot make the connection"
+    )
+    device_error_detail: str = Field(
+        description="The forward's verbatim error, empty unless this device is what cannot connect"
+    )
 
 
 def _is_lifecycle_request_authenticated() -> bool:
@@ -358,6 +365,11 @@ def _handle_recovery_info(workspace_id: str) -> Response:
     # while the card is open, and it outranks whatever the machine's own health
     # says -- no restart routed through an unreachable backend can help.
     backend_verdict = read_backend_unreachable_verdict(resolved_id, backend_resolver=backend_resolver, tracker=tracker)
+    # Read on the same poll and for the same reason: a device-side failure can
+    # start or clear while the card is open, and it outranks the machine's own
+    # health because it explains it -- the machine reads STUCK because this
+    # device cannot reach it, whatever the machine is doing.
+    device_verdict = read_device_cannot_connect_verdict(resolved_id, tracker=tracker)
     response = RecoveryInfoResponse(
         agent_id=str(resolved_id),
         workspace_name=workspace_name or str(resolved_id),
@@ -369,6 +381,8 @@ def _handle_recovery_info(workspace_id: str) -> Response:
         is_backend_unreachable=backend_verdict is not None,
         provider_label=backend_verdict.provider_label if backend_verdict is not None else "",
         unreachable_reason=backend_verdict.reason if backend_verdict is not None else "",
+        is_device_cannot_connect=device_verdict is not None,
+        device_error_detail=device_verdict.detail if device_verdict is not None else "",
     )
     return _json_response(response, 200)
 

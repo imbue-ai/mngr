@@ -20,17 +20,42 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     react (e.g. drive a health tracker / recovery UI).
 
     - ``CONNECT_ERROR``: the plugin could not establish a connection to
-      the backend (httpx.ConnectError / RemoteProtocolError before any
-      response bytes, or a failure setting up the SSH tunnel to a remote
-      backend -- e.g. when the agent's host has gone away). It also
-      covers the plugin's own connection pool being exhausted, where the
-      backend is never dialed at all and so its health is unknown: a
-      consumer must not read this reason as proof that the backend
-      itself is at fault.
-    - ``SSE_EOF``: the backend dropped the response stream after some
-      bytes had already been delivered. Despite the name (motivated by
-      the SSE forwarding path that originally surfaced this), it also
-      covers non-SSE mid-response read failures.
+      the backend (httpx.ConnectError, or RemoteProtocolError / ReadError
+      / a timeout before any response bytes, or a failure dialing the SSH
+      host a remote backend lives on -- e.g. when the agent's host has
+      gone away). It is the residual class: a failure that leaves the
+      backend's own health unresolved, where it really may be at fault.
+      The three reasons below were split out of it precisely because they
+      are *not* that. The plugin's own refusal to dial host loopback for
+      an agent with no tunnel is reported here too -- the one case that
+      dialed nothing and still leaves the backend unresolved.
+    - ``TUNNEL_SETUP_FAILED``: this device could not build its own end of
+      the tunnel -- no known_hosts file to pin the host key against, no
+      private key to authenticate with, a local socket it could not
+      create or bind. Evidence about the machine running the plugin,
+      not about the agent's backend, which was never dialed. Only
+      failures raised against this device's own filesystem and socket
+      table carry this reason; anything that failed against the host,
+      mid-handshake included, stays ``CONNECT_ERROR`` -- including a key
+      that is present but no longer accepted, which cannot be told from
+      the host rejecting us without asking it.
+    - ``POOL_EXHAUSTED``: the plugin's own connection pool ran out (e.g.
+      leaked streaming responses), so the backend was never dialed and
+      its health is unknown. Again evidence about the plugin, not the
+      backend.
+    - ``BACKEND_NOT_LISTENING``: the SSH tunnel to the agent's host was
+      established and the host refused the ``direct-tcpip`` channel to
+      the inner port -- the host is reachable and nothing is serving the
+      backend port. Distinguishes a dead service inside a live container
+      from a container that cannot be reached at all.
+    - ``SSE_EOF``: the backend answered -- its response headers arrived
+      -- and the body then failed, either dropped or stalled until the
+      read budget ran out. Despite the name (motivated by the SSE
+      forwarding path that originally surfaced this), it also covers a
+      buffered response, where no body bytes need have been delivered at
+      all. What it always says is that the request reached the backend
+      and the backend replied, which is what separates it from
+      ``CONNECT_ERROR``.
     - ``ERROR_RESPONSE``: the backend answered with a non-2xx HTTP status.
       ``status_code`` carries the code. The plugin forwards the response
       unchanged and does not interpret which codes matter -- the consumer
@@ -49,6 +74,9 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
     """
 
     CONNECT_ERROR = auto()
+    TUNNEL_SETUP_FAILED = auto()
+    POOL_EXHAUSTED = auto()
+    BACKEND_NOT_LISTENING = auto()
     SSE_EOF = auto()
     ERROR_RESPONSE = auto()
     UNRESOLVED = auto()
@@ -117,37 +145,20 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
         default=None,
         description="HTTP status code returned by the backend (set when reason is ERROR_RESPONSE; None otherwise)",
     )
-
-
-class ResolverSnapshotPayload(FrozenModel):
-    """Emitted on every resolver mutation: full per-instance service map.
-
-    Carries the full ``{"<agent_id>@<host_id>": {service_name: url}}`` map held
-    by the plugin's ``ForwardResolver`` at the moment of mutation. Keys are
-    agent *instance* keys (agent ids are unique per host, not globally, so the
-    same id on two hosts keeps two independent entries). A consumer can keep
-    the latest copy in process state to mirror which services the plugin has
-    resolved for a given agent instance (e.g. for diagnostics).
-
-    The full map is sent on every change (no per-instance diff) so a consumer
-    that connects late only needs the most recent envelope to be in sync.
-    """
-
-    type: Literal["resolver_snapshot"] = "resolver_snapshot"
-    # The wire field name stays ``services_by_agent`` for compatibility with
-    # existing consumers; only the key form changed to instance keys.
-    services_by_agent: dict[str, dict[str, str]] = Field(
-        default_factory=dict,
-        description="Full per-instance service map: {'<agent_id>@<host_id>': {service_name: url}}",
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Description of the exception that produced the observation, for a consumer to show or log: "
+            "its message, or its class name where it carries no message (httpx leaves ReadError and every "
+            "TimeoutException empty). None wherever no exception backs the observation -- every "
+            "ERROR_RESPONSE / UNRESOLVED / STALLED, and the CONNECT_ERROR the plugin raises itself when it "
+            "refuses to dial host loopback for an agent with no SSH tunnel."
+        ),
     )
 
 
 ForwardPayload = (
-    LoginUrlPayload
-    | ListeningPayload
-    | ReverseTunnelEstablishedPayload
-    | SystemInterfaceBackendFailurePayload
-    | ResolverSnapshotPayload
+    LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | SystemInterfaceBackendFailurePayload
 )
 
 

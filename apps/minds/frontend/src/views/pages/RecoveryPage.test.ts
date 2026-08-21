@@ -5,6 +5,7 @@ import { createEmptyStores } from "../../models/boot";
 import { ShellState } from "../shell/shell-state";
 import { RecoveryPage } from "./RecoveryPage";
 import { RecoveryModel, type LifecycleDeps, type RecoveryInfo } from "../../models/backups";
+import { attrsOf, collectVnodes } from "../../testing";
 
 const RECOVERY_ROUTE = "/agents/agent-aa11/recovery?return_to=%2Fgoto%2Fhost-bb22%2F&intent=start";
 const RETURN_TO = "/goto/host-bb22/";
@@ -25,11 +26,14 @@ const ANSWERING: RecoveryInfo = {
   workspace_name: "alpha",
   health: "healthy",
   health_error: "",
+  is_restart_start_only: null,
   ssh_command: "",
   is_host_offline: false,
   is_backend_unreachable: false,
   provider_label: "",
   unreachable_reason: "",
+  is_device_cannot_connect: false,
+  device_error_detail: "",
 };
 
 type UpdateVnode = Parameters<NonNullable<typeof RecoveryPage.onupdate>>[0];
@@ -68,6 +72,15 @@ function withShell(): { shell: ShellState; routeSets: string[] } {
 
 function runUpdate(vnode: UpdateVnode): void {
   (RecoveryPage.onupdate as (v: UpdateVnode) => void)(vnode);
+}
+
+/** The attrs the page hands the recovery panel, found by the panel's own id so
+ * the search does not depend on how deep the page wraps it. */
+function panelAttrs(vnode: UpdateVnode): { onEnterMachine?: (() => void) | null } {
+  const rendered = (RecoveryPage.view as (v: UpdateVnode) => m.Vnode)(vnode);
+  const panel = collectVnodes(rendered).find((node) => typeof attrsOf(node).panelId === "string");
+  if (panel === undefined) throw new Error("the page rendered no recovery panel");
+  return attrsOf(panel) as { onEnterMachine?: (() => void) | null };
 }
 
 afterEach(() => {
@@ -147,5 +160,48 @@ describe("recovery page return", () => {
     const { routeSets } = withShell();
     runUpdate(pageShowing(ANSWERING, { state: { returnTo: null } }));
     expect(routeSets).toEqual([]);
+  });
+});
+
+describe("recovery page exit button", () => {
+  it("offers the way into a machine that is answering, with no destination to return to", () => {
+    // The dead end this exists for: a page reached without ?return_to, on a
+    // machine that has since come back. The automatic return has nowhere to go
+    // -- correctly, the reader was never headed anywhere -- so without a button
+    // the card says "nothing further is needed here" over a machine the reader
+    // cannot reach from it.
+    const { routeSets } = withShell();
+    const vnode = pageShowing(ANSWERING, { state: { returnTo: null } });
+
+    const enter = panelAttrs(vnode).onEnterMachine;
+    expect(enter).not.toBeNull();
+    enter?.();
+
+    // The machine itself, since the click-through named nowhere else.
+    expect(routeSets).toEqual(["/workspace/agent-aa11"]);
+  });
+
+  it("lands the click where waiting would have landed the reader", () => {
+    // Two ways out of one page. A reader who clicks rather than waiting for the
+    // return must not end up somewhere else.
+    const { routeSets: clicked } = withShell();
+    panelAttrs(pageShowing(ANSWERING)).onEnterMachine?.();
+    vi.restoreAllMocks();
+    clearAppContextForTests();
+    const { routeSets: waited } = withShell();
+    runUpdate(pageShowing(ANSWERING));
+
+    // Pinned, not just compared: two paths that both went nowhere would agree.
+    expect(clicked).toEqual(["/workspace/host-bb22"]);
+    expect(clicked).toEqual(waited);
+  });
+
+  it("withholds the button over a machine that is not answering", () => {
+    // The reason the card has no exit anywhere else: before the machine
+    // answers, this button would name a destination known not to work.
+    withShell();
+    expect(panelAttrs(pageShowing({ ...ANSWERING, health: "stuck" })).onEnterMachine).toBeNull();
+    expect(panelAttrs(pageShowing({ ...ANSWERING, is_host_offline: true })).onEnterMachine).toBeNull();
+    expect(panelAttrs(pageShowing(ANSWERING, { model: { isRestartRunning: true } })).onEnterMachine).toBeNull();
   });
 });

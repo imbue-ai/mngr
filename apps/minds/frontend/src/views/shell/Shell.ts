@@ -468,6 +468,7 @@ export function Shell(): m.Component<ShellAttrs> {
         surfaceWorkspaceId !== null,
         electronBridge.isDesktop,
         unreachableProviderLabel,
+        entry?.is_device_cannot_connect ?? false,
       );
       // The card is a modal of its own, so it is raised only where it can sit
       // on top: the machine's own route. It out-z-indexes the docked options
