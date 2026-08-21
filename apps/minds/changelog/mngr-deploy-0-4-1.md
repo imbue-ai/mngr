@@ -1,0 +1,1 @@
+Add the deployment history entry for the minds-v0.4.1 production deployment (connector + LiteLLM deploy id 20260819T020036Z, two new 24sys032-us boxes -- one per US region -- and 61 minds-v0.4.1 pool slices baked across the new boxes and four spare-slot fills).
