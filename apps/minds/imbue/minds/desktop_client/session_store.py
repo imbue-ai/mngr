@@ -39,8 +39,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 
 _USER_ID_PREFIX_LENGTH = 16
 
-# One (name, mtime_ns, size) triple per entry of the plugin's sessions dir.
-_SessionsFingerprint = tuple[tuple[str, int, int], ...]
+# One (name, mtime_ns, size, inode) tuple per entry of the plugin's sessions dir.
+_SessionsFingerprint = tuple[tuple[str, int, int, int], ...]
 
 
 def _sessions_state_fingerprint(sessions_dir: Path) -> _SessionsFingerprint:
@@ -49,14 +49,17 @@ def _sessions_state_fingerprint(sessions_dir: Path) -> _SessionsFingerprint:
     Any signin/signout through the plugin CLI touches this directory (it
     writes ``<user_id>.json``, ``accounts.json``, and ``active_account``),
     so a changed fingerprint means the cached ``auth list`` result may be
-    stale. A missing directory fingerprints the same as an empty one: both
-    mean "no sessions".
+    stale. The inode is included because the plugin writes via atomic
+    temp-file-plus-rename (a new inode every write): it catches a rewrite
+    that races a fingerprint within one coarse-clock mtime tick without
+    changing the size. A missing directory fingerprints the same as an
+    empty one: both mean "no sessions".
     """
     try:
         entries = sorted(sessions_dir.iterdir())
     except OSError:
         return ()
-    fingerprint: list[tuple[str, int, int]] = []
+    fingerprint: list[tuple[str, int, int, int]] = []
     for entry in entries:
         try:
             stats = entry.stat()
@@ -64,7 +67,7 @@ def _sessions_state_fingerprint(sessions_dir: Path) -> _SessionsFingerprint:
             # Deleted between iterdir and stat (a concurrent signout); the
             # dir mutation shows up as the entry's absence on the next read.
             continue
-        fingerprint.append((entry.name, stats.st_mtime_ns, stats.st_size))
+        fingerprint.append((entry.name, stats.st_mtime_ns, stats.st_size, stats.st_ino))
     return tuple(fingerprint)
 
 
