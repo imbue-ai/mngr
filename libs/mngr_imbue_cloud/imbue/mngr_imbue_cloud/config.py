@@ -114,6 +114,8 @@ def get_active_profile_dir(default_host_dir: Path) -> Path:
         root_config = tomllib.loads(config_path.read_text())
     except OSError as exc:
         raise ImbueCloudError(f"Failed to read mngr root config at {config_path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ImbueCloudError(f"mngr root config at {config_path} is not valid UTF-8: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ImbueCloudError(f"mngr root config at {config_path} is not valid TOML: {exc}") from exc
     profile_id = root_config.get("profile")

@@ -40,6 +40,13 @@ def test_get_active_profile_dir_wraps_malformed_config(tmp_path: Path) -> None:
         get_active_profile_dir(tmp_path)
 
 
+def test_get_active_profile_dir_wraps_non_utf8_config(tmp_path: Path) -> None:
+    """A corrupt (non-UTF-8) config.toml surfaces as ImbueCloudError, not a raw UnicodeDecodeError."""
+    (tmp_path / "config.toml").write_bytes(b"\xff\xfeprofile")
+    with pytest.raises(ImbueCloudError):
+        get_active_profile_dir(tmp_path)
+
+
 def test_get_active_profile_dir_rejects_non_string_profile(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text("profile = 123\n")
     with pytest.raises(ImbueCloudError):
