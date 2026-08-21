@@ -580,19 +580,15 @@ def _set_master_password_via_ui(page: Page, origin: str, new_password: str) -> N
 
 
 def _goto_landing(page: Page, origin: str) -> None:
-    """Open the landing page, clicking through the first-run consent screen if it appears.
+    """Open the landing page.
 
-    A fresh install's first visit to ``/`` after sign-in shows the
-    error-reporting consent page (the real UX); a user clicks Continue. The
-    submit's redirect can be swallowed like other in-page navigations, so the
-    landing is loaded explicitly afterwards.
+    No consent detour: the SPA shows the first-run error-reporting notice only
+    on its own /consent route, which nothing but the Electron shell's
+    cold-start first-window routing opens (the legacy frontend's server-side
+    gate on ``/`` is gone), so an explicit load of ``/`` always renders the
+    landing -- and nothing these tests drive is gated on acknowledging it.
     """
     page.goto(f"{origin}/", wait_until="domcontentloaded")
-    if page.query_selector("#consent-continue") is not None:
-        logger.info("Dismissing the first-run error-reporting consent screen")
-        page.click("#consent-continue")
-        page.wait_for_timeout(1_000)
-        page.goto(f"{origin}/", wait_until="domcontentloaded")
 
 
 # The snapshot table's per-row Download control (SnapshotTable.ts; the rows
