@@ -112,6 +112,61 @@ describe("ShellState.openInbox", () => {
   });
 });
 
+describe("ShellState.rememberPageBehindOverlay", () => {
+  const RECOVERY_ROUTE = `/agents/${WORKSPACE_ID}/recovery?return_to=%2Fgoto%2Fhost-bb22%2F`;
+
+  it("keeps the recovery page behind the modal opened from it", () => {
+    // Get help forwards ?workspace=, which is what tells the Shell to paint a
+    // machine behind the form -- and over this page that machine is the one
+    // that would not load. The page the reader is reporting on stays instead.
+    const shell = makeShell();
+    land(shell, RECOVERY_ROUTE);
+
+    shell.rememberPageBehindOverlay();
+
+    expect(shell.pageRouteBehindOverlay).toBe(RECOVERY_ROUTE);
+  });
+
+  it("remembers nothing from a surface whose own backdrop is right", () => {
+    // The same card as a modal over a live machine: that machine is already
+    // painted underneath and is what the form should float on.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+
+    shell.rememberPageBehindOverlay();
+
+    expect(shell.pageRouteBehindOverlay).toBeNull();
+  });
+
+  it("forgets the page once the reader has left the modal", () => {
+    const shell = makeShell();
+    land(shell, RECOVERY_ROUTE);
+    shell.rememberPageBehindOverlay();
+    land(shell, `/help?workspace=${WORKSPACE_ID}&assist=0`);
+    expect(shell.pageRouteBehindOverlay).toBe(RECOVERY_ROUTE);
+
+    land(shell, RECOVERY_ROUTE);
+
+    expect(shell.pageRouteBehindOverlay).toBeNull();
+  });
+
+  it("dismisses back to the page when there is no history to go back through", () => {
+    // A window opened straight onto the form (session restore, a deeplink):
+    // the fallback must not send the reader to the machine ?workspace= names,
+    // which is the one destination this page exists because it does not work.
+    const shell = makeShell();
+    land(shell, RECOVERY_ROUTE);
+    shell.rememberPageBehindOverlay();
+    vi.stubGlobal("window", { history: { length: 1, back: () => undefined } });
+    land(shell, `/help?workspace=${WORKSPACE_ID}&assist=0`);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(routeSet).toHaveBeenCalledWith(RECOVERY_ROUTE);
+  });
+});
+
 describe("ShellState.closeAppOverlay", () => {
   it("does not fire a second history.back() when Escape is held down", () => {
     // history.back() does not land synchronously, and the router re-runs

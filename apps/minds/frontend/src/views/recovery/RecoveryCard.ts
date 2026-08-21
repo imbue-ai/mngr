@@ -17,6 +17,7 @@
 // never caused and never saw.
 
 import m from "mithril";
+import { getAppContext } from "../../app-context";
 import { Button } from "../components/Button";
 import { CopyField } from "../components/Layout";
 import { DialogCloseButton } from "../components/Modal";
@@ -91,8 +92,17 @@ export interface RecoveryCardAttrs {
 
 /** Open the bug-report surface for this machine, so the report identifies the
  * right workspace. Assist is never offered from here: the machine the card
- * speaks for is the one that cannot answer. */
+ * speaks for is the one that cannot answer.
+ *
+ * The ?workspace= that names the machine is also what the Shell reads to
+ * decide what to paint behind the form, and over the recovery PAGE that would
+ * be the machine's own surface -- the one that would not load. Asking the
+ * shell to remember the page first keeps the card the reader is reporting on
+ * behind the form instead. Over the modal there is nothing to remember: the
+ * machine is already the surface underneath.
+ */
 function reportProblem(agentId: string): void {
+  getAppContext().shell.rememberPageBehindOverlay();
   m.route.set("/help", { workspace: agentId, assist: "0" });
 }
 

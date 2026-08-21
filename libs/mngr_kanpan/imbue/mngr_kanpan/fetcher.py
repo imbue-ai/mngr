@@ -24,6 +24,7 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_source import BoolField
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_PR
@@ -225,14 +226,24 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
     raise AssertionError(f"Unhandled PR state: {pr.state}")
 
 
-def set_agent_mute(mngr_ctx: MngrContext, agent_id: AgentId, host_id: HostId, is_agent_muted: bool) -> None:
+def set_agent_mute(
+    mngr_ctx: MngrContext,
+    agent_id: AgentId,
+    host_id: HostId,
+    provider_name: ProviderInstanceName,
+    is_agent_muted: bool,
+) -> None:
     """Set the mute state of the agent instance with this id on this host.
 
     Takes the state to write rather than flipping what is stored, so a caller that has
     already decided from what it shows cannot disagree with the stored value about which
-    way the flip goes. Host-scoped because agent ids are only unique per host.
+    way the flip goes. Addresses the exact ``(provider, host, agent)`` instance -- agent
+    ids are only unique per host -- so resolution is scoped to the one provider that owns
+    the agent.
     """
-    host_ref, agent_ref = find_one_agent(AgentAddress(agent=agent_id, host=HostAddress(host=host_id)), mngr_ctx)
+    host_ref, agent_ref = find_one_agent(
+        AgentAddress(agent=agent_id, host=HostAddress(host=host_id, provider=provider_name)), mngr_ctx
+    )
     agent, _host = resolve_to_started_host_and_agent(
         host_ref=host_ref,
         agent_ref=agent_ref,
