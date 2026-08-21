@@ -121,7 +121,7 @@ def get_active_profile_dir(default_host_dir: Path) -> Path:
     profile_id = root_config.get("profile")
     if not isinstance(profile_id, str) or not profile_id:
         raise ImbueCloudError(
-            f"mngr root config at {config_path} has no `profile` field; reinitialize with `mngr config init`."
+            f"mngr root config at {config_path} has no valid `profile` entry; reinitialize with `mngr config init`."
         )
     return expanded / "profiles" / profile_id
 
