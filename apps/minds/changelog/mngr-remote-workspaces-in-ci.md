@@ -11,3 +11,5 @@ Release tests now exercise real remote workspace allocation against pre-baked CI
 - `test_latchkey_e2e`'s in-workspace `printenv` probe now reads only the first stdout line: `mngr exec` appends a "Command succeeded on agent ..." status line to stdout, which broke the strict-equality assertion (latent since the exec status line landed; surfaced by the first release-tier dispatch in a while).
 
 - `deployment_tests/helpers.py` gains the per-env pool-secrets Vault path (`minds/ci/runs/<env>/pool`) plus publish/delete helpers: the bake stage republishes the template repo's read-only deploy key there so the CI test job's narrower Vault role can read it.
+
+- `test_sync_e2e`'s host-to-agent-id lookup scopes `mngr list` to the docker provider: the offload sandbox runs as root, where limactl refuses to start, so an unscoped list aborted with the provider-inaccessible exit code (latent since the sync e2e tests landed; surfaced by the first release-tier dispatch in a while).

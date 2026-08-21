@@ -346,8 +346,13 @@ def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
     Content URLs are host-keyed while the app's records, settings routes, and
     sync records stay agent-keyed, so the flow needs this translation once.
     """
+    # Scoped to the docker provider: these workspaces are docker-launched, and
+    # an unscoped list aborts with the provider-inaccessible exit code when any
+    # OTHER configured provider cannot be queried (the offload sandbox runs as
+    # root, where limactl refuses to start, so the lima provider is always
+    # inaccessible there).
     result = subprocess.run(
-        ["uv", "run", "mngr", "list", "--format", "json"],
+        ["uv", "run", "mngr", "list", "--format", "json", "--provider", "docker"],
         env={**os.environ, "MNGR_HOST_DIR": str(runtime.host_config_root), "MNGR_PREFIX": runtime.mngr_prefix},
         capture_output=True,
         text=True,
