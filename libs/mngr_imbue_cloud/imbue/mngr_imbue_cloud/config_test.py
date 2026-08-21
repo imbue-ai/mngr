@@ -6,8 +6,10 @@ from pydantic import AnyUrl
 from imbue.mngr_imbue_cloud.config import CONNECTOR_URL_ENV_VAR
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import MissingConnectorUrlError
+from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
+from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 
 
@@ -20,6 +22,28 @@ def test_sessions_dir_is_one_level_up_from_instance() -> None:
     sessions = get_sessions_dir(Path("/some/profile_dir"))
     assert sessions == Path("/some/profile_dir/providers/imbue_cloud/sessions")
     # Multiple instances share this dir; the path is independent of instance name.
+
+
+def test_get_active_profile_dir_resolves_profile(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text('profile = "profile0"\n')
+    assert get_active_profile_dir(tmp_path) == tmp_path / "profiles" / "profile0"
+
+
+def test_get_active_profile_dir_wraps_malformed_config(tmp_path: Path) -> None:
+    """A torn / hand-edited config.toml surfaces as ImbueCloudError, not a raw TOMLDecodeError.
+
+    Callers (e.g. the minds desktop client's render-path identity cache) only
+    handle ImbueCloudError, so a decode failure must not leak through.
+    """
+    (tmp_path / "config.toml").write_text('profile = "unterminated')
+    with pytest.raises(ImbueCloudError):
+        get_active_profile_dir(tmp_path)
+
+
+def test_get_active_profile_dir_rejects_non_string_profile(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text("profile = 123\n")
+    with pytest.raises(ImbueCloudError):
+        get_active_profile_dir(tmp_path)
 
 
 def test_get_connector_url_uses_explicit_field_when_set() -> None:

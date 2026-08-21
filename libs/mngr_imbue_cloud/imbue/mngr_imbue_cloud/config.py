@@ -99,7 +99,10 @@ def get_active_profile_dir(default_host_dir: Path) -> Path:
     available, e.g. inside ``ImbueCloudProvider`` methods).
 
     Raises ``ImbueCloudError`` if mngr hasn't been initialized in this
-    host_dir yet -- there's nothing to attach plugin state to.
+    host_dir yet -- there's nothing to attach plugin state to -- and for an
+    unreadable or malformed root config, so callers (including the minds
+    desktop client's render-path identity cache) only ever have to handle
+    ``ImbueCloudError``.
     """
     expanded = default_host_dir.expanduser()
     config_path = expanded / "config.toml"
@@ -107,9 +110,14 @@ def get_active_profile_dir(default_host_dir: Path) -> Path:
         raise ImbueCloudError(
             f"mngr root config not found at {config_path}; run any `mngr` command once to initialize."
         )
-    root_config = tomllib.loads(config_path.read_text())
+    try:
+        root_config = tomllib.loads(config_path.read_text())
+    except OSError as exc:
+        raise ImbueCloudError(f"Failed to read mngr root config at {config_path}: {exc}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ImbueCloudError(f"mngr root config at {config_path} is not valid TOML: {exc}") from exc
     profile_id = root_config.get("profile")
-    if not profile_id:
+    if not isinstance(profile_id, str) or not profile_id:
         raise ImbueCloudError(
             f"mngr root config at {config_path} has no `profile` field; reinitialize with `mngr config init`."
         )
