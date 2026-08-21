@@ -419,7 +419,13 @@ def run(
         device_label=read_device_label(),
     )
     session_store = MultiAccountSessionStore(
-        data_dir=data_directory, cli=imbue_cloud_cli, record_store=workspace_record_store
+        data_dir=data_directory,
+        cli=imbue_cloud_cli,
+        record_store=workspace_record_store,
+        # Lets the identity cache detect out-of-band `mngr imbue_cloud auth
+        # signin`/`signout` runs (a terminal under this host dir) by
+        # fingerprinting the plugin's on-disk sessions directory.
+        mngr_host_dir=mngr_host_dir,
     )
     backup_reaper = BackupReaperManager(
         paths=paths,
