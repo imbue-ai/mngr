@@ -160,32 +160,77 @@ describe("the Updates panel", () => {
     });
   });
 
-  it("hides a channel that is not offered yet, and keeps the rest in order", async () => {
-    // Beta has no audience decided, so putting it in front of people would be
-    // asking them to pick something nobody has defined.
+  it("lists every channel this build serves, slowest first", async () => {
     await withMindsNative({}, async () => {
       const model = updatesModel({});
       const text = panelText(model);
 
-      expect(text).not.toContain("Beta");
-      expect(text).toContain("Stable");
-      expect(text).toContain("Alpha");
-      expect(text.indexOf("Stable")).toBeLessThan(text.indexOf("Alpha"));
-      expect(channelRadios(renderRoot(SettingsSections, { model }))).toHaveLength(2);
+      expect(text.indexOf("Stable")).toBeLessThan(text.indexOf("Beta"));
+      expect(text.indexOf("Beta")).toBeLessThan(text.indexOf("Alpha"));
+      expect(channelRadios(renderRoot(SettingsSections, { model }))).toHaveLength(3);
     });
   });
 
-  it("still shows an unoffered channel when it is the one in effect", async () => {
-    // Otherwise the selected radio is absent from its own list and the panel
-    // shows two unselected channels with no way to read what you are on.
+  it("hides a channel this build cannot serve", async () => {
+    // A build naming no manifest host reaches only ToDesktop's own feed, so
+    // offering the faster channels would offer a switch that breaks checking.
     await withMindsNative({}, async () => {
-      const onBeta = { ...ON_STABLE, channel: "beta" as const };
-      const model = updatesModel({ updateState: onBeta });
+      const stableOnly: UpdateState = { ...ON_STABLE, available: ["stable"] };
+      const model = updatesModel({ updateState: stableOnly });
+      const text = panelText(model);
+
+      expect(text).toContain("Stable");
+      expect(text).not.toContain("Beta");
+      expect(text).not.toContain("Alpha");
+      expect(text).not.toContain("Internal channels");
+      expect(channelRadios(renderRoot(SettingsSections, { model }))).toHaveLength(1);
+    });
+  });
+
+  it("still shows the channel in effect when this build cannot serve it", async () => {
+    // A preference written by a build that had a manifest host survives into
+    // one that does not, and readChannel resolves it against every known
+    // channel. Leaving it out renders a list with nothing selected and the
+    // channel actually in use named nowhere.
+    await withMindsNative({}, async () => {
+      const stranded: UpdateState = { ...ON_STABLE, channel: "alpha", available: ["stable"] };
+      const model = updatesModel({ updateState: stranded });
       const radios = channelRadios(renderRoot(SettingsSections, { model }));
 
-      expect(panelText(model)).toContain("Beta");
-      expect(radios).toHaveLength(3);
+      expect(panelText(model)).toContain("Alpha");
+      expect(radios).toHaveLength(2);
       expect(radios[1].checked).toBe(true);
+    });
+  });
+
+  it("keeps alpha behind a disclosure, so it is never a stray click", async () => {
+    await withMindsNative({}, async () => {
+      const model = updatesModel({});
+      const root = renderRoot(SettingsSections, { model });
+      const details = collectVnodes(root).filter((vnode) => vnode.tag === "details");
+
+      expect(panelText(model)).toContain("Internal channels");
+      expect(details).toHaveLength(1);
+      expect(details[0].attrs?.open).toBe(false);
+      expect(channelRadios(root)).toHaveLength(3);
+    });
+  });
+
+  it("opens the disclosure when alpha is the channel in effect", async () => {
+    // What you are running is never behind something you have to open. The row
+    // stays put rather than moving into the list: selecting a channel should
+    // not make the group it lives in disappear under the cursor.
+    await withMindsNative({}, async () => {
+      const onAlpha: UpdateState = { ...ON_STABLE, channel: "alpha" };
+      const model = updatesModel({ updateState: onAlpha });
+      const root = renderRoot(SettingsSections, { model });
+      const details = collectVnodes(root).filter((vnode) => vnode.tag === "details");
+      const radios = channelRadios(root);
+
+      expect(details).toHaveLength(1);
+      expect(details[0].attrs?.open).toBe(true);
+      expect(radios).toHaveLength(3);
+      expect(radios[2].checked).toBe(true);
     });
   });
 
@@ -200,8 +245,8 @@ describe("the Updates panel", () => {
       const radios = channelRadios(renderRoot(SettingsSections, { model }));
 
       expect(text).toContain("Unavailable right now.");
-      expect(radios).toHaveLength(2);
-      expect(radios[1].disabled).toBe(true);
+      expect(radios).toHaveLength(3);
+      expect(radios[2].disabled).toBe(true);
       expect(radios[0].disabled).toBe(false);
       expect(radios[0].checked).toBe(true);
     });

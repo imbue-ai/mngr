@@ -16,10 +16,13 @@
 # promotion. See scripts/release_channel/publish.py for the gates each entry has
 # to pass, and the Release channels section of apps/minds/docs/deploy/release.md
 # for withdrawing a build.
-#
-# `beta` is publishable but has no entry yet.
 
 [channels.stable]
+build_id = "26081836c9ajpkh"
+version = "0.4.1"
+fallback_branch = "minds-v0.4.1"
+
+[channels.beta]
 build_id = "26081836c9ajpkh"
 version = "0.4.1"
 fallback_branch = "minds-v0.4.1"

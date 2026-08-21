@@ -5,7 +5,7 @@
 // Updates panel is desktop-only and has no jinja original.
 
 import m from "mithril";
-import type { UpdateChannel } from "../../../electron-bridge";
+import type { UpdateChannel, UpdateState } from "../../../electron-bridge";
 import type {
   PendingRevoke,
   ServiceAccountOverview,
@@ -801,6 +801,107 @@ function formatChecked(iso: string): string {
   return `at ${new Date(then).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
 }
 
+/**
+ * The channels the panel lists: what this build can serve, plus whatever is in
+ * effect.
+ *
+ * The channel in effect is included even when this build cannot serve it. A
+ * preference written by a build with a manifest host survives into one without,
+ * and `readChannel` resolves it against every known channel rather than against
+ * this build's -- so leaving it out renders a list where nothing is selected
+ * and the channel actually in use is named nowhere.
+ */
+function visibleChannels(state: UpdateState): typeof CHANNEL_COPY {
+  return CHANNEL_COPY.filter(
+    (channel) => state.available.includes(channel.name) || state.channel === channel.name,
+  );
+}
+
+/** Held behind a disclosure, so selecting it takes a decision rather than a stray click. */
+const INTERNAL_CHANNEL: UpdateChannel = "alpha";
+
+function channelRow(
+  model: SettingsModel,
+  state: UpdateState,
+  channel: (typeof CHANNEL_COPY)[number],
+): m.Children {
+  const peeked = model.peekedChannels[channel.name];
+  // A build this app can offer but whose manifest does not resolve -- a
+  // channel nobody has promoted to yet, or a feed host that is down. It is
+  // not selectable: the preference would stick and updates would stop.
+  const isUnavailable = peeked !== undefined && peeked.version === null;
+  return m(
+    "label",
+    {
+      class:
+        "flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer",
+    },
+    [
+      m("span", [
+        // The version rides in the heading rather than on its own line: it is
+        // what the channel *is* right now, and a second line repeated the word
+        // "Currently" down the whole list.
+        m(
+          "span",
+          { class: "type-body text-primary font-semibold" },
+          peeked !== undefined && peeked.version !== null
+            ? `${channel.label} (${peeked.version})`
+            : channel.label,
+        ),
+        m("span", { class: "block type-helper text-tertiary" }, channel.blurb),
+        isUnavailable
+          ? m("span", { class: "block type-helper text-warning" }, "Unavailable right now.")
+          : null,
+      ]),
+      m("input", {
+        type: "radio",
+        name: "update-channel",
+        class: "mt-1 shrink-0",
+        checked: state.channel === channel.name,
+        disabled: model.isUpdateBusy || isUnavailable,
+        onchange: () => void model.requestChannel(channel.name),
+      }),
+    ],
+  );
+}
+
+/**
+ * The internal channel, held behind a disclosure.
+ *
+ * It stays here even when it is the channel in effect, and the disclosure
+ * opens itself instead. Moving the row into the list on selection would make
+ * the group vanish under the cursor that just clicked it, and drop it out of
+ * sight again on the way back -- a layout jump either way, for two end states
+ * that were already legible.
+ *
+ * The rows render exactly as they do in the list above -- same width, same
+ * alignment, no tint. The summary is the whole of the containment: anything
+ * that set the row apart visually would also move it, and a channel that
+ * renders differently depending on where it sits reads as a different thing.
+ */
+function internalChannelDisclosure(
+  model: SettingsModel,
+  state: UpdateState,
+  concealed: typeof CHANNEL_COPY,
+): m.Children {
+  return m(
+    "details",
+    // Open when it holds the channel in effect, so what you are running is
+    // never behind something you have to open. A manual toggle survives:
+    // mithril skips an attribute whose value has not changed, so a redraw does
+    // not touch the DOM the reader just changed.
+    { open: concealed.some((channel) => channel.name === state.channel) },
+    [
+      m(
+        "summary",
+        { class: "type-helper text-tertiary py-3 cursor-pointer" },
+        "Internal channels",
+      ),
+      ...concealed.map((channel) => channelRow(model, state, channel)),
+    ],
+  );
+}
+
 function updatesPanel(model: SettingsModel): m.Children {
   const state = model.updateState;
   if (state === null) {
@@ -817,6 +918,9 @@ function updatesPanel(model: SettingsModel): m.Children {
         : m("p", { class: "type-body text-secondary" }, "Reading the update state..."),
     ]);
   }
+  const visible = visibleChannels(state);
+  const listed = visible.filter((channel) => channel.name !== INTERNAL_CHANNEL);
+  const concealed = visible.filter((channel) => channel.name === INTERNAL_CHANNEL);
   return m("section", [
     m("h2", { class: "type-heading-lg text-primary mb-2" }, "Updates"),
     m(
@@ -825,46 +929,8 @@ function updatesPanel(model: SettingsModel): m.Children {
       `You are running Minds ${state.currentVersion}.`,
     ),
     updateStatusLine(model),
-    ...CHANNEL_COPY.filter(
-      (channel) =>
-        state.available.includes(channel.name) &&
-        // A channel not yet offered is still shown when it is the one in
-        // effect, so the selected radio is never absent from its own list.
-        (channel.isOffered || state.channel === channel.name),
-    ).map((channel) => {
-      const peeked = model.peekedChannels[channel.name];
-      // A build this app can offer but whose manifest does not resolve -- a
-      // channel nobody has promoted to yet, or a feed host that is down. It is
-      // not selectable: the preference would stick and updates would stop.
-      const isUnavailable = peeked !== undefined && peeked.version === null;
-      return m(
-        "label",
-        {
-          class:
-            "flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer",
-        },
-        [
-          m("span", [
-            m("span", { class: "type-body text-primary font-semibold" }, channel.label),
-            m("span", { class: "block type-helper text-tertiary" }, channel.blurb),
-            peeked !== undefined && peeked.version !== null
-              ? m("span", { class: "block type-helper text-tertiary" }, `Currently ${peeked.version}.`)
-              : null,
-            isUnavailable
-              ? m("span", { class: "block type-helper text-warning" }, "Unavailable right now.")
-              : null,
-          ]),
-          m("input", {
-            type: "radio",
-            name: "update-channel",
-            class: "mt-1 shrink-0",
-            checked: state.channel === channel.name,
-            disabled: model.isUpdateBusy || isUnavailable,
-            onchange: () => void model.requestChannel(channel.name),
-          }),
-        ],
-      );
-    }),
+    ...listed.map((channel) => channelRow(model, state, channel)),
+    concealed.length > 0 ? internalChannelDisclosure(model, state, concealed) : null,
     state.available.length === 1
       ? m(
           "p",

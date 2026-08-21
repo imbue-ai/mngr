@@ -120,34 +120,26 @@ export const SETTINGS_SECTIONS: {
  * Blurbs say what a channel *is*, never how often it ships: a cadence printed
  * in the UI is a promise the release process has not made.
  *
- * `isOffered` is false for a channel the app can serve but should not put in
- * front of anyone yet. It stays in this list rather than being deleted so the
- * ordering above stays complete, and so a preference already set to it still
- * resolves to a label.
  */
 export const CHANNEL_COPY: {
   name: UpdateChannel;
   label: string;
   blurb: string;
-  isOffered: boolean;
 }[] = [
   {
     name: "stable",
     label: "Stable",
-    blurb: "Tested and ready for everyday use.",
-    isOffered: true,
+    blurb: "Ready for everyday use.",
   },
   {
     name: "beta",
     label: "Beta",
-    blurb: "An early look, once a release has settled.",
-    isOffered: false,
+    blurb: "Test new features early.",
   },
   {
     name: "alpha",
     label: "Alpha",
-    blurb: "The newest features as soon as they land. Expect rough edges.",
-    isOffered: true,
+    blurb: "Internal development builds.",
   },
 ];
 
