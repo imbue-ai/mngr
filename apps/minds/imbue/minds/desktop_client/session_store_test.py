@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,35 @@ def test_out_of_band_plugin_signout_surfaces_without_invalidate(tmp_path: Path) 
 
     session_file.unlink()
     assert store.list_accounts() == []
+
+
+def test_atomic_same_size_same_mtime_rewrite_surfaces(tmp_path: Path) -> None:
+    """An atomic same-size rewrite landing in the same mtime tick still refreshes the cache.
+
+    The plugin writes session files via temp-file-plus-os.replace, so every
+    rewrite mints a new inode even when the payload size is unchanged and the
+    coarse clock hands it the same mtime (forced here via os.utime); the
+    fingerprint's inode component is what catches this case.
+    """
+    host_dir, sessions_dir = _make_plugin_host_dir(tmp_path)
+    session_file = sessions_dir / "user-1.json"
+    session_file.write_text('{"n": 1}')
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="old@example.com")
+    store = make_session_store_for_test(tmp_path / "data", cli=cli, mngr_host_dir=host_dir)
+    assert {a.email for a in store.list_accounts()} == {"old@example.com"}
+
+    original_stats = session_file.stat()
+    cli.remove_account("user-1")
+    cli.add_account(user_id="user-1", email="new@example.com")
+    # Simulate the plugin's atomic rewrite: same name, same size, and (forced)
+    # the exact same mtime -- only the inode differs.
+    replacement = sessions_dir / "user-1.json.tmp"
+    replacement.write_text('{"n": 2}')
+    os.replace(replacement, session_file)
+    os.utime(session_file, ns=(original_stats.st_atime_ns, original_stats.st_mtime_ns))
+    assert session_file.stat().st_size == original_stats.st_size
+    assert {a.email for a in store.list_accounts()} == {"new@example.com"}
 
 
 def test_sessions_dir_appearing_later_is_picked_up(tmp_path: Path) -> None:
