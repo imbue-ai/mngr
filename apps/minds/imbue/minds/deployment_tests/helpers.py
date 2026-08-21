@@ -111,6 +111,30 @@ def delete_shared_env_secrets(*, env_name: DevEnvName, role: SharedEnvRole) -> N
     delete_vault_kv(env_secrets_vault_path(env_name=env_name, role=role))
 
 
+# The per-env Vault path carrying the pool bake's secrets for the (separately
+# authorized) test job. The CI test runner's Vault role reads only a curated
+# subset of minds/ci plus minds/ci/runs/*, and the static template deploy key
+# at minds/ci/dwt is not in that subset -- so the bake stage (whose role reads
+# all of minds/ci/*) republishes the key under the env's runs/ directory,
+# exactly the same hand-off pattern as the shared-env secrets above.
+POOL_DWT_READ_KEY_SECRET_KEY: Final[str] = "DWT_READ_KEY_B64"
+
+
+def pool_secrets_vault_path(*, env_name: DevEnvName) -> VaultPath:
+    """Vault directory holding one env's pool-bake secrets for the test job."""
+    return VaultPath(f"{RUN_SECRETS_VAULT_ROOT}/{env_name}/pool")
+
+
+def publish_pool_secrets(*, env_name: DevEnvName, secrets: Mapping[str, str]) -> None:
+    """Write the pool bake's per-env secrets to the env's per-env Vault path."""
+    write_vault_kv(pool_secrets_vault_path(env_name=env_name), dict(secrets))
+
+
+def delete_pool_secrets(*, env_name: DevEnvName) -> None:
+    """Delete an env's pool-bake secrets from Vault. Idempotent against already-gone."""
+    delete_vault_kv(pool_secrets_vault_path(env_name=env_name))
+
+
 def read_ci_test_user_credentials() -> tuple[NonEmptyStr, SecretStr]:
     """Read the fixed ``(email, password)`` for the CI test user from Vault."""
     kv = read_vault_kv(CI_PAID_ACCOUNTS_VAULT_PATH)

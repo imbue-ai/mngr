@@ -664,7 +664,11 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             # The workspace really carries the latchkey wiring in its host env.
             env_probe = _exec_in_workspace(env, repo, agent_address, f"printenv {ENV_LATCHKEY_GATEWAY}")
             assert env_probe.returncode == 0, f"printenv probe failed:\n{env_probe.stderr}"
-            assert env_probe.stdout.strip() == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+            # mngr exec appends a "Command succeeded on agent ..." status line
+            # to stdout, so the env value is the first line only.
+            assert env_probe.stdout.splitlines()[0].strip() == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}", (
+                f"unexpected {ENV_LATCHKEY_GATEWAY} value:\n{env_probe.stdout}"
+            )
 
             # -- Step 4: run the forward supervisor (gateway + discovery + provisioning + sync) --
             forward_log_path = tmp_path / "latchkey-forward.log"
