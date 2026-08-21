@@ -30,9 +30,33 @@ import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
 
 interface RecoveryState {
   model: RecoveryModel;
-  /** Validated same-app ?return_to destination, honored on restart success. */
+  /** Validated same-app ?return_to destination, honored once the machine answers. */
   returnTo: string | null;
   hasReturned: boolean;
+  /** Whether the click-through's own restart has been asked for (immediately
+   * true when it carried no ?intent). Until it has, the machine's health is a
+   * reading of the state that restart was meant to change, so returning on it
+   * would leave without doing the thing the click-through came to do. */
+  isDispatchSettled: boolean;
+}
+
+/**
+ * Whether the machine is answering again, and this page is therefore done.
+ *
+ * Deliberately NOT "the restart succeeded". A restart can fail while the
+ * machine comes back anyway -- the failure and the recovery have separate
+ * causes, and this page's own state poll is what reports the second one. Read
+ * the other way, a page whose restart errored parked the reader on a card
+ * saying "nothing further is needed here" with no way into the machine it was
+ * saying it about.
+ */
+function isMachineAnswering(model: RecoveryModel): boolean {
+  if (model.isRestartRunning) return false;
+  if (model.isRestartSucceeded) return true;
+  const info = model.info;
+  // A stopped machine reads healthy (there is nothing wrong with it); it is
+  // simply not somewhere anyone can be sent.
+  return info !== null && info.health === "healthy" && !info.is_host_offline;
 }
 
 /** Follow a validated in-app return_to; /goto/ URLs enter the workspace
@@ -59,27 +83,34 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     // crafted deeplink cannot turn the return into an open redirect.
     vnode.state.returnTo = rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//") ? rawReturnTo : null;
     vnode.state.hasReturned = false;
+    const isDispatchingIntent = intent === "start" || intent === "restart";
+    vnode.state.isDispatchSettled = !isDispatchingIntent;
     const model = new RecoveryModel(workspaceAnyId, browserLifecycleDeps(() => m.redraw()));
     vnode.state.model = model;
-    void model.load().then(() => {
+    void model.load().then(async () => {
       // load() already re-attached if a restart is in flight, and
       // dispatchRestart is a no-op while one is running.
-      if ((intent === "start" || intent === "restart") && model.loadError === null) {
-        void model.dispatchRestart(intent === "start");
+      if (isDispatchingIntent && model.loadError === null) {
+        await model.dispatchRestart(intent === "start");
       }
+      vnode.state.isDispatchSettled = true;
     });
   },
   onremove(vnode) {
     vnode.state.model.stop();
   },
   onupdate(vnode) {
-    // The click-through carried where the user was headed; once the restart
-    // lands, take them there instead of parking them on the success notice.
+    // The click-through carried where the user was headed; once the machine
+    // answers, take them there instead of parking them on the card.
     const { model, returnTo } = vnode.state;
-    if (model.isRestartSucceeded && returnTo !== null && !vnode.state.hasReturned) {
-      vnode.state.hasReturned = true;
-      followReturnTo(returnTo);
-    }
+    if (returnTo === null || vnode.state.hasReturned || !vnode.state.isDispatchSettled) return;
+    // Not out from under a bug report opened over this page: the reader is
+    // mid-sentence in a form about this machine, and this page is what the
+    // form is floating on.
+    if (getAppContext().shell.pageRouteBehindOverlay !== null) return;
+    if (!isMachineAnswering(model)) return;
+    vnode.state.hasReturned = true;
+    followReturnTo(returnTo);
   },
   view(vnode) {
     const { model } = vnode.state;

@@ -56,6 +56,7 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
 interface RenderOptions {
   workspaceParam?: string | null;
   optionsContent?: m.Children;
+  behindContent?: m.Children;
 }
 
 /** Instantiate the Shell and call view() directly (no DOM). `window` is
@@ -74,6 +75,7 @@ function renderShell(
     workspaceParam: options.workspaceParam === undefined ? WORKSPACE_ID : options.workspaceParam,
     content,
     homeContent: m("div#home-content"),
+    behindContent: options.behindContent ?? null,
     optionsContent: options.optionsContent ?? null,
   } as unknown as m.Attributes) as m.Vnode;
   return (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(instance, vnode) as unknown as AnyVnode;
@@ -194,6 +196,39 @@ describe("Shell request popup layer", () => {
     expect(appOverlay(root)).toBeUndefined();
     // No options route and no remembered panel: nothing paints the panel.
     expect(collectVnodes(root)).not.toContain(content);
+  });
+});
+
+describe("Shell app-overlay backdrop", () => {
+  const HELP_PATH = "/help";
+
+  it("keeps the remembered page painted, instead of the machine the modal names", () => {
+    // Report a problem on the recovery page forwards ?workspace= so the report
+    // identifies the right machine -- and that same param used to make the
+    // Shell mount that machine's surface behind the form. Over the recovery
+    // page that is the machine the page exists because it would not load: the
+    // card the reader was reading got replaced by a loading frame.
+    const { state } = makeShell();
+    const recoveryPage = m("div#recovery-page");
+    const root = renderShell(state, HELP_PATH, m("div#help-form"), {
+      workspaceParam: null,
+      behindContent: recoveryPage,
+    });
+
+    expect(appOverlay(root)).toBeDefined();
+    expect(collectVnodes(root)).toContain(recoveryPage);
+    expect(collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame)).toBeUndefined();
+    expect(collectVnodes(root).find((vnode) => attrsOf(vnode).id === "home-content")).toBeUndefined();
+  });
+
+  it("still floats over the live machine when no page was remembered", () => {
+    // The same modal opened from inside a machine (or from its recovery card
+    // as a modal): that machine is the surface, and it stays mounted.
+    const { state } = makeShell();
+    const root = renderShell(state, HELP_PATH, m("div#help-form"), { workspaceParam: null });
+
+    const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
+    expect(attrsOf(frame as AnyVnode).workspaceAnyId).toBe(WORKSPACE_ID);
   });
 });
 

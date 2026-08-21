@@ -347,6 +347,11 @@ export interface ShellAttrs {
   // router owns route->page identity, so it names this (keeping the Shell
   // page-agnostic -- it only knows there is a base to render).
   homeContent: m.Children;
+  // The hub page to keep painted behind an app-level modal, for a page that
+  // outranks both of the Shell's usual backdrops (Home, and the workspace
+  // ?workspace= names); null when no modal floats over such a page. The router
+  // owns which pages those are.
+  behindContent: m.Children;
   // The workspace-options panel to keep painted behind an app-level modal that
   // was opened over it; null when no modal floats over the panel. Same page as
   // the routed `content` on the options route, so the slot below holds one
@@ -363,7 +368,7 @@ export function Shell(): m.Component<ShellAttrs> {
       watchUpdateStatus(() => m.redraw());
     },
     view(vnode) {
-      const { shell, routePath, workspaceParam, content, homeContent, optionsContent } = vnode.attrs;
+      const { shell, routePath, workspaceParam, content, homeContent, behindContent, optionsContent } = vnode.attrs;
       // The visual-diff harness captures with ?visual-diff=1 and no live
       // channel; suppress the indicator so screenshots stay deterministic.
       const isCaptureMode = new URLSearchParams(window.location.search).has("visual-diff");
@@ -383,7 +388,11 @@ export function Shell(): m.Component<ShellAttrs> {
       const behindWorkspaceId =
         isAppOverlay || isTemplateRoute ? overlayBehindWorkspaceId(routePath, routeSearch) : null;
       const isTemplateModal = isTemplateRoute && behindWorkspaceId !== null;
-      const surfaceWorkspaceId = workspaceParam ?? behindWorkspaceId;
+      // A page kept behind the modal IS the surface, so the workspace the modal
+      // forwards does not become one: mounting that machine's frame is exactly
+      // what the remembered page is there to prevent.
+      const isPageKeptBehind = isAppOverlay && behindContent !== null && behindContent !== undefined;
+      const surfaceWorkspaceId = workspaceParam ?? (isPageKeptBehind ? null : behindWorkspaceId);
       const localScrollClass =
         "bg-surface-primary overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]";
 
@@ -397,9 +406,10 @@ export function Shell(): m.Component<ShellAttrs> {
               // takeover it replaced covered every window, so leaving pages to
               // opt in would silently drop the condition on the ones that
               // forget. Pages that want it inline place their own.
-              // An app modal over Home keeps Home painted behind its backdrop;
-              // otherwise the routed page is the surface itself.
-              [m(LocalPageNotice), isAppOverlay ? homeContent : content],
+              // An app modal keeps its opener painted behind its backdrop --
+              // the page the router remembered, else Home; otherwise the routed
+              // page is the surface itself.
+              [m(LocalPageNotice), isAppOverlay ? (isPageKeptBehind ? behindContent : homeContent) : content],
             );
 
       // The options panel is its own docked overlay layer (backdrop + tab strip
