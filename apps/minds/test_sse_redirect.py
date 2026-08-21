@@ -141,10 +141,8 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 # then put the log sentinel. The creating page's status poll
                 # (`operations/create/<create_attempt_id>`) is the authoritative
                 # completion signal: once it returns DONE + redirect_url the
-                # page stamps data-ready + data-redirect-url on the creating
-                # root, and the walkthrough enters the workspace from there.
-                # The redirect URL is the canonical `/goto/<agent>/` route the
-                # real creator populates.
+                # walkthrough enters the workspace. The redirect URL is the
+                # canonical `/goto/<agent>/` route the real creator populates.
                 with creator._lock:
                     creator._statuses[str(create_attempt_id)] = AgentCreateAttemptStatus.DONE
                     creator._canonical_agent_ids[str(create_attempt_id)] = agent_id
@@ -154,19 +152,18 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 log_sink.put(LOG_SENTINEL)
 
                 # The walkthrough enters the workspace as soon as its status
-                # poll sees DONE -- navigating away destroys the creating root
-                # element, so waiting for the data-ready stamp races the
-                # navigation and loses. The navigation itself is the observable
-                # completion signal: in a plain browser the SPA goes through
-                # /forward-bridge?next=/goto/<agent>/ (Electron goes straight
-                # to /goto/). This minimal fixture runs no forward plugin, so
-                # the bridge dead-ends in a 404 -- the URL still proves the
-                # creating page detected completion and redirected to the
-                # workspace route.
+                # poll sees DONE. Entry is an in-app route change: the SPA
+                # extracts the agent id from the `/goto/<agent>/` redirect URL
+                # and routes to `/workspace/<agent-id>` (the workspace
+                # surface), so that main-frame URL is the observable
+                # completion signal. The `/forward-bridge?next=...` URL only
+                # ever appears as the workspace iframe's src, never in the
+                # main frame; this minimal fixture runs no forward plugin, so
+                # that iframe dead-ends in a 404, which does not matter here.
                 logger.info("CreateAttempt done, waiting for the redirect into the workspace...")
-                page.wait_for_url(re.compile(r"/forward-bridge|/goto/"), timeout=10000)
+                page.wait_for_url(re.compile(rf"/workspace/{agent_id}"), timeout=10000)
                 logger.info("Redirect happened! URL: {}", page.url)
-                assert f"/goto/{agent_id}" in page.url
+                assert f"/workspace/{agent_id}" in page.url
 
             finally:
                 browser.close()
