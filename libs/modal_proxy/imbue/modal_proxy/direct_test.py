@@ -38,6 +38,7 @@ from imbue.modal_proxy.direct import _unwrap_volume
 from imbue.modal_proxy.direct import _volume_wait
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
@@ -243,6 +244,16 @@ def test_translate_modal_cli_not_found_reraises_for_other() -> None:
             id="resource_exhausted",
         ),
         pytest.param(modal.exception.RemoteError("remote"), ModalProxyRemoteError, id="remote"),
+        # The control plane could not be reached at all -- what a dropped network
+        # or a Modal outage looks like. This must get its own type rather than
+        # falling through to the generic branch: consumers decide "Modal is
+        # temporarily unavailable" (skippable) from "Modal answered with a real
+        # failure" (fatal) on exactly this distinction.
+        pytest.param(
+            modal.exception.ConnectionError("Could not connect to the Modal server."),
+            ModalProxyConnectionError,
+            id="connection",
+        ),
         # A bare modal.exception.Error that matches none of the specific branches
         # must fall through to the generic ModalProxyError.
         pytest.param(modal.exception.Error("generic"), ModalProxyError, id="fallback_generic"),

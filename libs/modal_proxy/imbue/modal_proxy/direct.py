@@ -42,6 +42,7 @@ from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.data_types import TunnelInfo
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
@@ -90,6 +91,12 @@ def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
         return ModalProxyRateLimitError(str(e))
     if isinstance(e, modal.exception.RemoteError):
         return ModalProxyRemoteError(str(e))
+    # The SDK raises this when it cannot open a connection to the control plane
+    # at all (it folds a connect timeout into the same class), so it is the one
+    # branch here that means "Modal was never reached" rather than "Modal said
+    # no". Callers act on that difference, so it must not fall through below.
+    if isinstance(e, modal.exception.ConnectionError):
+        return ModalProxyConnectionError(str(e))
     return ModalProxyError(str(e))
 
 

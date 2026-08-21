@@ -24,6 +24,7 @@ from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -38,6 +39,7 @@ from imbue.mngr_modal.plugin import MODAL_BUILD_ARGS_HELP
 from imbue.mngr_modal.plugin import MODAL_START_ARGS_HELP
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyAuthError
+from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
@@ -576,7 +578,32 @@ class ModalProviderBackend(ProviderBackendInterface):
                     f"It will be created the first time you run `mngr create @.{name}`."
                 ),
             ) from e
+        except ModalProxyConnectionError as e:
+            # Modal was never reached (a dropped network, a Modal outage), so what
+            # it holds is unknown rather than absent. ProviderUnavailableError is
+            # one of only two construction failures provider enumeration will skip
+            # and record, which is what keeps an offline laptop from failing every
+            # mngr command on a provider the command may not even be about. Paths
+            # that genuinely target Modal do not tolerate it: `mngr create @.modal`
+            # surfaces this straight from its bootstrap, and an agent lookup that
+            # matches nothing re-raises it naming this provider rather than
+            # claiming the agent does not exist.
+            raise ProviderUnavailableError(
+                name,
+                reason=f"could not reach Modal ({e})",
+                short_reason="Modal is unreachable",
+                short_remediation="check your network connection",
+                user_help_text=(
+                    "Could not reach Modal: check your network connection and try again "
+                    "(https://status.modal.com reports whether Modal itself is down), or "
+                    f"disable this provider with `mngr config set --scope local providers.{name}.is_enabled false`."
+                ),
+            ) from e
         except ModalProxyError as e:
+            # Everything else Modal can fail with is Modal answering, or a bug of
+            # ours -- a real failure, and deliberately still fatal. Calling those
+            # "unavailable" would have enumeration swallow them, turning a broken
+            # Modal integration into a silently short listing.
             raise MngrError(f"Modal provider '{name}' failed to initialize: {e}") from e
 
         return ModalProviderInstance(

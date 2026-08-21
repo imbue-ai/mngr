@@ -85,6 +85,18 @@ class ModalProxyRemoteError(ModalProxyError):
     """Raised on Modal remote execution errors."""
 
 
+class ModalProxyConnectionError(ModalProxyError):
+    """Raised when the Modal control plane could not be reached at all.
+
+    Distinct from every other error here, which Modal produced *after* a
+    connection was established: nothing was reached in this case, so whatever
+    lives behind Modal is in an unknown state rather than a known-bad one. It
+    is the shape a dropped network or a Modal outage takes, so consumers can
+    treat it as "Modal is temporarily unavailable" instead of as a failure of
+    the operation they asked for.
+    """
+
+
 class ModalProxyAppLockedError(ModalProxyError):
     """Raised when a Modal operation fails due to a concurrent modification of the same app.
 
