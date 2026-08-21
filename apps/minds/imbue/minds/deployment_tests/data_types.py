@@ -85,8 +85,9 @@ class PoolProvisionInfo(FrozenModel):
 
     Present only when the bake stage ran (the CI release flow and the local
     ``bake-pool`` iterate mode); absent for runs without pool capacity. Tests
-    that lease fast-path use ``repo_branch_or_tag`` so they can only ever adopt
-    this run's own bake. See specs/remote-workspaces-in-ci.md.
+    that lease fast-path request the stamped ``(repo_url, repo_branch_or_tag)``
+    pair so they can only ever adopt this run's own bake. See
+    specs/remote-workspaces-in-ci.md.
     """
 
     repo_url: NonEmptyStr = Field(
