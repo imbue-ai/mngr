@@ -327,12 +327,34 @@ def test_set_agent_mute_writes_the_state_it_is_given(
     agent = create_test_agent_state(local_host, work_dir, "set-mute-agent")
     name = AgentName("set-mute-agent")
 
-    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, True)
     assert _read_persisted_mute(temp_mngr_ctx, name) is True
-    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, True)
     assert _read_persisted_mute(temp_mngr_ctx, name) is True
-    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, False)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, False)
     assert _read_persisted_mute(temp_mngr_ctx, name) is False
+
+
+@pytest.mark.acceptance
+@pytest.mark.tmux
+def test_set_agent_mute_touches_only_the_agents_own_provider(
+    local_host: Host,
+    work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Muting resolves through the agent's own provider, not a scan of every provider.
+
+    Mute names the exact ``(provider, host, agent)`` instance, so a second, unrelated
+    provider that cannot even be constructed is never touched. Were resolution an unscoped
+    cross-provider discovery it would build that provider and fail the whole lookup.
+    """
+    agent = create_test_agent_state(local_host, work_dir, "scoped-mute-agent")
+    name = AgentName("scoped-mute-agent")
+    ctx_with_broken_other_provider = _ctx_with_failing_provider(temp_mngr_ctx)
+
+    set_agent_mute(ctx_with_broken_other_provider, agent.id, local_host.id, local_host.provider_instance.name, True)
+
+    assert _read_persisted_mute(temp_mngr_ctx, name) is True
 
 
 @pytest.mark.acceptance
@@ -368,7 +390,7 @@ def test_fetch_board_snapshot_muted_agent_in_muted_section(
 ) -> None:
     """A muted agent appears in the MUTED section of the board snapshot."""
     agent = create_test_agent_state(local_host, work_dir, "muted-section-agent")
-    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, True)
     result = fetch_board_snapshot(temp_mngr_ctx, [], {})
     entries = {e.name: e for e in result.snapshot.entries}
     entry = entries[AgentName("muted-section-agent")]
@@ -397,7 +419,7 @@ def test_fetch_board_snapshot_muted_agent_stays_muted_when_a_provider_fails(
     failing provider, so the muted agent must remain in MUTED.
     """
     agent = create_test_agent_state(local_host, work_dir, "muted-despite-failure-agent")
-    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, True)
+    set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, True)
 
     failing_ctx = _ctx_with_failing_provider(temp_mngr_ctx)
     result = fetch_board_snapshot(failing_ctx, [], {})

@@ -1251,7 +1251,7 @@ def _mute_focused_agent(state: _KanpanState) -> None:
 
     # Persist in background
     def _do_mute() -> None:
-        set_agent_mute(state.mngr_ctx, instance_key.agent_id, instance_key.host_id, new_muted)
+        set_agent_mute(state.mngr_ctx, instance_key.agent_id, instance_key.host_id, entry.provider_name, new_muted)
 
     future = state.executor.submit(_do_mute)
     if state.loop is not None:
