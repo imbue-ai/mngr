@@ -75,12 +75,19 @@ excludes the whole `apps/minds` tree by path.
   slices -- the release dispatch pre-bakes them onto the standing CI boxes
   (see `specs/remote-workspaces-in-ci.md`).
 
-### 1.4 JS / Electron tests (`apps/minds/test/`)
+### 1.4 JS / Electron tests (`apps/minds/test/`, `apps/minds/frontend/src/`)
+
+Both suites below run from `just test-minds-js`, wired into CI as the
+**`test-minds-js`** job (see 1.5). Neither is reachable from pytest, so that job
+is the only thing that runs them.
 
 - **Node unit** (`test/unit/*.test.js`): `node --test` suites for the pure
   Electron-shell helpers (startup routing, surface routing, deeplinks, session
-  persistence, log handling, the embed contract). Run via `pnpm test:unit`.
-  **Not in any CI workflow.**
+  persistence, log handling, the embed contract, release channels). Run alone via
+  `pnpm test:unit`.
+- **Frontend unit** (`frontend/src/**/*.test.ts`): vitest suites for the SPA's
+  models and views, rendered without a DOM through the `renderRoot` helper in
+  `frontend/src/testing.ts`. Run alone via `pnpm -C frontend test`.
 - **Playwright e2e** (`test/e2e/`, `playwright.config.js`, `pnpm test:e2e`):
   - `macos-launch.spec.js` -- launches the installed `/Applications/Minds.app`
     via the `mindsApp` fixture. **The only JS spec** (wired into CI in
@@ -92,6 +99,13 @@ excludes the whole `apps/minds` tree by path.
 `.github/workflows/ci.yml` (push to main + all PRs):
 
 - **`check-changelog`** -- changelog gate.
+- **`test-minds-js`** -- `just test-minds-js`, on PRs only and only when
+  `apps/minds/electron`, `apps/minds/test/unit`, `apps/minds/frontend`,
+  `apps/minds/package.json`, `apps/minds/pnpm-lock.yaml` or
+  `apps/minds/todesktop.js` changed. The lockfile counts because
+  `electron-updater` is pinned exactly, so moving it need not touch
+  `package.json`. Node toolchain, so it runs on the orchestrator rather than in
+  an offload sandbox.
 - **`test-offload`** ("Unit + Integration Tests") -- `just test-offload`. Filter:
   `not acceptance and not release and not flaky and not sdk_live and not
   minds_deployment and not minds_services and not minds_snapshot_resume`, plus a

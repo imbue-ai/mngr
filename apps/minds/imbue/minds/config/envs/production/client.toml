@@ -11,3 +11,11 @@ litellm_proxy_url = "https://minds-production--llm-production-proxy.modal.run"
 # The accounts host shared-workspace visitor links point at (a Modal custom
 # domain on the connector app; see the [origins] block in deploy.toml).
 accounts_base_url = "https://accounts.imbue.com"
+
+# Serves the release-channel manifests that the desktop app reads.
+# Example: https://updates.imbueminds.com/alpha-mac.yml
+# Absent means the app falls back to ToDesktop's own feed and offers stable only.
+#
+# Bare hostname on purpose -- this URL is compiled into every shipped binary and
+# can never change without stranding installs that already have it.
+update_feed_base_url = "https://updates.imbueminds.com"

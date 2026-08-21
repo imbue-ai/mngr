@@ -1,8 +1,11 @@
-// The app-level settings sections: left nav + the five panels + the shared
-// revoke dialog. Port of templates/AppSettingsSections.jinja with the
-// interactivity of static/app_settings.js folded into the SettingsModel.
+// The app-level settings sections: left nav + the shared revoke dialog + one
+// panel each for connectors, local files, machines, error reporting, updates,
+// and the master password. Port of templates/AppSettingsSections.jinja with the
+// interactivity of static/app_settings.js folded into the SettingsModel; the
+// Updates panel is desktop-only and has no jinja original.
 
 import m from "mithril";
+import type { UpdateChannel, UpdateState } from "../../../electron-bridge";
 import type {
   PendingRevoke,
   ServiceAccountOverview,
@@ -12,7 +15,8 @@ import type {
   WorkspaceDelegationGrant,
   WorkspaceFileSharingGrant,
 } from "../../../models/settings";
-import { SETTINGS_SECTIONS, addAccountBlockedReason } from "../../../models/settings";
+import { CHANNEL_COPY, addAccountBlockedReason } from "../../../models/settings";
+import { formatRelativeAgo } from "../../../models/backups";
 import { Button } from "../../components/Button";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
@@ -701,6 +705,274 @@ function revokeDialog(model: SettingsModel): m.Children {
   );
 }
 
+/** The one notice above the channel list, or nothing when there is none to give. */
+function updateStatusLine(model: SettingsModel): m.Children {
+  const state = model.updateState;
+  if (state === null) return null;
+  const status = state.status;
+  // `parked` gets no notice. Being ahead of your channel is temporary and
+  // self-correcting -- the channel catches up -- and every channel already
+  // prints what it serves, which is the same fact without the alarm. Warning
+  // that you are "not receiving updates" reads as a fault when nothing is
+  // wrong.
+  if (status.type === "error") {
+    return m(Notice, { variant: "warn" }, `Update check failed: ${status.message}`);
+  }
+  if (status.type === "update-downloaded") {
+    return m(Notice, { variant: "info" }, `Minds ${status.version} is downloaded. Restart to install.`);
+  }
+  if (status.type === "update-available") {
+    return m(Notice, { variant: "info" }, `Downloading ${status.feedVersion}...`);
+  }
+  if (status.type === "disabled") {
+    return m(Notice, { variant: "info" }, "Updates are only available in installed builds.");
+  }
+  if (status.type === "parked" && status.feedVersion != null && status.currentVersion !== undefined) {
+    // Stated, but not as an alarm: nothing is wrong, and the versions beside
+    // each channel already imply it. Left unsaid, though, a channel switch
+    // looks like it did nothing -- the panel redraws identically to up-to-date.
+    return m(
+      "p",
+      { class: "type-helper text-tertiary" },
+      `${channelLabel(status.channel)} is at ${status.feedVersion}, so you will stay on ` +
+        `${status.currentVersion} until it catches up.`,
+    );
+  }
+  return null;
+}
+
+/** A channel's display name, so a sentence never drops the bare `alpha` into prose. */
+function channelLabel(channel: UpdateChannel | undefined): string {
+  return CHANNEL_COPY.find((entry) => entry.name === channel)?.label ?? "That channel";
+}
+
+function channelSwitchDialog(model: SettingsModel): m.Children {
+  const pending = model.pendingChannelSwitch;
+  if (pending === null || model.updateState === null) return null;
+  const label = channelLabel(pending.channel);
+  // Read from the staged version rather than the status: the artifact is with
+  // the OS installer, so it survives the later checks that overwrite the status
+  // that announced it -- and this is the one moment the fact is being weighed.
+  const stagedVersion = model.updateState.downloadedVersion;
+  return m(
+    Modal,
+    { isOpen: true, onClose: () => model.cancelChannelSwitch() },
+    [
+      m("h3", { class: "type-heading-md text-primary mb-2" }, `Switch to ${label}?`),
+      m(
+        "p",
+        { class: "type-body text-secondary mb-3" },
+        `${label} is at ${pending.targetVersion}. You will stay on ` +
+          `${model.updateState.currentVersion} until it catches up.`,
+      ),
+      // Says where the next restart lands, because switching to a slower
+      // channel does not hold it back: a completed download is already with the
+      // installer, so the restart moves forward, and the wait gets longer.
+      stagedVersion != null
+        ? m(
+            "p",
+            { class: "type-body text-secondary mb-3" },
+            `Minds ${stagedVersion} is already downloaded and will still install when you ` +
+              `restart -- you will stay on it until ${label} passes it.`,
+          )
+        : null,
+      m("div", { class: "flex gap-2 justify-end" }, [
+        m(Button, { variant: "secondary", onclick: () => model.cancelChannelSwitch() }, "Cancel"),
+        m(Button, { onclick: () => void model.confirmChannelSwitch() }, "Switch"),
+      ]),
+    ],
+  );
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long ago the last check ran.
+ *
+ * Relative while that is the useful answer: checks run often enough that this
+ * almost always reads "just now" or a count of minutes. Past a day they have
+ * stopped, and "3 days ago" is a worse answer than the time it happened.
+ */
+function formatChecked(iso: string): string {
+  const nowMs = Date.now();
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  if (nowMs - then < DAY_MS) return formatRelativeAgo(iso, nowMs);
+  return `at ${new Date(then).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+}
+
+/**
+ * The channels the panel lists: what this build can serve, plus whatever is in
+ * effect.
+ *
+ * The channel in effect is included even when this build cannot serve it. A
+ * preference written by a build with a manifest host survives into one without,
+ * and `readChannel` resolves it against every known channel rather than against
+ * this build's -- so leaving it out renders a list where nothing is selected
+ * and the channel actually in use is named nowhere.
+ */
+function visibleChannels(state: UpdateState): typeof CHANNEL_COPY {
+  return CHANNEL_COPY.filter(
+    (channel) => state.available.includes(channel.name) || state.channel === channel.name,
+  );
+}
+
+/** Held behind a disclosure, so selecting it takes a decision rather than a stray click. */
+const INTERNAL_CHANNEL: UpdateChannel = "alpha";
+
+function channelRow(
+  model: SettingsModel,
+  state: UpdateState,
+  channel: (typeof CHANNEL_COPY)[number],
+): m.Children {
+  const peeked = model.peekedChannels[channel.name];
+  // A build this app can offer but whose manifest does not resolve -- a
+  // channel nobody has promoted to yet, or a feed host that is down. It is
+  // not selectable: the preference would stick and updates would stop.
+  const isUnavailable = peeked !== undefined && peeked.version === null;
+  return m(
+    "label",
+    {
+      class:
+        "flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer",
+    },
+    [
+      m("span", [
+        // The version rides in the heading rather than on its own line: it is
+        // what the channel *is* right now, and a second line repeated the word
+        // "Currently" down the whole list.
+        m(
+          "span",
+          { class: "type-body text-primary font-semibold" },
+          peeked !== undefined && peeked.version !== null
+            ? `${channel.label} (${peeked.version})`
+            : channel.label,
+        ),
+        m("span", { class: "block type-helper text-tertiary" }, channel.blurb),
+        isUnavailable
+          ? m("span", { class: "block type-helper text-warning" }, "Unavailable right now.")
+          : null,
+      ]),
+      m("input", {
+        type: "radio",
+        name: "update-channel",
+        class: "mt-1 shrink-0",
+        checked: state.channel === channel.name,
+        disabled: model.isUpdateBusy || isUnavailable,
+        onchange: () => void model.requestChannel(channel.name),
+      }),
+    ],
+  );
+}
+
+/**
+ * The internal channel, held behind a disclosure.
+ *
+ * It stays here even when it is the channel in effect, and the disclosure
+ * opens itself instead. Moving the row into the list on selection would make
+ * the group vanish under the cursor that just clicked it, and drop it out of
+ * sight again on the way back -- a layout jump either way, for two end states
+ * that were already legible.
+ *
+ * The rows render exactly as they do in the list above -- same width, same
+ * alignment, no tint. The summary is the whole of the containment: anything
+ * that set the row apart visually would also move it, and a channel that
+ * renders differently depending on where it sits reads as a different thing.
+ */
+function internalChannelDisclosure(
+  model: SettingsModel,
+  state: UpdateState,
+  concealed: typeof CHANNEL_COPY,
+): m.Children {
+  return m(
+    "details",
+    // Open when it holds the channel in effect, so what you are running is
+    // never behind something you have to open. A manual toggle survives:
+    // mithril skips an attribute whose value has not changed, so a redraw does
+    // not touch the DOM the reader just changed.
+    { open: concealed.some((channel) => channel.name === state.channel) },
+    [
+      m(
+        "summary",
+        { class: "type-helper text-tertiary py-3 cursor-pointer" },
+        "Internal channels",
+      ),
+      ...concealed.map((channel) => channelRow(model, state, channel)),
+    ],
+  );
+}
+
+function updatesPanel(model: SettingsModel): m.Children {
+  const state = model.updateState;
+  if (state === null) {
+    return m("section", [
+      m("h2", { class: "type-heading-lg text-primary mb-2" }, "Updates"),
+      // Only a desktop build renders this panel at all, so the state is either
+      // still being read or the read failed. Saying "updates are managed by the
+      // desktop app" here would tell a desktop user, on the surface built to
+      // manage them, that they are somebody else's business -- and the menu
+      // bar's "Check for Updates..." lands here from oninit, before the read
+      // has resolved.
+      model.updateError !== ""
+        ? m(Notice, { variant: "warn" }, `Could not read the update state: ${model.updateError}`)
+        : m("p", { class: "type-body text-secondary" }, "Reading the update state..."),
+    ]);
+  }
+  const visible = visibleChannels(state);
+  const listed = visible.filter((channel) => channel.name !== INTERNAL_CHANNEL);
+  const concealed = visible.filter((channel) => channel.name === INTERNAL_CHANNEL);
+  return m("section", [
+    m("h2", { class: "type-heading-lg text-primary mb-2" }, "Updates"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      `You are running Minds ${state.currentVersion}.`,
+    ),
+    updateStatusLine(model),
+    ...listed.map((channel) => channelRow(model, state, channel)),
+    concealed.length > 0 ? internalChannelDisclosure(model, state, concealed) : null,
+    state.available.length === 1
+      ? m(
+          "p",
+          { class: "type-helper text-tertiary mt-3" },
+          "This build serves the stable channel only.",
+        )
+      : null,
+    model.updateError !== ""
+      ? m("p", { class: "type-body text-important mt-3", role: "alert" }, model.updateError)
+      : null,
+    m("div", { class: "mt-4 flex items-center gap-3" }, [
+      // The floating card carries the same control, but it is dismissible and
+      // does not come back for a version already dismissed -- so without this
+      // there is no way in the app to install a download it has finished.
+      state.downloadedVersion != null
+        ? m(Button, { variant: "primary", onclick: () => void model.installUpdateNow() }, "Restart now")
+        : null,
+      // Disabled while the download it already started is running, because a
+      // check queued behind that transfer would answer minutes later. The
+      // status line above says what is happening, so the button does not
+      // repeat it.
+      m(
+        Button,
+        {
+          variant: "secondary",
+          disabled: model.isUpdateBusy || state.status.type === "update-available",
+          onclick: () => void model.checkForUpdatesNow(),
+        },
+        model.isUpdateBusy ? "Checking..." : "Check now",
+      ),
+      // Most checks change nothing on screen -- up to date and parked both
+      // redraw the same strings -- so without this the button is
+      // indistinguishable from one that does nothing. Reported by the main
+      // process, so the background checks it runs on its own count too.
+      state.lastCheckedAt != null && !model.isUpdateBusy
+        ? m("span", { class: "type-helper text-tertiary" }, `Checked ${formatChecked(state.lastCheckedAt)}.`)
+        : null,
+    ]),
+    channelSwitchDialog(model),
+  ]);
+}
+
 /** The grouped left nav + the active panel, in the same two-column pane every
  * machine's options tabs use, so the section list keeps its own scroller
  * instead of riding the card's and sliding off the top of it. */
@@ -727,9 +999,9 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
                 },
                 group,
               ),
-              ...SETTINGS_SECTIONS.filter(
-                (section) => section.group === group,
-              ).map((section) => navButton(model, section.name, section.label)),
+              ...model.visibleSections
+                .filter((section) => section.group === group)
+                .map((section) => navButton(model, section.name, section.label)),
             ]),
           ),
           content: [
@@ -743,6 +1015,7 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
             model.activeSection === "error-reporting"
               ? errorReportingPanel(model)
               : null,
+            model.activeSection === "updates" ? updatesPanel(model) : null,
             model.activeSection === "backups"
               ? masterPasswordPanel(model, masterPasswordState)
               : null,

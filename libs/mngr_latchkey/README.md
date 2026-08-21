@@ -445,7 +445,11 @@ egress](#desktop-egress) for how a workspace asks for it.
 The workspace therefore always has one gateway URL and one agent-side skill.
 If the user's computer is offline, third-party calls through the VPS gateway
 continue to work, while desktop-owned extension routes fail with a clear HTTP
-502 response.
+502 response. Calls carrying an *expiring* credential -- an OAuth connection or
+Zoom -- keep working only until its access token runs out (typically an hour):
+the VPS gateway is launched with `LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`, so
+only the desktop renews those, and it does so from a periodic loop that stops
+with the machine. Static tokens are unaffected.
 
 Workspaces created *before* this one-gateway rollout still carry a
 permissions-override JWT in their host env file, naming a desktop-side opaque

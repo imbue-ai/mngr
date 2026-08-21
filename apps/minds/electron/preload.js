@@ -4,7 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 // app server; it owns navigation, modals, and all content handling in-page
 // (frontend/src/electron-bridge.ts is the typed facade over this object).
 // Only genuinely native affordances remain here: window controls, native
-// dialogs, the renderer-to-main shell-event relay, and the
+// dialogs, the renderer-to-main shell-event relay, the release-channel and
+// update-status calls (there is no binary to update in a browser), and the
 // startup/error/quitting shell.html channels.
 contextBridge.exposeInMainWorld('mindsNative', {
   platform: process.platform,
@@ -37,6 +38,17 @@ contextBridge.exposeInMainWorld('mindsNative', {
 
   // Multi-window (desktop-only concept).
   openWorkspaceInNewWindow: (agentId) => ipcRenderer.send('open-workspace-in-new-window', agentId),
+
+  // Release channels. Desktop-only: the web UI has no binary to update, so the
+  // Settings section that uses these renders only when mindsNative is present.
+  getUpdateState: () => ipcRenderer.invoke('get-update-state'),
+  peekUpdateChannels: () => ipcRenderer.invoke('peek-update-channels'),
+  setUpdateChannel: (channel) => ipcRenderer.invoke('set-update-channel', channel),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  onUpdateStatus: (callback) => {
+    ipcRenderer.on('update-status', (_event, status) => callback(status));
+  },
 
   // The renderer owns the /ui/ws channel; the few events main still acts on
   // (workspaces summaries for OS titles + destroyed-window detach,
