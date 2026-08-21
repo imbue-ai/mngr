@@ -13,3 +13,5 @@ Release tests now exercise real remote workspace allocation against pre-baked CI
 - `deployment_tests/helpers.py` gains the per-env pool-secrets Vault path (`minds/ci/runs/<env>/pool`) plus publish/delete helpers: the bake stage republishes the template repo's read-only deploy key there so the CI test job's narrower Vault role can read it.
 
 - `test_sync_e2e`'s host-to-agent-id lookup scopes `mngr list` to the docker provider: the offload sandbox runs as root, where limactl refuses to start, so an unscoped list aborted with the provider-inaccessible exit code (latent since the sync e2e tests landed; surfaced by the first release-tier dispatch in a while).
+
+- `ci_admin_auth_header` prefers an injected `$MINDS_ADMIN_KEY` over its Vault read (the CI test job's Vault role cannot read the tier's static supertokens entry); the relay-fleet tests skip on per-run `ci-*` envs, which by design carry no relay fleet; `test_sync_e2e`'s agent lookup uses `mngr list --on-error continue` (tolerating the provider-inaccessible exit code) instead of docker-provider scoping, and includes the list output in its failure message.

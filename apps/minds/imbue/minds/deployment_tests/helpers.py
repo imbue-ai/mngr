@@ -82,7 +82,16 @@ _CI_VAULT_PREFIX: Final[str] = "secrets/minds/ci"
 
 
 def ci_admin_auth_header() -> dict[str, str]:
-    """Bearer header for the connector's admin endpoints, from the ci tier's supertokens Vault entry."""
+    """Bearer header for the connector's admin endpoints.
+
+    Prefers an injected ``$MINDS_ADMIN_KEY`` (the CI test job's Vault role
+    cannot read the tier's static supertokens entry, so the env-build step
+    republishes the key with the per-env secrets and the CI job exports it),
+    falling back to the ci tier's supertokens Vault entry for local runs.
+    """
+    injected_admin_key = os.environ.get("MINDS_ADMIN_KEY")
+    if injected_admin_key:
+        return {"Authorization": f"Bearer {injected_admin_key}"}
     secret = read_vault_kv(VaultPath(f"{_CI_VAULT_PREFIX}/supertokens"))
     return {"Authorization": f"Bearer {admin_key_from_supertokens_secret(secret, _CI_VAULT_PREFIX)}"}
 

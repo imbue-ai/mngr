@@ -346,25 +346,29 @@ def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
     Content URLs are host-keyed while the app's records, settings routes, and
     sync records stay agent-keyed, so the flow needs this translation once.
     """
-    # Scoped to the docker provider: these workspaces are docker-launched, and
-    # an unscoped list aborts with the provider-inaccessible exit code when any
-    # OTHER configured provider cannot be queried (the offload sandbox runs as
-    # root, where limactl refuses to start, so the lima provider is always
-    # inaccessible there).
+    # ``--on-error continue`` with the provider-inaccessible exit code (6)
+    # tolerated: the offload sandbox runs as root, where limactl refuses to
+    # start, so the configured lima provider is always inaccessible there; the
+    # default abort mode would fail the whole list on it, while continue mode
+    # still emits every reachable provider's agents and signals the partial
+    # failure through the exit code.
     result = subprocess.run(
-        ["uv", "run", "mngr", "list", "--format", "json", "--provider", "docker"],
+        ["uv", "run", "mngr", "list", "--format", "json", "--on-error", "continue"],
         env={**os.environ, "MNGR_HOST_DIR": str(runtime.host_config_root), "MNGR_PREFIX": runtime.mngr_prefix},
         capture_output=True,
         text=True,
         timeout=120,
-        check=True,
+        check=False,
+    )
+    assert result.returncode in (0, 6), (
+        f"`mngr list` failed (exit {result.returncode}):\n{result.stderr[-4000:]}"
     )
     data = json.loads(result.stdout)
     for raw in data.get("agents", []) if isinstance(data, dict) else []:
         host = raw.get("host") if isinstance(raw.get("host"), dict) else {}
         if host.get("id") == host_id and raw.get("id"):
             return str(raw["id"])
-    raise AssertionError(f"No agent on host {host_id!r} in `mngr list` output")
+    raise AssertionError(f"No agent on host {host_id!r} in `mngr list` output:\n{result.stdout[:4000]}")
 
 
 def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password: str) -> str:
