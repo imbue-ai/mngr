@@ -39,7 +39,6 @@ from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.data_types import ForwardStrategy
 from imbue.mngr_forward.data_types import ProxyTarget
-from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -51,25 +50,15 @@ class ForwardResolver(MutableModel):
         frozen=True,
         description="Either ForwardServiceStrategy or ForwardPortStrategy; chosen at CLI parse time",
     )
-    envelope_writer: EnvelopeWriter | None = Field(
-        default=None,
-        description=(
-            "Optional writer used to emit a ``resolver_snapshot`` envelope on every "
-            "mutation of the per-instance services map -- ``update_services`` "
-            "(set/replace) plus the destruction paths (``remove_known_agent`` and "
-            "``update_known_agents`` when they drop an agent that had services). "
-            "The plugin wires this so a downstream consumer can mirror the per-instance "
-            "service map. None in tests / code paths that don't care about emission."
-        ),
-    )
     service_map_cache: ServiceMapCache | None = Field(
         default=None,
         description=(
             "Optional last-known service-map cache. When set, every mutation of "
-            "the per-instance services map (the same points that emit "
-            "``resolver_snapshot``) is persisted through it, and ``seed_services`` "
-            "loads from it at startup so a fresh run resolves without waiting on "
-            "the slow per-agent event stream. None in tests / paths that don't persist."
+            "the per-instance services map -- ``update_services`` (set/replace) plus "
+            "the destruction paths (``remove_known_agent`` and ``update_known_agents`` "
+            "when they drop an agent that had services) -- is persisted through it, and "
+            "``seed_services`` loads from it at startup so a fresh run resolves without "
+            "waiting on the slow per-agent event stream. None in tests / paths that don't persist."
         ),
     )
 
@@ -85,21 +74,21 @@ class ForwardResolver(MutableModel):
     _initial_discovery_done: bool = PrivateAttr(default=False)
 
     def _snapshot_services_locked(self) -> dict[str, dict[str, str]]:
-        """Return a deep copy of ``_services_by_instance`` for emission.
+        """Return a deep copy of ``_services_by_instance`` for persistence.
 
-        Caller MUST hold ``self._lock``. The copy is taken under the lock
-        so the resulting payload is a consistent point-in-time view; the
-        actual ``emit_resolver_snapshot`` call must happen outside the
-        lock to avoid holding it across a write.
+        Caller MUST hold ``self._lock``. The copy is taken under the lock so the
+        persisted map is a consistent point-in-time view; the write itself must
+        happen outside the lock to avoid holding it across disk I/O.
         """
         return {instance: dict(svc) for instance, svc in self._services_by_instance.items()}
 
     def update_known_agents(self, instance_keys: tuple[AgentInstanceKey, ...]) -> None:
         """Replace the set of known agent instances. Drops services / SSH info for removed ones.
 
-        Emits a ``resolver_snapshot`` envelope when any instance's services
-        entry was dropped, so consumers stay in sync with the resolver
-        after bulk destruction.
+        Persists the post-mutation map when any instance's services entry was
+        dropped, so the cache does not seed the next run with agents that no
+        longer exist. A bulk destruction persists once for the batch, not once
+        per instance.
         """
         snapshot: dict[str, dict[str, str]] | None = None
         with self._lock:
@@ -116,7 +105,7 @@ class ForwardResolver(MutableModel):
             if services_changed:
                 snapshot = self._snapshot_services_locked()
         if snapshot is not None:
-            self._publish_services_snapshot(snapshot)
+            self._persist_services_snapshot(snapshot)
 
     def add_known_agent(self, instance_key: AgentInstanceKey) -> None:
         """Mark a single agent instance as known (incremental discovery)."""
@@ -127,12 +116,10 @@ class ForwardResolver(MutableModel):
     def remove_known_agent(self, instance_key: AgentInstanceKey) -> None:
         """Mark a single agent instance as no longer known (incremental destruction).
 
-        Emits a ``resolver_snapshot`` envelope when the instance had a services
-        entry (i.e. there was something for the consumer's mirror to drop).
-        Mirrors the ``update_services`` emission contract: every mutation
-        of ``_services_by_instance`` produces a snapshot envelope so the
-        consumer-side mirror does not retain stale entries for destroyed
-        agents.
+        Persists the post-mutation map when the instance had a services entry
+        (i.e. there was something to drop). Every mutation of
+        ``_services_by_instance`` persists, so the cache does not retain stale
+        entries for destroyed agents.
         """
         snapshot: dict[str, dict[str, str]] | None = None
         with self._lock:
@@ -144,20 +131,19 @@ class ForwardResolver(MutableModel):
             if services_changed:
                 snapshot = self._snapshot_services_locked()
         if snapshot is not None:
-            self._publish_services_snapshot(snapshot)
+            self._persist_services_snapshot(snapshot)
 
     def update_services(self, instance_key: AgentInstanceKey, services: dict[str, str]) -> None:
         """Replace the known services for a single agent instance.
 
-        Emits a ``resolver_snapshot`` envelope after the mutation so consumers
-        can mirror the per-instance service map. The snapshot carries the full
-        per-instance map (not just this instance) so a late-attaching consumer
-        can catch up from a single envelope.
+        Persists the post-mutation map, which carries every instance rather
+        than just this one, so the persisted cache is a complete point-in-time
+        view a later run can seed from in a single read.
         """
         with self._lock:
             self._services_by_instance[str(instance_key)] = dict(services)
             snapshot = self._snapshot_services_locked()
-        self._publish_services_snapshot(snapshot)
+        self._persist_services_snapshot(snapshot)
 
     def update_service_labels(self, instance_key: AgentInstanceKey, label_to_name: dict[str, str]) -> None:
         """Replace the known origin-label -> service-name map for a single agent instance.
@@ -246,16 +232,12 @@ class ForwardResolver(MutableModel):
                     continue
                 self._services_by_instance[instance_str] = dict(services)
 
-    def _publish_services_snapshot(self, snapshot: dict[str, dict[str, str]]) -> None:
-        """Emit the ``resolver_snapshot`` envelope and persist the service-map cache.
+    def _persist_services_snapshot(self, snapshot: dict[str, dict[str, str]]) -> None:
+        """Persist the service-map cache.
 
         Called (outside ``self._lock``) at every point that mutates the
-        per-instance services map. The envelope keeps a downstream consumer's
-        mirror in sync; the cache persists the same full map so a later run can
-        seed from it.
+        per-instance services map, so a later run can seed from the full map.
         """
-        if self.envelope_writer is not None:
-            self.envelope_writer.emit_resolver_snapshot(snapshot)
         if self.service_map_cache is not None:
             self.service_map_cache.persist(snapshot)
 

@@ -70,8 +70,6 @@ from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_e
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
-from imbue.minds.desktop_client.recovery_probe import PROBE_SENTINEL
-from imbue.minds.desktop_client.recovery_probe import build_probe_shell_command
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
@@ -94,7 +92,6 @@ _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 _SYSTEM_INTERFACE_PORT: Final[int] = 8000
 _MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
 _SYSTEM_INTERFACE_READY_TIMEOUT_SECONDS: Final[int] = 120
-_PROBE_TIMEOUT_SECONDS: Final[int] = 120
 _SERVICES_REGISTERED_TIMEOUT_SECONDS: Final[int] = 120
 
 # The always-on core services that must re-register in the data/.state app registry
@@ -294,29 +291,6 @@ def _wait_for_system_interface_down(container_name: str) -> bool:
     return _exec_in_container(container_name, poll, timeout=90).returncode == 0
 
 
-def _run_minds_in_container_probe(container_name: str) -> dict[str, Any]:
-    """Run minds' real in-container recovery probe and return its parsed payload.
-
-    Ships the exact probe shell command minds' recovery flow runs (normally
-    via ``mngr exec``) straight into the container via ``docker exec``, then
-    parses the documented sentinel + single-JSON-line contract. The payload
-    carries ``curl_status`` (system_interface health), ``inner_port``,
-    ``system_interface_status``, etc.
-    """
-    result = _exec_in_container(
-        container_name, f"cd /home/user/workspace && {build_probe_shell_command()}", timeout=_PROBE_TIMEOUT_SECONDS
-    )
-    assert PROBE_SENTINEL in result.stdout, (
-        f"minds recovery probe sentinel missing; stdout={result.stdout!r} stderr={result.stderr!r}"
-    )
-    after_sentinel = result.stdout.split(PROBE_SENTINEL, 1)[1]
-    for line in after_sentinel.splitlines():
-        candidate = line.strip()
-        if candidate:
-            return json.loads(candidate)
-    raise AssertionError(f"minds recovery probe emitted no JSON payload; stdout={result.stdout!r}")
-
-
 @pytest.fixture(scope="session")
 def running_workspace() -> Iterator[_ResumedWorkspace]:
     """Resume the snapshot's workspace and yield it once system_interface serves.
@@ -495,16 +469,15 @@ def test_resumed_workspace_registered_expected_apps(running_workspace: _ResumedW
 @pytest.mark.docker
 @pytest.mark.timeout(360)
 def test_minds_recovery_restores_dead_system_interface() -> None:
-    """A dead system_interface is diagnosed by minds' recovery probe and revived by an agent bounce.
+    """A dead system_interface is revived by an agent bounce.
 
     Drives the actual minds recovery building blocks against a deterministic
     break: stop the system-services agent (which takes system_interface down),
-    confirm minds' real in-container recovery probe diagnoses it as unhealthy,
-    then bounce the system-services agent (``mngr stop`` + ``mngr start``
-    inside the container -- the in-container analogue of the desktop client's
-    host restart, which cannot ``--stop-host`` from within the container it
-    would stop) and confirm both the live HTTP check and minds' probe see
-    system_interface healthy again.
+    confirm the interface really goes down, then bounce the system-services
+    agent (``mngr stop`` + ``mngr start`` inside the container -- the
+    in-container analogue of the desktop client's host restart, which cannot
+    ``--stop-host`` from within the container it would stop) and confirm the
+    live HTTP check sees system_interface serving again.
 
     Self-contained (it establishes its own broken state) so it is robust to
     running in the same sandbox as the ``running_workspace`` fixture tests.
@@ -524,16 +497,9 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
         f"Failed to stop system-services to set up the broken state: {stop_result.stderr}"
     )
 
-    # Wait for the interface to actually go down before diagnosing, so the
-    # broken-state assertion isn't a timing race against a lingering listener.
     assert _wait_for_system_interface_down(container_name), (
         "system_interface stayed up after stopping the system-services agent; "
         "the agent may not own the bootstrap/system_interface process tree."
-    )
-    # minds' real recovery probe should now see system_interface unhealthy.
-    broken_probe = _run_minds_in_container_probe(container_name)
-    assert broken_probe.get("curl_status") not in _SERVED_HTTP_STATUS_CODES, (
-        f"Expected system_interface unhealthy after stopping system-services; probe={broken_probe!r}"
     )
 
     # Recover by bouncing the system-services agent (stop is idempotent here;
@@ -547,10 +513,6 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
 
     assert _wait_for_system_interface_up(container_name), (
         "system_interface did not recover after restarting the system-services agent."
-    )
-    recovered_probe = _run_minds_in_container_probe(container_name)
-    assert recovered_probe.get("curl_status") in _SERVED_HTTP_STATUS_CODES, (
-        f"minds recovery probe still reports system_interface unhealthy after restart; probe={recovered_probe!r}"
     )
 
 

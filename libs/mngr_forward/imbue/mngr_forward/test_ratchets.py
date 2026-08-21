@@ -173,7 +173,13 @@ def test_prevent_async_await() -> None:
     # with the client's disconnect, which is what puts the disconnect at the
     # rendezvous first and so leaves the handoff free to finish before the
     # ``asyncio.wait`` waiter resumes -- the ordering the tie branch is about.
-    rc.check_async_await(_DIR, snapshot(105))
+    # 109: the buffered path reads the response headers and the body in two
+    # steps instead of one ``request()``, which is what tells a backend that
+    # never answered from one that answered and then dropped the body. Splitting
+    # them means awaiting the send, the read, and the close separately, and they
+    # stay in one coroutine so the caller still races a single task against the
+    # client disconnect.
+    rc.check_async_await(_DIR, snapshot(109))
 
 
 # --- Hardcoded paths ---

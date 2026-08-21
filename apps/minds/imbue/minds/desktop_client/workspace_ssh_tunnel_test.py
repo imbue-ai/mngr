@@ -8,6 +8,7 @@ from imbue.minds.desktop_client.workspace_ssh_tunnel import is_loopback_host
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 
 
 class _StubTunnelManager(SSHTunnelManager):
@@ -23,7 +24,7 @@ class _StubTunnelManager(SSHTunnelManager):
         self, ssh_info: RemoteSSHInfo, local_port: int, remote_port: int = 0, agent_id: str | None = None
     ) -> int:
         if self.should_raise:
-            raise SSHTunnelError("connect refused")
+            raise SSHTunnelError("connect refused", SSHTunnelPhase.HOST_CONNECT)
         self.recorded_local_port = local_port
         self.recorded_caller_host = ssh_info.host
         self.recorded_agent_id = agent_id or ""

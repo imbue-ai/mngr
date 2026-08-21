@@ -1,10 +1,10 @@
-"""Unit coverage for the workspace-recovery engine (host-health probe + restart worker).
+"""Unit coverage for the workspace-recovery engine (passive verdicts + restart worker).
 
-These exercise the building blocks behind ``GET /api/v1/workspaces/<id>/health``
-and ``POST /api/v1/workspaces/<id>/restart`` directly, complementing the
-end-to-end route tests in ``api_v1_test.py`` with the granular restart-sequence
-failure modes (unresolved system-services agent, stop/start command failures,
-the host-already-stopped fast path).
+These exercise the building blocks behind ``POST /api/v1/workspaces/<id>/restart``
+and the recovery card's polled verdicts directly, complementing the end-to-end
+route tests in ``api_v1_test.py`` with the granular restart-sequence failure
+modes (unresolved system-services agent, stop/start command failures, the
+host-already-stopped fast path).
 """
 
 import shlex
@@ -15,6 +15,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Final
 
+import pytest
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -22,8 +23,6 @@ from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SEC
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.recovery_probe import DispatchTier
-from imbue.minds.desktop_client.recovery_probe import HOST_ACCESS_REJECTED_REASON
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
@@ -33,6 +32,7 @@ from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
+from imbue.minds.desktop_client.workspace_recovery import HOST_ACCESS_REJECTED_REASON
 from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import RestartReadinessOutcome
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
@@ -40,14 +40,15 @@ from imbue.minds.desktop_client.workspace_recovery import _HOST_RESTART_STARTUP_
 from imbue.minds.desktop_client.workspace_recovery import _await_system_interface_ready
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
+from imbue.minds.desktop_client.workspace_recovery import _did_start_boot_a_host
 from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outage_reason
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import _report_restart_step_failure
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
-from imbue.minds.desktop_client.workspace_recovery import probe_workspace_health
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
+from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.errors import MngrCommandError
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -60,6 +61,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 # Long enough that only a genuinely broken run reaches it. The wait ends the
 # instant the command turns up, so this bounds a failure, not a passing test --
@@ -82,12 +85,27 @@ def _write_mngr_stub(script: Path, subcommand_cases: str) -> str:
     return str(script)
 
 
-def _write_fake_mngr(tmp_path: Path, stop_exit: int = 0, start_exit: int = 0) -> str:
+def _write_fake_mngr(
+    tmp_path: Path,
+    stop_exit: int = 0,
+    start_exit: int = 0,
+    was_host_started: bool | None = None,
+) -> str:
     """Write an mngr stub that exits per-subcommand.
 
     Lets a test simulate a failing stop or start without a real mngr / provider.
+    ``was_host_started`` makes the start print the ``--format json`` result line
+    real ``mngr start`` prints; None prints nothing, standing in for an older
+    binary that cannot answer.
     """
-    return _write_mngr_stub(tmp_path / "fake_mngr", f"  stop) exit {stop_exit} ;;\n  start) exit {start_exit} ;;\n")
+    if was_host_started is None:
+        start_case = f"  start) exit {start_exit} ;;\n"
+    else:
+        result = '{"started_agents": [], "count": 0, "was_host_started": %s}' % (
+            "true" if was_host_started else "false"
+        )
+        start_case = f"  start) echo '{result}'; exit {start_exit} ;;\n"
+    return _write_mngr_stub(tmp_path / "fake_mngr", f"  stop) exit {stop_exit} ;;\n" + start_case)
 
 
 def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
@@ -132,10 +150,40 @@ def test_build_mngr_stop_argv_always_stops_the_host() -> None:
     assert "--stop-host" in argv
 
 
-def test_build_mngr_start_argv_targets_the_agent() -> None:
+def test_build_mngr_start_argv_targets_the_agent_and_asks_for_structured_output() -> None:
+    """The start must be structured: its ``was_host_started`` is the only way to
+    learn that an idempotent start booted nothing, which is what stops the
+    terminal state from claiming a restart that never ran."""
     aid = AgentId.generate()
     argv = _build_mngr_start_argv("/usr/local/bin/mngr", aid)
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
+    assert argv[-2:] == ["--format", "json"]
+
+
+@pytest.mark.parametrize(
+    "stdout, expected",
+    [
+        ('{"started_agents": [], "count": 0, "was_host_started": false}', False),
+        ('{"started_agents": ["a"], "count": 1, "was_host_started": true}', True),
+        # An older mngr on PATH, or output that is not the result line: absence
+        # of evidence, which a caller must not fold into "nothing booted".
+        ("Successfully started 1 agent(s)", None),
+        ("", None),
+        ('{"count": 0}', None),
+        ("not json at all {", None),
+    ],
+)
+def test_did_start_boot_a_host_reads_only_a_real_answer(stdout: str, expected: bool | None) -> None:
+    assert _did_start_boot_a_host(stdout) is expected
+
+
+def test_an_unreadable_start_result_is_reported_rather_than_passed_over() -> None:
+    """Silence disables the no-op detection for every restart, so it cannot be silent itself."""
+    with capture_loguru(level="WARNING") as log_output:
+        assert _did_start_boot_a_host("Successfully started 1 agent(s)") is None
+    # Human output is not JSON, so this is the decode branch specifically -- the
+    # other warning arm is for output that parsed but carried no field.
+    assert "Could not read" in log_output.getvalue()
 
 
 # -- provider-error attribution --
@@ -622,257 +670,6 @@ def test_classification_trustworthiness_without_onset_falls_back_to_age() -> Non
     assert is_recovery_classification_trustworthy(resolver, None, agent_id) is False
 
 
-# -- host-health probe: classification-time consistency --
-
-
-class _HostStateFlipResolver(MngrCliBackendResolver):
-    """Resolver whose host state flips RUNNING -> STOPPED across successive reads.
-
-    Emulates a fresh discovery snapshot landing while the slow in-container exec
-    is in flight: the pre-exec host-state read sees the stale RUNNING; every read
-    after that sees the fresh STOPPED.
-    """
-
-    _host_state_reads: int = PrivateAttr(default=0)
-
-    def get_host_state(self, host_id: HostId) -> HostState | None:
-        self._host_state_reads += 1
-        return HostState.RUNNING if self._host_state_reads == 1 else HostState.STOPPED
-
-
-def _register_workspace_with_services(
-    resolver: MngrCliBackendResolver, workspace_agent: AgentId, services_agent: AgentId, provider_name: str
-) -> None:
-    """Register a machine agent and its system-services agent on one shared host."""
-    host_id = HostId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(workspace_agent, services_agent),
-            discovered_agents=(
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=workspace_agent,
-                    agent_name=AgentName("ws-agent"),
-                    provider_name=ProviderInstanceName(provider_name),
-                    certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
-                ),
-                DiscoveredAgent(
-                    host_id=host_id,
-                    agent_id=services_agent,
-                    agent_name=AgentName("system-services"),
-                    provider_name=ProviderInstanceName(provider_name),
-                ),
-            ),
-        )
-    )
-
-
-def test_probe_pairs_the_classified_host_state_with_the_freshness_gate(tmp_path: Path) -> None:
-    """A snapshot landing mid-exec must not split the verdict from its evidence.
-
-    The in-container exec takes tens of seconds. If a fresh discovery snapshot
-    lands during it, the freshness gate (evaluated after the exec) sees a
-    post-onset snapshot time -- but the host state read *before* the exec still
-    holds the pre-snapshot value. Classifying that pair rendered a trusted
-    HOST_UNRESPONSIVE off a stale RUNNING when the very snapshot that opened the
-    gate already read STOPPED. The probe must classify the host state as re-read
-    at gate time: HOST_OFFLINE.
-    """
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = _HostStateFlipResolver()
-    _register_workspace_with_services(resolver, workspace_agent, services_agent, "docker")
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
-    # The mid-exec snapshot: post-onset, so the gate opens.
-    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
-
-    with ConcurrencyGroup(name="test-probe") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=_write_fake_mngr(tmp_path),
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
-
-    # Two reads happened: the pre-exec gate read (RUNNING, so the exec ran) and
-    # the classification-time read (STOPPED).
-    assert resolver._host_state_reads >= 2
-    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
-
-
-def test_probe_attempts_exec_and_resolves_when_discovery_is_stalled(tmp_path: Path) -> None:
-    """With a stalled discovery stream, the probe gathers direct evidence instead of waiting.
-
-    The dead-producer dead-end: no snapshot for the machine's provider means
-    the resolver has no (trusted) host state and the freshness gate can never
-    open, so the old behavior re-classified INDETERMINATE forever. The probe must
-    attempt the in-container exec despite the host not reading RUNNING; the
-    exec's completed failure (the stub exits 0 with no sentinel) then resolves to
-    the consent-gated HOST_UNRESPONSIVE, whose restart also revives a genuinely
-    stopped container.
-    """
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    _drive_to_stuck_with_onset(tracker, workspace_agent)
-    # No provider snapshot is ever recorded, so the classification never becomes
-    # trustworthy and the exec is the only way out of INDETERMINATE.
-
-    mngr_binary = _write_fake_mngr(tmp_path)
-    with ConcurrencyGroup(name="test-probe-stalled") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
-
-    exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
-    assert exec_invocations, "the exec probe must be attempted when discovery is stalled"
-    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
-
-
-def test_probe_skips_exec_for_a_trusted_not_running_host(tmp_path: Path) -> None:
-    """With discovery flowing and the host trustworthily observed STOPPED, no exec fires.
-
-    The doomed-round-trip guard: a fresh post-onset snapshot already answers the
-    question, so the probe classifies HOST_OFFLINE without paying the exec's
-    provider round-trip.
-    """
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPED)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
-    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
-
-    mngr_binary = _write_fake_mngr(tmp_path)
-    with ConcurrencyGroup(name="test-probe-skip-exec") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
-
-    assert _read_fake_mngr_invocations(mngr_binary) == []
-    assert response.dispatch_tier == DispatchTier.HOST_OFFLINE
-
-
-def test_probe_attempts_exec_for_an_untrusted_non_offline_state(tmp_path: Path) -> None:
-    """A stale host state gathers direct evidence instead of waiting.
-
-    Any state the resolver cannot yet vouch for (no snapshot at/after the outage
-    onset has landed) triggers the exec immediately -- there is no fixed
-    staleness threshold to wait out. Here a pre-onset STOPPING resolves via the
-    exec's completed failure (the stub exits 0 with no sentinel) to the
-    consent-gated HOST_UNRESPONSIVE instead of spinning at INDETERMINATE.
-    """
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
-    # A pre-onset snapshot: within the absolute freshness window but still holding
-    # the pre-outage state, so the classification stays untrustworthy.
-    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
-
-    mngr_binary = _write_fake_mngr(tmp_path)
-    with ConcurrencyGroup(name="test-probe-untrusted-stopping") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
-
-    exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
-    assert exec_invocations, "an untrusted non-offline state must gather direct evidence via the exec"
-    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
-
-
-def test_probe_skips_exec_for_a_trusted_transitional_host(tmp_path: Path) -> None:
-    """A trusted transitional state is left to the classifier, not execced into a false verdict.
-
-    A fresh post-onset snapshot showing STOPPING is the host genuinely
-    mid-shutdown; firing a doomed exec there would flip a normal transition into a
-    premature consent-gated HOST_UNRESPONSIVE. The probe skips the exec and yields
-    INDETERMINATE (keep checking), so the next snapshot resolves it (e.g. to
-    HOST_OFFLINE once it reads STOPPED).
-    """
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.STOPPING)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
-    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
-
-    mngr_binary = _write_fake_mngr(tmp_path)
-    with ConcurrencyGroup(name="test-probe-trusted-stopping") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
-
-    assert _read_fake_mngr_invocations(mngr_binary) == []
-    assert response.dispatch_tier == DispatchTier.INDETERMINATE
-
-
-def test_probe_attempts_exec_for_a_trusted_unknown_host(tmp_path: Path) -> None:
-    """A trusted UNKNOWN carries no host-state verdict, so the exec gathers direct evidence.
-
-    A host observed up but unreadable from the inside (a running container whose
-    inner sshd/exec did not answer) surfaces as UNKNOWN even with discovery
-    flowing. UNKNOWN answers neither "running" nor "offline", so the classifier
-    has no host-state verdict for it; unlike a trusted STOPPING (a real
-    transition, left alone), the exec MUST fire so a dead inner sshd resolves to
-    the consent-gated HOST_UNRESPONSIVE rather than stranding on INDETERMINATE.
-    Regression guard for the UNREACHABLE->UNKNOWN collapse: before, UNREACHABLE
-    was a direct host-state verdict; now the completed exec must drive it.
-    """
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.UNKNOWN)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
-    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1))
-
-    mngr_binary = _write_fake_mngr(tmp_path)
-    with ConcurrencyGroup(name="test-probe-trusted-unknown") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
-
-    exec_invocations = [line for line in _read_fake_mngr_invocations(mngr_binary) if line.startswith("exec ")]
-    assert exec_invocations, "a trusted UNKNOWN host must gather direct evidence via the exec"
-    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
-
-
 # -- unattended recovery + the shared dispatch --
 
 
@@ -1304,9 +1101,10 @@ def test_backend_unreachable_verdict_withholds_a_provider_error_from_a_previous_
 def test_backend_unreachable_verdict_is_none_while_the_backend_answers() -> None:
     """No provider error and a reachable host is not a verdict this read can make.
 
-    A wedged-but-reachable container needs the exec probe; this read only ever
-    answers "is the backend unreachable?", so silence here must not be mistaken
-    for a healthy machine.
+    This read only ever answers "is the backend unreachable?", and a wedged but
+    reachable container looks identical to a healthy one here -- it is the probe
+    loop that settles that -- so silence must not be mistaken for a healthy
+    machine.
     """
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
@@ -1469,107 +1267,166 @@ def test_a_rejected_restarts_verdict_lasts_until_the_backend_is_next_polled(tmp_
     assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
 
 
-def test_probe_reads_backend_unreachable_from_the_execs_own_provider_rejection(tmp_path: Path) -> None:
-    """An exec mngr rejected at the provider classifies the backend, not the container.
+# -- the this-device-cannot-connect verdict --
 
-    Same setup as the stalled-discovery case above -- the resolver has surfaced
-    no provider error, so the exec fires -- except that the exec fails at the
-    provider. Without reading that in-band reason the exec looks like a completed
-    failure, which is direct evidence about the *container*: the probe would
-    render HOST_UNRESPONSIVE and offer a restart routed through the backend that
-    is down, and would keep doing so until discovery caught up a poll interval
-    later.
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED,
+        SystemInterfaceBackendFailureReason.POOL_EXHAUSTED,
+    ],
+)
+def test_device_verdict_covers_every_failure_raised_before_the_backend_was_dialed(
+    reason: SystemInterfaceBackendFailureReason,
+) -> None:
+    """Both causes that never reached the network read as this device's fault.
+
+    They are not separated for the user: an app restart is the remedy for both
+    and the only one available, so a second card would be a distinction with no
+    action behind it. The verbatim error travels so the card can show what
+    actually broke.
     """
+    tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    _drive_to_stuck_with_onset(tracker, workspace_agent)
-    mngr_binary, reason = _write_fake_mngr_with_provider_outage(tmp_path, "exec")
+    tracker.record_connection_failure(workspace_agent, reason, "the exact error")
 
-    with ConcurrencyGroup(name="test-probe-provider-outage") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
+    verdict = read_device_cannot_connect_verdict(workspace_agent, tracker=tracker)
 
-    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
-    # The provider's own words, so the log says which outage produced the verdict.
-    assert response.unreachable_reason == reason
+    assert verdict is not None
+    assert verdict.detail == "the exact error"
 
 
-def test_probe_settles_a_gated_off_provider_error_in_band(tmp_path: Path) -> None:
-    """A provider error the freshness gate withholds is settled by the exec, not left unsaid.
+@pytest.mark.parametrize(
+    "reason",
+    [
+        # Reached the network and failed there: the workspace is still implicated.
+        SystemInterfaceBackendFailureReason.CONNECT_ERROR,
+        # The host answered and refused the inner port -- about the workspace,
+        # not this device.
+        SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING,
+    ],
+)
+def test_device_verdict_is_withheld_for_a_failure_that_reached_the_network(
+    reason: SystemInterfaceBackendFailureReason,
+) -> None:
+    """Only a failure raised against this device's own resources clears it.
 
-    Gating the resolver's error is what stops a previous episode explaining this
-    one, but it must not cost the verdict where the backend really is down: with
-    the latched error withheld the exec now fires, and a backend that is still
-    down rejects it, which is a live observation and so speaks regardless of the
-    gate. The verdict carries the exec's reason rather than the withheld
-    snapshot's, being the later account of the same backend.
+    Anything that reached the network leaves the workspace's own reachability
+    open, and claiming otherwise would suppress the restart that fixes it.
     """
+    tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
-    record_provider_discovery_error(
-        resolver, "docker", "an error latched before this outage began", last_snapshot_at=onset - timedelta(seconds=1)
-    )
-    mngr_binary, reason = _write_fake_mngr_with_provider_outage(tmp_path, "exec")
+    tracker.record_connection_failure(workspace_agent, reason, "boom")
 
-    with ConcurrencyGroup(name="test-probe-gated-provider-error") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
-            tracker=tracker,
-            mngr_binary=mngr_binary,
-            mngr_host_dir=tmp_path,
-            concurrency_group=cg,
-            envelope_stream_consumer=None,
-        )
-
-    assert response.dispatch_tier == DispatchTier.BACKEND_UNREACHABLE
-    assert response.unreachable_reason == reason
+    assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is None
 
 
-def test_probe_does_not_read_another_providers_outage_as_this_machines_backend(tmp_path: Path) -> None:
-    """An outage at a provider this machine does not live on is not its backend's.
+def test_device_verdict_outranks_the_restart_episodes_own_conclusion(tmp_path: Path) -> None:
+    """A restart that ran and failed does not displace the verdict that explains it.
 
-    The exec aborts on whichever provider it queried turns out to be unavailable,
-    not only the target's, so the same rejection arrives for a machine whose own
-    backend is fine. Adopting it would put this machine's provider name over
-    another backend's error and withhold a restart that would have worked.
+    The app restarts a machine that stops answering without being asked, so a
+    device-side fault produces RESTARTING and then RESTART_FAILED all by itself.
+    Reporting those would blame the machine for the app's own broken connection,
+    which is the whole misdiagnosis this verdict exists to stop.
     """
+    tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    _drive_to_stuck_with_onset(tracker, workspace_agent)
-    mngr_binary, _reason = _write_fake_mngr_with_provider_outage(
-        tmp_path, "exec", provider_name="imbue_cloud_someone-imbue-com"
+    tracker.record_connection_failure(
+        workspace_agent, SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, "no known_hosts"
     )
 
-    with ConcurrencyGroup(name="test-probe-foreign-provider-outage") as cg:
-        response = probe_workspace_health(
-            workspace_agent,
-            backend_resolver=resolver,
+    tracker.mark_stuck(workspace_agent)
+    tracker.mark_restarting(workspace_agent, start_only=True)
+    assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is not None
+
+    tracker.mark_restart_failed(workspace_agent, "The system interface did not respond.")
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is not None
+
+
+def test_device_verdict_clears_the_moment_the_machine_answers() -> None:
+    """A probe that reaches the machine settles it: the connection works now."""
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    tracker.record_connection_failure(
+        workspace_agent, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, "pool timeout"
+    )
+
+    tracker.record_probe_success(workspace_agent)
+
+    assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is None
+
+
+def test_device_verdict_is_none_without_a_tracker() -> None:
+    """No tracker is no evidence, not a verdict."""
+    assert read_device_cannot_connect_verdict(AgentId.generate(), tracker=None) is None
+
+
+# -- a start that booted nothing --
+
+
+def test_a_start_that_booted_nothing_is_recorded_against_the_episode(tmp_path: Path) -> None:
+    """A no-op start that leaves the machine unreachable must not read as a failed restart.
+
+    The unattended dispatch fires ``mngr start`` at any machine that stops
+    answering, and that start is idempotent: against a host that is already up
+    it does nothing at all. The tracker still reaches RESTART_FAILED -- the
+    machine really did not come back -- but the surfaces read the recorded
+    no-op and report the machine as unresponsive instead of blaming a restart
+    that never ran.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker = SystemInterfaceHealthTracker()
+    tracker.mark_restarting(workspace_agent, start_only=True)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
             tracker=tracker,
-            mngr_binary=mngr_binary,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path, was_host_started=False),
             mngr_host_dir=tmp_path,
             concurrency_group=cg,
-            envelope_stream_consumer=None,
+            # Port 1 refuses every probe, so the readiness wait runs out: the
+            # machine stayed unreachable after a start that started nothing.
+            mngr_forward_port=1,
+            mngr_forward_preauth_cookie="cookie",
+            registry=_started_registry(workspace_agent),
+            skip_stop=True,
+            startup_wait_seconds=0.1,
         )
 
-    # The exec still completed without reaching the container, which is what that
-    # observation on its own means: the machine is unresponsive, restart offered.
-    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
-    assert response.unreachable_reason == ""
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.is_restart_a_no_op(workspace_agent) is True
+
+
+def test_a_start_that_really_booted_the_host_keeps_the_restart_framing(tmp_path: Path) -> None:
+    """A cold boot that did not converge *is* a failed restart, and still reads as one."""
+    workspace_agent = AgentId.generate()
+    tracker = SystemInterfaceHealthTracker()
+    tracker.mark_restarting(workspace_agent, start_only=True)
+    resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate())
+
+    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
+        run_restart_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path, was_host_started=True),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            mngr_forward_port=1,
+            mngr_forward_preauth_cookie="cookie",
+            registry=_started_registry(workspace_agent),
+            skip_stop=True,
+            startup_wait_seconds=0.1,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.is_restart_a_no_op(workspace_agent) is False
 
 
 # -- post-restart readiness wait --

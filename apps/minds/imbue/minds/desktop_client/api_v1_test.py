@@ -2403,44 +2403,6 @@ def _resolver_with_services_agent(agent_id: AgentId, services_id: AgentId) -> Ba
     return make_resolver_with_data(agents_json)
 
 
-def test_workspace_health_returns_probes_for_known_workspace(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    # A known workspace returns the flat HostHealthResponse the recovery page
-    # renders: a probe list plus the derived dispatch tier.
-    agent_id = AgentId()
-    resolver = make_resolver_with_data(make_agents_json(agent_id))
-    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
-
-    response = client.get(f"/api/v1/workspaces/{agent_id}/health", headers=_auth_header())
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    assert isinstance(body["probes"], list)
-    assert "dispatch_tier" in body
-
-
-def test_workspace_health_unknown_workspace_returns_404(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    resolver = make_resolver_with_data(make_agents_json(AgentId()))
-    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
-
-    response = client.get(f"/api/v1/workspaces/{AgentId()}/health", headers=_auth_header())
-
-    assert response.status_code == 404
-
-
-def test_workspace_health_requires_bearer(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
-    agent_id = AgentId()
-    resolver = make_resolver_with_data(make_agents_json(agent_id))
-    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
-
-    response = client.get(f"/api/v1/workspaces/{agent_id}/health")
-
-    assert response.status_code == 401
-
-
 def test_workspace_restart_returns_202_operation_handle(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:

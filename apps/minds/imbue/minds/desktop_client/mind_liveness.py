@@ -75,7 +75,7 @@ _SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset(
 _LOCAL_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"docker", "lima"})
 
 # Discovery ``HostState`` values that mean the container exists but is not
-# running. Mirrors the offline set the recovery-diagnostics probe uses.
+# running.
 _OFFLINE_HOST_STATES: Final[frozenset[HostState]] = frozenset(
     {HostState.STOPPED, HostState.STOPPING, HostState.CRASHED, HostState.FAILED}
 )

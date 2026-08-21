@@ -267,37 +267,35 @@ cross-component behavior.
 6. **Cross-workspace notification route** [snapshot] -- `POST
    /api/v1/agents/<id>/notifications` for the resumed workspace returns `ok` and
    dispatches (assert via a recording dispatcher).
-7. **Health probe** [snapshot] -- `GET /workspaces/<id>/health` returns a
-   `HostHealthResponse` with a sane `dispatch_tier` for a live workspace.
 
 ### 2.2 Electron-driven (one more real lifecycle)
 
-8. **Create -> v1 destroy round-trip** [electron] -- extend the existing create
+7. **Create -> v1 destroy round-trip** [electron] -- extend the existing create
    e2e: after `system_interface` renders, drive `POST
    /api/v1/workspaces/<id>/destroy`, poll `GET
    /workspaces/operations/destroy/<id>` to DONE, and assert the host is gone (the
    operator harness `scripts/electron_full_flow_e2e.py` already does a superset;
    this would crystallize the destroy half as a CI-run acceptance test).
-9. **Browser create posts to `/api/v1/workspaces`** [electron] -- once the create
+8. **Browser create posts to `/api/v1/workspaces`** [electron] -- once the create
    UI is repointed (handoff item #2.B), assert the form submit drives the v1
    create + operation poll, not the legacy `/api/create-agent/...` routes.
 
 ### 2.3 Local integration (no Docker, no login)
 
-10. **`require_api_or_cookie_auth` matrix** [local] -- table-driven: bearer-only,
+9. **`require_api_or_cookie_auth` matrix** [local] -- table-driven: bearer-only,
     cookie-only, both, neither, wrong bearer -> assert 200 vs 401 across a
     representative route. Locks the dual-auth contract the whole `/api/v1`
     surface depends on.
-11. **Operation-status routing precedence** [local] -- a workspace id that has
+10. **Operation-status routing precedence** [local] -- a workspace id that has
     both a stale restart record and a live destroy record resolves to the
     destroy (the documented precedence in `_handle_operation_status`); the
     `creation-` prefix routes to the creator.
-12. **SSH grant validation 400s** [local] -- via the Flask test client with a
+11. **SSH grant validation 400s** [local] -- via the Flask test client with a
     stubbed `mngr` exec: empty/multi-line public key, whitespace in
     `requester_workspace_id`, missing `requester_workspace_id` -> 400 with the
     right message. (Requires making the route's `mngr exec` injectable; see the
     note below.)
-13. **`compose_pruned_authorized_keys` over realistic files** [local] -- already
+12. **`compose_pruned_authorized_keys` over realistic files** [local] -- already
     added in `workspace_ssh_test.py`; extend with a fuzz-style case mixing user
     keys, comments, blank lines, and multiple grants to lock the
     preserve-verbatim guarantee.
@@ -308,15 +306,15 @@ These need a remote host and/or a logged-in account, so they belong in
 release/deployment suites, not the snapshot stage, and cannot run in this
 environment today:
 
-14. **SSH remote->remote establish + connect** [release] -- create two remote
+13. **SSH remote->remote establish + connect** [release] -- create two remote
     workspaces, grant SSH from one to the other, and actually `ssh`/`git pull`
     across. Exercises the implemented remote-direct path.
-15. **SSH remote->local broker** [release] -- create one remote + one local
+14. **SSH remote->local broker** [release] -- create one remote + one local
     workspace, grant SSH from the remote caller to the local target, and connect
     through the hub-brokered loopback endpoint. The broker itself is implemented;
     the local->local half can run in the snapshot stage (proposal 2b below),
     while the remote-caller half needs a cloud host so it stays release-only.
-16. **imbue_cloud create + backup parity** [deployment] -- already covered
+15. **imbue_cloud create + backup parity** [deployment] -- already covered
     in spirit by the `minds_deployment`/`minds_services` suites.
 
 ## Note on testability gaps

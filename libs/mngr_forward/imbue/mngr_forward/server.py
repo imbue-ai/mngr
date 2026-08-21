@@ -57,6 +57,7 @@ from pydantic import Field
 from starlette.types import Send
 from websockets import ClientConnection
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -84,6 +85,7 @@ from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 
 # How long a backend may go without answering before the plugin emits an
@@ -524,7 +526,137 @@ def _get_tunnel_http_client(
         return client
 
 
+class _BackendRefusalProbe(FrozenModel):
+    """Whether this request's tunnel had a channel open refused while it was in flight.
+
+    A refused ``direct-tcpip`` open cannot reach the proxy as anything but the
+    tunnel socket closing, which is indistinguishable from every other
+    connect-time failure. The tunnel layer counts refusals instead (see
+    :meth:`SSHTunnelManager.get_backend_refusal_count`); this holds the count as
+    it stood when the request was dialed, so a later reading that has moved says
+    the host answered and refused the inner port.
+    """
+
+    tunnel_manager: SSHTunnelManager = Field(description="Manager holding the tunnel's refusal count")
+    ssh_info: RemoteSSHInfo = Field(description="SSH host the tunnel runs over")
+    remote_host: str = Field(description="Backend host inside the tunnel")
+    remote_port: int = Field(description="Backend port inside the tunnel")
+    refusals_at_dial: int = Field(description="Refusal count read just before the request was dialed")
+
+    def __call__(self) -> bool:
+        current = self.tunnel_manager.get_backend_refusal_count(self.ssh_info, self.remote_host, self.remote_port)
+        return current > self.refusals_at_dial
+
+
+def _never_refused() -> bool:
+    """A backend dialed without an SSH tunnel has no channel open to be refused."""
+    return False
+
+
+def _snapshot_backend_refusals(
+    tunnel_manager: SSHTunnelManager,
+    backend_url: str,
+    ssh_info: RemoteSSHInfo | None,
+) -> Callable[[], bool]:
+    """Arm the refused-channel check for one request, or a constant False when there is no tunnel.
+
+    Must be called before the request is dialed: the check is a comparison
+    against the count as it stands now, so anything refused earlier (a previous
+    request, a workspace that has since come up) is excluded by construction.
+    """
+    if ssh_info is None:
+        return _never_refused
+    remote_host, remote_port = parse_url_host_port(backend_url)
+    return _BackendRefusalProbe(
+        tunnel_manager=tunnel_manager,
+        ssh_info=ssh_info,
+        remote_host=remote_host,
+        remote_port=remote_port,
+        refusals_at_dial=tunnel_manager.get_backend_refusal_count(ssh_info, remote_host, remote_port),
+    )
+
+
+def _tunnel_setup_failure_reason(exc: BaseException) -> SystemInterfaceBackendFailureReason:
+    """Classify a failure raised while establishing the tunnel to a remote backend.
+
+    Only a failure the tunnel layer itself tagged ``LOCAL_SETUP`` counts as
+    device-side: it is raised against this machine's own socket table and
+    filesystem, so it says nothing about the agent's host. Everything else -- a
+    dial that did not answer, a handshake paramiko rejected, a bare ``OSError``
+    out of the dial -- reached the network and stays ``CONNECT_ERROR``, where a
+    consumer may still read it as evidence about the workspace.
+    """
+    if isinstance(exc, SSHTunnelError) and exc.phase is SSHTunnelPhase.LOCAL_SETUP:
+        return SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED
+    return SystemInterfaceBackendFailureReason.CONNECT_ERROR
+
+
+def _connect_failure_reason(was_backend_refused: Callable[[], bool]) -> SystemInterfaceBackendFailureReason:
+    """Classify a connect-time failure of a request that was actually dialed.
+
+    A refusal recorded against this request's tunnel while it was in flight means
+    the host answered and nothing is listening on the inner port; anything else
+    leaves the backend's reachability unresolved and stays ``CONNECT_ERROR``.
+    """
+    if was_backend_refused():
+        return SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING
+    return SystemInterfaceBackendFailureReason.CONNECT_ERROR
+
+
 # -- HTTP forwarding -------------------------------------------------------
+
+
+class _BackendBodyError(MngrForwardError):
+    """Raised when a backend response failed *after* its headers had arrived.
+
+    Exists because httpx raises the same exceptions either side of that line,
+    while the two mean opposite things to a consumer: before the headers the
+    backend never answered at all (a connect-time failure the recovery UI acts
+    on), after them it answered and then dropped the body (``SSE_EOF``). The
+    read that produces the second case is the only place that distinction is
+    still visible, so it is recorded there rather than guessed at afterwards.
+    """
+
+
+async def _send_and_read_backend_response(
+    http_client: httpx.AsyncClient, backend_request: httpx.Request
+) -> httpx.Response:
+    """Send a buffered request, returning the response with its body read.
+
+    Streams rather than using ``request()`` so the headers land before the body
+    is read, which is what separates a backend that never answered from one
+    that answered and then dropped the connection. The body failure is re-raised
+    as :class:`_BackendBodyError` so the caller can tell them apart; everything
+    else propagates unchanged.
+
+    A timeout is wrapped alongside the transport errors, and has to be: a body
+    that stalls and a backend that never sent headers both raise
+    ``httpx.ReadTimeout``, so the phase is the only thing separating them and
+    this is the last point that still knows it. Left unwrapped it would reach
+    the caller's timeout branch and be reported as an unreachable backend,
+    against a backend that demonstrably answered.
+
+    Reading and closing here rather than in the caller keeps the response's
+    lifetime inside the single task the caller races against the client
+    disconnect: cancelling that task then still releases the pooled connection,
+    exactly as it did when this was one ``request()`` call.
+    """
+    response = await http_client.send(backend_request, stream=True)
+    try:
+        await response.aread()
+    except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+        raise _BackendBodyError(_describe_backend_failure_cause(e)) from e
+    finally:
+        # A read that completed has already closed the response and released the
+        # connection; httpx only skips the close on a *failed* read, so this is
+        # the real close of a connection that has just broken. Guarded so an
+        # error raised here cannot replace the _BackendBodyError above and be
+        # reported as a backend that never answered.
+        try:
+            await response.aclose()
+        except (httpx.HTTPError, OSError) as close_error:
+            logger.trace("Error closing the backend response: {}", close_error)
+    return response
 
 
 def _schedule_stall_notice(
@@ -639,7 +771,15 @@ async def _forward_workspace_http(
     agent_id: AgentId,
     envelope_writer: EnvelopeWriter,
     stall_notice_seconds: float,
+    was_backend_refused: Callable[[], bool],
 ) -> Response:
+    """Byte-forward one request to ``backend_url`` and report what happened.
+
+    ``was_backend_refused`` must have been armed by
+    :func:`_snapshot_backend_refusals` before this is called: it is what tells a
+    connect-time failure over a live tunnel (the host refused the inner port)
+    from one that leaves the backend's reachability unknown.
+    """
     base = backend_url.rstrip("/")
     path = request.url.path.lstrip("/")
     url = f"{base}/{path}" if path else base + "/"
@@ -698,29 +838,29 @@ async def _forward_workspace_http(
                 logger.debug("Client disconnected before the backend stream for {} opened", agent_id)
                 return Response(status_code=499, content="Client disconnected")
             backend_response = handoff_task.result()
-        except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
-            # ``RemoteProtocolError`` here means the backend disconnected
-            # before sending headers -- typical when the system interface
-            # died between the SSH tunnel accepting the unix-socket
-            # connection and the channel-open completing. Same recovery
-            # signal as a connect-time failure.
+        except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
+            # All three mean the same thing here, because ``send(stream=True)``
+            # returns as soon as the response headers are in: the backend never
+            # answered. Typical when the system interface died between the SSH
+            # tunnel accepting the unix-socket connection and the channel-open
+            # completing -- and which exception carries it is the platform's
+            # choice, not a distinction about the backend. A peer that closes a
+            # socket still holding the unread request is a clean EOF on macOS
+            # (``RemoteProtocolError``) and an RST on Linux (``ReadError``).
             logger.debug("Failed to reach the backend for {} at {}: {}", agent_id, backend_url, e)
-            _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+            _emit_backend_failure(envelope_writer, agent_id, _connect_failure_reason(was_backend_refused), None, e)
             return _service_unavailable_response(request)
-        except httpx.ReadError as e:
-            logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
-            _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
-            return Response(status_code=502, content="Backend connection lost")
         except httpx.PoolTimeout as e:
             # PoolTimeout fires while waiting to check out a pooled connection,
             # before the backend is ever dialed: the proxy's own pool is
             # exhausted (e.g. by leaked streaming responses), and the backend's
-            # health is unknown. The envelope reason stays CONNECT_ERROR (it is
-            # a cross-version contract with consumers), but the log line and
-            # response body name the actual condition so the two failures are
-            # tellable apart.
+            # health is unknown. POOL_EXHAUSTED says exactly that, so a consumer
+            # does not read a proxy of its own that ran out of slots as evidence
+            # against the workspace.
             logger.warning("Exhausted the proxy connection pool for {} at {}: {}", agent_id, backend_url, e)
-            _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+            _emit_backend_failure(
+                envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e
+            )
             return Response(status_code=504, content="Proxy connection pool exhausted")
         except httpx.TimeoutException as e:
             # A wedged-but-listening backend produces a TimeoutException
@@ -728,7 +868,9 @@ async def _forward_workspace_http(
             # consumer still treats the agent as failing, matching the
             # behaviour for a backend that returns a 504.
             logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
-            _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+            _emit_backend_failure(
+                envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e
+            )
             return Response(status_code=504, content="Backend stream timed out")
         finally:
             # Cancelling the loser is what releases its resources; a no-op on
@@ -766,7 +908,7 @@ async def _forward_workspace_http(
                     yield chunk
             except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
                 logger.warning("Backend SSE stream failed for {}: {}", request.url.path, e)
-                _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
+                _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None, e)
 
         media_type = backend_response.headers.get("content-type", "text/event-stream")
         return _StallGuardedStreamingResponse(
@@ -792,7 +934,9 @@ async def _forward_workspace_http(
     # pooled connection (and, for a remote agent, the SSH channel and relay
     # thread behind it) as soon as nobody is waiting for it.
     backend_task = asyncio.create_task(
-        http_client.request(method=request.method, url=url, headers=headers, content=body)
+        _send_and_read_backend_response(
+            http_client, http_client.build_request(method=request.method, url=url, headers=headers, content=body)
+        )
     )
     disconnect_task = asyncio.create_task(_wait_for_client_disconnect(request))
     try:
@@ -814,30 +958,37 @@ async def _forward_workspace_http(
             logger.debug("Client disconnected before the backend for {} answered at {}", agent_id, backend_url)
             return Response(status_code=499, content="Client disconnected")
         backend_response = backend_task.result()
-    except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
+    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError) as e:
         # System interface may not yet be listening, or it may have closed the
         # connection before sending headers (typical during startup). Surface
         # a 503 (and the failure envelope below) so a consumer can react (e.g.
         # navigate the user to its recovery UI); non-HTML callers can interpret
         # the 503 programmatically. Logged at debug, since a workspace that has
         # not finished starting is the expected source of it.
+        #
+        # ``ReadError`` belongs here rather than with the mid-response failure
+        # below because the read that produces one is the read of the headers:
+        # a peer that closes a socket still holding the unread request is a
+        # clean EOF on macOS (``RemoteProtocolError``) and an RST on Linux
+        # (``ReadError``). Which one arrives is the platform's choice, not a
+        # distinction about the backend.
         logger.debug("Failed to reach the backend for {} at {}: {}", agent_id, backend_url, e)
-        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        _emit_backend_failure(envelope_writer, agent_id, _connect_failure_reason(was_backend_refused), None, e)
         return _service_unavailable_response(request)
-    except httpx.ReadError as e:
-        # ReadError fires after the connection was established, so this is a
-        # mid-response failure (same shape as SSE_EOF on the streaming path),
-        # not a connect-time failure -- hence warning: unlike a connect failure,
-        # a workspace that is merely still starting does not produce this.
+    except _BackendBodyError as e:
+        # The headers arrived and the body did not finish, so the backend was
+        # reachable and answered -- a mid-response failure (same shape as
+        # SSE_EOF on the streaming path), not a connect-time one. Hence
+        # warning: unlike a connect failure, a workspace that is merely still
+        # starting does not produce this.
         logger.warning("Lost the backend connection for {} at {}: {}", agent_id, backend_url, e)
-        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None)
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.SSE_EOF, None, e)
         return Response(status_code=502, content="Backend connection lost")
     except httpx.PoolTimeout as e:
         # Same distinction as the SSE branch above: the proxy's own pool is
-        # exhausted and the backend was never dialed. Envelope reason stays
-        # CONNECT_ERROR; the log line and body name the actual condition.
+        # exhausted and the backend was never dialed.
         logger.warning("Exhausted the proxy connection pool for {} at {}: {}", agent_id, backend_url, e)
-        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, e)
         return Response(status_code=504, content="Proxy connection pool exhausted")
     except httpx.TimeoutException as e:
         # Either the dial timed out, or the backstop expired on a backend that
@@ -847,7 +998,7 @@ async def _forward_workspace_http(
         # still starting refuses the connection or closes it, so one that
         # accepted it and then stayed silent is a different condition.
         logger.warning("Timed out reaching the backend for {} at {}: {}", agent_id, backend_url, e)
-        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, e)
         return Response(status_code=504, content="Backend timed out")
     finally:
         stall_notice.cancel()
@@ -879,19 +1030,59 @@ async def _forward_workspace_http(
     return response
 
 
+# What ``PoolTimeout`` means, spelled out because it is the one message-less
+# exception here whose description is read by a person rather than by a log.
+# ``POOL_EXHAUSTED`` is a device-side reason, and the recovery card expands a
+# device-side detail verbatim behind "Error details" -- so the class-name
+# fallback below would put the bare word "PoolTimeout" in front of a user. Every
+# other message-less case reaches only the log, where the class name is exactly
+# the right amount of detail.
+_POOL_TIMEOUT_DESCRIPTION: Final[str] = (
+    "Timed out waiting for a free connection in this device's forwarding pool; the machine was never contacted"
+)
+
+
+def _describe_backend_failure_cause(exc: BaseException) -> str:
+    """Describe the exception behind a backend failure, for a consumer to show or log.
+
+    Its message, except that several httpx exceptions do not carry one: both
+    ``ReadError`` and every ``TimeoutException`` stringify empty, which is
+    exactly the RST and the stalled read this plugin classifies most carefully.
+    Reporting those as an empty string leaves a consumer with the bare category
+    name again, so the class name stands in -- the only thing a message-less
+    exception still says about itself.
+    """
+    if isinstance(exc, httpx.PoolTimeout):
+        return _POOL_TIMEOUT_DESCRIPTION
+    return str(exc) or type(exc).__name__
+
+
 def _emit_backend_failure(
     envelope_writer: EnvelopeWriter,
     agent_id: AgentId,
     reason: SystemInterfaceBackendFailureReason,
     status_code: int | None,
+    cause: BaseException | None = None,
 ) -> None:
     """Emit a ``system_interface_backend_failure`` envelope on best-effort basis.
 
     The plugin never lets envelope-emission errors break a forwarded
     request -- if stdout is gone (parent died) we just log and continue.
+
+    ``cause`` is the exception behind the observation, when there is one. Its
+    description crosses the envelope as ``detail`` so a consumer can show the
+    user what actually went wrong rather than a category name; the plugin does
+    not interpret it. Taking the exception rather than a string is what keeps
+    that promise: a caller cannot hand this an empty description, because
+    :func:`_describe_backend_failure_cause` is the only thing that renders one.
     """
     try:
-        payload = SystemInterfaceBackendFailurePayload(agent_id=agent_id, reason=reason, status_code=status_code)
+        payload = SystemInterfaceBackendFailurePayload(
+            agent_id=agent_id,
+            reason=reason,
+            status_code=status_code,
+            detail=None if cause is None else _describe_backend_failure_cause(cause),
+        )
         envelope_writer.emit_system_interface_backend_failure(payload)
     except (OSError, ValueError) as e:
         logger.trace("Could not emit system_interface_backend_failure envelope for {}: {}", agent_id, e)
@@ -1139,7 +1330,10 @@ async def _handle_workspace_forward_http(
         )
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         # A stopped container fails here (its SSH endpoint is gone) rather
-        # than at the resolver -- the resolver still holds a stale entry.
+        # than at the resolver -- the resolver still holds a stale entry. So
+        # does trust material this device is missing, which is not about the
+        # container at all; ``_tunnel_setup_failure_reason`` reads the phase the
+        # tunnel layer tagged to tell the two apart.
         # Emit a backend-failure envelope so a consumer can react (e.g. drive
         # its own recovery UI), and serve the same styled loader as the
         # UNRESOLVED path instead of raw error text.
@@ -1147,7 +1341,7 @@ async def _handle_workspace_forward_http(
         if suppressed_repeats is not None:
             repeat_suffix = f" ({suppressed_repeats} earlier failures suppressed)" if suppressed_repeats > 0 else ""
             logger.warning("SSH tunnel setup failed for {}: {}{}", agent_id, e, repeat_suffix)
-        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        _emit_backend_failure(envelope_writer, agent_id, _tunnel_setup_failure_reason(e), None, e)
         return _service_unavailable_response(request)
 
     if tunnel_client is None and _is_loopback_url(backend_url) and not allow_host_loopback:
@@ -1175,6 +1369,9 @@ async def _handle_workspace_forward_http(
         agent_id=agent_id,
         envelope_writer=envelope_writer,
         stall_notice_seconds=stall_notice_seconds,
+        # Armed here rather than inside the forward, so the count it compares
+        # against is read before the request is dialed.
+        was_backend_refused=_snapshot_backend_refusals(tunnel_manager, backend_url, target.ssh_info),
     )
 
 
@@ -1227,7 +1424,7 @@ async def _handle_workspace_forward_websocket(
         )
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.debug("SSH tunnel setup failed for WS {}: {}", agent_id, e)
-        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        _emit_backend_failure(envelope_writer, agent_id, _tunnel_setup_failure_reason(e), None, e)
         try:
             await websocket.close(code=1011, reason="SSH tunnel failed")
         except RuntimeError:
@@ -1248,6 +1445,10 @@ async def _handle_workspace_forward_websocket(
             pass
         return
 
+    # Armed before the backend socket is opened, so the refusal count it
+    # compares against predates this connection's own channel open.
+    was_backend_refused = _snapshot_backend_refusals(tunnel_manager, backend_url, target.ssh_info)
+
     ws_backend = backend_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/")
     path = websocket.url.path.lstrip("/")
     ws_url = f"{ws_backend}/{path}" if path else ws_backend + "/"
@@ -1259,11 +1460,18 @@ async def _handle_workspace_forward_websocket(
     if client_subprotocol_header:
         subprotocols = [s.strip() for s in client_subprotocol_header.split(",")]
 
+    # The except below spans the whole relay, not just the handshake, so it has
+    # to know which side of the handshake a failure came from: the refusal count
+    # answers "was this connection's own channel open refused?", and it stops
+    # meaning that the moment the connection exists and the count is free to
+    # move for other requests.
+    is_backend_connected = False
     try:
         backend_ws_conn = _connect_backend_websocket(
             ws_url=ws_url, subprotocols=subprotocols, tunnel_socket_path=tunnel_socket_path
         )
         async with backend_ws_conn as backend_ws:
+            is_backend_connected = True
             await websocket.accept(subprotocol=backend_ws.subprotocol)
             logger.info("WS forward established for {} path={}", agent_id, websocket.url.path)
             client_to_backend = asyncio.create_task(
@@ -1330,7 +1538,17 @@ async def _handle_workspace_forward_websocket(
         websockets.exceptions.InvalidHandshake,
     ) as connection_error:
         logger.debug("Backend WS connection failed for {}: {}", agent_id, connection_error)
-        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        # A failure after the backend answered is a mid-connection failure, and
+        # says nothing about the inner port: this connection's own channel open
+        # succeeded, so any refusal the count has picked up since belongs to
+        # some other request. Only a handshake that never completed can be read
+        # against the count.
+        reason = (
+            SystemInterfaceBackendFailureReason.CONNECT_ERROR
+            if is_backend_connected
+            else _connect_failure_reason(was_backend_refused)
+        )
+        _emit_backend_failure(envelope_writer, agent_id, reason, None, connection_error)
         try:
             await websocket.close(code=1011, reason="Backend connection failed")
         except RuntimeError:

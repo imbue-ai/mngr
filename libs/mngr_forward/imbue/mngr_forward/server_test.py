@@ -10,14 +10,19 @@ import asyncio
 import io
 import json
 import socket as socket_module
+import struct
 import tempfile
 import threading
 import time
 from collections.abc import AsyncGenerator
+from collections.abc import Iterator
 from collections.abc import MutableMapping
 from contextlib import asynccontextmanager
+from contextlib import contextmanager
+from enum import auto
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 import httpx
 import pytest
@@ -33,6 +38,7 @@ from starlette.websockets import WebSocketDisconnect
 from websockets.sync.server import ServerConnection
 from websockets.sync.server import serve as ws_serve
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
@@ -52,6 +58,7 @@ from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import TunnelWarningRateLimiter
 from imbue.mngr_forward.server import _PROXY_BACKSTOP_TIMEOUT_SECONDS
+from imbue.mngr_forward.server import _PROXY_CONNECT_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _PROXY_POOL_LIMITS
 from imbue.mngr_forward.server import _PROXY_TIMEOUT
 from imbue.mngr_forward.server import _SSE_READ_TIMEOUT_SECONDS
@@ -61,12 +68,14 @@ from imbue.mngr_forward.server import _TUNNEL_POOL_LIMITS
 from imbue.mngr_forward.server import _forward_workspace_http
 from imbue.mngr_forward.server import _get_tunnel_http_client
 from imbue.mngr_forward.server import _is_loopback_url
+from imbue.mngr_forward.server import _never_refused
 from imbue.mngr_forward.server import _sanitize_next_url
 from imbue.mngr_forward.server import _select_ws_receive_payload
 from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
 
@@ -1683,18 +1692,42 @@ class _FailingTunnelManager(SSHTunnelManager):
     A stopped agent container still has a resolver entry (stop is not destroy),
     so the forward handler resolves a target with ssh_info and then fails when
     opening the SSH tunnel -- exactly the path a stopped container exercises.
+    ``phase`` picks which side of the tunnel the failure is attributed to; the
+    forward reads it to decide whether the agent's host is implicated at all.
     """
 
+    phase: SSHTunnelPhase = Field(
+        default=SSHTunnelPhase.HOST_CONNECT, description="Phase to tag the simulated failure with"
+    )
+
     def get_tunnel_socket_path(self, ssh_info: RemoteSSHInfo, remote_host: str, remote_port: int) -> Path:
-        raise SSHTunnelError(f"Unable to connect to port {remote_port} on {remote_host}")
+        raise SSHTunnelError(f"Unable to connect to port {remote_port} on {remote_host}", self.phase)
 
 
-def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Path) -> None:
-    """An SSH-tunnel setup failure (stopped container) must emit ``CONNECT_ERROR`` and serve the loader.
+@pytest.mark.parametrize(
+    "phase, expected_reason",
+    [
+        # The tunnel was dialed and the host did not answer -- a stopped
+        # container, a host that went away. Evidence about the workspace.
+        (SSHTunnelPhase.HOST_CONNECT, "CONNECT_ERROR"),
+        # This device could not build its own end (no known_hosts to pin
+        # against, a socket that would not bind). Every one is raised against
+        # this device's own filesystem or socket table, so nothing here is
+        # evidence about the workspace at all.
+        (SSHTunnelPhase.LOCAL_SETUP, "TUNNEL_SETUP_FAILED"),
+    ],
+)
+def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(
+    tmp_path: Path, phase: SSHTunnelPhase, expected_reason: str
+) -> None:
+    """An SSH-tunnel setup failure must emit a failure envelope naming which side failed, and serve the loader.
 
     Regression test: previously this path returned a raw 502 with no failure
     envelope, so a consumer had no signal to drive recovery -- the user just
-    saw raw "SSH tunnel failed" text.
+    saw raw "SSH tunnel failed" text. The reason is split by phase because both
+    failures raise the same exception type here, and reading a local trust-material
+    failure as CONNECT_ERROR is what makes minds blame (and "restart") a
+    workspace that was answering all along.
     """
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
@@ -1711,7 +1744,7 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
-        tunnel_manager=_FailingTunnelManager(),
+        tunnel_manager=_FailingTunnelManager(phase=phase),
         envelope_writer=EnvelopeWriter(output=envelope_output),
         listen_host="127.0.0.1",
         listen_port=18421,
@@ -1738,11 +1771,23 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
     assert envelope["agent_id"] == str(instance_key.agent_id)
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
-    assert payload["reason"] == "CONNECT_ERROR"
+    assert payload["reason"] == expected_reason
+    # The verbatim text is what the recovery card shows the user; a category
+    # name alone leaves a broken install undiagnosable from the app.
+    assert "Unable to connect to port 8000 on stub-backend" in payload["detail"]
 
 
-def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Path) -> None:
-    """A websocket whose SSH-tunnel setup fails must emit ``CONNECT_ERROR``.
+@pytest.mark.parametrize(
+    "phase, expected_reason",
+    [
+        (SSHTunnelPhase.HOST_CONNECT, "CONNECT_ERROR"),
+        (SSHTunnelPhase.LOCAL_SETUP, "TUNNEL_SETUP_FAILED"),
+    ],
+)
+def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(
+    tmp_path: Path, phase: SSHTunnelPhase, expected_reason: str
+) -> None:
+    """A websocket whose SSH-tunnel setup fails must emit the same phase-split reason as the HTTP path.
 
     The websocket analogue of
     ``test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error``: a
@@ -1773,7 +1818,7 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
-        tunnel_manager=_FailingTunnelManager(),
+        tunnel_manager=_FailingTunnelManager(phase=phase),
         envelope_writer=EnvelopeWriter(output=envelope_output),
         listen_host="127.0.0.1",
         listen_port=18421,
@@ -1802,23 +1847,35 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp
     assert envelope["agent_id"] == str(instance_key.agent_id)
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
-    assert payload["reason"] == "CONNECT_ERROR"
+    assert payload["reason"] == expected_reason
 
 
 class _AcceptThenCloseTunnelManager(SSHTunnelManager):
     """Tunnel manager whose socket accepts a connection and immediately closes it.
 
-    This is what a forward tunnel does to an in-flight connection once it
-    retires itself over a transport-level failure: ``_open_and_relay`` closes
-    the accepted socket without ever speaking HTTP. The ``websockets`` client
-    reports that as ``InvalidMessage``, not as an ``OSError``.
+    This is what a forward tunnel does to an in-flight connection either way an
+    open can fail: ``_open_and_relay`` closes the accepted socket without ever
+    speaking HTTP. The ``websockets`` client reports that as ``InvalidMessage``,
+    not as an ``OSError``.
+
+    Which failure it was is invisible in the socket, which is the whole reason
+    the tunnel layer counts refusals separately. When ``is_refusal_recorded``
+    is on, the accept loop records a refusal against the tunnel key the forward
+    asked for -- exactly as ``_open_and_relay`` does when sshd answers and
+    refuses the inner port -- before closing, so the two cases stay
+    byte-identical on the wire and differ only in that count.
     """
+
+    is_refusal_recorded: bool = Field(
+        default=False, description="Whether each accepted connection counts as a refused channel open"
+    )
 
     _socket_tmpdir: tempfile.TemporaryDirectory[str] = PrivateAttr()
     _socket_path: Path = PrivateAttr()
     _server: socket_module.socket = PrivateAttr()
     _stop: threading.Event = PrivateAttr(default_factory=threading.Event)
     _thread: threading.Thread = PrivateAttr()
+    _requested_tunnel_key: str | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: object) -> None:
         # Not pytest's tmp_path: on macOS that lives under /var/folders/... and
@@ -1838,9 +1895,13 @@ class _AcceptThenCloseTunnelManager(SSHTunnelManager):
                 continue
             except OSError:
                 return
+            requested_tunnel_key = self._requested_tunnel_key
+            if self.is_refusal_recorded and requested_tunnel_key is not None:
+                self._record_backend_refusal(requested_tunnel_key)
             conn.close()
 
     def get_tunnel_socket_path(self, ssh_info: RemoteSSHInfo, remote_host: str, remote_port: int) -> Path:
+        self._requested_tunnel_key = f"{ssh_info.host}:{ssh_info.port}->{remote_host}:{remote_port}"
         return self._socket_path
 
     def cleanup(self) -> None:
@@ -1851,8 +1912,21 @@ class _AcceptThenCloseTunnelManager(SSHTunnelManager):
         super().cleanup()
 
 
-def test_websocket_emits_failure_when_backend_closes_during_handshake(tmp_path: Path) -> None:
-    """A backend that closes mid-handshake must emit ``CONNECT_ERROR``, not escape as an ASGI error.
+@pytest.mark.parametrize(
+    "is_refusal_recorded, expected_reason",
+    [
+        # The tunnel retired itself under the handshake (its SSH transport
+        # stopped answering): nothing was learned about the inner port.
+        (False, "CONNECT_ERROR"),
+        # sshd answered and refused the channel to the inner port: the host is
+        # reachable and its server is not listening.
+        (True, "BACKEND_NOT_LISTENING"),
+    ],
+)
+def test_websocket_emits_failure_when_backend_closes_during_handshake(
+    tmp_path: Path, is_refusal_recorded: bool, expected_reason: str
+) -> None:
+    """A backend that closes mid-handshake must emit a failure envelope, not escape as an ASGI error.
 
     Regression test for the same class of bug as
     ``test_websocket_forward_emits_failure_on_ssh_tunnel_setup_error``, reached
@@ -1880,7 +1954,7 @@ def test_websocket_emits_failure_when_backend_closes_during_handshake(tmp_path: 
     )
     envelope_output = io.StringIO()
     preauth = "preauth-cookie-ws-handshake-eof"
-    tunnel_manager = _AcceptThenCloseTunnelManager()
+    tunnel_manager = _AcceptThenCloseTunnelManager(is_refusal_recorded=is_refusal_recorded)
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
@@ -1908,7 +1982,277 @@ def test_websocket_emits_failure_when_backend_closes_during_handshake(tmp_path: 
     assert envelope["agent_id"] == str(instance_key.agent_id)
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
+    "is_refusal_recorded, expected_reason",
+    [
+        (False, "CONNECT_ERROR"),
+        (True, "BACKEND_NOT_LISTENING"),
+    ],
+)
+def test_http_forward_reports_a_refused_channel_as_the_backend_not_listening(
+    tmp_path: Path, is_refusal_recorded: bool, expected_reason: str
+) -> None:
+    """A refused ``direct-tcpip`` open must be tellable from a host that could not be reached.
+
+    Both reach the proxy as the tunnel socket closing under an in-flight
+    request, so the exception is identical (``RemoteProtocolError``); only the
+    refusal the tunnel layer recorded separates them. The distinction is the
+    passive replacement for the deleted in-container LISTEN scan: it says the
+    container is up and its server is not, at every retry rather than once.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_ssh_info(
+        instance_key,
+        RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
+    )
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-http-refused-channel"
+    tunnel_manager = _AcceptThenCloseTunnelManager(is_refusal_recorded=is_refusal_recorded)
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=EnvelopeWriter(output=envelope_output),
+        listen_host="127.0.0.1",
+        listen_port=18423,
+        preauth_cookie_value=preauth,
+    )
+
+    try:
+        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18423", follow_redirects=False) as client:
+            response = client.get(
+                "/api/state",
+                headers={
+                    "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                    "accept": "application/json",
+                },
+            )
+    finally:
+        tunnel_manager.cleanup()
+
+    assert response.status_code == 503
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == expected_reason
+
+
+# How long the failing backend below waits for the proxy to connect, and the
+# ceiling on how long it holds a stalled body open. Generous for the accept,
+# which only ever elapses when the request never arrives -- i.e. the test is
+# already failing -- and the serving thread is a daemon that must not outlive
+# the test either way.
+_STUB_BACKEND_ACCEPT_TIMEOUT_SECONDS: Final[float] = 10.0
+
+# A ``content-length`` deliberately larger than the bytes actually sent, so the
+# body is unmistakably incomplete when the connection dies or stalls under it.
+_TRUNCATED_BODY_HEAD = b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\n\r\npartial"
+
+
+class _BackendFailureMode(UpperCaseStrEnum):
+    """How the stub backend below fails the one connection it serves.
+
+    The two resets are what make their tests say the same thing on every
+    platform. A peer that merely closes is a clean EOF on macOS and, when it
+    still holds the unread request, an RST on Linux -- so an ordinary close
+    reaches httpx as ``RemoteProtocolError`` on one and ``ReadError`` on the
+    other. Draining the request first and closing under ``SO_LINGER`` with a
+    zero timeout produces the RST (and so the ``ReadError``) on both.
+
+    ``STALL_AFTER_HEADERS`` answers and then simply stops, which httpx reports
+    as a ``ReadTimeout`` from under the body -- the same exception a backend
+    that never sent headers raises, so only the phase separates the two.
+    """
+
+    RESET_BEFORE_HEADERS = auto()
+    RESET_AFTER_HEADERS = auto()
+    STALL_AFTER_HEADERS = auto()
+
+
+def _arm_reset_on_close(conn: socket_module.socket) -> None:
+    """Make this socket's close send an RST rather than a FIN."""
+    conn.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_LINGER, struct.pack("ii", 1, 0))
+
+
+@contextmanager
+def _failing_backend(mode: _BackendFailureMode) -> Iterator[int]:
+    """Serve one loopback connection that fails in ``mode``, yielding the port to point a backend URL at."""
+    server = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+    server.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    server.settimeout(_STUB_BACKEND_ACCEPT_TIMEOUT_SECONDS)
+    port = int(server.getsockname()[1])
+    is_released = threading.Event()
+
+    def _serve() -> None:
+        try:
+            conn, _ = server.accept()
+        except OSError:
+            return
+        with conn:
+            # Drain the request so a reset below is this backend's own choice
+            # rather than a side effect of closing on unread data.
+            conn.recv(65536)
+            match mode:
+                case _BackendFailureMode.RESET_BEFORE_HEADERS:
+                    _arm_reset_on_close(conn)
+                case _BackendFailureMode.RESET_AFTER_HEADERS:
+                    conn.sendall(_TRUNCATED_BODY_HEAD)
+                    _arm_reset_on_close(conn)
+                case _BackendFailureMode.STALL_AFTER_HEADERS:
+                    conn.sendall(_TRUNCATED_BODY_HEAD)
+                    # Hold the rest of the body back so the proxy's own read
+                    # budget is what ends the request. Released on teardown.
+                    is_released.wait(_STUB_BACKEND_ACCEPT_TIMEOUT_SECONDS)
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        is_released.set()
+        # Joined past the accept timeout before the listener is closed: a test
+        # body that failed before issuing its request leaves the thread blocked
+        # in ``accept``, and closing the socket out from under it is the wrong
+        # way round even when the thread is a daemon that would survive it.
+        thread.join(timeout=_STUB_BACKEND_ACCEPT_TIMEOUT_SECONDS + 1.0)
+        server.close()
+
+
+def _make_loopback_backend_app(tmp_path: Path, port: int, preauth: str) -> tuple[FastAPI, io.StringIO]:
+    """Build a forward app whose backend is a loopback port, so no tunnel is involved."""
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{port}"})
+    envelope_output = io.StringIO()
+    app = create_forward_app(
+        auth_store=FileAuthStore(data_directory=tmp_path),
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=envelope_output),
+        listen_host="127.0.0.1",
+        listen_port=18424,
+        preauth_cookie_value=preauth,
+        # The backend is a real socket on this machine, which is exactly what
+        # the proxy otherwise refuses to dial.
+        allow_host_loopback=True,
+    )
+    return app, envelope_output
+
+
+def test_http_forward_reports_a_reset_before_the_headers_as_a_connect_failure(tmp_path: Path) -> None:
+    """A backend that resets before answering never answered, whichever exception carries it.
+
+    The reset reaches httpx as ``ReadError``, which reads like a mid-response
+    failure and is not one: nothing was delivered, so this is the same
+    unreachable-backend signal the recovery UI acts on. This is the case a
+    refused ``direct-tcpip`` open produces on Linux, where the tunnel closes the
+    accepted socket with the request still unread.
+    """
+    preauth = "preauth-cookie-reset-before-headers"
+    with _failing_backend(_BackendFailureMode.RESET_BEFORE_HEADERS) as port:
+        app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
+        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18424", follow_redirects=False) as client:
+            response = client.get(
+                "/api/state",
+                headers={
+                    "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                    "accept": "application/json",
+                },
+            )
+
+    assert response.status_code == 503
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "CONNECT_ERROR"
+    # httpx leaves a ``ReadError`` with no message at all, so the class name is
+    # what reaches the consumer instead of an empty string.
+    assert payload["detail"] == "ReadError"
+
+
+def test_http_forward_reports_a_reset_after_the_headers_as_a_lost_body(tmp_path: Path) -> None:
+    """A backend that answers and then dies mid-body is still a mid-response failure.
+
+    The other side of the split: the headers arrived, so the backend was
+    reachable and answering, and calling this unreachable would send a consumer
+    into recovery for a workspace that is up.
+    """
+    preauth = "preauth-cookie-reset-after-headers"
+    with _failing_backend(_BackendFailureMode.RESET_AFTER_HEADERS) as port:
+        app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
+        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18424", follow_redirects=False) as client:
+            response = client.get(
+                "/api/state",
+                headers={
+                    "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                    "accept": "application/json",
+                },
+            )
+
+    assert response.status_code == 502
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "SSE_EOF"
+
+
+# Read budget for the stalling-body test, standing in for production's 600s
+# backstop. What that test pins is which phase the timeout lands in, not how
+# long it takes to fire, and it must stay well under the 30s STALLED advisory
+# so the stall does not add a second envelope.
+_STALLED_BODY_READ_TIMEOUT_SECONDS: Final[float] = 2.0
+
+
+def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_body(tmp_path: Path) -> None:
+    """A read timeout under the body is a mid-response failure, not an unreachable backend.
+
+    The timeout counterpart of the reset split above. httpx raises the same
+    ``ReadTimeout`` either side of the headers, so without the phase to separate
+    them a body that stalls once the backend has answered is reported as a
+    backend that never answered -- evidence against a workspace that
+    demonstrably did. The SSE path already reads a mid-stream
+    ``TimeoutException`` as ``SSE_EOF``.
+    """
+    preauth = "preauth-cookie-stalled-body"
+    with _failing_backend(_BackendFailureMode.STALL_AFTER_HEADERS) as port:
+        app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
+        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18424", follow_redirects=False) as client:
+            app.state.http_client.timeout = httpx.Timeout(
+                connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
+                pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
+                read=_STALLED_BODY_READ_TIMEOUT_SECONDS,
+                write=_PROXY_BACKSTOP_TIMEOUT_SECONDS,
+            )
+            response = client.get(
+                "/api/state",
+                headers={
+                    "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                    "accept": "application/json",
+                },
+            )
+
+    assert response.status_code == 502
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "SSE_EOF"
+    # A ``ReadTimeout`` is message-less too, so the same fallback applies.
+    assert payload["detail"] == "ReadTimeout"
 
 
 def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
@@ -2712,6 +3056,7 @@ async def _run_sse_write_failure_through_the_forward_handler(
                 agent_id=AgentId(),
                 envelope_writer=EnvelopeWriter(output=envelope_output),
                 stall_notice_seconds=_STALL_NOTICE_SECONDS,
+                was_backend_refused=_never_refused,
             )
             with pytest.raises(MngrForwardError):
                 # The ASGI call must unwind on its own once the write fails; the
@@ -2763,9 +3108,8 @@ def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tm
 
     Both used to surface as an identical 504 "Backend timed out" +
     ``CONNECT_ERROR``, which made a saturated proxy indistinguishable from a
-    wedged backend. The envelope reason intentionally stays ``CONNECT_ERROR``
-    (a cross-version contract with consumers); the response body and log line
-    carry the distinction.
+    wedged backend -- so minds read the proxy's own saturation as the workspace
+    being sick and restarted it. ``POOL_EXHAUSTED`` says whose fault it is.
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-pool-timeout"
@@ -2804,7 +3148,13 @@ def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tm
     for line in lines:
         payload = json.loads(line)["payload"]
         assert payload["type"] == "system_interface_backend_failure"
-        assert payload["reason"] == "CONNECT_ERROR"
+        assert payload["reason"] == "POOL_EXHAUSTED"
+        # ``POOL_EXHAUSTED`` is a device-side reason, and a device-side detail is
+        # what the recovery card expands verbatim behind "Error details".
+        # ``PoolTimeout`` stringifies empty, so without a description of its own
+        # the class-name fallback would put the bare word in front of a user.
+        assert "PoolTimeout" not in payload["detail"]
+        assert "pool" in payload["detail"]
 
 
 class _FixedSocketTunnelManager(SSHTunnelManager):
@@ -2944,6 +3294,7 @@ async def _run_simultaneous_disconnect_and_handoff(
             agent_id=AgentId(),
             envelope_writer=EnvelopeWriter(output=envelope_output),
             stall_notice_seconds=_STALL_NOTICE_SECONDS,
+            was_backend_refused=_never_refused,
         )
     finally:
         await http_client.aclose()
