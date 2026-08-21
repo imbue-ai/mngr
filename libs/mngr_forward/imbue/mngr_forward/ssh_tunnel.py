@@ -738,16 +738,31 @@ class SSHTunnelManager(MutableModel):
             self._tmpdir = None
 
 
+def _is_user_config_host(ssh_info: RemoteSSHInfo) -> bool:
+    """True when the producer supplied no key of its own (``Path("")`` coerces to ``Path(".")``)."""
+    return str(ssh_info.key_path) == "."
+
+
 def _resolve_known_hosts_path(ssh_info: RemoteSSHInfo) -> Path | None:
     """Pick the known_hosts file to verify the host key against, or None when no candidate exists.
 
     The explicitly-supplied path wins when it exists on disk. A supplied path
     that is missing falls back to the key-sibling rather than failing: a stale
     producer path must never break a connection the sibling convention would
-    have allowed.
+    have allowed. A host with no producer-owned key at all (an empty
+    ``key_path``: mngr defers its credentials to the user's own SSH setup, e.g.
+    a ``DOCKER_HOST=ssh://...`` outer host) is verified against the user's own
+    ``~/.ssh/known_hosts`` -- the pinned-key source that credential-deferral
+    convention implies (resolved via ``$HOME``, matching the pyinfra-based
+    consumers of the same hosts).
     """
     if ssh_info.known_hosts_path is not None and ssh_info.known_hosts_path.exists():
         return ssh_info.known_hosts_path
+    if _is_user_config_host(ssh_info):
+        user_known_hosts_path = Path.home() / ".ssh" / "known_hosts"
+        if user_known_hosts_path.exists():
+            return user_known_hosts_path
+        return None
     # CLEANUP: drop this key-sibling fallback (and the sibling branch of the
     # error message in _create_ssh_client) once every supported producer of
     # SSH info events/snapshots emits the explicit known_hosts_path field.
@@ -770,21 +785,29 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     """
     client = paramiko.SSHClient()
 
+    is_user_config_host = _is_user_config_host(ssh_info)
     known_hosts_path = _resolve_known_hosts_path(ssh_info)
     if known_hosts_path is None:
-        sibling_path = ssh_info.key_path.parent / "known_hosts"
+        fallback_path = (
+            Path.home() / ".ssh" / "known_hosts" if is_user_config_host else ssh_info.key_path.parent / "known_hosts"
+        )
         checked_paths = (
-            f"{ssh_info.known_hosts_path} or {sibling_path}" if ssh_info.known_hosts_path is not None else sibling_path
+            f"{ssh_info.known_hosts_path} or {fallback_path}"
+            if ssh_info.known_hosts_path is not None
+            else fallback_path
         )
         raise SSHTunnelError(f"No known_hosts file at {checked_paths}; refusing to connect without a pinned host key")
     client.load_host_keys(str(known_hosts_path))
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
+    # A host with no producer-owned key defers authentication to the user's
+    # own SSH setup: let paramiko run its default lookup chain (``~/.ssh/id_*``
+    # and the agent) instead of pointing it at an empty key filename.
     client.connect(
         hostname=ssh_info.host,
         port=ssh_info.port,
         username=ssh_info.user,
-        key_filename=str(ssh_info.key_path),
+        key_filename=None if is_user_config_host else str(ssh_info.key_path),
         timeout=10.0,
     )
 

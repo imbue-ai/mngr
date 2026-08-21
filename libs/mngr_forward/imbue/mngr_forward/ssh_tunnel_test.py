@@ -263,6 +263,42 @@ def test_resolve_known_hosts_path_falls_back_to_the_key_sibling_when_explicit_is
     assert _resolve_known_hosts_path(ssh_info) == sibling_path
 
 
+def test_resolve_known_hosts_path_uses_the_user_known_hosts_for_credential_deferring_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty key_path defers credentials to the user's SSH setup, so their known_hosts is the pin source."""
+    home = tmp_path / "home"
+    user_known_hosts = home / ".ssh" / "known_hosts"
+    user_known_hosts.parent.mkdir(parents=True)
+    user_known_hosts.write_text("user-pin")
+    monkeypatch.setenv("HOME", str(home))
+    ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=Path(""))
+
+    assert _resolve_known_hosts_path(ssh_info) == user_known_hosts
+
+
+def test_resolve_known_hosts_path_returns_none_for_credential_deferring_host_without_user_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No user known_hosts either: still no candidate (the client then refuses rather than TOFU)."""
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=Path(""))
+
+    assert _resolve_known_hosts_path(ssh_info) is None
+
+
+def test_create_ssh_client_refusal_names_the_user_known_hosts_for_credential_deferring_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The empty-key refusal points at the user's known_hosts, not a cwd-relative sibling."""
+    home = tmp_path / "empty-home"
+    monkeypatch.setenv("HOME", str(home))
+    ssh_info = RemoteSSHInfo(user="root", host="203.0.113.5", port=22, key_path=Path(""))
+
+    with pytest.raises(SSHTunnelError, match=str(home / ".ssh" / "known_hosts")):
+        _create_ssh_client(ssh_info)
+
+
 def test_resolve_known_hosts_path_returns_none_when_no_candidate_exists(tmp_path: Path) -> None:
     key_path = tmp_path / "ssh_key"
     key_path.write_text("irrelevant-key-material")

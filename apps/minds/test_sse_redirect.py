@@ -153,13 +153,18 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 log_sink.put("[test] Agent created successfully.")
                 log_sink.put(LOG_SENTINEL)
 
-                logger.info("CreateAttempt done, waiting for the ready state...")
-                page.wait_for_selector("#creating[data-ready='true']", state="attached", timeout=10000)
-
-                # Nothing to click: the walkthrough enters the workspace itself
-                # as soon as it sees the ready state, wherever it has got to.
-                logger.info("Ready state reached, waiting for browser redirect...")
-                page.wait_for_url(re.compile(r"/goto/"), timeout=10000)
+                # The walkthrough enters the workspace as soon as its status
+                # poll sees DONE -- navigating away destroys the creating root
+                # element, so waiting for the data-ready stamp races the
+                # navigation and loses. The navigation itself is the observable
+                # completion signal: in a plain browser the SPA goes through
+                # /forward-bridge?next=/goto/<agent>/ (Electron goes straight
+                # to /goto/). This minimal fixture runs no forward plugin, so
+                # the bridge dead-ends in a 404 -- the URL still proves the
+                # creating page detected completion and redirected to the
+                # workspace route.
+                logger.info("CreateAttempt done, waiting for the redirect into the workspace...")
+                page.wait_for_url(re.compile(r"/forward-bridge|/goto/"), timeout=10000)
                 logger.info("Redirect happened! URL: {}", page.url)
                 assert f"/goto/{agent_id}" in page.url
 

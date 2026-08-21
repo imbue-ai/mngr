@@ -352,9 +352,19 @@ def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
     # default abort mode would fail the whole list on it, while continue mode
     # still emits every reachable provider's agents and signals the partial
     # failure through the exit code.
+    # Same invocation shape as _sign_in_headless's mngr subprocess: the APP's
+    # own MNGR_HOST_DIR (where its agents' host records live -- pointing at the
+    # isolated config root instead returns an empty listing), with the config
+    # root as cwd so the project-config walk finds the pytest-opted-in
+    # settings.toml.
     result = subprocess.run(
-        ["uv", "run", "mngr", "list", "--format", "json", "--on-error", "continue"],
-        env={**os.environ, "MNGR_HOST_DIR": str(runtime.host_config_root), "MNGR_PREFIX": runtime.mngr_prefix},
+        ["uv", "run", "--project", str(_REPO_ROOT), "mngr", "list", "--format", "json", "--on-error", "continue"],
+        env={
+            **os.environ,
+            "MNGR_HOST_DIR": str(mngr_host_dir_for(runtime.root_name)),
+            "MNGR_PREFIX": runtime.mngr_prefix,
+        },
+        cwd=runtime.host_config_root,
         capture_output=True,
         text=True,
         timeout=120,
