@@ -360,9 +360,7 @@ def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
         timeout=120,
         check=False,
     )
-    assert result.returncode in (0, 6), (
-        f"`mngr list` failed (exit {result.returncode}):\n{result.stderr[-4000:]}"
-    )
+    assert result.returncode in (0, 6), f"`mngr list` failed (exit {result.returncode}):\n{result.stderr[-4000:]}"
     data = json.loads(result.stdout)
     for raw in data.get("agents", []) if isinstance(data, dict) else []:
         host = raw.get("host") if isinstance(raw.get("host"), dict) else {}
