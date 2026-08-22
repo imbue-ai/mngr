@@ -88,6 +88,7 @@ addopts = [
   "--cov=imbue.mngr_tutor",
   "--cov=imbue.mngr_kanpan",
   "--cov=imbue.mngr_usage",
+  "--cov=imbue.mngr_donate",
   "--cov=imbue.mngr_claude_usage",
   "--cov=imbue.mngr_opencode_usage",
   "--cov=imbue.mngr_pi_coding_usage",
