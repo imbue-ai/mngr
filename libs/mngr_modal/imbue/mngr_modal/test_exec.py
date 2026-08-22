@@ -50,11 +50,17 @@ def _exec_on_agent(
     args = ["uv", "run", "mngr", "exec", agent_name, command]
     if extra_args:
         args.extend(extra_args)
+    # The first exec after create establishes the SSH connection, and a fresh
+    # Modal sandbox transiently accepts TCP before sshd answers the banner (the
+    # slow window the exec tests are marked flaky for). mngr's bounded
+    # banner-retry rides out the common case but can outlast a tight bound, so
+    # give a valid-but-slow exec generous headroom -- still well under the
+    # per-test 300s pytest timeout, which remains the hang backstop.
     return subprocess.run(
         args,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
         env=modal_subprocess_env.env,
     )
 
