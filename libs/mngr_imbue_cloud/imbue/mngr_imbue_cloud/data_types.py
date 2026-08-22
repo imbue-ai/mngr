@@ -87,7 +87,10 @@ class WarmCacheReport(FrozenModel):
     was_tar_already_present: bool = Field(description="Whether the box already held the tar (cheap no-op)")
     is_warmed: bool = Field(description="Whether the box holds the tar now")
     slices: tuple[SliceBakeOutcome, ...] = Field(
-        description="Throwaway seed-slice attempt outcomes, in completion order (empty on a no-op)"
+        description=(
+            "The throwaway seed slice's final outcome -- the first success or the last retried "
+            "failure (empty on a no-op)"
+        )
     )
 
 
