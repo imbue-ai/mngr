@@ -82,3 +82,11 @@ max_active_synced_workspaces = 200
 accounts_origin = "https://accounts.imbue-staging.com"
 chrome_origin = "https://minds.imbue-staging.com"
 cookie_domain = "imbue-staging.com"
+
+# Whether this tier deploys the analytics app (analytics-<tier>): the
+# gold-table aggregation + lake maintenance crons. Off until the tier's
+# analytics bringup (apps/analytics/docs/bringup.md) has provisioned the
+# Neon project, R2 buckets, and Vault entry. Dev envs can opt in per-env
+# with the sticky `minds env deploy --with-analytics` flag.
+[analytics]
+is_deployed = false

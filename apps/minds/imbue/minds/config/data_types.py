@@ -261,6 +261,22 @@ class MinContainersConfig(FrozenModel):
     )
 
 
+class AnalyticsDeployConfig(FrozenModel):
+    """Whether the tier deploys the analytics app (``analytics-<tier>``).
+
+    The tier default: off everywhere until the once-per-tier bringup runbook
+    (apps/analytics/docs/bringup.md) has provisioned the Neon project, R2
+    buckets, and Vault entry the app needs. Dynamic dev envs override the
+    tier default with the sticky ``minds env deploy --with-analytics`` /
+    ``--without-analytics`` flag (persisted in the env's local state).
+    """
+
+    is_deployed: bool = Field(
+        default=False,
+        description="Deploy the analytics app (push its Modal Secret, run its ops migrations, `modal deploy`).",
+    )
+
+
 class ScaledownWindowConfig(FrozenModel):
     """Idle-before-scaledown windows (seconds) for each Modal app the tier ships.
 
@@ -508,6 +524,14 @@ class DeployEnvConfig(FrozenModel):
             "tier ships. Threaded into the matching ``modal deploy`` as an env var "
             "(``MINDS_CONNECTOR_SCALEDOWN_WINDOW`` / ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW``); "
             "0 means use Modal's own default."
+        ),
+    )
+    analytics: AnalyticsDeployConfig = Field(
+        default_factory=AnalyticsDeployConfig,
+        description=(
+            "Whether this tier deploys the analytics app. Off by default (and in every "
+            "committed deploy.toml) until the tier's analytics bringup has run; dynamic dev "
+            "envs override via the sticky --with-analytics deploy flag."
         ),
     )
     paid: PaidDefaultsConfig = Field(

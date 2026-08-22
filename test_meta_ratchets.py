@@ -932,6 +932,11 @@ def test_offload_version_pinned_consistently() -> None:
 def _collect_class_defs_for_model_config_checks() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
     """Collect, repo-wide, each class's base names and any extra="forbid" declarations in its body.
 
+    Cached: three tests share this repo-wide AST walk, and the meta-ratchet
+    xdist group runs them in one process, so the repo is parsed once instead
+    of three times (the walk alone can approach a 10s timeout on a loaded CI
+    sandbox).
+
     Returns ``(base_names_by_class, forbid_locations_by_class)``. Classes are keyed
     by bare name; two same-named classes in different files have their bases merged,
     which can only over-approximate a base's subclass set (acceptable for guards
@@ -1019,6 +1024,8 @@ def _config_value_sets_extra_forbid(value: ast.expr) -> bool:
     return False
 
 
+# Repo-wide AST walk (cached, but the first caller pays it); the default 10s
+# timeout is too tight on a loaded CI sandbox.
 @pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
@@ -1048,6 +1055,8 @@ def test_event_envelope_subclasses_never_re_forbid_extra() -> None:
     )
 
 
+# Repo-wide AST walk (cached, but the first caller pays it); the default 10s
+# timeout is too tight on a loaded CI sandbox.
 @pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_wire_model_subclasses_never_re_forbid_extra() -> None:
@@ -1078,6 +1087,8 @@ def test_wire_model_subclasses_never_re_forbid_extra() -> None:
     )
 
 
+# Repo-wide AST walk (cached, but the first caller pays it); the default 10s
+# timeout is too tight on a loaded CI sandbox.
 @pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
