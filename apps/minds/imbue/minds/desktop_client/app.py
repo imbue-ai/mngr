@@ -1103,9 +1103,10 @@ def _build_workspace_list(
     Shutdown-capable minds (those on a provider whose host minds can stop/start,
     see :func:`provider_backend_supports_shutdown`) additionally carry
     ``supports_shutdown="true"`` and a ``liveness`` of RUNNING / STOPPED /
-    UNKNOWN. Container liveness rides here rather than on a separate SSE channel:
-    a liveness change makes the entry differ, so the existing ``workspaces``
-    diff pushes it. Non-capable minds carry neither field.
+    STOPPING / STARTING / UNKNOWN. Container liveness rides here rather than
+    on a separate SSE channel: a liveness change makes the entry differ, so
+    the existing ``workspaces`` diff pushes it. Non-capable minds carry
+    neither field.
     """
     liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
     agent_ids = backend_resolver.list_active_workspace_ids()

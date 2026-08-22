@@ -51,6 +51,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostNotFoundError
@@ -298,11 +299,13 @@ def _rewrite_container_host_name(
             pass
 
 
-# How each non-running wire status surfaces as an mngr host state. Stopping
-# deliberately reads as STOPPED: the VM is already down seconds after the stop
-# request, and the in-flight upload is invisible plumbing (Q21 in the plan).
+# How each non-running wire status surfaces as an mngr host state. Every
+# status maps to its literal counterpart: a stopping workspace really is
+# mid-stop (its upload is in flight and the connector refuses starts until
+# it lands on stopped), so rendering it as an already-startable STOPPED
+# would offer an action the server rejects.
 WORKSPACE_HOST_STATE_BY_STATUS: Final[dict[WorkspaceStatus, HostState]] = {
-    WorkspaceStatus.STOPPING: HostState.STOPPED,
+    WorkspaceStatus.STOPPING: HostState.STOPPING,
     WorkspaceStatus.STOPPED: HostState.STOPPED,
     WorkspaceStatus.STARTING: HostState.STARTING,
     WorkspaceStatus.CRASHED: HostState.CRASHED,
@@ -333,25 +336,87 @@ def leased_info_from_workspace(workspace: WorkspaceInfo) -> LeasedHostInfo:
     )
 
 
-def _read_workspace_start_outcome(
-    client: "ImbueCloudConnectorClient", token: SecretStr, host_db_id: str, host_id: HostId
+def _workspace_start_failed_error(host_id: HostId, transition_error: str | None) -> WorkspaceStartFailedError:
+    return WorkspaceStartFailedError(f"workspace {host_id} failed to start: {transition_error or 'unknown error'}")
+
+
+def _workspace_abandoned_error(host_id: HostId, transition_error: str | None) -> WorkspaceStartFailedError:
+    return WorkspaceStartFailedError(
+        f"workspace {host_id} was abandoned ({transition_error or 'no reason recorded'}); "
+        "restore it from its backup into a fresh workspace"
+    )
+
+
+def _unrecognized_workspace_status_error(host_id: HostId) -> UnrecognizedWorkspaceStatusError:
+    return UnrecognizedWorkspaceStatusError(
+        f"workspace {host_id} is in a state this app version does not recognize; update the app to manage it"
+    )
+
+
+class _WorkspaceStartPollState(MutableModel):
+    """Mutable bookkeeping for one workspace-start poll, advanced once per probe."""
+
+    is_start_requested: bool = Field(default=False, description="Whether this poll has issued its start request")
+    last_observed_status: WorkspaceStatus | None = Field(
+        default=None, description="Most recent status the poll observed"
+    )
+    last_transition_error: str | None = Field(
+        default=None, description="Most recent non-empty transition_error the poll observed"
+    )
+
+
+def _advance_workspace_start(
+    client: "ImbueCloudConnectorClient",
+    # Fetched per probe (not once for the whole poll) so a poll outliving the
+    # access token's remaining validity keeps authenticating: the provider's
+    # token helper refreshes near expiry, and a token minted 20 minutes ago
+    # would otherwise surface mid-poll as a bare 401 instead of a start error.
+    token_provider: Callable[[], SecretStr],
+    host_db_id: str,
+    host_id: HostId,
+    state: _WorkspaceStartPollState,
 ) -> WorkspaceInfo | Exception | None:
-    """One start-poll probe: the running workspace, a terminal failure, or None (keep polling)."""
-    current = client.get_workspace(token, host_db_id)
-    if current.status == WorkspaceStatus.RUNNING:
-        return current
-    if current.status == WorkspaceStatus.STOPPED:
-        return WorkspaceStartFailedError(
-            f"workspace {host_id} failed to start: {current.transition_error or 'unknown error'}"
-        )
-    if current.status == WorkspaceStatus.CRASHED:
-        # An operator abandoned the workspace mid-start; it can never reach
-        # running, so waiting out the poll window would only bury the reason.
-        return WorkspaceStartFailedError(
-            f"workspace {host_id} was abandoned ({current.transition_error or 'no reason recorded'}); "
-            "restore it from its backup into a fresh workspace"
-        )
-    return None
+    """One start-poll step: the running workspace, a terminal failure, or None (keep polling).
+
+    Requests the start itself the moment the workspace is startable: a
+    still-``stopping`` workspace is waited out first (the connector refuses
+    starts mid-stop; the stop lands on ``stopped`` once its upload verifies).
+    """
+    current = client.get_workspace(token_provider(), host_db_id)
+    state.last_observed_status = current.status
+    if current.transition_error:
+        state.last_transition_error = current.transition_error
+    match current.status:
+        case WorkspaceStatus.RUNNING:
+            return current
+        case WorkspaceStatus.CRASHED:
+            # An operator abandoned the workspace; it can never reach running,
+            # so waiting out the poll window would only bury the reason.
+            return _workspace_abandoned_error(host_id, current.transition_error)
+        case WorkspaceStatus.UNKNOWN:
+            return _unrecognized_workspace_status_error(host_id)
+        case WorkspaceStatus.STARTING:
+            return None
+        case WorkspaceStatus.STOPPED:
+            if state.is_start_requested:
+                # Our start ran and landed back on stopped: it failed, and the
+                # row carries the reason.
+                return _workspace_start_failed_error(host_id, current.transition_error)
+            client.start_workspace(token_provider(), host_db_id)
+            state.is_start_requested = True
+            return None
+        case WorkspaceStatus.STOPPING:
+            if state.is_start_requested:
+                # Only an old connector lands a failed in-window restart back
+                # on stopping; surface its recorded reason instead of burning
+                # the rest of the poll window into a generic timeout.
+                # CLEANUP: drop this bounce-to-stopping branch (keeping the
+                # plain wait below) once every tier runs a connector that
+                # lands failed starts back on 'stopped' (#547).
+                return _workspace_start_failed_error(host_id, current.transition_error)
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 class ImbueCloudProvider(BaseProviderInstance):
@@ -2249,12 +2314,14 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         Stops the *whole workspace*: the container is stopped gracefully
         first (so agents shut down cleanly), then the connector halts the
-        slice VM, uploads its disks to the tier's storage bucket in the
-        background, and frees the bare-metal slot once the upload verifies
-        (after the local-retention window). ``mngr start`` brings the same
-        workspace back -- near-instantly inside the window, via a restore
-        onto any same-region box after it. Returns once the stop is accepted
-        (the VM halts seconds later; the upload is invisible plumbing).
+        slice VM and uploads its disks to the tier's storage bucket in the
+        background -- the workspace shows as stopping until the upload
+        verifies and lands it on stopped; its halted local VM (and the
+        bare-metal slot) is kept through the local-retention window, then
+        reaped. ``mngr start`` brings the same workspace back --
+        near-instantly inside the window, via a restore onto any same-region
+        box after it. Returns once the stop is accepted (the VM halts
+        seconds later; the upload runs server-side).
 
         Against a connector that predates /workspaces, this falls back to
         the old container-only stop (the VM keeps running and billing).
@@ -2351,45 +2418,52 @@ class ImbueCloudProvider(BaseProviderInstance):
         return self._build_host_object(leased)
 
     def _start_workspace_and_wait(self, host_id: HostId, workspace: WorkspaceInfo) -> None:
-        """Ask the connector to start a stopped workspace and wait until it is running.
+        """Drive a stopped (or still-stopping) workspace to running and wait for it.
 
         The start is asynchronous server-side (restore may download the
         workspace onto a different box), so this polls the workspace until
         it reports ``running`` -- then refreshes caches and re-pins the host
-        keys under the (possibly new) address/ports. A start that lands back
-        on ``stopped`` with a recorded error raises ``WorkspaceStartFailedError``
-        (e.g. "no capacity available right now, try again later"); the
-        artifact is untouched and the start can simply be retried.
+        keys under the (possibly new) address/ports. A workspace still
+        ``stopping`` is waited out first (the connector refuses starts
+        mid-stop; its upload usually verifies within minutes) and the start
+        is requested the moment it lands on ``stopped``. A start that lands
+        back on ``stopped`` with a recorded error raises
+        ``WorkspaceStartFailedError`` (e.g. "no capacity available right now,
+        try again later"); the artifact is untouched and the start can simply
+        be retried.
         """
         if workspace.status == WorkspaceStatus.UNKNOWN:
             # A lifecycle state this client version cannot interpret: driving a
             # start from it would act blindly, so refuse with the remedy
             # (before any account/token work -- the refusal needs neither).
-            raise UnrecognizedWorkspaceStatusError(
-                f"workspace {host_id} is in a state this app version does not recognize; update the app to manage it"
-            )
+            raise _unrecognized_workspace_status_error(host_id)
+        if workspace.status == WorkspaceStatus.CRASHED:
+            raise _workspace_abandoned_error(host_id, workspace.transition_error)
         account = self._require_account()
-        token = self._get_access_token(account)
         host_db_id = str(workspace.host_db_id)
-        if workspace.status in (WorkspaceStatus.STOPPED, WorkspaceStatus.STOPPING):
-            self.client.start_workspace(token, host_db_id)
-        elif workspace.status == WorkspaceStatus.CRASHED:
-            raise WorkspaceStartFailedError(
-                f"workspace {host_id} was abandoned ({workspace.transition_error or 'no reason recorded'}); "
-                "restore it from its backup into a fresh workspace"
-            )
-        else:
-            # Already starting (e.g. a concurrent request); just wait for it.
-            pass
+        state = _WorkspaceStartPollState()
+        if workspace.status == WorkspaceStatus.STARTING:
+            # A start is already in flight (e.g. a concurrent request): wait on
+            # it rather than layering another request on top.
+            state.is_start_requested = True
 
         outcome, _poll_count, _elapsed = poll_for_value(
-            lambda: _read_workspace_start_outcome(self.client, token, host_db_id, host_id),
+            lambda: _advance_workspace_start(
+                self.client, lambda: self._get_access_token(account), host_db_id, host_id, state
+            ),
             timeout=_WORKSPACE_START_TIMEOUT_SECONDS,
             poll_interval=_WORKSPACE_START_POLL_SECONDS,
         )
         if outcome is None:
+            last_status = state.last_observed_status.value if state.last_observed_status is not None else "unknown"
+            error_note = (
+                f"; last recorded transition error: {state.last_transition_error}"
+                if state.last_transition_error
+                else ""
+            )
             raise WorkspaceStartTimeoutError(
-                f"workspace {host_id} did not reach running within {_WORKSPACE_START_TIMEOUT_SECONDS:.0f}s"
+                f"workspace {host_id} did not reach running within {_WORKSPACE_START_TIMEOUT_SECONDS:.0f}s "
+                f"(last observed status: {last_status}{error_note})"
             )
         if isinstance(outcome, Exception):
             raise outcome

@@ -51,6 +51,14 @@ modal_env_strategy = "PER_ENV"
 writes_local_state = true
 tracks_generation = false
 
+# Workspace stop/start knobs stamped over the Vault ``storage`` entry at
+# deploy time. Dev envs keep the retention window (halted local VM held for
+# instant restart-in-place before the slot is freed) short so stop/start
+# iteration and the opt-in release test see the retention finalize land in
+# minutes; production/staging keep the default hour.
+[storage]
+stop_retention_seconds = 300
+
 # Default paid-access entries seeded (seed-if-absent) into the connector's
 # paid_domains table after migrations, so the imbue team can use paid features
 # (host pool, LiteLLM keys, R2 buckets) on a fresh env without manual setup.

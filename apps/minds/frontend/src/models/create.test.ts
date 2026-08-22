@@ -53,6 +53,15 @@ describe("MindLivenessTracker", () => {
     expect(tracker.displayedLiveness("agent-1", "STOPPED")).toBe("STOPPED");
   });
 
+  it("passes backend-observed transitional states through when no action is pending", () => {
+    const tracker = new MindLivenessTracker(() => undefined);
+    expect(tracker.displayedLiveness("agent-3", "STOPPING")).toBe("STOPPING");
+    expect(tracker.displayedLiveness("agent-3", "STARTING")).toBe("STARTING");
+    // An unrecognized reading still reports honestly as unknown.
+    expect(tracker.displayedLiveness("agent-3", "weird")).toBe("UNKNOWN");
+    expect(tracker.displayedLiveness("agent-3", "")).toBe("UNKNOWN");
+  });
+
   it("drops the transient when the action fails", async () => {
     const tracker = new MindLivenessTracker(() => undefined);
     vi.stubGlobal(

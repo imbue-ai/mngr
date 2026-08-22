@@ -562,6 +562,39 @@ def test_host_state_override_wins_over_discovery_then_drops_on_agreement() -> No
     assert resolver.get_host_state(host) is HostState.RUNNING
 
 
+def test_stopped_override_is_retired_by_a_backend_observed_stopping_reading() -> None:
+    """Discovery observing the stop still in flight (STOPPING) retires a STOPPED override.
+
+    An imbue_cloud host stop returns once the stop is accepted, while the
+    workspace reports STOPPING for as long as its upload runs -- that reading
+    is fresher than the optimistic settle, so the honest "Stopping" badge must
+    show instead of an already-startable "Stopped" one.
+    """
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = _resolver_with_host_state(host, agent, HostState.RUNNING)
+    resolver.set_host_state_override(host, HostState.STOPPED)
+
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.STOPPING},
+        )
+    )
+
+    assert resolver.get_host_state(host) is HostState.STOPPING
+    # The override is gone: the eventual settled reading shows unmasked.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.STOPPED},
+        )
+    )
+    assert resolver.get_host_state(host) is HostState.STOPPED
+
+
 def test_clear_host_state_override_reverts_to_discovery() -> None:
     host = HostId.generate()
     agent = AgentId.generate()

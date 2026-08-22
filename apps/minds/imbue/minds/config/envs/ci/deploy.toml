@@ -36,6 +36,14 @@ modal_env_strategy = "PER_ENV"
 writes_local_state = true
 tracks_generation = false
 
+# Workspace stop/start knobs stamped over the Vault ``storage`` entry at
+# deploy time. CI envs keep the retention window (halted local VM held for
+# instant restart-in-place before the slot is freed) short: the stop/start
+# tests must see the retention finalize land in minutes, and nothing in CI
+# ever wants an hour-long instant-restart window.
+[storage]
+stop_retention_seconds = 60
+
 # Default paid-access entries seeded (seed-if-absent) into paid_domains after
 # migrations, so CI / deployment-test envs can exercise paid features.
 [paid]

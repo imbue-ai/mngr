@@ -166,15 +166,17 @@ def test_local_liveness_drops_shutdown_capable_cloud_minds(cloud_backend: str, l
 # -- host-state classification --
 
 
-def test_classify_host_state_maps_running_stopped_unknown() -> None:
+def test_classify_host_state_maps_running_stopped_transitional_unknown() -> None:
     assert classify_host_state(HostState.RUNNING) == MindLiveness.RUNNING
-    # Every "container exists but is down" state collapses to STOPPED.
+    # Every "container exists and is settled but down" state collapses to STOPPED.
     assert classify_host_state(HostState.STOPPED) == MindLiveness.STOPPED
-    assert classify_host_state(HostState.STOPPING) == MindLiveness.STOPPED
     assert classify_host_state(HostState.CRASHED) == MindLiveness.STOPPED
     assert classify_host_state(HostState.FAILED) == MindLiveness.STOPPED
-    # Transient / unobserved states are UNKNOWN, not assumed stopped.
-    assert classify_host_state(HostState.STARTING) == MindLiveness.UNKNOWN
+    # Backend-observed transitions pass through: a mid-transition host is
+    # neither startable nor stoppable, so it must not render as STOPPED.
+    assert classify_host_state(HostState.STOPPING) == MindLiveness.STOPPING
+    assert classify_host_state(HostState.STARTING) == MindLiveness.STARTING
+    # Unobserved / odd states are UNKNOWN, not assumed stopped.
     assert classify_host_state(HostState.PAUSED) == MindLiveness.UNKNOWN
     assert classify_host_state(None) == MindLiveness.UNKNOWN
 

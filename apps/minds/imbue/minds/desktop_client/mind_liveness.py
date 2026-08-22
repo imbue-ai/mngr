@@ -19,7 +19,7 @@ scopes it to shutdown-capable minds:
   machine, which is a narrower question than shutdown capability and the one
   the quit prompt asks.
 - ``classify_host_state`` -- maps a discovery ``HostState`` to the coarse
-  RUNNING / STOPPED / UNKNOWN the UI shows.
+  RUNNING / STOPPED / STOPPING / STARTING / UNKNOWN the UI shows.
 - ``get_shutdown_capable_workspace_agent_ids`` -- which active workspaces sit on
   a shutdown-capable provider.
 - ``compute_mind_liveness_by_agent_id`` -- the per-mind liveness map the
@@ -54,13 +54,14 @@ from imbue.mngr.primitives import HostState
 # billing, and the provider's offline state bucket keeps a stopped workspace
 # visible in the UI. imbue_cloud workspaces now support full VM-level
 # stop/start too: ``mngr stop`` halts the slice VM and uploads it to the
-# tier's storage bucket (freeing the bare-metal slot), and ``mngr start``
-# restores it -- in place within the retention window, or onto any
-# same-region box after it. Remote backends without a real host-stop
-# (Modal, OVH leases) stay out. This is the *one* place that encodes that
-# restriction: when another provider gains host shutdown support, widen this set
-# (or replace it with a richer per-provider capability check) and every Start /
-# Stop surface follows. See ``provider_backend_supports_shutdown``.
+# tier's storage bucket (the bare-metal slot is freed once the retention
+# window closes), and ``mngr start`` restores it -- in place within the
+# retention window, or onto any same-region box after it. Remote backends
+# without a real host-stop (Modal, OVH leases) stay out. This is the *one*
+# place that encodes that restriction: when another provider gains host
+# shutdown support, widen this set (or replace it with a richer per-provider
+# capability check) and every Start / Stop surface follows. See
+# ``provider_backend_supports_shutdown``.
 _SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset(
     {"docker", "lima", "aws", "gcp", "azure", "imbue_cloud"}
 )
@@ -74,18 +75,20 @@ _SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset(
 # it is stopped deliberately from its Start/Stop control instead.
 _LOCAL_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"docker", "lima"})
 
-# Discovery ``HostState`` values that mean the container exists but is not
-# running.
-_OFFLINE_HOST_STATES: Final[frozenset[HostState]] = frozenset(
-    {HostState.STOPPED, HostState.STOPPING, HostState.CRASHED, HostState.FAILED}
-)
-
 
 class MindLiveness(UpperCaseStrEnum):
-    """Container liveness of a mind, surfaced to the landing page + quit prompt."""
+    """Container liveness of a mind, surfaced to the landing page + quit prompt.
+
+    STOPPING / STARTING are the *backend-observed* transitional states (e.g. an
+    imbue_cloud workspace whose stop upload is still in flight); the frontend
+    additionally synthesizes the same labels while one of its own Start/Stop
+    actions is in flight. The UI offers no Start/Stop action for either.
+    """
 
     RUNNING = auto()
     STOPPED = auto()
+    STOPPING = auto()
+    STARTING = auto()
     UNKNOWN = auto()
 
 
@@ -107,14 +110,23 @@ def provider_backend_is_local(backend: str) -> bool:
 def classify_host_state(host_state: HostState | None) -> MindLiveness:
     """Classify a discovery ``HostState`` into the coarse liveness the UI shows.
 
-    ``None`` (host state not known to discovery yet) and transient/odd states map
-    to UNKNOWN so the UI can distinguish "we can't tell" from "confirmed stopped".
+    Transitional states pass through (a mid-transition host is neither
+    startable nor stoppable); ``None`` (host state not known to discovery yet)
+    and other odd states map to UNKNOWN so the UI can distinguish "we can't
+    tell" from "confirmed stopped".
     """
-    if host_state is HostState.RUNNING:
-        return MindLiveness.RUNNING
-    if host_state in _OFFLINE_HOST_STATES:
-        return MindLiveness.STOPPED
-    return MindLiveness.UNKNOWN
+    match host_state:
+        case HostState.RUNNING:
+            return MindLiveness.RUNNING
+        case HostState.STOPPING:
+            return MindLiveness.STOPPING
+        case HostState.STARTING:
+            return MindLiveness.STARTING
+        case HostState.STOPPED | HostState.CRASHED | HostState.FAILED:
+            # The container exists but is settled and down (not mid-transition).
+            return MindLiveness.STOPPED
+        case _:
+            return MindLiveness.UNKNOWN
 
 
 def _build_backend_by_provider_name(backend_resolver: BackendResolverInterface) -> dict[str, str]:

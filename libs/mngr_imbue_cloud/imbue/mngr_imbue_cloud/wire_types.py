@@ -35,10 +35,12 @@ class WorkspaceStatus(WireEnum):
     """Wire lifecycle status of a remote workspace (GET /workspaces).
 
     ``running`` maps from the connector-internal ``leased``. ``stopping``
-    means the VM is halted and its upload is in flight (still restartable in
-    place); ``stopped`` means the artifact is in object storage and the
-    bare-metal slot is freed; ``starting`` means a supervisor is restoring
-    it; ``crashed`` means an operator abandoned it (recover from backup).
+    means the VM is halted and its upload is in flight (the connector
+    refuses starts until it lands on ``stopped``); ``stopped`` means the
+    artifact is in object storage, with the halted local VM kept through the
+    retention window for a restart in place before the slot is freed;
+    ``starting`` means a supervisor is restoring it; ``crashed`` means an
+    operator abandoned it (recover from backup).
     ``unknown`` is never sent by the server: it is the client-side coercion
     of a status value this client version does not recognize (a newer
     server), rendered as "shown but not actionable".
@@ -130,9 +132,11 @@ class LeaseResult(WireModel):
 class WorkspaceInfo(WireModel):
     """One entry from GET /workspaces: a workspace in any lifecycle state.
 
-    Placement fields (``vps_address`` and the two ports) are None while the
-    workspace is stopped -- its VM then exists only as encrypted objects in
-    the tier's storage bucket. ``status`` uses the wire lifecycle vocabulary
+    Placement fields (``vps_address`` and the two ports) stay set on a
+    just-stopped workspace through the retention window (its halted local VM
+    is kept for a restart in place) and are None once the retention finalize
+    frees the slot -- the VM then exists only as encrypted objects in the
+    tier's storage bucket. ``status`` uses the wire lifecycle vocabulary
     (:class:`WorkspaceStatus`).
     """
 
@@ -143,10 +147,16 @@ class WorkspaceInfo(WireModel):
             "unrecognized value (a newer server) coerces to UNKNOWN client-side"
         )
     )
-    vps_address: str | None = Field(default=None, description="Box address (None while stopped)")
-    ssh_port: int | None = Field(default=None, description="VM-root forwarded port (None while stopped)")
+    vps_address: str | None = Field(
+        default=None, description="Box address (None once fully stopped; see class docstring)"
+    )
+    ssh_port: int | None = Field(
+        default=None, description="VM-root forwarded port (None once fully stopped; see class docstring)"
+    )
     ssh_user: str = Field(default="root", description="SSH user on the VM")
-    container_ssh_port: int | None = Field(default=None, description="Container forwarded port (None while stopped)")
+    container_ssh_port: int | None = Field(
+        default=None, description="Container forwarded port (None once fully stopped; see class docstring)"
+    )
     agent_id: str = Field(description="Pre-baked mngr agent id")
     host_id: str = Field(description="mngr host id")
     host_name: str = Field(description="User-chosen friendly name")

@@ -18,7 +18,7 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import { fetchCreateFormDefaults, recoveryRoute } from "../../models/create";
+import { MIND_LIVENESS_LABELS, fetchCreateFormDefaults, recoveryRoute } from "../../models/create";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { Button, ButtonSubmit } from "../components/Button";
 import { Card } from "../components/Card";
@@ -280,7 +280,12 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
 
   function machineRow(entry: UiWorkspaceEntry): m.Children {
     const { stores, shell } = getAppContext();
-    const isStopped = (entry.supports_shutdown ?? false) && entry.liveness === "STOPPED";
+    const liveness = entry.liveness ?? "";
+    // Badge the settled-down and transitional states; UNKNOWN stays unbadged
+    // here (this page has no liveness tracker, so an unknown reading is
+    // common and not actionable from a template picker).
+    const isBadged = liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING";
+    const livenessLabel = (entry.supports_shutdown ?? false) && isBadged ? MIND_LIVENESS_LABELS[liveness] : null;
     return m(
       Card,
       {
@@ -302,7 +307,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       },
       [
         m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
-        isStopped ? m(StatusBadge, "Stopped") : null,
+        livenessLabel ? m(StatusBadge, livenessLabel) : null,
         m("span", { class: "text-tertiary shrink-0" }, m(Icon16, { name: "chevron-right" })),
       ],
     );

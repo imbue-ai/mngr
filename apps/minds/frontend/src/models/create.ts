@@ -147,10 +147,22 @@ export function progressForElapsed(elapsedSeconds: number, expectedDurationSecon
 
 // ---- Optimistic mind Start/Stop tracking (port of the Landing page's
 // pendingMindActionByAgent machinery). The channel's workspaces message
-// carries the authoritative liveness; while an action is in flight the
-// transient STARTING/STOPPING label wins until the target state arrives.
+// carries the authoritative liveness -- including backend-observed
+// STARTING/STOPPING transitions (e.g. a stop issued from another device),
+// which pass straight through; while a local action is in flight the same
+// transient labels win until the target state arrives.
 
 export type MindLiveness = "RUNNING" | "STOPPED" | "UNKNOWN" | "STARTING" | "STOPPING";
+
+// Human labels for the non-RUNNING liveness states, shared by every surface
+// that renders a liveness badge or title (RUNNING deliberately has none:
+// those surfaces show no badge for a running machine).
+export const MIND_LIVENESS_LABELS: Record<string, string> = {
+  STOPPED: "Stopped",
+  STOPPING: "Stopping…",
+  STARTING: "Starting…",
+  UNKNOWN: "Status unknown",
+};
 
 export class MindLivenessTracker {
   private pendingTargetByAgentId = new Map<string, "RUNNING" | "STOPPED">();
@@ -170,7 +182,14 @@ export class MindLivenessTracker {
       }
       return pending === "RUNNING" ? "STARTING" : "STOPPING";
     }
-    if (authoritative === "RUNNING" || authoritative === "STOPPED") return authoritative;
+    if (
+      authoritative === "RUNNING" ||
+      authoritative === "STOPPED" ||
+      authoritative === "STOPPING" ||
+      authoritative === "STARTING"
+    ) {
+      return authoritative;
+    }
     return "UNKNOWN";
   }
 

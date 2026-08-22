@@ -698,6 +698,24 @@ class _HostStateOverride(FrozenModel):
     set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
 
 
+def _does_discovery_confirm_override(override_state: HostState, discovery_state: HostState | None) -> bool:
+    """Whether a fresh discovery reading confirms (and thus retires) an optimistic override.
+
+    Exact agreement always confirms. A STOPPED override is additionally
+    confirmed by a discovery reading of STOPPING: an imbue_cloud host stop
+    returns once the stop is accepted while the workspace reports STOPPING
+    for as long as its upload runs, so the backend has observed the stop and
+    its reading is strictly fresher than the optimistic settle -- keeping the
+    override would mask the honest "Stopping" as an already-startable
+    "Stopped" until the TTL. The RUNNING override has no such case: a start
+    only returns once the workspace is running, so a STARTING reading there
+    is stale, not fresher.
+    """
+    if discovery_state == override_state:
+        return True
+    return override_state is HostState.STOPPED and discovery_state is HostState.STOPPING
+
+
 _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
 
 
@@ -916,7 +934,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         for host_id_str in tuple(self._host_state_override_by_host_id):
             override = self._host_state_override_by_host_id[host_id_str]
             discovery_state = discovery_state_by_host_id.get(host_id_str)
-            agreed = discovery_state == override.state
+            agreed = _does_discovery_confirm_override(override.state, discovery_state)
             expired = (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
             if agreed or expired:
                 del self._host_state_override_by_host_id[host_id_str]
@@ -1311,7 +1329,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             override = self._host_state_override_by_host_id.get(host_id_str)
             if override is None:
                 return discovery_state
-            agreed = discovery_state == override.state
+            agreed = _does_discovery_confirm_override(override.state, discovery_state)
             expired = (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
             if agreed or expired:
                 del self._host_state_override_by_host_id[host_id_str]

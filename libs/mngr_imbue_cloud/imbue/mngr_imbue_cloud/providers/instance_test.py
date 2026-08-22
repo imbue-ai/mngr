@@ -54,8 +54,9 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.providers.instance import WORKSPACE_HOST_STATE_BY_STATUS
+from imbue.mngr_imbue_cloud.providers.instance import _WorkspaceStartPollState
+from imbue.mngr_imbue_cloud.providers.instance import _advance_workspace_start
 from imbue.mngr_imbue_cloud.providers.instance import _read_first_existing_host_record
-from imbue.mngr_imbue_cloud.providers.instance import _read_workspace_start_outcome
 from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attributes
 from imbue.mngr_imbue_cloud.providers.instance import leased_info_from_workspace
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
@@ -1280,48 +1281,120 @@ class _CannedWorkspaceClient(ImbueCloudConnectorClient):
     """Connector-client stub whose ``get_workspace`` returns a canned workspace (no HTTP)."""
 
     canned_workspace: WorkspaceInfo
+    start_request_count: int = 0
 
     def get_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceInfo:
         return self.canned_workspace
 
+    def start_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceStatus:
+        self.start_request_count = self.start_request_count + 1
+        return WorkspaceStatus.STARTING
 
-def test_read_workspace_start_outcome_distinguishes_terminal_statuses() -> None:
-    host_id = HostId("host-" + "a" * 32)
 
-    def outcome_for(workspace: WorkspaceInfo) -> WorkspaceInfo | Exception | None:
-        client = _CannedWorkspaceClient(base_url=AnyUrl("https://example.com"), canned_workspace=workspace)
-        return _read_workspace_start_outcome(
-            client,
-            SecretStr("tok"),
-            "00000000-0000-0000-0000-0000000000aa",
-            host_id,
-        )
+def _advance_once(
+    workspace: WorkspaceInfo, state: _WorkspaceStartPollState, token_calls: list[int] | None = None
+) -> tuple[WorkspaceInfo | Exception | None, "_CannedWorkspaceClient"]:
+    client = _CannedWorkspaceClient(base_url=AnyUrl("https://example.com"), canned_workspace=workspace)
 
+    def token_provider() -> SecretStr:
+        if token_calls is not None:
+            token_calls.append(1)
+        return SecretStr("tok")
+
+    outcome = _advance_workspace_start(
+        client,
+        token_provider,
+        "00000000-0000-0000-0000-0000000000aa",
+        HostId("host-" + "a" * 32),
+        state,
+    )
+    return outcome, client
+
+
+def test_advance_workspace_start_distinguishes_terminal_statuses() -> None:
     # Running: success, the workspace itself comes back.
-    running = outcome_for(_make_workspace_info("running"))
+    running, _client = _advance_once(_make_workspace_info("running"), _WorkspaceStartPollState())
     assert isinstance(running, WorkspaceInfo)
 
-    # Stopped: the start failed server-side; the recorded error surfaces.
-    stopped = outcome_for(_make_workspace_info("stopped", with_placement=False, transition_error="no capacity"))
+    # Stopped after our start request: the start failed server-side; the
+    # recorded error surfaces.
+    stopped, _client = _advance_once(
+        _make_workspace_info("stopped", with_placement=False, transition_error="no capacity"),
+        _WorkspaceStartPollState(is_start_requested=True),
+    )
     assert isinstance(stopped, WorkspaceStartFailedError)
     assert "no capacity" in str(stopped)
 
     # Crashed (operator abandon mid-start): terminal failure, not a 20-minute
     # poll-until-timeout; the message carries the reason and the recovery path.
-    crashed = outcome_for(_make_workspace_info("crashed", with_placement=False, transition_error="box died"))
+    crashed, _client = _advance_once(
+        _make_workspace_info("crashed", with_placement=False, transition_error="box died"),
+        _WorkspaceStartPollState(),
+    )
     assert isinstance(crashed, WorkspaceStartFailedError)
     assert "box died" in str(crashed)
     assert "backup" in str(crashed)
 
-    # In-flight statuses keep the poll going.
-    assert outcome_for(_make_workspace_info("starting", with_placement=False)) is None
-    assert outcome_for(_make_workspace_info("stopping")) is None
+    # An in-flight start keeps the poll going.
+    starting, _client = _advance_once(
+        _make_workspace_info("starting", with_placement=False), _WorkspaceStartPollState(is_start_requested=True)
+    )
+    assert starting is None
 
 
-def test_workspace_host_state_mapping_shows_stopping_as_stopped() -> None:
-    # A stopping workspace's VM is already down; the in-flight upload is
-    # invisible plumbing, so users see STOPPED immediately.
-    assert WORKSPACE_HOST_STATE_BY_STATUS[WorkspaceStatus.STOPPING] == HostState.STOPPED
+def test_advance_workspace_start_requests_the_start_once_the_stop_lands() -> None:
+    # Still stopping: wait it out (the connector refuses starts mid-stop);
+    # no start request is issued yet.
+    state = _WorkspaceStartPollState()
+    outcome, client = _advance_once(_make_workspace_info("stopping"), state)
+    assert outcome is None
+    assert client.start_request_count == 0
+    assert state.is_start_requested is False
+
+    # Stopped: the probe itself issues the start request, exactly once.
+    outcome_after_stop, client_after_stop = _advance_once(_make_workspace_info("stopped", with_placement=False), state)
+    assert outcome_after_stop is None
+    assert client_after_stop.start_request_count == 1
+    assert state.is_start_requested is True
+
+
+def test_advance_workspace_start_surfaces_an_old_connector_bounce_to_stopping() -> None:
+    # Only an old connector lands a failed in-window restart back on
+    # stopping; the recorded reason must surface within one poll cycle
+    # instead of burning the rest of the window into a generic timeout.
+    bounced, _client = _advance_once(
+        _make_workspace_info("stopping", transition_error="Error reading SSH protocol banner"),
+        _WorkspaceStartPollState(is_start_requested=True),
+    )
+    assert isinstance(bounced, WorkspaceStartFailedError)
+    assert "SSH protocol banner" in str(bounced)
+
+
+def test_advance_workspace_start_fetches_a_token_every_probe() -> None:
+    # The token is fetched per probe (refresh-near-expiry runs inside the
+    # provider's token helper), so a poll outliving the token's remaining
+    # validity keeps authenticating.
+    state = _WorkspaceStartPollState()
+    token_calls: list[int] = []
+    _advance_once(_make_workspace_info("starting", with_placement=False), state, token_calls)
+    _advance_once(_make_workspace_info("starting", with_placement=False), state, token_calls)
+    assert len(token_calls) == 2
+
+
+def test_advance_workspace_start_records_the_last_observed_status_and_error() -> None:
+    # The poll state feeds the timeout message, so a start that never
+    # converges names the real recorded reason instead of a bare timeout.
+    state = _WorkspaceStartPollState()
+    _advance_once(_make_workspace_info("stopping", transition_error="box unreachable"), state)
+    assert state.last_observed_status is WorkspaceStatus.STOPPING
+    assert state.last_transition_error == "box unreachable"
+
+
+def test_workspace_host_state_mapping_is_literal_for_every_status() -> None:
+    # A stopping workspace is genuinely mid-stop (upload in flight; the
+    # connector refuses starts until it lands on stopped), so it must not
+    # render as an already-startable STOPPED.
+    assert WORKSPACE_HOST_STATE_BY_STATUS[WorkspaceStatus.STOPPING] == HostState.STOPPING
     assert WORKSPACE_HOST_STATE_BY_STATUS[WorkspaceStatus.STOPPED] == HostState.STOPPED
     assert WORKSPACE_HOST_STATE_BY_STATUS[WorkspaceStatus.STARTING] == HostState.STARTING
     assert WORKSPACE_HOST_STATE_BY_STATUS[WorkspaceStatus.CRASHED] == HostState.CRASHED

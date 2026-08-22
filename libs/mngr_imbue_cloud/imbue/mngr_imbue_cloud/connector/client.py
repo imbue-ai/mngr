@@ -698,7 +698,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return validate_wire(WorkspaceInfo, body)
 
     def stop_workspace(self, access_token: SecretStr, host_db_id: str) -> WorkspaceStatus:
-        """Begin stopping a workspace (VM halt + upload + slot free); returns its status.
+        """Begin stopping a workspace (VM halt + upload, slot freed after retention); returns its status.
 
         Asynchronous and idempotent server-side (a retried POST joins the
         in-flight stop): the returned status is ``stopping`` when the request

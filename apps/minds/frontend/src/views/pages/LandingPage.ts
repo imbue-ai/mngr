@@ -9,7 +9,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { LandingExtras, MindLiveness } from "../../models/create";
-import { MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
+import { MIND_LIVENESS_LABELS, MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { UiProviderEntry } from "../../generated/ui";
 import { Button, ButtonLink } from "../components/Button";
@@ -195,14 +195,7 @@ export const LandingPage: m.ClosureComponent = () => {
 
   function livenessBadge(liveness: MindLiveness): m.Children {
     if (liveness === "RUNNING") return null;
-    const label =
-      liveness === "STOPPED"
-        ? "Stopped"
-        : liveness === "STOPPING"
-          ? "Stopping…"
-          : liveness === "STARTING"
-            ? "Starting…"
-            : "Status unknown";
+    const label = MIND_LIVENESS_LABELS[liveness] ?? "Status unknown";
     const tone =
       liveness === "STOPPING" || liveness === "STARTING"
         ? "bg-warning/15 text-warning"

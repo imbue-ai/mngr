@@ -289,6 +289,27 @@ class ScaledownWindowConfig(FrozenModel):
     )
 
 
+class StorageDeployConfig(FrozenModel):
+    """The ``[storage]`` block of a ``deploy.toml`` -- git-owned workspace-storage knobs.
+
+    The tier's storage *credentials* stay in Vault (the ``storage`` service
+    entry); this block carries only the deploy-time-owned settings stamped
+    over them into the pushed Modal Secret.
+    """
+
+    stop_retention_seconds: NonNegativeInt | None = Field(
+        default=None,
+        description=(
+            "Seconds a stopped workspace's halted VM lingers on its box for instant "
+            "restart-in-place before the retention finalize frees the slot. Stamped as "
+            "``WORKSPACE_STOP_RETENTION_SECONDS`` over the Vault entry at deploy time; "
+            "unset defers to the Vault value (or the connector's 3600s default). ci/dev "
+            "set this low so stop/start tests finish in minutes rather than waiting out "
+            "an hour-long window."
+        ),
+    )
+
+
 class PaidDefaultsConfig(FrozenModel):
     """Default paid-access entries seeded into the connector's paid tables on deploy.
 
@@ -509,6 +530,13 @@ class DeployEnvConfig(FrozenModel):
         description=(
             "Pinned template + blessed compute shape for browser-driven workspace creation "
             "(the connector's POST /hosts/claim). None (the default) disables web creates on the tier."
+        ),
+    )
+    storage: StorageDeployConfig | None = Field(
+        default=None,
+        description=(
+            "Git-owned workspace-storage knobs stamped over the Vault ``storage`` entry at "
+            "deploy time. None (the default) leaves the Vault values untouched."
         ),
     )
     origins: OriginsConfig | None = Field(
