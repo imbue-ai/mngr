@@ -34,6 +34,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
 from imbue.mngr_imbue_cloud.slices.bare_metal import count_authorized_key_lines
 from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
+from imbue.mngr_imbue_cloud.slices.bare_metal import find_first_ready_server_in_datacenter
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import foreign_tier_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import is_slice_owned_by_env
@@ -50,12 +51,13 @@ def _server(
     status: str,
     slot_count: int = 8,
     server_id: str = "11111111-1111-1111-1111-111111111111",
+    region: str = "vin",
 ) -> BareMetalServer:
     now = datetime.now(timezone.utc)
     return BareMetalServer(
         id=BareMetalServerDbId(server_id),
         plan_code="24rise02-v1-us",
-        region="vin",
+        region=region,
         slot_count=slot_count,
         status=BareMetalServerStatus(status),
         created_at=now,
@@ -284,6 +286,29 @@ def test_find_server_capacity_by_id_raises_when_absent() -> None:
     only = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=0)
     with pytest.raises(SliceCapacityError):
         find_server_capacity_by_id([only], BareMetalServerDbId("99999999-9999-9999-9999-999999999999"))
+
+
+def test_find_first_ready_server_in_datacenter_returns_the_first_ready_row_in_that_datacenter() -> None:
+    not_ready = _server(SERVER_STATUS_ORDERED, server_id="11111111-1111-1111-1111-111111111111")
+    first_ready = _server(SERVER_STATUS_READY, server_id="22222222-2222-2222-2222-222222222222")
+    later_ready = _server(SERVER_STATUS_READY, server_id="33333333-3333-3333-3333-333333333333")
+    chosen = find_first_ready_server_in_datacenter([not_ready, first_ready, later_ready], "vin")
+    assert chosen is not None
+    assert chosen.id == first_ready.id
+
+
+def test_find_first_ready_server_in_datacenter_ignores_other_datacenters() -> None:
+    hil_ready = _server(SERVER_STATUS_READY, server_id="22222222-2222-2222-2222-222222222222", region="hil")
+    vin_ready = _server(SERVER_STATUS_READY, server_id="33333333-3333-3333-3333-333333333333", region="vin")
+    chosen = find_first_ready_server_in_datacenter([hil_ready, vin_ready], "hil")
+    assert chosen is not None
+    assert chosen.id == hil_ready.id
+
+
+def test_find_first_ready_server_in_datacenter_returns_none_when_no_ready_row_matches() -> None:
+    assert find_first_ready_server_in_datacenter([], "vin") is None
+    assert find_first_ready_server_in_datacenter([_server(SERVER_STATUS_INSTALLING)], "vin") is None
+    assert find_first_ready_server_in_datacenter([_server(SERVER_STATUS_READY, region="hil")], "vin") is None
 
 
 def test_compute_orphan_slice_instance_names_returns_this_envs_untracked_slice_vms() -> None:

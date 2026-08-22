@@ -79,6 +79,18 @@ class SliceBakeReport(FrozenModel):
     slices: tuple[SliceBakeOutcome, ...] = Field(description="Per-slice outcomes, in completion order")
 
 
+class WarmCacheReport(FrozenModel):
+    """The summary the cache pre-warm (``minds-admin pool warm-cache``) emits."""
+
+    cache_tag: str = Field(description="The content-addressed image-cache tag the warm targeted")
+    server_id: str = Field(description="The bare_metal_servers row id of the warmed box")
+    was_tar_already_present: bool = Field(description="Whether the box already held the tar (cheap no-op)")
+    is_warmed: bool = Field(description="Whether the box holds the tar now")
+    slices: tuple[SliceBakeOutcome, ...] = Field(
+        description="Throwaway seed-slice attempt outcomes, in completion order (empty on a no-op)"
+    )
+
+
 class BoxTierAudit(FrozenModel):
     """What one bare-metal box actually carries, read over SSH rather than from the DB.
 

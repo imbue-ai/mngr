@@ -382,6 +382,25 @@ def count_slice_resource_names(names: AbstractSet[str]) -> int:
     return sum(1 for name in names if name.startswith(SLICE_LIMA_INSTANCE_PREFIX))
 
 
+@pure
+def find_first_ready_server_in_datacenter(
+    servers: Sequence[BareMetalServer], datacenter: str
+) -> BareMetalServer | None:
+    """The first ready server in the given OVH datacenter, or None when the datacenter has none.
+
+    The deterministic CI box selection shared by the cache pre-warm job and the
+    bake stage (specs/remote-workspaces-in-ci.md): given the same server rows
+    (``fetch_servers`` orders by created_at ASC) and the same datacenter, both
+    steps pick the same box, so the warm job's tar lands on the box the bake
+    will use. One box per datacenter today; if several exist the first ready one
+    wins -- the bake's on-box occupancy check is what actually guards capacity.
+    """
+    for server in servers:
+        if str(server.status) == SERVER_STATUS_READY and server.region == datacenter:
+            return server
+    return None
+
+
 # /proc/mdstat structure: an array header line (``md3 : active raid1 ...``)
 # followed by a status line whose ``[expected/active]`` bracket reports member
 # counts (``... blocks super 1.2 [2/1] [_U]``). Fewer active members than

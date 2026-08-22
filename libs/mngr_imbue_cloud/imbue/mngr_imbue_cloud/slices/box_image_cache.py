@@ -41,6 +41,10 @@ class BoxImageCacheInterface(MutableModel, ABC):
         """Atomically become the seed builder for image_tag (reclaiming a stale lock); True if acquired."""
 
     @abstractmethod
+    def is_build_locked(self, image_tag: str) -> bool:
+        """Return whether a live (non-stale) seed build currently holds the build lock for image_tag."""
+
+    @abstractmethod
     def release_build_lock(self, image_tag: str) -> None:
         """Release the seed build lock for image_tag (no-op if not held)."""
 

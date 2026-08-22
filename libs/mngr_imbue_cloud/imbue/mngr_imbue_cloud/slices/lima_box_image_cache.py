@@ -55,6 +55,26 @@ class LimaBoxImageCache(BoxImageCacheInterface):
         )
         return rc == 0
 
+    def _read_build_lock_age_seconds(self, image_tag: str) -> int | None:
+        """Age of the build-lock dir per the box's own clock, or None when unreadable.
+
+        A lock that vanished between the caller's existence probe and this read
+        yields a huge age (the ``|| echo 0`` epoch fallback), which every caller
+        correctly treats as stale/absent.
+        """
+        lock = self._lock_path(image_tag)
+        age_rc, age_out, _err = self._run(
+            f"echo $(( $(date +%s) - $(stat -c %Y {shlex.quote(lock)} 2>/dev/null || echo 0) ))",
+            timeout=_SHORT_TIMEOUT_SECONDS,
+            label="cache-lock-age",
+        )
+        if age_rc != 0:
+            return None
+        try:
+            return int(age_out.strip())
+        except ValueError:
+            return None
+
     def try_acquire_build_lock(self, image_tag: str) -> bool:
         # `mkdir -p` the cache dir first: on a box whose prep predates the
         # current cache dir name, a bare `mkdir <lock>` would fail on the
@@ -69,16 +89,8 @@ class LimaBoxImageCache(BoxImageCacheInterface):
             return True
         # The lock dir exists; reclaim it only if it is older than the build TTL (its
         # builder almost certainly died mid-seed), otherwise a seed is in flight.
-        age_rc, age_out, _err = self._run(
-            f"echo $(( $(date +%s) - $(stat -c %Y {shlex.quote(lock)} 2>/dev/null || echo 0) ))",
-            timeout=_SHORT_TIMEOUT_SECONDS,
-            label="cache-lock-age",
-        )
-        if age_rc != 0:
-            return False
-        try:
-            age_seconds = int(age_out.strip())
-        except ValueError:
+        age_seconds = self._read_build_lock_age_seconds(image_tag)
+        if age_seconds is None:
             return False
         if age_seconds <= BUILD_LOCK_TTL_SECONDS:
             return False
@@ -87,6 +99,22 @@ class LimaBoxImageCache(BoxImageCacheInterface):
             f"mkdir {shlex.quote(lock)}", timeout=_SHORT_TIMEOUT_SECONDS, label="cache-lock-retry"
         )
         return retry_rc == 0
+
+    def is_build_locked(self, image_tag: str) -> bool:
+        rc, _out, _err = self._run(
+            f"test -d {shlex.quote(self._lock_path(image_tag))}",
+            timeout=_SHORT_TIMEOUT_SECONDS,
+            label="cache-lock-probe",
+        )
+        if rc != 0:
+            return False
+        # Mirror try_acquire_build_lock: an unreadable age counts as held (a seed
+        # is presumably in flight), a stale age counts as not held (its builder
+        # died; the next contender will reclaim it).
+        age_seconds = self._read_build_lock_age_seconds(image_tag)
+        if age_seconds is None:
+            return True
+        return age_seconds <= BUILD_LOCK_TTL_SECONDS
 
     def release_build_lock(self, image_tag: str) -> None:
         self._run(

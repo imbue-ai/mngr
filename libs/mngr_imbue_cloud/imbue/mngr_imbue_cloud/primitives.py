@@ -44,6 +44,13 @@ OVH_DATACENTER_CODE_BY_US_REGION: Final[Mapping[str, str]] = {"US-EAST-VA": "vin
 # itself accepts any string and simply matches the column).
 KNOWN_OVH_US_REGIONS: Final[frozenset[str]] = frozenset(OVH_DATACENTER_CODE_BY_US_REGION)
 
+# The reverse pairing: the lease-region label served by each OVH datacenter code
+# (as stored in ``bare_metal_servers.region``). Derived from the forward map so
+# the two can never disagree.
+US_REGION_BY_OVH_DATACENTER_CODE: Final[Mapping[str, str]] = {
+    datacenter: region for region, datacenter in OVH_DATACENTER_CODE_BY_US_REGION.items()
+}
+
 OVH_US_DATACENTER_CODES: Final[frozenset[str]] = frozenset(OVH_DATACENTER_CODE_BY_US_REGION.values())
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")

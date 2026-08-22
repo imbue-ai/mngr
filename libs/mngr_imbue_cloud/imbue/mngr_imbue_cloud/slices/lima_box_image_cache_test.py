@@ -146,3 +146,48 @@ def test_create_transfer_key_returns_generated_public_key() -> None:
     transfer_key = _cache(responder).create_transfer_key()
     assert transfer_key.public_key == "ssh-ed25519 GENERATED"
     assert transfer_key.private_key_path_on_box.startswith(f"{_CACHE_DIR}/.transfer-")
+
+
+def test_is_build_locked_is_false_when_the_lock_dir_is_absent() -> None:
+    def responder(command: str) -> tuple[int | None, str, str]:
+        if command.startswith("test -d"):
+            return 1, "", ""
+        raise AssertionError(f"unexpected command: {command}")
+
+    assert _cache(responder).is_build_locked(_TAG) is False
+
+
+def test_is_build_locked_is_true_for_a_fresh_lock() -> None:
+    def responder(command: str) -> tuple[int | None, str, str]:
+        if command.startswith("test -d"):
+            return 0, "", ""
+        if "stat -c %Y" in command:
+            # 100s old, well under the TTL.
+            return 0, "100\n", ""
+        raise AssertionError(f"unexpected command: {command}")
+
+    assert _cache(responder).is_build_locked(_TAG) is True
+
+
+def test_is_build_locked_is_false_for_a_stale_lock() -> None:
+    def responder(command: str) -> tuple[int | None, str, str]:
+        if command.startswith("test -d"):
+            return 0, "", ""
+        if "stat -c %Y" in command:
+            # Far older than the TTL -> its builder died; not a live seed.
+            return 0, "99999\n", ""
+        raise AssertionError(f"unexpected command: {command}")
+
+    assert _cache(responder).is_build_locked(_TAG) is False
+
+
+def test_is_build_locked_is_true_when_the_age_probe_fails() -> None:
+    # Mirrors try_acquire_build_lock: an unreadable age counts as held.
+    def responder(command: str) -> tuple[int | None, str, str]:
+        if command.startswith("test -d"):
+            return 0, "", ""
+        if "stat -c %Y" in command:
+            return 1, "", "ssh reset"
+        raise AssertionError(f"unexpected command: {command}")
+
+    assert _cache(responder).is_build_locked(_TAG) is True

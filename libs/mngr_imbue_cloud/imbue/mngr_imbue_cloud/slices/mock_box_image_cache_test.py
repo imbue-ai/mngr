@@ -39,6 +39,9 @@ class MockBoxImageCache(BoxImageCacheInterface):
         self.locks_held.add(image_tag)
         return True
 
+    def is_build_locked(self, image_tag: str) -> bool:
+        return image_tag in self.locks_held
+
     def release_build_lock(self, image_tag: str) -> None:
         self.locks_held.discard(image_tag)
 

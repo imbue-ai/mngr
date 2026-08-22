@@ -4,7 +4,9 @@ from imbue.mngr_imbue_cloud.primitives import CI_TIER
 from imbue.mngr_imbue_cloud.primitives import DEV_TIER
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import InvalidImbueCloudAccount
+from imbue.mngr_imbue_cloud.primitives import OVH_DATACENTER_CODE_BY_US_REGION
 from imbue.mngr_imbue_cloud.primitives import PRODUCTION_TIER
+from imbue.mngr_imbue_cloud.primitives import US_REGION_BY_OVH_DATACENTER_CODE
 from imbue.mngr_imbue_cloud.primitives import STAGING_TIER
 from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 from imbue.mngr_imbue_cloud.primitives import slugify_account
@@ -58,3 +60,11 @@ def test_is_box_exclusive_to_tier_requires_one_key_and_no_foreign_slices() -> No
     assert not is_box_exclusive_to_tier(authorized_key_count=2, foreign_tier_slice_count=0)
     assert not is_box_exclusive_to_tier(authorized_key_count=0, foreign_tier_slice_count=0)
     assert not is_box_exclusive_to_tier(authorized_key_count=1, foreign_tier_slice_count=1)
+
+
+def test_us_region_by_ovh_datacenter_code_round_trips_the_forward_map() -> None:
+    # The reverse map is derived from the forward one; every pairing must survive
+    # the round trip in both directions (which also proves neither side collides).
+    assert len(US_REGION_BY_OVH_DATACENTER_CODE) == len(OVH_DATACENTER_CODE_BY_US_REGION)
+    for region, datacenter in OVH_DATACENTER_CODE_BY_US_REGION.items():
+        assert US_REGION_BY_OVH_DATACENTER_CODE[datacenter] == region
