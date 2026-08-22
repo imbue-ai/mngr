@@ -76,6 +76,15 @@ class ImbueCloudEmailNotVerifiedError(ImbueCloudError):
         self.email = email
 
 
+class ImbueCloudAccountSuspendedError(ImbueCloudError):
+    """Raised when the connector refuses an action because the account is suspended.
+
+    Carries the connector's user-facing message from the structured 403
+    (``code: account_suspended``), which includes the support contact --
+    the operator-recorded reason is never sent to clients.
+    """
+
+
 class ImbueCloudAccountError(ImbueCloudError):
     """Raised when an account (plan / entitlements / usage) operation fails."""
 

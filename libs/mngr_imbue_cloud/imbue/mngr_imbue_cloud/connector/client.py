@@ -32,6 +32,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import CLIENT_TOO_OLD_FALLBACK_MESSAGE
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
@@ -54,6 +55,7 @@ from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.wire import parse_wire_entries
 from imbue.mngr_imbue_cloud.wire import validate_wire
 from imbue.mngr_imbue_cloud.wire_types import AccountInfo
+from imbue.mngr_imbue_cloud.wire_types import AdminAccountInfo
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
@@ -204,6 +206,16 @@ class ImbueCloudConnectorClient(MutableModel):
                 email=email if isinstance(email, str) else None,
             )
 
+    def _raise_if_account_suspended(self, response: httpx.Response) -> None:
+        """Raise the typed suspension error when a 403 carries the connector's structured detail."""
+        if response.status_code != 403:
+            return
+        detail = _detail_dict_from_response(response)
+        if detail is not None and detail.get("code") == "account_suspended":
+            raise ImbueCloudAccountSuspendedError(
+                str(detail.get("message", "This account is suspended. Contact support@imbue.com."))
+            )
+
     def _raise_if_grant_budget_exhausted(self, response: httpx.Response) -> None:
         """Raise the typed grant-budget error when a 403 carries the connector's structured detail."""
         if response.status_code != 403:
@@ -234,6 +246,7 @@ class ImbueCloudConnectorClient(MutableModel):
         self._raise_if_quota_exceeded(response)
         self._raise_if_grant_budget_exhausted(response)
         self._raise_if_email_not_verified(response)
+        self._raise_if_account_suspended(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
         if response.status_code in (200, 201, 202, 204):
@@ -1164,7 +1177,7 @@ class ImbueCloudConnectorClient(MutableModel):
         """
         return f"/admin/accounts/{quote(email, safe='@')}"
 
-    def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AccountInfo:
+    def admin_get_account(self, admin_api_key: SecretStr, email: str) -> AdminAccountInfo:
         response = self._send(
             "GET",
             self._url(self._admin_account_path(email)),
@@ -1172,7 +1185,7 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(admin_api_key),
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
-        return validate_wire(AccountInfo, self._check(response, ImbueCloudAccountError))
+        return validate_wire(AdminAccountInfo, self._check(response, ImbueCloudAccountError))
 
     def admin_set_account_plan(self, admin_api_key: SecretStr, email: str, plan: str) -> dict[str, Any]:
         # Always resets to the plan's defaults, so a retried request lands in
@@ -1201,6 +1214,53 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=self.timeout_seconds,
         )
         return self._check(response, ImbueCloudAccountError)
+
+    def admin_revoke_sessions(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
+        """Revoke every SuperTokens session of the addressed account (safe to retry)."""
+        response = self._send(
+            "POST",
+            self._url(f"{self._admin_account_path(email)}/revoke-sessions"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_suspend_account(
+        self, admin_api_key: SecretStr, email: str, reason: str, block_storage: bool
+    ) -> dict[str, Any]:
+        """Suspend the account (idempotent fan-out; re-running converges / escalates)."""
+        response = self._send(
+            "POST",
+            self._url(f"{self._admin_account_path(email)}/suspend"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            json={"reason": reason, "block_storage": block_storage},
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_unsuspend_account(self, admin_api_key: SecretStr, email: str) -> dict[str, Any]:
+        """Lift the account's suspension (idempotent restore fan-out)."""
+        response = self._send(
+            "POST",
+            self._url(f"{self._admin_account_path(email)}/unsuspend"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(admin_api_key),
+            timeout=KEY_OP_TIMEOUT_SECONDS,
+        )
+        return self._check(response, ImbueCloudAccountError)
+
+    def admin_stop_workspace(self, admin_api_key: SecretStr, host_db_id: str) -> dict[str, Any]:
+        """Operator force-stop of one workspace (idempotent, like the owner stop)."""
+        response = self._send(
+            "POST",
+            self._url(f"/admin/workspaces/{host_db_id}/stop"),
+            exc_cls=ImbueCloudConnectorError,
+            headers=self._bearer(admin_api_key),
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudConnectorError)
 
     def admin_run_r2_sweep(self, admin_api_key: SecretStr, email: str | None) -> dict[str, Any]:
         """Run one R2 storage-quota sweep pass on demand; ``email`` scopes it to one account.

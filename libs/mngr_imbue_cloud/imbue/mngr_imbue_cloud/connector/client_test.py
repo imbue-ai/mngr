@@ -21,6 +21,7 @@ from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.client import create_litellm_key_rotating_on_exists
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudAccountSuspendedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketExistsError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketLimitError
@@ -616,12 +617,17 @@ def test_admin_account_endpoints_use_admin_paths(monkeypatch: pytest.MonkeyPatch
                     "llm_budget_resets_at": None,
                     "active_synced_workspaces": 0,
                 },
+                "suspended_at": "2026-08-22 00:00:00+00:00",
+                "suspended_reason": "abuse",
             },
         )
 
     client = _install_mock_httpx(monkeypatch, handler)
     info = client.admin_get_account(SecretStr("adm"), "alice@imbue.com")
     assert info.plan_name == "explorer"
+    # The operator view carries the suspension state (what `account show` renders).
+    assert info.suspended_at == "2026-08-22 00:00:00+00:00"
+    assert info.suspended_reason == "abuse"
     client.admin_set_account_plan(SecretStr("adm"), "alice@imbue.com", "ally")
     client.admin_set_account_quota(SecretStr("adm"), "alice@imbue.com", "max_buckets", 60)
     assert seen == [
@@ -1758,3 +1764,41 @@ def test_workspace_with_unrecognized_status_coerces_to_unknown(monkeypatch: pyte
 
     assert len(workspaces) == 1
     assert workspaces[0].status is WorkspaceStatus.UNKNOWN
+
+
+def test_admin_suspension_endpoints_hit_the_right_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str, dict[str, object] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content) if request.content else None
+        seen.append((request.method, request.url.path, body))
+        return httpx.Response(200, json={"status": "ok", "steps": {}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    client.admin_revoke_sessions(SecretStr("adm"), "alice@imbue.com")
+    client.admin_suspend_account(SecretStr("adm"), "alice@imbue.com", "abuse", block_storage=True)
+    client.admin_unsuspend_account(SecretStr("adm"), "alice@imbue.com")
+    client.admin_stop_workspace(SecretStr("adm"), "11111111-2222-3333-4444-555566667777")
+    assert seen == [
+        ("POST", "/admin/accounts/alice@imbue.com/revoke-sessions", None),
+        ("POST", "/admin/accounts/alice@imbue.com/suspend", {"reason": "abuse", "block_storage": True}),
+        ("POST", "/admin/accounts/alice@imbue.com/unsuspend", None),
+        ("POST", "/admin/workspaces/11111111-2222-3333-4444-555566667777/stop", None),
+    ]
+
+
+def test_account_suspended_403_raises_the_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "detail": {
+                    "code": "account_suspended",
+                    "message": "This account is suspended. Contact support@imbue.com.",
+                }
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAccountSuspendedError, match="support@imbue.com"):
+        client.auth_device_token("code-1", "verifier-1", "http://127.0.0.1:1234/callback")

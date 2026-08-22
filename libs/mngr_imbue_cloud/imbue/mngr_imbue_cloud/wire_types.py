@@ -363,6 +363,19 @@ class AccountInfo(WireModel):
     )
 
 
+class AdminAccountInfo(AccountInfo):
+    """The operator view of an account, from GET /admin/accounts/{email}.
+
+    Extends the user-facing shape with the suspension state, which is
+    operator-facing only (the connector never sends it on ``GET /account``).
+    """
+
+    suspended_at: str | None = Field(default=None, description="When the account was suspended (None = not suspended)")
+    suspended_reason: str | None = Field(
+        default=None, description="Operator-recorded suspension reason (internal; never shown to the user)"
+    )
+
+
 class SyncWorkspaceRecord(WireModel):
     """Wire form of one synced workspace record (transport-only; the plugin never decrypts).
 
