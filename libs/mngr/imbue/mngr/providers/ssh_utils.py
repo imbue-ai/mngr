@@ -9,6 +9,7 @@ from typing import Final
 import paramiko
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from loguru import logger
 from pyinfra.api import Host as PyinfraHost
 from pyinfra.api import State as PyinfraState
 from pyinfra.api.inventory import Inventory
@@ -454,12 +455,17 @@ def _can_authenticate_to_server(
     hostname: str,
     port: int,
     private_key_path: Path,
-    timeout_seconds: float = 5.0,
+    username: str,
+    timeout_seconds: float,
 ) -> bool:
     """Check if we can authenticate and open a session to the SSH server.
 
     A full SSH connection with session open verifies the server is ready to
-    handle requests, not just accepting TCP connections.
+    handle requests, not just accepting TCP connections. The username must be
+    passed explicitly: paramiko defaults to the local OS user, which is almost
+    never the user the server's key is authorized for. The banner window is the
+    shared SSH_BANNER_TIMEOUT_SECONDS rather than the per-attempt budget because
+    degraded tunnels (e.g. Modal) are slow specifically at the banner exchange.
     """
     client = None
     try:
@@ -468,17 +474,19 @@ def _can_authenticate_to_server(
         client.connect(
             hostname=hostname,
             port=port,
+            username=username,
             key_filename=str(private_key_path),
             timeout=timeout_seconds,
             auth_timeout=timeout_seconds,
-            banner_timeout=timeout_seconds,
+            banner_timeout=SSH_BANNER_TIMEOUT_SECONDS,
         )
         transport = client.get_transport()
         if transport is None:
             return False
         transport.open_session(timeout=timeout_seconds)
         return True
-    except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError):
+    except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError) as e:
+        logger.trace("SSH session-open probe to {}:{} as user {} failed: {}", hostname, port, username, e)
         return False
     finally:
         if client is not None:
@@ -493,19 +501,22 @@ def wait_for_sshd_with_retry(
     port: int,
     timeout_seconds: float = 60.0,
     private_key_path: Path | None = None,
+    *,
+    username: str,
 ) -> None:
     """Wait for sshd to be ready, optionally verifying it can open sessions.
 
     First waits for the SSH transport handshake, then optionally verifies
     the server can actually open authenticated sessions. This absorbs
     cold-start latency where the tunnel is available but sshd is still
-    initializing.
+    initializing. ``username`` is the SSH user the private key authenticates
+    as (only used when ``private_key_path`` is given).
     """
     wait_for_sshd(hostname, port, timeout_seconds)
 
     if private_key_path is not None:
         if not poll_until(
-            lambda: _can_authenticate_to_server(hostname, port, private_key_path, 5.0),
+            lambda: _can_authenticate_to_server(hostname, port, private_key_path, username, 5.0),
             timeout=timeout_seconds,
             poll_interval=0.5,
         ):

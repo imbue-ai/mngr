@@ -165,6 +165,11 @@ DEFAULT_SANDBOX_TIMEOUT: Final[int] = 2 * 60
 # Seconds to wait for sshd to be ready
 SSH_CONNECT_TIMEOUT: Final[int] = 60
 
+# SSH user mngr connects as inside sandboxes. The client key is authorized for
+# exactly this user by _start_sshd_in_sandbox, so every SSH connection
+# (readiness probes included) must authenticate as this user.
+DEFAULT_SSH_USER: Final[str] = "root"
+
 # Tag key constants for sandbox metadata stored in Modal tags.
 # Only host_id and host_name are stored as tags (for discovery). All other
 # metadata is stored on the Modal Volume for persistence and sharing.
@@ -994,7 +999,7 @@ class ModalProviderInstance(BaseProviderInstance):
         client_public_key: str,
         host_private_key: str,
         host_public_key: str,
-        ssh_user: str = "root",
+        ssh_user: str = DEFAULT_SSH_USER,
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
     ) -> None:
@@ -1084,7 +1089,7 @@ class ModalProviderInstance(BaseProviderInstance):
     ) -> None:
         """Wait for sshd to be ready to accept connections."""
         private_key_path, _ = self._get_ssh_keypair(host_id)
-        wait_for_sshd_with_retry(hostname, port, timeout_seconds, private_key_path)
+        wait_for_sshd_with_retry(hostname, port, timeout_seconds, private_key_path, username=DEFAULT_SSH_USER)
 
     def _create_pyinfra_host(self, hostname: str, port: int, private_key_path: Path) -> PyinfraHost:
         """Create a pyinfra host with SSH connector."""

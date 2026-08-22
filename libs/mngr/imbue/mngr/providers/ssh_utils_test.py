@@ -1,16 +1,23 @@
 """Unit tests for SSH key generation and management utilities."""
 
+import contextlib
 import socket
 import stat
 import threading
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import paramiko
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.hazmat.primitives.serialization import PublicFormat
 from cryptography.hazmat.primitives.serialization import load_ssh_private_key
+from paramiko.common import AUTH_FAILED
+from paramiko.common import AUTH_SUCCESSFUL
+from paramiko.common import OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+from paramiko.common import OPEN_SUCCEEDED
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.mngr.errors import MngrError
@@ -38,6 +45,8 @@ from imbue.mngr.providers.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.providers.ssh_utils import wait_for_sshd_with_retry
+from imbue.mngr.utils.testing import allow_warnings
 
 # =============================================================================
 # generate_ssh_keypair
@@ -626,6 +635,128 @@ def test_wait_for_sshd_raises_on_non_listening_port() -> None:
 
     with pytest.raises(MngrError, match="SSH server not ready after"):
         wait_for_sshd("127.0.0.1", unused_port, timeout_seconds=0.0)
+
+
+# =============================================================================
+# wait_for_sshd_with_retry
+# =============================================================================
+
+# A username that never matches the local OS user, so a probe that forgot to
+# pass its username through (paramiko then defaults to getpass.getuser())
+# reliably fails these tests instead of accidentally passing.
+_TEST_SSH_USERNAME: str = "mngr-test-ssh-user"
+
+
+class _ConfigurableSshServer(paramiko.ServerInterface):
+    """In-process SSH server that accepts only a fixed username and public key."""
+
+    def __init__(self, allowed_username: str, allowed_public_key_blob: str, allow_sessions: bool) -> None:
+        self._allowed_username = allowed_username
+        self._allowed_public_key_blob = allowed_public_key_blob
+        self._allow_sessions = allow_sessions
+
+    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
+        if username == self._allowed_username and key.get_base64() == self._allowed_public_key_blob:
+            return AUTH_SUCCESSFUL
+        return AUTH_FAILED
+
+    def get_allowed_auths(self, username: str) -> str:
+        return "publickey"
+
+    def check_channel_request(self, kind: str, chanid: int) -> int:
+        if kind == "session" and self._allow_sessions:
+            return OPEN_SUCCEEDED
+        return OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+
+def _handle_test_ssh_connection(
+    client_sock: socket.socket,
+    host_key: paramiko.RSAKey,
+    server: paramiko.ServerInterface,
+) -> None:
+    transport = paramiko.Transport(client_sock)
+    transport.add_server_key(host_key)
+    try:
+        transport.start_server(server=server)
+    except (paramiko.SSHException, EOFError, OSError):
+        transport.close()
+
+
+def _accept_test_ssh_connections(
+    listening_sock: socket.socket,
+    host_key: paramiko.RSAKey,
+    allowed_username: str,
+    allowed_public_key_blob: str,
+    allow_sessions: bool,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            client_sock, _ = listening_sock.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            return
+        server = _ConfigurableSshServer(allowed_username, allowed_public_key_blob, allow_sessions)
+        threading.Thread(target=_handle_test_ssh_connection, args=(client_sock, host_key, server), daemon=True).start()
+
+
+@contextlib.contextmanager
+def _run_test_ssh_server(
+    allowed_username: str,
+    allowed_public_key_blob: str,
+    allow_sessions: bool,
+) -> Generator[int, None, None]:
+    """Run a loopback SSH server in a background thread, yielding its port."""
+    host_key = paramiko.RSAKey.generate(bits=1024)
+    listening_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listening_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listening_sock.bind(("127.0.0.1", 0))
+    listening_sock.listen(16)
+    listening_sock.settimeout(0.1)
+    stop_event = threading.Event()
+    accept_thread = threading.Thread(
+        target=_accept_test_ssh_connections,
+        args=(listening_sock, host_key, allowed_username, allowed_public_key_blob, allow_sessions, stop_event),
+        daemon=True,
+    )
+    accept_thread.start()
+    try:
+        yield listening_sock.getsockname()[1]
+    finally:
+        stop_event.set()
+        listening_sock.close()
+        accept_thread.join(timeout=2.0)
+
+
+def test_wait_for_sshd_with_retry_succeeds_when_server_accepts_auth_and_sessions(tmp_path: Path) -> None:
+    """The probe must authenticate as the given username (not the local OS user) and open a session."""
+    private_key_path, public_key_path = save_ssh_keypair(tmp_path)
+    public_key_blob = public_key_path.read_text().split()[1]
+
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, allow_sessions=True) as port:
+        wait_for_sshd_with_retry("127.0.0.1", port, 10.0, private_key_path, username=_TEST_SSH_USERNAME)
+
+
+def test_wait_for_sshd_with_retry_times_out_when_username_is_rejected(tmp_path: Path) -> None:
+    """A server that rejects the probe's username must produce the session-open timeout error."""
+    private_key_path, public_key_path = save_ssh_keypair(tmp_path)
+    public_key_blob = public_key_path.read_text().split()[1]
+
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, allow_sessions=True) as port:
+        with pytest.raises(MngrError, match="could not open sessions"):
+            wait_for_sshd_with_retry("127.0.0.1", port, 1.0, private_key_path, username="mngr-wrong-ssh-user")
+
+
+def test_wait_for_sshd_with_retry_times_out_when_sessions_are_refused(tmp_path: Path) -> None:
+    """Auth succeeding is not enough: a server that refuses session channels must time out."""
+    private_key_path, public_key_path = save_ssh_keypair(tmp_path)
+    public_key_blob = public_key_path.read_text().split()[1]
+
+    with _run_test_ssh_server(_TEST_SSH_USERNAME, public_key_blob, allow_sessions=False) as port:
+        with allow_warnings(match="Administratively prohibited"):
+            with pytest.raises(MngrError, match="could not open sessions"):
+                wait_for_sshd_with_retry("127.0.0.1", port, 1.0, private_key_path, username=_TEST_SSH_USERNAME)
 
 
 # =============================================================================
