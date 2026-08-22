@@ -57,6 +57,7 @@ _BUCKET_DESTROY_TIMEOUT_SECONDS = 600.0
 # kept duplicated here to avoid pulling the plugin's config module into the
 # desktop client.
 _CONNECTOR_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
+_ACCOUNTS_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL"
 
 # The plugin's error_class marker for a structured quota refusal, as written
 # into its JSON stderr body by handle_imbue_cloud_errors. Substring-matched
@@ -334,6 +335,17 @@ class ImbueCloudCli(MutableModel):
             "env var; the plugin has no baked-in default."
         ),
     )
+    accounts_base_url: AnyUrl | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Base URL of the tier's browser accounts origin (client.toml `accounts_base_url`, "
+            "e.g. https://accounts.imbue.com on production). Passed to the plugin via the "
+            "MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL env var so `auth login` opens the hosted "
+            "login page on the origin where Google OAuth and session cookies actually work. None "
+            "on tiers without a dedicated accounts domain (the connector host serves the pages)."
+        ),
+    )
 
     def _run(
         self,
@@ -349,6 +361,8 @@ class ImbueCloudCli(MutableModel):
         # MNGR_HOST_DIR etc. from the minds backend, so only this override is
         # needed.
         env_overrides = {_CONNECTOR_URL_SUBPROCESS_ENV: str(self.connector_url).rstrip("/")}
+        if self.accounts_base_url is not None:
+            env_overrides[_ACCOUNTS_URL_SUBPROCESS_ENV] = str(self.accounts_base_url).rstrip("/")
         # Run from $HOME like every other laptop-side mngr invocation, so this
         # does not resolve project config from minds' cwd (the monorepo root in
         # a dev checkout). Otherwise `mngr imbue_cloud auth list` loads

@@ -13,6 +13,15 @@ from imbue.mngr_vps.config import VpsProviderConfig
 
 CONNECTOR_URL_ENV_VAR = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
 
+# Base URL of the tier's browser accounts origin (e.g. https://accounts.imbue.com
+# on production) -- the host where the hosted login/signup pages actually work:
+# Google's OAuth redirect URI is registered there, and the browser session
+# cookie's Domain is scoped to its apex. Only `auth login` (which opens a
+# browser) consumes this; API traffic stays on the connector URL. Unset means
+# the tier has no dedicated accounts origin (dev/CI) and the connector host
+# serves the pages itself.
+ACCOUNTS_URL_ENV_VAR = "MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL"
+
 
 class MissingConnectorUrlError(ImbueCloudError):
     """Raised when the provider's connector URL is unset (no field, no env)."""
@@ -61,6 +70,18 @@ class ImbueCloudProviderConfig(VpsProviderConfig):
             "Override for the remote_service_connector base URL. When None, the plugin reads "
             "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL from the environment. There is no "
             "baked-in default; raise when neither source supplies a value."
+        ),
+    )
+    accounts_url: AnyUrl | None = Field(
+        default=None,
+        description=(
+            "Base URL of the tier's browser accounts origin (e.g. https://accounts.imbue.com). "
+            "Declared so the MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL env override is a valid "
+            "config key (mngr parses every MNGR__PROVIDERS__* env var as a provider-config "
+            "override and rejects unknown fields). `auth login` resolves the value from its "
+            "--accounts-url flag or that env var directly, not from this field: plugin-local "
+            "CLI commands run without a loaded mngr config. None means the tier has no "
+            "dedicated accounts origin and the login page opens on the connector host."
         ),
     )
     container_ssh_port: int = Field(

@@ -408,6 +408,7 @@ def run(
     imbue_cloud_cli = ImbueCloudCli(
         mngr_caller=mngr_caller,
         connector_url=client_env_config.connector_url,
+        accounts_base_url=client_env_config.accounts_base_url,
     )
     workspace_record_store = WorkspaceRecordStore(
         paths=paths,

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import AnyUrl
 
+from imbue.mngr_imbue_cloud.config import ACCOUNTS_URL_ENV_VAR
 from imbue.mngr_imbue_cloud.config import CONNECTOR_URL_ENV_VAR
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import MissingConnectorUrlError
@@ -51,6 +52,17 @@ def test_get_active_profile_dir_rejects_non_string_profile(tmp_path: Path) -> No
     (tmp_path / "config.toml").write_text("profile = 123\n")
     with pytest.raises(ImbueCloudError):
         get_active_profile_dir(tmp_path)
+
+
+@pytest.mark.parametrize("env_var", [CONNECTOR_URL_ENV_VAR, ACCOUNTS_URL_ENV_VAR])
+def test_provider_env_override_vars_map_to_declared_config_fields(env_var: str) -> None:
+    """mngr parses every MNGR__PROVIDERS__IMBUE_CLOUD__<FIELD> env var as a
+    providers.imbue_cloud.<field> config override and rejects unknown fields in
+    strict mode (the default), so each env var this plugin documents must map to
+    a declared field -- otherwise exporting it breaks every full mngr command
+    with a ConfigParseError."""
+    field_name = env_var.rsplit("__", 1)[-1].lower()
+    assert field_name in ImbueCloudProviderConfig.model_fields
 
 
 def test_get_connector_url_uses_explicit_field_when_set() -> None:

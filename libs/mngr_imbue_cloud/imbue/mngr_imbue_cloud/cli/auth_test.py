@@ -25,6 +25,7 @@ import httpx
 import pytest
 from pydantic import AnyUrl
 
+from imbue.mngr_imbue_cloud.cli._common import resolve_accounts_url
 from imbue.mngr_imbue_cloud.cli.auth import _CallbackCaptureBox
 from imbue.mngr_imbue_cloud.cli.auth import _bind_callback_listener
 from imbue.mngr_imbue_cloud.cli.auth import _ensure_connector_supports_browser_login
@@ -36,6 +37,7 @@ from imbue.mngr_imbue_cloud.cli.auth import _write_login_url_file
 from imbue.mngr_imbue_cloud.cli.auth import build_login_url
 from imbue.mngr_imbue_cloud.cli.auth import compute_pkce_challenge
 from imbue.mngr_imbue_cloud.cli.auth import make_pkce_verifier
+from imbue.mngr_imbue_cloud.config import ACCOUNTS_URL_ENV_VAR
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.connector.session_store import make_session_from_tokens
@@ -144,6 +146,17 @@ def test_build_login_url_carries_the_authorize_handoff_as_next() -> None:
     assert next_query["redirect_uri"] == ["http://127.0.0.1:8123/callback"]
     assert next_query["code_challenge"] == ["challenge-abc"]
     assert next_query["state"] == ["state-xyz"]
+
+
+def test_resolve_accounts_url_prefers_flag_then_env_then_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The browser accounts origin resolves flag > env > None (None = no dedicated
+    accounts origin, so ``login`` falls back to opening the page on the connector host)."""
+    monkeypatch.delenv(ACCOUNTS_URL_ENV_VAR, raising=False)
+    assert resolve_accounts_url(None) is None
+
+    monkeypatch.setenv(ACCOUNTS_URL_ENV_VAR, "https://accounts-env.example.com/")
+    assert resolve_accounts_url(None) == "https://accounts-env.example.com"
+    assert resolve_accounts_url("https://accounts-flag.example.com/") == "https://accounts-flag.example.com"
 
 
 def _make_auth_response(needs_email_verification: bool) -> AuthRawResponse:

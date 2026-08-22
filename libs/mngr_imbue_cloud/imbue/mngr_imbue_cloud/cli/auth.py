@@ -24,6 +24,7 @@ from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import parse_account
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
+from imbue.mngr_imbue_cloud.cli._common import resolve_accounts_url
 from imbue.mngr_imbue_cloud.connector.auth_helper import force_refresh
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
 from imbue.mngr_imbue_cloud.connector.client import CONNECTOR_TOO_OLD_REMEDY
@@ -588,13 +589,19 @@ def _write_login_url_file(url_file: str, login_url: str) -> None:
         fail_with_json(f"Could not write the sign-in URL to {url_file}: {exc}", error_class="LoginFailed")
 
 
-def build_login_url(connector_url: str, callback_url: str, code_challenge: str, state: str) -> str:
-    """The hosted login page URL that authorizes a device handoff back to ``callback_url``."""
+def build_login_url(login_base_url: str, callback_url: str, code_challenge: str, state: str) -> str:
+    """The hosted login page URL that authorizes a device handoff back to ``callback_url``.
+
+    ``login_base_url`` must be the tier's browser accounts origin when it has
+    one (Google's OAuth redirect URI and the session cookie's Domain are bound
+    to it); only tiers without a dedicated accounts origin serve the page on
+    the connector host itself.
+    """
     authorize_query = urllib.parse.urlencode(
         {"redirect_uri": callback_url, "code_challenge": code_challenge, "state": state}
     )
     next_path = f"/accounts/authorize?{authorize_query}"
-    return f"{connector_url.rstrip('/')}/login?" + urllib.parse.urlencode({"next": next_path})
+    return f"{login_base_url.rstrip('/')}/login?" + urllib.parse.urlencode({"next": next_path})
 
 
 @auth.command(name="login")
@@ -643,6 +650,16 @@ def build_login_url(connector_url: str, callback_url: str, code_challenge: str, 
     ),
 )
 @click.option("--connector-url", default=None, help="Override connector URL")
+@click.option(
+    "--accounts-url",
+    default=None,
+    help=(
+        "Override the browser accounts-origin URL the login page is opened on "
+        "(default: $MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL, else the connector URL). "
+        "Tiers with a dedicated accounts domain (e.g. production) only complete Google "
+        "sign-in and session cookies on that origin."
+    ),
+)
 @handle_imbue_cloud_errors
 def login(
     account: str | None,
@@ -651,12 +668,14 @@ def login(
     success_redirect_url: str | None,
     url_file: str | None,
     connector_url: str | None,
+    accounts_url: str | None,
 ) -> None:
     """Sign in via the hosted browser page (email/password, sign-up, or Google).
 
-    Spins up a localhost callback listener, opens the connector's hosted
-    login page in the system browser, and exchanges the one-time code the
-    page hands back (PKCE-bound) for this machine's own session. The browser
+    Spins up a localhost callback listener, opens the hosted login page in
+    the system browser (on the tier's accounts origin when one is configured,
+    else on the connector host), and exchanges the one-time code the page
+    hands back (PKCE-bound) for this machine's own session. The browser
     session established along the way stays in the browser; this device gets
     independent tokens.
     """
@@ -674,7 +693,9 @@ def login(
     server = _bind_callback_listener(callback_port, handler_class)
     port = server.server_address[1]
     callback_url = f"http://127.0.0.1:{port}{_LOGIN_CALLBACK_PATH}"
-    login_url = build_login_url(str(client.base_url), callback_url, compute_pkce_challenge(code_verifier), state)
+    # Tiers without a dedicated accounts origin serve the page on the connector host.
+    login_base_url = resolve_accounts_url(accounts_url) or str(client.base_url)
+    login_url = build_login_url(login_base_url, callback_url, compute_pkce_challenge(code_verifier), state)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-login-cb")
     server_thread.start()

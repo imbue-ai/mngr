@@ -146,6 +146,7 @@ mngr imbue_cloud auth login [OPTIONS]
 | `--success-redirect-url` | text | URL the success page links to once the callback lands (e.g. a minds:// deeplink so a click returns the user to the desktop app). Default: no link; the page just says to close the tab. | None |
 | `--url-file` | file | Write the sign-in URL to this file once the callback listener is up. Lets an embedder (the minds desktop client) offer a copy-the-link fallback without parsing stderr. | None |
 | `--connector-url` | text | Override connector URL | None |
+| `--accounts-url` | text | Override the browser accounts-origin URL the login page is opened on (default: $MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL, else the connector URL). Tiers with a dedicated accounts domain (e.g. production) only complete Google sign-in and session cookies on that origin. | None |
 
 ## mngr imbue_cloud auth forgot-password
 
