@@ -34,7 +34,10 @@ _IS_SOURCE_OF_TRUTH = (_REPO_ROOT / "mirror").exists()
 _EXCLUDED_PROJECTS: frozenset[str] = frozenset()
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
-_DATA_FILE_EXCLUSION: tuple[str, ...] = ("*.jsonl",)
+# Machine-generated data files whose contents are not human-written text:
+# npm lockfiles carry random base64 integrity hashes that can contain any
+# short letter run (e.g. "mng"), so they are excluded from content scans.
+_DATA_FILE_EXCLUSION: tuple[str, ...] = ("*.jsonl", "package-lock.json")
 _MIGRATION_SCRIPT_EXCLUSION: tuple[str, ...] = (
     "migrate_code_mng_to_mngr.sh",
     "migrate_state_mng_to_mngr.sh",
