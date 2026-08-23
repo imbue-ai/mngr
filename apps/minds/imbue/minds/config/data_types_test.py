@@ -145,8 +145,10 @@ def test_committed_deploy_tomls_all_define_the_launch_plans() -> None:
         plans = {name: PlanQuotasConfig.model_validate(values) for name, values in raw.get("plans", {}).items()}
         plan_blocks_by_tier[path.parent.name] = plans
     for tier, plans in plan_blocks_by_tier.items():
-        assert sorted(plans) == ["ally", "explorer"], f"tier {tier} is missing a launch plan"
+        assert sorted(plans) == ["ally", "explorer", "free"], f"tier {tier} is missing a launch plan"
         assert plans == plan_blocks_by_tier["dev"], f"tier {tier} diverges from the shared [plans] values"
+    assert plan_blocks_by_tier["dev"]["free"].max_remote_workspaces == 1
+    assert plan_blocks_by_tier["dev"]["free"].monthly_llm_spend_usd == 0.0
     assert plan_blocks_by_tier["dev"]["explorer"].monthly_llm_spend_usd == 0.0
     assert plan_blocks_by_tier["dev"]["ally"].monthly_llm_spend_usd == 1000.0
 

@@ -22,10 +22,65 @@ interface AccountCardAttrs {
   account: AccountEntry;
 }
 
+// Shared plan copy (mirrors the hosted signup page's plan selector).
+const PLAN_DESCRIPTION_BY_NAME: Record<string, string> = {
+  explorer:
+    "2 free cloud workspaces. You agree to share product data from those workspaces with Imbue " +
+    "to help improve Minds.",
+  free:
+    "1 free cloud workspace. Your workspace may be temporarily paused when idle or when capacity " +
+    "is low. Our goal is to make your data private and secure.",
+};
+
+// Switching TO explorer is the analytics consent, so it needs an explicit
+// affirmative agreement, not just a dropdown pick.
+const EXPLORER_AGREEMENT_COPY =
+  "I agree to the privacy policy for the Explorer edition, which includes sharing product data " +
+  "from my workspace with Imbue.";
+
+function pendingPlanDetails(
+  view: { plan_name: string },
+  privacyPolicyUrl: string,
+  selectedPlan: string,
+  isAgreementChecked: boolean,
+  onAgreementChange: (isChecked: boolean) => void,
+): m.Children {
+  if (selectedPlan === view.plan_name) return null;
+  const description = PLAN_DESCRIPTION_BY_NAME[selectedPlan];
+  if (description === undefined && selectedPlan !== "explorer") return null;
+  const learnMore = privacyPolicyUrl
+    ? m(
+        Link,
+        { href: privacyPolicyUrl, target: "_blank", rel: "noopener", extra: "type-helper" },
+        "Learn more.",
+      )
+    : null;
+  return m("div", { class: "mb-2" }, [
+    description !== undefined
+      ? m("p", { class: "type-helper text-tertiary mb-1" }, [description, " ", learnMore])
+      : null,
+    selectedPlan === "explorer"
+      ? m("label", { class: "flex items-start gap-2 type-helper text-secondary cursor-pointer" }, [
+          m("input", {
+            id: "explorer-agreement-checkbox",
+            type: "checkbox",
+            checked: isAgreementChecked,
+            class: "mt-0.5 cursor-pointer",
+            onchange: (event: Event) => {
+              onAgreementChange((event.target as HTMLInputElement).checked);
+            },
+          }),
+          m("span", EXPLORER_AGREEMENT_COPY),
+        ])
+      : null,
+  ]);
+}
+
 function planSection(
   model: AccountsDetailModel,
   account: AccountEntry,
   selectedPlanByUserId: Map<string, string>,
+  isExplorerAgreementCheckedByUserId: Map<string, boolean>,
 ): m.Children {
   const plan = model.planStateFor(account.user_id);
   if (!plan.isLoaded) {
@@ -49,6 +104,9 @@ function planSection(
   // The draft lives in component state (keyed by user_id): a per-render
   // local would be reset by the redraw that follows the select's onchange.
   const selectedPlan = selectedPlanByUserId.get(account.user_id) ?? view.plan_name;
+  const isAgreementChecked = isExplorerAgreementCheckedByUserId.get(account.user_id) === true;
+  const isAgreementNeeded = selectedPlan === "explorer" && selectedPlan !== view.plan_name;
+  const isSwitchingPlan = model.isSwitchingPlan(account.user_id);
   return m("div", [
     verifyPrompt !== null
       ? m(Notice, { variant: "warn" }, [
@@ -93,6 +151,8 @@ function planSection(
                 width: "w-32",
                 onchange: (event: Event) => {
                   selectedPlanByUserId.set(account.user_id, (event.target as HTMLSelectElement).value);
+                  // A new pick invalidates a previously-checked agreement.
+                  isExplorerAgreementCheckedByUserId.delete(account.user_id);
                 },
               },
               view.available_plans.map((plan_name) =>
@@ -107,14 +167,26 @@ function planSection(
               Button,
               {
                 variant: "secondary",
+                // Enabled only for an actual change: a pick equal to the
+                // current plan (the resting state), a missing explorer
+                // agreement, or an in-flight switch all refuse.
+                disabled:
+                  selectedPlan === view.plan_name ||
+                  (isAgreementNeeded && !isAgreementChecked) ||
+                  isSwitchingPlan,
                 onclick: () =>
                   void model.switchPlan(account.user_id, selectedPlan),
               },
-              "Switch plan",
+              isSwitchingPlan
+                ? [m(Spinner, { size: "sm" }), "Switching…"]
+                : "Switch plan",
             ),
           ])
         : null,
     ]),
+    pendingPlanDetails(view, plan.privacyPolicyUrl, selectedPlan, isAgreementChecked, (isChecked) => {
+      isExplorerAgreementCheckedByUserId.set(account.user_id, isChecked);
+    }),
     m(
       "table",
       { class: "w-full type-helper" },
@@ -172,6 +244,7 @@ function planSection(
 
 export function AccountCard(): m.Component<AccountCardAttrs> {
   const selectedPlanByUserId = new Map<string, string>();
+  const isExplorerAgreementCheckedByUserId = new Map<string, boolean>();
   return {
     view(vnode) {
       const { model, account } = vnode.attrs;
@@ -243,7 +316,7 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
         m(
           "div",
           { class: "mt-3 pt-3 border-t border-default" },
-          planSection(model, account, selectedPlanByUserId),
+          planSection(model, account, selectedPlanByUserId, isExplorerAgreementCheckedByUserId),
         ),
       ]);
     },

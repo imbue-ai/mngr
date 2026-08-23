@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 
+from pydantic import AnyUrl
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
@@ -144,6 +146,32 @@ def test_account_plan_degrades_to_null_plan_view_without_a_connector(tmp_path: P
     payload = json.loads(response.data)
     assert payload["plan_view"] is None
     assert payload["trim_status"] is None
+    # No client env config means no known origin for the privacy policy.
+    assert payload["privacy_policy_url"] == ""
+
+
+def test_account_plan_resolves_the_privacy_policy_url_from_the_client_env_config(tmp_path: Path) -> None:
+    """The Learn-more link prefers the accounts origin and falls back to the connector host."""
+    connector_only = ClientEnvConfig(
+        connector_url=AnyUrl("https://connector.example.com"),
+        litellm_proxy_url=AnyUrl("https://llm.example.com"),
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, client_env_config=connector_only
+    )
+    payload = json.loads(client.get("/ui/api/accounts/user-123/plan").data)
+    assert payload["privacy_policy_url"] == "https://connector.example.com/privacy-policy"
+
+    with_accounts_origin = ClientEnvConfig(
+        connector_url=AnyUrl("https://connector.example.com"),
+        litellm_proxy_url=AnyUrl("https://llm.example.com"),
+        accounts_base_url=AnyUrl("https://accounts.example.com"),
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path / "accounts-origin", is_authenticated=True, client_env_config=with_accounts_origin
+    )
+    payload = json.loads(client.get("/ui/api/accounts/user-123/plan").data)
+    assert payload["privacy_policy_url"] == "https://accounts.example.com/privacy-policy"
 
 
 def test_ai_keys_context_requires_authentication(tmp_path: Path) -> None:

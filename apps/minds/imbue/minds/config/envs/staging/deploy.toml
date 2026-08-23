@@ -44,6 +44,14 @@ domains = ["imbue.com"]
 # `minds-admin account set-plan / set-quota`. The same values are
 # committed for every tier; tests that need small limits override per-user
 # via the admin API.
+[plans.free]
+max_remote_workspaces = 1
+max_total_workspaces = 5
+max_buckets = 5
+max_total_bucket_gb = 25
+monthly_llm_spend_usd = 0
+max_active_synced_workspaces = 200
+
 [plans.explorer]
 max_remote_workspaces = 2
 max_total_workspaces = 10

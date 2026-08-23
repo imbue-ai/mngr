@@ -119,6 +119,17 @@ class ClientEnvConfig(FrozenModel):
         ),
     )
 
+    def accounts_origin_url(self) -> str:
+        """The tier's browser accounts origin, without a trailing slash.
+
+        Prefers ``accounts_base_url`` (production: https://accounts.imbue.com)
+        and falls back to ``connector_url``, which serves the same pages on
+        tiers without a dedicated accounts domain.
+        """
+        if self.accounts_base_url is not None:
+            return str(self.accounts_base_url).rstrip("/")
+        return str(self.connector_url).rstrip("/")
+
 
 class DeploySecretsConfig(FrozenModel):
     """The ``[secrets]`` subtable of a ``deploy.toml`` -- which Vault-backed services this tier needs.

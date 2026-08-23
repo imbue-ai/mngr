@@ -116,6 +116,9 @@ class UiAccountPlanResponse(FrozenModel):
 
     plan_view: UiAccountPlanView | None = Field(description="Plan + usage, or None when unavailable")
     trim_status: UiTrimStatus | None = Field(description="Trim progress when a trim ran or is running")
+    privacy_policy_url: str = Field(
+        description="The tier's privacy-policy page (for the plan selector's Learn-more link); '' when unknown"
+    )
 
 
 class UiAiKeysContext(FrozenModel):
@@ -294,6 +297,19 @@ def _trim_status_payload(trim_status: BackupTrimStatus | None) -> UiTrimStatus |
     return UiTrimStatus(is_running=trim_status.is_running, detail=trim_status.detail)
 
 
+def _privacy_policy_url() -> str:
+    """The tier's privacy-policy page, served by the connector's accounts surface.
+
+    Prefers the dedicated accounts origin (production: accounts.imbue.com)
+    and falls back to the connector host, mirroring how the login page is
+    resolved. Empty when the app runs without a client env config.
+    """
+    client_env_config = get_state().client_env_config
+    if client_env_config is None:
+        return ""
+    return client_env_config.accounts_origin_url() + "/privacy-policy"
+
+
 def _handle_account_plan(user_id: str) -> Response:
     """GET /ui/api/accounts/<user_id>/plan: one account's plan + usage (slow: connector round trip).
 
@@ -317,7 +333,13 @@ def _handle_account_plan(user_id: str) -> Response:
         else:
             plan_view = UiAccountPlanView.model_validate(build_account_plan_view(info))
     trim_status = get_state().backup_trim_manager.get_status(user_id)
-    return _json_response(UiAccountPlanResponse(plan_view=plan_view, trim_status=_trim_status_payload(trim_status)))
+    return _json_response(
+        UiAccountPlanResponse(
+            plan_view=plan_view,
+            trim_status=_trim_status_payload(trim_status),
+            privacy_policy_url=_privacy_policy_url(),
+        )
+    )
 
 
 def _handle_ai_keys_context() -> Response:

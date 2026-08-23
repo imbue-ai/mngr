@@ -35,7 +35,11 @@ describe("AccountsDetailModel", () => {
         urls.push(url);
         if (url === "/ui/api/accounts")
           return jsonResponse({ accounts: [ACCOUNT] });
-        return jsonResponse({ plan_view: null, trim_status: null });
+        return jsonResponse({
+          plan_view: null,
+          trim_status: null,
+          privacy_policy_url: "https://accounts.example.com/privacy-policy",
+        });
       },
       () => {},
       (callback) => callback(),
@@ -49,6 +53,9 @@ describe("AccountsDetailModel", () => {
     expect(model.accounts).toEqual([ACCOUNT]);
     expect(urls).toContain("/ui/api/accounts/user-1/plan");
     expect(model.planStateFor("user-1").isUnavailable).toBe(true);
+    expect(model.planStateFor("user-1").privacyPolicyUrl).toBe(
+      "https://accounts.example.com/privacy-policy",
+    );
   });
 
   it("re-polls the plan section while a trim is running", async () => {
@@ -84,6 +91,8 @@ describe("AccountsDetailModel", () => {
     expect(planFetchCount).toBe(2);
     expect(scheduled.length).toBe(1);
     expect(model.planStateFor("user-1").trimStatus?.detail).toBe("done");
+    // A payload without privacy_policy_url (older backends) falls back to "".
+    expect(model.planStateFor("user-1").privacyPolicyUrl).toBe("");
   });
 
   it("surfaces a failed form action's body as the page error", async () => {
@@ -281,5 +290,39 @@ describe("log-out busy state", () => {
     releaseLogout(new Response("", { status: 200 }));
     await logoutDone;
     expect(model.isLoggingOut("user-1")).toBe(false);
+  });
+});
+
+describe("plan-switch busy state", () => {
+  it("marks the account busy during the POST and swallows a second click", async () => {
+    let releaseSwitch: (response: Response) => void = () => {};
+    let switchPostCount = 0;
+    const model = new AccountsDetailModel(
+      async (input) => {
+        const url = String(input);
+        if (url === "/ui/api/accounts")
+          return jsonResponse({ accounts: [ACCOUNT] });
+        if (url === "/accounts/user-1/plan") {
+          switchPostCount += 1;
+          return new Promise<Response>((resolve) => {
+            releaseSwitch = resolve;
+          });
+        }
+        return jsonResponse({ plan_view: null, trim_status: null });
+      },
+      () => {},
+      (callback) => callback(),
+    );
+    await model.load();
+
+    const switchDone = model.switchPlan("user-1", "explorer");
+    expect(model.isSwitchingPlan("user-1")).toBe(true);
+    // A second click while busy is swallowed (no extra POST).
+    await model.switchPlan("user-1", "explorer");
+    expect(switchPostCount).toBe(1);
+
+    releaseSwitch(new Response("", { status: 200 }));
+    await switchDone;
+    expect(model.isSwitchingPlan("user-1")).toBe(false);
   });
 });

@@ -44,6 +44,7 @@ export interface AccountPlanState {
   isUnavailable: boolean;
   planView: AccountPlanView | null;
   trimStatus: TrimStatus | null;
+  privacyPolicyUrl: string;
 }
 
 /** The contextual "verify your email" prompt shown after a plan switch was
@@ -71,6 +72,7 @@ export class AccountsDetailModel {
   planByUserId = new Map<string, AccountPlanState>();
   verifyEmailPromptByUserId = new Map<string, VerifyEmailPrompt>();
   loggingOutUserIds = new Set<string>();
+  switchingPlanUserIds = new Set<string>();
 
   private readonly fetchImpl: FetchLike;
   private readonly redraw: () => void;
@@ -122,6 +124,7 @@ export class AccountsDetailModel {
       isUnavailable: false,
       planView: null,
       trimStatus: null,
+      privacyPolicyUrl: "",
     };
     this.planByUserId.set(userId, fresh);
     return fresh;
@@ -141,11 +144,13 @@ export class AccountsDetailModel {
       const payload = (await response.json()) as {
         plan_view: AccountPlanView | null;
         trim_status: TrimStatus | null;
+        privacy_policy_url?: string;
       };
       state.isLoaded = true;
       state.isUnavailable = payload.plan_view === null;
       state.planView = payload.plan_view;
       state.trimStatus = payload.trim_status;
+      state.privacyPolicyUrl = payload.privacy_policy_url ?? "";
       if (payload.trim_status?.is_running && !this.isDisposed) {
         this.schedule(() => void this.loadPlan(userId), TRIM_POLL_MS);
       }
@@ -218,22 +223,37 @@ export class AccountsDetailModel {
   }
 
   async switchPlan(userId: string, plan: string): Promise<void> {
-    this.verifyEmailPromptByUserId.delete(userId);
-    await this.submitAccountForm(
-      `/accounts/${encodeURIComponent(userId)}/plan`,
-      { plan },
-      (status, bodyText) => {
-        const refusal = parseEmailNotVerified(status, bodyText);
-        if (refusal === null) return false;
-        this.verifyEmailPromptByUserId.set(userId, {
-          email: refusal.email,
-          wasAutoSent: refusal.wasAutoSent,
-          isResending: false,
-          wasResent: false,
-        });
-        return true;
-      },
-    );
+    // Switching runs a connector round trip plus a full reload (several
+    // seconds); the card's button reads this set to show a busy state and
+    // swallow double-clicks, like the log-out button.
+    if (this.switchingPlanUserIds.has(userId)) return;
+    this.switchingPlanUserIds.add(userId);
+    this.redraw();
+    try {
+      this.verifyEmailPromptByUserId.delete(userId);
+      await this.submitAccountForm(
+        `/accounts/${encodeURIComponent(userId)}/plan`,
+        { plan },
+        (status, bodyText) => {
+          const refusal = parseEmailNotVerified(status, bodyText);
+          if (refusal === null) return false;
+          this.verifyEmailPromptByUserId.set(userId, {
+            email: refusal.email,
+            wasAutoSent: refusal.wasAutoSent,
+            isResending: false,
+            wasResent: false,
+          });
+          return true;
+        },
+      );
+    } finally {
+      this.switchingPlanUserIds.delete(userId);
+      this.redraw();
+    }
+  }
+
+  isSwitchingPlan(userId: string): boolean {
+    return this.switchingPlanUserIds.has(userId);
   }
 
   /** The verify-email prompt's resend button (the server applies a cooldown). */

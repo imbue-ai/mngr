@@ -39,7 +39,7 @@ Email verification is non-blocking: a fresh signup counts as signed in immediate
 
 ## Account plans and quotas
 
-Every account has a plan ("explorer" by default; "ally" grants higher limits and requires a paid-listed email) whose quotas cap resource use: remote workspaces, buckets, total bucket storage, monthly LLM spend, and synced workspaces. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit. Workspace sharing (`mngr imbue_cloud shares`, self-hosted relays with workspace-terminated TLS) is capped separately at 50 shared workspaces per account rather than through a plan entitlement.
+Every account has a plan whose quotas cap resource use: remote workspaces, buckets, total bucket storage, monthly LLM spend, and synced workspaces. New accounts pick "free" (one remote workspace) or "explorer" (two remote workspaces, in exchange for sharing product data from those workspaces with Imbue) at signup; an account with no recorded choice defaults to "free". "Ally" grants higher limits and requires a paid-listed email. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit. Workspace sharing (`mngr imbue_cloud shares`, self-hosted relays with workspace-terminated TLS) is capped separately at 50 shared workspaces per account rather than through a plan entitlement.
 
 ```bash
 # Show the plan, entitlement values, and live usage.
