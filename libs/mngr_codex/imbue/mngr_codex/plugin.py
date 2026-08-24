@@ -18,7 +18,7 @@ The per-agent ``CODEX_HOME`` tree (mngr-owned files rewritten each provision;
 see :mod:`imbue.mngr_codex.codex_config`)::
 
     config.toml              # model, sandbox, approval, credential-store pin, [notice], trust
-    hooks.json               # policy guards + the session-pointer recorder hook
+    hooks.json               # the session-pointer recorder hook (guards live in the repo's .codex/hooks.json)
     auth.json -> ~/.codex/auth.json   # symlink: shared login, write-through refresh
     .personality_migration   # empty NUX-skip marker
     sessions/.../rollout-*.jsonl      # codex-owned transcripts

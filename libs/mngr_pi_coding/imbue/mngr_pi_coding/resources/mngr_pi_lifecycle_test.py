@@ -1149,7 +1149,8 @@ def test_control_watcher_applies_model_and_effort_switch(tmp_path: Path) -> None
 
 
 # Driver for the policy-guard tool_call handler: fire one bash tool_call and report
-# the handler's return value plus the (possibly mutated) command, as JSON on stdout.
+# the handler's return value, the (possibly mutated) command, and the pre-rewrite
+# command the handler records for other extensions, as JSON on stdout.
 _GUARD_DRIVER_MJS = """
 import mngrPiLifecycle from "./mngr_pi_lifecycle.ts";
 const command = process.argv[2];
@@ -1158,12 +1159,16 @@ mngrPiLifecycle({ on: (name, handler) => { (handlers[name] ||= []).push(handler)
 const event = { toolName: "bash", input: { command } };
 let result;
 for (const handler of (handlers["tool_call"] || [])) { result = handler(event, {}); }
-process.stdout.write(JSON.stringify({ result: result ?? null, command: event.input.command }));
+process.stdout.write(JSON.stringify({
+  result: result ?? null,
+  command: event.input.command,
+  originalCommand: event.mngrOriginalCommand ?? null,
+}));
 """
 
 
 def _run_tool_call(tmp_path: Path, command: str, env: dict[str, str] | None = None) -> dict[str, Any]:
-    """Fire one bash ``tool_call`` through the extension; return ``{result, command}``."""
+    """Fire one bash ``tool_call``; return ``{result, command, originalCommand}``."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not available")
@@ -1209,6 +1214,19 @@ def test_guard_allows_and_rewrites_a_normal_command(tmp_path: Path) -> None:
     assert out["command"].endswith("; ls -la")
 
 
+def test_guard_records_the_pre_rewrite_command_for_other_extensions(tmp_path: Path) -> None:
+    """pi runs every extension's tool_call handler on one event, in an order we do not
+    control. A workspace guard reading `input.command` after the rewrite would see the
+    prefix as a command chained ahead of the agent's and refuse it, so the handler
+    records what the agent actually wrote."""
+    out = _run_tool_call(tmp_path, "tk start abc")
+    assert out["originalCommand"] == "tk start abc"
+    assert out["command"] != out["originalCommand"]
+    # A blocked command never reaches the rewrite, so there is nothing to record.
+    blocked = _run_tool_call(tmp_path, "git rebase -i HEAD~2")
+    assert blocked["originalCommand"] is None
+
+
 def test_guard_rewrites_with_git_identity_when_resolvable(tmp_path: Path) -> None:
     host_dir = tmp_path / "host"
     host_dir.mkdir()
@@ -1224,251 +1242,3 @@ def test_guard_rewrites_with_git_identity_when_resolvable(tmp_path: Path) -> Non
     assert out["result"] is None
     assert "GIT_AUTHOR_NAME='test-agent'" in out["command"]
     assert "GIT_AUTHOR_EMAIL='agent-x@host-9'" in out["command"]
-
-
-# --- tk workflow-discipline guards -------------------------------------------
-# These guards reuse the vendored `ticket` binary and the tk-standalone checker,
-# which live in the DWT workspace (system/vendor/tk, system/scripts) -- not in this
-# mngr repo. So the tests build a stub WORK_DIR with a fake `ticket` (its `steps`
-# output driven by STUB_INPROGRESS / STUB_STEPS env vars) and a fake checker (exit 2
-# on a non-standalone command), and point MNGR_AGENT_WORK_DIR at it. This keeps the
-# tests self-contained and independent of the DWT checkout, while exercising the real
-# extension logic (gating, the block/append/inject channels, the tk-command skips).
-
-# Stub tk-standalone checker: exit 2 (block) when the command is not a standalone tk
-# call -- any shell separator, or a leading `cd`. Mirrors the real checker's contract
-# (command as argv[1], reason on stderr, exit 2) without its shlex tokenizing.
-_STUB_CHECKER = """#!/usr/bin/env python3
-import sys
-cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-# Exit 2 (block) on a non-standalone tk call, with no stderr -- so the test also
-# exercises the extension's fallback reason. The real checker writes a reason.
-if any(sep in cmd for sep in ("&&", "||", ";", "|", chr(10))) or cmd.strip().startswith("cd "):
-    sys.exit(2)
-sys.exit(0)
-"""
-
-# Stub `ticket`: its `steps` output is driven by env so a test can model any step
-# state. Exits non-zero with no output (like the real tk) when the requested set is
-# empty -- the extension reads that as "consulted, no steps". With STUB_ECHO_TICKETS_DIR
-# set it instead reports the TICKETS_DIR value the child process actually received, so a
-# test can pin that the extension exports its resolved dir to the spawned tk.
-_STUB_TICKET = """#!/usr/bin/env bash
-if [[ "$1" == "steps" && -n "${STUB_ECHO_TICKETS_DIR:-}" ]]; then
-  printf 'tickets_dir=%s' "${TICKETS_DIR:-unset}"
-  exit 0
-fi
-if [[ "$1" == "steps" && "$2" == "--status=in_progress" ]]; then
-  printf '%s' "${STUB_INPROGRESS:-}"
-  [[ -n "${STUB_INPROGRESS:-}" ]] && exit 0 || exit 2
-fi
-if [[ "$1" == "steps" ]]; then
-  printf '%s' "${STUB_STEPS:-}"
-  [[ -n "${STUB_STEPS:-}" ]] && exit 0 || exit 2
-fi
-exit 0
-"""
-
-# Generic single-event driver: fire one event through the extension and print the
-# handler's return value as JSON on stdout. stderr is captured by the caller.
-_EVENT_DRIVER_MJS = """
-import mngrPiLifecycle from "./mngr_pi_lifecycle.ts";
-const spec = JSON.parse(process.argv[2]);
-const handlers = {};
-mngrPiLifecycle({ on: (name, handler) => { (handlers[name] ||= []).push(handler); } });
-let result;
-for (const handler of (handlers[spec.event] || [])) { result = handler(spec.payload || {}, {}); }
-process.stdout.write(JSON.stringify({ result: result ?? null }));
-"""
-
-
-def _build_stub_work_dir(work_dir: Path) -> None:
-    """Write the stub `ticket` + tk-standalone checker under ``work_dir``/system/..."""
-    scripts = work_dir / "system" / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    (scripts / "claude_tk_standalone_check.py").write_text(_STUB_CHECKER)
-    tk_dir = work_dir / "system" / "vendor" / "tk"
-    tk_dir.mkdir(parents=True, exist_ok=True)
-    ticket = tk_dir / "ticket"
-    ticket.write_text(_STUB_TICKET)
-    ticket.chmod(0o755)
-
-
-def _run_event(
-    tmp_path: Path, event: str, payload: dict[str, Any], *, env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess[str]:
-    """Fire one ``event`` through the extension against a stub WORK_DIR.
-
-    Returns the completed process (assert on ``.returncode``, parse ``.stdout`` for
-    the handler result ``{"result": ...}``, read ``.stderr`` for the stop nudge).
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not available")
-    work_dir = tmp_path / "work"
-    work_dir.mkdir(exist_ok=True)
-    if not _node_supports_typescript(node, work_dir):
-        pytest.skip("node does not support importing TypeScript modules")
-    (work_dir / _LIFECYCLE_EXTENSION_NAME).write_text(_load_resource(_LIFECYCLE_EXTENSION_NAME))
-    (work_dir / "event_driver.mjs").write_text(_EVENT_DRIVER_MJS)
-    _build_stub_work_dir(work_dir)
-    state_dir = tmp_path / "state"
-    state_dir.mkdir(exist_ok=True)
-    full_env = {
-        "PATH": os.environ.get("PATH", ""),
-        "MNGR_AGENT_STATE_DIR": str(state_dir),
-        # Point the guards at the stub scripts and a tickets dir that exists.
-        "MNGR_AGENT_WORK_DIR": str(work_dir),
-        "TICKETS_DIR": str(work_dir),
-    }
-    full_env.update(env or {})
-    return subprocess.run(
-        [node, str(work_dir / "event_driver.mjs"), json.dumps({"event": event, "payload": payload})],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=full_env,
-    )
-
-
-def _event_result(proc: subprocess.CompletedProcess[str]) -> Any:
-    assert proc.returncode == 0, f"event driver failed:\n{proc.stdout}\n{proc.stderr}"
-    return json.loads(proc.stdout)["result"]
-
-
-def test_tk_standalone_blocks_a_chained_tk_start(tmp_path: Path) -> None:
-    result = _event_result(
-        _run_event(tmp_path, "tool_call", {"toolName": "bash", "input": {"command": "cd /tmp && tk start abc"}})
-    )
-    assert result is not None and result["block"] is True
-    # The stub checker exits 2 with no stderr, so the extension supplies its fallback reason.
-    assert "only command in the tool call" in result["reason"]
-
-
-def test_tk_standalone_allows_a_bare_tk_start(tmp_path: Path) -> None:
-    # A standalone tk start is fine (checker exits 0); the handler then rewrites and
-    # returns nothing, so the tool call is not blocked.
-    result = _event_result(
-        _run_event(tmp_path, "tool_call", {"toolName": "bash", "input": {"command": "tk start abc"}})
-    )
-    assert result is None
-
-
-def test_tk_standalone_ignores_a_non_tk_command_with_separators(tmp_path: Path) -> None:
-    # A chained command that does not mention tk/ticket must never reach the checker,
-    # so it is not blocked as a tk violation (the stub checker would block on `&&`).
-    result = _event_result(
-        _run_event(tmp_path, "tool_call", {"toolName": "bash", "input": {"command": "cd /tmp && echo hi"}})
-    )
-    assert result is None
-
-
-def test_require_steps_appends_reminder_when_no_step(tmp_path: Path) -> None:
-    proc = _run_event(
-        tmp_path,
-        "tool_result",
-        {"toolName": "bash", "input": {"command": "echo hi"}, "content": [{"type": "text", "text": "out"}]},
-        env={"STUB_INPROGRESS": "", "STUB_STEPS": ""},
-    )
-    result = _event_result(proc)
-    assert result is not None
-    texts = [block["text"] for block in result["content"] if block.get("type") == "text"]
-    # The original result content is preserved, and the reminder is appended.
-    assert texts[0] == "out"
-    assert "[Step tracking reminder]" in texts[-1]
-    assert "without declaring any step records" in texts[-1]
-
-
-def test_require_steps_silent_when_a_step_is_in_progress(tmp_path: Path) -> None:
-    result = _event_result(
-        _run_event(
-            tmp_path,
-            "tool_result",
-            {"toolName": "bash", "input": {"command": "echo hi"}, "content": [{"type": "text", "text": "out"}]},
-            env={"STUB_INPROGRESS": "wor-1 [in_progress] - doing it", "STUB_STEPS": "wor-1 [in_progress] - doing it"},
-        )
-    )
-    assert result is None
-
-
-def test_require_steps_skips_read_only_tools(tmp_path: Path) -> None:
-    result = _event_result(
-        _run_event(
-            tmp_path,
-            "tool_result",
-            {"toolName": "read", "input": {}, "content": [{"type": "text", "text": "file"}]},
-            env={"STUB_INPROGRESS": "", "STUB_STEPS": ""},
-        )
-    )
-    assert result is None
-
-
-def test_require_steps_skips_a_bash_tk_command(tmp_path: Path) -> None:
-    result = _event_result(
-        _run_event(
-            tmp_path,
-            "tool_result",
-            {
-                "toolName": "bash",
-                "input": {"command": "tk create --step 'x'"},
-                "content": [{"type": "text", "text": "ok"}],
-            },
-            env={"STUB_INPROGRESS": "", "STUB_STEPS": ""},
-        )
-    )
-    assert result is None
-
-
-def test_carryover_appends_open_steps_to_system_prompt(tmp_path: Path) -> None:
-    result = _event_result(
-        _run_event(
-            tmp_path,
-            "before_agent_start",
-            {"systemPrompt": "BASE_PROMPT"},
-            env={"STUB_STEPS": "wor-9 [open] - unfinished thing"},
-        )
-    )
-    assert result is not None
-    assert result["systemPrompt"].startswith("BASE_PROMPT")
-    assert "[Open task reminder" in result["systemPrompt"]
-    assert "wor-9 [open] - unfinished thing" in result["systemPrompt"]
-
-
-def test_carryover_silent_when_no_open_steps(tmp_path: Path) -> None:
-    result = _event_result(
-        _run_event(tmp_path, "before_agent_start", {"systemPrompt": "BASE"}, env={"STUB_STEPS": ""})
-    )
-    assert result is None
-
-
-def test_ticket_child_receives_the_fallback_tickets_dir(tmp_path: Path) -> None:
-    """With no TICKETS_DIR in the environment the guard resolves the WORK_DIR fallback for its
-    own existence gate -- and must export that SAME dir to the spawned tk child (as the shell
-    hooks these guards mirror do), or the child consults a different tickets dir than the one
-    the guard checked. The stub ticket echoes the TICKETS_DIR it received."""
-    fallback = tmp_path / "work" / ".tickets"
-    fallback.mkdir(parents=True)
-    # An empty TICKETS_DIR is falsy on the Node side, modeling the unset-env case while still
-    # overriding the value _run_event supplies by default.
-    result = _event_result(
-        _run_event(
-            tmp_path,
-            "before_agent_start",
-            {"systemPrompt": "BASE"},
-            env={"TICKETS_DIR": "", "STUB_ECHO_TICKETS_DIR": "1"},
-        )
-    )
-    assert result is not None
-    assert f"tickets_dir={fallback}" in result["systemPrompt"]
-
-
-def test_stop_nudge_writes_to_stderr_when_steps_open(tmp_path: Path) -> None:
-    proc = _run_event(tmp_path, "agent_settled", {}, env={"STUB_STEPS": "wor-1 [open] - a\nwor-2 [open] - b"})
-    assert proc.returncode == 0, proc.stderr
-    assert "Stopping with 2 step record(s) still open" in proc.stderr
-
-
-def test_stop_nudge_silent_when_no_open_steps(tmp_path: Path) -> None:
-    proc = _run_event(tmp_path, "agent_settled", {}, env={"STUB_STEPS": ""})
-    assert proc.returncode == 0, proc.stderr
-    assert "Stopping with" not in proc.stderr

@@ -262,38 +262,15 @@ def test_is_project_trusted() -> None:
 # =============================================================================
 
 
-def test_build_codex_hooks_config_wires_policy_guards_and_the_session_pointer_recorder() -> None:
-    hooks = build_codex_hooks_config()
-    user_prompt = hooks["hooks"]["UserPromptSubmit"]
-    stop = hooks["hooks"]["Stop"]
-    pre_tool_use = hooks["hooks"]["PreToolUse"]
-    # Only three events are hooked: the PreToolUse policy guards, the UserPromptSubmit
-    # session-pointer recorder + carryover reminder, and the Stop nudge. No lifecycle-marker
-    # events -- RUNNING/WAITING is read from the daemon's thread/status, not any marker -- so
-    # SubagentStart/SubagentStop/PermissionRequest/PostToolUse are gone.
-    assert set(hooks["hooks"]) == {"PreToolUse", "UserPromptSubmit", "Stop"}
-    # PreToolUse runs the dwt policy scripts from the work dir, in order: the two blockers,
-    # the tk-standalone block, the require-steps soft reminder, then the rewriter last. The
-    # rewriter carries ``--codex``, which makes it emit ``permissionDecision: "allow"`` alongside
-    # ``updatedInput`` -- required by codex (it rejects an updatedInput-only rewrite), unlike claude.
-    pre_commands = [h["command"] for h in pre_tool_use[0]["hooks"]]
-    assert pre_commands == [
-        'bash "$MNGR_AGENT_WORK_DIR/system/scripts/claude_block_pipe_tail_head.sh"',
-        'bash "$MNGR_AGENT_WORK_DIR/system/scripts/claude_prevent_commit_rewrite.sh"',
-        'bash "$MNGR_AGENT_WORK_DIR/system/scripts/claude_tk_standalone.sh"',
-        'bash "$MNGR_AGENT_WORK_DIR/system/scripts/claude_require_steps_pretool.sh"',
-        'python3 "$MNGR_AGENT_WORK_DIR/system/scripts/claude_rewrite_bash_command.py" --codex',
-    ]
-    # UserPromptSubmit: the session-pointer recorder, then the open-steps carryover reminder.
-    user_prompt_commands = [h["command"] for h in user_prompt[0]["hooks"]]
-    assert RECORD_SESSION_POINTERS_SCRIPT_NAME in user_prompt_commands[0]
-    assert (
-        user_prompt_commands[1] == 'bash "$MNGR_AGENT_WORK_DIR/system/scripts/claude_open_tickets_reminder.sh" --codex'
-    )
-    assert user_prompt[0]["hooks"][0]["type"] == "command"
-    # Stop: only the open-steps nudge (stderr-only, exit 0) -- no marker clearing.
-    stop_commands = [h["command"] for h in stop[0]["hooks"]]
-    assert stop_commands == ['bash "$MNGR_AGENT_WORK_DIR/system/scripts/claude_open_tickets_stop_nudge.sh"']
+def test_build_codex_hooks_config_carries_only_the_session_pointer_recorder() -> None:
+    """mngr provisions one hook, and it is bookkeeping. Guards belong to the repo the
+    agent runs in, which codex reads from its own `.codex/` config layer."""
+    hooks = build_codex_hooks_config()["hooks"]
+    assert set(hooks) == {"UserPromptSubmit"}
+    commands = [h["command"] for h in hooks["UserPromptSubmit"][0]["hooks"]]
+    assert len(commands) == 1
+    assert RECORD_SESSION_POINTERS_SCRIPT_NAME in commands[0]
+    assert hooks["UserPromptSubmit"][0]["hooks"][0]["type"] == "command"
 
 
 def test_serialize_codex_hooks_round_trips_to_json() -> None:
