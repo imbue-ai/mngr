@@ -856,6 +856,58 @@ def test_remove_reverse_tunnels_for_agent_keeps_connection_for_forward_tunnel(tm
     manager.cleanup()
 
 
+def test_remove_reverse_tunnel_drops_only_the_named_endpoint(tmp_path: Path) -> None:
+    """Removing one endpoint's tunnel leaves a same-agent tunnel to another endpoint intact.
+
+    The latchkey discovery handler clears a stale desktop->container tunnel on
+    every discovery cycle while the same agent's desktop->VPS tunnel must stay
+    up; an agent-keyed removal would tear down (and force a re-dial of) both.
+    """
+    container_ssh_info = _sample_ssh_info(tmp_path)
+    vps_ssh_info = RemoteSSHInfo(
+        user="root",
+        host="198.51.100.7",
+        port=22,
+        key_path=tmp_path / "vps-key",
+    )
+    container_client = FakeSSHClient.create(active=True)
+    vps_client = FakeSSHClient.create(active=True)
+    manager = _make_manager_with_fake_connection(container_ssh_info, container_client)
+    container_conn_key = f"{container_ssh_info.host}:{container_ssh_info.port}"
+    vps_conn_key = f"{vps_ssh_info.host}:{vps_ssh_info.port}"
+    with manager._lock:
+        manager._connections[vps_conn_key] = vps_client
+        manager._reverse_tunnels[(container_conn_key, 8420)] = ReverseTunnelInfo(
+            ssh_info=container_ssh_info,
+            local_port=8420,
+            remote_port=1989,
+            requested_remote_port=1989,
+            agent_id="agent-a@host-1",
+        )
+        manager._reverse_tunnels[(vps_conn_key, 8420)] = ReverseTunnelInfo(
+            ssh_info=vps_ssh_info,
+            local_port=8420,
+            remote_port=1988,
+            requested_remote_port=1988,
+            agent_id="agent-a@host-1",
+        )
+
+    # Removing an endpoint with no registered tunnel reports nothing removed.
+    assert manager.remove_reverse_tunnel(container_ssh_info, 9999) is False
+
+    assert manager.remove_reverse_tunnel(container_ssh_info, 8420) is True
+    with manager._lock:
+        assert (container_conn_key, 8420) not in manager._reverse_tunnels
+        # The same agent's tunnel to the other endpoint (and its SSH
+        # connection) survives.
+        assert (vps_conn_key, 8420) in manager._reverse_tunnels
+        assert vps_conn_key in manager._connections
+
+    # A repeat removal of the already-removed endpoint is a no-op.
+    assert manager.remove_reverse_tunnel(container_ssh_info, 8420) is False
+    manager.cleanup()
+
+
 # -- setup_reverse_tunnel -------------------------------------------------
 #
 # These tests inject a FakeSSHClient directly into _connections so that

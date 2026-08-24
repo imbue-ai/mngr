@@ -672,6 +672,19 @@ class SSHTunnelManager(MutableModel):
             backoff_seconds,
         )
 
+    def remove_reverse_tunnel(self, ssh_info: RemoteSSHInfo, local_port: int) -> bool:
+        """Tear down the one reverse tunnel to ``ssh_info``'s endpoint forwarding ``local_port``, if any.
+
+        The exact inverse of :meth:`setup_reverse_tunnel`: the tunnel is
+        identified by the same ``(host:port, local_port)`` key, so only the
+        tunnel to this endpoint is dropped. Tunnels sharing the same
+        ``agent_id`` tag but targeting other endpoints are untouched -- use
+        :meth:`remove_reverse_tunnels_for_agent` to drop everything an agent
+        owns. Returns whether a tunnel existed and was removed.
+        """
+        tunnel_key = (f"{ssh_info.host}:{ssh_info.port}", local_port)
+        return self._drop_tunnel_keys((tunnel_key,)) == 1
+
     def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
         """Tear down every reverse tunnel associated with ``agent_id``.
 
@@ -690,7 +703,11 @@ class SSHTunnelManager(MutableModel):
         return self._drop_tunnel_keys(tuple(keys))
 
     def _drop_tunnel_keys(self, tunnel_keys: tuple[tuple[str, int], ...]) -> int:
-        """Internal shared cleanup used by :meth:`remove_reverse_tunnels_for_agent`.
+        """Internal shared cleanup used by :meth:`remove_reverse_tunnel` and
+        :meth:`remove_reverse_tunnels_for_agent`.
+
+        A key with no registered tunnel is skipped, so callers may pass keys
+        that might not exist.
 
         For each ``(conn_key, local_port)`` in ``tunnel_keys``: cancel its
         reverse port forward (best-effort -- the transport may already be

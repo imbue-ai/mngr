@@ -1121,6 +1121,7 @@ class _RecordingTunnelManager(SSHTunnelManager):
 
     _calls: list[tuple[RemoteSSHInfo, int, int, str | None]] = PrivateAttr(default_factory=list)
     _removed_agent_ids: list[str] = PrivateAttr(default_factory=list)
+    _removed_endpoints: list[tuple[RemoteSSHInfo, int]] = PrivateAttr(default_factory=list)
 
     def setup_reverse_tunnel(
         self,
@@ -1135,6 +1136,10 @@ class _RecordingTunnelManager(SSHTunnelManager):
     def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
         self._removed_agent_ids.append(agent_id)
         return 0
+
+    def remove_reverse_tunnel(self, ssh_info: RemoteSSHInfo, local_port: int) -> bool:
+        self._removed_endpoints.append((ssh_info, local_port))
+        return False
 
 
 class _RaisingTunnelManager(SSHTunnelManager):
@@ -1530,7 +1535,11 @@ def test_discovery_route_resolution_failure_wires_nothing_then_retries(
             poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
 
         assert handler._resolve_calls == 2
-        assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
+        # The stale-tunnel cleanup is keyed by the container endpoint, never by
+        # the agent tag: an agent-keyed removal would also drop the
+        # desktop->VPS tunnel set up on the same cycle.
+        assert tunnel_manager._removed_agent_ids == []
+        assert tunnel_manager._removed_endpoints == [(agent_ssh_info, host_side_port)]
         # The only tunnel ever opened is the desktop->VPS one, once the route resolved.
         assert tunnel_manager._calls == [
             (_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, _instance_tag(agent_id, host_id))
@@ -1577,7 +1586,11 @@ def test_discovery_handler_routes_remote_workspace_only_through_vps_gateway(
                 _instance_tag(agent_id, host_id),
             )
         ]
-        assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
+        # Any stale desktop->container tunnel is cleared by endpoint, not by
+        # agent tag -- the agent-keyed removal would take the desktop->VPS
+        # tunnel above down with it on every discovery cycle.
+        assert tunnel_manager._removed_agent_ids == []
+        assert tunnel_manager._removed_endpoints == [(ssh_info, host_side_port)]
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
 

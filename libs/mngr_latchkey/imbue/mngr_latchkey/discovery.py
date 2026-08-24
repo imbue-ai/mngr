@@ -382,10 +382,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # or its outer is this very machine): the normal local path.
                 self._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, host_side_port)
             else:
-                # Drop a desktop->container tunnel opened by an earlier cycle
-                # before the outer host was resolvable; otherwise it holds 1989
-                # and the VPS->container tunnel cannot bind there.
-                self.tunnel_manager.remove_reverse_tunnels_for_agent(instance_key)
+                self._remove_stale_desktop_to_container_tunnel(agent_id, host_id, ssh_info, host_side_port)
                 self._setup_desktop_gateway_reachability_on_vps(
                     agent_id,
                     host_id,
@@ -402,6 +399,26 @@ class LatchkeyDiscoveryHandler(MutableModel):
             if not is_pending_handed_off:
                 with self._pending_lock:
                     self._pending_remote_agents.discard(str(instance_key))
+
+    def _remove_stale_desktop_to_container_tunnel(
+        self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo, host_side_port: int
+    ) -> None:
+        """Drop the desktop->container tunnel an earlier cycle may have opened for a VPS workspace.
+
+        A cycle that wired this workspace to the desktop gateway (e.g. before
+        a provider reload revealed its outer host) left a tunnel holding 1989
+        in the container, where the VPS->container tunnel must bind. Removal is
+        keyed by the container endpoint rather than the agent tag: the
+        desktop->VPS tunnel set up right after this carries the same agent tag,
+        so an agent-keyed removal tore it down and re-dialed it on every
+        discovery cycle. In the steady state (no stale tunnel) this is a no-op.
+        """
+        if self.tunnel_manager.remove_reverse_tunnel(ssh_info, host_side_port):
+            logger.debug(
+                "Removed a stale desktop->container latchkey tunnel for agent {} on host {}",
+                agent_id,
+                host_id,
+            )
 
     def _tear_down_stopped_agent(self, agent_id: AgentId, host_id: HostId) -> None:
         """Drop a stopped agent's reverse tunnel and mark its host for re-provisioning.
