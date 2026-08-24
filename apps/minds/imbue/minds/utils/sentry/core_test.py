@@ -179,22 +179,33 @@ def test_collect_external_attachments_sweeps_latchkey_and_discovery_dirs(tmp_pat
     discovery_dir = tmp_path / "mngr" / "events" / "mngr" / "discovery"
     discovery_dir.mkdir(parents=True)
     (discovery_dir / "events.jsonl").write_text("discovery\n")
+    mngr_cli_events_dir = tmp_path / "mngr" / "events" / "logs" / "mngr"
+    mngr_cli_events_dir.mkdir(parents=True)
+    (mngr_cli_events_dir / "events.jsonl").write_text("cli-command\n")
 
     uploader = ErrorAttachmentsS3Uploader(
         log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
-        + _external_log_attachment_groups(latchkey_dir, discovery_dir)
+        + _external_log_attachment_groups(latchkey_dir, discovery_dir, mngr_cli_events_dir)
     )
     try:
         raise ValueError("boom")
     except ValueError as exception:
         groups, callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
 
-    assert set(groups) == {"", "live_logs", "latchkey_live_logs", "latchkey_raw_logs", "discovery_events"}
+    assert set(groups) == {
+        "",
+        "live_logs",
+        "latchkey_live_logs",
+        "latchkey_raw_logs",
+        "discovery_events",
+        "mngr_cli_events",
+    }
     assert len(groups["latchkey_live_logs"]) == 1
     assert len(groups["latchkey_raw_logs"]) == 1
     assert len(groups["discovery_events"]) == 1
-    # one callback per upload: traceback + the four log files.
-    assert len(callbacks) == 5
+    assert len(groups["mngr_cli_events"]) == 1
+    # one callback per upload: traceback + the five log files.
+    assert len(callbacks) == 6
 
 
 def test_collect_external_attachments_tolerates_missing_external_dirs(tmp_path: Path) -> None:
@@ -206,7 +217,9 @@ def test_collect_external_attachments_tolerates_missing_external_dirs(tmp_path: 
 
     uploader = ErrorAttachmentsS3Uploader(
         log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
-        + _external_log_attachment_groups(tmp_path / "no-latchkey", tmp_path / "no-discovery")
+        + _external_log_attachment_groups(
+            tmp_path / "no-latchkey", tmp_path / "no-discovery", tmp_path / "no-mngr-cli"
+        )
     )
     try:
         raise ValueError("boom")

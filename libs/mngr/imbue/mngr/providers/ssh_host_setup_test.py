@@ -13,6 +13,7 @@ import pytest
 import imbue.mngr.resources as mngr_resources
 from imbue.mngr.providers.ssh_host_setup import RequiredHostPackage
 from imbue.mngr.providers.ssh_host_setup import SSHD_PROVISIONED_MARKER_PATH
+from imbue.mngr.providers.ssh_host_setup import SSHD_START_OPTIONS
 from imbue.mngr.providers.ssh_host_setup import WARNING_PREFIX
 from imbue.mngr.providers.ssh_host_setup import _build_package_check_snippet
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
@@ -502,7 +503,7 @@ def test_self_healing_entrypoint_skips_sshd_without_provisioned_marker(tmp_path:
     probe = (
         prefix.replace(SSHD_PROVISIONED_MARKER_PATH, str(marker_path))
         .replace("mkdir -p /run/sshd; ", "")
-        .replace("/usr/sbin/sshd -o MaxSessions=100", f"touch {sshd_started}")
+        .replace(f"/usr/sbin/sshd {SSHD_START_OPTIONS}", f"touch {sshd_started}")
     )
     # No marker present -> sshd branch is skipped (the `[ -f ] && {{...}}` is a no-op).
     subprocess.run(["sh", "-c", probe], check=False)
@@ -551,7 +552,7 @@ def test_start_sshd_command_is_a_noop_when_sshd_is_already_running(tmp_path: Pat
     cmd = (
         build_start_sshd_command()
         .replace("mkdir -p /run/sshd && ", "")
-        .replace("/usr/sbin/sshd -D -o MaxSessions=100", f"touch {marker}")
+        .replace(f"/usr/sbin/sshd -D {SSHD_START_OPTIONS}", f"touch {marker}")
     )
     # Force the not-running check to report "already running" (false): start is skipped.
     running_cmd = cmd.replace("! grep -lxs sshd /proc/[0-9]*/comm >/dev/null 2>&1", "false")

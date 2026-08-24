@@ -200,6 +200,27 @@ def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeF
     return entries
 
 
+# Interval for paramiko transport-level keepalives, set on every SSH connection
+# at connect time. paramiko sends these without awaiting a reply, so they do not
+# detect a wedged-but-ACKing sshd on their own; what they provide is periodic
+# *writes*, so a silently dead TCP path (laptop slept mid-operation, NAT state
+# dropped, peer vanished without a FIN) surfaces as a transport error within the
+# TCP retransmission window instead of never -- a reader blocked in ``recv()``
+# on such a path would otherwise wait forever, since a pure reader generates no
+# traffic of its own for TCP to fail on.
+SSH_KEEPALIVE_INTERVAL_SECONDS: Final[int] = 15
+
+# Bound on opening a new channel on an established transport (exec sessions,
+# SFTP). A healthy sshd answers a channel open within a round trip; only a
+# wedged one stalls, and an unbounded open would hang there indefinitely.
+SSH_CHANNEL_OPEN_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Per-read silence bound applied to SFTP channels whose caller supplies no
+# timeout. ``settimeout`` applies per socket operation, so arbitrarily large
+# transfers stay safe as long as bytes keep flowing.
+SFTP_CHANNEL_SILENCE_TIMEOUT_SECONDS: Final[float] = 300.0
+
+
 @pure
 def is_transient_ssh_error(exception: BaseException) -> bool:
     """Check if the exception is a transient SSH connection error worth retrying.
@@ -497,6 +518,13 @@ class OuterHost(OuterHostInterface):
             # host discovery) treat it as a per-host connection failure rather than
             # letting it abort the whole operation.
             raise HostConnectionError(f"Failed to connect to host: {e}") from e
+        # Keepalives on every fresh transport: without them, a connection whose
+        # path dies silently leaves any blocked reader (a command's output read,
+        # the lock channel's recv) waiting forever. See the constant's comment
+        # for what they do and do not detect.
+        transport = _get_ssh_transport(self.connector.host)
+        if transport is not None:
+            transport.set_keepalive(SSH_KEEPALIVE_INTERVAL_SECONDS)
         # We just (re)built the connection. If a cooperative lock was held, the dropped
         # connection orphaned its lock channel and released the flock, so re-acquire and
         # verify that no other actor acquired in the gap before any operation proceeds.
@@ -726,8 +754,31 @@ class OuterHost(OuterHostInterface):
         return transport
 
     def _create_sftp_client(self, transport: Transport) -> SFTPClient | None:
-        """Create an SFTPClient from a paramiko Transport."""
-        return SFTPClient.from_transport(transport)
+        """Create an SFTPClient from a paramiko Transport.
+
+        Mirrors ``SFTPClient.from_transport`` but opens the channel with an
+        explicit timeout (``from_transport`` passes none, so a wedged sshd
+        hangs the open forever) and gives the channel a default silence
+        timeout; callers with their own read budget override it via
+        ``settimeout`` (see ``_get_file_via_paramiko``).
+        """
+        channel = transport.open_session(timeout=SSH_CHANNEL_OPEN_TIMEOUT_SECONDS)
+        if channel is None:
+            return None
+        # Close the channel if any setup step after the open fails (the
+        # subsystem request or SFTP version negotiation), so a failed setup
+        # never leaks a channel onto the shared transport. Mirrors the
+        # host-lock channel handling in ``Host._open_lock_channel``.
+        is_sftp_ready = False
+        try:
+            channel.settimeout(SFTP_CHANNEL_SILENCE_TIMEOUT_SECONDS)
+            channel.invoke_subsystem("sftp")
+            sftp_client = SFTPClient(channel)
+            is_sftp_ready = True
+        finally:
+            if not is_sftp_ready:
+                channel.close()
+        return sftp_client
 
     def _get_file(
         self,
@@ -743,7 +794,8 @@ class OuterHost(OuterHostInterface):
         channel, which (after transient retries) surfaces as a
         ``HostConnectionError``. Used by the per-host-bounded discovery read so a
         wedged host cannot hang the read forever; other callers leave it ``None``
-        (unbounded, prior behavior).
+        and fall back to the channel's default per-read silence bound
+        (``SFTP_CHANNEL_SILENCE_TIMEOUT_SECONDS``).
         """
         with (
             self._notify_on_connection_error(),
@@ -826,8 +878,9 @@ class OuterHost(OuterHostInterface):
         This is thread-safe because paramiko transports can multiplex channels.
 
         When ``timeout_seconds`` is set, the SFTP channel is given that socket
-        timeout so a stalled transfer raises ``socket.timeout`` (a ``TimeoutError``)
-        instead of blocking forever.
+        timeout (overriding the default silence bound applied by
+        ``_create_sftp_client``) so a stalled transfer raises ``socket.timeout``
+        (a ``TimeoutError``) within the caller's own budget.
         """
         transport = self._get_paramiko_transport()
         sftp = self._create_sftp_client(transport)

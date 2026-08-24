@@ -759,3 +759,51 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
     "Socket is closed" message, so bare timeouts need their own branch.
     """
     assert is_transient_ssh_error(exception) is expected
+
+
+class _FakeSftpSetupChannel:
+    """Channel whose SFTP subsystem request fails, recording whether it was closed."""
+
+    def __init__(self) -> None:
+        self.is_closed = False
+        self.timeout: float | None = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def invoke_subsystem(self, subsystem: str) -> None:
+        raise SSHException("channel request failed")
+
+    def close(self) -> None:
+        self.is_closed = True
+
+
+class _FakeSftpSetupTransport:
+    """Transport handing out a single fake channel for SFTP setup."""
+
+    def __init__(self, channel: _FakeSftpSetupChannel) -> None:
+        self.channel = channel
+
+    def open_session(self, timeout: float | None = None) -> _FakeSftpSetupChannel:
+        return self.channel
+
+
+def test_create_sftp_client_closes_the_channel_when_setup_fails(temp_mngr_ctx: MngrContext) -> None:
+    """A channel whose SFTP setup fails after the open is closed, not leaked.
+
+    The setup steps after ``open_session`` (the subsystem request, version
+    negotiation) can raise; without the cleanup the opened channel would linger
+    on the shared transport across every transient retry.
+    """
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(create_local_pyinfra_host()),
+        mngr_ctx=temp_mngr_ctx,
+    )
+    channel = _FakeSftpSetupChannel()
+    transport = _FakeSftpSetupTransport(channel)
+
+    with pytest.raises(SSHException, match="channel request failed"):
+        outer._create_sftp_client(cast(Any, transport))
+
+    assert channel.is_closed is True

@@ -61,6 +61,8 @@ from imbue.mngr.hosts.host import _parse_acquired_generation_token
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
 from imbue.mngr.hosts.outer_host import ActiveRemoteLock
+from imbue.mngr.hosts.outer_host import SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
+from imbue.mngr.hosts.outer_host import SSH_KEEPALIVE_INTERVAL_SECONDS
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -1687,6 +1689,26 @@ class _FakeLockChannel:
         self.closed = True
 
 
+class _FakeStalledHolderChannel:
+    """Channel that accepts the exec but never answers the read, as a wedged sshd's would."""
+
+    def __init__(self) -> None:
+        self.timeout: float | None = None
+        self.close_call_count = 0
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def exec_command(self, command: str) -> None:
+        pass
+
+    def recv(self, size: int) -> bytes:
+        raise TimeoutError("timed out")
+
+    def close(self) -> None:
+        self.close_call_count += 1
+
+
 class _FakeTransport:
     """Fake paramiko transport for testing."""
 
@@ -1694,11 +1716,15 @@ class _FakeTransport:
         self._is_active = is_active
         self._open_session_results: list[object] = open_session_results if open_session_results is not None else []
         self.open_session_call_count = 0
+        self.keepalive_interval: int | None = None
 
     def is_active(self) -> bool:
         return self._is_active
 
-    def open_session(self) -> object:
+    def set_keepalive(self, interval: int) -> None:
+        self.keepalive_interval = interval
+
+    def open_session(self, timeout: float | None = None) -> object:
         idx = self.open_session_call_count
         self.open_session_call_count += 1
         if idx < len(self._open_session_results):
@@ -2624,6 +2650,32 @@ def test_run_shell_command_wraps_timeout_error_in_host_connection_error(
 # =========================================================================
 
 
+def test_connecting_sets_transport_keepalives(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Every transport mngr builds gets keepalives, set at the _ensure_connected chokepoint.
+
+    Without them a connection whose network path dies silently leaves any blocked
+    reader waiting forever: paramiko generates no traffic of its own, so TCP never
+    has a write to fail on.
+    """
+    transport = _FakeTransport()
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=transport))
+    fake.connected = False
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = Host(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    host._ensure_connected()
+
+    assert transport.keepalive_interval == SSH_KEEPALIVE_INTERVAL_SECONDS
+
+
 def test_disconnect_closes_paramiko_client(
     local_provider: LocalProviderInstance,
 ) -> None:
@@ -3044,6 +3096,28 @@ def test_hold_remote_host_lock_retries_transient_ssh_error_and_reconnects(
     assert fake.disconnect_call_count == 1
     # The acquired channel is released (EOF + close) when the block exits.
     assert channel.shutdown_write_call_count == 1
+    assert channel.close_call_count == 1
+
+
+@pytest.mark.allow_warnings(match=r"^Detached host-lock holder did not confirm launch")
+def test_detached_lock_holder_launch_gives_up_when_the_channel_stalls(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A wedged sshd must not hang the detached lock holder's launch confirmation.
+
+    The confirmation is one round trip on a healthy host, so the read is bounded
+    and a stall degrades to the same tolerated "did not confirm launch" outcome
+    as a channel that closes early -- the retain flag is a debugging aid, not a
+    reason to block forever.
+    """
+    channel = _FakeStalledHolderChannel()
+    transport = _FakeTransport(open_session_results=[channel])
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=transport))
+    host = _create_host_with_fake_connector(local_provider, fake)
+
+    host._launch_detached_lock_holder(host.host_dir / "host_lock")
+
+    assert channel.timeout == SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
     assert channel.close_call_count == 1
 
 

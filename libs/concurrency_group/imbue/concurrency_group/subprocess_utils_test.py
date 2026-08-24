@@ -5,6 +5,8 @@ import time
 import warnings
 from io import BytesIO
 from threading import Event
+from typing import IO
+from typing import cast
 
 import pytest
 
@@ -13,6 +15,7 @@ from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.concurrency_group.subprocess_utils import OutputGatherer
 from imbue.concurrency_group.subprocess_utils import PartialOutputContainer
+from imbue.concurrency_group.subprocess_utils import _POST_KILL_DRAIN_TIMEOUT_SECONDS
 from imbue.concurrency_group.subprocess_utils import _is_timeout
 from imbue.concurrency_group.subprocess_utils import _shutdown_popen
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
@@ -287,6 +290,88 @@ def test_shutdown_popen_reaps_already_exited_process_with_its_own_exit_code() ->
     returncode = _shutdown_popen(process, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
 
     assert returncode == 0
+
+
+def test_timed_out_process_dying_words_are_captured() -> None:
+    """Output written while the child handles its shutdown signal reaches the result.
+
+    A timeout kill's final output is the tail that diagnoses where the command
+    was stuck, and it is written after the poll loop has stopped gathering --
+    only the post-kill drain picks it up.
+    """
+    # The sleep runs in the background with an interruptible ``wait``: a
+    # foreground sleep would defer the TERM trap until the sleep finished.
+    script = (
+        "trap 'kill $child 2>/dev/null; echo dying-words; exit 1' TERM; echo started; sleep 30 & child=$!; wait $child"
+    )
+    finished = run_local_command_modern_version(
+        ["sh", "-c", script],
+        is_checked=False,
+        timeout=0.5,
+    )
+    assert finished.is_timed_out
+    assert "started" in finished.stdout
+    assert "dying-words" in finished.stdout
+
+
+def test_shutdown_killed_process_dying_words_are_captured() -> None:
+    """Output written while the child handles a shutdown-requested kill also reaches the result.
+
+    The post-kill drain must ignore the shutdown event: it is set in exactly
+    this case, and the mid-loop gathers stop once it is set, so only the drain
+    can pick up what the child printed while dying. The shutdown is requested
+    from the output callback on the child's own trap-armed line, so the TERM
+    always reaches an armed handler without any sleep-and-poll.
+    """
+    script = "trap 'kill $child 2>/dev/null; echo dying-words; exit 1' TERM; echo trap-armed; sleep 30 & child=$!; wait $child"
+    shutdown_event = Event()
+
+    def request_shutdown_once_trap_is_armed(line: str, is_stdout: bool) -> None:
+        if "trap-armed" in line:
+            shutdown_event.set()
+
+    finished = run_local_command_modern_version(
+        ["sh", "-c", script],
+        is_checked=False,
+        shutdown_event=shutdown_event,
+        trace_output=True,
+        trace_on_line_callback=request_shutdown_once_trap_is_armed,
+    )
+    assert not finished.is_timed_out
+    assert "trap-armed" in finished.stdout
+    assert "dying-words" in finished.stdout
+
+
+class _EndlessStream:
+    """Pipe stand-in that always has another full chunk ready, like a live writer would."""
+
+    def read(self, size: int) -> bytes:
+        return b"x" * size
+
+
+def test_post_kill_drain_gives_up_on_a_stream_that_never_runs_dry() -> None:
+    """The post-kill drain is bounded even when the pipes keep yielding.
+
+    Only the direct child is signalled, so a grandchild that inherited the pipes
+    can keep the write ends open and keep writing. The drain has no shutdown
+    short-circuit to fall back on, so without its own deadline it would never
+    return and the kill path -- the one place a hang is least acceptable --
+    would hang.
+    """
+    gatherer = OutputGatherer(
+        stdout=cast(IO[bytes], _EndlessStream()),
+        stderr=cast(IO[bytes], _EndlessStream()),
+        stdout_container=PartialOutputContainer(is_output_accumulated=False),
+        stderr_container=PartialOutputContainer(is_output_accumulated=False),
+        shutdown_event=Event(),
+    )
+
+    started_at = time.monotonic()
+    gatherer.gather_output(is_draining_after_exit=True)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed >= _POST_KILL_DRAIN_TIMEOUT_SECONDS
+    assert elapsed < _POST_KILL_DRAIN_TIMEOUT_SECONDS + 10.0
 
 
 def test_gather_output_reads_from_stdout_and_stderr() -> None:

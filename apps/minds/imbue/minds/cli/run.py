@@ -117,6 +117,7 @@ from imbue.mngr.api.discovery_events import get_discovery_events_dir
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.logging import get_default_cli_events_log_dir
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
@@ -245,6 +246,7 @@ def run(
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
         latchkey_plugin_data_dir=latchkey.plugin_data_dir,
         discovery_events_dir=get_discovery_events_dir(MngrConfig(default_host_dir=mngr_host_dir)),
+        mngr_cli_events_dir=get_default_cli_events_log_dir(mngr_host_dir),
     )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)

@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SEC
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.mngr_command import OUTPUT_TAIL_MAX_CHARS
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
@@ -45,12 +46,15 @@ from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outa
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import _report_restart_step_failure
+from imbue.minds.desktop_client.workspace_recovery import _run_mngr
+from imbue.minds.desktop_client.workspace_recovery import _run_mngr_capturing
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
 from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
 from imbue.minds.errors import MngrCommandError
+from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.errors import ProviderUnavailableError
@@ -153,11 +157,20 @@ def test_build_mngr_stop_argv_always_stops_the_host() -> None:
 def test_build_mngr_start_argv_targets_the_agent_and_asks_for_structured_output() -> None:
     """The start must be structured: its ``was_host_started`` is the only way to
     learn that an idempotent start booted nothing, which is what stops the
-    terminal state from claiming a restart that never ran."""
+    terminal state from claiming a restart that never ran.
+
+    It must also stay verbose. The two demands read as opposites and are not:
+    ``--format json`` owns stdout (the one result line), while ``-v`` widens the
+    logging that goes to stderr, which is the step timeline a killed-on-timeout
+    start is diagnosed from. Reintroducing ``--quiet`` for the structured output
+    would silence that timeline and put start timeouts back in the dark.
+    """
     aid = AgentId.generate()
     argv = _build_mngr_start_argv("/usr/local/bin/mngr", aid)
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
     assert argv[-2:] == ["--format", "json"]
+    assert "-v" in argv
+    assert "--quiet" not in argv
 
 
 @pytest.mark.parametrize(
@@ -184,6 +197,133 @@ def test_an_unreadable_start_result_is_reported_rather_than_passed_over() -> Non
     # Human output is not JSON, so this is the decode branch specifically -- the
     # other warning arm is for output that parsed but carried no field.
     assert "Could not read" in log_output.getvalue()
+
+
+# -- timed-out subprocess output capture --
+
+
+def test_run_mngr_capturing_timeout_carries_the_output_tail(tmp_path: Path) -> None:
+    """A timed-out mngr subprocess's captured output rides the error instead of being discarded.
+
+    The tail is the only record of which step the killed command died in; the
+    message itself stays short because it is what user-facing surfaces render.
+    """
+    script = tmp_path / "hanging_mngr"
+    script.write_text("#!/bin/sh\necho step-one-done\necho step-two-started >&2\nsleep 30\n")
+    script.chmod(0o755)
+
+    caught: MngrCommandTimeoutError | None = None
+    with ConcurrencyGroup(name="test-timeout-tail") as cg:
+        try:
+            _run_mngr_capturing(cg, [str(script), "start", "agent-x"], env={}, timeout_seconds=2.0)
+        except MngrCommandTimeoutError as exc:
+            caught = exc
+
+    assert caught is not None
+    assert "step-one-done" in (caught.output_tail or "")
+    assert "step-two-started" in (caught.output_tail or "")
+    assert "step-one-done" not in str(caught)
+
+
+def test_restart_step_failure_logs_the_timeout_output_tail_without_widening_the_user_message() -> None:
+    """The timeout's output tail reaches the (single) error record but not the user-facing message."""
+    workspace_agent = AgentId.generate()
+    tracker = SystemInterfaceHealthTracker()
+    exc = MngrCommandTimeoutError(
+        "timed out after 1260s",
+        output_tail="--- stderr tail ---\nacquiring host lock at /home/user/.mngr/host_lock",
+    )
+
+    with capture_error_logs() as error_records:
+        _report_restart_step_failure(
+            "Start",
+            exc,
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            registry=_started_registry(workspace_agent),
+        )
+
+    assert len(error_records) == 1, error_records
+    assert "acquiring host lock" in error_records[0]
+    message = tracker.get_last_restart_error(workspace_agent) or ""
+    assert "acquiring host lock" not in message
+
+
+def _run_failing_mngr_stub(cg: ConcurrencyGroup, script: Path, stderr_script_body: str) -> MngrCommandError:
+    """Run a stub that writes ``stderr_script_body`` to stderr and exits 1, returning the raised error."""
+    script.write_text(f"#!/bin/sh\n{stderr_script_body}exit 1\n")
+    script.chmod(0o755)
+    with pytest.raises(MngrCommandError) as exc_info:
+        _run_mngr(cg, [str(script), "stop", "agent-x"], env={})
+    return exc_info.value
+
+
+def test_run_mngr_narrows_a_nonzero_exit_error_to_mngrs_verdict(tmp_path: Path) -> None:
+    """A failed command's error message is mngr's verdict; the timeline it printed rides the tail.
+
+    With ``-v`` in the recovery argv the captured stderr is the whole DEBUG
+    timeline. This message is rendered to the user and is what the substring
+    consumers (the shutdown-not-supported match, provider outage parsing) key
+    on, so only the verdict block may reach it. The whole block does: a verdict
+    spans lines, since mngr appends its bracketed help text.
+    """
+    with ConcurrencyGroup(name="test-verdict-only") as cg:
+        caught = _run_failing_mngr_stub(
+            cg,
+            tmp_path / "failing_mngr",
+            'i=0; while [ $i -lt 500 ]; do echo "DEBUG step $i" >&2; i=$((i+1)); done\n'
+            "echo 'Error: the real failure' >&2\n"
+            "echo '  [try it the other way]' >&2\n",
+        )
+
+    assert str(caught) == "exited 1: Error: the real failure\n  [try it the other way]"
+    assert len(str(caught)) <= len("exited 1: ") + OUTPUT_TAIL_MAX_CHARS
+    assert "DEBUG step 499" in (caught.output_tail or "")
+
+
+def test_run_mngr_keeps_a_tolerated_provider_skip_out_of_the_verdict(tmp_path: Path) -> None:
+    """A provider mngr skipped and carried on past is not read as this machine's backend outage.
+
+    Under ``-v``, mngr logs every provider it skips as unavailable at DEBUG with
+    the verbatim ``ProviderUnavailableError`` text that the outage parser
+    matches -- for a provider it then *continued past*. Letting that into the
+    error message would report a step that died of something else entirely as a
+    backend outage, and record it stickily on the tracker for the episode.
+    """
+    provider = ProviderInstanceName("imbue_cloud_someone-imbue-com")
+    skip_reason = "could not reach Imbue Cloud: [Errno 8] nodename nor servname provided"
+    stderr_path = tmp_path / "skip_then_fail.txt"
+    stderr_path.write_text(
+        f"Skipping provider {provider} (unavailable): {ProviderUnavailableError(provider, skip_reason)}\n"
+        "Error: Agent agent-x not found\n"
+    )
+
+    with ConcurrencyGroup(name="test-tolerated-skip") as cg:
+        caught = _run_failing_mngr_stub(
+            cg, tmp_path / "failing_mngr_with_skip", f"cat {shlex.quote(str(stderr_path))} >&2\n"
+        )
+
+    assert _in_band_provider_outage_reason(caught, str(provider)) is None
+    assert str(caught) == "exited 1: Error: Agent agent-x not found"
+    assert skip_reason in (caught.output_tail or "")
+
+
+def test_run_mngr_falls_back_to_the_stderr_tail_when_mngr_printed_no_verdict(tmp_path: Path) -> None:
+    """An mngr that crashed without a verdict still reports whatever it did print.
+
+    An unhandled exception reaches stderr as a traceback with no ``Error:``
+    marker, and that traceback is the only diagnosis there is -- so the message
+    must not come out empty.
+    """
+    with ConcurrencyGroup(name="test-verdict-fallback") as cg:
+        caught = _run_failing_mngr_stub(
+            cg,
+            tmp_path / "crashing_mngr",
+            "echo 'Traceback (most recent call last):' >&2\necho 'RecursionError' >&2\n",
+        )
+
+    assert "RecursionError" in str(caught)
 
 
 # -- provider-error attribution --

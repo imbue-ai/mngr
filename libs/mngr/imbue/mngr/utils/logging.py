@@ -474,6 +474,19 @@ def _resolve_log_dir(log_dir: Path, default_host_dir: Path) -> Path:
     return log_dir.expanduser()
 
 
+def get_default_cli_events_log_dir(default_host_dir: Path) -> Path:
+    """Directory holding the default per-command JSONL event log under a host dir.
+
+    Mirrors ``setup_logging``'s default file-sink path resolution
+    (``<host_dir>/events/logs/mngr/events.jsonl``) for consumers that need to
+    locate the CLI's file logs without loading a logging config -- e.g. the
+    minds bug-report attachment sweep, which uploads this log so a spawned
+    ``mngr`` subprocess's step timeline is available when diagnosing a report.
+    """
+    config = LoggingConfig()
+    return _resolve_log_dir(config.log_dir, default_host_dir) / str(config.event_source)
+
+
 class BufferedMessage(FrozenModel):
     """A buffered log message with its formatted output and destination."""
 

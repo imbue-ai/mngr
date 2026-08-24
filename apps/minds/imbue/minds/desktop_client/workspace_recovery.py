@@ -40,6 +40,8 @@ from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plu
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.mngr_command import format_output_tail
+from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.workspace_lifecycle import HOST_START_TIMEOUT_SECONDS
@@ -276,30 +278,46 @@ def _report_restart_step_failure(
     # Which verdict the user was shown, alongside what the command actually
     # printed. The two now differ -- that difference is the whole verdict -- and
     # the raw output is still what a failure nobody anticipated is diagnosed from.
+    # The subprocess's captured output tail is appended to this same (single)
+    # error record -- reaching minds.log and error reporting -- rather than
+    # carried in the user-facing message above.
     logger.error(
-        "{} step of host restart for {} failed ({}): {}",
+        "{} step of host restart for {} failed ({}): {}{}",
         step_label,
         workspace_agent_id,
         "reported as a backend outage" if reason is not None else "reported as a failed step",
         exc,
+        "" if exc.output_tail is None else f"\nsubprocess output:\n{exc.output_tail}",
     )
     tracker.mark_restart_failed(workspace_agent_id, message)
     registry.fail(workspace_agent_id, message)
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
-    """Build the argv for ``mngr stop`` on ``agent_id``, stopping its host with it."""
-    return [mngr_binary, "stop", str(agent_id), "--quiet", "--stop-host"]
+    """Build the argv for ``mngr stop`` on ``agent_id``, stopping its host with it.
+
+    ``-v`` (DEBUG console logging to stderr) instead of ``--quiet``: the output
+    goes to the capture pipe, not a terminal, and it is the per-step timeline
+    that makes a killed-on-timeout command diagnosable (see ``output_tail`` on
+    ``MngrCommandError``). ``--quiet`` here is what left every production start
+    timeout a black box. The timeline stays on that tail and off the error
+    message, which ``mngr_failure_verdict`` narrows to mngr's verdict alone.
+    """
+    return [mngr_binary, "stop", str(agent_id), "-v", "--stop-host"]
 
 
 def _build_mngr_start_argv(mngr_binary: str, agent_id: AgentId) -> list[str]:
     """Build the argv for ``mngr start`` on ``agent_id`` (also starts the host if it is stopped).
 
+    ``-v`` instead of ``--quiet`` for the same reason as ``_build_mngr_stop_argv``.
+
     Structured output because the restart needs one thing the human output does
-    not carry: whether a host was actually booted. ``--quiet`` only silences
-    mngr's stderr logging, so stdout is exactly the one JSON result line.
+    not carry: whether a host was actually booted. The two flags act on separate
+    streams and do not fight: ``--format json`` writes the one result line to
+    stdout and suppresses the human lines entirely, while all of mngr's logging
+    -- everything ``-v`` widens -- goes to stderr.
     """
-    return [mngr_binary, "start", str(agent_id), "--quiet", "--format", "json"]
+    return [mngr_binary, "start", str(agent_id), "-v", "--format", "json"]
 
 
 def _did_start_boot_a_host(stdout: str) -> bool | None:
@@ -349,7 +367,13 @@ def _run_mngr(
     """
     stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env, timeout_seconds=timeout_seconds)
     if returncode != 0:
-        raise MngrCommandError(f"exited {returncode}: {stderr.strip()}")
+        # Only mngr's verdict rides the message (see ``mngr_failure_verdict``);
+        # the timeline it printed getting there rides the tail, exactly as the
+        # timeout path below does.
+        raise MngrCommandError(
+            f"exited {returncode}: {mngr_failure_verdict(stderr)}",
+            output_tail=format_output_tail(stdout, stderr),
+        )
     return stdout
 
 
@@ -379,7 +403,13 @@ def _run_mngr_capturing(
         # wrap it as the single MngrCommandError they already catch.
         raise MngrCommandError(str(exc)) from exc
     if finished.is_timed_out:
-        raise MngrCommandTimeoutError(f"timed out after {int(timeout_seconds)}s")
+        # A killed subprocess never printed a verdict, so its captured output is
+        # the only record of which step it died in; carry it on the error
+        # (bounded, out of the message) instead of discarding it.
+        raise MngrCommandTimeoutError(
+            f"timed out after {int(timeout_seconds)}s",
+            output_tail=format_output_tail(finished.stdout, finished.stderr),
+        )
     # A finished, non-timed-out process always carries a returncode; the Optional
     # is for the not-yet-finished case, which this branch has ruled out.
     returncode = finished.returncode if finished.returncode is not None else 1

@@ -36,6 +36,7 @@ from imbue.mngr.utils.logging import _is_expected_paramiko_thread_exception
 from imbue.mngr.utils.logging import _patched_transport_log
 from imbue.mngr.utils.logging import _resolve_log_dir
 from imbue.mngr.utils.logging import _threading_excepthook
+from imbue.mngr.utils.logging import get_default_cli_events_log_dir
 from imbue.mngr.utils.logging import remove_console_handlers
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.logging import suppress_warnings
@@ -83,6 +84,22 @@ def test_setup_logging_creates_events_jsonl_file(temp_mngr_ctx: MngrContext) -> 
 
     events_file = log_dir / "logs" / "mngr" / "events.jsonl"
     assert events_file.exists()
+
+
+def test_get_default_cli_events_log_dir_matches_setup_logging_sink_location(temp_mngr_ctx: MngrContext) -> None:
+    """The helper resolves to the directory setup_logging's default file sink actually writes into.
+
+    The two derive the path independently, and out-of-process consumers (the
+    minds bug-report attachment sweep) rely on the helper to find the CLI's
+    events.jsonl -- a drift between them would silently break that upload.
+    """
+    default_host_dir = temp_mngr_ctx.config.default_host_dir
+    setup_logging(LoggingConfig(console_level=LogLevel.INFO), default_host_dir=default_host_dir, command="test")
+
+    # Log a message to trigger file creation
+    logger.info("test log message")
+
+    assert (get_default_cli_events_log_dir(default_host_dir) / "events.jsonl").exists()
 
 
 def test_setup_logging_writes_flat_jsonl_with_envelope_and_loguru_fields(temp_mngr_ctx: MngrContext) -> None:

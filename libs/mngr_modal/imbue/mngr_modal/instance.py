@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import tempfile
 import threading
@@ -102,6 +103,7 @@ from imbue.mngr.providers.host_key_store import remove_host_key_record
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import REQUIRED_HOST_PACKAGES
+from imbue.mngr.providers.ssh_host_setup import SSHD_START_OPTIONS
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
@@ -1049,11 +1051,12 @@ class ModalProviderInstance(BaseProviderInstance):
         with log_span("Starting sshd in sandbox"):
             # Start sshd (-D: don't detach, -E: log to file instead of syslog)
             # stdout/stderr are suppressed so Modal doesn't track them for performance/stability reasons.
+            # The rest of the options come from the shared constant, so a sandbox's
+            # sshd is configured identically to every other container sshd mngr starts.
             self._ssh_process = sandbox.exec(
                 "/usr/sbin/sshd",
                 "-D",
-                "-o",
-                "MaxSessions=100",
+                *shlex.split(SSHD_START_OPTIONS),
                 "-E",
                 sshd_log_path,
                 stdout=StreamType.DEVNULL,

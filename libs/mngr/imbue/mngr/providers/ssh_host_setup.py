@@ -133,7 +133,15 @@ def build_check_and_install_packages_command(
 # Options passed to sshd on startup to raise the per-connection session cap.
 # Shared by the provider's explicit start and the self-healing entrypoint so
 # both bring sshd up with identical settings.
-SSHD_START_OPTIONS: Final[str] = "-o MaxSessions=100"
+# MaxSessions is raised for the many concurrent channels the forward proxy
+# multiplexes. The ClientAlive pair reaps sessions whose client path died
+# silently (a laptop that slept mid-operation, dropped NAT state, a vanished
+# peer): without it the only reaper is kernel TCP keepalive (~2h11m at Linux
+# defaults), so a dead client's remote processes -- a cooperative host-lock
+# holder above all -- linger for hours and block every subsequent operation.
+# 30s x 4 bounds that to ~2 minutes. Passed as ``-o`` flags so they override
+# whatever sshd_config the container image baked.
+SSHD_START_OPTIONS: Final[str] = "-o MaxSessions=100 -o ClientAliveInterval=30 -o ClientAliveCountMax=4"
 
 # Marker file mngr writes (alongside its injected host key) once it has
 # provisioned sshd. The self-healing entrypoint gates on THIS marker rather than

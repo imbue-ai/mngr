@@ -67,6 +67,7 @@ from imbue.mngr.hosts.offline_host import BaseHost
 from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import ActiveRemoteLock
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
@@ -1006,7 +1007,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         self._ensure_connected()
         transport = self._get_paramiko_transport()
         try:
-            channel = transport.open_session()
+            # Bounded open: a wedged sshd that accepts TCP but no longer
+            # services channel opens would otherwise hang here forever.
+            channel = transport.open_session(timeout=SSH_CHANNEL_OPEN_TIMEOUT_SECONDS)
         except (OSError, EOFError, SSHException) as e:
             if is_transient_ssh_error(e):
                 logger.debug("Transient SSH error opening host-lock channel: {}, disconnecting for retry", e)
@@ -1168,14 +1171,22 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         )
         self._ensure_connected()
         transport = self._get_paramiko_transport()
-        channel = transport.open_session()
+        channel = transport.open_session(timeout=SSH_CHANNEL_OPEN_TIMEOUT_SECONDS)
+        # The confirmation is one round trip on a healthy sshd, so bound the read on
+        # the same budget as the open: an sshd that accepts the channel but stops
+        # servicing it would otherwise block here forever.
+        channel.settimeout(SSH_CHANNEL_OPEN_TIMEOUT_SECONDS)
         try:
             channel.exec_command(command)
             # Wait for the launch confirmation so the holder forks before we release.
             marker_bytes = _LOCK_HOLDER_LAUNCHED_MARKER.encode()
             buffer = b""
             while marker_bytes not in buffer:
-                chunk = channel.recv(4096)
+                try:
+                    chunk = channel.recv(4096)
+                except TimeoutError:
+                    logger.warning("Detached host-lock holder did not confirm launch within the read timeout")
+                    break
                 if not chunk:
                     logger.warning("Detached host-lock holder did not confirm launch")
                     break
