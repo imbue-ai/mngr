@@ -38,7 +38,7 @@ export interface OptionsPanelAttrs {
  * (shrink-0) above the scrolling pane; the name truncates so a long one never
  * pushes into a second line or crowds the close X. */
 function paneTitle(tab: OptionsTab, name: string): m.Child {
-  const icon = tab === "share" ? "send" : "settings";
+  const icon = tab === "share" ? "share" : "settings";
   const label = tab === "share" ? "Share machine:" : "Machine settings:";
   return m("h1", { class: "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
     m(Icon16, { name: icon, size: "lg", extra: "shrink-0" }),

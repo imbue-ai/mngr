@@ -168,7 +168,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                             : "",
                         onclick: () => toggleWorkspaceOptions(shell, routePath, context, "share"),
                       },
-                      m(Icon16, { name: "send" }),
+                      m(Icon16, { name: "share" }),
                     ),
                   ]),
                 ]

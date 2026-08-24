@@ -214,7 +214,7 @@ describe("icon catalogs", () => {
       "home",
       "inbox",
       "bug",
-      "send",
+      "share",
       "settings",
       "close",
       "check",
