@@ -26,6 +26,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import Final
 from typing import IO
 from typing import Iterator
 from typing import Mapping
@@ -48,9 +49,11 @@ from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.util import CommandOutput
 from pyinfra.connectors.util import OutputLine
+from tenacity import Retrying
 from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import stop_after_attempt
+from tenacity import stop_after_delay
 from tenacity import wait_chain
 from tenacity import wait_fixed
 
@@ -255,21 +258,30 @@ def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
     return isinstance(exception, ConnectError) and "error reading ssh protocol banner" in str(exception).lower()
 
 
-_retry_on_transient_ssh_connect_error = retry(
-    retry=retry_if_exception(_is_transient_ssh_connect_error),
-    # Immediate retries, no pause: each failed attempt already blocked for
-    # paramiko's banner timeout waiting for sshd to answer (30s for provider
-    # hosts via ssh_paramiko_connect_kwargs -- see SSH_BANNER_TIMEOUT_SECONDS
-    # in providers/ssh_utils.py -- 15s paramiko default elsewhere). Three
-    # attempts ride out the boot race while bounding the worst case (a host
-    # that accepts TCP but never speaks SSH) at ~90 seconds; two attempts
-    # proved one window too tight in practice (a slow fresh Modal sandbox
-    # outlasted the single retry on both offload attempts of
-    # test_exec_json_output_on_modal, 2026-08-17 CI run).
-    stop=stop_after_attempt(3),
-    wait=wait_fixed(0),
-    reraise=True,
-)
+# A freshly provisioned host (a new Modal sandbox, a new VPS) transiently accepts TCP
+# before its sshd answers the SSH banner. paramiko surfaces that banner-read failure
+# either immediately (the tunnel accepts the connection then resets it before the backend
+# sshd is up) or only after the full banner timeout (a stalled tunnel) -- so a fixed count
+# of zero-wait retries can burn every attempt in milliseconds before sshd is ready. Ride
+# the race out over a wall-clock deadline with a fixed pause between attempts instead, so
+# the ride-out window does not depend on how each individual attempt happens to fail.
+SSH_CONNECT_BANNER_RETRY_DEADLINE_SECONDS: Final[float] = 30.0
+SSH_CONNECT_BANNER_RETRY_BACKOFF_SECONDS: Final[float] = 0.5
+
+
+def _connect_pyinfra_host_retrying_banner_read_failures(
+    pyinfra_host: PyinfraHost,
+    deadline_seconds: float,
+    backoff_seconds: float,
+) -> None:
+    """Connect a pyinfra host, retrying banner-read failures until it answers or the deadline passes."""
+    retrying = Retrying(
+        retry=retry_if_exception(_is_transient_ssh_connect_error),
+        stop=stop_after_delay(deadline_seconds),
+        wait=wait_fixed(backoff_seconds),
+        reraise=True,
+    )
+    retrying(lambda: pyinfra_host.connect(raise_exceptions=True))
 
 
 def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
@@ -458,25 +470,16 @@ class OuterHost(OuterHostInterface):
         except (EOFError, SSHException) as e:
             raise HostConnectionError(failed) from e
 
-    @_retry_on_transient_ssh_connect_error
-    def _connect_with_transient_retry(self) -> None:
-        """Connect the pyinfra host, retrying banner-read connect failures.
-
-        Each banner-read failure already spent paramiko's own banner timeout
-        waiting for sshd to answer, so immediate retries ride out the boot
-        race where a freshly created host accepts TCP before sshd is ready --
-        which otherwise surfaces to users as a spurious create failure --
-        while keeping the worst case bounded (~90 seconds at the 30s provider
-        banner timeout).
-        """
-        self.connector.host.connect(raise_exceptions=True)
-
     def _ensure_connected(self) -> None:
         """Ensure the pyinfra host is connected, re-verifying a held cooperative lock across reconnects."""
         if self.connector.host.connected:
             return
         try:
-            self._connect_with_transient_retry()
+            _connect_pyinfra_host_retrying_banner_read_failures(
+                self.connector.host,
+                SSH_CONNECT_BANNER_RETRY_DEADLINE_SECONDS,
+                SSH_CONNECT_BANNER_RETRY_BACKOFF_SECONDS,
+            )
         except ConnectError as e:
             message = str(e).lower()
             # Missing/unverifiable host keys are a trust failure: we have no basis to

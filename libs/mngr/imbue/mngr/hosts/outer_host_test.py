@@ -16,6 +16,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import _connect_pyinfra_host_retrying_banner_read_failures
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
@@ -635,52 +636,50 @@ def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: Mn
     assert fake.connect_call_count == 2
 
 
-def test_ensure_connected_recovers_when_only_the_third_banner_read_attempt_succeeds(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Two consecutive banner-read failures still recover on the third attempt.
+def test_banner_read_retry_recovers_after_more_than_three_consecutive_failures() -> None:
+    """The connect retry rides out more than three consecutive banner-read failures.
 
-    Regression test for the widened retry budget: a slow fresh Modal sandbox
-    outlasted the single retry (both offload attempts of
-    test_exec_json_output_on_modal), so the bounded budget is three attempts.
-    """
-    fake = _FakePyinfraHostRecoveringOnConnect(
-        failure_count=2,
-        message="SSH error (Error reading SSH protocol banner)",
-    )
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(cast(PyinfraHost, fake)),
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-    outer._ensure_connected()
-
-    assert fake.connected is True
-    assert fake.connect_call_count == 3
-
-
-def test_ensure_connected_gives_up_after_three_banner_read_attempts(temp_mngr_ctx: MngrContext) -> None:
-    """A persistent banner-read failure makes exactly three attempts before surfacing.
-
-    Each attempt already blocks for paramiko's banner timeout (30s on provider
-    hosts), so capping at three attempts bounds the worst case (a host that
-    accepts TCP but never speaks SSH) at ~90 seconds.
+    The MIND-202 pin: a fresh Modal sandbox can reset several fresh connections
+    in a row before its sshd answers the banner, and the connect retry must keep
+    trying until the host answers rather than giving up after a fixed count. A
+    zero backoff keeps the test instant while still exercising the deadline loop.
     """
     fake = _FakePyinfraHostRecoveringOnConnect(
         failure_count=5,
         message="SSH error (Error reading SSH protocol banner)",
     )
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(cast(PyinfraHost, fake)),
-        mngr_ctx=temp_mngr_ctx,
+
+    _connect_pyinfra_host_retrying_banner_read_failures(
+        cast(PyinfraHost, fake),
+        deadline_seconds=5.0,
+        backoff_seconds=0.0,
     )
 
-    with pytest.raises(HostConnectionError):
-        outer._ensure_connected()
+    assert fake.connected is True
+    assert fake.connect_call_count == 6
 
-    assert fake.connect_call_count == 3
+
+def test_banner_read_retry_gives_up_after_the_deadline_elapses() -> None:
+    """A host that never answers the banner is retried until the deadline, then the failure surfaces.
+
+    The retry is bounded by a wall-clock deadline rather than a fixed attempt
+    count, so it makes many well-spaced attempts before reraising the last
+    banner-read ConnectError (which the caller maps to HostConnectionError).
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=1_000_000,
+        message="SSH error (Error reading SSH protocol banner)",
+    )
+
+    with pytest.raises(ConnectError):
+        _connect_pyinfra_host_retrying_banner_read_failures(
+            cast(PyinfraHost, fake),
+            deadline_seconds=0.2,
+            backoff_seconds=0.01,
+        )
+
+    # The deadline, not a fixed attempt count, bounds the retry, so it makes many attempts.
+    assert fake.connect_call_count > 3
 
 
 def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mngr_ctx: MngrContext) -> None:
