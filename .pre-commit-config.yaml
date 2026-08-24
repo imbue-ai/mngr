@@ -37,6 +37,20 @@ repos:
         types: [python]
         pass_filenames: false
         stages: [pre-push]
+    -   id: minds-evals-sync-and-ty
+#        apps/minds_evals is a standalone uv project, not a workspace member (see the root
+#        [tool.uv.workspace].exclude), so the uv-sync-pre-push and ty hooks above -- which
+#        both operate on the root workspace -- never touch it. This is its local equivalent:
+#        sync its own venv from its own lock, then type-check it. Scoped to the project so
+#        pushes that do not touch it pay nothing. `--locked` matches what the CI job runs:
+#        a plain `uv sync` would rewrite the tracked uv.lock as a side effect of the push
+#        and let a pyproject edit with no matching `uv lock` through to fail in CI instead.
+        name: "Sync + type check the standalone minds_evals project"
+        entry: bash -c 'cd apps/minds_evals && uv sync --locked --quiet && uv run ty check'
+        language: system
+        stages: [pre-push]
+        files: '^apps/minds_evals/'
+        pass_filenames: false
     -   id: regenerate-cli-docs
         name: "Regenerate CLI markdown docs"
         entry: bash -c 'uv run python scripts/make_cli_docs.py --check'

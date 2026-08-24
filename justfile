@@ -109,6 +109,17 @@ test-minds-js:
   cd apps/minds/frontend && pnpm install --frozen-lockfile && pnpm run generate && pnpm run check && pnpm test
 
 
+# Type-check and test apps/minds_evals. It is a standalone uv project, not a
+# workspace member (see the root [tool.uv.workspace].exclude), so it has its own
+# lock and venv: the root `uv sync --all-packages`, `just test-quick`, `just
+# test-offload` and the root `ty check` all skip it, and this recipe is the only
+# thing that runs its suite. `--locked` fails rather than silently re-resolving,
+# so a pyproject edit without a matching `uv lock` is caught here.
+[group("minds evals")]
+test-minds-evals args="":
+  cd apps/minds_evals && uv sync --locked && uv run ty check && uv run pytest {{args}}
+
+
 # Render one relay's on-disk config (frps.toml, nftables.conf, the :80
 # redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see
 # apps/share_relay/README.md. RELAY_ID comes from `just register-share-relay`
