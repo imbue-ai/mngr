@@ -128,6 +128,7 @@ _DISPLAY_NAME_BY_SCOPE: Final[Mapping[str, str]] = {
     "google-directions-api": "Google Directions",
     "huggingface-api": "Hugging Face",
     "openrouter-api": "OpenRouter",
+    "tailscale-api": "Tailscale",
 }
 
 # Curated order in which services appear in the catalog (and thus in the

@@ -1762,6 +1762,47 @@
       ]
     }
   ],
+  "tailscale": [
+    {
+      "scope": "tailscale-api",
+      "display_name": "Tailscale",
+      "description": "All requests to the Tailscale admin REST API (api.tailscale.com), which is served under /api/v2/. Covers tailnet-wide user management (roles, approval, suspension, deletion), device management, ACL/policy, DNS, keys, logs, and webhooks. Does not cover the admin console (console.tailscale.com) or the sign-in host (login.tailscale.com), which the browser login visits but which are not API targets.",
+      "permissions": [
+        {
+          "name": "tailscale-read-all",
+          "description": "Read anything from the Tailscale admin API: list users, devices, keys, webhooks, posture integrations, services, tailnets, DNS and logging configuration, and the policy file. Safe methods only."
+        },
+        {
+          "name": "tailscale-write-all",
+          "description": "Change anything through the Tailscale admin API: change user roles, approve/suspend/restore/delete users, authorize/expire/delete devices, set device tags/routes/names, set the policy file, configure DNS and logging, create and revoke keys, and manage webhooks and OAuth apps. Covers every unsafe method."
+        },
+        {
+          "name": "tailscale-read-users",
+          "description": "Read user information and invitations: list users and user invites, get a user's details. Safe methods on the users and user-invites endpoints only. Maps to Tailscale's own OAuth `users:read` scope."
+        },
+        {
+          "name": "tailscale-write-users",
+          "description": "Change user roles and handle user approval, suspension, deletion, and restoration; create and resend user invites. Unsafe methods on the users and user-invites endpoints only. Maps to Tailscale's own OAuth `users` scope."
+        },
+        {
+          "name": "tailscale-read-devices",
+          "description": "Read device information: list tailnet devices, get a device's details, posture attributes, and routes. Safe methods on the device and device-invites endpoints only. Maps to Tailscale's own OAuth `devices:read` scope."
+        },
+        {
+          "name": "tailscale-write-devices",
+          "description": "Add or edit machines: authorize, expire, rename, retag, re-route, or delete devices, and manage device invites and posture attributes. Unsafe methods on the device and device-invites endpoints only. Maps to Tailscale's own OAuth `devices` scope."
+        },
+        {
+          "name": "tailscale-read-keys",
+          "description": "Read the tailnet's keys: list and inspect auth keys (tskey-auth, for the tailscale CLI), API access tokens, OAuth clients, and federated identities. Safe methods on the keys endpoint only. Tailscale's own OAuth model splits this across `auth_keys:read`, `api_access_tokens:read`, `oauth_keys:read`, and `federated_keys:read`, but those are all served by the same `/tailnet/{tailnet}/keys` endpoint and cannot be separated by path."
+        },
+        {
+          "name": "tailscale-write-keys",
+          "description": "Mint, update, or revoke any key the tailnet's keys endpoint serves: auth keys (tskey-auth, which the tailscale CLI consumes to bring up nodes), API access tokens, OAuth clients, and federated identities. Unsafe methods on the keys endpoint only. Note that minting an OAuth client or federated identity creates a long-lived credential that can mint further access tokens, so this scope is broader than Tailscale's own `auth_keys` OAuth scope (which covers device auth keys only) -- detent matches by method and path, not request body, so the keyType field that distinguishes them cannot be narrowed here. This is the scope an agent needs to connect new machines to the tailnet."
+        }
+      ]
+    }
+  ],
   "todoist": [
     {
       "scope": "todoist-api",
