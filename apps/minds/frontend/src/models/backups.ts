@@ -13,6 +13,8 @@
 // Everything network- or timer-shaped is injected so vitest drives the state
 // machines synchronously; pages construct with the browser defaults.
 
+import type { EnvironmentBlock } from "./health";
+
 export const BACKUP_HISTORY_PAGE_SIZE = 15;
 
 const OPERATION_POLL_INTERVAL_MS = 2000;
@@ -709,6 +711,7 @@ export interface RecoveryInfo {
   is_restart_start_only: boolean | null;
   ssh_command: string;
   is_host_offline: boolean;
+  device_environment: EnvironmentBlock;
   is_backend_unreachable: boolean;
   provider_label: string;
   unreachable_reason: string;

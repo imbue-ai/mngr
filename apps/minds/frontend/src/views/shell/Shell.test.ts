@@ -1,6 +1,7 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ShellState } from "./shell-state";
+import { NoticeBand } from "./NoticeBand";
 import { Shell } from "./Shell";
 import { ToastLayer } from "./ToastLayer";
 import { WorkspaceFrame } from "./WorkspaceFrame";
@@ -51,8 +52,15 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     currentRouteSearch: () => `workspace=${WORKSPACE_ID}`,
     closeAppOverlay: () => true,
     stores: {
-      workspaces: { toAgentScopedId: (anyId: string) => anyId, entryByAnyId: () => null },
-      health: { statusFor: () => "healthy", discoveryHealth: "healthy" },
+      workspaces: {
+        toAgentScopedId: (anyId: string) => anyId,
+        entryByAnyId: () => null,
+      },
+      health: {
+        statusFor: () => "healthy",
+        discoveryHealth: "healthy",
+        appEnvironmentBlock: () => "NONE",
+      },
     },
     isRecoveryModalOpenFor: () => false,
     ...overrides,
@@ -312,7 +320,11 @@ describe("Shell notifications overlay", () => {
       closeNotifications: () => undefined,
       stores: {
         workspaces: { toAgentScopedId: (anyId: string) => anyId },
-        health: { statusFor: () => "healthy", discoveryHealth: "healthy" },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentBlock: () => "NONE",
+        },
         notifications: { entries: [], unresolvedCount: 0 },
       },
     } as unknown as Partial<ShellState>);
@@ -577,6 +589,110 @@ describe("Shell app-overlay card chrome", () => {
   });
 });
 
+describe("Shell notice band wiring", () => {
+  it("hands the device's condition to the band over a stuck machine", () => {
+    // The band's decisions are its own suite's business; what is pinned here is
+    // the call: the Shell reading the store's app-level condition into the
+    // band's field, so a stuck machine on a blocked network is narrated as the
+    // network rather than as its own failure.
+    const { state } = makeShell({
+      stores: {
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
+        health: {
+          statusFor: () => "stuck",
+          discoveryHealth: "healthy",
+          appEnvironmentBlock: () => "SSH_BLOCKED",
+        },
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
+
+    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
+    expect(attrsOf(band as AnyVnode).payload).toMatchObject({
+      message: "This network blocks the connection to your machines.",
+    });
+  });
+
+  it("speaks the device's own condition over a machine nothing has convicted yet", () => {
+    // The case the whole app-level reading exists for: the user lands straight
+    // on a machine page with the wifi off, and no machine has failed a probe
+    // long enough to be convicted -- yet the band must already say what is
+    // wrong rather than nothing at all.
+    const { state } = makeShell({
+      stores: {
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => ({
+            id: WORKSPACE_ID,
+            is_network_dependent: true,
+          }),
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentBlock: () => "OFFLINE",
+        },
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
+
+    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
+    expect(attrsOf(band as AnyVnode).payload).toMatchObject({
+      message: "No network connection.",
+    });
+  });
+
+  it("reads locality off the machine's own row before speaking over it", () => {
+    // A docker container answers over loopback, so a dead network explains
+    // nothing about it and the band must not displace its recovery copy. The
+    // band's own suite proves the parameter works; what is pinned here is which
+    // field the Shell puts in it -- another boolean off the same row would
+    // type-check, compile, and give every on-device machine a no-network band.
+    const { state } = makeShell({
+      stores: {
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => ({
+            id: WORKSPACE_ID,
+            is_network_dependent: false,
+          }),
+        },
+        health: {
+          statusFor: () => "stuck",
+          discoveryHealth: "healthy",
+          appEnvironmentBlock: () => "OFFLINE",
+        },
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
+
+    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
+    // Still a band -- the machine is stuck -- but the ordinary one, with the
+    // device's condition kept out of it.
+    expect(attrsOf(band as AnyVnode).payload).toMatchObject({
+      message: "Lost connection to this machine. Reconnecting…",
+    });
+  });
+});
+
 describe("Shell toast layer", () => {
   function findToastLayer(root: AnyVnode): AnyVnode | undefined {
     return collectVnodes(root).find((vnode) => vnode.tag === ToastLayer);
@@ -595,7 +711,11 @@ describe("Shell toast layer", () => {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
-        health: { statusFor: () => "healthy", discoveryHealth: "healthy" },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentBlock: () => "NONE",
+        },
         notifications: { entries: [liveEntry] },
       } as unknown as ShellState["stores"],
     });
@@ -631,7 +751,11 @@ describe("Shell toast layer", () => {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
         },
-        health: { statusFor: () => "healthy", discoveryHealth: "healthy" },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentBlock: () => "NONE",
+        },
         notifications: { entries: [notificationEntry("n1")] },
       } as unknown as ShellState["stores"],
     });

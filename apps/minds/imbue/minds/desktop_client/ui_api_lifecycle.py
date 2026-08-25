@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
 from imbue.minds.desktop_client.backup_reaper import parse_destroyed_at
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -52,6 +53,7 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTR
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
+from imbue.minds.desktop_client.workspace_recovery import read_environment_block
 from imbue.minds.desktop_client.workspace_recovery import read_host_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
@@ -93,6 +95,17 @@ class RecoveryInfoResponse(FrozenModel):
     )
     ssh_command: str = Field(description="Copy-pasteable SSH command for the host, empty when unknown")
     is_host_offline: bool = Field(description="Whether discovery currently reads the host as stopped/stopping/crashed")
+    device_environment: EnvironmentBlock = Field(
+        description=(
+            "Device-level condition blocking this machine (offline / SSH-blocked network), or NONE. "
+            "Outranks the machine's own health in the card: while it holds there is no restart to "
+            "narrate and none that could run. The device's cached reading, not a per-machine "
+            "record, so it answers for a machine that was already stuck when the network died and "
+            "for one whose restart already failed. Still NONE for a machine that runs on this "
+            "device: a docker container is reachable with the wifi off, so a dead network neither "
+            "explains its failure nor is a reason to withhold the restart that fixes it."
+        )
+    )
     is_backend_unreachable: bool = Field(
         description="Whether the provider hosting this machine is unreachable or rejecting us"
     )
@@ -384,6 +397,7 @@ def _handle_recovery_info(workspace_id: str) -> Response:
         is_restart_start_only=tracker.get_restart_is_start_only(resolved_id) if tracker is not None else None,
         ssh_command=_build_ssh_command(backend_resolver, resolved_id),
         is_host_offline=_is_host_offline(backend_resolver, resolved_id),
+        device_environment=read_environment_block(state.connectivity_detector, backend_resolver, resolved_id),
         is_backend_unreachable=backend_verdict is not None,
         provider_label=backend_verdict.provider_label if backend_verdict is not None else "",
         unreachable_reason=backend_verdict.reason if backend_verdict is not None else "",

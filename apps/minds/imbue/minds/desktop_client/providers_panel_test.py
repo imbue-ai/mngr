@@ -277,6 +277,42 @@ def test_build_workspace_list_does_not_report_unreachable_for_unrelated_provider
     assert "is_backend_unreachable" not in workspaces[0]
 
 
+# -- _build_workspace_list connectivity locality --
+
+
+@pytest.mark.parametrize("backend", ["local", "docker", "lima"])
+def test_build_workspace_list_marks_on_device_machines_as_needing_no_network(backend: str) -> None:
+    """The band reads this to know when *not* to blame the network for an outage.
+
+    A machine on one of these backends answers over loopback, so this device
+    losing its network says nothing about it -- and the band would otherwise
+    displace its recovery copy with "No network connection" and send the user to
+    a card that withholds the restart that would fix it.
+    """
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent(backend)
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+    seed_provider_snapshots(resolver, providers=(_make_discovered_provider(backend, backend=backend),))
+
+    workspaces = _build_workspace_list(resolver)
+
+    assert len(workspaces) == 1
+    assert workspaces[0]["is_network_dependent"] == "false"
+
+
+def test_build_workspace_list_marks_a_remote_machine_as_needing_the_network() -> None:
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("imbue_cloud_acct")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+    seed_provider_snapshots(
+        resolver, providers=(_make_discovered_provider("imbue_cloud_acct", backend="imbue_cloud"),)
+    )
+
+    workspaces = _build_workspace_list(resolver)
+
+    assert workspaces[0]["is_network_dependent"] == "true"
+
+
 # -- _build_workspace_list device-cannot-connect verdict --
 
 

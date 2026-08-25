@@ -185,31 +185,38 @@ def test_unauthenticated_ws_upgrade_gets_plain_401_and_server_keeps_serving(tmp_
 
 
 def test_ws_connect_receives_hello_then_full_snapshot(tmp_path: Path) -> None:
+    # Read exactly as many frames as the sequence is expected to carry, so a
+    # frame added to it fails here rather than silently going unlooked-at (and
+    # taking the frame after it, in whatever test reads one, with it).
+    expected_types = [
+        "workspaces",
+        "accounts",
+        "providers",
+        "requests",
+        "discovery_health",
+        "notifications",
+        "environment",
+    ]
     with _serve_ws_capable_app(tmp_path) as (port, cookie, _state):
         client = _connect_ws(port, cookie)
         try:
-            frames = [json.loads(client.receive(timeout=5)) for _ in range(7)]
+            frames = [json.loads(client.receive(timeout=5)) for _ in range(len(expected_types) + 1)]
         finally:
             client.close()
         assert frames[0]["type"] == "hello"
         assert frames[0]["schema_version"] == UI_SCHEMA_VERSION
-        assert [frame["type"] for frame in frames[1:]] == [
-            "workspaces",
-            "accounts",
-            "providers",
-            "requests",
-            "discovery_health",
-            "notifications",
-        ]
+        assert [frame["type"] for frame in frames[1:]] == expected_types
 
 
 def test_broadcast_after_connect_reaches_the_ws_client(tmp_path: Path) -> None:
     with _serve_ws_capable_app(tmp_path) as (port, cookie, state):
         client = _connect_ws(port, cookie)
         try:
-            for _ in range(7):
-                client.receive(timeout=5)
             assert state.ui_publisher is not None
+            # However long the connect sequence is: what is under test here is
+            # the push that follows it, not the sequence itself.
+            for _ in state.ui_publisher.build_snapshot_frames():
+                client.receive(timeout=5)
             state.ui_publisher.publish_one_shot(UiReloadMessage())
             pushed = json.loads(client.receive(timeout=5))
         finally:

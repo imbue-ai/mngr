@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -161,6 +162,11 @@ class DesktopClientState(MutableModel):
     )
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = Field(
         default=None, frozen=True, description="App-global discovery-pipeline health watchdog"
+    )
+    connectivity_detector: ConnectivityDetector | None = Field(
+        default=None,
+        frozen=True,
+        description="Whether this device can reach anything, for the restart paths that would otherwise be doomed",
     )
     mngr_binary: str = Field(default="mngr", frozen=True, description="Path/name of the mngr binary to shell out to")
     mngr_caller: MngrCaller | None = Field(

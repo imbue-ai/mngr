@@ -4,23 +4,16 @@ import threading
 import time
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.testing import build_ui_state_publisher_for_test
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
-from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
-from imbue.minds.desktop_client.ui_models import UiAccountsMessage
-from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
-from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
-from imbue.minds.desktop_client.ui_models import UiProvidersMessage
-from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
-from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 
 
 class _MutableWorkspaceSource:
@@ -38,35 +31,27 @@ class _MutableWorkspaceSource:
         )
 
 
-def _build_publisher(source: _MutableWorkspaceSource) -> tuple[UiStatePublisher, "queue.Queue[str | None]"]:
-    broadcaster = UiChannelBroadcaster()
-    publisher = UiStatePublisher(
-        broadcaster=broadcaster,
-        derive_workspaces=source.derive,
-        derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
-        derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
-        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
-        derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
-        derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
-        derive_health_states=lambda: (),
-    )
-    client_queue = broadcaster.register()
-    return publisher, client_queue
-
-
 def test_publish_now_broadcasts_every_message_type_on_first_pass() -> None:
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
 
     publisher.publish_now()
 
     types = [frame["type"] for frame in drain_ui_channel_frames(client_queue)]
-    assert sorted(types) == ["accounts", "discovery_health", "notifications", "providers", "requests", "workspaces"]
+    assert sorted(types) == [
+        "accounts",
+        "discovery_health",
+        "environment",
+        "notifications",
+        "providers",
+        "requests",
+        "workspaces",
+    ]
 
 
 def test_publish_now_suppresses_unchanged_frames_on_second_pass() -> None:
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
     publisher.publish_now()
     drain_ui_channel_frames(client_queue)
 
@@ -77,7 +62,7 @@ def test_publish_now_suppresses_unchanged_frames_on_second_pass() -> None:
 
 def test_publish_now_rebroadcasts_only_the_changed_message_type() -> None:
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
     publisher.publish_now()
     drain_ui_channel_frames(client_queue)
 
@@ -95,7 +80,7 @@ def test_publish_now_rebroadcasts_only_the_changed_message_type() -> None:
 
 def test_one_shot_workspace_stopped_event_reaches_the_channel() -> None:
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
 
     publisher.publish_one_shot(UiWorkspaceStoppedMessage(agent_id="agent-42"))
 
@@ -105,7 +90,7 @@ def test_one_shot_workspace_stopped_event_reaches_the_channel() -> None:
 
 def test_one_shot_open_help_event_reaches_the_channel() -> None:
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
 
     publisher.publish_one_shot(UiOpenHelpMessage(description="the diagnosis", workspace_agent_id="agent-7"))
 
@@ -115,7 +100,7 @@ def test_one_shot_open_help_event_reaches_the_channel() -> None:
 
 def test_one_shot_workspace_refresh_event_reaches_the_channel() -> None:
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
 
     publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id="agent-13"))
 
@@ -125,7 +110,7 @@ def test_one_shot_workspace_refresh_event_reaches_the_channel() -> None:
 
 def test_publish_health_broadcasts_immediately_without_diffing() -> None:
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
 
     publisher.publish_health(UiHealthMessage(agent_id="agent-9", status=AgentHealth.STUCK, error=None))
     publisher.publish_health(UiHealthMessage(agent_id="agent-9", status=AgentHealth.STUCK, error=None))
@@ -139,27 +124,15 @@ def test_publish_loop_survives_an_unexpected_derive_exception() -> None:
     unexpected exception in one pass must not kill the loop: later wakes must
     still publish."""
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
-    original_derive = source.derive
     did_explode = threading.Event()
 
     def derive_that_explodes_once() -> UiWorkspacesMessage:
         if not did_explode.is_set():
             did_explode.set()
             raise KeyError("an unexpected derive bug")
-        return original_derive()
+        return source.derive()
 
-    # Rebuild the publisher around the exploding derive (fields are frozen).
-    exploding_publisher = UiStatePublisher(
-        broadcaster=publisher.broadcaster,
-        derive_workspaces=derive_that_explodes_once,
-        derive_accounts=publisher.derive_accounts,
-        derive_providers=publisher.derive_providers,
-        derive_requests=publisher.derive_requests,
-        derive_notifications=publisher.derive_notifications,
-        derive_discovery_health=publisher.derive_discovery_health,
-        derive_health_states=publisher.derive_health_states,
-    )
+    exploding_publisher, client_queue = build_ui_state_publisher_for_test(derive_that_explodes_once)
     concurrency_group = ConcurrencyGroup(name="test-ui-publisher")
     with concurrency_group:
         exploding_publisher.start(concurrency_group)
@@ -193,19 +166,10 @@ def test_replayed_health_frames_say_they_are_a_replay() -> None:
     promised, so a client inferring it from position would go on inferring it
     after any reordering, silently.
     """
-    broadcaster = UiChannelBroadcaster()
     failed = UiHealthMessage(agent_id="agent-ab12", status=AgentHealth.RESTART_FAILED, error="no answer")
-    publisher = UiStatePublisher(
-        broadcaster=broadcaster,
-        derive_workspaces=_MutableWorkspaceSource().derive,
-        derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
-        derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
-        derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
-        derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
-        derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
-        derive_health_states=lambda: (failed,),
+    publisher, client_queue = build_ui_state_publisher_for_test(
+        _MutableWorkspaceSource().derive, derive_health_states=lambda: (failed,)
     )
-    client_queue = broadcaster.register()
 
     snapshot_health = [
         frame for frame in (json.loads(raw) for raw in publisher.build_snapshot_frames()) if frame["type"] == "health"
@@ -218,7 +182,7 @@ def test_replayed_health_frames_say_they_are_a_replay() -> None:
 
 def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> None:
     source = _MutableWorkspaceSource()
-    publisher, _client_queue = _build_publisher(source)
+    publisher, _client_queue = build_ui_state_publisher_for_test(source.derive)
 
     frames = [json.loads(frame) for frame in publisher.build_snapshot_frames()]
 
@@ -231,13 +195,14 @@ def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> Non
         "requests",
         "discovery_health",
         "notifications",
+        "environment",
     ]
 
 
 def test_snapshot_notifications_frame_says_it_is_a_replay() -> None:
     """Same contract as health: the snapshot's notifications frame is marked, a live publish is not."""
     source = _MutableWorkspaceSource()
-    publisher, client_queue = _build_publisher(source)
+    publisher, client_queue = build_ui_state_publisher_for_test(source.derive)
 
     snapshot_frames = [json.loads(frame) for frame in publisher.build_snapshot_frames()]
     publisher.publish_now()

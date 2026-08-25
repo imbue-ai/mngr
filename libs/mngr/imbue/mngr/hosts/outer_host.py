@@ -222,11 +222,31 @@ SFTP_CHANNEL_SILENCE_TIMEOUT_SECONDS: Final[float] = 300.0
 
 
 @pure
+def is_dead_ssh_connection_error(exception: OSError) -> bool:
+    """Whether this ``OSError`` is a connection this side still believes in, now dead.
+
+    The two shapes that wreckage arrives in, which every caller has to treat
+    alike: a socket pyinfra closed under us ("Socket is closed"), and a peer
+    that reset one we were still holding -- what a transport cached across a
+    laptop sleep gets when it is next used. The reset is matched on the type
+    because its message is the errno text ("[Errno 54] Connection reset by
+    peer"), which no message match for the first shape will ever catch.
+
+    Whichever it was, the connection cannot be reused: a retry has to disconnect
+    and rebuild rather than let ``_ensure_connected`` hand the same dead one
+    back. Shared so that a third shape of wire death is classified once instead
+    of in each of the paths that have to react to it.
+    """
+    return isinstance(exception, ConnectionResetError) or "Socket is closed" in str(exception)
+
+
+@pure
 def is_transient_ssh_error(exception: BaseException) -> bool:
     """Check if the exception is a transient SSH connection error worth retrying.
 
     Matches:
-    - OSError with "Socket is closed" (stale socket from pyinfra)
+    - OSError naming a dead connection, per :func:`is_dead_ssh_connection_error`
+      (a stale socket from pyinfra, or a peer that reset the connection)
     - SSHException (e.g. "SSH session not active" when transport dies),
       including ChannelException (server refused to open a new channel,
       e.g. MaxSessions limit -- the transport may still be alive)
@@ -234,11 +254,11 @@ def is_transient_ssh_error(exception: BaseException) -> bool:
     - TimeoutError (pyinfra read_output_buffers timeout when the remote
       sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
       Note: ``TimeoutError`` is an OSError subclass on Python 3, but the
-      OSError branch above only matches on its "Socket is closed" message,
-      so bare timeouts fall through and need this explicit branch to be
+      OSError branch above matches neither of the dead-connection shapes, so
+      bare timeouts fall through and need this explicit branch to be
       classified transient.
     """
-    if isinstance(exception, OSError) and "Socket is closed" in str(exception):
+    if isinstance(exception, OSError) and is_dead_ssh_connection_error(exception):
         return True
     if isinstance(exception, SSHException):
         return True
@@ -473,10 +493,11 @@ class OuterHost(OuterHostInterface):
         directory). The branch order matters: ``timed_out``, when provided,
         wraps a post-retry ``TimeoutError`` and MUST be caught before the
         ``OSError`` branch because ``TimeoutError`` is an ``OSError`` subclass.
-        A "Socket is closed" ``OSError`` means the channel died mid-operation;
-        any other ``OSError`` propagates unchanged. Pass ``timed_out=None`` to
-        let a raw ``TimeoutError`` propagate (the list-directory path's existing
-        behavior).
+        An ``OSError`` naming a dead connection (see
+        :func:`is_dead_ssh_connection_error`) means the channel died
+        mid-operation; any other ``OSError`` propagates unchanged. Pass
+        ``timed_out=None`` to let a raw ``TimeoutError`` propagate (the
+        list-directory path's existing behavior).
         """
         try:
             yield
@@ -485,7 +506,7 @@ class OuterHost(OuterHostInterface):
                 raise
             raise HostConnectionError(timed_out) from e
         except OSError as e:
-            if "Socket is closed" in str(e):
+            if is_dead_ssh_connection_error(e):
                 raise HostConnectionError(closed) from e
             raise
         except (EOFError, SSHException) as e:
@@ -672,8 +693,8 @@ class OuterHost(OuterHostInterface):
             self._disconnect_for_retry()
             raise
         except OSError as e:
-            if "Socket is closed" in str(e):
-                logger.debug("Socket closed while running command, disconnecting for retry")
+            if is_dead_ssh_connection_error(e):
+                logger.debug("SSH connection died while running command ({}), disconnecting for retry", e)
                 self._disconnect_for_retry()
             raise
 
@@ -845,8 +866,8 @@ class OuterHost(OuterHostInterface):
             error_msg = str(e)
             if "No such file or directory" in error_msg or "cannot stat" in error_msg:
                 raise FileNotFoundError(f"File not found: {remote_filename}") from e
-            elif "Socket is closed" in error_msg:
-                logger.debug("Socket closed while reading {}, disconnecting for retry", remote_filename)
+            elif is_dead_ssh_connection_error(e):
+                logger.debug("SSH connection died while reading {} ({}), disconnecting for retry", remote_filename, e)
                 self._disconnect_for_retry()
                 raise
             else:
@@ -951,8 +972,8 @@ class OuterHost(OuterHostInterface):
             self._disconnect_for_retry()
             raise
         except OSError as e:
-            if "Socket is closed" in str(e):
-                logger.debug("Socket closed while writing {}, disconnecting for retry", remote_filename)
+            if is_dead_ssh_connection_error(e):
+                logger.debug("SSH connection died while writing {} ({}), disconnecting for retry", remote_filename, e)
                 self._disconnect_for_retry()
                 raise
             else:

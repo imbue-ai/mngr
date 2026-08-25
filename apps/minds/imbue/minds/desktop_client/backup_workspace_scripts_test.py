@@ -173,6 +173,14 @@ def test_build_workspace_script_command_round_trips_through_bash(tmp_path: Path)
 # --- check script against real git repos ---
 
 
+# The tests below marked flaky time out at the 10s per-test budget while shelling out
+# to git, under xdist contention on a loaded machine; they pass in isolation (the whole
+# file: 47 passed in 2m50s). Observed stalling in two places: waiting on the child's
+# output in subprocess.communicate, and waiting on the exec-status pipe inside
+# Popen.__init__ -- the second is the child being slow to even start, which the first
+# does not distinguish from a slow git. Retried rather than lengthened: the timeout is
+# the suite-wide budget, and the same work fits inside it when nothing is competing.
+@pytest.mark.flaky
 def test_check_script_reports_matches_when_tag_equals_worktree(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
@@ -231,6 +239,8 @@ def test_check_script_reports_outdated_on_a_new_layout_workspace(tmp_path: Path)
     assert payload["code_state"] == "outdated"
 
 
+# Flaky for the reason noted above test_check_script_reports_matches_when_tag_equals_worktree.
+@pytest.mark.flaky
 def test_check_script_reports_outdated_on_a_creation_rename_layout_workspace(tmp_path: Path) -> None:
     # A workspace shaped like the creation-rename template keeps the backup
     # code at system/services/host_backup, checked against a tag with the same
@@ -482,6 +492,8 @@ def test_gate_probe_treats_a_tick_as_dead_when_the_backup_service_is_not_running
 # --- apply update script ---
 
 
+# Flaky for the reason noted above test_check_script_reports_matches_when_tag_equals_worktree.
+@pytest.mark.flaky
 def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     # The target tag carries newer backup code on a side branch (outdated state).
@@ -529,6 +541,8 @@ def test_apply_update_converges_new_layout_code_to_the_tag(tmp_path: Path) -> No
     assert subject == "backup-update: minds-v2.0.0"
 
 
+# Flaky for the reason noted above test_check_script_reports_matches_when_tag_equals_worktree.
+@pytest.mark.flaky
 def test_apply_update_converges_a_decluttered_workspace_onto_a_pre_declutter_tag(tmp_path: Path) -> None:
     # The update target (e.g. the shipped minimum tag) predates the declutter,
     # so its tree stores the code at libs/host_backup while the workspace runs

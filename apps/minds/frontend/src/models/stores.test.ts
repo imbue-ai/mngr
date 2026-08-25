@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { UiNotificationsMessage, UiRequestsMessage } from "../channel/messages";
+import type {
+  UiNotificationsMessage,
+  UiRequestsMessage,
+} from "../channel/messages";
 import { notificationEntry, workspacesMessage } from "../testing";
-import { applySnapshotToStores, bootFromBootstrap, createEmptyStores } from "./boot";
+import {
+  applySnapshotToStores,
+  bootFromBootstrap,
+  createEmptyStores,
+} from "./boot";
 import { HealthStore } from "./health";
 import { NotificationsStore } from "./notifications";
 import { RequestsStore } from "./requests";
@@ -12,7 +19,11 @@ function requestsMessage(ids: string[]): UiRequestsMessage {
 }
 
 function notificationsMessage(ids: string[]): UiNotificationsMessage {
-  return { type: "notifications", entries: ids.map((id) => notificationEntry(id)), unresolved_count: ids.length };
+  return {
+    type: "notifications",
+    entries: ids.map((id) => notificationEntry(id)),
+    unresolved_count: ids.length,
+  };
 }
 
 describe("WorkspacesStore", () => {
@@ -37,7 +48,10 @@ describe("WorkspacesStore", () => {
     store.applyWorkspacesMessage(workspacesMessage());
     expect(store.accentEntry("host-bb22")?.accent).toBe("#aabbcc");
     store.applyAccentPreview("agent-aa11", "#112233");
-    expect(store.accentEntry("agent-aa11")).toEqual({ accent: "#112233", name: "alpha" });
+    expect(store.accentEntry("agent-aa11")).toEqual({
+      accent: "#112233",
+      name: "alpha",
+    });
   });
 
   it("notifies subscribers when the list changes", () => {
@@ -53,10 +67,20 @@ describe("HealthStore", () => {
   it("treats untracked workspaces as healthy and clears on healthy transitions", () => {
     const store = new HealthStore();
     expect(store.statusFor("agent-x")).toBe("healthy");
-    store.applyHealthMessage({ type: "health", agent_id: "agent-x", status: "stuck", error: null });
+    store.applyHealthMessage({
+      type: "health",
+      agent_id: "agent-x",
+      status: "stuck",
+      error: null,
+    });
     expect(store.statusFor("agent-x")).toBe("stuck");
     expect(store.isContentAssumedReady("agent-x")).toBe(false);
-    store.applyHealthMessage({ type: "health", agent_id: "agent-x", status: "healthy", error: null });
+    store.applyHealthMessage({
+      type: "health",
+      agent_id: "agent-x",
+      status: "healthy",
+      error: null,
+    });
     expect(store.statusFor("agent-x")).toBe("healthy");
   });
 
@@ -78,11 +102,21 @@ describe("HealthStore", () => {
 
     // A later non-healthy frame that does not carry it: a fresh restart attempt
     // resets the tracker's record, so the frame's silence is the answer.
-    store.applyHealthMessage({ type: "health", agent_id: "agent-x", status: "restarting", error: null });
+    store.applyHealthMessage({
+      type: "health",
+      agent_id: "agent-x",
+      status: "restarting",
+      error: null,
+    });
     expect(store.isRestartANoOpFor("agent-x")).toBe(false);
 
     store.applyHealthMessage(noOpFailure);
-    store.applyHealthMessage({ type: "health", agent_id: "agent-x", status: "healthy", error: null });
+    store.applyHealthMessage({
+      type: "health",
+      agent_id: "agent-x",
+      status: "healthy",
+      error: null,
+    });
     expect(store.isRestartANoOpFor("agent-x")).toBe(false);
 
     // Reconnect resync: the snapshot only carries non-HEALTHY agents, so
@@ -116,11 +150,21 @@ describe("HealthStore", () => {
     // The episode ends: the frame stops describing a restart, and so must the
     // store -- a held `false` would go on claiming one over a machine that has
     // stopped restarting.
-    store.applyHealthMessage({ type: "health", agent_id: "agent-x", status: "restart_failed", error: "no answer" });
+    store.applyHealthMessage({
+      type: "health",
+      agent_id: "agent-x",
+      status: "restart_failed",
+      error: "no answer",
+    });
     expect(store.isRestartStartOnlyFor("agent-x")).toBeNull();
 
     store.applyHealthMessage(bounce);
-    store.applyHealthMessage({ type: "health", agent_id: "agent-x", status: "healthy", error: null });
+    store.applyHealthMessage({
+      type: "health",
+      agent_id: "agent-x",
+      status: "healthy",
+      error: null,
+    });
     expect(store.isRestartStartOnlyFor("agent-x")).toBeNull();
 
     store.applyHealthMessage(bounce);
@@ -151,10 +195,50 @@ describe("RequestsStore", () => {
     store.applyRequestsMessage(requestsMessage([]));
     store.applyRequestsMessage(requestsMessage(["evt-brand-new"]));
     expect(Object.keys(store)).toEqual(["requestIds"]);
-    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(store)).filter(
-      (name) => name !== "constructor",
-    );
+    const methods = Object.getOwnPropertyNames(
+      Object.getPrototypeOf(store),
+    ).filter((name) => name !== "constructor");
     expect(methods).toEqual(["applyRequestsMessage"]);
+  });
+});
+
+describe("HealthStore device environment", () => {
+  it("reports the device condition the server sends, with nothing convicted", () => {
+    // The cold-start case: minds opened on a dead network. No machine has been
+    // asked to load, so none is stuck -- and the hub page still has to be able
+    // to say what is wrong.
+    const store = new HealthStore();
+    expect(store.appEnvironmentBlock()).toBe("NONE");
+
+    store.applyEnvironmentMessage({ type: "environment", state: "OFFLINE" });
+
+    expect(store.appEnvironmentBlock()).toBe("OFFLINE");
+    expect(store.statusFor("agent-aa11")).toBe("healthy");
+  });
+
+  it("clears the device condition when the network comes back", () => {
+    const store = new HealthStore();
+    store.applyEnvironmentMessage({
+      type: "environment",
+      state: "SSH_BLOCKED",
+    });
+    expect(store.appEnvironmentBlock()).toBe("SSH_BLOCKED");
+
+    store.applyEnvironmentMessage({ type: "environment", state: "NONE" });
+
+    expect(store.appEnvironmentBlock()).toBe("NONE");
+  });
+
+  it("keeps the device condition across a reconnect resync", () => {
+    // reset() clears per-machine state so a machine that recovered while the
+    // socket was down does not stay stuck. The device condition is not
+    // per-machine, and the snapshot always re-sends it.
+    const store = new HealthStore();
+    store.applyEnvironmentMessage({ type: "environment", state: "OFFLINE" });
+
+    store.reset();
+
+    expect(store.appEnvironmentBlock()).toBe("OFFLINE");
   });
 });
 
@@ -173,24 +257,52 @@ describe("NotificationsStore", () => {
 describe("boot seeding", () => {
   it("seeds every store from the bootstrap snapshot", () => {
     const boot = bootFromBootstrap({
-      seed: { accent: "#123456", is_mac: true, mngr_forward_origin: "http://localhost:8421" },
+      seed: {
+        accent: "#123456",
+        is_mac: true,
+        mngr_forward_origin: "http://localhost:8421",
+      },
       schema_version: 1,
       snapshot: {
         workspaces: workspacesMessage(),
-        accounts: { type: "accounts", has_accounts: true, account_email: "a@b.c", extra_account_count: 1 },
-        providers: { type: "providers", providers: [], last_event_at: null, last_full_snapshot_at: null },
+        accounts: {
+          type: "accounts",
+          has_accounts: true,
+          account_email: "a@b.c",
+          extra_account_count: 1,
+        },
+        providers: {
+          type: "providers",
+          providers: [],
+          last_event_at: null,
+          last_full_snapshot_at: null,
+        },
         requests: requestsMessage(["evt-9"]),
         notifications: notificationsMessage(["evt-9"]),
-        health: [{ type: "health", agent_id: "agent-aa11", status: "restarting", error: null }],
+        health: [
+          {
+            type: "health",
+            agent_id: "agent-aa11",
+            status: "restarting",
+            error: null,
+          },
+        ],
         discovery_health: { type: "discovery_health", state: "healthy" },
+        // Not NONE: an app cold-started on a dead network is the case this
+        // frame exists for, and NONE is the value that would read the same
+        // whether the seeding happened or not.
+        environment: { type: "environment", state: "OFFLINE" },
       },
     });
     expect(boot.seed.isMac).toBe(true);
     expect(boot.stores.workspaces.workspaces).toHaveLength(1);
     expect(boot.stores.accounts.accountEmail).toBe("a@b.c");
     expect(boot.stores.requests.requestIds).toEqual(["evt-9"]);
-    expect(boot.stores.notifications.entries.map((entry) => entry.id)).toEqual(["evt-9"]);
+    expect(boot.stores.notifications.entries.map((entry) => entry.id)).toEqual([
+      "evt-9",
+    ]);
     expect(boot.stores.health.statusFor("agent-aa11")).toBe("restarting");
+    expect(boot.stores.health.appEnvironmentBlock()).toBe("OFFLINE");
   });
 
   it("applySnapshotToStores lands the connect-time snapshot in every store", () => {
@@ -198,17 +310,29 @@ describe("boot seeding", () => {
     applySnapshotToStores(stores, {
       snapshot: {
         workspaces: workspacesMessage(),
-        accounts: { type: "accounts", has_accounts: true, account_email: "a@b.c", extra_account_count: 0 },
-        providers: { type: "providers", providers: [], last_event_at: null, last_full_snapshot_at: null },
+        accounts: {
+          type: "accounts",
+          has_accounts: true,
+          account_email: "a@b.c",
+          extra_account_count: 0,
+        },
+        providers: {
+          type: "providers",
+          providers: [],
+          last_event_at: null,
+          last_full_snapshot_at: null,
+        },
         requests: requestsMessage(["evt-1"]),
         notifications: notificationsMessage(["evt-1"]),
         health: [],
         discovery_health: { type: "discovery_health", state: "healthy" },
+        environment: { type: "environment", state: "OFFLINE" },
       },
     });
     expect(stores.requests.requestIds).toEqual(["evt-1"]);
     expect(stores.notifications.unresolvedCount).toBe(1);
     expect(stores.accounts.hasAccounts).toBe(true);
     expect(stores.accounts.accountEmail).toBe("a@b.c");
+    expect(stores.health.appEnvironmentBlock()).toBe("OFFLINE");
   });
 });

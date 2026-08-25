@@ -8,8 +8,10 @@ from typing import cast
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
+from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
+from pyinfra.connectors.util import CommandOutput
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
@@ -611,6 +613,77 @@ class _FakePyinfraHostRecoveringOnConnect:
         self.connected = True
 
 
+class _FakePyinfraHostResettingOnCommand:
+    """Pyinfra-host stand-in whose first ``run_shell_command`` is reset by the peer.
+
+    The shape a transport cached across a laptop sleep presents when it is next
+    used: the connection this side still believes in is gone, and the reset
+    arrives from the command rather than from the connect.
+    """
+
+    def __init__(self, failure_count: int) -> None:
+        self.connected = True
+        self.name = "fake-ssh-host"
+        self.connector_cls = type("SSHConnector", (), {})
+        self.command_call_count = 0
+        self.disconnect_call_count = 0
+        self._failure_count = failure_count
+
+    def connect(self, raise_exceptions: bool = False) -> None:
+        self.connected = True
+
+    def disconnect(self) -> None:
+        self.disconnect_call_count += 1
+        self.connected = False
+
+    def run_shell_command(self, command: Any, **kwargs: Any) -> tuple[bool, Any]:
+        self.command_call_count += 1
+        if self.command_call_count <= self._failure_count:
+            raise ConnectionResetError(54, "Connection reset by peer")
+        return True, CommandOutput([])
+
+
+def test_run_shell_command_reconnects_after_the_peer_resets_the_connection(temp_mngr_ctx: MngrContext) -> None:
+    """A reset mid-command rebuilds the connection and retries, rather than surfacing.
+
+    Regression guard for a stale transport across a laptop sleep. The reset
+    arrives as ``ConnectionResetError``, whose message is the errno text rather
+    than "Socket is closed", so it used to miss both the transient classifier
+    and the disconnect-before-retry branch -- and escaped the CLI as a raw
+    paramiko traceback, failing a restart of a machine that was fine.
+    """
+    fake = _FakePyinfraHostResettingOnCommand(failure_count=1)
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    success, _output = outer._run_shell_command_with_transient_retry(StringCommand("true"), {})
+
+    assert success is True
+    assert fake.command_call_count == 2
+    # The retry must not reuse the connection the peer just dropped.
+    assert fake.disconnect_call_count == 1
+
+
+def test_a_reset_that_outlives_the_retries_is_translated_not_raw(temp_mngr_ctx: MngrContext) -> None:
+    """A reset that survives the retry budget leaves as a domain error, not a paramiko traceback.
+
+    Exercised at the translation boundary rather than through the retry, which
+    would spend its real ~10s backoff to reach the same assertion.
+    """
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(create_local_pyinfra_host()),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="closed"):
+        with outer._translate_ssh_errors(failed="failed", closed="closed", timed_out="timed out"):
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+
 def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: MngrContext) -> None:
     """A banner-read ConnectError is retried, and the connect succeeds on the next attempt.
 
@@ -732,6 +805,7 @@ def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
         (ChannelException(2, "open failed"), True),
         (EOFError(), True),
         (TimeoutError("Timed out reading output"), True),
+        (ConnectionResetError(54, "Connection reset by peer"), True),
         (ValueError("not transient"), False),
     ],
     ids=[
@@ -742,6 +816,7 @@ def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
         "channel-exception",
         "eof-error",
         "timeout-error",
+        "connection-reset",
         "non-os-error",
     ],
 )
@@ -757,6 +832,12 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
     of host creation. ``TimeoutError`` is an ``OSError`` subclass on
     Python 3, but the classifier's OSError branch only matches on the
     "Socket is closed" message, so bare timeouts need their own branch.
+
+    ``ConnectionResetError`` is the same shape of gap, and was reaching users:
+    a transport cached across a laptop sleep is reset by the peer when it is
+    next used, and the errno text ("[Errno 54] Connection reset by peer")
+    slips past the "Socket is closed" match -- so `mngr start` on a machine
+    that was fine died with a raw paramiko traceback instead of reconnecting.
     """
     assert is_transient_ssh_error(exception) is expected
 

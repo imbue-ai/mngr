@@ -58,6 +58,9 @@ from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
+from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
+from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -113,13 +116,13 @@ from imbue.minds.desktop_client.ui_models import NotificationOutcome
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
+from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
 from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
-from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.webdav import create_webdav_app
@@ -129,8 +132,10 @@ from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
+from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
+from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
@@ -1148,6 +1153,14 @@ def _build_workspace_list(
             entry["is_device_cannot_connect"] = "true"
         if info is not None and info.provider_name is not None:
             entry["provider_label"] = friendly_provider_label(info.provider_name)
+        # Whether this device's own connectivity can say anything about this
+        # machine at all. The band needs it to know when *not* to speak: a
+        # docker container answers over loopback with the wifi off, so blaming
+        # the network for its outage is both wrong and a route to a card with no
+        # restart button. Emitted on every real row, so an absent key means a
+        # row that has no backend (a create attempt, or a machine on another
+        # device) and keeps the conservative default.
+        entry["is_network_dependent"] = "true" if is_network_dependent_workspace(backend_resolver, aid) else "false"
         liveness = liveness_by_agent_id.get(str(aid))
         if liveness is not None:
             entry["supports_shutdown"] = "true"
@@ -1851,6 +1864,7 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         is_backend_unreachable=entry.get("is_backend_unreachable") == "true",
         is_device_cannot_connect=entry.get("is_device_cannot_connect") == "true",
         provider_label=entry.get("provider_label", ""),
+        is_network_dependent=entry.get("is_network_dependent", "true") == "true",
         supports_shutdown=entry.get("supports_shutdown") == "true",
         liveness=entry.get("liveness", ""),
         account=entry.get("account", ""),
@@ -1986,6 +2000,23 @@ def _derive_ui_discovery_health_message(
     return UiDiscoveryHealthMessage(state=health)
 
 
+def _derive_ui_environment_message(
+    connectivity_detector: ConnectivityDetector | None,
+) -> UiEnvironmentMessage:
+    """The device's own condition, read without touching the network.
+
+    Whatever the last probe found. NONE where no detector is wired, and NONE
+    before the first probe lands -- an unmeasured device must not be reported
+    as a broken one.
+    """
+    block = (
+        connectivity_detector.get_reading().environment_block
+        if connectivity_detector is not None
+        else EnvironmentBlock.NONE
+    )
+    return UiEnvironmentMessage(state=block)
+
+
 def _derive_ui_health_states(
     system_interface_health_tracker: SystemInterfaceHealthTracker | None,
 ) -> tuple[UiHealthMessage, ...]:
@@ -2018,6 +2049,9 @@ class _LegacyUiStateDeriver(MutableModel):
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = Field(
         frozen=True, description="Discovery pipeline watchdog"
     )
+    connectivity_detector: ConnectivityDetector | None = Field(
+        frozen=True, description="This device's own connectivity condition"
+    )
 
     def derive_workspaces(self) -> UiWorkspacesMessage:
         return _derive_ui_workspaces_message(self.flask_app, self.backend_resolver, self.session_store, self.paths)
@@ -2037,6 +2071,9 @@ class _LegacyUiStateDeriver(MutableModel):
     def derive_discovery_health(self) -> UiDiscoveryHealthMessage:
         return _derive_ui_discovery_health_message(self.discovery_health_watchdog)
 
+    def derive_environment(self) -> UiEnvironmentMessage:
+        return _derive_ui_environment_message(self.connectivity_detector)
+
     def derive_health_states(self) -> tuple[UiHealthMessage, ...]:
         return _derive_ui_health_states(self.system_interface_health_tracker)
 
@@ -2049,6 +2086,7 @@ def _create_ui_state_publisher(
     paths: WorkspacePaths | None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None,
+    connectivity_detector: ConnectivityDetector | None,
 ) -> UiStatePublisher:
     """Build the channel publisher from the same derivation helpers the legacy SSE uses."""
     deriver = _LegacyUiStateDeriver(
@@ -2058,6 +2096,7 @@ def _create_ui_state_publisher(
         paths=paths,
         system_interface_health_tracker=system_interface_health_tracker,
         discovery_health_watchdog=discovery_health_watchdog,
+        connectivity_detector=connectivity_detector,
     )
     return UiStatePublisher(
         broadcaster=broadcaster,
@@ -2067,6 +2106,7 @@ def _create_ui_state_publisher(
         derive_requests=deriver.derive_requests,
         derive_notifications=deriver.derive_notifications,
         derive_discovery_health=deriver.derive_discovery_health,
+        derive_environment=deriver.derive_environment,
         derive_health_states=deriver.derive_health_states,
     )
 
@@ -2128,6 +2168,7 @@ def create_desktop_client(
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
     mngr_caller: MngrCaller | None = None,
     sync_scheduler: WorkspaceSyncScheduler | None = None,
+    connectivity_detector: ConnectivityDetector | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2201,6 +2242,7 @@ def create_desktop_client(
         paths=paths,
         system_interface_health_tracker=system_interface_health_tracker,
         discovery_health_watchdog=discovery_health_watchdog,
+        connectivity_detector=connectivity_detector,
     )
 
     # The durable notification feed behind the channel's notifications frame,
@@ -2241,6 +2283,7 @@ def create_desktop_client(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        connectivity_detector=connectivity_detector,
         mngr_caller=mngr_caller,
         sync_scheduler=sync_scheduler,
         ui_channel_broadcaster=ui_channel_broadcaster,
@@ -2272,24 +2315,47 @@ def create_desktop_client(
 
         _health_tracker_for_ui.add_on_change_callback(_publish_ui_health_edge)
 
-        _health_tracker_for_ui.add_on_recovery_callback(_WorkspaceViewRefresher(publisher=ui_publisher))
-        # The tracker fires its on-change callbacks before its stuck-edge ones,
-        # so the band is already showing STUCK by the time this dispatches.
         if root_concurrency_group is not None:
-            _health_tracker_for_ui.add_on_stuck_edge_callback(
-                UnattendedRecoveryDispatcher(
-                    tracker=_health_tracker_for_ui,
-                    backend_resolver=backend_resolver,
-                    registry=state.workspace_operation_registry,
-                    concurrency_group=root_concurrency_group,
-                    mngr_binary=state.mngr_binary,
-                    mngr_host_dir=state.mngr_host_dir,
-                    mngr_forward_port=state.mngr_forward_port or 0,
-                    mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
-                )
+            # Both edges feed the refresher: the health one raises a refresh, and
+            # the connectivity one is what releases a refresh raised at a moment
+            # the reload it asks for could not have survived.
+            workspace_view_refresher = WorkspaceViewRefresher(
+                publisher=ui_publisher,
+                backend_resolver=backend_resolver,
+                connectivity_detector=connectivity_detector,
+                concurrency_group=root_concurrency_group,
             )
+            _health_tracker_for_ui.add_on_recovery_callback(workspace_view_refresher)
+            if connectivity_detector is not None:
+                connectivity_detector.add_on_recovery_callback(workspace_view_refresher.on_connectivity_recovered)
+            # The tracker fires its on-change callbacks before its stuck-edge ones,
+            # so the band is already showing STUCK by the time this dispatches.
+            unattended_recovery_dispatcher = UnattendedRecoveryDispatcher(
+                tracker=_health_tracker_for_ui,
+                backend_resolver=backend_resolver,
+                registry=state.workspace_operation_registry,
+                concurrency_group=root_concurrency_group,
+                mngr_binary=state.mngr_binary,
+                mngr_host_dir=state.mngr_host_dir,
+                mngr_forward_port=state.mngr_forward_port or 0,
+                mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
+                connectivity_detector=connectivity_detector,
+            )
+            _health_tracker_for_ui.add_on_stuck_edge_callback(unattended_recovery_dispatcher)
+            # The other half of the gate: a start withheld while this device
+            # could not reach anything is owed, and the detector is what
+            # eventually reports that it can.
+            if connectivity_detector is not None:
+                connectivity_detector.add_on_recovery_callback(
+                    unattended_recovery_dispatcher.on_connectivity_recovered
+                )
     if discovery_health_watchdog is not None:
         discovery_health_watchdog.add_on_change_callback(ui_publisher.notify_change)
+    if connectivity_detector is not None:
+        # The device's condition is chrome state like any other: the publisher
+        # re-derives and diffs it, so a probe that changes nothing broadcasts
+        # nothing.
+        connectivity_detector.add_on_change_callback(ui_publisher.notify_change)
 
     # Mount the SPA surface (/ui, /ui/ws, /ui/api/*).
     app.register_blueprint(create_ui_blueprint())
@@ -2469,29 +2535,6 @@ class _ConnectedFocusedWorkspaceAgentIdsReader(FrozenModel):
         )
 
 
-class _WorkspaceViewRefresher(FrozenModel):
-    """Recovery callback that tells every window to rebuild a recovered machine's view.
-
-    While the machine was down each window went on painting whatever it last
-    served -- an error page, or a half-loaded one -- and recovering does not
-    change the address that view was loaded from, so the dead page would sit
-    there until the user navigated away and back.
-
-    Hung on the recovery rather than on the restart that usually causes it, so
-    it also covers a machine that came back some other way: a cold boot that
-    finished on its own, or the user starting a machine they had stopped.
-    """
-
-    publisher: UiStatePublisher = Field(
-        frozen=True, description="Publishes the refresh frame onto the /ui/ws channel every window is on."
-    )
-
-    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-
-    def __call__(self, agent_id: AgentId) -> None:
-        self.publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id=str(agent_id)))
-
-
 class _MindsApiKeyProvider(FrozenModel):
     """Resolves the live central minds API key from an app's state for the WebDAV gate.
 
@@ -2520,6 +2563,7 @@ def start_system_interface_health_probe_loop(
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str | None,
     root_concurrency_group: ConcurrencyGroup | None,
+    sleep_tracker: SleepTracker | None = None,
 ) -> None:
     """Start a background thread that probes suspect / non-HEALTHY agents.
 
@@ -2539,13 +2583,24 @@ def start_system_interface_health_probe_loop(
     Probing is skipped entirely when the plugin port or preauth cookie are
     unset (e.g. minds running without the plugin) -- without a working
     plugin route there is no way to ask whether the workspace is reachable.
+
+    Each pass ticks ``sleep_tracker`` before it reads anything, so the failure
+    runs it is about to age are aged against a wake this loop has established
+    for itself rather than one the heartbeat thread may not have recorded yet.
     """
     if mngr_forward_port == 0 or not mngr_forward_preauth_cookie or root_concurrency_group is None:
         return
 
     root_concurrency_group.start_new_thread(
         target=_run_system_interface_health_probe_loop,
-        args=(tracker, backend_resolver, mngr_forward_port, mngr_forward_preauth_cookie, root_concurrency_group),
+        args=(
+            tracker,
+            backend_resolver,
+            mngr_forward_port,
+            mngr_forward_preauth_cookie,
+            root_concurrency_group,
+            sleep_tracker,
+        ),
         name="system-interface-health-probe",
         daemon=True,
     )
@@ -2557,6 +2612,7 @@ def _run_system_interface_health_probe_loop(
     mngr_forward_port: int,
     mngr_forward_preauth_cookie: str,
     root_concurrency_group: ConcurrencyGroup,
+    sleep_tracker: SleepTracker | None,
 ) -> None:
     """Loop body for the background system-interface health probe thread."""
     if not isinstance(backend_resolver, MngrCliBackendResolver):
@@ -2574,6 +2630,23 @@ def _run_system_interface_health_probe_loop(
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
     ) as probe_client:
         while not root_concurrency_group.is_shutting_down():
+            if sleep_tracker is not None:
+                # Established here rather than trusted from the heartbeat
+                # thread, for the reason the discovery watchdog ticks it too:
+                # both loops block on a wall-clock deadline that expires *during*
+                # a sleep, so on resume they become runnable at the same instant
+                # with no ordering between them. A pass that lands first reports
+                # every probe target as failing -- the workspaces really are
+                # unreachable for the moment -- and each of those failures is
+                # aged against a monotonic clock that barely moved while the
+                # machine slept, so a run opened seconds before the lid closed
+                # convicts immediately. This loop is the only authority on STUCK
+                # and cannot take that back: record_probe_failure returns early
+                # for anything but HEALTHY. Ticking here is honest (this loop
+                # running is the same evidence the heartbeat records) and cannot
+                # invent a gap: an extra tick only ever shortens the one it
+                # measures.
+                sleep_tracker.record_heartbeat()
             for aid in tracker.snapshot_probe_targets():
                 # Workspace origins are keyed by host id; an agent whose host
                 # coordinate discovery hasn't supplied yet cannot be probed and
@@ -2612,20 +2685,24 @@ def start_discovery_health_watchdog_loop(
     watchdog: DiscoveryHealthWatchdog,
     backend_resolver: BackendResolverInterface,
     root_concurrency_group: ConcurrencyGroup | None,
+    sleep_tracker: SleepTracker | None = None,
 ) -> None:
     """Start the background thread that drives the discovery-health watchdog.
 
-    Each tick reads the resolver's ``last_event_at`` and hands it to
-    ``watchdog.evaluate``, which detects a producer stall (or a dead supervisor)
-    and runs producer remediation -- bounce once, then restart on a capped
-    exponential backoff, retrying forever. The thread no-ops when there is no
-    concurrency group (test factories that skip background threads).
+    Each tick reads the resolver's ``last_event_at`` -- and the moment this
+    process was last observed running again, which it establishes by ticking
+    ``sleep_tracker`` itself rather than trusting the heartbeat loop to have got
+    there first -- and hands both to ``watchdog.evaluate``, which detects a
+    producer stall (or a dead supervisor) and runs producer remediation --
+    bounce once, then restart on a capped exponential backoff, retrying forever.
+    The thread no-ops when there is no concurrency group (test factories that
+    skip background threads).
     """
     if root_concurrency_group is None:
         return
     root_concurrency_group.start_new_thread(
         target=_run_discovery_health_watchdog_loop,
-        args=(watchdog, backend_resolver, root_concurrency_group),
+        args=(watchdog, backend_resolver, root_concurrency_group, sleep_tracker),
         name="discovery-health-watchdog",
         daemon=True,
     )
@@ -2635,6 +2712,7 @@ def _run_discovery_health_watchdog_loop(
     watchdog: DiscoveryHealthWatchdog,
     backend_resolver: BackendResolverInterface,
     root_concurrency_group: ConcurrencyGroup,
+    sleep_tracker: SleepTracker | None,
 ) -> None:
     """Loop body for the discovery-health watchdog thread."""
     if not isinstance(backend_resolver, MngrCliBackendResolver):
@@ -2648,8 +2726,66 @@ def _run_discovery_health_watchdog_loop(
         return
     while not root_concurrency_group.is_shutting_down():
         last_event_at, _ = backend_resolver.get_freshness_timestamps()
-        watchdog.evaluate(last_event_at)
+        last_wake_at: datetime | None = None
+        if sleep_tracker is not None:
+            # Tick before reading, so the reading is current at the moment it is
+            # consumed. Both loops block on a wall-clock deadline that expires
+            # *during* a sleep, so on resume both become runnable at the same
+            # instant with no ordering between them -- and a tick of this loop
+            # that reads a pre-sleep wake ages an hours-old event from the
+            # watchdog's start, calls it a stall, and SIGHUPs a producer that
+            # was never given a chance to emit. Ticking here is honest (this
+            # loop running is the same evidence the heartbeat records) and
+            # cannot invent a gap: an extra tick only ever shortens the one it
+            # measures.
+            sleep_tracker.record_heartbeat()
+            last_wake_at = sleep_tracker.get_last_wake_at()
+        watchdog.evaluate(last_event_at, last_wake_at)
         # Sleep on the group's shutdown event (not a throwaway Event) so the
         # loop wakes immediately when shutdown is triggered instead of holding
         # the concurrency-group exit for up to a full interval.
         root_concurrency_group.shutdown_event.wait(timeout=_DISCOVERY_WATCHDOG_POLL_INTERVAL_SECONDS)
+
+
+# How often the sleep tracker samples the wall clock. The gap threshold sits
+# thirty times above this, so the tick can be missed repeatedly under load
+# without the window between two of them ever reading as a sleep.
+_SLEEP_HEARTBEAT_INTERVAL_SECONDS: Final[float] = 1.0
+
+
+def start_sleep_heartbeat_loop(
+    sleep_tracker: SleepTracker,
+    root_concurrency_group: ConcurrencyGroup | None,
+) -> None:
+    """Start the background thread whose ticks are the sleep detector.
+
+    The loop's only job is to prove the process was running: each tick records
+    the wall clock, and a gap between two of them is a window in which nothing
+    here ran. Started as early as possible in the app's life, since a consumer
+    can only subtract sleep that happened after the first tick.
+
+    The thread no-ops when there is no concurrency group (test factories that
+    skip background threads); the tracker then simply records no intervals,
+    which every consumer reads as "no sleep known".
+    """
+    if root_concurrency_group is None:
+        return
+    root_concurrency_group.start_new_thread(
+        target=_run_sleep_heartbeat_loop,
+        args=(sleep_tracker, root_concurrency_group),
+        name="sleep-heartbeat",
+        daemon=True,
+    )
+
+
+def _run_sleep_heartbeat_loop(
+    sleep_tracker: SleepTracker,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Loop body for the sleep-heartbeat thread."""
+    while not root_concurrency_group.is_shutting_down():
+        sleep_tracker.record_heartbeat()
+        # Sleep on the group's shutdown event (not a throwaway Event) so the
+        # loop wakes immediately when shutdown is triggered instead of holding
+        # the concurrency-group exit for up to a full interval.
+        root_concurrency_group.shutdown_event.wait(timeout=_SLEEP_HEARTBEAT_INTERVAL_SECONDS)

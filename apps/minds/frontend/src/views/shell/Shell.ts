@@ -825,9 +825,16 @@ export function Shell(): m.Component<ShellAttrs> {
         health,
         shell.stores.health.discoveryHealth,
         surfaceWorkspaceId !== null,
-        electronBridge.isDesktop,
-        unreachableProviderLabel,
-        entry?.is_device_cannot_connect ?? false,
+        {
+          isRestartAppAvailable: electronBridge.isDesktop,
+          unreachableProviderLabel,
+          deviceEnvironmentBlock: shell.stores.health.appEnvironmentBlock(),
+          // Which scopes that app-global condition to the machines it can
+          // explain: one on an on-device backend answers over loopback with the
+          // wifi off. A row we have no entry for keeps the conservative default.
+          isWorkspaceNetworkDependent: entry?.is_network_dependent ?? true,
+          isDeviceCannotConnect: entry?.is_device_cannot_connect ?? false,
+        },
       );
       // The card is a modal of its own, so it is raised only where it can sit
       // on top: the machine's own route. It out-z-indexes the docked options

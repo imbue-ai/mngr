@@ -48,6 +48,13 @@ There is no timer: the only path to STUCK is sustained, probe-confirmed
 failure. An agent that emits one bad request and then idles is still handled,
 because the probe loop actively polls every suspect agent regardless of
 whether further traffic arrives.
+
+That run must also be *observed* failure, not merely elapsed failure. A laptop
+that sleeps mid-run stops the probe loop along with everything else, so the
+seconds it slept were backed by no probe at all; a run that straddles a sleep
+is restarted from the first failure observed after it (see ``sleep_tracker``),
+and the threshold is reached only once it has accumulated entirely while the
+process was running.
 """
 
 import threading
@@ -65,6 +72,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
@@ -323,6 +331,14 @@ class SystemInterfaceHealthTracker(MutableModel):
         default=_DEFAULT_STUCK_THRESHOLD_SECONDS,
         description="Seconds of continuous probe failures before HEALTHY -> STUCK fires.",
     )
+    sleep_tracker: SleepTracker | None = Field(
+        default=None,
+        description=(
+            "Records the windows in which this process was not running, so a probe-failure run that "
+            "straddles one can be restarted from the wake. None leaves the run purely elapsed-time "
+            "based, which is what a process with no heartbeat loop (tests, embedded factories) gets."
+        ),
+    )
     established_cause_deference_seconds: float = Field(
         default=_DEFAULT_ESTABLISHED_CAUSE_DEFERENCE_SECONDS,
         description=(
@@ -456,6 +472,22 @@ class SystemInterfaceHealthTracker(MutableModel):
             del self._create_attempt_grace_deadline_by_agent[aid_str]
             return False
         return True
+
+    def _is_run_interrupted_by_sleep_locked(self, record: _AgentRecord) -> bool:
+        """Whether this agent's in-progress failure run straddles a sleep (must hold ``self._lock``).
+
+        Asks the wall-clock question, because the monotonic onset the run is
+        measured against cannot answer it: that clock freezes across sleep, so
+        the run's own elapsed time looks the same whether the machine slept or
+        the workspace really was failing that whole time.
+
+        Called under this tracker's lock, which is safe because the tracker it
+        calls fires its own callbacks outside its lock -- so there is no path by
+        which a sleep-tracker consumer re-enters here holding it.
+        """
+        if self.sleep_tracker is None or record.failure_run_started_wall_at is None:
+            return False
+        return self.sleep_tracker.was_asleep_since(record.failure_run_started_wall_at)
 
     # -- Intentional stops ------------------------------------------------
 
@@ -665,10 +697,19 @@ class SystemInterfaceHealthTracker(MutableModel):
         HEALTHY (already STUCK, or RESTARTING / RESTART_FAILED -- states owned
         by the restart flow) or that has no record (de-enrolled concurrently)
         are ignored.
+
+        A run whose onset predates a recorded sleep interval is restarted from
+        this failure instead of being continued: the probe loop was frozen for
+        the sleep, so those seconds were never observed and cannot be counted
+        toward a conviction. Only the run is reset -- the *episode* onset
+        (``outage_started_wall_at``) is left alone, since the machine really did
+        stop answering when it did, and the discovery-freshness gate that reads
+        it is only made stricter by an older mark.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
         stuck_after_seconds: float | None = None
+        is_run_restarted_at_wake = False
         with self._lock:
             # An in-flight create attempt's readiness window suppresses failure
             # accounting entirely: 503s while the workspace is still
@@ -681,19 +722,34 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record is None or record.health != AgentHealth.HEALTHY:
                 return
             now = time.monotonic()
-            if record.failure_run_started_at is None:
+            now_wall = datetime.now(timezone.utc)
+            # The run starts here in two cases: this is the first failure of a
+            # new one, or the one in progress spans seconds nobody observed.
+            is_run_restarted_at_wake = (
+                record.failure_run_started_at is not None and self._is_run_interrupted_by_sleep_locked(record)
+            )
+            if record.failure_run_started_at is None or is_run_restarted_at_wake:
                 record.failure_run_started_at = now
-                record.failure_run_started_wall_at = datetime.now(timezone.utc)
-                # Opens the episode too, if this is the run that started it. A
-                # later run within the same episode cannot reach here (this
-                # branch needs HEALTHY), so the earliest failure keeps the mark.
-                if record.outage_started_wall_at is None:
-                    record.outage_started_wall_at = record.failure_run_started_wall_at
+                record.failure_run_started_wall_at = now_wall
+            # Opens the episode too, if this is the failure that started it. A
+            # later run within the same episode cannot reach here (that needs
+            # HEALTHY), so the earliest failure keeps the mark -- and a run
+            # restarted at a wake leaves it exactly where it was.
+            if record.outage_started_wall_at is None:
+                record.outage_started_wall_at = now_wall
             elapsed = now - record.failure_run_started_at
             if elapsed + 1e-6 >= self.stuck_threshold_seconds:
                 record.health = AgentHealth.STUCK
                 fire_health = AgentHealth.STUCK
                 stuck_after_seconds = elapsed
+        # A restarted run is the sleep signal actually changing an outcome, and
+        # the only trace of a conviction that did not happen.
+        if is_run_restarted_at_wake:
+            logger.info(
+                "Probe-failure run for {} restarted: it began before a recorded sleep interval, "
+                "so the stuck threshold re-accumulates from now",
+                agent_id,
+            )
         # The STUCK edge is the key diagnostic; the elapsed time tells us exactly
         # how long the workspace was continuously failing before it tripped.
         if fire_health is not None and stuck_after_seconds is not None:

@@ -10,6 +10,7 @@ import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -19,10 +20,13 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import build_resolver_with_provider_backend
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
+from imbue.minds.desktop_client.testing import build_stub_connectivity_detector
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
 from imbue.minds.desktop_client.ui_api_lifecycle import _build_ssh_command
 from imbue.minds.desktop_client.ui_api_lifecycle import _resolve_workspace_coordinate_to_agent_id
@@ -60,6 +64,7 @@ def _build_lifecycle_client(
     is_reaper_wired: bool = False,
     backend_resolver: BackendResolverInterface | None = None,
     tracker: SystemInterfaceHealthTracker | None = None,
+    connectivity_detector: ConnectivityDetector | None = None,
 ) -> tuple[FlaskClient, MultiAccountSessionStore]:
     """A desktop-client test app with the stores the lifecycle routes read.
 
@@ -95,6 +100,7 @@ def _build_lifecycle_client(
         session_store=session_store,
         sync_scheduler=sync_scheduler,
         system_interface_health_tracker=tracker,
+        connectivity_detector=connectivity_detector,
     )
     return client, session_store
 
@@ -301,6 +307,48 @@ def test_recovery_info_reports_the_backend_a_restart_was_already_rejected_at(tmp
     assert payload["is_backend_unreachable"] is True
     assert payload["provider_label"] == "Docker"
     assert payload["unreachable_reason"] == "Docker Desktop is manually paused."
+
+
+def test_recovery_info_reports_a_dead_network_for_a_machine_it_can_explain(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The card falls back to this, so a machine on the far side of a dead network says so."""
+    agent_id = AgentId(_DESTROYED_AGENT_ID)
+    resolver = build_resolver_with_provider_backend(
+        agent_id, provider_name="imbue_cloud_someone", backend="imbue_cloud"
+    )
+    detector, _ = build_stub_connectivity_detector(root_concurrency_group, is_internet_up=False)
+    detector.probe_now()
+    client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, connectivity_detector=detector)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+
+    assert payload["device_environment"] == "OFFLINE"
+
+
+@pytest.mark.parametrize("backend", ["local", "docker", "lima"])
+def test_recovery_info_withholds_the_device_condition_from_a_machine_on_this_device(
+    tmp_path: Path,
+    backend: str,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A dead network explains nothing about a container on this laptop, and must not disarm its card.
+
+    The card renders this field with no locality of its own: a non-NONE value
+    replaces the Restart button with a waiting-for-network line. On an on-device
+    machine that restart is exactly what would fix it -- it runs over loopback,
+    which the wifi has no say in -- so reporting the device's condition here
+    would take away a working affordance over a condition that does not apply.
+    """
+    agent_id = AgentId(_DESTROYED_AGENT_ID)
+    resolver = build_resolver_with_provider_backend(agent_id, provider_name=backend, backend=backend)
+    detector, _ = build_stub_connectivity_detector(root_concurrency_group, is_internet_up=False)
+    detector.probe_now()
+    client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, connectivity_detector=detector)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+
+    assert payload["device_environment"] == "NONE"
 
 
 def test_recovery_info_reports_a_connection_this_device_could_not_make(tmp_path: Path) -> None:

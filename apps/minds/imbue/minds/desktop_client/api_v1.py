@@ -1451,6 +1451,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         mngr_forward_port=state.mngr_forward_port or 0,
         mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
         skip_stop=skip_stop,
+        connectivity_detector=state.connectivity_detector,
     )
     match outcome:
         # A refused dispatch leaves the record untouched, so it still names the

@@ -10,6 +10,7 @@ import type {
   UiAccountsMessage,
   UiBootstrap,
   UiDiscoveryHealthMessage,
+  UiEnvironmentMessage,
   UiHealthMessage,
   UiHelloMessage,
   UiNotificationEntry,
@@ -29,6 +30,7 @@ export type {
   UiAccountsMessage,
   UiBootstrap,
   UiDiscoveryHealthMessage,
+  UiEnvironmentMessage,
   UiHealthMessage,
   UiHelloMessage,
   UiNotificationEntry,
@@ -58,6 +60,7 @@ export type UiServerMessage =
   | Framed<UiNotificationsMessage, "notifications">
   | Framed<UiHealthMessage, "health">
   | Framed<UiDiscoveryHealthMessage, "discovery_health">
+  | Framed<UiEnvironmentMessage, "environment">
   | Framed<UiWorkspaceStoppedMessage, "workspace_stopped">
   | Framed<UiOpenHelpMessage, "open_help">
   | Framed<UiWorkspaceRefreshMessage, "workspace_refresh">
@@ -91,6 +94,7 @@ export function parseServerMessage(raw: string): UiServerMessage | null {
     case "notifications":
     case "health":
     case "discovery_health":
+    case "environment":
     case "workspace_stopped":
     case "open_help":
     case "workspace_refresh":

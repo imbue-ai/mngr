@@ -24,6 +24,7 @@ import { DialogCloseButton } from "../components/Modal";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
 import type { RecoveryModel } from "../../models/backups";
+import type { EnvironmentBlock } from "../../models/health";
 import { electronBridge } from "../../electron-bridge";
 
 /**
@@ -113,6 +114,31 @@ const BACKEND_UNREACHABLE_EXPLANATION =
   "This issue may be transient. Minds will reconnect you to your machine as soon as it can be reached again.";
 
 /**
+ * What this device's own condition means for the machine, and what to do.
+ *
+ * Both states describe this device, and neither vouches for the machine. What
+ * was measured is that nothing here can reach anything; the far side of that
+ * connection was not observed and cannot be reported on, so telling the user
+ * their machine is fine would be a guess dressed as a reading -- and a wrong one
+ * for a machine that died just before the network did. What is honest, and is
+ * most of the reassurance anyway, is that minds is watching and will say so when
+ * it can see again.
+ *
+ * They differ in what they ask of the user: nothing at all when the network is
+ * simply down (it comes back, and the app is watching for it), and a different
+ * network when this one blocks the connection minds needs -- a wait that would
+ * never end on its own. The SSH copy names the protocol and concedes the browser
+ * works, because otherwise it reads as the app being wrong about a connection
+ * the user can see is fine.
+ */
+const ENVIRONMENT_BLOCKED_EXPLANATION: Record<Exclude<EnvironmentBlock, "NONE">, string> = {
+  OFFLINE: "This device has no network connection. Minds will reconnect to your machine as soon as it does.",
+  SSH_BLOCKED:
+    "This network blocks the connection Minds uses to reach your machines (SSH). " +
+    "Your browser works, but Minds can't get through. Try another network or a VPN.",
+};
+
+/**
  * What a connection this device could not make means, and what fixes it.
  *
  * The machine is not implicated: the failure happened before anything was sent
@@ -130,6 +156,18 @@ const BACKEND_UNREACHABLE_EXPLANATION =
 const DEVICE_CANNOT_CONNECT_CONDITION =
   "This machine may be running normally — the connection failed on this device, before reaching it.";
 const DEVICE_CANNOT_CONNECT_REMEDY = "Restarting Minds rebuilds the connection.";
+
+/**
+ * The heading both device-scoped verdicts carry.
+ *
+ * One connection this device could not make, or every connection it could not
+ * make: the same verdict at two scales, so a reader who has seen one has been
+ * told what the other means. Shared rather than spelled once per branch,
+ * because reading alike is the point and two literals only happen to.
+ */
+function deviceScopedHeading(machineName: string): string {
+  return `Can't connect to ${machineName} from this device`;
+}
 
 export interface RecoveryCardAttrs {
   model: RecoveryModel;
@@ -173,6 +211,44 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       const { model, isSelfDismissing = false, onEnterMachine = null } = vnode.attrs;
       const info = model.info;
       if (info === null) return null;
+      // On a surface that dismisses itself, a finished restart is still waiting
+      // on the confirmation that dismisses it. Reading as idle in that window
+      // would offer a Restart button for the restart that just ran.
+      const isSettling = isSelfDismissing && model.isRestartSucceeded;
+      // A restart nobody started from this card counts too: the unattended one,
+      // or the same machine's card in another window. Its progress is what is
+      // actually happening to the machine, so the card must not offer a Restart
+      // button beside it -- nor replace one with a waiting-for-network line.
+      // The click flips isRestartRunning at once while info.health only moves
+      // on the next poll, so reading health alone would drop a running
+      // restart's spinner and log lines for a poll interval.
+      const isBusy = model.isRestartRunning || isSettling || info.health === "restarting";
+      // The device's condition, and never over a running restart: there is a
+      // restart to narrate, and rendering the block would swap its spinner for
+      // a wait that does not hold it. The route answers NONE for a machine on
+      // this device, whose outage a dead network cannot explain.
+      const environment = isBusy ? "NONE" : info.device_environment;
+      // This device having no usable network outranks everything below,
+      // including the backend verdict, because it explains those too: a laptop
+      // that cannot reach the network cannot reach the provider either, so the
+      // provider's poll errors and the machine reads unreachable -- and naming
+      // the backend there blames something that is working for a condition the
+      // user can actually fix. No restart button, and not a disabled one: the
+      // restart would route over the same dead network, and there is nothing
+      // here for the user to decide. The card returns to its normal states on
+      // its own: the machine answering clears it, and so does connectivity
+      // coming back -- which also runs the start that was withheld. On a dead
+      // network only the second of those can happen.
+      if (environment !== "NONE" && info.health !== "healthy") {
+        return m("div", { class: "flex flex-col gap-3" }, [
+          m("div", { class: "type-heading pr-10" }, deviceScopedHeading(info.workspace_name)),
+          m("p", { class: "type-helper text-tertiary" }, ENVIRONMENT_BLOCKED_EXPLANATION[environment]),
+          m("div", { class: "flex items-center gap-2" }, [
+            m("span", { class: "type-label text-secondary" }, "Waiting for network…"),
+            m(Button, { variant: "secondary", onclick: () => reportProblem(info.agent_id) }, "Report a problem"),
+          ]),
+        ]);
+      }
       // The backend being unreachable outranks whatever else the machine's
       // health reads, because it explains it: a machine minds cannot reach
       // through its provider reads stuck either way, and only one of the two
@@ -204,16 +280,18 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
         ]);
       }
       // The connection failed on this device, before the machine was ever
-      // reached. Ranked below the backend verdict only because that one names a
-      // whole provider being down, which is the larger fact when both are true;
-      // both outrank the machine's own health, and for the same reason -- the
-      // machine reads unhealthy *because* of them, and its restart episode is
-      // an effect rather than a cause. As above, withheld over a machine that is
-      // answering: whatever failed earlier, it is not failing now.
+      // reached -- but on a network that works, which is what puts it last of
+      // the three explanations. The two above it are larger facts when they
+      // hold at the same time: a dead network takes this machine down along
+      // with every other, and an unreachable provider takes down all of its.
+      // All three outrank the machine's own health, and for the same reason --
+      // the machine reads unhealthy *because* of them, and its restart episode
+      // is an effect rather than a cause. As above, withheld over a machine
+      // that is answering: whatever failed earlier, it is not failing now.
       if (info.is_device_cannot_connect && info.health !== "healthy") {
         const isRestartAppAvailable = electronBridge.isDesktop;
         return m("div", { class: "flex flex-col gap-3" }, [
-          m("div", { class: "type-heading pr-10" }, `Can't connect to ${info.workspace_name} from this device`),
+          m("div", { class: "type-heading pr-10" }, deviceScopedHeading(info.workspace_name)),
           m(
             "p",
             { class: "type-helper text-tertiary" },
@@ -246,15 +324,6 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
             : null,
         ]);
       }
-      // On a surface that dismisses itself, a finished restart is still waiting
-      // on the confirmation that dismisses it. Reading as idle in that window
-      // would offer a Restart button for the restart that just ran.
-      const isSettling = isSelfDismissing && model.isRestartSucceeded;
-      // A restart nobody started from this card counts too: the unattended one,
-      // or the same machine's card in another window. Its progress is what is
-      // actually happening to the machine, so the card must not offer a Restart
-      // button beside it.
-      const isBusy = model.isRestartRunning || isSettling || info.health === "restarting";
       const health = isBusy ? "restarting" : info.health;
       // A restart dispatched from here knows its own shape from the click,
       // before the tracker has caught up and can answer -- and that window is

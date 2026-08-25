@@ -443,12 +443,14 @@ def build_desktop_client_for_test(
 
 @pytest.fixture
 def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
-    """Root ``ConcurrencyGroup`` for tests that construct an ``AgentCreator``.
+    """Root ``ConcurrencyGroup`` for tests that construct something requiring one.
 
-    ``AgentCreator.root_concurrency_group`` is required (in production it is
-    owned by ``start_desktop_client`` and brackets the FastAPI lifespan); this
-    fixture enters an equivalent group for the test's duration and exits it
-    cleanly afterwards so any strand tracking / shutdown semantics match.
+    Several components take it as a required field -- ``AgentCreator``,
+    ``ConnectivityDetector``, ``WorkspaceViewRefresher`` -- and in production all
+    of them are handed the one group ``start_desktop_client`` owns, which
+    brackets the app's lifespan. This fixture enters an equivalent group for the
+    test's duration and exits it cleanly afterwards so any strand tracking /
+    shutdown semantics match.
     """
     cg = ConcurrencyGroup(name="test-root")
     with cg:

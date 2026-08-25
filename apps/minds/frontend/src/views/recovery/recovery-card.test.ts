@@ -29,6 +29,7 @@ const UNRESPONSIVE: RecoveryInfo = {
   is_restart_start_only: null,
   ssh_command: "",
   is_host_offline: false,
+  device_environment: "NONE",
   is_backend_unreachable: false,
   provider_label: "",
   unreachable_reason: "",
@@ -213,6 +214,100 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain("Restart Machine");
   });
 
+  it("explains this device's dead network and offers no restart to route over it", () => {
+    // The restart would go over the same network that is down, so there is
+    // nothing here for the user to decide -- not even a disabled button.
+    const text = renderCard({ ...UNRESPONSIVE, health: "stuck", device_environment: "OFFLINE" });
+
+    expect(text).toContain("Can't connect to my-machine from this device");
+    expect(text).toContain("This device has no network connection.");
+    expect(text).toContain("Minds will reconnect to your machine as soon as it does.");
+    expect(text).toContain("Waiting for network");
+    expect(text).not.toContain("Restart Machine");
+    expect(text).toContain("Report a problem");
+  });
+
+  it("tells a user on an SSH-blocking network what is actually wrong", () => {
+    // Their browser works, so "you are offline" is a claim they can see is
+    // false -- and unlike a dead network, this one never fixes itself.
+    const text = renderCard({ ...UNRESPONSIVE, health: "stuck", device_environment: "SSH_BLOCKED" });
+
+    expect(text).toContain("This network blocks the connection Minds uses to reach your machines (SSH).");
+    expect(text).toContain("Try another network or a VPN.");
+    expect(text).not.toContain("This device has no network connection.");
+    expect(text).not.toContain("Restart Machine");
+  });
+
+  it("blames this device before it blames the backend behind it", () => {
+    // A laptop with no network cannot reach the provider either, so the
+    // provider's error is a symptom of the same condition rather than a second
+    // one -- and naming the provider would send the user after the wrong thing.
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      device_environment: "OFFLINE",
+      is_backend_unreachable: true,
+      provider_label: "Imbue Cloud",
+      unreachable_reason: "could not reach Imbue Cloud",
+    });
+
+    expect(text).toContain("Can't connect to my-machine from this device");
+    expect(text).not.toContain("Can't connect to Imbue Cloud");
+  });
+
+  it("explains the device for a machine stuck before the network died", () => {
+    // No stuck edge fired under the condition, so no dispatch was ever
+    // withheld for this machine -- and the band that sent the user here named
+    // the device, so the card must not blame the backend.
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      health: "stuck",
+      device_environment: "OFFLINE",
+      is_backend_unreachable: true,
+      provider_label: "Imbue Cloud",
+      unreachable_reason: "could not reach Imbue Cloud",
+    });
+
+    expect(text).toContain("This device has no network connection.");
+    expect(text).not.toContain("Can't connect to Imbue Cloud");
+    expect(text).not.toContain("Restart Machine");
+  });
+
+  it("keeps narrating a restart that is actually running", () => {
+    // The device may well be offline, but the restart is in flight and its
+    // progress is what the user asked to see.
+    const text = renderCard({ ...UNRESPONSIVE, health: "restarting", device_environment: "OFFLINE" });
+
+    expect(text).not.toContain("This device has no network connection.");
+    expect(text).not.toContain("Waiting for network");
+  });
+
+  it("keeps narrating a restart this card just started, before the poll catches up", () => {
+    // The click flips the model at once; info.health only moves on the next 2s
+    // poll, and a read already in flight can land after it still saying stuck.
+    // Reading the server's health alone would swap the spinner and the log
+    // lines for "Waiting for network..." over a restart that is running.
+    const info: RecoveryInfo = { ...UNRESPONSIVE, health: "stuck", device_environment: "OFFLINE" };
+    const model = modelShowing(info);
+    model.isRestartRunning = true;
+    // A click from this card is a full stop+start bounce, which is what
+    // licenses the card to call it a restart at all.
+    model.dispatchedRestartIsStartOnly = false;
+
+    const text = renderCard(info, model);
+
+    expect(text).toContain("Restarting my-machine...");
+    expect(text).not.toContain("Waiting for network");
+  });
+
+  it("returns the machine to its normal states once it answers again", () => {
+    // The device may still be blocked for everything else, but this machine is
+    // answering -- the card must not keep the waiting state on it.
+    const text = renderCard({ ...UNRESPONSIVE, health: "healthy", device_environment: "OFFLINE" });
+
+    expect(text).toContain("my-machine is responding again.");
+    expect(text).not.toContain("Waiting for network");
+  });
+
   it("reads a restart nobody started here as busy, not as an idle machine", async () => {
     // The unattended dispatcher restarts a wedged machine on its own, so the
     // card must not sit there offering to start a second one. It is start-only,
@@ -348,6 +443,21 @@ describe("RecoveryCardBody", () => {
     const text = renderedText(renderRoot(RecoveryCardBody, { model, isSelfDismissing: true }));
     expect(text).toContain("Reconnecting...");
     expect(text).not.toContain("Restart Machine");
+  });
+
+  it("keeps that window free of the device's condition too", () => {
+    // The same window as above, with a device block still recorded: the machine
+    // has answered, so the block is stale and the card is one confirmation away
+    // from leaving. Rendering the wait here would replace a restart that just
+    // succeeded with an indefinite "Waiting for network".
+    const model = modelShowing({ ...UNRESPONSIVE, health: "stuck", device_environment: "OFFLINE" });
+    model.isRestartSucceeded = true;
+    const text = renderedText(renderRoot(RecoveryCardBody, { model, isSelfDismissing: true }));
+    // No evidence of the restart's shape here, so the busy label is the
+    // weakest honest one -- what matters is that it narrates the restart.
+    expect(text).toContain("Reconnecting...");
+    expect(text).not.toContain("Waiting for network");
+    expect(text).not.toContain("This device has no network connection.");
   });
 
   it("offers the way into the machine when the surface it is on has one", () => {

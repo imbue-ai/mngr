@@ -277,6 +277,23 @@ describe("UiChannelClient", () => {
     expect(relayedTypes).toEqual([]);
   });
 
+  it("tracks the device's condition as the server reports it changing", () => {
+    // The frame has to survive both halves of the client -- the parser's type
+    // allowlist and the dispatch switch -- or the notice is correct at first
+    // paint (seeded from the bootstrap snapshot) and then never moves again,
+    // which is the wifi dropping mid-session saying nothing at all.
+    const { client, stores, sockets } = makeClient();
+    client.start();
+    sockets[0].open();
+    sockets[0].receive({ type: "hello", schema_version: 1 });
+
+    sockets[0].receive({ type: "environment", state: "OFFLINE" });
+    expect(stores.health.appEnvironmentBlock()).toBe("OFFLINE");
+
+    sockets[0].receive({ type: "environment", state: "NONE" });
+    expect(stores.health.appEnvironmentBlock()).toBe("NONE");
+  });
+
   it("clears per-workspace health on the reconnect hello (reconnect is resync)", () => {
     vi.useFakeTimers();
     const { client, stores, sockets } = makeClient();

@@ -16,10 +16,8 @@ import { localPageNoticeFor } from "./notice-band";
 export function LocalPageNotice(): m.Component {
   return {
     view() {
-      const payload = localPageNoticeFor(
-        getAppContext().stores.health.discoveryHealth,
-        electronBridge.isDesktop,
-      );
+      const health = getAppContext().stores.health;
+      const payload = localPageNoticeFor(health.discoveryHealth, electronBridge.isDesktop, health.appEnvironmentBlock());
       if (payload === null) return null;
       // Aligned to the page container rather than the full scroll width, so
       // it reads as part of the page's own column alongside the notices the

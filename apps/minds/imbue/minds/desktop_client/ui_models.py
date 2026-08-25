@@ -32,6 +32,7 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
+from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 
 # Bumped on ANY breaking change to the models in this module. The server
@@ -41,7 +42,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 5
+UI_SCHEMA_VERSION: int = 6
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -74,6 +75,16 @@ class UiWorkspaceEntry(FrozenModel):
     )
     provider_label: str = Field(
         default="", description="Friendly name of the provider hosting this workspace; empty when unknown"
+    )
+    # Whether a dead network on this device is even capable of explaining this
+    # machine being unreachable. False for the on-device backends (local,
+    # docker, lima), which answer over loopback with the wifi off -- the band
+    # must not attribute their failures to the network, nor lead the user to a
+    # card that withholds the restart that would fix them. Defaults True (and so
+    # to today's behaviour) for the rows that carry no backend at all: create
+    # attempts and machines hosted on another device.
+    is_network_dependent: bool = Field(
+        default=True, description="Whether reaching this machine requires this device to have a working network"
     )
     supports_shutdown: bool = Field(default=False, description="Whether minds can stop/start this workspace's host")
     liveness: str = Field(
@@ -258,6 +269,21 @@ class UiDiscoveryHealthMessage(FrozenModel):
     state: DiscoveryHealth = Field(description="Pipeline health bucket")
 
 
+class UiEnvironmentMessage(FrozenModel):
+    """This device's own condition, as one app-global fact.
+
+    App-global on purpose: the device cannot reach anything whether or not any
+    machine has been convicted yet, and an app opened on a dead network has
+    nothing to convict until the user clicks into a machine. One fact beside the
+    discovery health lets the hub pages say it then, and the per-machine
+    surfaces scope it themselves (a machine that runs on this device is
+    reachable with the wifi off, so the condition explains nothing about it).
+    """
+
+    type: Literal["environment"] = "environment"
+    state: EnvironmentBlock = Field(description="Device-level condition (offline / SSH-blocked network), or NONE")
+
+
 class UiWorkspaceStoppedMessage(FrozenModel):
     """An in-app action stopped this workspace's host; open views must not observe (and restart) it."""
 
@@ -317,6 +343,7 @@ UiServerMessage = Annotated[
     | UiNotificationsMessage
     | UiHealthMessage
     | UiDiscoveryHealthMessage
+    | UiEnvironmentMessage
     | UiWorkspaceStoppedMessage
     | UiOpenHelpMessage
     | UiWorkspaceRefreshMessage
@@ -341,6 +368,7 @@ class UiSnapshot(FrozenModel):
     notifications: UiNotificationsMessage = Field(description="Current notification feed")
     health: tuple[UiHealthMessage, ...] = Field(description="Per-workspace health states (only tracked workspaces)")
     discovery_health: UiDiscoveryHealthMessage = Field(description="Current discovery pipeline health")
+    environment: UiEnvironmentMessage = Field(description="Current device-level connectivity condition")
 
 
 class UiBootstrapSeed(FrozenModel):
@@ -578,6 +606,7 @@ class UiWireSchema(FrozenModel):
     notifications: UiNotificationsMessage = Field(description="notifications frame")
     health: UiHealthMessage = Field(description="health frame")
     discovery_health: UiDiscoveryHealthMessage = Field(description="discovery_health frame")
+    environment: UiEnvironmentMessage = Field(description="environment frame")
     workspace_stopped: UiWorkspaceStoppedMessage = Field(description="workspace_stopped frame")
     open_help: UiOpenHelpMessage = Field(description="open_help frame")
     workspace_refresh: UiWorkspaceRefreshMessage = Field(description="workspace_refresh frame")

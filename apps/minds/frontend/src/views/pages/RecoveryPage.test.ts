@@ -29,6 +29,7 @@ const ANSWERING: RecoveryInfo = {
   is_restart_start_only: null,
   ssh_command: "",
   is_host_offline: false,
+  device_environment: "NONE",
   is_backend_unreachable: false,
   provider_label: "",
   unreachable_reason: "",

@@ -820,6 +820,12 @@ def _make_origin_repo_with_branch(origin: Path, branch: str) -> None:
     _git(origin, "checkout", "-q", "main")
 
 
+# Times out at the 10s per-test budget while shelling out to git, under xdist
+# contention on a loaded machine; passes in isolation. Retried rather than lengthened:
+# the timeout is the suite-wide budget, and this test is only slow when it is
+# competing, not when it is doing more work. Same shape as the group marked in
+# backup_workspace_scripts_test.py.
+@pytest.mark.flaky
 def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path: Path) -> None:
     """Cloning then checking out a branch keeps full ancestry (non-shallow) and remains mirror-pushable.
 

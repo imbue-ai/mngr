@@ -234,6 +234,9 @@ export class UiChannelClient {
       case "discovery_health":
         stores.health.applyDiscoveryHealthMessage(message);
         break;
+      case "environment":
+        stores.health.applyEnvironmentMessage(message);
+        break;
       case "workspace_stopped":
         this.options.onWorkspaceStopped?.(message);
         break;

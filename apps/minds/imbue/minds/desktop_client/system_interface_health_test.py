@@ -11,6 +11,8 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
+from imbue.minds.desktop_client.testing import make_sleep_tracker
+from imbue.minds.desktop_client.testing import record_sleep_of
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
@@ -775,6 +777,94 @@ def test_probe_success_clears_create_attempt_grace() -> None:
 def test_end_create_attempt_grace_is_idempotent_for_unknown_agent() -> None:
     tracker = SystemInterfaceHealthTracker()
     tracker.end_create_attempt_grace(AgentId.generate())
+
+
+def test_failure_run_that_straddles_a_sleep_re_accumulates_from_the_wake() -> None:
+    """The stuck threshold must be reached entirely while the process was running.
+
+    Closing the lid mid-outage-check freezes the probe loop, so the seconds it
+    slept were backed by no probe at all and cannot convict the workspace.
+    """
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    aid = AgentId.generate()
+    seen: list[AgentHealth] = []
+    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+
+    tracker.record_failure(aid)
+    tracker.record_probe_failure(aid)
+    outage_onset = tracker.get_outage_started_wall_at(aid)
+    record_sleep_of(sleep_tracker, clock, seconds=900.0)
+
+    # The first probe after the wake: the run looks old enough to convict, and
+    # would have without the sleep signal.
+    _sleep(_FAST_THRESHOLD + 0.02)
+    tracker.record_probe_failure(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert seen == []
+    # The episode onset is not rewound with the run: the machine really did stop
+    # answering when it did, and the freshness gate that reads it is only made
+    # stricter by the older mark.
+    assert tracker.get_outage_started_wall_at(aid) == outage_onset
+
+    # The re-accumulated run convicts on its own, with no further sleep behind it.
+    _sleep(_FAST_THRESHOLD + 0.02)
+    tracker.record_probe_failure(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.STUCK
+    assert seen == [AgentHealth.STUCK]
+
+
+def test_each_sleep_inside_one_outage_restarts_the_run_again() -> None:
+    """Several naps during one outage each disqualify the run they interrupted."""
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    aid = AgentId.generate()
+
+    tracker.record_failure(aid)
+    tracker.record_probe_failure(aid)
+    for _ in range(3):
+        record_sleep_of(sleep_tracker, clock, seconds=600.0)
+        _sleep(_FAST_THRESHOLD + 0.02)
+        tracker.record_probe_failure(aid)
+        assert tracker.get_health(aid) == AgentHealth.HEALTHY
+
+    _sleep(_FAST_THRESHOLD + 0.02)
+    tracker.record_probe_failure(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.STUCK
+
+
+def test_failure_run_after_a_sleep_convicts_unchanged() -> None:
+    """A recorded interval that the run does not overlap suppresses nothing."""
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    aid = AgentId.generate()
+
+    record_sleep_of(sleep_tracker, clock, seconds=900.0)
+    _drive_to_stuck(tracker, aid)
+
+    assert tracker.get_health(aid) == AgentHealth.STUCK
+
+
+def test_a_sleep_never_reopens_a_forced_stuck() -> None:
+    """A machine that is already STUCK stays STUCK, whatever the sleep signal says.
+
+    Held by the early return for any record that is not HEALTHY, which the sleep
+    check sits behind and never gets past -- so the qualifier that a forced
+    ``mark_stuck`` also carries no failure run to disqualify is a second reason
+    rather than the operative one.
+    """
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    aid = AgentId.generate()
+
+    tracker.mark_stuck(aid)
+    record_sleep_of(sleep_tracker, clock, seconds=900.0)
+    tracker.record_probe_failure(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.STUCK
 
 
 # -- the classified cause of an episode's connection failures --

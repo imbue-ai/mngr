@@ -213,6 +213,9 @@ class DiscoveryHealthWatchdog(MutableModel):
     _restart_count: int = PrivateAttr(default=0)
     # When the most recent remediation ran, for the inter-remediation backoff.
     _last_remediation_at: datetime | None = PrivateAttr(default=None)
+    # The latest wake ``evaluate`` has been told about, so a wake is acted on
+    # exactly once rather than on every tick that keeps reporting it.
+    _last_wake_at_seen: datetime | None = PrivateAttr(default=None)
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
 
     # -- Public callback registration -------------------------------------
@@ -253,7 +256,7 @@ class DiscoveryHealthWatchdog(MutableModel):
         if self._set_blocked():
             logger.error("Discovery watchdog: consumer subprocess died; discovery pipeline is down")
 
-    def evaluate(self, last_event_at: datetime | None) -> None:
+    def evaluate(self, last_event_at: datetime | None, last_wake_at: datetime | None = None) -> None:
         """Re-assess producer health from the resolver's freshness and drive remediation.
 
         Called every poll by the watchdog loop with the resolver's most recent
@@ -263,6 +266,19 @@ class DiscoveryHealthWatchdog(MutableModel):
         on a capped exponential backoff). The producer path never reaches
         ``BLOCKED`` -- it retries forever. A no-op once ``BLOCKED`` (consumer
         death).
+
+        ``last_wake_at`` is when this process was last observed running again
+        after not running at all (a laptop sleep -- see
+        ``environment_signals.SleepTracker``), or ``None`` where that is not
+        tracked. It does two things, both of which say the same thing: nothing
+        that happened before it was observed by a loop that was running. It
+        joins the freshness baseline, so the first tick after a lid opens ages
+        from the wake rather than from an event the producer emitted before the
+        machine went down -- otherwise a night of sleep reads as a stalled
+        producer and is answered with a SIGHUP the producer never needed. And it
+        ends the current remediation episode, so a stall that *is* detected
+        afterwards starts again from the cheap bounce rather than resuming a
+        backoff whose waits also elapsed while nothing was running.
         """
         now = self.now_fn()
         action: Callable[[], None] | None = None
@@ -272,13 +288,16 @@ class DiscoveryHealthWatchdog(MutableModel):
                 return
             if self._started_at is None:
                 self._started_at = now
-            if not self._is_stalled_locked(last_event_at, now):
+            if last_wake_at is not None and (
+                self._last_wake_at_seen is None or last_wake_at > self._last_wake_at_seen
+            ):
+                self._last_wake_at_seen = last_wake_at
+                self._reset_remediation_episode_locked()
+            if not self._is_stalled_locked(last_event_at, now, last_wake_at):
                 if self._health != DiscoveryHealth.HEALTHY:
                     self._health = DiscoveryHealth.HEALTHY
                     fire = DiscoveryHealth.HEALTHY
-                self._bounce_attempted = False
-                self._restart_count = 0
-                self._last_remediation_at = None
+                self._reset_remediation_episode_locked()
             else:
                 action = self._next_remediation_locked(now)
                 if self._health == DiscoveryHealth.HEALTHY:
@@ -298,7 +317,19 @@ class DiscoveryHealthWatchdog(MutableModel):
 
     # -- Internals --------------------------------------------------------
 
-    def _is_stalled_locked(self, last_event_at: datetime | None, now: datetime) -> bool:
+    def _reset_remediation_episode_locked(self) -> None:
+        """Forget the current stall episode's remediation history (must hold ``_lock``).
+
+        Whatever has been tried against the producer no longer describes the
+        situation: either it worked (the pipeline is fresh again) or nothing at
+        all was running while it appeared not to (a wake). Either way the next
+        stall is a new episode, which starts at the cheap bounce.
+        """
+        self._bounce_attempted = False
+        self._restart_count = 0
+        self._last_remediation_at = None
+
+    def _is_stalled_locked(self, last_event_at: datetime | None, now: datetime, last_wake_at: datetime | None) -> bool:
         """Whether the producer is emitting nothing (must hold ``_lock``).
 
         Only an event from this watchdog's own lifetime counts as producer
@@ -309,8 +340,16 @@ class DiscoveryHealthWatchdog(MutableModel):
         supervisor to death. An event predating ``_started_at`` -- like no event
         at all (cold start) -- therefore ages from the watchdog's start, giving
         a normal startup the full grace period before the backstop fires.
+
+        A wake is the same argument inside a single lifetime: an event from
+        before the machine slept is as unrepresentative of the producer's
+        current state as one from before the process started, and the silence
+        since is not silence anyone was listening to. So the baseline is the
+        latest of the two, and a just-woken app gets the same full grace period
+        a just-started one does.
         """
-        baseline = self._started_at if self._started_at is not None else now
+        started_at = self._started_at if self._started_at is not None else now
+        baseline = max(started_at, last_wake_at) if last_wake_at is not None else started_at
         if last_event_at is not None and last_event_at >= baseline:
             age = (now - last_event_at).total_seconds()
             return age > self.stall_threshold_seconds

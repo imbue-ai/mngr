@@ -72,6 +72,11 @@ def test_form_defaults_seed_the_shipped_template_repo_and_ref(tmp_path: Path, mo
     assert payload["branch"] == FALLBACK_BRANCH
 
 
+# Observed once hanging for ~33 minutes on a leaked forked child blocked in read,
+# with the test itself long finished; killing the child let the run continue, and
+# it has not recurred. Retried rather than diagnosed: the leak is in the fork, not
+# in what this test asserts, and a hang has no failure to read.
+@pytest.mark.flaky
 def test_form_defaults_honor_the_operator_worktree_only_when_opted_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

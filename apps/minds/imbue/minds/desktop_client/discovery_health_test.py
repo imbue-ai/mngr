@@ -12,12 +12,10 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
-from pydantic import Field
-
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
-from imbue.minds.desktop_client.discovery_health import ProducerRemediator
-from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.minds.desktop_client.testing import ManualClock
+from imbue.minds.desktop_client.testing import RecordingProducerRemediator
 
 _T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 _STALL_SECONDS = 35.0
@@ -25,41 +23,8 @@ _REMEDIATION_WAIT_SECONDS = 15.0
 _MAX_BACKOFF_SECONDS = 300.0
 
 
-class _Clock:
-    """A manually-advanced UTC clock used as the watchdog's ``now_fn``."""
-
-    def __init__(self, start: datetime) -> None:
-        self._now = start
-
-    def __call__(self) -> datetime:
-        return self._now
-
-    def advance(self, seconds: float) -> None:
-        self._now += timedelta(seconds=seconds)
-
-
-class _FakeRemediator(ProducerRemediator):
-    """Records remediation calls instead of touching a real supervisor.
-
-    ``fail_restart``, when True, makes ``restart`` raise after recording the
-    call -- mirroring a real supervisor restart that fails, which the watchdog
-    must treat as "did not help" (retry), not give up.
-    """
-
-    calls: list[str] = Field(default_factory=list)
-    fail_restart: bool = Field(default=False)
-
-    def bounce(self) -> None:
-        self.calls.append("bounce")
-
-    def restart(self) -> None:
-        self.calls.append("restart")
-        if self.fail_restart:
-            raise LatchkeyError("simulated supervisor restart failure")
-
-
 def _make_watchdog(
-    clock: _Clock, remediator: _FakeRemediator
+    clock: ManualClock, remediator: RecordingProducerRemediator
 ) -> tuple[DiscoveryHealthWatchdog, list[DiscoveryHealth]]:
     watchdog = DiscoveryHealthWatchdog(
         remediator=remediator,
@@ -76,8 +41,8 @@ def _make_watchdog(
 
 
 def test_fresh_event_stays_healthy() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     watchdog.evaluate(_T0)
@@ -93,8 +58,8 @@ def test_fresh_event_stays_healthy_even_when_full_snapshot_is_stale() -> None:
     # keeps advancing) is alive and must not be remediated, even if it has not
     # completed a full re-poll for a while. The loop passes ``last_event_at``, so
     # a fresh event here stands in for "events flowing, full snapshot stale".
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     clock.advance(120)
@@ -106,8 +71,8 @@ def test_fresh_event_stays_healthy_even_when_full_snapshot_is_stale() -> None:
 
 
 def test_stall_enters_reconnecting_and_bounces_immediately() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     # Anchor a same-session event at T0 so the later stall ages from event time
@@ -124,8 +89,8 @@ def test_stall_enters_reconnecting_and_bounces_immediately() -> None:
 
 
 def test_remediation_bounces_then_restarts_on_growing_backoff_forever() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     # Anchor a same-session event at T0 so the later stall ages from event time
@@ -162,8 +127,8 @@ def test_remediation_bounces_then_restarts_on_growing_backoff_forever() -> None:
 
 
 def test_failed_restart_does_not_block_and_keeps_retrying() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator(fail_restart=True)
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator(fail_restart=True)
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     # Anchor a same-session event at T0 so the later stall ages from event time
@@ -192,8 +157,8 @@ def test_failed_restart_does_not_block_and_keeps_retrying() -> None:
 
 
 def test_recovery_mid_remediation_returns_to_healthy_and_resets() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     # Anchor a same-session event at T0 so the later stall ages from event time
@@ -223,8 +188,8 @@ def test_recovery_mid_remediation_returns_to_healthy_and_resets() -> None:
 
 
 def test_consumer_death_blocks_immediately_without_remediation() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     watchdog.record_consumer_death()
@@ -235,8 +200,8 @@ def test_consumer_death_blocks_immediately_without_remediation() -> None:
 
 
 def test_consumer_death_is_idempotent() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     watchdog.record_consumer_death()
@@ -246,8 +211,8 @@ def test_consumer_death_is_idempotent() -> None:
 
 
 def test_blocked_is_terminal_and_evaluate_is_a_no_op() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     # Force the terminal tier (consumer death), then a stale evaluate must not
@@ -262,8 +227,8 @@ def test_blocked_is_terminal_and_evaluate_is_a_no_op() -> None:
 
 
 def test_consumer_death_during_reconnecting_escalates_to_blocked() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     # Anchor a same-session event at T0 so the later stall ages from event time
@@ -280,8 +245,8 @@ def test_consumer_death_during_reconnecting_escalates_to_blocked() -> None:
 
 
 def test_cold_start_has_grace_then_stalls_when_no_first_event() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, _transitions = _make_watchdog(clock, remediator)
 
     # No event has ever arrived. The first evaluate anchors the baseline and is
@@ -304,8 +269,8 @@ def test_replayed_pre_watchdog_events_get_cold_start_grace_instead_of_immediate_
     # tick sampled mid-replay must not read that as a stall -- the resulting
     # bounce once SIGHUP'd the still-booting supervisor to death. Timestamps
     # predating the watchdog age from its start, like the no-event cold start.
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, transitions = _make_watchdog(clock, remediator)
 
     stale_replayed = _T0 - timedelta(hours=3)
@@ -329,8 +294,8 @@ def test_replayed_pre_watchdog_events_get_cold_start_grace_instead_of_immediate_
 
 
 def test_cold_start_that_never_recovers_keeps_retrying_without_blocking() -> None:
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, _transitions = _make_watchdog(clock, remediator)
 
     # Anchor the baseline (healthy), then never deliver a first event: the
@@ -357,8 +322,8 @@ def test_backoff_holds_at_cap_without_overflow_after_many_restarts() -> None:
     # raises OverflowError at count 1024 -- it is uncaught and would kill the
     # watchdog thread). Drive the counter well past that threshold and assert the
     # backoff stays at the cap and a stalled evaluate keeps remediating cleanly.
-    clock = _Clock(_T0)
-    remediator = _FakeRemediator()
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
     watchdog, _transitions = _make_watchdog(clock, remediator)
 
     # Anchor a same-session event at T0 so the stalled evaluate below ages from
@@ -379,3 +344,96 @@ def test_backoff_holds_at_cap_without_overflow_after_many_restarts() -> None:
     assert remediator.calls == ["restart"]
     assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
     assert watchdog._current_backoff_seconds() == _MAX_BACKOFF_SECONDS
+
+
+def test_a_long_sleep_is_not_read_as_a_stalled_producer() -> None:
+    """The first tick after the lid opens must not SIGHUP a producer that never stalled.
+
+    Both loops were frozen for the sleep, so the producer's silence was never
+    observed -- and the event it emitted before the machine went down describes
+    a world nobody has looked at since.
+    """
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
+    watchdog, transitions = _make_watchdog(clock, remediator)
+
+    watchdog.evaluate(_T0)
+
+    # A ten-minute sleep, ending now: far past the stall threshold, with the
+    # last event stamped before it began.
+    clock.advance(600)
+    woke_at = clock()
+    watchdog.evaluate(_T0, woke_at)
+
+    assert watchdog.get_health() is DiscoveryHealth.HEALTHY
+    assert remediator.calls == []
+    assert transitions == []
+
+
+def test_a_producer_that_is_still_dead_after_the_wake_grace_is_remediated() -> None:
+    """The wake buys a fresh grace period, not an exemption."""
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
+    watchdog, _transitions = _make_watchdog(clock, remediator)
+
+    watchdog.evaluate(_T0)
+    clock.advance(600)
+    woke_at = clock()
+    watchdog.evaluate(_T0, woke_at)
+
+    # A full stall threshold has now elapsed since the wake with nothing new
+    # from the producer, which is a stall this session actually watched.
+    clock.advance(_STALL_SECONDS + 5)
+    watchdog.evaluate(_T0, woke_at)
+
+    assert watchdog.get_health() is DiscoveryHealth.RECONNECTING
+    assert remediator.calls == ["bounce"]
+
+
+def test_a_wake_restarts_the_remediation_episode_at_the_cheap_bounce() -> None:
+    """A backoff whose waits elapsed while nothing was running has measured nothing.
+
+    Without this the first post-wake stall would resume mid-escalation and issue
+    a full supervisor restart -- re-provisioning every managed host -- for a
+    producer that has not been given one cheap re-kick since the machine woke.
+    """
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
+    watchdog, _transitions = _make_watchdog(clock, remediator)
+
+    # A genuine stall that escalates past the bounce into the restart backoff.
+    watchdog.evaluate(_T0)
+    clock.advance(40)
+    watchdog.evaluate(_T0)
+    clock.advance(_REMEDIATION_WAIT_SECONDS)
+    watchdog.evaluate(_T0)
+    assert remediator.calls == ["bounce", "restart"]
+
+    # The machine sleeps, then wakes; the producer is still silent afterwards.
+    clock.advance(600)
+    woke_at = clock()
+    watchdog.evaluate(_T0, woke_at)
+    clock.advance(_STALL_SECONDS + 5)
+    watchdog.evaluate(_T0, woke_at)
+
+    assert remediator.calls == ["bounce", "restart", "bounce"]
+
+
+def test_the_same_wake_reported_every_tick_resets_the_episode_only_once() -> None:
+    """The loop re-reads the last wake each tick; only a newer one is an event."""
+    clock = ManualClock(_T0)
+    remediator = RecordingProducerRemediator()
+    watchdog, _transitions = _make_watchdog(clock, remediator)
+
+    watchdog.evaluate(_T0)
+    clock.advance(600)
+    woke_at = clock()
+
+    # Past the wake's own grace, the producer's continued silence escalates
+    # normally even though every tick keeps reporting the same wake.
+    clock.advance(_STALL_SECONDS + 5)
+    watchdog.evaluate(_T0, woke_at)
+    clock.advance(_REMEDIATION_WAIT_SECONDS)
+    watchdog.evaluate(_T0, woke_at)
+
+    assert remediator.calls == ["bounce", "restart"]

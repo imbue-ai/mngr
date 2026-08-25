@@ -65,5 +65,6 @@ export function applySnapshotToStores(stores: AppStores, bootstrap: Pick<UiBoots
   stores.requests.applyRequestsMessage(snapshot.requests);
   stores.notifications.applyNotificationsMessage(snapshot.notifications);
   stores.health.applyDiscoveryHealthMessage(snapshot.discovery_health);
+  stores.health.applyEnvironmentMessage(snapshot.environment);
   for (const health of snapshot.health) stores.health.applyHealthMessage(health);
 }
