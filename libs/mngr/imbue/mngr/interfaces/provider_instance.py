@@ -17,6 +17,7 @@ from typing import TypeVar
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import PrivateAttr
 from pyinfra.api.host import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -321,6 +322,12 @@ def _discover_agents_on_host(
     # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
         agents = host.discover_agents(timeout_seconds=timeout_seconds)
+        # A successful live read is the one moment discovery can heal the
+        # provider's persisted agent store (e.g. records for agents created by
+        # an in-container bootstrap, which the client-side persist path never
+        # sees). Diff-gated, so this is free in the steady state.
+        if isinstance(host, OnlineHostInterface):
+            provider.heal_persisted_agent_data(host, agents, timeout_seconds=timeout_seconds)
         return agents, _ssh_info_from_host(host)
 
 
@@ -458,6 +465,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
     name: ProviderInstanceName = Field(frozen=True, description="Name of this provider instance")
     host_dir: Path = Field(frozen=True, description="Base directory for mngr data on hosts managed by this instance")
     mngr_ctx: MngrContext = Field(frozen=True, repr=False, description="The mngr context")
+    # Per-host live-agent-id sets from the last completed healing pass, so
+    # steady-state discovery (unchanged live agents) never re-reads the
+    # persisted store. See heal_persisted_agent_data.
+    _healed_live_agent_ids_by_host_id: dict[HostId, frozenset[AgentId]] = PrivateAttr(default_factory=dict)
 
     # =========================================================================
     # Capability Properties
@@ -1209,6 +1220,131 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         The default implementation is a no-op for providers that don't need this.
         """
+
+    @property
+    def is_agent_data_persistence_supported(self) -> bool:
+        """Whether this provider persists agent data for offline listing.
+
+        Providers that override the persisted-agent-data hooks
+        (``persist_agent_data``, ``remove_persisted_agent_data`` and
+        ``list_persisted_agent_data_for_host``) should return True so
+        discovery-time healing keeps the persisted store in sync with each
+        host's live agents. The default False keeps healing a no-op.
+        """
+        return False
+
+    def heal_persisted_agent_data(
+        self,
+        host: OnlineHostInterface,
+        live_agents: Sequence[DiscoveredAgent],
+        timeout_seconds: float | None = None,
+    ) -> None:
+        """Reconcile the persisted agent store with a host's live agent listing.
+
+        ``persist_agent_data`` is only invoked by the client-side mngr process
+        that creates or edits an agent, so agents created *inside* the host
+        (e.g. by an in-container bootstrap running ``mngr create`` against its
+        local provider) never reach the provider's persisted store -- any
+        offline listing then structurally misses them. Called by discovery
+        after a successful live agent read: persists live agents missing from
+        the store and removes records whose agents no longer exist.
+
+        Best-effort and diff-gated: when the live agent id set matches the last
+        healed set for this host, no store read happens at all, so steady-state
+        discovery stays read-only. Expected failure shapes (``MngrError``,
+        ``OSError``) are logged and swallowed so an environmental hiccup in
+        healing does not break discovery; anything else (a programming bug, a
+        raw provider-SDK error) still surfaces.
+
+        ``timeout_seconds`` bounds the pass's own live re-read the same way the
+        caller's listing was bounded (the per-host-bounded discovery path must
+        stay bounded through healing too).
+        """
+        if not self.is_agent_data_persistence_supported:
+            return
+        live_agent_ids = frozenset(agent.agent_id for agent in live_agents)
+        if self._healed_live_agent_ids_by_host_id.get(host.id) == live_agent_ids:
+            return
+        try:
+            self._reconcile_persisted_agent_data(host, live_agent_ids, timeout_seconds)
+        except (MngrError, OSError) as e:
+            logger.warning("Skipped persisted-agent healing for host {}: {}", host.id, e)
+
+    def _reconcile_persisted_agent_data(
+        self,
+        host: OnlineHostInterface,
+        live_agent_ids: frozenset[AgentId],
+        timeout_seconds: float | None,
+    ) -> None:
+        """Apply one healing pass; see :meth:`heal_persisted_agent_data`.
+
+        Deletion safety relies on strict ordering: read the persisted store,
+        probe the host lock, then re-read the live listing, and only delete
+        records absent from that *post-probe* listing. An in-flight create
+        holds the host lock across both its persisted write and its on-host
+        state write, so a held lock means "someone is mutating -- retry next
+        pass", and a free lock means any record without a matching live agent
+        in the post-probe listing is genuinely orphaned (its create crashed or
+        its agent is gone).
+        """
+        persisted_agent_ids: set[AgentId] = set()
+        for record in self.list_persisted_agent_data_for_host(host.id):
+            record_id = record.get("id")
+            if not record_id:
+                # persist_agent_data implementations refuse id-less data, so such
+                # a record is corrupt; healing can never reconcile or remove it,
+                # and a silent skip would leave it lingering with no signal.
+                logger.warning("Ignoring persisted agent record without an id field on host {}", host.id)
+                continue
+            try:
+                persisted_agent_ids.add(AgentId(str(record_id)))
+            except ValueError:
+                logger.warning("Ignoring persisted agent record with malformed id {!r} on host {}", record_id, host.id)
+
+        missing_agent_ids = live_agent_ids - persisted_agent_ids
+        stale_agent_ids = persisted_agent_ids - live_agent_ids
+        if not missing_agent_ids and not stale_agent_ids:
+            self._healed_live_agent_ids_by_host_id[host.id] = live_agent_ids
+            return
+
+        # A held lock means a create/start/gc (possibly running inside the
+        # host) is mutating agent state right now; skip without caching so the
+        # next discovery pass retries.
+        if host.is_lock_held():
+            logger.debug("Skipped persisted-agent healing for host {}: host lock is held", host.id)
+            return
+
+        # Re-read the live listing after the probe: a create that finished
+        # before the probe released the lock only after its on-host state write
+        # completed, so its agent is guaranteed to appear here. The decisions
+        # below are recomputed against this post-probe listing (not the
+        # pre-probe one) so the store ends up consistent with exactly the set
+        # that gets cached -- otherwise an agent that appeared (or vanished)
+        # between the two listings would never be healed, because the next
+        # pass's live listing would match the cache and skip.
+        fresh_agent_by_id = {agent.agent_id: agent for agent in host.discover_agents(timeout_seconds=timeout_seconds)}
+        fresh_agent_ids = frozenset(fresh_agent_by_id)
+
+        for agent_id in sorted(fresh_agent_ids - persisted_agent_ids):
+            fresh_agent = fresh_agent_by_id[agent_id]
+            if not fresh_agent.certified_data.get("id"):
+                # persist_agent_data implementations refuse data without an id,
+                # so skip -- but loudly, or the agent silently never reaches the
+                # persisted store (the healed-set cache masks the skip afterward).
+                logger.warning(
+                    "Not persisting live agent {} on host {}: its certified data has no id field", agent_id, host.id
+                )
+                continue
+            logger.debug("Healing persisted store: persisting live agent {} on host {}", agent_id, host.id)
+            self.persist_agent_data(host.id, dict(fresh_agent.certified_data))
+
+        for agent_id in sorted(persisted_agent_ids - fresh_agent_ids):
+            logger.debug(
+                "Healing persisted store: removing orphaned record for agent {} on host {}", agent_id, host.id
+            )
+            self.remove_persisted_agent_data(host.id, agent_id)
+
+        self._healed_live_agent_ids_by_host_id[host.id] = fresh_agent_ids
 
     # =========================================================================
     # Outer Host Access

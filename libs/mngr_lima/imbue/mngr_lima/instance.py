@@ -303,7 +303,10 @@ class LimaProviderInstance(BaseProviderInstance):
     @cached_property
     def _host_store(self) -> LimaHostStore:
         """Host record store backed by the state volume."""
-        return LimaHostStore(volume=self._state_volume)
+        return LimaHostStore(
+            volume=self._state_volume,
+            is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
+        )
 
     # =========================================================================
     # Volume Helpers
@@ -1603,6 +1606,10 @@ sudo poweroff
     # =========================================================================
     # Agent Data Persistence
     # =========================================================================
+
+    @property
+    def is_agent_data_persistence_supported(self) -> bool:
+        return True
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict[str, Any]]:
         return self._host_store.list_persisted_agent_data_for_host(host_id)

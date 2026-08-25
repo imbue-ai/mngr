@@ -1,9 +1,11 @@
 """Tests for ProviderInstanceInterface default method implementations."""
 
 import threading
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -985,3 +987,269 @@ def test_discover_within_timeouts_harvests_late_finished_read_on_next_poll(
         registry=registry,
     )
     assert provider.read_count_for_host(host.host_id) == 2
+
+
+# =============================================================================
+# Persisted-agent healing (heal_persisted_agent_data)
+# =============================================================================
+
+
+class _HealingStubHost:
+    """Duck-typed ``OnlineHostInterface`` stand-in for healing tests.
+
+    Healing only touches ``id``, ``is_lock_held()`` and ``discover_agents()``,
+    so a full interface implementation would be pure boilerplate; call sites
+    ``cast`` it (same pattern as the destroy CLI's stub host tests).
+    """
+
+    def __init__(
+        self,
+        host_id: HostId,
+        fresh_agents: list[DiscoveredAgent],
+        is_lock_held: bool,
+    ) -> None:
+        self.id = host_id
+        self.fresh_agents = list(fresh_agents)
+        self.is_lock_held_value = is_lock_held
+        self.lock_probe_count = 0
+        self.discover_timeouts: list[float | None] = []
+
+    def is_lock_held(self) -> bool:
+        self.lock_probe_count += 1
+        return self.is_lock_held_value
+
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
+        self.discover_timeouts.append(timeout_seconds)
+        return list(self.fresh_agents)
+
+
+class _HealingRecordingProvider(MockProviderInstance):
+    """MockProviderInstance that supports persistence and records healing writes."""
+
+    persisted_agent_data_calls: list[tuple[HostId, dict]] = Field(default_factory=list)
+    removed_agent_ids: list[tuple[HostId, AgentId]] = Field(default_factory=list)
+    persisted_list_read_count: int = Field(default=0)
+
+    @property
+    def is_agent_data_persistence_supported(self) -> bool:
+        return True
+
+    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
+        self.persisted_list_read_count += 1
+        return [dict(record) for record in self.mock_agent_data]
+
+    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
+        self.persisted_agent_data_calls.append((host_id, dict(agent_data)))
+
+    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
+        self.removed_agent_ids.append((host_id, agent_id))
+
+
+def _make_live_agent(host_id: HostId, provider_name: ProviderInstanceName) -> DiscoveredAgent:
+    agent_id = AgentId.generate()
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName(f"agent-{agent_id}"),
+        provider_name=provider_name,
+        certified_data={"id": str(agent_id), "name": f"agent-{agent_id}", "work_dir": "/tmp/test"},
+    )
+
+
+def _make_healing_provider(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    persisted_records: list[dict],
+) -> _HealingRecordingProvider:
+    return _HealingRecordingProvider(
+        name=ProviderInstanceName("test"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_agent_data=persisted_records,
+    )
+
+
+def test_heal_persists_live_agents_missing_from_the_store(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A live agent absent from the persisted store (e.g. bootstrap-created) gets persisted."""
+    provider = _make_healing_provider(temp_host_dir, temp_mngr_ctx, persisted_records=[])
+    live_agent = _make_live_agent(host_id, provider.name)
+    host = _HealingStubHost(host_id, fresh_agents=[live_agent], is_lock_held=False)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [live_agent])
+
+    assert provider.persisted_agent_data_calls == [(host_id, dict(live_agent.certified_data))]
+    assert provider.removed_agent_ids == []
+
+
+def test_heal_is_read_only_once_live_set_matches_last_healed(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """After a completed pass, an unchanged live set skips even the persisted-store read."""
+    provider = _make_healing_provider(temp_host_dir, temp_mngr_ctx, persisted_records=[])
+    live_agent = _make_live_agent(host_id, provider.name)
+    host = _HealingStubHost(host_id, fresh_agents=[live_agent], is_lock_held=False)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [live_agent])
+    reads_after_first_pass = provider.persisted_list_read_count
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [live_agent])
+
+    assert reads_after_first_pass == 1
+    assert provider.persisted_list_read_count == reads_after_first_pass
+    assert len(provider.persisted_agent_data_calls) == 1
+
+
+def test_heal_removes_records_for_agents_that_no_longer_exist(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A persisted record with no matching live agent (post-probe) is deleted."""
+    orphan_agent_id = AgentId.generate()
+    provider = _make_healing_provider(temp_host_dir, temp_mngr_ctx, persisted_records=[{"id": str(orphan_agent_id)}])
+    host = _HealingStubHost(host_id, fresh_agents=[], is_lock_held=False)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [])
+
+    assert provider.removed_agent_ids == [(host_id, orphan_agent_id)]
+    assert provider.persisted_agent_data_calls == []
+
+
+def test_heal_warns_about_persisted_record_without_an_id(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """An id-less persisted record (corrupt: writers refuse id-less data) is skipped loudly, not removed."""
+    provider = _make_healing_provider(temp_host_dir, temp_mngr_ctx, persisted_records=[{"name": "no-id-record"}])
+    # A live agent missing from the store triggers the reconcile pass; the
+    # id-less record itself is invisible to the diff.
+    live_agent = _make_live_agent(host_id, provider.name)
+    host = _HealingStubHost(host_id, fresh_agents=[live_agent], is_lock_held=False)
+
+    with capture_loguru() as log_output:
+        provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [live_agent])
+
+    assert "persisted agent record without an id field" in log_output.getvalue()
+    assert provider.removed_agent_ids == []
+
+
+def test_heal_skips_all_writes_while_host_lock_is_held_and_retries_next_pass(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A held host lock means an in-flight mutation; healing stands down and retries later."""
+    orphan_agent_id = AgentId.generate()
+    provider = _make_healing_provider(temp_host_dir, temp_mngr_ctx, persisted_records=[{"id": str(orphan_agent_id)}])
+    host = _HealingStubHost(host_id, fresh_agents=[], is_lock_held=True)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [])
+    assert provider.removed_agent_ids == []
+    assert provider.persisted_agent_data_calls == []
+
+    # The skipped pass must not be cached as healed: once the lock frees, the
+    # next pass re-reads the store and applies the deletion.
+    host.is_lock_held_value = False
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [])
+    assert provider.persisted_list_read_count == 2
+    assert provider.removed_agent_ids == [(host_id, orphan_agent_id)]
+
+
+def test_heal_keeps_record_when_agent_appears_in_post_probe_listing(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Deletion is decided against the post-probe listing, so a just-finished create's agent survives."""
+    live_agent = _make_live_agent(host_id, ProviderInstanceName("test"))
+    provider = _make_healing_provider(
+        temp_host_dir, temp_mngr_ctx, persisted_records=[{"id": str(live_agent.agent_id)}]
+    )
+    # The initial listing missed the agent (raced with its create), but the
+    # post-probe re-read sees it -- the record must NOT be deleted.
+    host = _HealingStubHost(host_id, fresh_agents=[live_agent], is_lock_held=False)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [])
+
+    assert provider.removed_agent_ids == []
+
+
+def test_heal_applies_writes_from_the_post_probe_listing_not_the_initial_one(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The pass heals against the post-probe listing, so the cached set matches the store.
+
+    An agent that appears only in the post-probe listing (its create finished
+    between the two listings) must be persisted, and a record whose agent was
+    in the initial listing but is gone by the post-probe one must be removed --
+    otherwise the cached fresh set would claim a consistency the store doesn't
+    have, and the next (matching) pass would skip the healing forever.
+    """
+    raced_create_agent = _make_live_agent(host_id, ProviderInstanceName("test"))
+    raced_destroy_agent = _make_live_agent(host_id, ProviderInstanceName("test"))
+    # The store holds only the destroyed agent's record; a third orphan record
+    # triggers the reconcile pass (the raced agents alone would not, since the
+    # initial listing has no diff involving them).
+    orphan_agent_id = AgentId.generate()
+    provider = _make_healing_provider(
+        temp_host_dir,
+        temp_mngr_ctx,
+        persisted_records=[{"id": str(raced_destroy_agent.agent_id)}, {"id": str(orphan_agent_id)}],
+    )
+    # Initial listing: the destroyed agent still shows; the created agent does
+    # not yet. Post-probe listing: the created agent shows; the destroyed one
+    # is gone.
+    host = _HealingStubHost(host_id, fresh_agents=[raced_create_agent], is_lock_held=False)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [raced_destroy_agent])
+
+    assert provider.persisted_agent_data_calls == [(host_id, dict(raced_create_agent.certified_data))]
+    assert sorted(provider.removed_agent_ids) == sorted(
+        [(host_id, raced_destroy_agent.agent_id), (host_id, orphan_agent_id)]
+    )
+    # The cached set now truly reflects the store: a follow-up pass with the
+    # post-probe set as the live listing is a no-op (no store re-read).
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [raced_create_agent])
+    assert provider.persisted_list_read_count == 1
+
+
+def test_heal_bounds_the_post_probe_listing_with_the_discovery_timeout(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The healing re-read inherits the caller's per-host read bound, so bounded discovery stays bounded."""
+    orphan_agent_id = AgentId.generate()
+    provider = _make_healing_provider(temp_host_dir, temp_mngr_ctx, persisted_records=[{"id": str(orphan_agent_id)}])
+    host = _HealingStubHost(host_id, fresh_agents=[], is_lock_held=False)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [], timeout_seconds=7.5)
+
+    assert host.discover_timeouts == [7.5]
+
+
+def test_heal_is_a_noop_for_providers_without_persisted_agent_data(
+    host_id: HostId, provider: MockProviderInstance
+) -> None:
+    """The default provider (no persistence support) never probes the lock or reads the store."""
+    live_agent = _make_live_agent(host_id, provider.name)
+    host = _HealingStubHost(host_id, fresh_agents=[live_agent], is_lock_held=False)
+
+    provider.heal_persisted_agent_data(cast(OnlineHostInterface, host), [live_agent])
+
+    assert host.lock_probe_count == 0
+
+
+def test_discover_agents_on_host_triggers_healing_for_online_hosts(
+    host_id: HostId, temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Discovery's per-host agent read heals the persisted store from its live listing.
+
+    Covers the wiring in ``_discover_agents_on_host`` (including its
+    ``isinstance(host, OnlineHostInterface)`` gate): if healing silently
+    stopped firing during discovery, bootstrap-created agents would never
+    reach the persisted store again.
+    """
+    provider = _make_healing_provider(temp_host_dir, temp_mngr_ctx, persisted_records=[])
+    live_agent = _make_live_agent(host_id, provider.name)
+    mock_host = _make_mock_online_host(host_id)
+    mock_host.discover_agents.return_value = [live_agent]
+    provider.mock_hosts = [mock_host]
+
+    agents, ssh_info = _discover_agents_on_host(provider, host_id)
+
+    assert agents == [live_agent]
+    assert ssh_info is None
+    assert provider.persisted_agent_data_calls == [(host_id, dict(live_agent.certified_data))]

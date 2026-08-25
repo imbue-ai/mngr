@@ -37,6 +37,7 @@ from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import DockerGvisorEphemeralRootfsError
 from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotNotFoundError
@@ -466,7 +467,10 @@ class DockerProviderInstance(BaseProviderInstance):
     @cached_property
     def _host_store(self) -> DockerHostStore:
         """Get the host record store backed by the state volume."""
-        return DockerHostStore(volume=self._state_volume)
+        return DockerHostStore(
+            volume=self._state_volume,
+            is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
+        )
 
     @property
     def _keys_dir(self) -> Path:
@@ -2137,6 +2141,11 @@ kill -TERM 1
                         if host_obj is not None:
                             hosts_with_state.append((host_obj, HostState.RUNNING))
                             continue
+                    except HostRecordUnreadableError:
+                        # Strict parsing: a running container with an unreadable
+                        # record must fail discovery loudly, not degrade to the
+                        # stale offline view below.
+                        raise
                     except (KeyError, ValueError, MngrError) as e:
                         logger.warning("Failed to create host from container {}: {}", host_id, e)
 
@@ -2167,6 +2176,10 @@ kill -TERM 1
                     host_obj = self._create_host_from_container(container)
                     if host_obj is not None:
                         hosts_with_state.append((host_obj, HostState.RUNNING))
+                except HostRecordUnreadableError:
+                    # Strict parsing: a running container with an unreadable
+                    # record must fail discovery loudly, not silently vanish.
+                    raise
                 except (KeyError, ValueError, MngrError) as e:
                     logger.warning("Failed to create host from container {}: {}", host_id, e)
 
@@ -2499,6 +2512,10 @@ kill -TERM 1
     # =========================================================================
     # Agent Data Persistence
     # =========================================================================
+
+    @property
+    def is_agent_data_persistence_supported(self) -> bool:
+        return True
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict[str, Any]]:
         """List persisted agent data for a stopped host."""

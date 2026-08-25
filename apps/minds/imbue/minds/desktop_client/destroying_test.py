@@ -1,9 +1,9 @@
 """Unit tests for the detached destroy lifecycle.
 
-We avoid actually invoking ``mngr destroy`` -- the bash command the spawn
-helper builds is exercised by replacing the binary at the call boundary
-with a tiny shell script that writes to stdout/stderr and exits 0 or 1.
-That gives us deterministic coverage of the pid + log + host_id capture and
+We avoid actually invoking ``mngr destroy`` -- the argv the spawn helper
+builds is exercised by replacing the binary at the call boundary with a
+tiny shell script that writes to stdout/stderr and exits 0 or 1. That
+gives us deterministic coverage of the pid + log + host_id capture and
 the status table without any live mngr state.
 """
 
@@ -56,8 +56,9 @@ def _wait_for_pid_exit(pid: int, timeout: float = 5.0, poll: float = 0.05) -> bo
 def _make_fake_mngr(tmp_path: Path, exit_code: int, stdout: str = "", stderr: str = "") -> Path:
     """Write a tiny bash script that pretends to be ``mngr`` and exits with ``exit_code``.
 
-    The destroy command (``mngr list ... | mngr destroy -f -``) ends up running
-    this binary, which is enough for the destroy helper's contract.
+    The destroy command (``mngr destroy @<host_id>.<provider> --force``, or
+    the bare host id without a provider) ends up running this binary, which is
+    enough for the destroy helper's contract.
 
     stdout/stderr are passed through ``printf '%b'`` so that ``\\n`` in the
     Python string is interpreted as a real newline by bash (rather than a
@@ -86,16 +87,26 @@ def _path_with_fake_mngr(fake_bin: Path) -> dict[str, str]:
     return env
 
 
-def test_build_destroy_command_fans_out_over_the_whole_host() -> None:
+def test_build_destroy_command_targets_the_whole_host_via_its_provider() -> None:
     host_id = HostId.generate()
-    command = _build_destroy_command(host_id)
-    assert command[0] == "bash"
-    assert command[1] == "-c"
-    # Pipe-fanout shape: list every agent on the host | destroy -f -. There is
-    # deliberately no single-agent path, so destroying a minds workspace tears
-    # down the whole host (workspace agent + system-services).
-    assert f'host.id == "{host_id}"' in command[2]
-    assert "destroy -f -" in command[2]
+    command = _build_destroy_command(host_id, provider_name="imbue_cloud")
+    # Whole-host shape: the host itself is the destroy target, so teardown
+    # completeness does not depend on an agent-listing snapshot being complete
+    # at that moment. There is deliberately no single-agent path, so destroying
+    # a minds workspace tears down the whole host (workspace agent +
+    # system-services). The @id.provider address (the startup reconcile's
+    # shape) scopes resolution to the owning provider; --force keeps a retry
+    # idempotent when the host is already gone.
+    assert command == ["mngr", "destroy", f"@{host_id}.imbue_cloud", "--force"]
+
+
+def test_build_destroy_command_falls_back_to_bare_host_id_without_provider() -> None:
+    host_id = HostId.generate()
+    command = _build_destroy_command(host_id, provider_name=None)
+    # Without a recorded provider (discovery did not report one), the bare
+    # host-<hex> address still targets the whole host, resolving across all
+    # providers.
+    assert command == ["mngr", "destroy", str(host_id), "--force"]
 
 
 def test_start_destroy_writes_pid_log_and_host_id(tmp_path: Path) -> None:
@@ -260,7 +271,7 @@ def test_read_destroying_status_done_when_pid_dead_and_host_gone(tmp_path: Path)
 
 
 def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_path: Path) -> None:
-    """The exact silent-orphan bug: the wrapper exited but the host is still up.
+    """The exact silent-orphan bug: the destroy process exited but the host is still up.
 
     Models a destroy that tore down only the machine agent (or otherwise
     failed) while the host kept running -- it must read as FAILED, not DONE, so

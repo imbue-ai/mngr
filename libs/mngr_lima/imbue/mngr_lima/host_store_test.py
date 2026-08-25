@@ -3,6 +3,9 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import pytest
+
+from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -57,6 +60,55 @@ def test_write_and_read_host_record(tmp_path: Path) -> None:
 def test_read_nonexistent_record(tmp_path: Path) -> None:
     store = _make_store(tmp_path)
     assert store.read_host_record(HostId.generate()) is None
+
+
+@pytest.mark.allow_warnings(match=r"^Failed to parse host record host_state")
+def test_read_corrupt_record_reads_as_missing_by_default(tmp_path: Path) -> None:
+    """Default (non-strict) behavior: an unparseable record is treated like an absent one."""
+    store = _make_store(tmp_path)
+    host_id = HostId.generate()
+    store.volume.write_files({f"host_state/{host_id}.json": b"not valid json {{{"})
+
+    assert store.read_host_record(host_id, use_cache=False) is None
+
+
+def test_read_corrupt_record_raises_in_strict_mode(tmp_path: Path) -> None:
+    """Strict parsing distinguishes corrupt from absent: corrupt raises, absent stays None."""
+    store = LimaHostStore(volume=LocalVolume(root_path=tmp_path), is_strict_parsing=True)
+    host_id = HostId.generate()
+    store.volume.write_files({f"host_state/{host_id}.json": b"not valid json {{{"})
+
+    with pytest.raises(HostRecordUnreadableError, match=str(host_id)):
+        store.read_host_record(host_id, use_cache=False)
+    assert store.read_host_record(HostId.generate(), use_cache=False) is None
+
+
+def test_read_host_record_recovers_when_torn_write_completes_before_retries_exhaust(tmp_path: Path) -> None:
+    """A torn (empty) read heals via retry: the re-read picks up the completed write."""
+    volume = _HealingReadVolume(root_path=tmp_path)
+    store = LimaHostStore(volume=volume, is_strict_parsing=True)
+    host_id = HostId.generate()
+    store.write_host_record(HostRecord(certified_host_data=_make_certified_data(host_id)))
+    store.clear_cache()
+
+    # First read returns b"" (a torn mid-write observation); the retry re-reads
+    # the real content, so even strict mode sees a valid record.
+    volume.torn_reads_remaining = 1
+    result = store.read_host_record(host_id, use_cache=False)
+    assert result is not None
+    assert result.certified_host_data.host_id == str(host_id)
+
+
+class _HealingReadVolume(LocalVolume):
+    """LocalVolume whose next ``torn_reads_remaining`` reads observe an empty file."""
+
+    torn_reads_remaining: int = 0
+
+    def read_file(self, path: str) -> bytes:
+        if self.torn_reads_remaining > 0:
+            self.torn_reads_remaining -= 1
+            return b""
+        return super().read_file(path)
 
 
 def test_delete_host_record(tmp_path: Path) -> None:

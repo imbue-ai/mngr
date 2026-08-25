@@ -1005,10 +1005,14 @@ def _destroy_emptied_hosts(
             )
             continue
         if remaining:
-            logger.debug(
-                "Host {} still has {} agent(s) after destroy; leaving host alive",
+            # In a partial-teardown incident this line is the clearest signal that a
+            # destroy left the host (and its billing resources) alive, so it must be
+            # loud and name exactly which agents kept the host up.
+            logger.warning(
+                "Host {} still has {} agent(s) after destroy; leaving host alive. Remaining: {}",
                 host_name,
                 len(remaining),
+                ", ".join(f"{agent.name} ({agent.id})" for agent in remaining),
             )
             continue
         try:

@@ -547,6 +547,13 @@ class MngrConfig(FrozenModel):
             "operations; configs written for tests set this to True to opt in."
         ),
     )
+    strict_host_record_parsing: bool = Field(
+        default=False,
+        description="When true, a host record that exists on a provider's state store but cannot be parsed "
+        "(after retries) raises an error instead of being treated as missing. The default (false) logs a "
+        "warning and treats the record as missing, which keeps discovery and destroy working around a "
+        "corrupt record at the cost of that host silently dropping out of listings.",
+    )
     default_destroyed_host_persisted_seconds: float = Field(
         default=_DEFAULT_DESTROYED_HOST_PERSISTED_SECONDS,
         description="Default number of seconds a destroyed host's records are kept before permanent deletion. "

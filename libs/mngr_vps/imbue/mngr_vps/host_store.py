@@ -8,10 +8,15 @@ from typing import Final
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
+from tenacity import retry
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_fixed
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostConfig
@@ -141,6 +146,12 @@ class VpsHostStore(MutableModel):
             "store directory for the bare realizer."
         ),
     )
+    is_strict_parsing: bool = Field(
+        default=False,
+        frozen=True,
+        description="When True, an unparseable host record raises HostRecordUnreadableError "
+        "(after retries) instead of being treated as missing",
+    )
 
     @property
     def _host_state_path(self) -> Path:
@@ -154,10 +165,33 @@ class VpsHostStore(MutableModel):
         return self._agents_dir / f"{agent_id}.json"
 
     def write_host_record(self, host_record: VpsHostRecord) -> None:
-        """Write the host record to the unified volume."""
+        """Write the host record to the unified volume.
+
+        Atomic (temp file + rename) so a concurrent reader -- e.g. a discovery
+        pass on another mngr client -- never observes a torn (empty / partial)
+        record.
+        """
         data = host_record.model_dump_json(indent=2)
-        self.outer.write_text_file(self._host_state_path, data)
+        self.outer.write_file(self._host_state_path, data.encode("utf-8"), is_atomic=True)
         logger.trace("Wrote host record at {}", self._host_state_path)
+
+    @retry(
+        retry=retry_if_exception_type(ValueError),
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(0.2),
+        reraise=True,
+    )
+    def _read_and_validate_host_record(self, path: Path) -> VpsHostRecord:
+        """Read and parse the record, re-reading on parse failure.
+
+        A parse failure can be a torn read of a mid-write record (writers that
+        predate atomic record writes truncate in place), so the whole
+        read-then-parse is retried: the re-read picks up the completed write.
+        Both json.JSONDecodeError and pydantic's ValidationError are ValueError
+        subclasses, so retrying on ValueError covers every parse-failure shape.
+        """
+        data = self.outer.read_text_file(path)
+        return VpsHostRecord.model_validate_json(data)
 
     def read_host_record(self) -> VpsHostRecord | None:
         """Read the host record from the unified volume. Returns None if not present.
@@ -171,22 +205,32 @@ class VpsHostStore(MutableModel):
         guards in callers like ``_read_records_from_vps`` can log a warning
         and fall back to cached records instead of letting the host silently
         disappear from the listing.
+
+        A record that exists but cannot be parsed (after retries) is distinct
+        from an absent one: with strict parsing enabled it raises
+        HostRecordUnreadableError; otherwise it logs a warning and reads as
+        missing.
         """
         path = self._host_state_path
         if not self.outer.path_exists(path):
             return None
         try:
-            data = self.outer.read_text_file(path)
+            return self._read_and_validate_host_record(path)
         except OSError as e:
             # File raced from under us between path_exists and read
             # (FileNotFoundError) or a local-outer raised some other
             # OSError. Treat as "missing".
             logger.debug("Host record at {} not readable: {}", path, e)
             return None
-        try:
-            return VpsHostRecord.model_validate_json(data)
         except (json.JSONDecodeError, ValueError) as e:
-            logger.warning("Failed to parse host record at {}: {}", path, e)
+            if self.is_strict_parsing:
+                raise HostRecordUnreadableError(str(path), e) from e
+            logger.warning(
+                "Failed to parse host record at {} after retries; treating as missing "
+                "(set strict_host_record_parsing=true to fail loudly instead): {}",
+                path,
+                e,
+            )
             return None
 
     def delete_host_record(self) -> None:
@@ -201,7 +245,10 @@ class VpsHostStore(MutableModel):
         )
 
     def persist_agent_data(self, agent_data: Mapping[str, object]) -> None:
-        """Write agent data for offline listing."""
+        """Write agent data for offline listing.
+
+        Atomic for the same reason as :meth:`write_host_record`.
+        """
         agent_id_value = agent_data.get("id")
         if not agent_id_value:
             logger.warning("Cannot persist agent data without id field")
@@ -209,7 +256,7 @@ class VpsHostStore(MutableModel):
 
         path = self._agent_data_path(AgentId(str(agent_id_value)))
         data = json.dumps(dict(agent_data), indent=2)
-        self.outer.write_text_file(path, data)
+        self.outer.write_file(path, data.encode("utf-8"), is_atomic=True)
         logger.trace("Persisted agent data at {}", path)
 
     def list_persisted_agent_data(self) -> list[dict[str, Any]]:
@@ -265,7 +312,7 @@ class VpsHostStore(MutableModel):
             logger.warning("Failed to remove agent data {}: {}", path, e)
 
 
-def open_host_store(outer: OuterHostInterface, volume_name: str) -> VpsHostStore:
+def open_host_store(outer: OuterHostInterface, volume_name: str, is_strict_parsing: bool = False) -> VpsHostStore:
     """Resolve ``volume_name``'s bind-source path on ``outer`` and bind a store to it.
 
     The store's underlying directory is the btrfs subvolume the docker volume's
@@ -277,4 +324,4 @@ def open_host_store(outer: OuterHostInterface, volume_name: str) -> VpsHostStore
     does not carry the expected bind options.
     """
     device_path = resolve_volume_device(outer, volume_name)
-    return VpsHostStore(outer=outer, mountpoint=device_path)
+    return VpsHostStore(outer=outer, mountpoint=device_path, is_strict_parsing=is_strict_parsing)

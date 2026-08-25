@@ -2414,10 +2414,14 @@ version = "0.1.10"
 source = { editable = "libs/mngr_vps" }
 dependencies = [
     { name = "imbue-mngr" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "tenacity", specifier = ">=8.0" },
+]
 
 [[package]]
 name = "imbue-mngr-vultr"

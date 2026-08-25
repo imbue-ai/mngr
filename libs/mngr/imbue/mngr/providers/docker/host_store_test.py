@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import AgentId
@@ -190,7 +191,7 @@ def test_list_all_host_records_returns_all_records(store: DockerHostStore) -> No
     assert host_ids == {HOST_ID_A, HOST_ID_B}
 
 
-@pytest.mark.allow_warnings(match=r"^Failed to read host record host_state")
+@pytest.mark.allow_warnings(match=r"^Failed to parse host record host_state")
 def test_list_all_host_records_skips_corrupt_files(store: DockerHostStore, tmp_path: Path) -> None:
     record = _make_host_record(host_id=HOST_ID_A, host_name="valid")
     store.write_host_record(record)
@@ -201,6 +202,56 @@ def test_list_all_host_records_skips_corrupt_files(store: DockerHostStore, tmp_p
     results = store.list_all_host_records()
     assert len(results) == 1
     assert results[0].certified_host_data.host_id == HOST_ID_A
+
+
+@pytest.mark.allow_warnings(match=r"^Failed to parse host record host_state")
+def test_read_host_record_corrupt_reads_as_missing_by_default(store: DockerHostStore) -> None:
+    """Default (non-strict) behavior: an unparseable record is treated like an absent one."""
+    store.volume.write_files({f"host_state/{HOST_ID_A}.json": b"not valid json {{{"})
+
+    assert store.read_host_record(HostId(HOST_ID_A), use_cache=False) is None
+
+
+def test_read_host_record_corrupt_raises_in_strict_mode(tmp_path: Path) -> None:
+    """Strict parsing distinguishes corrupt from absent: corrupt raises, absent stays None."""
+    volume = LocalVolume(root_path=tmp_path / "docker-store")
+    strict_store = DockerHostStore(volume=volume, is_strict_parsing=True)
+    strict_store.volume.write_files({f"host_state/{HOST_ID_A}.json": b"not valid json {{{"})
+
+    with pytest.raises(HostRecordUnreadableError, match=str(HOST_ID_A)):
+        strict_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    # An absent record is still "missing", not an error, even in strict mode.
+    assert strict_store.read_host_record(HostId(HOST_ID_B), use_cache=False) is None
+
+
+def test_read_host_record_recovers_when_torn_write_completes_before_retries_exhaust(
+    tmp_path: Path,
+) -> None:
+    """A torn (empty) read heals via retry: the re-read picks up the completed write."""
+    volume = _HealingReadVolume(root_path=tmp_path / "docker-store")
+    store = DockerHostStore(volume=volume, is_strict_parsing=True)
+    record = _make_host_record(host_id=HOST_ID_A)
+    store.write_host_record(record)
+    store.clear_cache()
+
+    # First read returns b"" (a torn mid-write observation); the retry re-reads
+    # the real content, so even strict mode sees a valid record.
+    volume.torn_reads_remaining = 1
+    result = store.read_host_record(HostId(HOST_ID_A), use_cache=False)
+    assert result is not None
+    assert result.certified_host_data.host_id == HOST_ID_A
+
+
+class _HealingReadVolume(LocalVolume):
+    """LocalVolume whose next ``torn_reads_remaining`` reads observe an empty file."""
+
+    torn_reads_remaining: int = 0
+
+    def read_file(self, path: str) -> bytes:
+        if self.torn_reads_remaining > 0:
+            self.torn_reads_remaining -= 1
+            return b""
+        return super().read_file(path)
 
 
 def test_persist_agent_data(store: DockerHostStore) -> None:

@@ -1,0 +1,1 @@
+Documented how `ModalVolume.write_files` satisfies the strengthened per-file atomic-visibility contract on `Volume.write_files` (introduced by the robustness fixes from the 2026-07-14 partial workspace-destroy incident): modal's batched upload commits files as a unit, so concurrent readers never observe a torn (empty / partial) record. No behavior change.

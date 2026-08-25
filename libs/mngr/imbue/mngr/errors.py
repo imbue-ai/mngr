@@ -113,6 +113,27 @@ class CorruptedAgentDataError(HostError):
         super().__init__("Agent {} has corrupted data at {}: {}".format(agent_id, data_path, parse_error))
 
 
+class HostRecordUnreadableError(HostError):
+    """Raised when a host record exists on a state store but cannot be parsed, after retries.
+
+    Distinct from "no record" (which reads as None): a running host whose record
+    is unreadable must not silently vanish from discovery or degrade to stale
+    offline data. Only raised when strict host record parsing is enabled
+    (``strict_host_record_parsing`` in the mngr config); the default behavior
+    logs a warning and treats the record as missing.
+
+    Deliberately NOT a ValueError subclass, so the broad parse-error catches
+    around record reads cannot swallow it back into the "missing" path.
+    """
+
+    def __init__(self, record_path: str, parse_error: Exception) -> None:
+        self.record_path = record_path
+        super().__init__(
+            f"Host record at {record_path} exists but cannot be parsed (after retries): {parse_error}\n"
+            f"The record may be corrupt. Inspect (and repair or delete) the file to recover."
+        )
+
+
 class HostDataSchemaError(HostError):
     """Raised when host data.json has an incompatible schema.
 

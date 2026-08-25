@@ -6,9 +6,14 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
+from tenacity import retry
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_fixed
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import FileType
@@ -110,6 +115,12 @@ class DockerHostStore(MutableModel):
     """
 
     volume: Volume = Field(frozen=True, description="Volume for storing host state")
+    is_strict_parsing: bool = Field(
+        default=False,
+        frozen=True,
+        description="When True, an unparseable host record raises HostRecordUnreadableError "
+        "(after retries) instead of being treated as missing",
+    )
     _cache: dict[HostId, HostRecord] = PrivateAttr(default_factory=dict)
 
     def _host_record_path(self, host_id: HostId) -> str:
@@ -132,22 +143,52 @@ class DockerHostStore(MutableModel):
         logger.trace("Wrote host record: {}", path)
         self._cache[host_id] = host_record
 
+    @retry(
+        retry=retry_if_exception_type(ValueError),
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(0.2),
+        reraise=True,
+    )
+    def _read_and_validate_host_record(self, path: str) -> HostRecord:
+        """Read and parse a record, re-reading on parse failure.
+
+        A parse failure can be a torn read of a mid-write record (writers that
+        predate atomic record writes truncate in place), so the whole
+        read-then-parse is retried: the re-read picks up the completed write.
+        Both json.JSONDecodeError and pydantic's ValidationError are ValueError
+        subclasses, so retrying on ValueError covers every parse-failure shape.
+        """
+        data = self.volume.read_file(path)
+        return HostRecord.model_validate_json(data)
+
     def read_host_record(self, host_id: HostId, use_cache: bool = True) -> HostRecord | None:
-        """Read a host record from the volume. Returns None if not found."""
+        """Read a host record from the volume. Returns None if not found.
+
+        A record that exists but cannot be parsed (after retries) is distinct
+        from an absent one: with strict parsing enabled it raises
+        HostRecordUnreadableError; otherwise it logs a warning and reads as
+        missing (which can make a live host silently drop out of listings).
+        """
         if use_cache and host_id in self._cache:
             return self._cache[host_id]
 
         path = self._host_record_path(host_id)
         try:
-            data = self.volume.read_file(path)
-            host_record = HostRecord.model_validate_json(data)
-            self._cache[host_id] = host_record
-            return host_record
+            host_record = self._read_and_validate_host_record(path)
         except FileNotFoundError:
             return None
         except (json.JSONDecodeError, ValueError) as e:
-            logger.warning("Failed to read host record {}: {}", path, e)
+            if self.is_strict_parsing:
+                raise HostRecordUnreadableError(path, e) from e
+            logger.warning(
+                "Failed to parse host record {} after retries; treating as missing "
+                "(set strict_host_record_parsing=true to fail loudly instead): {}",
+                path,
+                e,
+            )
             return None
+        self._cache[host_id] = host_record
+        return host_record
 
     def delete_host_record(self, host_id: HostId) -> None:
         """Delete a host record and associated agent data from the volume."""

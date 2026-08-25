@@ -515,6 +515,26 @@ def test_docker_volume_write_and_read(docker_provider: DockerProviderInstance) -
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
 @pytest.mark.docker_sdk
+def test_docker_volume_write_files_overwrites_atomically_without_temp_leftovers(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    """Overwriting a file goes through temp-name + rename and leaves no temp siblings.
+
+    The rename step is what keeps concurrent readers from ever observing a
+    torn (empty / partial) record -- put_archive alone truncates the
+    destination in place.
+    """
+    volume = docker_provider._state_volume
+    volume.write_files({"atomic-test/record.json": b"first version"})
+    volume.write_files({"atomic-test/record.json": b"second version"})
+
+    assert volume.read_file("atomic-test/record.json") == b"second version"
+    leftover_names = [e.path.rsplit("/", 1)[-1] for e in volume.listdir("atomic-test")]
+    assert leftover_names == ["record.json"]
+
+
+@pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
+@pytest.mark.docker_sdk
 def test_docker_volume_listdir(docker_provider: DockerProviderInstance) -> None:
     """Verify DockerVolume.listdir returns entries."""
     volume = docker_provider._state_volume

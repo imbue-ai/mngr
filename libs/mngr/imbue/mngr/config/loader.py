@@ -336,6 +336,7 @@ def load_config(
     config_dict["is_allowed_in_pytest"] = config.is_allowed_in_pytest
     config_dict["pre_command_scripts"] = config.pre_command_scripts
     config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
+    config_dict["strict_host_record_parsing"] = config.strict_host_record_parsing
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
     config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
     config_dict["agent_ready_timeout"] = config.agent_ready_timeout
@@ -1144,6 +1145,7 @@ def parse_config(
     kwargs["is_allowed_in_pytest"] = raw.pop("is_allowed_in_pytest", None)
     kwargs["pre_command_scripts"] = raw.pop("pre_command_scripts", None)
     kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
+    kwargs["strict_host_record_parsing"] = raw.pop("strict_host_record_parsing", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
     kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
     kwargs["agent_ready_timeout"] = raw.pop("agent_ready_timeout", None)

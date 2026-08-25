@@ -78,6 +78,16 @@ def test_scoped_volume(volume: LocalVolume) -> None:
     assert scoped.read_file("data.json") == b'{"id":"a1"}'
 
 
+def test_write_files_overwrites_existing_file_and_leaves_no_temp_files(volume: LocalVolume) -> None:
+    volume.write_files({"record.json": b"first version"})
+    volume.write_files({"record.json": b"second version"})
+
+    assert volume.read_file("record.json") == b"second version"
+    # The atomic temp-file-then-rename write must not leak its temp siblings.
+    leftover_names = [e.path for e in volume.listdir("") if e.path != "record.json"]
+    assert leftover_names == []
+
+
 def test_write_multiple_files(volume: LocalVolume) -> None:
     volume.write_files(
         {

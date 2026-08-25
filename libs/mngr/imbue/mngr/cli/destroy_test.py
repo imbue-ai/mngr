@@ -2,6 +2,7 @@
 
 import json
 import threading
+from types import SimpleNamespace
 from typing import cast
 
 import pluggy
@@ -440,11 +441,13 @@ def test_destroy_emptied_hosts_destroys_host_when_no_agents_remain(temp_mngr_ctx
     )
 
 
+@pytest.mark.allow_warnings(match="still has")
 def test_destroy_emptied_hosts_skips_host_with_remaining_agents(temp_mngr_ctx: MngrContext) -> None:
     """A host that still has live agents (e.g. only some targeted) is left alive."""
     # One live agent remains on the host -- destroy CLI must NOT take the host
-    # out from under it.
-    host = _StubOnlineHost(remaining_agents=[object()])
+    # out from under it. The sweep's warning names each remaining agent's name
+    # and id, so the stub agent must carry both.
+    host = _StubOnlineHost(remaining_agents=[SimpleNamespace(name="survivor", id="agent-1234")])
     provider = _RecordingProvider()
 
     _destroy_emptied_hosts(

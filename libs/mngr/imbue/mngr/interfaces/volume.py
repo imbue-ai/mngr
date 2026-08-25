@@ -55,7 +55,13 @@ class Volume(MutableModel, ABC):
 
     @abstractmethod
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
-        """Write one or more files to the volume."""
+        """Write one or more files to the volume; each file must become visible atomically.
+
+        Volumes back state stores whose records are read concurrently by other
+        mngr processes, so implementations must never let a reader observe a
+        truncated or partially-written file (write to a temp name, then rename).
+        Atomicity is per file, not across the batch.
+        """
         ...
 
     @abstractmethod

@@ -16,6 +16,7 @@ from pydantic import Field
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
@@ -349,6 +350,23 @@ def test_read_host_record_returns_none_when_missing(tmp_path: Path) -> None:
 def test_read_host_record_returns_none_on_corrupt_json(tmp_path: Path) -> None:
     (tmp_path / "host_state.json").write_text("{not valid json")
     store = _make_store(tmp_path)
+    assert store.read_host_record() is None
+
+
+def test_read_host_record_corrupt_raises_in_strict_mode(tmp_path: Path) -> None:
+    """Strict parsing distinguishes corrupt from absent: corrupt raises, absent stays None."""
+    (tmp_path / "host_state.json").write_text("{not valid json")
+    outer = _LocalFakeOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={"unused": tmp_path},
+    )
+    store = VpsHostStore(outer=outer, mountpoint=tmp_path, is_strict_parsing=True)
+
+    with pytest.raises(HostRecordUnreadableError, match="host_state.json"):
+        store.read_host_record()
+
+    (tmp_path / "host_state.json").unlink()
     assert store.read_host_record() is None
 
 

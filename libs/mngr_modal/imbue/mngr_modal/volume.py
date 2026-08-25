@@ -98,4 +98,13 @@ class ModalVolume(BaseVolume):
 
     @_translate_transient_proxy_errors
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+        """Write files via the underlying VolumeInterface.
+
+        Satisfies the per-file atomic-visibility contract of
+        ``Volume.write_files`` without a temp-name + rename step: the
+        underlying implementation stages the files through modal's batched
+        upload, which commits them as a unit, so a concurrent reader only
+        ever observes committed file contents -- never a truncated or
+        partially-uploaded file.
+        """
         self.modal_volume.write_files(file_contents_by_path)

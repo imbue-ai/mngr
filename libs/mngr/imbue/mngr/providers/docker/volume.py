@@ -227,6 +227,11 @@ class DockerVolume(BaseVolume):
         content, never a torn write. The dot prefix plus non-.json suffix
         keeps in-flight temp files out of the host store's listings.
         """
+        # An empty batch has nothing to upload or rename (and the rename exec
+        # would otherwise degenerate to an empty shell command).
+        if not file_contents_by_path:
+            return
+
         # Ensure parent directories exist
         for file_path in file_contents_by_path:
             resolved = self._resolve(file_path)
@@ -260,4 +265,8 @@ class DockerVolume(BaseVolume):
         )
         exit_code, output = self._exec(move_command)
         if exit_code != 0:
+            # Best-effort cleanup so a failed finalize does not strand temp
+            # files on the volume (already-renamed temps no longer exist, so
+            # rm -f is a no-op for them).
+            self._exec(" ; ".join(f"rm -f '{temp_path}'" for temp_path in temp_path_by_final_path.values()))
             raise MngrError(f"Failed to finalize volume write (mv exited {exit_code}): {output.strip()[:200]}")

@@ -101,14 +101,24 @@ class BareRealizer(HostRealizer):
 
     def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> VpsHostStore:
         # One host per VM, so the store lives at a fixed root-disk path.
-        return VpsHostStore(outer=outer, mountpoint=BARE_HOST_STORE_DIR)
+        return VpsHostStore(
+            outer=outer,
+            mountpoint=BARE_HOST_STORE_DIR,
+            is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
+        )
 
     # --- discovery / listing ----------------------------------------------
 
     def find_host_record(self, outer: OuterHostInterface) -> tuple[HostId, VpsHostRecord] | None:
         # No container to probe: read the record straight from the fixed store
-        # path; the record carries its own host_id.
-        record = VpsHostStore(outer=outer, mountpoint=BARE_HOST_STORE_DIR).read_host_record()
+        # path; the record carries its own host_id. Same store construction as
+        # open_host_store (which cannot be reused here: it takes a host_id, and
+        # this read is what yields the host_id).
+        record = VpsHostStore(
+            outer=outer,
+            mountpoint=BARE_HOST_STORE_DIR,
+            is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
+        ).read_host_record()
         if record is None:
             return None
         return HostId(record.certified_host_data.host_id), record

@@ -225,7 +225,11 @@ class DockerRealizer(SnapshotCapableRealizer):
         )
 
     def open_host_store(self, outer: OuterHostInterface, host_id: HostId) -> VpsHostStore:
-        return open_host_store(outer, host_volume_name_for(host_id))
+        return open_host_store(
+            outer,
+            host_volume_name_for(host_id),
+            is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
+        )
 
     # --- discovery / listing ----------------------------------------------
 

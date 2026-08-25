@@ -308,6 +308,15 @@ class BaseObjectStoreVolume(BaseVolume, _ObjectStoreErrorSeam):
             self._delete_prefix(_as_dir_prefix(path))
 
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
+        """Write each file as a single object PUT.
+
+        Satisfies the per-file atomic-visibility contract of
+        ``Volume.write_files`` without a temp-name + rename step: object
+        stores make each single-object write (S3 put_object, Azure
+        upload_blob, GCS upload_from_string) visible atomically, so a
+        concurrent reader sees the old object or the new one -- never a
+        truncated or partially-written mix.
+        """
         with self._translate_errors():
             for path, content in file_contents_by_path.items():
                 self._write_object(path.lstrip("/"), content)
