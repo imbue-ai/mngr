@@ -25,14 +25,27 @@ from imbue.mngr.providers.host_key_store import pin_host_key
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_until
 
-# How long paramiko waits for the server's SSH banner after the TCP connect,
-# passed to every provider SSH connection via ssh_paramiko_connect_kwargs.
-# paramiko's default is 15 seconds, which degraded Modal sandbox tunnels have
-# been observed to hover right at (13-16s measured end to end per exec on
-# 2026-08-17): every connection then dies with "Error reading SSH protocol
-# banner" no matter how often it is retried. Doubling the window tolerates a
-# slow-but-working tunnel; a genuinely dead endpoint still fails fast at the
-# TCP layer (refused/unreachable), which this timeout does not extend.
+# A word on vocabulary, since "SSH protocol banner" turns up all over this file.
+# The banner is the server's identification string: the plaintext line, something
+# like "SSH-2.0-OpenSSH_9.6", that an SSH server sends the instant the TCP
+# connection opens, before any key exchange. RFC 4253 section 4.2 calls this the
+# Protocol Version Exchange. paramiko reads the line in Transport._check_banner,
+# and if the line never arrives or the peer hangs up before sending it, paramiko
+# raises SSHException("Error reading SSH protocol banner").
+#
+# That is a different thing from the RFC 4252 SSH_MSG_USERAUTH_BANNER, the
+# human-readable "authorized users only" notice some servers print during login.
+# People call that one an "SSH banner" too, but it comes later in the handshake
+# and is governed by auth_timeout, so this constant has nothing to do with it.
+#
+# This constant sets how long paramiko waits for the banner after the TCP connect,
+# and we pass it to every provider SSH connection through ssh_paramiko_connect_kwargs.
+# paramiko defaults to 15 seconds. Degraded Modal sandbox tunnels were measured
+# hovering right at that line, 13 to 16 seconds end to end per exec on 2026-08-17,
+# so at the default every connection dies with "Error reading SSH protocol banner"
+# however many times you retry it. Thirty seconds gives a slow but working tunnel
+# room to answer. A genuinely dead endpoint still fails fast at the TCP layer,
+# refused or unreachable, which this timeout does not stretch.
 SSH_BANNER_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
@@ -424,8 +437,8 @@ def wait_for_sshd(hostname: str, port: int, timeout_seconds: float = 60.0) -> No
     """Wait for sshd to be ready to accept connections.
 
     Attempts a full SSH transport handshake (key exchange) rather than just
-    checking for the SSH banner. This prevents race conditions where the banner
-    is available but the key exchange hasn't completed yet, which causes
+    checking for the SSH protocol banner. This prevents race conditions where the
+    banner is available but the key exchange hasn't completed yet, which causes
     "No existing session" errors on the subsequent real connection.
     """
     start_time = time.time()
@@ -463,9 +476,10 @@ def _can_authenticate_to_server(
     A full SSH connection with session open verifies the server is ready to
     handle requests, not just accepting TCP connections. The username must be
     passed explicitly: paramiko defaults to the local OS user, which is almost
-    never the user the server's key is authorized for. The banner window is the
-    shared SSH_BANNER_TIMEOUT_SECONDS rather than the per-attempt budget because
-    degraded tunnels (e.g. Modal) are slow specifically at the banner exchange.
+    never the user the server's key is authorized for. The wait for the SSH
+    protocol banner is the shared SSH_BANNER_TIMEOUT_SECONDS rather than the
+    per-attempt budget because degraded tunnels (e.g. Modal) are slow specifically
+    at sending that banner.
     """
     client = None
     try:

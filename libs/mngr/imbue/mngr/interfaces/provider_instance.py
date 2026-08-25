@@ -311,7 +311,7 @@ def _discover_agents_on_host(
     for local hosts.
     """
     # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
-    # connection failure (timeout, connection refused, banner reset) is retried
+    # connection failure (timeout, connection refused, SSH banner read failure) is retried
     # here rather than immediately surfacing to the caller. The retry predicate
     # must NOT retry permanent failures (HostAuthenticationError / bad key) --
     # those should fail fast. This is the right layer for it: retrying here means
@@ -332,7 +332,7 @@ def _discover_agents_on_host_with_offline_fallback(
     """Discover a host's agents (and its SSH endpoint), falling back to the provider's offline view on connection error.
 
     The host was reachable enough to be discovered, but enumerating its agents
-    over SSH failed (sshd crashed, banner reset, auth failure, ...). Rather than
+    over SSH failed (sshd crashed, SSH banner read failure, auth failure, ...). Rather than
     fail the whole provider, recover the host's agents from the provider's
     persisted/offline records so its workspaces stay visible. Mirrors the
     inline recovery in ``discover_hosts_and_agents``.
@@ -712,7 +712,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 results[host_ref] = agents
             except HostConnectionError as e:
                 # The host was reachable enough to be discovered, but enumerating
-                # its agents failed (sshd crashed, banner reset, auth failure,
+                # its agents failed (sshd crashed, SSH banner read failure, auth failure,
                 # ...). Rather than let that bubble up to
                 # _construct_and_discover_for_provider -- which records a
                 # per-provider error and reports agents=[] / hosts=[] for the
