@@ -1,8 +1,11 @@
+import gzip
 import json
 import os
 import queue
 import subprocess
 import time
+import zipfile
+from collections.abc import Mapping
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
@@ -14,9 +17,18 @@ from flask.testing import FlaskClient
 from itsdangerous import TimestampSigner
 from itsdangerous import URLSafeTimedSerializer
 from pydantic import SecretStr
+from pydantic import TypeAdapter
+from sentry_sdk.types import Event
 from werkzeug.test import TestResponse
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.sentry.core import COMPRESSED_LOG_EXTENSION
+from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
+from imbue.imbue_common.sentry.s3_uploader import EXTRAS_UPLOADED_FILES_KEY
+from imbue.imbue_common.sentry.testing import TEST_S3_BUCKET
+from imbue.imbue_common.sentry.testing import capturing_sentry_client
+from imbue.imbue_common.sentry.testing import recording_s3_bucket
+from imbue.imbue_common.sentry.testing import registered_attachments_uploader
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
@@ -34,6 +46,7 @@ from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.console_log_staging import ELECTRON_CONSOLE_TAIL_FILENAME
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import _COOKIE_SALT
@@ -58,6 +71,11 @@ from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
 from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
 from imbue.minds.desktop_client.testing import write_stub_mngr
+from imbue.minds.desktop_client.workspace_diagnostics import CONSOLE_ATTACHMENT_KEY
+from imbue.minds.desktop_client.workspace_diagnostics import TRANSCRIPT_ATTACHMENT_KEY
+from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_LOGS_ATTACHMENT_KEY
+from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_ZIP_ATTACHMENT_KEY
+from imbue.minds.desktop_client.workspace_diagnostics import build_staged_diagnostics_filename
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
@@ -67,6 +85,8 @@ from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.polling import wait_for
 
 
 def _create_test_desktop_client(
@@ -805,6 +825,11 @@ def _create_test_client_with_stores(
     # When set, wired into the app state so routes that reach the backup
     # reaper through ``get_state().sync_scheduler.backup_reaper`` work.
     sync_scheduler: WorkspaceSyncScheduler | None = None,
+    # When set (with mngr_binary/mngr_host_dir), workspace-scoped bug reports
+    # actually run the diagnostics collection exec instead of short-circuiting.
+    root_concurrency_group: ConcurrencyGroup | None = None,
+    mngr_binary: str = "mngr",
+    mngr_host_dir: Path | None = None,
 ) -> tuple[FlaskClient, FileAuthStore]:
     """Create a desktop client with session store and config for testing new routes.
 
@@ -832,6 +857,9 @@ def _create_test_client_with_stores(
         mngr_caller=mngr_caller,
         imbue_cloud_cli=imbue_cloud_cli,
         sync_scheduler=sync_scheduler,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=mngr_binary,
+        mngr_host_dir=mngr_host_dir,
     )
     client = app.test_client()
     return client, auth_store
@@ -1202,6 +1230,407 @@ def test_help_report_accepts_a_description(tmp_path: Path) -> None:
     body = response.get_json()
     assert body["ok"] is True
     assert body["event_id"] is None
+
+
+def _write_console_tail(tmp_path: Path, contents: str) -> Path:
+    """Write the rolling console tail the Electron shell keeps, as the route expects to find it."""
+    log_dir = WorkspacePaths(data_dir=tmp_path).log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+    tail_path = log_dir / ELECTRON_CONSOLE_TAIL_FILENAME
+    tail_path.write_text(contents)
+    return tail_path
+
+
+def test_help_report_outside_a_workspace_still_attaches_the_captured_console(tmp_path: Path) -> None:
+    """The console is the shell's own output, so no workspace is needed to attach it.
+
+    It stages app-side, unscanned by decision -- the same standing as
+    ``electron.log`` and ``minds.log``, which already upload unscanned on every
+    event. Under the retired design the console could only leave after an
+    in-container scan, so a report filed outside a workspace lost it; that
+    requirement went with the scan, and this pins the new behavior so nobody
+    silently reintroduces the workspace dependency.
+    """
+    client, _ = _create_test_client_with_stores(tmp_path)
+    tail_text = "2026-01-01T00:00:00Z [console:ERROR] boom (app.js:1)\n"
+    tail_path = _write_console_tail(tmp_path, tail_text)
+    with recording_s3_bucket() as uploads, registered_attachments_uploader(ErrorAttachmentsS3Uploader()):
+        with capturing_sentry_client() as captured_events:
+            response = client.post("/help/report", json={"description": "the app froze", "include_logs": True})
+    assert response.status_code == 200
+    staged_consoles = list(WorkspacePaths(data_dir=tmp_path).log_dir.glob("bug-report-*-console.log"))
+    assert len(staged_consoles) == 1, staged_consoles
+    assert staged_consoles[0].read_text(encoding="utf-8") == tail_text
+    report = _submitted_report(captured_events[0])
+    # No console omission -- it attached. The workspace content was never on
+    # offer outside a workspace, so its checkboxes read as not requested.
+    assert report["attachment_omissions"] == {
+        WORKSPACE_LOGS_ATTACHMENT_KEY: "not_requested",
+        TRANSCRIPT_ATTACHMENT_KEY: "not_requested",
+    }
+    # Staged is not attached: the console must ARRIVE -- an event extra naming its
+    # uploaded copy, and the tail's bytes at the uploaded key. Without this, losing
+    # the one app.py line that maps the staged file into report_file_paths would
+    # leave the console staged on disk forever while every report ships without it.
+    extra: Mapping[str, Any] = captured_events[0]["extra"]
+    assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_console" in extra, sorted(extra)
+    # The S3 key is minted from the staged file's own name; the logical
+    # bug_report_console name lives only in the event extra asserted above.
+    console_uploads = [(key, body) for key, body in uploads if "-console.log" in key]
+    assert len(console_uploads) == 1, [key for key, _ in uploads]
+    assert gzip.decompress(console_uploads[0][1]).decode("utf-8") == tail_text
+    # The rolling file is app-lifetime history; a report copies rather than consumes it.
+    assert tail_path.exists()
+
+
+def test_help_report_leaves_another_reports_staged_file_alone(tmp_path: Path) -> None:
+    """A staged file belonging to another report is neither attached nor deleted.
+
+    Staged names carry their own collection's slug, so a later report cannot
+    clobber them, and attachments are one-shot by exact path, so nothing can ride
+    along on an event that did not name it. Deleting them at submit time would
+    instead race the background upload that is still reading them.
+    """
+    client, _ = _create_test_client_with_stores(tmp_path)
+    tail_path = _write_console_tail(tmp_path, "2026-01-01T00:00:00Z [console:WARNING] hmm (app.js:2)\n")
+    log_dir = WorkspacePaths(data_dir=tmp_path).log_dir
+    other_report_file = log_dir / build_staged_diagnostics_filename(CONSOLE_ATTACHMENT_KEY, "0" * 32)
+    other_report_file.write_text("collected for a report that is still uploading\n")
+
+    with recording_s3_bucket(), registered_attachments_uploader(ErrorAttachmentsS3Uploader()):
+        with capturing_sentry_client() as captured_events:
+            response = client.post(
+                "/help/report",
+                json={"description": "second", "include_logs": False, "include_transcript": False},
+            )
+
+    assert response.status_code == 200
+    assert other_report_file.exists()
+    assert tail_path.exists()
+    extra: Mapping[str, Any] = captured_events[0]["extra"]
+    assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_console" not in extra
+
+
+def test_help_report_never_attaches_a_file_for_an_unticked_box(tmp_path: Path) -> None:
+    """An unticked box contributes no file, even with a staged one sitting there.
+
+    The prefetch that runs when the form opens collects for the boxes ticked at
+    that moment, so a user who unticks one before pressing Send leaves a staged
+    file behind that must not ride along. Attachments are named one by one, by
+    exact path, so a file this report did not ask for cannot reach the event --
+    and the transcript's reason still reads ``not_requested`` rather than any
+    failure of the collection that did run.
+    """
+    client, _ = _create_test_client_with_stores(tmp_path)
+    logs_dir = WorkspacePaths(data_dir=tmp_path).log_dir
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    opted_out_zip = logs_dir / build_staged_diagnostics_filename(WORKSPACE_ZIP_ATTACHMENT_KEY, "1" * 32)
+    with zipfile.ZipFile(opted_out_zip, "w") as archive:
+        archive.writestr("chats/agent-earlier-claude.jsonl", "chat the user later opted out of\n")
+
+    with capturing_sentry_client() as captured_events:
+        response = client.post(
+            "/help/report",
+            json={
+                "description": "it broke",
+                "workspace_agent_id": "agent-" + "0" * 32,
+                "include_logs": True,
+                "include_transcript": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert opted_out_zip.exists()
+    extra: Mapping[str, Any] = captured_events[0]["extra"]
+    assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_workspace" not in extra
+    report = TypeAdapter(dict[str, Any]).validate_python(extra["bug_report"])
+    assert report["attachment_omissions"][TRANSCRIPT_ATTACHMENT_KEY] == "not_requested"
+
+
+def test_help_report_reports_an_unticked_box_as_not_requested_even_when_collection_cannot_run(
+    tmp_path: Path,
+) -> None:
+    """An unticked checkbox reads ``not_requested`` on every path, including collection failures.
+
+    The minimal test app has no root concurrency group, so a workspace-scoped report can neither run
+    the collection exec nor hand it to a background strand. That degrades to a report answered
+    immediately with every attachment already final -- nothing may be left pending when nothing will
+    ever finish it. The failure reason belongs only to the attachment the user asked for; the unticked
+    one was never going to be collected, and stamping it ``exec_failed`` would misdirect whoever reads
+    the reason codes off the event.
+    """
+    client, _ = _create_test_client_with_stores(tmp_path)
+    with capturing_sentry_client() as captured_events:
+        response = client.post(
+            "/help/report",
+            json={
+                "description": "it broke",
+                "workspace_agent_id": "agent-" + "0" * 32,
+                "include_logs": False,
+                "include_transcript": True,
+            },
+        )
+    assert response.status_code == 200
+    assert len(captured_events) == 1
+    # ``Event`` types its ``extra`` values as ``object``, so the report is validated back into a
+    # mapping rather than assumed to be one (same pattern as report_collector_test).
+    extra: Mapping[str, Any] = captured_events[0]["extra"]
+    report = TypeAdapter(dict[str, Any]).validate_python(extra["bug_report"])
+    assert report["attachment_omissions"] == {
+        WORKSPACE_LOGS_ATTACHMENT_KEY: "not_requested",
+        TRANSCRIPT_ATTACHMENT_KEY: "exec_failed",
+        # The console rides the logs checkbox, so unticking logs leaves it unrequested too.
+        CONSOLE_ATTACHMENT_KEY: "not_requested",
+    }
+    assert report["attachments_pending"] == []
+    assert report["logs_requested"] is False
+    assert report["transcript_requested"] is True
+
+
+def test_help_report_hands_the_captured_console_tail_to_the_collection(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The route reads the rolling tail and hands it to the collection when logs are requested.
+
+    The fake mngr exits without the collector sentinel, so the workspace content
+    shares the collection's ``exec_failed`` reason -- while the console the
+    route handed over still stages app-side, unscanned, untouched by the failed
+    exec. Had the route never read the tail, the console would instead read
+    ``no_console_output`` -- so this pins the route-to-collection wiring and the
+    console's independence from the exec at once.
+    """
+    mngr_binary = tmp_path / "fake-mngr"
+    mngr_binary.write_text("#!/bin/sh\necho 'Error: agent is not running'\nexit 1\n")
+    mngr_binary.chmod(0o755)
+    client, _ = _create_test_client_with_stores(
+        tmp_path,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=str(mngr_binary),
+        mngr_host_dir=tmp_path / "mngr-host",
+    )
+    tail_text = "2026-01-01T00:00:00Z [console:ERROR] boom (app.js:1)\n"
+    _write_console_tail(tmp_path, tail_text)
+    with capturing_sentry_client() as captured_events:
+        response = client.post(
+            "/help/report",
+            json={
+                "description": "it broke",
+                "workspace_agent_id": "agent-" + "0" * 32,
+                "include_logs": True,
+                "include_transcript": False,
+            },
+        )
+    assert response.status_code == 200
+    assert len(captured_events) == 1
+    report = _submitted_report(captured_events[0])
+    assert report["attachment_omissions"] == {
+        WORKSPACE_LOGS_ATTACHMENT_KEY: "exec_failed",
+        TRANSCRIPT_ATTACHMENT_KEY: "not_requested",
+    }
+    staged_consoles = list(WorkspacePaths(data_dir=tmp_path).log_dir.glob("bug-report-*-console.log"))
+    assert len(staged_consoles) == 1, staged_consoles
+    assert staged_consoles[0].read_text(encoding="utf-8") == tail_text
+
+
+def _submitted_report(event: Event) -> dict[str, Any]:
+    """The structured bug report as it reached Sentry.
+
+    ``Event`` types its ``extra`` values as ``object``, so the report is validated back into a mapping
+    rather than assumed to be one.
+    """
+    extra: Mapping[str, Any] = event["extra"]
+    return TypeAdapter(dict[str, Any]).validate_python(extra["bug_report"])
+
+
+def _uploaded_files_uri(event: Event, name: str) -> str:
+    """The single ``s3://`` uri the event published for one attachment name."""
+    extra: Mapping[str, Any] = event["extra"]
+    uris = TypeAdapter(list[str]).validate_python(extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{name}"])
+    assert len(uris) == 1
+    return uris[0]
+
+
+def _s3_key_from_uri(uri: str) -> str:
+    """The bucket-relative key an ``s3://`` uri names, against the test bucket."""
+    prefix = f"s3://{TEST_S3_BUCKET}/"
+    assert uri.startswith(prefix), uri
+    return uri[len(prefix) :]
+
+
+def _wait_for_upload(uploads: list[tuple[str, bytes]], key: str, timeout_seconds: float = 60.0) -> bytes:
+    """Block until the background strand uploads ``key``, returning what it wrote.
+
+    The whole point of the route under test is that it answers before this has
+    happened, so a test that wants to read the result has to wait for it.
+    """
+    contents, _polls, _elapsed = poll_for_value(
+        lambda: next((uploaded for uploaded_key, uploaded in list(uploads) if uploaded_key == key), None),
+        timeout=timeout_seconds,
+        poll_interval=0.05,
+    )
+    assert contents is not None, f"nothing was uploaded to {key} within {timeout_seconds}s"
+    return contents
+
+
+def _write_blocking_fake_mngr(tmp_path: Path, started_path: Path, release_path: Path) -> Path:
+    """A fake mngr that announces it started, waits to be released, then fails the collection.
+
+    Lets a test hold the diagnostics collection open while it inspects what the
+    submit already answered, without depending on how long anything takes.
+    """
+    binary = tmp_path / "blocking-fake-mngr"
+    binary.write_text(
+        "#!/bin/sh\n"
+        f'echo started > "{started_path}"\n'
+        f'while [ ! -f "{release_path}" ]; do sleep 0.05; done\n'
+        "echo 'Error: agent is not running'\n"
+        "exit 1\n"
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def _wait_for_path(path: Path, timeout_seconds: float = 30.0) -> None:
+    """Block until ``path`` exists, so a test can act on work another thread started."""
+    wait_for(
+        path.exists,
+        timeout=timeout_seconds,
+        poll_interval=0.05,
+        error_message=f"{path} never appeared within {timeout_seconds}s",
+    )
+
+
+def test_help_report_answers_before_its_attachments_have_been_collected(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The submit returns a report id while the collection is demonstrably still running.
+
+    Collection reaches into the workspace and takes tens of seconds, so a report
+    with no finished prefetch to reuse *reserves* an S3 location per staged file
+    (minting a key is purely local) and publishes those uris on the event now,
+    leaving the collection and the uploads to a background strand. The fake mngr
+    here blocks until this test releases it, so the response being in hand while
+    it is still blocked is proof that nothing was collected on the request thread.
+    """
+    started_path = tmp_path / "collection-started"
+    release_path = tmp_path / "collection-released"
+    mngr_binary = _write_blocking_fake_mngr(tmp_path, started_path, release_path)
+    client, _ = _create_test_client_with_stores(
+        tmp_path,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=str(mngr_binary),
+        mngr_host_dir=tmp_path / "mngr-host",
+    )
+    _write_console_tail(tmp_path, "2026-01-01T00:00:00Z [console:ERROR] boom (app.js:1)\n")
+    agent_id = "agent-" + "0" * 32
+
+    with recording_s3_bucket() as uploads, registered_attachments_uploader(ErrorAttachmentsS3Uploader()):
+        with capturing_sentry_client() as captured_events:
+            response = client.post(
+                "/help/report",
+                json={
+                    "description": "it broke",
+                    "workspace_agent_id": agent_id,
+                    "include_logs": True,
+                    "include_transcript": False,
+                },
+            )
+        assert response.status_code == 200
+        event_id = response.get_json()["event_id"]
+        assert event_id is not None
+
+        # The collection the report is waiting on has not finished -- it has not
+        # even been let past its first step.
+        _wait_for_path(started_path)
+        assert not release_path.exists()
+
+        event = captured_events[0]
+        report = _submitted_report(event)
+        # The pending list still speaks content keys, even though the two
+        # workspace content types will share one staged archive.
+        assert sorted(report["attachments_pending"]) == sorted([WORKSPACE_LOGS_ATTACHMENT_KEY, CONSOLE_ATTACHMENT_KEY])
+        # An unticked box is final immediately; the pending keys have no reason
+        # yet, and inventing one would be a made-up final outcome.
+        assert report["attachment_omissions"] == {TRANSCRIPT_ATTACHMENT_KEY: "not_requested"}
+        # Uploads are reserved per staged FILE (the workspace archive and the
+        # console), not per content type -- the retired per-content names must
+        # not come back.
+        extra: Mapping[str, Any] = event["extra"]
+        assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_workspace_logs" not in extra
+        assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_transcript" not in extra
+        workspace_key = _s3_key_from_uri(_uploaded_files_uri(event, "bug_report_workspace"))
+        console_key = _s3_key_from_uri(_uploaded_files_uri(event, "bug_report_console"))
+        status_key = _s3_key_from_uri(_uploaded_files_uri(event, "bug_report_attachment_status"))
+        assert not [key for key, _contents in uploads if key in (workspace_key, console_key, status_key)]
+
+        release_path.write_text("go\n")
+        status_document = _wait_for_upload(uploads, status_key).decode("utf-8")
+
+        # The status document is what makes the pending event honest: a reader
+        # follows it to learn what each attachment actually did -- and the
+        # console, which never rides the exec, attached despite the failed
+        # collection.
+        assert status_document == (
+            f"bug report event: {event_id}\nworkspace: {agent_id}\n\nconsole: attached\nworkspace_logs: exec_failed\n"
+        )
+        # The collection produced no workspace archive, so nothing was written
+        # to the uri the event published for it; the console's bytes did reach
+        # its reserved key.
+        _wait_for_upload(uploads, console_key)
+    assert not [key for key, _contents in uploads if key == workspace_key]
+
+
+def test_help_report_reserves_the_workspace_archive_under_a_key_naming_the_zip(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The reserved workspace key ends ``.zip``, and the console's ``.gz``.
+
+    The workspace content stages as one archive that already carries its own
+    compression, and the suffix on the reserved key is the only thing the upload
+    later reads to decide whether to gzip. Reserving it as ``.gz`` would wrap the
+    zip in a gzip, so whoever follows the uri published on the event unwraps two
+    layers to reach the conversations they asked for. The key is minted before
+    the bytes exist, so nothing but this assertion observes the choice.
+    """
+    started_path = tmp_path / "collection-started"
+    release_path = tmp_path / "collection-released"
+    mngr_binary = _write_blocking_fake_mngr(tmp_path, started_path, release_path)
+    client, _ = _create_test_client_with_stores(
+        tmp_path,
+        root_concurrency_group=root_concurrency_group,
+        mngr_binary=str(mngr_binary),
+        mngr_host_dir=tmp_path / "mngr-host",
+    )
+    _write_console_tail(tmp_path, "2026-01-01T00:00:00Z [console:ERROR] boom (app.js:1)\n")
+
+    with recording_s3_bucket() as uploads, registered_attachments_uploader(ErrorAttachmentsS3Uploader()):
+        with capturing_sentry_client() as captured_events:
+            response = client.post(
+                "/help/report",
+                json={
+                    "description": "it broke",
+                    "workspace_agent_id": "agent-" + "0" * 32,
+                    "include_logs": True,
+                    "include_transcript": True,
+                },
+            )
+        assert response.status_code == 200
+        event = captured_events[0]
+        assert sorted(_submitted_report(event)["attachments_pending"]) == sorted(
+            [WORKSPACE_LOGS_ATTACHMENT_KEY, CONSOLE_ATTACHMENT_KEY, TRANSCRIPT_ATTACHMENT_KEY]
+        )
+        workspace_uri = _uploaded_files_uri(event, "bug_report_workspace")
+        assert workspace_uri.endswith(".zip"), workspace_uri
+        # The console is plain text and still gzipped on the way up, so the
+        # suffix is chosen per staged file rather than switched wholesale.
+        console_uri = _uploaded_files_uri(event, "bug_report_console")
+        assert console_uri.endswith(f".{COMPRESSED_LOG_EXTENSION}"), console_uri
+
+        status_key = _s3_key_from_uri(_uploaded_files_uri(event, "bug_report_attachment_status"))
+        release_path.write_text("go\n")
+        # Waited out so the background strand finishes inside the recording
+        # bucket rather than uploading into a torn-down one.
+        _wait_for_upload(uploads, status_key)
 
 
 def _create_test_client_with_api_key(tmp_path: Path, api_key: str) -> FlaskClient:

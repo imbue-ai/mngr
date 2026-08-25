@@ -47,6 +47,9 @@ def capturing_sentry_client(
 
     Capture is synchronous, so the yielded list is already populated inside the block.
     """
+    # Mirror setup_sentry's serializer configuration so captured events are trimmed (or, for real
+    # event shapes, not trimmed) exactly as production events are.
+    sentry_core.raise_sentry_databag_breadth()
     captured_events: list[Event] = []
     client = Client(
         dsn=_TEST_DSN,

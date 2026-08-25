@@ -84,6 +84,16 @@ _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str | Non
 #   * ``electron.log.<ts>.gz``    -- rotated (gzipped) Electron main-process logs
 # The live/current files are uncompressed on disk (compressed on upload); the rotated ``*.gz``
 # files are already gzipped by the Electron rotation helper, so they are uploaded as-is.
+#
+# A manual bug report additionally *stages* up to two files into that same folder immediately
+# before it submits: ``bug-report-<collection slug>-workspace.zip`` (the archive the in-workspace
+# collector hands back, holding the workspace logs plus one ``.jsonl`` per recent chat -- staged
+# already compressed rather than as bare ``.jsonl`` files the backend-log groups above would sweep)
+# and ``bug-report-<collection slug>-console.log`` (the shell's captured console tail, staged
+# app-side). No group's glob matches either name -- ``*.jsonl`` and ``*.jsonl.*`` need a ``.jsonl``
+# that neither the ``.zip`` nor the ``.log`` has, and the remaining four are anchored on the exact
+# stems ``minds.log`` or ``electron.log`` -- so a staged file never joins a group and reaches only
+# the one report it was staged for (see the note below the groups).
 _MINDS_LOG_ATTACHMENT_GROUPS = (
     # The live Python backend jsonl log (mutable -- re-upload on every report).
     LogAttachmentGroup(
@@ -134,6 +144,15 @@ _MINDS_LOG_ATTACHMENT_GROUPS = (
         is_immutable=True,
     ),
 )
+
+# The bug-report staged files (``bug-report-<collection slug>-workspace.zip``
+# and its ``-console.log`` sibling) are deliberately NOT attachment groups:
+# groups are process-global and swept onto every event, so a group matching them
+# would carry one report's consented files onto every unrelated automatic error
+# for as long as they sat on disk. They reach exactly one event instead --
+# ``submit_manual_bug_report``'s ``report_file_paths`` for a collection that has
+# already finished, or ``report_file_uris`` for one still running, which names an
+# S3 key reserved for that report alone.
 
 
 def sentry_deploy_environment_from_minds_env_name(env_name: str | None) -> SentryDeployEnvironment:

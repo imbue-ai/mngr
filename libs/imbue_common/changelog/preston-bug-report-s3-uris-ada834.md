@@ -1,0 +1,5 @@
+Manual bug report events no longer lose the S3 URIs of their own attachments. The sentry SDK's client-side serializer trims the event's `extra` dict (and every dict/list nested under it) to its first 10 entries in insertion order, and a full-size report carries 15 extra keys -- so the reserved `uploaded_files_bug_report_workspace` / `_console` / `_attachment_status` pointers, inserted last, were silently dropped from the stored event even though the files themselves uploaded fine.
+
+`setup_sentry` now raises the SDK's databag breadth cap (`raise_sentry_databag_breadth`, pinned by a test against the real serializer) so no extras are trimmed on any event -- this also restores the `platform` extra and the last swept log groups that automatic error events had been losing to the same cap.
+
+`submit_manual_bug_report` additionally inserts the report's own attachment pointers (description, staged report files, reserved URIs) before the swept log-group extras, so if truncation ever returns, a swept log group falls off instead of the pointers to the files the user consented to attach.

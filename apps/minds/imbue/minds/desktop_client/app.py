@@ -81,7 +81,7 @@ from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
-from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
+from imbue.minds.desktop_client.report_collector import submit_report_with_attachments
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
@@ -562,6 +562,12 @@ def _handle_help_report() -> Response:
     Unauthenticated for the same reason as the page: the user may be reporting a sign-in problem. An
     agent-initiated report (the ``/api/v1`` route) lands here too: that route pre-fills this same form
     rather than submitting, so the human-reviewed send always flows through this collector.
+
+    The workspace's own logs and chat transcript are opt-out, so this route attaches them from inside
+    the container, along with the shell's captured console. It never waits on that: the attachments
+    are reserved and collected on a background strand while the user gets their report id now.
+    Collection never fails the report either -- whatever it could not produce travels as a reason
+    code instead, and that reason lands in the status document the event points at.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -575,13 +581,7 @@ def _handle_help_report() -> Response:
             status_code=400, content='{"error": "A description is required"}', media_type="application/json"
         )
 
-    state = get_state()
-    event_id = submit_bug_report_from_body(
-        body=body,
-        session_store=state.session_store,
-        backend_resolver=state.backend_resolver,
-        paths=state.api_v1_paths,
-    )
+    event_id = submit_report_with_attachments(body=body, state=get_state())
     return make_response(
         status_code=200,
         content=json.dumps({"ok": True, "event_id": event_id}),

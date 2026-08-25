@@ -29,7 +29,8 @@ export function renderRoot<A>(
  * are about what the reader sees rather than about markup. */
 export function renderedText(vnode: m.Vnode | null): string {
   if (vnode === null || vnode === undefined) return "";
-  if (typeof vnode === "string" || typeof vnode === "number") return String(vnode);
+  if (typeof vnode === "string" || typeof vnode === "number")
+    return String(vnode);
   if (Array.isArray(vnode)) return vnode.map(renderedText).join(" ");
   const text = (vnode as unknown as { text?: unknown }).text;
   if (text !== undefined && text !== null) return String(text);
@@ -38,7 +39,9 @@ export function renderedText(vnode: m.Vnode | null): string {
 }
 
 /** A one-workspace list message: agent `agent-aa11` on host `host-bb22`. */
-export function workspacesMessage(overrides: Partial<UiWorkspacesMessage> = {}): UiWorkspacesMessage {
+export function workspacesMessage(
+  overrides: Partial<UiWorkspacesMessage> = {},
+): UiWorkspacesMessage {
   return {
     type: "workspaces",
     workspaces: [
@@ -113,7 +116,10 @@ export function jsonResponse(payload: unknown, status = 200): Response {
  * browser's receiver check: it throws "Illegal invocation" unless invoked as
  * a plain call (as a model's default `fetchImpl` wrapper must), and otherwise
  * resolves to a JSON response carrying `payload`. Restores the real fetch. */
-export async function withReceiverGuardedGlobalFetch(payload: unknown, run: () => Promise<void>): Promise<void> {
+export async function withReceiverGuardedGlobalFetch(
+  payload: unknown,
+  run: () => Promise<void>,
+): Promise<void> {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = function (this: unknown) {
     if (this !== undefined && this !== globalThis) {
@@ -136,6 +142,22 @@ export async function settle(): Promise<void> {
   await Promise.resolve();
 }
 
+/** An in-memory stand-in for the sticky-preference `localStorage`, injected
+ * through the models' `storage` option (tests run under node, which has no
+ * `localStorage` at all). `values` exposes what was written. */
+export function memoryStorage(): Pick<Storage, "getItem" | "setItem"> & {
+  values: Map<string, string>;
+} {
+  const values = new Map<string, string>();
+  return {
+    values,
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+    },
+  };
+}
+
 /** Run `run` with `window.mindsNative` set to `surface`, or with a `window`
  * carrying no bridge at all when it is null -- which is the browser build.
  *
@@ -154,8 +176,7 @@ export async function withMindsNative(
   } finally {
     if (original === undefined) delete globals.window;
     else globals.window = original;
-  }
-}
+  }}
 
 // -- Walking a rendered vnode tree ------------------------------------------
 //
@@ -176,7 +197,8 @@ export interface AnyVnode {
 
 /** Every vnode in the tree, parents before their children. */
 export function collectVnodes(node: unknown, out: AnyVnode[] = []): AnyVnode[] {
-  if (node === null || node === undefined || typeof node !== "object") return out;
+  if (node === null || node === undefined || typeof node !== "object")
+    return out;
   if (Array.isArray(node)) {
     for (const child of node) collectVnodes(child, out);
     return out;
@@ -189,7 +211,8 @@ export function collectVnodes(node: unknown, out: AnyVnode[] = []): AnyVnode[] {
 /** Every string in the tree, in render order: bare children and vnode `text`
  * alike, since mithril stores a lone string child as either one. */
 export function collectText(node: unknown, out: string[] = []): string[] {
-  if (node === null || node === undefined || typeof node === "boolean") return out;
+  if (node === null || node === undefined || typeof node === "boolean")
+    return out;
   if (typeof node === "string") {
     out.push(node);
     return out;
@@ -230,5 +253,7 @@ export function allText(node: unknown): string {
 /** Every vnode carrying `name` as an attribute, whatever its value -- the way
  * the views' `data-*` hooks are found. */
 export function withAttr(node: unknown, name: string): AnyVnode[] {
-  return collectVnodes(node).filter((vnode) => attrsOf(vnode)[name] !== undefined);
+  return collectVnodes(node).filter(
+    (vnode) => attrsOf(vnode)[name] !== undefined,
+  );
 }

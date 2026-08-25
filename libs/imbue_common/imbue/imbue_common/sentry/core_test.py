@@ -1,5 +1,8 @@
+import gzip
+import io
 import logging
 import sys
+import zipfile
 from collections.abc import Callable
 from collections.abc import Iterator
 from functools import partial
@@ -376,6 +379,382 @@ def test_submit_manual_bug_report_copies_the_description_out_of_band_without_a_l
     # The inline copy is still sent alongside it: it survives the scrubber for most reports and is
     # the convenient one to read.
     assert extra["bug_report"]["description"] == _SCRUBBER_TRIPPING_DESCRIPTION
+
+
+def test_submit_manual_bug_report_attaches_report_files_one_shot(tmp_path: Path) -> None:
+    """Report files ride only on the report they were staged for.
+
+    They are named by exact path rather than matched by the process-global
+    groups, so the event carries their extras keys while a later error event's
+    sweep -- which sees the same folder -- picks up nothing. Both halves are
+    pinned: the report references and uploads the files, and a subsequent
+    error-path collection over the same folder does not.
+    """
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    staged = logs_folder / "bug-report-transcript.log"
+    staged.write_text('{"type": "user_message"}\n')
+    uploader = _RecordingUploader()
+    with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+        submit_manual_bug_report(
+            title="[bug report] boom",
+            description="something broke",
+            report={"description": "something broke"},
+            logs_folder=None,
+            report_file_paths={"bug_report_transcript": staged},
+        )
+
+    assert uploader.uploaded_file_paths == [staged]
+    assert len(captured_events) == 1
+    extra = cast(dict, captured_events[0]["extra"])
+    assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_transcript" in extra
+
+    # The same folder, swept by the error path with no groups configured for
+    # these names, must not touch the staged file.
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, _ = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
+    assert "bug_report_transcript" not in groups
+
+
+def test_submit_manual_bug_report_skips_missing_report_files(tmp_path: Path) -> None:
+    """A path whose file vanished contributes neither an extras key nor an upload."""
+    uploader = _RecordingUploader()
+    with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+        submit_manual_bug_report(
+            title="[bug report] boom",
+            description="something broke",
+            report={"description": "something broke"},
+            logs_folder=None,
+            report_file_paths={"bug_report_transcript": tmp_path / "never-written.log"},
+        )
+
+    assert uploader.uploaded_file_paths == []
+    extra = cast(dict, captured_events[0]["extra"])
+    assert f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_transcript" not in extra
+
+
+# One member per recent chat, exactly as the in-container collector names them.
+_TRANSCRIPT_ARCHIVE_MEMBER_NAME = "agent-1-claude.jsonl"
+
+
+def _write_chat_transcript_archive(path: Path) -> bytes:
+    """Write a chat-transcript zip like the collector stages, returning its bytes verbatim."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(_TRANSCRIPT_ARCHIVE_MEMBER_NAME, '{"type": "user_message"}\n')
+    return path.read_bytes()
+
+
+def test_submit_manual_bug_report_publishes_reserved_uris_before_the_files_exist() -> None:
+    """A reserved uri reaches the event with nothing uploaded yet.
+
+    This is what lets the submit return an event id immediately while collection (tens of seconds of
+    it) is still running: the key is minted locally, so the uri can be published first and the bytes
+    written to it afterwards.
+    """
+    with recording_s3_bucket() as uploads:
+        uploader = ErrorAttachmentsS3Uploader()
+        reservations = uploader.reserve_report_file_uploads(
+            {"bug_report_transcript": ".zip", "bug_report_logs": ".log"}
+        )
+        assert uploads == []
+
+        with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+            submit_manual_bug_report(
+                title="[bug report] boom",
+                description="",
+                report={"description": ""},
+                logs_folder=None,
+                report_file_uris={name: uri for name, (uri, _key) in reservations.items()},
+            )
+
+    assert len(captured_events) == 1
+    extra = cast(dict, captured_events[0]["extra"])
+    for name, (uri, key) in reservations.items():
+        assert uri == f"s3://{TEST_S3_BUCKET}/{key}"
+        assert extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{name}"] == [uri]
+    # The event is captured with its attachments still unwritten -- that is the entire point.
+    assert uploads == []
+
+
+def test_submit_manual_bug_report_keeps_every_attachment_pointer_on_a_full_size_report(tmp_path: Path) -> None:
+    """Every ``uploaded_files_*`` extra survives to the delivered event at real-report size.
+
+    A real minds report carries its ``bug_report`` payload, the description uri, ten swept log
+    groups, and three reserved report-file uris -- 15 extra keys. Sentry's client-side serializer
+    keeps only the first ``MAX_DATABAG_BREADTH`` keys of the extra dict (recording a ``_meta``
+    marker and dropping the rest), and with the SDK default of 10 the keys inserted last -- the
+    pointers to the report's own attachments -- were exactly what fell off.
+    ``raise_sentry_databag_breadth`` (applied by ``setup_sentry`` and mirrored by the capturing
+    client) lifts the cap; this pins that a full-size report reaches the wire whole.
+    """
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    swept_groups: list[LogAttachmentGroup] = []
+    for group_idx in range(10):
+        log_name = f"service_{group_idx}.log"
+        (logs_folder / log_name).write_text("log line\n")
+        swept_groups.append(
+            LogAttachmentGroup(
+                group_name=f"service_{group_idx}",
+                glob=log_name,
+                max_file_count=1,
+                is_compressed=True,
+                is_immutable=False,
+            )
+        )
+
+    with recording_s3_bucket():
+        uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=tuple(swept_groups))
+        reservations = uploader.reserve_report_file_uploads(
+            {"bug_report_workspace": ".zip", "bug_report_console": ".log"}
+        )
+        status_uri, _status_key = uploader.reserve_text_upload("bug_report_attachment_status")
+        with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+            submit_manual_bug_report(
+                title="[bug report] boom",
+                description="something broke",
+                report={"description": "something broke"},
+                logs_folder=logs_folder,
+                report_file_uris={
+                    **{name: uri for name, (uri, _key) in reservations.items()},
+                    "bug_report_attachment_status": status_uri,
+                },
+            )
+
+    assert len(captured_events) == 1
+    event = captured_events[0]
+    extra = cast(dict, event["extra"])
+    expected_keys = {"bug_report", BUG_REPORT_DESCRIPTION_EXTRA_KEY}
+    expected_keys |= {f"{EXTRAS_UPLOADED_FILES_KEY}_service_{group_idx}" for group_idx in range(10)}
+    expected_keys |= {
+        f"{EXTRAS_UPLOADED_FILES_KEY}_{name}"
+        for name in ("bug_report_workspace", "bug_report_console", "bug_report_attachment_status")
+    }
+    assert expected_keys <= set(extra)
+    # The serializer records every trim in the event's ``_meta``; a whole report must produce none.
+    assert "_meta" not in event
+
+
+def test_submit_manual_bug_report_inserts_report_pointers_before_swept_log_groups(tmp_path: Path) -> None:
+    """The report's own attachment extras precede the swept log-group extras in insertion order.
+
+    Anything that trims an extra dict keeps the first entries and drops the last, so insertion order
+    is priority order: should truncation ever return (say, an SDK upgrade quietly reverting the
+    breadth raise), a swept log group is what falls off -- never the description or the pointers to
+    the files the user consented to attach.
+    """
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    (logs_folder / "events.jsonl").write_text("live\n")
+    staged = tmp_path / "bug-report-transcript.zip"
+    _write_chat_transcript_archive(staged)
+
+    with recording_s3_bucket():
+        uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(_LIVE_LOG_GROUP,))
+        reserved_uri, _key = uploader.reserve_report_file_uploads({"bug_report_console": ".log"})["bug_report_console"]
+        with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+            submit_manual_bug_report(
+                title="[bug report] boom",
+                description="something broke",
+                report={"description": "something broke"},
+                logs_folder=logs_folder,
+                report_file_paths={"bug_report_transcript": staged},
+                report_file_uris={"bug_report_console": reserved_uri},
+            )
+
+    extra_keys = list(cast(dict, captured_events[0]["extra"]))
+    own_pointer_keys = [
+        BUG_REPORT_DESCRIPTION_EXTRA_KEY,
+        f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_transcript",
+        f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_console",
+    ]
+    swept_group_key = f"{EXTRAS_UPLOADED_FILES_KEY}_{_LIVE_LOG_GROUP.group_name}"
+    assert max(extra_keys.index(key) for key in own_pointer_keys) < extra_keys.index(swept_group_key)
+
+
+def test_reserved_and_staged_attachments_produce_identically_shaped_extras(tmp_path: Path) -> None:
+    # Whoever reads the event cannot tell (and must not need to tell) whether an attachment was
+    # already staged at submit time or was still being collected, so both paths must write the same
+    # ``uploaded_files_<name>`` shape: a one-element list holding the uri.
+    staged = tmp_path / "bug-report-transcript.log"
+    staged.write_text('{"type": "user_message"}\n')
+    extras_key = f"{EXTRAS_UPLOADED_FILES_KEY}_bug_report_transcript"
+
+    with recording_s3_bucket():
+        uploader = ErrorAttachmentsS3Uploader()
+        with registered_attachments_uploader(uploader), capturing_sentry_client() as captured_events:
+            submit_manual_bug_report(
+                title="[bug report] boom",
+                description="",
+                report={},
+                logs_folder=None,
+                report_file_paths={"bug_report_transcript": staged},
+            )
+            reserved_uri, _key = uploader.reserve_report_file_uploads({"bug_report_transcript": ".log"})[
+                "bug_report_transcript"
+            ]
+            submit_manual_bug_report(
+                title="[bug report] boom",
+                description="",
+                report={},
+                logs_folder=None,
+                report_file_uris={"bug_report_transcript": reserved_uri},
+            )
+
+    staged_extra = cast(dict, captured_events[0]["extra"])[extras_key]
+    reserved_extra = cast(dict, captured_events[1]["extra"])[extras_key]
+    assert len(staged_extra) == 1 and len(reserved_extra) == 1
+    assert staged_extra[0].startswith(f"s3://{TEST_S3_BUCKET}/bug-report-transcript.log_")
+    assert reserved_extra[0].startswith(f"s3://{TEST_S3_BUCKET}/bug_report_transcript_")
+
+
+def test_upload_reserved_report_file_writes_gzipped_bytes_to_the_key_its_uri_named(tmp_path: Path) -> None:
+    # The reservation's uri is on an event that was already sent, so the later upload has exactly one
+    # chance to hit the object it named: a different key (or uncompressed bytes under a ``.gz`` uri)
+    # leaves a reader following a link to nothing, with nothing to notice it.
+    staged = tmp_path / "bug-report-abc-workspace-logs.log"
+    contents = b"staged workspace logs\n"
+    staged.write_bytes(contents)
+
+    with recording_s3_bucket() as uploads:
+        uploader = ErrorAttachmentsS3Uploader()
+        uri, key = uploader.reserve_report_file_uploads({"bug_report_logs": ".log"})["bug_report_logs"]
+        uploader.upload_reserved_report_file(key=key, file_path=staged)
+
+    assert key.endswith(".gz")
+    assert len(uploads) == 1
+    uploaded_key, uploaded_contents = uploads[0]
+    assert uploaded_key == key
+    assert uri == f"s3://{TEST_S3_BUCKET}/{uploaded_key}"
+    assert gzip.decompress(uploaded_contents) == contents
+
+
+def test_upload_reserved_report_file_writes_a_staged_archive_verbatim_to_its_zip_key(tmp_path: Path) -> None:
+    # The chat-transcript archive is reserved from its suffix alone, before it exists, and the uri that
+    # names a ``.zip`` is already out on a sent event. So the object there has to *be* the archive:
+    # gzipping it would hand whoever follows that uri something that is not the zip the key claimed,
+    # and no second chance to notice.
+    staged = tmp_path / "bug-report-abc-transcript.zip"
+    archive_bytes = _write_chat_transcript_archive(staged)
+
+    with recording_s3_bucket() as uploads:
+        uploader = ErrorAttachmentsS3Uploader()
+        uri, key = uploader.reserve_report_file_uploads({"bug_report_transcript": ".zip"})["bug_report_transcript"]
+        uploader.upload_reserved_report_file(key=key, file_path=staged)
+
+    assert key.endswith(".zip")
+    assert len(uploads) == 1
+    uploaded_key, uploaded_contents = uploads[0]
+    assert uploaded_key == key
+    assert uri == f"s3://{TEST_S3_BUCKET}/{uploaded_key}"
+    assert uploaded_contents == archive_bytes
+    with zipfile.ZipFile(io.BytesIO(uploaded_contents)) as archive:
+        assert archive.namelist() == [_TRANSCRIPT_ARCHIVE_MEMBER_NAME]
+
+
+def test_prepare_report_file_uploads_gzips_a_staged_log_under_a_gz_key(tmp_path: Path) -> None:
+    # The one-shot path reads the key suffix and the compression off the staged file's own name, so an
+    # ordinary log keeps exactly the arrangement it has always had: gzip bytes under a ``.gz`` key.
+    staged = tmp_path / "bug-report-abc-workspace-logs.log"
+    contents = b"staged workspace logs\n"
+    staged.write_bytes(contents)
+
+    with recording_s3_bucket() as uploads:
+        uris, callbacks = ErrorAttachmentsS3Uploader().prepare_report_file_uploads(
+            {"bug_report_workspace_logs": staged}
+        )
+        for callback in callbacks:
+            callback()
+
+    assert len(uploads) == 1
+    uploaded_key, uploaded_contents = uploads[0]
+    assert uploaded_key.endswith(".gz")
+    assert list(uris["bug_report_workspace_logs"]) == [f"s3://{TEST_S3_BUCKET}/{uploaded_key}"]
+    assert gzip.decompress(uploaded_contents) == contents
+
+
+def test_prepare_report_file_uploads_writes_a_staged_archive_verbatim_under_a_zip_key(tmp_path: Path) -> None:
+    # Same rule on the fast path (the prefetch already finished, so the archive exists at submit time):
+    # a reader who follows either path's uri must reach the archive itself, not a gzip wrapped around
+    # one -- so the key keeps ``.zip`` and the bytes are stored untouched.
+    staged = tmp_path / "bug-report-abc-transcript.zip"
+    archive_bytes = _write_chat_transcript_archive(staged)
+
+    with recording_s3_bucket() as uploads:
+        uris, callbacks = ErrorAttachmentsS3Uploader().prepare_report_file_uploads({"bug_report_transcript": staged})
+        for callback in callbacks:
+            callback()
+
+    assert len(uploads) == 1
+    uploaded_key, uploaded_contents = uploads[0]
+    assert uploaded_key.endswith(".zip")
+    assert list(uris["bug_report_transcript"]) == [f"s3://{TEST_S3_BUCKET}/{uploaded_key}"]
+    assert uploaded_contents == archive_bytes
+    with zipfile.ZipFile(io.BytesIO(uploaded_contents)) as archive:
+        assert archive.namelist() == [_TRANSCRIPT_ARCHIVE_MEMBER_NAME]
+
+
+def test_prepare_report_file_uploads_does_not_re_gzip_a_file_already_gzipped_on_disk(tmp_path: Path) -> None:
+    # The same rule the ``*.gz`` log attachment groups are declared with (``is_compressed=False``): a
+    # file that arrives gzipped is stored as it is, so its ``.gz`` uri is one gunzip from the log.
+    staged = tmp_path / "minds.log.20250101.gz"
+    contents = b"rotated backend log\n"
+    staged.write_bytes(gzip.compress(contents))
+
+    with recording_s3_bucket() as uploads:
+        _uris, callbacks = ErrorAttachmentsS3Uploader().prepare_report_file_uploads({"bug_report_logs": staged})
+        for callback in callbacks:
+            callback()
+
+    assert len(uploads) == 1
+    uploaded_key, uploaded_contents = uploads[0]
+    assert uploaded_key.endswith(".gz")
+    assert uploaded_contents == staged.read_bytes()
+    assert gzip.decompress(uploaded_contents) == contents
+
+
+def test_reserve_report_file_uploads_refuses_bytes_that_are_already_gzipped() -> None:
+    # A ``.gz`` key is the one this uploader compresses into, so reserving one for bytes that are
+    # already gzip would leave the upload -- which has only the key to go on -- no way to avoid
+    # wrapping them a second time, under a key claiming a single layer.
+    with pytest.raises(AssertionError, match="already-gzipped"):
+        ErrorAttachmentsS3Uploader().reserve_report_file_uploads({"bug_report_logs": ".gz"})
+
+
+def test_upload_reserved_report_file_tolerates_a_file_that_never_materialized(tmp_path: Path) -> None:
+    # An attachment dropped for secrets (or one whose collection failed) never arrives at its reserved
+    # key. That is expected, not an error: it must be recorded in the log and leave the object absent,
+    # because raising would take the report's other uploads down with it.
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(message.record["message"]), level=0)
+    try:
+        with recording_s3_bucket() as uploads:
+            uploader = ErrorAttachmentsS3Uploader()
+            _uri, key = uploader.reserve_report_file_uploads({"bug_report_logs": ".log"})["bug_report_logs"]
+            uploader.upload_reserved_report_file(key=key, file_path=tmp_path / "never-written.log")
+    finally:
+        logger.remove(sink_id)
+
+    assert uploads == []
+    assert any("never materialized" in message for message in messages)
+
+
+def test_upload_reserved_text_is_readable_straight_from_its_uri() -> None:
+    # The status document exists to be read by whoever opens the Sentry event, so it is uploaded
+    # verbatim and uncompressed under the key whose uri the event carries.
+    status = "bug_report_logs: attached\nbug_report_transcript: omitted (collection failed)\n"
+    with recording_s3_bucket() as uploads:
+        uploader = ErrorAttachmentsS3Uploader()
+        uri, key = uploader.reserve_text_upload("bug_report_attachment_status")
+        uploader.upload_reserved_text(key=key, text=status)
+
+    assert len(uploads) == 1
+    uploaded_key, uploaded_contents = uploads[0]
+    assert uploaded_key == key and uploaded_key.endswith(".txt")
+    assert uri == f"s3://{TEST_S3_BUCKET}/{uploaded_key}"
+    assert uploaded_contents == status.encode()
 
 
 def test_submit_manual_bug_report_copies_the_description_alongside_the_log_attachments(tmp_path: Path) -> None:

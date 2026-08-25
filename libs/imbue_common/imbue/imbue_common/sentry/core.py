@@ -18,12 +18,14 @@ from functools import cache
 from functools import partial
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import Iterable
 from typing import MutableMapping
 from typing import TypedDict
 from typing import cast
 
 import sentry_sdk
+import sentry_sdk.serializer
 import sentry_sdk.utils
 import traceback_with_variables
 from loguru import logger
@@ -61,13 +63,78 @@ from imbue.imbue_common.sentry.s3_uploader import wait_for_s3_uploads
 # suffix appended to the (gzip-compressed) S3 upload keys for log files
 COMPRESSED_LOG_EXTENSION = "gz"
 
+# The suffix of an upload key whose object this uploader gzipped on the way up.
+_GZIPPED_UPLOAD_KEY_SUFFIX: Final[str] = f".{COMPRESSED_LOG_EXTENSION}"
+
+# Suffixes naming bytes that already carry their own compression: an upload of one keeps that suffix
+# on its key and is stored verbatim. Same reasoning the ``*.gz`` log attachment groups are declared
+# with ``is_compressed=False`` -- re-compressing buys nothing, and it would force whoever follows the
+# uri to unwrap two layers to reach the archive (or log) they asked for.
+_ALREADY_COMPRESSED_SUFFIXES: Final[tuple[str, ...]] = (".zip", _GZIPPED_UPLOAD_KEY_SUFFIX)
+
+
+def _is_already_compressed(filename_or_suffix: str) -> bool:
+    """Whether the bytes a filename (or a bare suffix) names already carry their own compression."""
+    return filename_or_suffix.lower().endswith(_ALREADY_COMPRESSED_SUFFIXES)
+
+
+def _upload_key_suffix(filename_or_suffix: str) -> str:
+    """The suffix an S3 upload key must carry for bytes named (or suffixed) ``filename_or_suffix``.
+
+    The one place that choice is made, so a key always advertises the encoding of the object under it:
+    already-compressed bytes keep their own suffix, and everything else is gzipped on the way up and
+    keyed ``.gz``.
+    """
+    lowered = filename_or_suffix.lower()
+    for suffix in _ALREADY_COMPRESSED_SUFFIXES:
+        if lowered.endswith(suffix):
+            return suffix
+    return _GZIPPED_UPLOAD_KEY_SUFFIX
+
+
+def _is_gzipped_upload_key(key: str) -> bool:
+    """Whether the object at ``key`` must be gzip, judged by the suffix the key itself advertises.
+
+    An upload to an already-published key takes its instruction from the key rather than from the file
+    it is reading, so the bytes stored there cannot contradict the uri a reader follows.
+    """
+    return key.lower().endswith(_GZIPPED_UPLOAD_KEY_SUFFIX)
+
 
 # sentry's size limits are annoyingly hard to evaluate before sending the event. we'll just try to be conservative.
 # https://docs.sentry.io/concepts/data-management/size-limits/
 # https://develop.sentry.dev/sdk/data-model/envelopes/#size-limits
 MAX_SENTRY_ATTACHMENT_SIZE = 10 * 1024 * 1024
-# sentry truncates any lists attached to the event["extra"] to this number.
+# How many files one log attachment group sweeps onto an event, and hence the length of the uri list
+# under that group's ``uploaded_files_<group>`` extra. A volume cap of our own, independent of the
+# SDK-side databag trimming that ``raise_sentry_databag_breadth`` lifts.
 MAX_SENTRY_LIST_SIZE = 10
+
+# The sentry SDK's serializer trims every "databag" node -- the event's ``extra`` dict itself, and
+# each dict/list nested anywhere under it -- to its first ``MAX_DATABAG_BREADTH`` entries in
+# insertion order, recording only a ``{"len": N}`` marker in the event's ``_meta`` for the rest. The
+# SDK default of 10 is smaller than one bug report's worth of extras (the ``bug_report`` payload,
+# the description uri, ten swept log groups, and the reserved report-file uris), which would
+# silently drop the keys inserted last -- the report's own attachment pointers. There is no
+# ``sentry_sdk.init`` option for this; the serializer reads the module-level constant live, so it is
+# raised to a value comfortably above any real event while still bounding a pathological one.
+MAX_SENTRY_DATABAG_BREADTH: Final[int] = 100
+
+
+def raise_sentry_databag_breadth() -> None:
+    """Lift sentry's client-side databag truncation to ``MAX_SENTRY_DATABAG_BREADTH`` entries per node.
+
+    Called from ``setup_sentry`` before any event can be serialized (and mirrored by the capturing
+    test client, so tests see the same serializer behavior production runs under). The attribute is
+    asserted to exist so an SDK upgrade that renames it fails loudly here instead of silently
+    reinstating the 10-entry cap.
+    """
+    assert hasattr(sentry_sdk.serializer, "MAX_DATABAG_BREADTH"), (
+        "sentry_sdk.serializer no longer defines MAX_DATABAG_BREADTH; re-port the databag-breadth raise"
+    )
+    # The SDK ships the constant unannotated, so the checker narrows it to Literal[10]; the attribute
+    # is genuinely mutable at runtime (the serializer reads it live on every serialize call).
+    sentry_sdk.serializer.MAX_DATABAG_BREADTH = MAX_SENTRY_DATABAG_BREADTH  # ty: ignore[invalid-assignment]
 
 
 # The Sentry scope context key under which the per-process config (the log folder
@@ -653,6 +720,10 @@ def setup_sentry(
 
     sentry_dsn = dsn
 
+    # Lift the serializer's per-dict/list truncation before anything can be captured: the SDK default
+    # keeps fewer extra keys than one event carries, silently dropping whatever was inserted last.
+    raise_sentry_databag_breadth()
+
     # NOTE: the rate limiter object's lifetime is maintained by being captured in the closure of the
     #       before_send function. Interrupt / clean-shutdown exceptions are dropped first (they are
     #       never real faults), then the automatic-reporting gate drops events the user has opted out
@@ -842,6 +913,17 @@ def _get_platform_info() -> str:
     return sys.platform
 
 
+def _file_size_or_unknown(path: Path) -> int | str:
+    """The file's size for logging, or a marker when it cannot be read.
+
+    Sizing a log purely to report it must never be what fails an error report.
+    """
+    try:
+        return path.stat().st_size
+    except OSError:
+        return "unknown"
+
+
 def _n_newest_files(files: Iterable[Path], n: int) -> Iterable[Path]:
     assert n > 0
     return sorted(files, key=lambda f: f.stat().st_mtime)[-n:]
@@ -916,6 +998,126 @@ class ErrorAttachmentsS3Uploader(MutableModel):
         key = get_s3_upload_key(BUG_REPORT_DESCRIPTION_KEY_PREFIX, ".txt")
         return get_s3_upload_url(key), partial(self._upload_description_cb, key=key, description=description)
 
+    def prepare_report_file_uploads(
+        self, file_paths: Mapping[str, Path]
+    ) -> tuple[Mapping[str, Collection[str | None]], tuple[_UploadCallback, ...]]:
+        """Prepare one-shot uploads of files that belong to exactly one manual report.
+
+        The log attachment groups are process-global and swept onto *every*
+        event, which is right for rolling logs and wrong for files a user
+        consented to attach to one specific bug report: anything a group's glob
+        can match rides along on every unrelated error event until it is
+        deleted. These uploads instead name exact files, produce the same
+        ``uploaded_files_<name>`` extras shape, and are referenced by nothing
+        else -- staged report files can therefore sit on disk untouched without
+        ever appearing on another event.
+
+        Both the key's suffix and whether the bytes are gzipped come from the
+        staged file's own name, so an attachment that already carries its own
+        compression (the chat-transcript ``.zip``) is stored verbatim under a key
+        that says so.
+        """
+        uris: dict[str, Collection[str | None]] = {}
+        callbacks: tuple[_UploadCallback, ...] = ()
+        for name, file_path in file_paths.items():
+            if not file_path.is_file():
+                continue
+            logger.info(
+                "Sentry attachment selected for report file {}: {} ({} bytes)",
+                name,
+                file_path,
+                _file_size_or_unknown(file_path),
+            )
+            key = get_s3_upload_key(file_path.name, _upload_key_suffix(file_path.name))
+            uris[name] = [get_s3_upload_url(key)]
+            callbacks += (
+                partial(
+                    self._upload_file_cb,
+                    key=key,
+                    file_path=file_path,
+                    compress=not _is_already_compressed(file_path.name),
+                ),
+            )
+        return uris, callbacks
+
+    def reserve_report_file_uploads(
+        self, staged_suffix_by_name: Mapping[str, str]
+    ) -> Mapping[str, tuple[str | None, str]]:
+        """Reserve an S3 key (and the URI it will be readable at) per attachment name, uploading nothing.
+
+        Keys are minted purely locally -- a timestamp and a uuid4 -- so a report can publish where its
+        attachments *will* live and be captured immediately, while collecting them takes tens of
+        seconds. Each entry is ``(uri, key)``: the uri goes on the event, and the key is what
+        ``upload_reserved_report_file`` writes to once the bytes exist. The uri is None exactly when no
+        bucket is configured, which is the same condition under which the upload is a no-op.
+
+        Each name is given the suffix its file will be staged under (``.zip`` for the chat-transcript
+        archive, ``.log`` for a log) rather than the staged filename, because nothing is staged yet:
+        the name itself does not exist either, carrying the slug of a collection that has not started.
+        The suffix is the whole of what a key needs -- it is what the key advertises, and what the
+        upload later reads back off the key to decide whether to gzip.
+
+        A name whose file never materializes (dropped for secrets, or a collection that failed) leaves
+        its reserved object absent; the report's status document is what says why.
+        """
+        # Bytes that are already gzip have no key to reserve: theirs would carry the same ``.gz``
+        # suffix as a key this uploader compresses into, leaving the upload no way to tell the two
+        # apart and so no way to avoid double-compressing them.
+        assert all(suffix.lower() != _GZIPPED_UPLOAD_KEY_SUFFIX for suffix in staged_suffix_by_name.values()), (
+            f"cannot reserve upload keys for already-gzipped bytes: {dict(staged_suffix_by_name)}"
+        )
+        return {
+            name: self._reserve_upload(name, _upload_key_suffix(staged_suffix))
+            for name, staged_suffix in staged_suffix_by_name.items()
+        }
+
+    def reserve_text_upload(self, name: str) -> tuple[str | None, str]:
+        """Reserve a key for a plain-text document (e.g. a report's attachment status) as ``(uri, key)``.
+
+        Separate from ``reserve_report_file_uploads`` because the text is uploaded uncompressed, so its
+        key must not claim the ``.gz`` suffix that a reader follows the uri with.
+        """
+        return self._reserve_upload(name, ".txt")
+
+    @staticmethod
+    def _reserve_upload(key_prefix: str, key_suffix: str) -> tuple[str | None, str]:
+        key = get_s3_upload_key(key_prefix, key_suffix)
+        return get_s3_upload_url(key), key
+
+    def upload_reserved_report_file(self, key: str, file_path: Path) -> None:
+        """Upload ``file_path`` to a key reserved earlier by ``reserve_report_file_uploads``.
+
+        Whether the bytes are gzipped is read off the reserved key's own suffix rather than off the
+        file, so the object can never contradict the uri that already went out on the event: a ``.gz``
+        key is one this uploader compresses into, and any other suffix it reserves (today ``.zip``)
+        holds the staged bytes verbatim. The one-shot path decides the same way from the same suffixes,
+        so which of the two published a uri makes no difference to whoever follows it.
+
+        A missing file is logged and otherwise ignored: an
+        attachment that was dropped (for secrets, or by a failed collection) simply never arrives, and
+        raising here would take down the rest of a report's uploads with it.
+        """
+        if not file_path.is_file():
+            logger.info("Sentry attachment never materialized for reserved key {}: {}", key, file_path)
+            return
+        logger.info(
+            "Sentry attachment selected for report file {}: {} ({} bytes)",
+            key,
+            file_path,
+            _file_size_or_unknown(file_path),
+        )
+        self._upload_file_cb(key=key, file_path=file_path, compress=_is_gzipped_upload_key(key))
+
+    @staticmethod
+    def upload_reserved_text(key: str, text: str) -> None:
+        """Upload arbitrary text to a previously reserved key, uncompressed.
+
+        Mirrors ``_upload_description_cb`` (including its lenient encoding, since any text routed here
+        may carry a lone surrogate that came in over JSON): a reader following the uri from the Sentry
+        event reads the document directly.
+        """
+        upload_to_s3_with_key(key, _bug_report_description_bytes(text))
+
     def collect_external_attachments(
         self, *, exception: BaseException | None, logs_folder: Path | None
     ) -> tuple[Mapping[str, Collection[str | None]], tuple[_UploadCallback, ...]]:
@@ -952,6 +1154,17 @@ class ErrorAttachmentsS3Uploader(MutableModel):
     ) -> None:
         key_suffix = f".{COMPRESSED_LOG_EXTENSION}" if group.is_compressed else ""
         for log_file in _n_newest_files(group_folder.glob(group.glob), n=group.max_file_count):
+            # The selected file, named before anything is keyed or uploaded, so a
+            # report's actual attachment set is readable from the logs alone. In
+            # an environment with no bucket configured the upload is skipped and
+            # the event's URIs are all null, which is otherwise indistinguishable
+            # from a group that matched nothing.
+            logger.info(
+                "Sentry attachment selected for group {}: {} ({} bytes)",
+                group.group_name,
+                log_file,
+                _file_size_or_unknown(log_file),
+            )
             if group.is_immutable:
                 with self._lock:
                     existing_key = self._immutable_logs_keys.get(log_file)
@@ -1023,6 +1236,8 @@ def submit_manual_bug_report(
     description: str,
     report: Mapping[str, Any],
     logs_folder: Path | None,
+    report_file_paths: Mapping[str, Path] | None = None,
+    report_file_uris: Mapping[str, str | None] | None = None,
 ) -> str | None:
     """Synthesize and send a user-submitted bug report as a Sentry event.
 
@@ -1044,9 +1259,19 @@ def submit_manual_bug_report(
     mechanism as automatic errors (a no-op in environments without an S3 bucket). No traceback is
     collected (a manual report has no meaningful one).
 
+    A report's own attachments arrive one of two ways, producing identically-shaped
+    ``uploaded_files_<name>`` extras. ``report_file_paths`` names files that already exist and uploads
+    them here; ``report_file_uris`` carries uris reserved via ``reserve_report_file_uploads`` for files
+    still being collected, letting the event be captured now with the bytes following later. A name
+    must not be given both ways, or one would silently stomp the other's uri.
+
     Returns the Sentry event id (a 32-char hex string the user can quote when following up), or None
     if Sentry is not active or the event was dropped before sending.
     """
+    assert not (report_file_paths and report_file_uris and set(report_file_paths) & set(report_file_uris)), (
+        "an attachment name may be given either as a path or as a reserved uri, not both"
+    )
+
     client = sentry_sdk.get_client()
     if not client.is_active():
         logger.info("Sentry is not active; manual bug report was not sent")
@@ -1071,24 +1296,40 @@ def submit_manual_bug_report(
         "fingerprint": [_MANUAL_BUG_REPORT_FINGERPRINT_PREFIX, uuid.uuid4().hex],
     }
 
+    # Extras are inserted most-important-first: anything that trims an extra dict (the client-side
+    # serializer should its lifted cap ever regress, or a server-side limit) keeps the first entries
+    # and drops the last, so the report's own attachment pointers go in before the swept log groups
+    # -- losing a swept log group is survivable, losing the pointers to the files the user consented
+    # to attach is not.
     callbacks: tuple[_UploadCallback, ...] = ()
     uploader = get_attachments_uploader()
-    if uploader is not None:
-        if description:
-            description_uri, description_callback = uploader.prepare_description_upload(description)
-            # A URI is only produced once an S3 bucket is configured, and that is the same condition
-            # the upload itself needs -- so with no URI to reference there is nothing to schedule.
-            if description_uri is not None:
-                extra[BUG_REPORT_DESCRIPTION_EXTRA_KEY] = [description_uri]
-                callbacks += (description_callback,)
-        if logs_folder is not None:
-            # exception=None -> only log files are prepared (no synthesized traceback).
-            s3_uri_groups, log_callbacks = uploader.collect_external_attachments(
-                exception=None, logs_folder=logs_folder
-            )
-            for group_name, s3_uris in s3_uri_groups.items():
-                extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"] = list(s3_uris)
-            callbacks += log_callbacks
+    if uploader is not None and description:
+        description_uri, description_callback = uploader.prepare_description_upload(description)
+        # A URI is only produced once an S3 bucket is configured, and that is the same condition
+        # the upload itself needs -- so with no URI to reference there is nothing to schedule.
+        if description_uri is not None:
+            extra[BUG_REPORT_DESCRIPTION_EXTRA_KEY] = [description_uri]
+            callbacks += (description_callback,)
+    if uploader is not None and report_file_paths:
+        # This report's own staged files, attached one-shot (see
+        # prepare_report_file_uploads): they must appear on this event and
+        # never on any other.
+        report_uri_groups, report_callbacks = uploader.prepare_report_file_uploads(report_file_paths)
+        for name, s3_uris in report_uri_groups.items():
+            extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{name}"] = list(s3_uris)
+        callbacks += report_callbacks
+    if report_file_uris:
+        # Keys reserved before their bytes existed: nothing to upload from here, the collection that
+        # is still running writes to those exact keys (see reserve_report_file_uploads). No uploader
+        # is consulted -- reserving is what produced these uris.
+        for name, reserved_uri in report_file_uris.items():
+            extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{name}"] = [reserved_uri]
+    if uploader is not None and logs_folder is not None:
+        # exception=None -> only log files are prepared (no synthesized traceback).
+        s3_uri_groups, log_callbacks = uploader.collect_external_attachments(exception=None, logs_folder=logs_folder)
+        for group_name, s3_uris in s3_uri_groups.items():
+            extra[f"{EXTRAS_UPLOADED_FILES_KEY}_{group_name}"] = list(s3_uris)
+        callbacks += log_callbacks
 
     if callbacks:
         handler = get_sentry_event_handler()

@@ -24,31 +24,41 @@ function modeChoice(model: HelpModel): m.Children {
   if (model.launch.isAgentReport) return null;
   const isAssistAvailable = model.launch.isAssistAvailable;
   return m("div", { class: "flex flex-col gap-2 mb-4" }, [
-    m("label", { class: `flex items-start gap-3 ${isAssistAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"}` }, [
-      m("input", {
-        type: "radio",
-        name: "help-mode",
-        value: "agent",
-        class: "mt-1 shrink-0",
-        disabled: !isAssistAvailable,
-        checked: model.mode === "agent",
-        onchange: () => {
-          model.mode = "agent";
-        },
-      }),
-      m("span", [
-        m("span", { class: "type-body text-primary font-semibold" }, "Have an agent help fix the problem"),
-        m(
-          "span",
-          { class: "block type-helper text-tertiary" },
-          isAssistAvailable
-            ? "Opens a new chat in this machine that diagnoses the issue and fixes what it can."
-            : model.launch.workspaceAgentId
-              ? "Available once this machine is responding."
-              : "Open a machine to use this.",
-        ),
-      ]),
-    ]),
+    m(
+      "label",
+      {
+        class: `flex items-start gap-3 ${isAssistAvailable ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`,
+      },
+      [
+        m("input", {
+          type: "radio",
+          name: "help-mode",
+          value: "agent",
+          class: "mt-1 shrink-0",
+          disabled: !isAssistAvailable,
+          checked: model.mode === "agent",
+          onchange: () => {
+            model.mode = "agent";
+          },
+        }),
+        m("span", [
+          m(
+            "span",
+            { class: "type-body text-primary font-semibold" },
+            "Have an agent help fix the problem",
+          ),
+          m(
+            "span",
+            { class: "block type-helper text-tertiary" },
+            isAssistAvailable
+              ? "Opens a new chat in this machine that diagnoses the issue and fixes what it can."
+              : model.launch.workspaceAgentId
+                ? "Available once this machine is responding."
+                : "Open a machine to use this.",
+          ),
+        ]),
+      ],
+    ),
     m("label", { class: "flex items-start gap-3 cursor-pointer" }, [
       m("input", {
         type: "radio",
@@ -61,36 +71,137 @@ function modeChoice(model: HelpModel): m.Children {
         },
       }),
       m("span", [
-        m("span", { class: "type-body text-primary font-semibold" }, "Report a bug to Imbue"),
+        m(
+          "span",
+          { class: "type-body text-primary font-semibold" },
+          "Report a bug to Imbue",
+        ),
         m(
           "span",
           { class: "block type-helper text-tertiary" },
-          "Send us a description and diagnostics so we can investigate.",
+          "We'll investigate!",
         ),
       ]),
     ]),
   ]);
 }
 
-function formPhase(model: HelpModel): m.Children {
+function diagnosticsChoice(
+  model: HelpModel,
+  options: {
+    id: string;
+    label: string;
+    reason: string;
+    isChecked: boolean;
+    onChange: (value: boolean) => void;
+  },
+): m.Children {
+  // The reason sits under its own checkbox rather than in one block of prose at
+  // the end: what a box is for is only useful next to the box.
+  return m("div", { class: "flex flex-col" }, [
+    m("label", { class: "flex items-center gap-2 cursor-pointer" }, [
+      m("input", {
+        type: "checkbox",
+        id: options.id,
+        class: "shrink-0",
+        checked: options.isChecked,
+        onchange: (event: Event) =>
+          options.onChange((event.target as HTMLInputElement).checked),
+      }),
+      // An unticked box is the thing the warning below is about, so it carries
+      // the same error colour rather than leaving the reader to match them up.
+      m(
+        "span",
+        {
+          id: `${options.id}-label`,
+          class: `type-body ${options.isChecked ? "text-primary" : "text-important"}`,
+        },
+        options.label,
+      ),
+    ]),
+    m("span", { class: "type-helper text-tertiary ml-6" }, options.reason),
+  ]);
+}
+
+function workspaceDiagnosticsChoices(model: HelpModel): m.Children {
+  // Both are collected from inside the machine, so they only make sense when
+  // the report is scoped to one.
+  if (!model.launch.workspaceAgentId) return null;
+  return [
+    // "workspace logs", not "logs": minds' own app logs (backend, Electron, and
+    // their rotations) ride on every Sentry event whatever this is set to, so a
+    // bare "Include logs" would promise a scope the checkbox cannot honor.
+    diagnosticsChoice(model, {
+      id: "help-include-logs",
+      label: "Include workspace logs",
+      reason: "We'll need these to send a fix.",
+      isChecked: model.isLogsIncluded,
+      onChange: (value) => model.setLogsIncluded(value),
+    }),
+    diagnosticsChoice(model, {
+      id: "help-include-transcript",
+      label: "Include recent chats",
+      reason:
+        "We'll need these to diagnose the issue. We will never access them without your consent.",
+      isChecked: model.isTranscriptIncluded,
+      onChange: (value) => model.setTranscriptIncluded(value),
+    }),
+  ];
+}
+
+function withheldDiagnosticsWarning(model: HelpModel): m.Children {
+  // Only inside a machine, where the boxes are actually offered: outside one
+  // there is nothing to withhold and the warning would be a non-sequitur.
+  if (!model.launch.workspaceAgentId) return null;
+  const withheld = [
+    model.isLogsIncluded ? null : "workspace logs",
+    model.isTranscriptIncluded ? null : "recent chats",
+  ].filter((name): name is string => name !== null);
+  if (withheld.length === 0) return null;
+  return m(
+    "p",
+    { id: "help-withheld-warning", class: "type-helper text-important mt-2" },
+    // Naming what is missing rather than warning in the abstract: the sentence
+    // has to say which box to tick to make it go away.
+    `We may not be able to solve this issue without ${withheld.join(" and ")}.`,
+  );
+}
+
+export function formPhase(model: HelpModel): m.Children {
   return m("div", [
     model.launch.isAgentReport
       ? m("p", { class: "type-body text-primary mb-4" }, [
           model.launch.workspaceName
             ? m.fragment({}, [
                 "An agent in machine ",
-                m("span", { class: "font-semibold" }, model.launch.workspaceName),
+                m(
+                  "span",
+                  { class: "font-semibold" },
+                  model.launch.workspaceName,
+                ),
                 " wants to submit this report:",
               ])
             : "An agent in this machine wants to submit this report:",
         ])
-      : m("p", { class: "type-body text-primary mb-4" }, "Here's how we can help:"),
+      : m(
+          "p",
+          { class: "type-body text-primary mb-4" },
+          "Here's how we can help:",
+        ),
     modeChoice(model),
-    m("label", { class: "block type-label text-secondary mb-1", for: "help-description" }, "What happened?"),
+    m(
+      "label",
+      {
+        class: "block type-label text-secondary mb-1",
+        for: "help-description",
+      },
+      "What happened?",
+    ),
     m("textarea", {
       id: "help-description",
       rows: 4,
-      class: "w-full rounded-md border border-default bg-surface-primary p-2 type-body text-primary",
+      class:
+        "w-full rounded-md border border-default bg-surface-primary p-2 type-body text-primary",
       placeholder: "Describe the problem you ran into...",
       value: model.description,
       oninput: (event: Event) => {
@@ -100,6 +211,7 @@ function formPhase(model: HelpModel): m.Children {
     model.mode === "report" || model.launch.isAgentReport
       ? m("div", [
           m("div", { class: "flex flex-col gap-2 mt-4" }, [
+            workspaceDiagnosticsChoices(model),
             m("label", { class: "flex items-center gap-2 cursor-pointer" }, [
               m("input", {
                 type: "checkbox",
@@ -107,18 +219,18 @@ function formPhase(model: HelpModel): m.Children {
                 class: "shrink-0",
                 checked: model.isRemoteAccessAllowed,
                 onchange: (event: Event) =>
-                  model.setRemoteAccessAllowed((event.target as HTMLInputElement).checked),
+                  model.setRemoteAccessAllowed(
+                    (event.target as HTMLInputElement).checked,
+                  ),
               }),
-              m("span", { class: "type-body text-primary" }, "Allow Imbue to request remote access to help debug"),
+              m(
+                "span",
+                { class: "type-body text-primary" },
+                "Allow Imbue to request remote access to help debug",
+              ),
             ]),
           ]),
-          m(
-            "p",
-            { class: "type-helper text-tertiary mt-3" },
-            "Recent logs and app diagnostics (app version, signed-in accounts, your list of machines, " +
-              "details of the machine you're reporting from, and system info) are always attached to help " +
-              "us diagnose the problem. Imbue will never look into your machines without your consent.",
-          ),
+          withheldDiagnosticsWarning(model),
         ])
       : null,
     m(
@@ -131,12 +243,17 @@ function formPhase(model: HelpModel): m.Children {
         disabled: model.isSubmitBusy,
         onclick: () => void model.submit(),
       },
-      model.mode === "agent" && !model.launch.isAgentReport ? "Start agent" : "Send report",
+      model.mode === "agent" && !model.launch.isAgentReport
+        ? "Start agent"
+        : "Send report",
     ),
     model.statusMessage !== null
       ? m(
           "p",
-          { id: "help-status", class: `type-helper mt-2 ${model.isStatusError ? "text-important" : "text-tertiary"}` },
+          {
+            id: "help-status",
+            class: `type-helper mt-2 ${model.isStatusError ? "text-important" : "text-tertiary"}`,
+          },
           model.statusMessage,
         )
       : null,
@@ -157,16 +274,53 @@ function loadingPhase(): m.Children {
 
 function agentErrorPhase(model: HelpModel): m.Children {
   return m("div", { class: "p-4 text-center" }, [
-    m("h2", { class: "type-heading text-primary mb-2" }, "Couldn't start an agent"),
+    m(
+      "h2",
+      { class: "type-heading text-primary mb-2" },
+      "Couldn't start an agent",
+    ),
     m("p", { class: "type-body text-secondary mb-4" }, model.agentErrorMessage),
-    m(Button, { variant: "primary", block: true, onclick: () => model.backToReportFromError() }, "Back to report"),
+    m(
+      Button,
+      {
+        variant: "primary",
+        block: true,
+        onclick: () => model.backToReportFromError(),
+      },
+      "Back to report",
+    ),
   ]);
 }
 
-function sentPhase(model: HelpModel): m.Children {
+/** Whether this report asked for anything that may still be uploading behind its ID.
+ *
+ * The ID arrives as soon as the report is filed; the machine's logs and chats are
+ * collected and uploaded after that, so a report that asked for either owes the
+ * user a word about it rather than looking finished when it is not.
+ */
+function isDiagnosticsUploadPending(model: HelpModel): boolean {
+  if (!model.launch.workspaceAgentId) return false;
+  return model.isLogsIncluded || model.isTranscriptIncluded;
+}
+
+export function sentPhase(model: HelpModel): m.Children {
   return m("div", { class: "p-4 text-center" }, [
     m("h2", { class: "type-heading text-primary mb-2" }, "Thanks!"),
-    m("p", { class: "type-body text-secondary mb-4" }, "Your report was sent to Imbue."),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-4" },
+      "Your report was sent to Imbue.",
+    ),
+    isDiagnosticsUploadPending(model)
+      ? m(
+          "p",
+          {
+            id: "help-diagnostics-pending",
+            class: "type-helper text-tertiary mb-4",
+          },
+          "The logs and chats you included finish uploading in the background — your report is already filed.",
+        )
+      : null,
     model.sentEventId !== null
       ? m("div", { class: "mb-4 text-left" }, [
           m("p", { class: "type-label text-secondary mb-1" }, "Report ID"),
@@ -185,7 +339,11 @@ function sentPhase(model: HelpModel): m.Children {
           ),
         ])
       : null,
-    m(Button, { variant: "primary", block: true, onclick: () => closeHelpSurface() }, "Done"),
+    m(
+      Button,
+      { variant: "primary", block: true, onclick: () => closeHelpSurface() },
+      "Done",
+    ),
   ]);
 }
 
@@ -197,7 +355,11 @@ function HelpPageComponent(): m.Component {
       // Route params take precedence (titlebar / deep link); a staged
       // pending-launch (open_help flow) fills anything the params omit.
       const workspaceParam = m.route.param("workspace");
-      if (workspaceParam || m.route.param("description") || m.route.param("agent_report")) {
+      if (
+        workspaceParam ||
+        m.route.param("description") ||
+        m.route.param("agent_report")
+      ) {
         setPendingHelpLaunch({
           workspaceAgentId: workspaceParam ?? "",
           isAssistAvailable: m.route.param("assist") === "1",
@@ -206,7 +368,10 @@ function HelpPageComponent(): m.Component {
           workspaceName: m.route.param("workspace_name") ?? "",
         });
       }
-      model = new HelpModel({ onClose: closeHelpSurface, redraw: () => m.redraw() });
+      model = new HelpModel({
+        onClose: closeHelpSurface,
+        redraw: () => m.redraw(),
+      });
     },
     onremove() {
       model = null;
@@ -216,7 +381,8 @@ function HelpPageComponent(): m.Component {
       if (activeModel === null) return null;
       let body: m.Children;
       if (activeModel.phase === "agent_loading") body = loadingPhase();
-      else if (activeModel.phase === "agent_error") body = agentErrorPhase(activeModel);
+      else if (activeModel.phase === "agent_error")
+        body = agentErrorPhase(activeModel);
       else if (activeModel.phase === "sent") body = sentPhase(activeModel);
       else body = formPhase(activeModel);
       // Rendered inside the AppOverlay card (Shell), which supplies the card

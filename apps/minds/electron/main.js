@@ -4,6 +4,7 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const paths = require('./paths');
 const { initElectronLogging } = require('./logger');
+const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
 const { initSentry, captureManualReport } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
@@ -34,6 +35,10 @@ const {
 // Tee console output into ~/.minds/logs/electron.log and record uncaught
 // main-process failures BEFORE anything else runs.
 initElectronLogging();
+
+// Open the rolling renderer-console tail beside it, so every window created
+// below has somewhere to record what its page printed.
+initConsoleCapture(paths.getLogDir());
 
 // Initialize Sentry as early as possible. The SDK only sends when the user has
 // enabled error reporting (read live per event) -- see electron/sentry.js.
@@ -429,6 +434,13 @@ function createBundle() {
 
   win.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
+  });
+
+  // Every level from every frame of this window -- the SPA's own output and the
+  // workspace iframe's, which share this webContents -- into the rolling
+  // console tail, so a bug report can carry what the UI actually printed.
+  win.webContents.on('console-message', (details) => {
+    recordConsoleMessage(details);
   });
 
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
@@ -2384,6 +2396,10 @@ async function runQuitSequence() {
   updateQuittingStatus('Closing…');
   await shutdown();
   if (bundles.size > 0) saveSessionState();
+  // The console capture writes through an async stream, so records logged in the
+  // last moments before quitting sit in its buffer. Flushing here is what puts
+  // the run-up to a shutdown in the file a later bug report reads.
+  await closeConsoleCapture();
   app.quit();
 }
 
