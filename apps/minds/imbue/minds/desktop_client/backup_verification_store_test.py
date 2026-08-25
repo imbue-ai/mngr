@@ -2,14 +2,14 @@
 
 from pathlib import Path
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
 from imbue.mngr.primitives import AgentId
 
 
-def _paths(tmp_path: Path) -> WorkspacePaths:
-    return WorkspacePaths(data_dir=tmp_path)
+def _paths(tmp_path: Path) -> InstallationPaths:
+    return InstallationPaths(data_dir=tmp_path)
 
 
 def test_verification_is_enabled_by_default(tmp_path: Path) -> None:

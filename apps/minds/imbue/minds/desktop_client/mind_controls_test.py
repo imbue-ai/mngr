@@ -14,7 +14,7 @@ from pathlib import Path
 
 from flask.testing import FlaskClient
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -55,7 +55,7 @@ def _make_client(tmp_path: Path, resolver: MngrCliBackendResolver) -> tuple[Flas
         http_client=None,
         # Mount the /api/v1 surface so the desktop running-workspaces / stop-hosts
         # / state-container routes are reachable with the session cookie.
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
     )
     return app.test_client(), auth_store
 

@@ -300,7 +300,7 @@ def _rewrite_container_host_name(
 
 
 # How each non-running wire status surfaces as an mngr host state. Every
-# status maps to its literal counterpart: a stopping workspace really is
+# status maps to its literal counterpart: a stopping host really is
 # mid-stop (its upload is in flight and the connector refuses starts until
 # it lands on stopped), so rendering it as an already-startable STOPPED
 # would offer an action the server rejects.
@@ -337,24 +337,24 @@ def leased_info_from_workspace(workspace: WorkspaceInfo) -> LeasedHostInfo:
 
 
 def _workspace_start_failed_error(host_id: HostId, transition_error: str | None) -> WorkspaceStartFailedError:
-    return WorkspaceStartFailedError(f"workspace {host_id} failed to start: {transition_error or 'unknown error'}")
+    return WorkspaceStartFailedError(f"host {host_id} failed to start: {transition_error or 'unknown error'}")
 
 
 def _workspace_abandoned_error(host_id: HostId, transition_error: str | None) -> WorkspaceStartFailedError:
     return WorkspaceStartFailedError(
-        f"workspace {host_id} was abandoned ({transition_error or 'no reason recorded'}); "
-        "restore it from its backup into a fresh workspace"
+        f"host {host_id} was abandoned ({transition_error or 'no reason recorded'}); "
+        "restore its data from backup onto a fresh host"
     )
 
 
 def _unrecognized_workspace_status_error(host_id: HostId) -> UnrecognizedWorkspaceStatusError:
     return UnrecognizedWorkspaceStatusError(
-        f"workspace {host_id} is in a state this app version does not recognize; update the app to manage it"
+        f"host {host_id} is in a state this app version does not recognize; update the app to manage it"
     )
 
 
 class _WorkspaceStartPollState(MutableModel):
-    """Mutable bookkeeping for one workspace-start poll, advanced once per probe."""
+    """Mutable bookkeeping for one host-start poll, advanced once per probe."""
 
     is_start_requested: bool = Field(default=False, description="Whether this poll has issued its start request")
     last_observed_status: WorkspaceStatus | None = Field(
@@ -376,10 +376,10 @@ def _advance_workspace_start(
     host_id: HostId,
     state: _WorkspaceStartPollState,
 ) -> WorkspaceInfo | Exception | None:
-    """One start-poll step: the running workspace, a terminal failure, or None (keep polling).
+    """One start-poll step: the running host's wire record, a terminal failure, or None (keep polling).
 
-    Requests the start itself the moment the workspace is startable: a
-    still-``stopping`` workspace is waited out first (the connector refuses
+    Requests the start itself the moment the host is startable: a
+    still-``stopping`` host is waited out first (the connector refuses
     starts mid-stop; the stop lands on ``stopped`` once its upload verifies).
     """
     current = client.get_workspace(token_provider(), host_db_id)
@@ -390,7 +390,7 @@ def _advance_workspace_start(
         case WorkspaceStatus.RUNNING:
             return current
         case WorkspaceStatus.CRASHED:
-            # An operator abandoned the workspace; it can never reach running,
+            # An operator abandoned the host; it can never reach running,
             # so waiting out the poll window would only bury the reason.
             return _workspace_abandoned_error(host_id, current.transition_error)
         case WorkspaceStatus.UNKNOWN:
@@ -1767,7 +1767,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             if not lease_result.outer_host_public_key or not lease_result.container_host_public_key:
                 raise MngrError(
                     f"lease of host {host_id} returned no pinned SSH host keys; upgrade the connector and run the "
-                    "one-time operator host-key backfill (`minds-admin pool backfill-host-keys`)"
+                    "one-time operator host-key backfill (`pool backfill-host-keys`)"
                 )
             self._record_host_key(
                 host_id, lease_result.vps_address, lease_result.ssh_port, lease_result.outer_host_public_key
@@ -2462,7 +2462,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 else ""
             )
             raise WorkspaceStartTimeoutError(
-                f"workspace {host_id} did not reach running within {_WORKSPACE_START_TIMEOUT_SECONDS:.0f}s "
+                f"host {host_id} did not reach running within {_WORKSPACE_START_TIMEOUT_SECONDS:.0f}s "
                 f"(last observed status: {last_status}{error_note})"
             )
         if isinstance(outcome, Exception):

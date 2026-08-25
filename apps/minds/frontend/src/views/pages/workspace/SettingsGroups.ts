@@ -101,8 +101,8 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
         ? m(
             Notice,
             { variant: "warn" },
-            "This machine is currently unreachable, so it can't be renamed right now. " +
-              "Try again once the machine reconnects.",
+            "This workspace's machine is currently unreachable, so the workspace can't be renamed " +
+              "right now. Try again once the machine reconnects.",
           )
         : null,
       m("div", { class: "flex items-center gap-2" }, [
@@ -113,7 +113,7 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
           maxlength: 200,
           spellcheck: "false",
           autocomplete: "off",
-          "aria-label": "Machine name",
+          "aria-label": "Workspace name",
           extra: "max-w-xs",
           disabled: data.is_stale,
           oninput: (event: InputEvent) => {
@@ -160,7 +160,7 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
         "div",
         {
           role: "radiogroup",
-          "aria-label": "Machine color palette",
+          "aria-label": "Workspace color palette",
           class: "flex flex-wrap items-center gap-2 mb-3",
           id: "color-swatches",
         },
@@ -190,7 +190,7 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
             maxlength: 9,
             spellcheck: "false",
             autocomplete: "off",
-            "aria-label": "Machine color hex",
+            "aria-label": "Workspace color hex",
             size: 8,
             disabled: data.is_stale || model.isColorSaving,
             oninput: (event: InputEvent) => {

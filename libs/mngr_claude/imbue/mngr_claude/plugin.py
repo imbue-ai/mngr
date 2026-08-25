@@ -2107,10 +2107,10 @@ class ClaudeCoreAgent(
             version=config.version,
         )
         # Pass host + options so approval finds keys arriving via --env, --pass-env,
-        # --pass-host-env, --host-env, and --host-env-file -- not just os.environ. The
-        # LOCAL/Docker minds path lands its ANTHROPIC_API_KEY only on the host's env
-        # file (via --host-env-file <repo>/.env), so without these arguments the
-        # approval missed the key and claude blocked on the custom-key TUI prompt.
+        # --pass-host-env, --host-env, and --host-env-file -- not just os.environ. A
+        # caller may land its ANTHROPIC_API_KEY only on the host's env file (via
+        # --host-env-file <repo>/.env), so without these arguments the approval
+        # missed the key and claude blocked on the custom-key TUI prompt.
         approve_api_key_for_claude(claude_json_data, host=host, options=options)
 
         settings_json = _build_settings_json(
@@ -3157,7 +3157,7 @@ class ClaudeAgent(
         # foreground with no expected-process descendant as DONE (see
         # determine_lifecycle_probe_result). A brace group runs in the pane
         # shell itself, so the branch's own command (claude, or a custom base
-        # like the minds services agent's `sleep infinity`) stays the
+        # like a command agent's `sleep infinity`) stays the
         # foreground command, exactly like the pre-chain launch command.
         return CommandString(
             f"{background_cmd} {env_exports}"
@@ -3810,10 +3810,9 @@ def approve_api_key_for_claude(
     - ``options.environment.env_vars`` -- explicit ``--env`` / ``--pass-env`` from the CLI.
     - ``host.get_env_var("ANTHROPIC_API_KEY")`` -- the *target host's* env file, populated by
       ``_write_host_env_vars`` from ``--host-env``, ``--pass-host-env``, and ``--host-env-file``.
-      The last one is critical: minds passes the workspace ``.env`` via ``--host-env-file`` and
-      its ``ANTHROPIC_API_KEY`` only ever lives there, never in ``os.environ``. Without consulting
-      the host env, the approval was a no-op for the LOCAL/Docker path (see PR thread for
-      assistant2 reproduction).
+      The last one is critical: a caller may pass a project ``.env`` via ``--host-env-file`` with
+      its ``ANTHROPIC_API_KEY`` only ever living there, never in ``os.environ``, so consulting the
+      host env is the only way to approve keys arriving through that path.
     - ``primaryApiKey`` in the user's ``~/.claude.json``.
 
     ``host`` and ``options`` default to ``None`` because :func:`approve_api_key_for_claude` is

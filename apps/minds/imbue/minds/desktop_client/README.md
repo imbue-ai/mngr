@@ -24,7 +24,7 @@ The local desktop client is a Flask app that handles authentication and traffic 
 > embed contract module, the vendored Sentry browser bundle + its init, the
 > service icons, and the built SPA bundle (`static/ui/`, gitignored).
 
-Each workspace already runs its own `system_interface`, which serves the dockview UI at the workspace's bare origin; every other registered service owns its own origin (`<service>.host-<hex>.localhost:PORT/`), so nothing proxies or rewrites service traffic. The desktop client's job is to route browser traffic for `[<service>.]host-<hex>.localhost:PORT/*` to the right in-workspace backend -- it does not rewrite paths or inject anything itself.
+Each workspace already runs its own `system_interface`, which serves the dockview UI at the workspace's bare origin; every other registered service owns its own origin (`<service>.agent-<hex>.localhost:PORT/`), so nothing proxies or rewrites service traffic. The desktop client's job is to route browser traffic for `[<service>.]agent-<hex>.localhost:PORT/*` to the right in-workspace backend -- it does not rewrite paths or inject anything itself.
 
 This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible locally.
 
@@ -81,9 +81,9 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
     page becomes the record-backed detail view: retry + discard for an interrupted
     create attempt, persisted error + log tail + dismiss for a failed one
 
-`[<service>.]host-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
+`[<service>.]agent-<hex>.localhost:PORT/*` (workspace-origin catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize
-    `[<service>.]host-<hex>.localhost(:port)` hosts and byte-forward the
+    `[<service>.]agent-<hex>.localhost(:port)` hosts and byte-forward the
     HTTP or WebSocket request to that workspace's matching backend: the
     bare origin reaches the system_interface, `<service>.` origins reach
     that registered service (resolved via the backend resolver, optionally
@@ -93,10 +93,10 @@ Note this is the *local* session with the desktop client itself. *Imbue account*
 
 ## Proxying design
 
-The desktop client only byte-forwards requests. Each workspace owns a family of origins keyed by its host id: the bare `host-<hex>.localhost` origin serves the shell (system_interface), each registered service owns `<service>.host-<hex>.localhost`, and deeper labels route to the same service (its own sub-origin space for multi-origin apps). Services therefore run unmodified -- root-absolute URLs, WebSockets, cookies, and service workers all work as written; nothing rewrites anything. One session cookie scoped `Domain=host-<hex>.localhost` (set by the forwarder's `/goto/` bridge, with `SameSite=None; Secure; Partitioned` so it is sent from inside the chrome's cross-site iframe) covers the whole family.
+The desktop client only byte-forwards requests. Each workspace owns a family of origins keyed by its workspace id (its agent id -- so URLs survive machine changes; legacy host-keyed origins redirect): the bare `agent-<hex>.localhost` origin serves the shell (system_interface), each registered service owns `<service>.agent-<hex>.localhost`, and deeper labels route to the same service (its own sub-origin space for multi-origin apps). Services therefore run unmodified -- root-absolute URLs, WebSockets, cookies, and service workers all work as written; nothing rewrites anything. One session cookie scoped `Domain=agent-<hex>.localhost` (set by the forwarder's `/goto/` bridge, with `SameSite=None; Secure; Partitioned` so it is sent from inside the chrome's cross-site iframe) covers the whole family.
 
 ## The SPA shell and the workspace iframe
 
-The user-facing UI is one web context per window (both in the desktop app and in a plain browser): the Mithril SPA shell, which renders the titlebar, the hub pages (Home, Create, Settings, ... routed client-side by `frontend/src/router.ts`), the sandboxed cross-origin iframe that displays workspace content (`frontend/src/views/shell/WorkspaceFrame.ts`), and in-DOM Mithril modals. Workspace entry goes through `GET /forward-bridge?next=/goto/<host-id>/`: minds verifies its own session and 302s to the forward plugin's `/_bridge` with a spawn-time secret, which sets the plugin's bare-origin cookie and redirects onward -- the browser twin of the Electron shell's programmatic cookie injection.
+The user-facing UI is one web context per window (both in the desktop app and in a plain browser): the Mithril SPA shell, which renders the titlebar, the hub pages (Home, Create, Settings, ... routed client-side by `frontend/src/router.ts`), the sandboxed cross-origin iframe that displays workspace content (`frontend/src/views/shell/WorkspaceFrame.ts`), and in-DOM Mithril modals. Workspace entry goes through `GET /forward-bridge?next=/goto/<workspace-id>/`: minds verifies its own session and 302s to the forward plugin's `/_bridge` with a spawn-time secret, which sets the plugin's bare-origin cookie and redirects onward -- the browser twin of the Electron shell's programmatic cookie injection.
 
 Shell<->workspace messaging flows exclusively through the embed contract (`static/embed_contract.js`, documented in `apps/minds/docs/embed-contract.md`); the forward plugin's appended `frame-ancestors` policy is what makes "being framed at all" proof the embedder was allowed.

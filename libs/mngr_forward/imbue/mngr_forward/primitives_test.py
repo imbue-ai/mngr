@@ -9,9 +9,11 @@ from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.primitives import ServiceLabel
 from imbue.mngr_forward.primitives import parse_forward_host
 
-# Host-header host ids require the full 32 hex characters (matching HostId).
+# Origin coordinates require the full 32 hex characters. The canonical
+# coordinate is the agent id; host-shaped coordinates are the legacy shape.
+_AGENT_A = "agent-" + "0123456789abcdef0123456789abcdef"
+_AGENT_B = "agent-" + "feedfacefeedfacefeedfacefeedface"
 _HOST_A = "host-" + "0123456789abcdef0123456789abcdef"
-_HOST_B = "host-" + "feedfacefeedfacefeedfacefeedface"
 
 
 def test_forward_port_rejects_zero() -> None:
@@ -30,16 +32,18 @@ def test_session_cookie_name_constant() -> None:
 @pytest.mark.parametrize(
     "host, expected",
     [
+        (f"{_AGENT_A}.localhost", _AGENT_A),
+        (f"{_AGENT_A}.localhost:8421", _AGENT_A),
+        (f"{_AGENT_B}.127.0.0.1", _AGENT_B),
+        (f"{_AGENT_B.upper().replace('AGENT', 'agent')}.127.0.0.1:9000", _AGENT_B),
+        # The legacy host-keyed coordinate still parses (redirect shim).
         (f"{_HOST_A}.localhost", _HOST_A),
-        (f"{_HOST_A}.localhost:8421", _HOST_A),
-        (f"{_HOST_B}.127.0.0.1", _HOST_B),
-        (f"{_HOST_B.upper().replace('HOST', 'host')}.127.0.0.1:9000", _HOST_B),
     ],
 )
 def test_subdomain_pattern_matches_valid_hosts(host: str, expected: str) -> None:
     match = FORWARD_SUBDOMAIN_PATTERN.match(host)
     assert match is not None
-    assert match.group("host").lower() == expected.lower()
+    assert match.group("coordinate").lower() == expected.lower()
 
 
 @pytest.mark.parametrize(
@@ -48,10 +52,12 @@ def test_subdomain_pattern_matches_valid_hosts(host: str, expected: str) -> None
         "localhost",
         "127.0.0.1",
         "example.com",
-        # Non-hex id, too-short id (host ids are 32 hex chars), mangled prefix.
+        # Non-hex id, too-short id (coordinates are 32 hex chars), mangled prefix.
         "host-XYZ.localhost",
         "host-1234.localhost",
-        f"ws{_HOST_A}.localhost",
+        "agent-XYZ.localhost",
+        "agent-1234.localhost",
+        f"ws{_AGENT_A}.localhost",
         # Labels on a non-workspace host / labels with no host coordinate.
         "svc.example.com",
         "svc.localhost",
@@ -66,35 +72,38 @@ def test_subdomain_pattern_rejects_invalid_hosts(host: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "host, host_id, service_name, service_labels, workspace_domain",
+    "host, coordinate, service_name, service_labels, workspace_domain",
     [
-        (f"{_HOST_A}.localhost", _HOST_A, None, None, f"{_HOST_A}.localhost"),
-        (f"{_HOST_A}.localhost:8421", _HOST_A, None, None, f"{_HOST_A}.localhost"),
-        (f"terminal.{_HOST_A}.localhost:8421", _HOST_A, "terminal", "terminal", f"{_HOST_A}.localhost"),
+        (f"{_AGENT_A}.localhost", _AGENT_A, None, None, f"{_AGENT_A}.localhost"),
+        (f"{_AGENT_A}.localhost:8421", _AGENT_A, None, None, f"{_AGENT_A}.localhost"),
+        (f"terminal.{_AGENT_A}.localhost:8421", _AGENT_A, "terminal", "terminal", f"{_AGENT_A}.localhost"),
         # Deeper labels route to the same service: the LAST label before the
-        # host coordinate is the service; the rest is its sub-origin space.
-        (f"deep.svc.{_HOST_A}.localhost", _HOST_A, "svc", "deep.svc", f"{_HOST_A}.localhost"),
-        (f"a.b.c.svc.{_HOST_A}.localhost:9000", _HOST_A, "svc", "a.b.c.svc", f"{_HOST_A}.localhost"),
+        # coordinate is the service; the rest is its sub-origin space.
+        (f"deep.svc.{_AGENT_A}.localhost", _AGENT_A, "svc", "deep.svc", f"{_AGENT_A}.localhost"),
+        (f"a.b.c.svc.{_AGENT_A}.localhost:9000", _AGENT_A, "svc", "a.b.c.svc", f"{_AGENT_A}.localhost"),
         # 127.0.0.1 stays a synonym.
-        (f"svc.{_HOST_B}.127.0.0.1:9000", _HOST_B, "svc", "svc", f"{_HOST_B}.127.0.0.1"),
+        (f"svc.{_AGENT_B}.127.0.0.1:9000", _AGENT_B, "svc", "svc", f"{_AGENT_B}.127.0.0.1"),
         # DNS names are case-insensitive: labels are lowercased.
-        (f"TERMINAL.{_HOST_A}.LOCALHOST", _HOST_A, "terminal", "terminal", f"{_HOST_A}.localhost"),
+        (f"TERMINAL.{_AGENT_A}.LOCALHOST", _AGENT_A, "terminal", "terminal", f"{_AGENT_A}.localhost"),
         # The shell's legacy underscore name works as a label too.
         (
-            f"system_interface.{_HOST_A}.localhost",
-            _HOST_A,
+            f"system_interface.{_AGENT_A}.localhost",
+            _AGENT_A,
             "system_interface",
             "system_interface",
-            f"{_HOST_A}.localhost",
+            f"{_AGENT_A}.localhost",
         ),
+        # A persisted pre-agent-keying URL still parses (redirect shim).
+        (f"svc.{_HOST_A}.localhost", _HOST_A, "svc", "svc", f"{_HOST_A}.localhost"),
     ],
 )
 def test_parse_forward_host_valid(
-    host: str, host_id: str, service_name: str | None, service_labels: str | None, workspace_domain: str
+    host: str, coordinate: str, service_name: str | None, service_labels: str | None, workspace_domain: str
 ) -> None:
     parsed = parse_forward_host(host)
     assert parsed is not None
-    assert str(parsed.host_id_str) == host_id
+    assert str(parsed.coordinate) == coordinate
+    assert parsed.is_legacy_host_coordinate == coordinate.startswith("host-")
     assert parsed.service_name == service_name
     assert parsed.service_labels == service_labels
     assert str(parsed.workspace_domain) == workspace_domain

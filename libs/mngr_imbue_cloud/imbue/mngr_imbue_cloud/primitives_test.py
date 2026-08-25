@@ -1,5 +1,6 @@
 import pytest
 
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.mngr_imbue_cloud.primitives import CI_TIER
 from imbue.mngr_imbue_cloud.primitives import DEV_TIER
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -8,6 +9,7 @@ from imbue.mngr_imbue_cloud.primitives import OVH_DATACENTER_CODE_BY_US_REGION
 from imbue.mngr_imbue_cloud.primitives import PRODUCTION_TIER
 from imbue.mngr_imbue_cloud.primitives import STAGING_TIER
 from imbue.mngr_imbue_cloud.primitives import US_REGION_BY_OVH_DATACENTER_CODE
+from imbue.mngr_imbue_cloud.primitives import WorkspaceId
 from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 from imbue.mngr_imbue_cloud.primitives import slugify_account
 from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
@@ -68,3 +70,17 @@ def test_us_region_by_ovh_datacenter_code_round_trips_the_forward_map() -> None:
     assert len(US_REGION_BY_OVH_DATACENTER_CODE) == len(OVH_DATACENTER_CODE_BY_US_REGION)
     for region, datacenter in OVH_DATACENTER_CODE_BY_US_REGION.items():
         assert US_REGION_BY_OVH_DATACENTER_CODE[datacenter] == region
+
+
+def test_workspace_id_accepts_a_services_agent_id() -> None:
+    workspace_id = WorkspaceId("agent-0123456789abcdef0123456789abcdef")
+    assert workspace_id == "agent-0123456789abcdef0123456789abcdef"
+
+
+def test_workspace_id_rejects_host_shaped_and_malformed_values() -> None:
+    with pytest.raises(InvalidRandomIdError):
+        WorkspaceId("host-0123456789abcdef0123456789abcdef")
+    with pytest.raises(InvalidRandomIdError):
+        WorkspaceId("agent-nothex")
+    with pytest.raises(InvalidRandomIdError):
+        WorkspaceId("agent-0123")

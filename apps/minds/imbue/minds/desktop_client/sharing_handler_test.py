@@ -231,7 +231,7 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
         host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=True
     )
 
-    assert cli.create_share_calls == [("owner@example.com", host_id, None, None)]
+    assert cli.create_share_calls == [("owner@example.com", host_id, None, None, str(agent_id))]
     # Exactly TWO execs touch the workspace: the one-shot state probe and the
     # combined write of grants + owner email + share.env. Each exec pays a full
     # mngr process + SSH round trip on a remote host, so the count is the
@@ -298,6 +298,7 @@ class _PreferredRegionRecordingCli(FakeImbueCloudCli):
         host_id: str,
         entry_label: str | None = None,
         preferred_region: str | None = None,
+        workspace_id: str | None = None,
     ) -> ShareCliInfo:
         self.recorded_preferred_regions.append(preferred_region)
         raise ImbueCloudCliError("recorded; stopping the bring-up here")

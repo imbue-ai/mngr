@@ -11,7 +11,7 @@ from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import _compute_cloud_tile_state
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -27,7 +27,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 
 
 def _make_profiled_store(tmp_path: Path, cli: FakeImbueCloudCli) -> WorkspaceRecordStore:
-    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     mngr_host_dir = tmp_path / "mngr"
     profile_id = uuid4().hex

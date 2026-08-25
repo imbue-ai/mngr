@@ -176,9 +176,9 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
 
         work_dir = tmp_path / "claude-source"
         _init_claude_workspace(work_dir)
-        return AgentReleaseContext(env=env, workspace=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
+        return AgentReleaseContext(env=env, project_dir=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
 
-    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+    def prepare_adoption_project_dir(self, work_dir: Path) -> None:
         # The adoption worktree is also a claude source, so it needs the same
         # repo-local .gitignore rule the seed worktree carries (see _init_claude_workspace).
         _init_claude_workspace(work_dir)
@@ -190,7 +190,7 @@ class _ClaudeReleaseProfile(AgentReleaseProfile):
         return [
             "--no-ensure-clean",
             "--source",
-            str(ctx.workspace),
+            str(ctx.project_dir),
             "--pass-env",
             "ANTHROPIC_API_KEY",
             "--",
@@ -709,7 +709,7 @@ class _BangShellModeProfile(_ClaudeReleaseProfile):
         return run_mngr_subprocess(*args, env=env, timeout=timeout)
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
-        args: list[str] = ["--no-ensure-clean", "--source", str(ctx.workspace)]
+        args: list[str] = ["--no-ensure-clean", "--source", str(ctx.project_dir)]
         if os.environ.get("ANTHROPIC_API_KEY"):
             args += ["--pass-env", "ANTHROPIC_API_KEY"]
         args += ["--", "--dangerously-skip-permissions", "--model", _MODEL]

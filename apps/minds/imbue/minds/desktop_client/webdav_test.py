@@ -8,7 +8,7 @@ from uuid import uuid4
 from flask.testing import FlaskClient
 from wsgidav.wsgidav_app import WsgiDAVApp
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -18,7 +18,7 @@ from imbue.minds.desktop_client.webdav import _build_wsgidav_config
 
 def _build_authenticated_client(tmp_path: Path) -> tuple[FlaskClient, str]:
     """Build a Flask test client + the central minds API key it expects."""
-    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     api_key = generate_api_key()
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})

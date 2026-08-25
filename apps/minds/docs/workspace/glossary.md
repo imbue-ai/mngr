@@ -2,10 +2,15 @@
 
 Key concepts in the minds system:
 
-- **workspace**: a persistent mngr *host*, created from a template repository via `mngr create --new-host`.
-  All configuration lives in the template's `.mngr/settings.toml`.
+- **workspace**: the logical unit a user works out of: a collection of permissions (what the agent can access, which outside users can access it), apps, data, and customizations.
+  A workspace is identified by its primary agent's id (its *workspace id*, which never changes for the life of the workspace) and discovered via that agent's `is_primary` label; the *machine* it currently runs on is a swappable attribute.
   A workspace holds several agents: exactly one primary agent, plus the chat, worktree, and worker agents created within it over time.
-  It is addressed by its primary agent's id, and discovered via that agent's `is_primary` label.
+  Workspaces are created from a template repository via `mngr create --new-host` (all configuration lives in the template's `.mngr/settings.toml`), and their backups are substrate-independent: a workspace's data can be restored onto a different machine.
+
+- **machine**: the place a workspace runs -- the thing with CPUs, RAM, disk, and an IP address.
+  At the mngr level a machine is a *host*, identified by its host id.
+  A machine cannot be copied (there are never two live instances of one machine), though an imbue_cloud machine can be suspended and resumed on different bare metal, keeping its host id.
+  mngr-level code speaks host/agent; minds-level code speaks machine/workspace (see `specs/machine-workspace-naming/decisions.md`).
 
 - **creation**: anything a user makes in their workspace.
   Used only at the highest conceptual level; the working vocabulary is the kinds: *apps* (opened as tabs), *skills* (an *automation* is a skill run automatically on a schedule), *data* (documents, images, notes), and *customizations* (changes to any of the above).

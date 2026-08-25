@@ -45,8 +45,8 @@ from playwright.sync_api import Page
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import mngr_prefix_for
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -1021,7 +1021,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
 
     data_dir = tmp_path / "minds-data"
     data_dir.mkdir()
-    paths = WorkspacePaths(data_dir=data_dir)
+    paths = InstallationPaths(data_dir=data_dir)
     repo_one = tmp_path / "restic-repo-1"
     repo_two = tmp_path / "restic-repo-2"
 
@@ -1034,7 +1034,6 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # random per-workspace password + injection into the real container.
     configure_backups_for_host(
         agent_id=agent_id,
-        host_id="host-snapshot-test",
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_one}"
         ),
@@ -1067,7 +1066,6 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # canonical env is archived minds-side and the workspace copy replaced.
     change_backup_destination_for_host(
         agent_id=agent_id,
-        host_id="host-snapshot-test",
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_two}"
         ),
@@ -1102,7 +1100,6 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     repo_three = tmp_path / "restic-repo-3"
     configure_backups_for_host(
         agent_id=agent_id,
-        host_id="host-snapshot-test",
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_three}"
         ),
@@ -1172,7 +1169,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     agent_id = AgentId(running_workspace.services_agent_id)
     data_dir = tmp_path / "minds-data"
     data_dir.mkdir()
-    paths = WorkspacePaths(data_dir=data_dir)
+    paths = InstallationPaths(data_dir=data_dir)
     # The repository path must be identical on the sandbox host and inside the
     # container (the same RESTIC_REPOSITORY string is read by both), so it
     # lives at a fixed absolute path rather than the per-test tmp_path. It must
@@ -1184,7 +1181,6 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # the container), then hand the initialized repository to the container.
     configure_backups_for_host(
         agent_id=agent_id,
-        host_id="host-restore-e2e",
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repository}"
         ),

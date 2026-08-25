@@ -167,7 +167,7 @@ export const LandingPage: m.ClosureComponent = () => {
   function rowClick(entry: UiWorkspaceEntry): void {
     const { stores, shell } = getAppContext();
     const health = stores.health.statusFor(entry.id);
-    const returnTo = `/goto/${stores.workspaces.toHostScopedId(entry.id)}/`;
+    const returnTo = `/goto/${entry.id}/`;
     const liveness = state.tracker.displayedLiveness(entry.id, entry.liveness ?? "");
     const action = rowClickActionFor(entry, liveness, health === "healthy");
     if (action === "recover") {
@@ -316,7 +316,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 "data-tooltip": "Restart machine",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
-                  const returnTo = `/goto/${stores.workspaces.toHostScopedId(entry.id)}/`;
+                  const returnTo = `/goto/${entry.id}/`;
                   m.route.set(recoveryRoute(entry.id, returnTo, "restart"));
                 },
               },
@@ -336,11 +336,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 electronBridge.openWorkspaceInNewWindow(entry.id);
               } else {
                 const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
-                window.open(
-                  `${forwardOrigin}/goto/${stores.workspaces.toHostScopedId(entry.id)}/`,
-                  "_blank",
-                  "noopener",
-                );
+                window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
               }
             },
           },

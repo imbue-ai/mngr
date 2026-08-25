@@ -48,8 +48,8 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -101,27 +101,27 @@ class DestroyingRecord(FrozenModel):
     log_path: Path = Field(description="Absolute path to output.log for the detail page tail")
 
 
-def _destroying_dir(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+def _destroying_dir(paths: InstallationPaths, agent_id: AgentId) -> Path:
     return paths.data_dir / _DESTROYING_DIR_NAME / str(agent_id)
 
 
-def _pid_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+def _pid_file(paths: InstallationPaths, agent_id: AgentId) -> Path:
     return _destroying_dir(paths, agent_id) / _PID_FILE_NAME
 
 
-def _log_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+def _log_file(paths: InstallationPaths, agent_id: AgentId) -> Path:
     return _destroying_dir(paths, agent_id) / _LOG_FILE_NAME
 
 
-def _host_id_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+def _host_id_file(paths: InstallationPaths, agent_id: AgentId) -> Path:
     return _destroying_dir(paths, agent_id) / _HOST_ID_FILE_NAME
 
 
-def _provider_file(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+def _provider_file(paths: InstallationPaths, agent_id: AgentId) -> Path:
     return _destroying_dir(paths, agent_id) / _PROVIDER_FILE_NAME
 
 
-def read_host_id(agent_id: AgentId, paths: WorkspacePaths) -> HostId | None:
+def read_host_id(agent_id: AgentId, paths: InstallationPaths) -> HostId | None:
     """Return the host id recorded for this agent's destroy, or None if absent/unreadable.
 
     Written by :func:`start_destroy` so a later status read can ask the
@@ -139,7 +139,7 @@ def read_host_id(agent_id: AgentId, paths: WorkspacePaths) -> HostId | None:
     return HostId(value) if value else None
 
 
-def read_provider_name(agent_id: AgentId, paths: WorkspacePaths) -> ProviderInstanceName | None:
+def read_provider_name(agent_id: AgentId, paths: InstallationPaths) -> ProviderInstanceName | None:
     """Return the provider instance name recorded for this agent's destroy, or None if absent/unreadable.
 
     Written by :func:`start_destroy` so a later status read can ask the resolver
@@ -165,7 +165,7 @@ def read_provider_name(agent_id: AgentId, paths: WorkspacePaths) -> ProviderInst
 
 def is_host_still_active(
     backend_resolver: BackendResolverInterface,
-    paths: WorkspacePaths | None,
+    paths: InstallationPaths | None,
     agent_id: AgentId,
 ) -> bool:
     """Whether the workspace's *host* is still up (not just the workspace agent).
@@ -285,7 +285,7 @@ def _build_destroy_command(
 
 def start_destroy(
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     host_id: HostId,
     # Provider instance managing the host (from discovery). Scopes the destroy
     # command's host address to that provider (see _build_destroy_command) and
@@ -388,7 +388,7 @@ def start_destroy(
 
 def read_destroying(
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     is_host_still_active: bool,
 ) -> DestroyingRecord | None:
     """Read the on-disk record for a single agent's destroy, or None if no dir.
@@ -438,7 +438,7 @@ def read_destroying(
 
 
 def list_destroying(
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     is_host_still_active: Callable[[AgentId], bool],
 ) -> dict[AgentId, DestroyingRecord]:
     """Walk ``<paths.data_dir>/destroying/`` and return a record per agent_id.
@@ -466,7 +466,7 @@ def list_destroying(
     return records
 
 
-def has_destroying_marker(agent_id: AgentId, paths: WorkspacePaths) -> bool:
+def has_destroying_marker(agent_id: AgentId, paths: InstallationPaths) -> bool:
     """Whether a destroy has been requested for this workspace (marker dir exists).
 
     Cheaper than :func:`read_destroying` when only "is a destroy in flight or
@@ -475,7 +475,7 @@ def has_destroying_marker(agent_id: AgentId, paths: WorkspacePaths) -> bool:
     return _destroying_dir(paths, agent_id).exists()
 
 
-def delete_destroying(agent_id: AgentId, paths: WorkspacePaths) -> bool:
+def delete_destroying(agent_id: AgentId, paths: InstallationPaths) -> bool:
     """Remove ``<paths.data_dir>/destroying/<agent_id>/``. Idempotent.
 
     Returns ``True`` if the directory was present and removed,
@@ -494,7 +494,7 @@ def delete_destroying(agent_id: AgentId, paths: WorkspacePaths) -> bool:
     return True
 
 
-def read_log_chunk(agent_id: AgentId, paths: WorkspacePaths, offset: int) -> tuple[bytes, int]:
+def read_log_chunk(agent_id: AgentId, paths: InstallationPaths, offset: int) -> tuple[bytes, int]:
     """Read ``output.log`` from ``offset`` to current EOF.
 
     Returns ``(content_bytes, next_offset)``. Empty bytes when there is

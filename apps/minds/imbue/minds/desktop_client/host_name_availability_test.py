@@ -13,7 +13,7 @@ from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -108,7 +108,7 @@ def _build_authenticated_client(
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         session_store=session_store,
     )
     client = app.test_client()
@@ -180,7 +180,7 @@ def test_availability_endpoint_requires_authentication(tmp_path: Path) -> None:
         auth_store=auth_store,
         backend_resolver=_resolver_with_sample_workspaces(),
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
     )
     client = app.test_client()
     response = client.get(
@@ -205,7 +205,7 @@ def _build_client_with_in_flight_create_attempt(tmp_path: Path, provider: str, n
     cg = ConcurrencyGroup(name="availability-test")
     cg.__enter__()
     agent_creator = _FixedInFlightAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds-data"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds-data"),
         root_concurrency_group=cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -217,7 +217,7 @@ def _build_client_with_in_flight_create_attempt(tmp_path: Path, provider: str, n
         auth_store=auth_store,
         backend_resolver=_resolver_with_sample_workspaces(),
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         agent_creator=agent_creator,
     )
     client = app.test_client()

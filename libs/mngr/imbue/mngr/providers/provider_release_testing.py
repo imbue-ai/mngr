@@ -15,7 +15,7 @@ The trip and its assertions are identical across providers; only the *plumbing* 
 (how the settings.toml selects the provider, how credentials are gated, how the cloud API
 is probed, how a resource is force-stranded). This module owns the trip and the shared
 assertions; each provider supplies a :class:`ProviderReleaseProfile` that owns its
-plumbing. A single ``run_provider_release_trip1(profile, tmp_path, workspace)`` call is then
+plumbing. A single ``run_provider_release_trip1(profile, tmp_path, project_dir)`` call is then
 the whole release test, so the parity the ``specs/provider-release-tests.md`` proposal
 describes is enforced executably.
 
@@ -234,7 +234,7 @@ class ProviderReleaseProfile(abc.ABC):
 
 def _run_mngr(
     settings_dir: Path,
-    workspace: Path,
+    project_dir: Path,
     *args: str,
     timeout: float,
     env_overrides: Mapping[str, str | None] | None = None,
@@ -243,7 +243,7 @@ def _run_mngr(
 
     Delegates to ``run_mngr_subprocess`` (the same helper the agent release harness uses), which
     streams the command's output live to the test log so a timed-out ``mngr create`` is still
-    diagnosable. ``workspace`` is the cwd and must be inside a git repo (``mngr create`` reads
+    diagnosable. ``project_dir`` is the cwd and must be inside a git repo (``mngr create`` reads
     the source from the current checkout). Per-provider credential preservation across the
     conftest HOME swap is already handled by each provider's autouse ``setup_test_mngr_env``
     fixture, so copying the current environment is sufficient here.
@@ -265,7 +265,7 @@ def _run_mngr(
         else:
             env[key] = value
     try:
-        result = run_mngr_subprocess(*args, timeout=timeout, env=env, cwd=workspace)
+        result = run_mngr_subprocess(*args, timeout=timeout, env=env, cwd=project_dir)
     except subprocess.TimeoutExpired:
         # 124 is the GNU-coreutils ``timeout`` convention; the output already streamed to the log.
         return subprocess.CompletedProcess(
@@ -281,21 +281,21 @@ def _run_mngr(
 
 def _exec_on_host(
     settings_dir: Path,
-    workspace: Path,
+    project_dir: Path,
     host_name: str,
     shell_command: str,
 ) -> subprocess.CompletedProcess[str]:
-    return _run_mngr(settings_dir, workspace, "exec", host_name, shell_command, timeout=_EXEC_TIMEOUT_SECONDS)
+    return _run_mngr(settings_dir, project_dir, "exec", host_name, shell_command, timeout=_EXEC_TIMEOUT_SECONDS)
 
 
-def _host_state_in_list(settings_dir: Path, workspace: Path, host_name: str) -> str | None:
+def _host_state_in_list(settings_dir: Path, project_dir: Path, host_name: str) -> str | None:
     """Return the host state ``mngr list`` reports for ``host_name``, or None if it is absent.
 
     Reads the explicit ``host.state`` field so the assertion keys on the host lifecycle state
     (RUNNING / STOPPED / CRASHED / DESTROYED) rather than the agent's session state.
     """
     result = _run_mngr(
-        settings_dir, workspace, "list", "--fields", "name,host.state", timeout=_LIFECYCLE_TIMEOUT_SECONDS
+        settings_dir, project_dir, "list", "--fields", "name,host.state", timeout=_LIFECYCLE_TIMEOUT_SECONDS
     )
     if result.returncode != 0:
         return None
@@ -310,7 +310,7 @@ def _host_state_in_list(settings_dir: Path, workspace: Path, host_name: str) -> 
 def run_provider_release_trip1(
     profile: ProviderReleaseProfile,
     tmp_path: Path,
-    workspace: Path,
+    project_dir: Path,
 ) -> None:
     """Drive Trip 1 (the full create -> lifecycle -> sketchy-kill -> gc arc) for ``profile``.
 
@@ -334,7 +334,7 @@ def run_provider_release_trip1(
         #    provider lifecycle, not the agent: ``mngr exec`` works regardless of agent type.
         create = _run_mngr(
             settings_dir,
-            workspace,
+            project_dir,
             "create",
             host_name,
             "--type",
@@ -359,15 +359,15 @@ def run_provider_release_trip1(
         assert profile.is_host_compute_running(handle), "cloud resource should be running right after create"
 
         # 3. The host shows up RUNNING in discovery.
-        assert _host_state_in_list(settings_dir, workspace, host_name) == "RUNNING", (
+        assert _host_state_in_list(settings_dir, project_dir, host_name) == "RUNNING", (
             f"host should be RUNNING in `mngr list`:\n"
-            f"{_run_mngr(settings_dir, workspace, 'list', timeout=_LIFECYCLE_TIMEOUT_SECONDS).stdout}"
+            f"{_run_mngr(settings_dir, project_dir, 'list', timeout=_LIFECYCLE_TIMEOUT_SECONDS).stdout}"
         )
 
         # 4. Write a marker file on the host and read it straight back.
-        written = _exec_on_host(settings_dir, workspace, host_name, f"echo {marker_token} > {_MARKER_HOST_PATH}")
+        written = _exec_on_host(settings_dir, project_dir, host_name, f"echo {marker_token} > {_MARKER_HOST_PATH}")
         assert written.returncode == 0, f"writing the marker failed:\n{written.stdout}"
-        read_back = _exec_on_host(settings_dir, workspace, host_name, f"cat {_MARKER_HOST_PATH}")
+        read_back = _exec_on_host(settings_dir, project_dir, host_name, f"cat {_MARKER_HOST_PATH}")
         assert marker_token in read_back.stdout, f"marker not readable after write:\n{read_back.stdout}"
 
         # 4b. Bare shape: the agent shell is the VM's own root, not a container. Assert the bare
@@ -377,7 +377,7 @@ def run_provider_release_trip1(
         if profile.is_bare_host:
             bare_shape = _exec_on_host(
                 settings_dir,
-                workspace,
+                project_dir,
                 host_name,
                 f"test -d {_BARE_HOST_STORE_PATH} && test ! -e /.dockerenv && echo bare-confirmed",
             )
@@ -387,16 +387,16 @@ def run_provider_release_trip1(
             )
 
         # 5. Plain stop stops only the agent's tmux; the host keeps running and the marker stays.
-        stopped = _run_mngr(settings_dir, workspace, "stop", host_name, timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        stopped = _run_mngr(settings_dir, project_dir, "stop", host_name, timeout=_LIFECYCLE_TIMEOUT_SECONDS)
         assert stopped.returncode == 0, f"plain stop failed:\n{stopped.stdout}"
         assert profile.is_host_compute_running(handle), "host compute should still run after a plain `mngr stop`"
-        still_there = _exec_on_host(settings_dir, workspace, host_name, f"cat {_MARKER_HOST_PATH}")
+        still_there = _exec_on_host(settings_dir, project_dir, host_name, f"cat {_MARKER_HOST_PATH}")
         assert marker_token in still_there.stdout, f"marker lost after plain stop:\n{still_there.stdout}"
 
         # 6. `mngr stop --stop-host`: a real machine stop where supported, a loud refusal where not.
         if profile.supports_shutdown_hosts:
             host_stopped = _run_mngr(
-                settings_dir, workspace, "stop", host_name, "--stop-host", timeout=_LIFECYCLE_TIMEOUT_SECONDS
+                settings_dir, project_dir, "stop", host_name, "--stop-host", timeout=_LIFECYCLE_TIMEOUT_SECONDS
             )
             assert host_stopped.returncode == 0, f"stop --stop-host failed:\n{host_stopped.stdout}"
             wait_for(
@@ -414,7 +414,7 @@ def run_provider_release_trip1(
                 # the default work-dir base is not served offline.
                 offline_read = _run_mngr(
                     settings_dir,
-                    workspace,
+                    project_dir,
                     "file",
                     "get",
                     host_name,
@@ -432,7 +432,7 @@ def run_provider_release_trip1(
                 )
         else:
             refused = _run_mngr(
-                settings_dir, workspace, "stop", host_name, "--stop-host", timeout=_LIFECYCLE_TIMEOUT_SECONDS
+                settings_dir, project_dir, "stop", host_name, "--stop-host", timeout=_LIFECYCLE_TIMEOUT_SECONDS
             )
             assert refused.returncode != 0, f"stop --stop-host should be refused but succeeded:\n{refused.stdout}"
             # The CLI surfaces HostShutdownNotSupportedError as its user-facing message rather
@@ -443,7 +443,7 @@ def run_provider_release_trip1(
 
         # 7. Start brings the host back (and is idempotent), then the marker must have survived.
         started = _run_mngr(
-            settings_dir, workspace, "start", host_name, "--no-connect", timeout=_CREATE_TIMEOUT_SECONDS
+            settings_dir, project_dir, "start", host_name, "--no-connect", timeout=_CREATE_TIMEOUT_SECONDS
         )
         assert started.returncode == 0, f"start failed:\n{started.stdout}"
         if profile.supports_shutdown_hosts:
@@ -454,20 +454,20 @@ def run_provider_release_trip1(
                 error_message="host compute did not come back running after `mngr start`",
             )
         started_again = _run_mngr(
-            settings_dir, workspace, "start", host_name, "--no-connect", timeout=_LIFECYCLE_TIMEOUT_SECONDS
+            settings_dir, project_dir, "start", host_name, "--no-connect", timeout=_LIFECYCLE_TIMEOUT_SECONDS
         )
         assert started_again.returncode == 0, f"second `mngr start` (idempotency) failed:\n{started_again.stdout}"
-        survived = _exec_on_host(settings_dir, workspace, host_name, f"cat {_MARKER_HOST_PATH}")
+        survived = _exec_on_host(settings_dir, project_dir, host_name, f"cat {_MARKER_HOST_PATH}")
         assert marker_token in survived.stdout, f"marker did not survive stop/start:\n{survived.stdout}"
 
         # 8. Snapshot create + list, where this shape supports snapshots (skipped on bare shapes).
         if profile.supports_snapshots:
             snapshot_created = _run_mngr(
-                settings_dir, workspace, "snapshot", "create", host_name, timeout=_CREATE_TIMEOUT_SECONDS
+                settings_dir, project_dir, "snapshot", "create", host_name, timeout=_CREATE_TIMEOUT_SECONDS
             )
             assert snapshot_created.returncode == 0, f"snapshot create failed:\n{snapshot_created.stdout}"
             snapshot_listed = _run_mngr(
-                settings_dir, workspace, "snapshot", "list", host_name, timeout=_LIFECYCLE_TIMEOUT_SECONDS
+                settings_dir, project_dir, "snapshot", "list", host_name, timeout=_LIFECYCLE_TIMEOUT_SECONDS
             )
             assert snapshot_listed.returncode == 0, f"snapshot list failed:\n{snapshot_listed.stdout}"
         else:
@@ -480,7 +480,7 @@ def run_provider_release_trip1(
 
         # 10. Discovery reflects the kill: the host stays visible but turns CRASHED.
         wait_for(
-            lambda: _host_state_in_list(settings_dir, workspace, host_name) in ("CRASHED", None),
+            lambda: _host_state_in_list(settings_dir, project_dir, host_name) in ("CRASHED", None),
             timeout=_CLOUD_TRANSITION_TIMEOUT_SECONDS,
             poll_interval=_CLOUD_POLL_INTERVAL_SECONDS,
             error_message="`mngr list` did not reflect the out-of-band kill (expected CRASHED)",
@@ -488,7 +488,7 @@ def run_provider_release_trip1(
 
         # 11. gc reclaims the stranded host and the cloud backend ends up clean.
         collected = _run_mngr(
-            settings_dir, workspace, "gc", "--provider", profile.provider_name, timeout=_CREATE_TIMEOUT_SECONDS
+            settings_dir, project_dir, "gc", "--provider", profile.provider_name, timeout=_CREATE_TIMEOUT_SECONDS
         )
         assert collected.returncode == 0, f"gc failed:\n{collected.stdout}"
         wait_for(
@@ -503,7 +503,7 @@ def run_provider_release_trip1(
         # failed/partial run cannot leak compute between iterative local runs. The session-end
         # orphan scanner in each provider's conftest is the final net.
         if not is_destroyed:
-            _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
+            _run_mngr(settings_dir, project_dir, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
         if handle is not None:
             profile.force_strand_host(handle)
 
@@ -511,7 +511,7 @@ def run_provider_release_trip1(
 def run_provider_release_trip2(
     profile: ProviderReleaseProfile,
     tmp_path: Path,
-    workspace: Path,
+    project_dir: Path,
 ) -> None:
     """Drive Trip 2 ("idle auto-shutdown contract") for ``profile``.
 
@@ -547,7 +547,7 @@ def run_provider_release_trip2(
         #    watcher sees no activity and self-stops (or the sandbox lifetime cap expires).
         create = _run_mngr(
             settings_dir,
-            workspace,
+            project_dir,
             "create",
             host_name,
             "--type",
@@ -574,7 +574,7 @@ def run_provider_release_trip2(
         #    a marker against -- writing it would also just risk resetting the idle timer.)
         if profile.resumes_after_auto_shutdown:
             written = _exec_on_host(
-                settings_dir, workspace, host_name, f"echo {marker_token} > {_TRIP2_MARKER_HOST_PATH}"
+                settings_dir, project_dir, host_name, f"echo {marker_token} > {_TRIP2_MARKER_HOST_PATH}"
             )
             assert written.returncode == 0, f"writing the pre-shutdown marker failed:\n{written.stdout}"
 
@@ -602,7 +602,7 @@ def run_provider_release_trip2(
         #    idle tests guard).
         if profile.resumes_after_auto_shutdown:
             started = _run_mngr(
-                settings_dir, workspace, "start", host_name, "--no-connect", timeout=_CREATE_TIMEOUT_SECONDS
+                settings_dir, project_dir, "start", host_name, "--no-connect", timeout=_CREATE_TIMEOUT_SECONDS
             )
             assert started.returncode == 0, f"start after auto-shutdown failed:\n{started.stdout}"
             wait_for(
@@ -611,7 +611,7 @@ def run_provider_release_trip2(
                 poll_interval=_CLOUD_POLL_INTERVAL_SECONDS,
                 error_message="host compute did not come back running after `mngr start`",
             )
-            survived = _exec_on_host(settings_dir, workspace, host_name, f"cat {_TRIP2_MARKER_HOST_PATH}")
+            survived = _exec_on_host(settings_dir, project_dir, host_name, f"cat {_TRIP2_MARKER_HOST_PATH}")
             assert marker_token in survived.stdout, (
                 f"marker did not survive the auto-shutdown stop/start:\n{survived.stdout}"
             )
@@ -623,7 +623,7 @@ def run_provider_release_trip2(
     finally:
         # Best-effort cleanup: destroy through mngr, then force-strand as a backstop so a
         # failed/partial run cannot leak compute between iterative local runs.
-        _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
+        _run_mngr(settings_dir, project_dir, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
         if handle is not None:
             profile.force_strand_host(handle)
 
@@ -653,7 +653,7 @@ def _curated_help_text(cli_output: str) -> str:
 def run_provider_release_trip4(
     profile: ProviderReleaseProfile,
     tmp_path: Path,
-    workspace: Path,
+    project_dir: Path,
 ) -> None:
     """Drive Trip 4 ("error classification contract") for ``profile`` -- a pure no-boot CLI exercise.
 
@@ -692,7 +692,7 @@ def run_provider_release_trip4(
     profile.write_credentials_unresolvable_settings(settings_dir)
     missing_creds = _run_mngr(
         settings_dir,
-        workspace,
+        project_dir,
         "create",
         host_name,
         "--type",
@@ -750,7 +750,7 @@ def run_provider_release_trip4(
         profile.write_settings(settings_dir)
         migration = _run_mngr(
             settings_dir,
-            workspace,
+            project_dir,
             "create",
             host_name,
             "--type",
@@ -800,7 +800,7 @@ def _snapshot_ids_in_output(output: str) -> list[str]:
 def run_provider_release_trip3(
     profile: ProviderReleaseProfile,
     tmp_path: Path,
-    workspace: Path,
+    project_dir: Path,
 ) -> None:
     """Drive Trip 3 ("snapshot survives destroy") for ``profile``.
 
@@ -832,7 +832,7 @@ def run_provider_release_trip3(
         # 1. Create the host and write a marker into its own filesystem (so the snapshot captures it).
         create = _run_mngr(
             settings_dir,
-            workspace,
+            project_dir,
             "create",
             host_name,
             "--type",
@@ -847,13 +847,13 @@ def run_provider_release_trip3(
             timeout=_CREATE_TIMEOUT_SECONDS,
         )
         assert create.returncode == 0, f"create failed:\n{create.stdout}"
-        written = _exec_on_host(settings_dir, workspace, host_name, f"echo {marker_token} > {_SNAPSHOT_MARKER_PATH}")
+        written = _exec_on_host(settings_dir, project_dir, host_name, f"echo {marker_token} > {_SNAPSHOT_MARKER_PATH}")
         assert written.returncode == 0, f"writing the marker failed:\n{written.stdout}"
 
         # 2. Snapshot the host and capture the new snapshot id (human output omits it; use --format).
         created = _run_mngr(
             settings_dir,
-            workspace,
+            project_dir,
             "snapshot",
             "create",
             host_name,
@@ -869,7 +869,7 @@ def run_provider_release_trip3(
         # 3. The snapshot is listed for the host before destroy (true for every snapshot provider).
         listed = _run_mngr(
             settings_dir,
-            workspace,
+            project_dir,
             "snapshot",
             "list",
             host_name,
@@ -883,7 +883,7 @@ def run_provider_release_trip3(
 
         # 4. Destroy the host.
         destroyed = _run_mngr(
-            settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS
+            settings_dir, project_dir, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS
         )
         assert destroyed.returncode == 0, f"destroy failed:\n{destroyed.stdout}"
         is_host_destroyed = True
@@ -896,7 +896,7 @@ def run_provider_release_trip3(
             # persists -- e.g. Modal.)
             restored = _run_mngr(
                 settings_dir,
-                workspace,
+                project_dir,
                 "create",
                 restored_name,
                 "--type",
@@ -914,7 +914,7 @@ def run_provider_release_trip3(
             )
             assert restored.returncode == 0, f"create --snapshot failed:\n{restored.stdout}"
             is_restored_created = True
-            recovered = _exec_on_host(settings_dir, workspace, restored_name, f"cat {_SNAPSHOT_MARKER_PATH}")
+            recovered = _exec_on_host(settings_dir, project_dir, restored_name, f"cat {_SNAPSHOT_MARKER_PATH}")
             assert marker_token in recovered.stdout, (
                 f"portable snapshot did not restore the marker file:\n{recovered.stdout}"
             )
@@ -925,7 +925,7 @@ def run_provider_release_trip3(
             # snapshots become portable here.
             after = _run_mngr(
                 settings_dir,
-                workspace,
+                project_dir,
                 "snapshot",
                 "list",
                 "--format",
@@ -938,13 +938,13 @@ def run_provider_release_trip3(
             )
     finally:
         if not is_host_destroyed:
-            _run_mngr(settings_dir, workspace, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
+            _run_mngr(settings_dir, project_dir, "destroy", host_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
         if is_restored_created:
-            _run_mngr(settings_dir, workspace, "destroy", restored_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
+            _run_mngr(settings_dir, project_dir, "destroy", restored_name, "--force", timeout=_DESTROY_TIMEOUT_SECONDS)
         if snapshot_id is not None and profile.snapshot_survives_destroy:
             _run_mngr(
                 settings_dir,
-                workspace,
+                project_dir,
                 "snapshot",
                 "destroy",
                 "--snapshot",

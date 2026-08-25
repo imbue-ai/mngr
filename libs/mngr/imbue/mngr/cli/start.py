@@ -78,7 +78,7 @@ def _output_result(
     up, as opposed to finding every host it needed already running. ``mngr start``
     is idempotent and starts a named agent whatever state it is in, so that
     difference is invisible in the agent list beside it -- and it is exactly what
-    a caller that dispatched a start to revive an unresponsive workspace needs,
+    a caller that dispatched a start to revive an unresponsive host needs,
     since a start that booted nothing cannot be the explanation for what happens
     next.
     """

@@ -37,8 +37,8 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.destroying import is_pid_alive
 
 _DISCARDING_DIR_NAME: Final[str] = "discarding_create_attempts"
@@ -64,13 +64,13 @@ class CreateAttemptDiscardRecord(FrozenModel):
     log_path: Path = Field(description="Absolute path to output.log for the detail-page tail")
 
 
-def _discard_dir(paths: WorkspacePaths, create_attempt_id: str) -> Path:
+def _discard_dir(paths: InstallationPaths, create_attempt_id: str) -> Path:
     return paths.data_dir / _DISCARDING_DIR_NAME / create_attempt_id
 
 
 def start_discard_of_host(
     create_attempt_id: str,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     host_id: str,
     provider_name: str,
     env: dict[str, str] | None = None,
@@ -136,7 +136,7 @@ def start_discard_of_host(
 
 
 def start_discard_without_host(
-    create_attempt_id: str, paths: WorkspacePaths, message: str
+    create_attempt_id: str, paths: InstallationPaths, message: str
 ) -> CreateAttemptDiscardRecord:
     """Record an immediately-DONE discard for a create attempt with no leftover host.
 
@@ -157,7 +157,7 @@ def start_discard_without_host(
     )
 
 
-def read_discard(create_attempt_id: str, paths: WorkspacePaths) -> CreateAttemptDiscardRecord | None:
+def read_discard(create_attempt_id: str, paths: InstallationPaths) -> CreateAttemptDiscardRecord | None:
     """Read the on-disk record for one create attempt's discard, or None if no dir."""
     dir_path = _discard_dir(paths, create_attempt_id)
     if not dir_path.is_dir():
@@ -200,7 +200,7 @@ def read_discard(create_attempt_id: str, paths: WorkspacePaths) -> CreateAttempt
     )
 
 
-def delete_discard(create_attempt_id: str, paths: WorkspacePaths) -> bool:
+def delete_discard(create_attempt_id: str, paths: InstallationPaths) -> bool:
     """Remove the discard dir. Idempotent; errors are logged and swallowed."""
     dir_path = _discard_dir(paths, create_attempt_id)
     if not dir_path.exists():
@@ -213,7 +213,7 @@ def delete_discard(create_attempt_id: str, paths: WorkspacePaths) -> bool:
     return True
 
 
-def read_discard_log_chunk(create_attempt_id: str, paths: WorkspacePaths, offset: int) -> tuple[bytes, int]:
+def read_discard_log_chunk(create_attempt_id: str, paths: InstallationPaths, offset: int) -> tuple[bytes, int]:
     """Read ``output.log`` from ``offset`` to current EOF.
 
     Returns ``(content_bytes, next_offset)``; empty bytes when there is no new

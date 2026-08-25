@@ -120,7 +120,7 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
       "div",
       {
         role: "tablist",
-        "aria-label": "Machine options",
+        "aria-label": "Workspace options",
         class: "pointer-events-auto absolute z-10 flex items-center gap-1",
         style: positionStyle,
       },

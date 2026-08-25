@@ -10,7 +10,7 @@ from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -77,7 +77,7 @@ def _build_authenticated_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         request_inbox=inbox,
         request_event_handlers=(handler,),
     )

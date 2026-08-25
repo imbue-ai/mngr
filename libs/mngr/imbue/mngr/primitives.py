@@ -261,9 +261,9 @@ class HostState(UpperCaseStrEnum):
     FAILED = auto()
     DESTROYED = auto()
     # Our access credential was rejected, or the host's sshd could not be verified, when connecting:
-    # observation of the workspace is impossible and retrying/restarting through the same path cannot
+    # observation of the host is impossible and retrying/restarting through the same path cannot
     # help. Two producers: imbue_cloud's outer SSH rejecting this machine's key (a restart routes
-    # through the same rejected key), and the generic provider SSH into the workspace host raising a
+    # through the same rejected key), and the generic provider SSH into the host raising a
     # rejected-credential or unverifiable-host-key error (a restart touches neither our known_hosts
     # nor a rejected key). Consumers should treat it as terminal rather than restart-worthy. Distinct
     # from UNKNOWN (could not observe -- including a host observed up but not readable from the

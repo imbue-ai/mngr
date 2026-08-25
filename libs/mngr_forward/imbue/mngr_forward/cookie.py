@@ -59,11 +59,11 @@ def verify_session_cookie(
     return payload == _SESSION_PAYLOAD
 
 
-def create_subdomain_auth_token(signing_key: CookieSigningKey, workspace_host_id: str) -> str:
+def create_subdomain_auth_token(signing_key: CookieSigningKey, origin_coordinate: str) -> str:
     """Mint a short-lived signed token that authorizes setting a session cookie
-    on the ``host-<hex>.localhost`` workspace domain.
+    on the ``agent-<hex>.localhost`` origin domain (or a legacy host-keyed one).
 
-    Used by the ``/goto/{host_id}/`` bridge: the bare-origin handler (which
+    Used by the ``/goto/{coordinate}/`` bridge: the bare-origin handler (which
     can read the real session cookie) mints this token, 302-redirects the
     browser to the workspace origin with the token in the query string, and
     the workspace handler verifies it before setting the domain-scoped
@@ -71,16 +71,16 @@ def create_subdomain_auth_token(signing_key: CookieSigningKey, workspace_host_id
     one-shot even though it isn't actually consumed on validation.
     """
     serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
-    return serializer.dumps(workspace_host_id, salt=_SUBDOMAIN_AUTH_SALT)
+    return serializer.dumps(origin_coordinate, salt=_SUBDOMAIN_AUTH_SALT)
 
 
 def verify_subdomain_auth_token(
     token: str,
     signing_key: CookieSigningKey,
-    workspace_host_id: str,
+    origin_coordinate: str,
 ) -> bool:
     """Verify that ``token`` was minted by ``create_subdomain_auth_token`` for
-    ``workspace_host_id`` and is within the short expiry window."""
+    ``origin_coordinate`` and is within the short expiry window."""
     serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
     try:
         payload = serializer.loads(
@@ -90,4 +90,4 @@ def verify_subdomain_auth_token(
         )
     except BadSignature:
         return False
-    return payload == workspace_host_id
+    return payload == origin_coordinate

@@ -37,7 +37,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.build_info import resolve_release_id
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -134,7 +134,7 @@ class BackupWorkerFailureHandler(MutableModel):
 def run_backup_update_sequence(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
@@ -162,7 +162,7 @@ def run_backup_update_sequence(
 def _run_update_phases(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
@@ -228,7 +228,7 @@ class _ExecLogForwarder(MutableModel):
 def _apply_update_and_verify(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
@@ -356,7 +356,7 @@ def _wait_for_quiet_workspace(
 def run_backup_restore_sequence(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
@@ -393,7 +393,7 @@ def run_backup_restore_sequence(
 def _resolve_restore_snapshot(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     snapshot_id: str,
     parent_cg: ConcurrencyGroup | None,
 ) -> restic_cli.ResticSnapshot:
@@ -420,7 +420,7 @@ def _resolve_restore_snapshot(
 def _resolve_restore_subpath(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     snapshot: restic_cli.ResticSnapshot,
     parent_cg: ConcurrencyGroup | None,
 ) -> str:
@@ -512,7 +512,7 @@ def _chained_update_warning(update_error: str) -> str:
 def _run_restore_phases(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     resolver: BackendResolverInterface,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
@@ -669,10 +669,9 @@ def _run_restore_phases(
 def run_backup_configure_sequence(
     *,
     agent_id: AgentId,
-    host_id: str,
     request: BackupSetupRequest,
     imbue_cloud_cli: ImbueCloudCli | None,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     parent_cg: ConcurrencyGroup | None,
     registry: WorkspaceOperationRegistryInterface,
     is_destination_change: bool,
@@ -687,7 +686,6 @@ def run_backup_configure_sequence(
         if is_destination_change:
             change_backup_destination_for_host(
                 agent_id=agent_id,
-                host_id=host_id,
                 request=request,
                 imbue_cloud_cli=imbue_cloud_cli,
                 paths=paths,
@@ -697,7 +695,6 @@ def run_backup_configure_sequence(
         else:
             configure_backups_for_host(
                 agent_id=agent_id,
-                host_id=host_id,
                 request=request,
                 imbue_cloud_cli=imbue_cloud_cli,
                 paths=paths,
@@ -714,7 +711,7 @@ def run_backup_configure_sequence(
 def run_backup_disable_sequence(
     *,
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     parent_cg: ConcurrencyGroup | None,
     registry: WorkspaceOperationRegistryInterface,
 ) -> None:

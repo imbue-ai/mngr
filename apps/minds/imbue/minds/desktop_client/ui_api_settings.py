@@ -154,7 +154,7 @@ class UiAccountPlanResponse(FrozenModel):
 class UiAiKeysContext(FrozenModel):
     """Context for the workspace AI-key mint page."""
 
-    workspace_host_id: str = Field(description="The workspace host id the key is minted for")
+    workspace_id: str = Field(description="The workspace coordinate the mint page was opened with")
     workspace_display_name: str = Field(description="Display name of the workspace")
     account_email: str = Field(description="The billed account's email")
     error_message: str = Field(description="Non-empty when minting is impossible; explains why")
@@ -508,14 +508,18 @@ def _handle_account_plan(user_id: str) -> Response:
 
 
 def _handle_ai_keys_context() -> Response:
-    """GET /ui/api/ai-keys?workspace=<host_id>: context for the mint page."""
+    """GET /ui/api/ai-keys?workspace=<workspace_id>: context for the mint page.
+
+    A machine's host id is also accepted as the coordinate while in-workspace
+    deep links (written before workspace ids) transition.
+    """
     if not _is_settings_request_authenticated():
         return _unauthenticated_response()
-    workspace_host_id = request.args.get("workspace", "").strip()
-    if not workspace_host_id:
+    workspace_coordinate = request.args.get("workspace", "").strip()
+    if not workspace_coordinate:
         return _json_response(
             UiAiKeysContext(
-                workspace_host_id="",
+                workspace_id="",
                 workspace_display_name="",
                 account_email="",
                 error_message=(
@@ -526,11 +530,11 @@ def _handle_ai_keys_context() -> Response:
         )
     sync_scheduler = get_state().sync_scheduler
     record_store = None if sync_scheduler is None else sync_scheduler.record_store
-    resolved = resolve_workspace_account(workspace_host_id, record_store, get_state().session_store)
+    resolved = resolve_workspace_account(workspace_coordinate, record_store, get_state().session_store)
     if resolved is None:
         return _json_response(
             UiAiKeysContext(
-                workspace_host_id=workspace_host_id,
+                workspace_id=workspace_coordinate,
                 workspace_display_name="",
                 account_email="",
                 error_message=(
@@ -541,7 +545,7 @@ def _handle_ai_keys_context() -> Response:
         )
     return _json_response(
         UiAiKeysContext(
-            workspace_host_id=workspace_host_id,
+            workspace_id=resolved.workspace_id,
             workspace_display_name=resolved.workspace_display_name,
             account_email=resolved.account_email,
             error_message="",

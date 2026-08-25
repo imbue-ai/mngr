@@ -234,14 +234,14 @@ describe("workspaceSurfaceIdFromPath", () => {
 });
 
 describe("parseWorkspaceIdFromUrl", () => {
-  it("extracts host ids from origin, goto, and forward-bridge URLs", () => {
-    expect(
-      parseWorkspaceIdFromUrl("http://web.host-ab12.localhost:8421/x"),
-    ).toBe("host-ab12");
+  it("extracts workspace ids (agent- and legacy host-keyed) from origin, goto, and forward-bridge URLs", () => {
+    expect(parseWorkspaceIdFromUrl("http://web.host-ab12.localhost:8421/x")).toBe("host-ab12");
+    expect(parseWorkspaceIdFromUrl("http://web.agent-cd34.localhost:8421/x")).toBe("agent-cd34");
     expect(parseWorkspaceIdFromUrl("/goto/host-ab12/")).toBe("host-ab12");
-    expect(
-      parseWorkspaceIdFromUrl("/forward-bridge?next=%2Fgoto%2Fhost-ab12%2F"),
-    ).toBe("host-ab12");
+    expect(parseWorkspaceIdFromUrl("/forward-bridge?next=%2Fgoto%2Fhost-ab12%2F")).toBe("host-ab12");
+    expect(parseWorkspaceIdFromUrl("/forward-bridge?next=%2Fgoto%2Fagent-cd34%2F")).toBe(
+      "agent-cd34",
+    );
     expect(parseWorkspaceIdFromUrl("/goto/agent-cd34/")).toBe("agent-cd34");
     expect(parseWorkspaceIdFromUrl("/workspace/agent-cd34")).toBe("agent-cd34");
     expect(parseWorkspaceIdFromUrl("/workspace/host-ab12")).toBe("host-ab12");

@@ -27,8 +27,8 @@ DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 MNGR_BINARY: Final[str] = "mngr"
 
 
-class WorkspacePaths(FrozenModel):
-    """Resolved filesystem paths for minds data storage."""
+class InstallationPaths(FrozenModel):
+    """Resolved filesystem paths of one minds installation (one data directory on one device)."""
 
     data_dir: Path = Field(description="Root directory for minds data (e.g. ~/.minds)")
 

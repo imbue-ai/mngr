@@ -88,6 +88,7 @@ def test_stop_host_stops_container(docker_provider: DockerProviderInstance) -> N
 
 @pytest.mark.docker
 @pytest.mark.docker_sdk
+@pytest.mark.flaky
 def test_stop_host_with_snapshot(docker_provider: DockerProviderInstance) -> None:
     host = docker_provider.create_host(HostName("test-snap-stop"))
     docker_provider.stop_host(host, create_snapshot=True)

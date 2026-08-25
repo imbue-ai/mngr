@@ -76,9 +76,9 @@ def _generate_ed25519_keypair() -> tuple[str, str]:
 def generate_ssh_keypair() -> tuple[str, str]:
     """Generate a new Ed25519 keypair for SSH client authentication.
 
-    Ed25519 rather than RSA so the same client key also works with services
-    that only accept Ed25519 signatures (e.g. the minds workspaces' owner-exec
-    envelope auth). Every consumer auto-detects the key type, and existing RSA
+    Ed25519 rather than RSA so the same client key also works with host-side
+    services that only accept Ed25519 signatures (e.g. envelope-auth daemons
+    some hosts run). Every consumer auto-detects the key type, and existing RSA
     keypairs on disk keep working -- load_or_create_ssh_keypair only generates
     when no pair exists.
 
@@ -182,9 +182,9 @@ def load_or_create_host_keypair(key_dir: Path, key_name: str = "host_key") -> tu
 # Subdirectory of a provider instance's key dir holding per-host keys. Host
 # keys are unique per host -- a host key proves "you reached the host you
 # expected", so reusing one across hosts would let a party who holds it
-# impersonate any sibling host. Per-host *client* keys keep synced workspace
-# records free of provider-wide material: a record carries only a key that
-# opens its one host, never one that opens all of the user's hosts.
+# impersonate any sibling host. Per-host *client* keys keep any export of a
+# host's credentials free of provider-wide material: an exported key opens
+# its one host, never all of the user's hosts.
 _PER_HOST_KEY_SUBDIR: Final[str] = "host_keys"
 
 

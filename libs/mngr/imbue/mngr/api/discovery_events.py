@@ -456,8 +456,8 @@ def make_discovered_provider(
     """Build a DiscoveredProvider with only the base ProviderInstanceConfig fields.
 
     Constructs a fresh persisted-config object (base fields only) so that any
-    subclass-specific fields on the input (e.g. plugin-defined credentials,
-    workspace IDs) are dropped.
+    subclass-specific fields on the input (e.g. plugin-defined credentials
+    or ids) are dropped.
     Pydantic's serialization would also drop them when typed as the base, but
     constructing explicitly here makes the intent obvious and avoids relying
     on serialization-time behavior at every call site.

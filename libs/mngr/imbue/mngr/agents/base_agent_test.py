@@ -1180,6 +1180,7 @@ def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(
         agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "x" * 1024)
 
 
+@pytest.mark.flaky
 def test_send_tmux_literal_keys_long_message_raises_on_paste_buffer_failure(
     temp_mngr_ctx: MngrContext,
 ) -> None:

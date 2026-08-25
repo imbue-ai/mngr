@@ -11,7 +11,7 @@ from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -96,7 +96,7 @@ def _build_lifecycle_client(
         backend_resolver=(
             backend_resolver if backend_resolver is not None else StaticBackendResolver(url_by_agent_and_service={})
         ),
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         session_store=session_store,
         sync_scheduler=sync_scheduler,
         system_interface_health_tracker=tracker,

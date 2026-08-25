@@ -120,8 +120,7 @@ function SidebarRow(): m.Component<SidebarRowAttrs> {
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
                   shell.closeSidebar();
-                  const hostScoped = shell.stores.workspaces.toHostScopedId(workspace.id);
-                  electronBridge.openWorkspaceInNewWindow(hostScoped);
+                  electronBridge.openWorkspaceInNewWindow(workspace.id);
                 },
               },
               m(

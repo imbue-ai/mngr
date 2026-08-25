@@ -158,6 +158,14 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("POST", "/api/v1/workspaces/{agent_id}/ssh"): _RouteModels(
         request_model=EstablishSshRequest, response_model=SshConnectionResponse
     ),
+    ("GET", "/api/v1/workspace-sharing/{workspace_id}"): _RouteModels(response_model=MachineSharingResponse),
+    ("PUT", "/api/v1/workspace-sharing/{workspace_id}"): _RouteModels(
+        request_model=MachineSharingRequest, response_model=MachineSharingResponse
+    ),
+    ("DELETE", "/api/v1/workspace-sharing/{workspace_id}"): _RouteModels(response_model=MachineSharingResponse),
+    ("GET", "/api/v1/workspace-sharing/{workspace_id}/readiness"): _RouteModels(
+        response_model=SharingReadinessResponse
+    ),
     ("GET", "/api/v1/machines/{host_id}/sharing"): _RouteModels(response_model=MachineSharingResponse),
     ("PUT", "/api/v1/machines/{host_id}/sharing"): _RouteModels(
         request_model=MachineSharingRequest, response_model=MachineSharingResponse

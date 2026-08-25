@@ -778,7 +778,7 @@ class RestartReadinessOutcome(UpperCaseStrEnum):
 
 
 def _await_system_interface_ready(
-    workspace_host_id: str,
+    workspace_id: str,
     mngr_forward_port: int,
     preauth_cookie: str,
     wait_seconds: float,
@@ -804,7 +804,7 @@ def _await_system_interface_ready(
             status = probe_workspace_through_plugin(
                 mngr_forward_port=mngr_forward_port,
                 preauth_cookie=preauth_cookie,
-                workspace_host_id=workspace_host_id,
+                workspace_id=workspace_id,
                 probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
                 client=probe_client,
             )
@@ -1311,14 +1311,14 @@ def run_restart_sequence(
         registry.complete(workspace_agent_id)
         return
 
-    # Workspace origins are keyed by host id; resolve it from discovery. A
-    # missing coordinate (discovery lost the host across the restart) means
-    # the probe could never route, so fail the restart rather than spin. The
-    # real host-<hex> shape is required: the resolver interface's placeholder
-    # ("localhost") would probe the unroutable vhost localhost.localhost.
+    # Workspace origins are keyed by the workspace id (the services agent's
+    # id), so the probe needs no coordinate lookup -- but a workspace that
+    # discovery no longer knows at all has no instance the plugin could route
+    # its origin to, so fail the restart fast rather than spin through the
+    # whole cold-boot wait.
     display_info = backend_resolver.get_agent_display_info(workspace_agent_id)
-    if display_info is None or not str(display_info.host_id).startswith("host-"):
-        message = "The workspace's host coordinate is unknown after the restart, so its recovery cannot be confirmed."
+    if display_info is None:
+        message = "The workspace is unknown to discovery after the restart, so its recovery cannot be confirmed."
         logger.error("Host restart of {} failed: {}", workspace_agent_id, message)
         tracker.mark_restart_failed(workspace_agent_id, message)
         registry.fail(workspace_agent_id, message)
@@ -1326,7 +1326,7 @@ def run_restart_sequence(
 
     registry.append_log(workspace_agent_id, "Waiting for the system interface to respond.")
     outcome = _await_system_interface_ready(
-        str(display_info.host_id),
+        str(workspace_agent_id),
         mngr_forward_port,
         mngr_forward_preauth_cookie,
         startup_wait_seconds,

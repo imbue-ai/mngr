@@ -79,15 +79,18 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
 
-# The workspace host every test agent runs on: requests route by the
-# ``host-<hex>.localhost`` Host header, and the resolver maps it back to the
-# agent instance (whose key carries the host coordinate).
+# The workspace host every test agent runs on, and the shared test agent id:
+# requests route by the ``agent-<hex>.localhost`` Host header (the canonical
+# origin coordinate), and the resolver maps it back to the agent instance.
 _TEST_HOST_ID = "host-" + "0123456789abcdef0123456789abcdef"
+# A deliberately different hex payload from the host id, so the legacy-origin
+# redirect assertions prove a real resolver lookup rather than a prefix swap.
+_TEST_AGENT_ID = "agent-" + "feedfacefeedfacefeedfacefeedface"
 
 
 def _make_test_instance_key() -> AgentInstanceKey:
-    """A fresh agent's instance key on the shared test host (the resolver is instance-keyed)."""
-    return AgentInstanceKey.build(AgentId(), HostId(_TEST_HOST_ID))
+    """The shared test agent's instance key (the resolver is instance-keyed)."""
+    return AgentInstanceKey.build(AgentId(_TEST_AGENT_ID), HostId(_TEST_HOST_ID))
 
 
 @pytest.fixture
@@ -231,7 +234,7 @@ def test_http2_subdomain_unauthenticated_html_redirects_to_https_goto(tmp_path: 
         use_http2=True,
     )
     with TestClient(
-        app, base_url=f"https://{_TEST_HOST_ID}.localhost:{listen_port}", follow_redirects=False
+        app, base_url=f"https://{_TEST_AGENT_ID}.localhost:{listen_port}", follow_redirects=False
     ) as client:
         response = client.get(
             "/",
@@ -241,7 +244,7 @@ def test_http2_subdomain_unauthenticated_html_redirects_to_https_goto(tmp_path: 
             },
         )
     assert response.status_code == 302
-    assert response.headers["Location"] == f"https://localhost:{listen_port}/goto/{_TEST_HOST_ID}/?next=%2F"
+    assert response.headers["Location"] == f"https://localhost:{listen_port}/goto/{_TEST_AGENT_ID}/?next=%2F"
 
 
 def test_http2_subdomain_auth_bridge_sets_secure_cookie(tmp_path: Path) -> None:
@@ -260,7 +263,7 @@ def test_http2_subdomain_auth_bridge_sets_secure_cookie(tmp_path: Path) -> None:
         use_http2=True,
     )
     valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), workspace_host_id=valid_host_id)
+    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=/",
@@ -336,7 +339,7 @@ def test_bare_origin_html_navigation_redirects_to_shell_label(tmp_path: Path) ->
         listen_port=18421,
     )
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         response = client.get(
             "/some/page?x=1",
             headers={"accept": "text/html"},
@@ -345,7 +348,7 @@ def test_bare_origin_html_navigation_redirects_to_shell_label(tmp_path: Path) ->
     assert response.status_code == 302
     assert (
         response.headers["location"]
-        == f"http://system_interface-shell111.{_TEST_HOST_ID}.localhost:18421/some/page?x=1"
+        == f"http://system_interface-shell111.{_TEST_AGENT_ID}.localhost:18421/some/page?x=1"
     )
 
 
@@ -371,7 +374,7 @@ def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
         return httpx.Response(200, json={"ok": True})
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_ok), follow_redirects=False)
         response = client.get(
             "/api/health",
@@ -418,7 +421,7 @@ def test_legacy_service_path_navigation_redirects_to_service_origin(tmp_path: Pa
     service iframes skip their service-worker bootstrap entirely."""
     app, auth_store = _make_legacy_workspace_app(tmp_path)
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         response = client.get(
             "/service/terminal/?arg=_&arg=session&arg=terminal-1",
             headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
@@ -427,7 +430,7 @@ def test_legacy_service_path_navigation_redirects_to_service_origin(tmp_path: Pa
     assert response.status_code == 307
     assert (
         response.headers["location"]
-        == f"http://terminal.{_TEST_HOST_ID}.localhost:18421/?arg=_&arg=session&arg=terminal-1"
+        == f"http://terminal.{_TEST_AGENT_ID}.localhost:18421/?arg=_&arg=session&arg=terminal-1"
     )
 
 
@@ -435,7 +438,7 @@ def test_legacy_service_path_navigation_preserves_subpath(tmp_path: Path) -> Non
     """The path after the ``/service/<name>`` prefix survives the redirect verbatim."""
     app, auth_store = _make_legacy_workspace_app(tmp_path)
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         response = client.get(
             "/service/browser/viewer/index.html?session=abc",
             headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
@@ -443,7 +446,8 @@ def test_legacy_service_path_navigation_preserves_subpath(tmp_path: Path) -> Non
         )
     assert response.status_code == 307
     assert (
-        response.headers["location"] == f"http://browser.{_TEST_HOST_ID}.localhost:18421/viewer/index.html?session=abc"
+        response.headers["location"]
+        == f"http://browser.{_TEST_AGENT_ID}.localhost:18421/viewer/index.html?session=abc"
     )
 
 
@@ -457,7 +461,7 @@ def test_legacy_service_path_unknown_service_passes_through_to_shell(tmp_path: P
         return httpx.Response(200, text="shell served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
         response = client.get(
             "/service/never-registered/",
@@ -478,7 +482,7 @@ def test_legacy_service_path_non_navigation_passes_through_to_shell(tmp_path: Pa
         return httpx.Response(200, text="shell served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
         response = client.get(
             "/service/terminal/__sw.js",
@@ -499,7 +503,7 @@ def test_legacy_service_path_on_non_shell_origin_passes_through(tmp_path: Path) 
 
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(
-        app, base_url=f"http://terminal.{_TEST_HOST_ID}.localhost:18421", follow_redirects=False
+        app, base_url=f"http://terminal.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
     ) as client:
         app.state.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(_terminal_marker), follow_redirects=False
@@ -542,7 +546,7 @@ def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path:
         return httpx.Response(200, json={"ok": True})
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/api/health",
@@ -651,7 +655,7 @@ def test_subdomain_auth_bridge_rejects_protocol_relative_next(tmp_path: Path) ->
         listen_port=18421,
     )
     valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), workspace_host_id=valid_host_id)
+    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=//evil.com/path",
@@ -725,7 +729,9 @@ def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path)
         listen_host="127.0.0.1",
         listen_port=listen_port,
     )
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:{listen_port}", follow_redirects=False) as client:
+    with TestClient(
+        app, base_url=f"http://{_TEST_AGENT_ID}.localhost:{listen_port}", follow_redirects=False
+    ) as client:
         response = client.get(
             "/",
             headers={
@@ -737,7 +743,7 @@ def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path)
         )
 
     assert response.status_code == 302
-    assert response.headers["Location"] == f"http://localhost:{listen_port}/goto/{_TEST_HOST_ID}/?next=%2F"
+    assert response.headers["Location"] == f"http://localhost:{listen_port}/goto/{_TEST_AGENT_ID}/?next=%2F"
 
 
 def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
@@ -762,7 +768,7 @@ def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
         listen_host="127.0.0.1",
         listen_port=18421,
     )
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         response = client.get(
             "/api/something",
             headers={
@@ -810,7 +816,7 @@ def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         # Replace the lifespan-created http_client with one whose transport we
         # control. Local agents (``ssh_info is None``) use ``app.state.http_client``
         # directly -- no SSH tunnel client to override.
@@ -868,7 +874,7 @@ def test_subdomain_forward_strips_session_cookie_when_only_session_cookie_presen
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/whatever",
@@ -945,7 +951,7 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/whatever",
@@ -996,7 +1002,7 @@ def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/whatever",
@@ -1036,7 +1042,7 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_refuse), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         html_response = client.get(
             "/",
@@ -1133,7 +1139,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_5xx(tmp_pat
         backend_status=503,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1168,7 +1174,7 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
         backend_status=200,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1199,7 +1205,7 @@ def test_subdomain_forward_emits_error_response_on_404(tmp_path: Path) -> None:
         backend_status=404,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/agents/agent-deadbeef/screen",
@@ -1236,7 +1242,7 @@ def test_subdomain_forward_emits_error_response_regardless_of_method(tmp_path: P
         backend_status=404,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.post(
             "/api/agents/agent-deadbeef/message",
@@ -1273,7 +1279,7 @@ def test_subdomain_forward_emits_error_response_on_application_500(tmp_path: Pat
         backend_status=500,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1313,7 +1319,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
         raise_error=httpx.RemoteProtocolError,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/events",
@@ -1347,7 +1353,7 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
         raise_error=httpx.ConnectError,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1381,7 +1387,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
         raise_error=httpx.ConnectTimeout,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/events",
@@ -1421,7 +1427,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_non_sse_tim
         raise_error=httpx.ConnectTimeout,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1458,7 +1464,7 @@ def test_sse_backend_requests_keep_a_tighter_read_budget_than_buffered_ones(tmp_
     captured: list[httpx.Request] = []
     app, _env_out, mock_client = _make_forward_app_with_capture(tmp_path, captured, instance_key, preauth)
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         cookie = f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"
         sse_response = client.get("/api/events", headers={"cookie": cookie, "accept": "text/event-stream"})
@@ -1491,7 +1497,7 @@ def test_subdomain_forward_reports_a_stalled_backend_without_abandoning_the_requ
         stall_notice_seconds=0.05,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/slow",
@@ -1530,7 +1536,7 @@ def test_subdomain_forward_emits_no_stall_envelope_when_the_backend_answers_in_t
         stall_notice_seconds=0.05,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/quick",
@@ -1593,7 +1599,7 @@ async def _drive_request_until_client_disconnects(
         "query_string": b"",
         "root_path": "",
         "headers": [
-            (b"host", f"{_TEST_HOST_ID}.localhost:18421".encode("utf-8")),
+            (b"host", f"{_TEST_AGENT_ID}.localhost:18421".encode("utf-8")),
             (b"cookie", f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}".encode("utf-8")),
             (b"accept", accept_header),
         ],
@@ -1751,7 +1757,7 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(
         preauth_cookie_value=preauth,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         html_response = client.get(
             "/",
             headers={
@@ -1825,7 +1831,7 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(
         preauth_cookie_value=preauth,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421") as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421") as client:
         # ``websocket_connect`` ignores ``base_url`` and builds the URL against
         # ``ws://testserver``, so the agent subdomain must be in the URL itself
         # for the handler to route on the right host header. The handler closes
@@ -1833,7 +1839,7 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(
         # WebSocketDisconnect on connect.
         with pytest.raises(WebSocketDisconnect):
             with client.websocket_connect(
-                f"ws://{_TEST_HOST_ID}.localhost:18421/api/ws",
+                f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws",
                 headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
             ):
                 pass
@@ -1966,10 +1972,10 @@ def test_websocket_emits_failure_when_backend_closes_during_handshake(
     )
 
     try:
-        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18422") as client:
+        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18422") as client:
             with pytest.raises(WebSocketDisconnect):
                 with client.websocket_connect(
-                    f"ws://{_TEST_HOST_ID}.localhost:18422/api/ws",
+                    f"ws://{_TEST_AGENT_ID}.localhost:18422/api/ws",
                     headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
                 ):
                     pass
@@ -2027,7 +2033,7 @@ def test_http_forward_reports_a_refused_channel_as_the_backend_not_listening(
     )
 
     try:
-        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18423", follow_redirects=False) as client:
+        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18423", follow_redirects=False) as client:
             response = client.get(
                 "/api/state",
                 headers={
@@ -2163,7 +2169,7 @@ def test_http_forward_reports_a_reset_before_the_headers_as_a_connect_failure(tm
     preauth = "preauth-cookie-reset-before-headers"
     with _failing_backend(_BackendFailureMode.RESET_BEFORE_HEADERS) as port:
         app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
-        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18424", follow_redirects=False) as client:
+        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18424", follow_redirects=False) as client:
             response = client.get(
                 "/api/state",
                 headers={
@@ -2193,7 +2199,7 @@ def test_http_forward_reports_a_reset_after_the_headers_as_a_lost_body(tmp_path:
     preauth = "preauth-cookie-reset-after-headers"
     with _failing_backend(_BackendFailureMode.RESET_AFTER_HEADERS) as port:
         app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
-        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18424", follow_redirects=False) as client:
+        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18424", follow_redirects=False) as client:
             response = client.get(
                 "/api/state",
                 headers={
@@ -2230,7 +2236,7 @@ def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_bod
     preauth = "preauth-cookie-stalled-body"
     with _failing_backend(_BackendFailureMode.STALL_AFTER_HEADERS) as port:
         app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
-        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18424", follow_redirects=False) as client:
+        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18424", follow_redirects=False) as client:
             app.state.http_client.timeout = httpx.Timeout(
                 connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
                 pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
@@ -2287,7 +2293,7 @@ def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
     with TestClient(
-        app, base_url=f"http://terminal.{_TEST_HOST_ID}.localhost:18421", follow_redirects=False
+        app, base_url=f"http://terminal.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
     ) as client:
         app.state.http_client = mock_client
         response = client.get(
@@ -2329,7 +2335,7 @@ def test_deep_service_origin_routes_to_owning_service(tmp_path: Path) -> None:
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
     with TestClient(
-        app, base_url=f"http://deep.svc.{_TEST_HOST_ID}.localhost:18421", follow_redirects=False
+        app, base_url=f"http://deep.svc.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
     ) as client:
         app.state.http_client = mock_client
         response = client.get(
@@ -2362,7 +2368,7 @@ def test_service_origin_unregistered_service_serves_loading_page(tmp_path: Path)
         preauth_cookie_value=preauth,
     )
 
-    with TestClient(app, base_url=f"http://notyet.{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://notyet.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         response = client.get(
             "/",
             headers={
@@ -2458,7 +2464,7 @@ def test_subdomain_auth_bridge_sets_workspace_domain_cookie(tmp_path: Path) -> N
         listen_port=18421,
     )
     valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), workspace_host_id=valid_host_id)
+    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=/",
@@ -2523,9 +2529,9 @@ def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> Non
             allow_host_loopback=True,
         )
 
-        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421") as client:
+        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421") as client:
             with client.websocket_connect(
-                f"ws://{_TEST_HOST_ID}.localhost:18421/api/ws",
+                f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws",
                 headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
             ) as websocket_session:
                 assert websocket_session.receive_text() == "hello-from-backend"
@@ -2593,9 +2599,9 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
             allow_host_loopback=True,
         )
 
-        with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421") as client:
+        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421") as client:
             with client.websocket_connect(
-                f"ws://{_TEST_HOST_ID}.localhost:18421/api/ws",
+                f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws",
                 headers={
                     "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
                     SHARE_OWNER_HEADER: "false",
@@ -2659,7 +2665,7 @@ def test_http2_subdomain_auth_bridge_cookie_is_none_and_partitioned(tmp_path: Pa
         use_http2=True,
     )
     valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), workspace_host_id=valid_host_id)
+    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=/",
@@ -2741,11 +2747,11 @@ def test_workspace_responses_carry_default_deny_frame_ancestors(tmp_path: Path) 
         listen_port=18421,
         use_http2=True,
     )
-    with TestClient(app, base_url=f"https://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"https://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         response = client.get("/", headers={"accept": "text/html"})
     policy = response.headers["content-security-policy"]
     assert policy == (
-        f"frame-ancestors 'self' https://{_TEST_HOST_ID}.localhost:18421 https://*.{_TEST_HOST_ID}.localhost:18421"
+        f"frame-ancestors 'self' https://{_TEST_AGENT_ID}.localhost:18421 https://*.{_TEST_AGENT_ID}.localhost:18421"
     )
 
 
@@ -2762,7 +2768,7 @@ def test_workspace_responses_include_configured_embedder_origins(tmp_path: Path)
         use_http2=True,
         embedder_origins=(EmbedderOrigin("http://localhost:8420"),),
     )
-    with TestClient(app, base_url=f"https://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"https://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         response = client.get("/", headers={"accept": "text/html"})
     assert response.headers["content-security-policy"].endswith("http://localhost:8420")
 
@@ -3122,7 +3128,7 @@ def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tm
         raise_error=httpx.PoolTimeout,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
         app.state.http_client = mock_client
         sse_response = client.get(
             "/api/events",
@@ -3340,3 +3346,98 @@ def test_sse_handoff_that_ties_with_the_client_disconnect_releases_the_backend_s
     assert streamed_chunks == [], "the stream was served to a client that had already gone"
     # A client hanging up says nothing about the backend's health.
     assert _envelope_lines(envelope_output) == []
+
+
+def test_legacy_host_origin_html_navigation_redirects_to_the_agent_origin(tmp_path: Path) -> None:
+    """A persisted pre-agent-keying URL (host-<hex> origin) 301s to the canonical agent origin."""
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+    )
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, base_url=f"http://svc.{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+        html_response = client.get(
+            "/some/page?x=1",
+            headers={"accept": "text/html"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+        non_html_response = client.get(
+            "/api/data",
+            headers={"accept": "application/json"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert html_response.status_code == 301
+    assert html_response.headers["location"] == f"http://svc.{_TEST_AGENT_ID}.localhost:18421/some/page?x=1"
+    # Non-navigations from a stale open page fail fast; a reload heals them.
+    assert non_html_response.status_code == 404
+
+
+def test_legacy_host_origin_websocket_closes_with_the_origin_moved_code(tmp_path: Path) -> None:
+    """A websocket to a legacy host-<hex> origin closes with 4004 even though the agent resolves.
+
+    Sockets cannot be redirected, so the shim closes them with a distinct code
+    (4004, not the 1013 retry code) telling the opener to heal by reloading
+    onto the canonical agent origin. Asserting 4004 rather than 1013 also
+    proves the resolvable agent did not take the unresolved branch.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    preauth = "preauth-cookie-legacy-ws"
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+    )
+    with TestClient(app, base_url=f"http://svc.{_TEST_HOST_ID}.localhost:18421") as client:
+        # ``websocket_connect`` ignores ``base_url``, so the legacy origin must
+        # be in the URL itself for the handler to route on the host header. The
+        # handler closes the socket before accepting, which the test client
+        # surfaces as a WebSocketDisconnect on connect.
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"ws://svc.{_TEST_HOST_ID}.localhost:18421/api/ws",
+                headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            ):
+                pass
+    assert exc_info.value.code == 4004
+    assert exc_info.value.reason == "Origin moved to its agent-keyed URL"
+
+
+def test_goto_canonicalizes_a_legacy_host_coordinate(tmp_path: Path) -> None:
+    """/goto/<host-id>/ (a persisted window URL) bridges onto the canonical agent origin."""
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=io.StringIO()),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+    )
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, follow_redirects=False) as client:
+        response = client.get(
+            f"/goto/{_TEST_HOST_ID}/",
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+    assert response.status_code == 302
+    assert response.headers["Location"].startswith(f"http://{_TEST_AGENT_ID}.localhost:18421/_subdomain_auth?")

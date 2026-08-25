@@ -20,7 +20,7 @@ from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _displayable_pending_requests
 from imbue.minds.desktop_client.app import create_desktop_client
@@ -287,7 +287,7 @@ def _build_authenticated_client(
         )
     else:
         backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
 
     app = create_desktop_client(
         auth_store=auth_store,
@@ -743,7 +743,7 @@ def _build_authenticated_client_with_handlers(
         )
     else:
         backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,

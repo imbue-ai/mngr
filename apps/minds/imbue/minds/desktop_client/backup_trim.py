@@ -27,7 +27,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_env_store import backup_env_dir
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -100,7 +100,7 @@ def select_snapshot_ids_to_forget(snapshots: Sequence[ResticSnapshot]) -> list[s
     return [snapshot.snapshot_id for snapshot in ordered[:forget_count]]
 
 
-def collect_trimmable_repos(paths: WorkspacePaths) -> dict[str, TrimmableRepo]:
+def collect_trimmable_repos(paths: InstallationPaths) -> dict[str, TrimmableRepo]:
     """Parse every canonical restic env on this machine, keyed by full bucket name.
 
     Only S3-style repositories (the imbue_cloud backup shape) are included;
@@ -138,7 +138,7 @@ def run_backup_trim(
     *,
     account_email: str,
     cli: ImbueCloudCli,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     report_progress: Callable[[str], None],
     # Injectable (fakes in tests); production callers pass the restic_cli
     # functions of the same names.
@@ -245,7 +245,7 @@ class BackupTrimManager(MutableModel):
         user_id: str,
         account_email: str,
         cli: ImbueCloudCli,
-        paths: WorkspacePaths,
+        paths: InstallationPaths,
         notification_dispatcher: NotificationDispatcher | None,
     ) -> bool:
         """Start a trim run on a detached thread; returns False when one is already running."""
@@ -281,7 +281,7 @@ class BackupTrimManager(MutableModel):
         user_id: str,
         account_email: str,
         cli: ImbueCloudCli,
-        paths: WorkspacePaths,
+        paths: InstallationPaths,
         notification_dispatcher: NotificationDispatcher | None,
     ) -> None:
         try:

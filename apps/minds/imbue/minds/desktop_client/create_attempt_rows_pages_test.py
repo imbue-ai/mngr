@@ -17,7 +17,7 @@ from uuid import uuid4
 from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
@@ -104,7 +104,7 @@ def _make_client_with_store(
     creator: AgentCreator
     if live_create_attempt_id_str is None:
         creator = AgentCreator(
-            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+            paths=InstallationPaths(data_dir=tmp_path / "minds"),
             root_concurrency_group=root_concurrency_group,
             notification_dispatcher=notification_dispatcher,
             system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -113,7 +113,7 @@ def _make_client_with_store(
     else:
         creator = _FixedLiveCreateAttemptAgentCreator(
             live_create_attempt_id_str=live_create_attempt_id_str,
-            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+            paths=InstallationPaths(data_dir=tmp_path / "minds"),
             root_concurrency_group=root_concurrency_group,
             notification_dispatcher=notification_dispatcher,
             system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -125,7 +125,7 @@ def _make_client_with_store(
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
         http_client=None,
         agent_creator=creator,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         mngr_binary=mngr_binary,
     )
@@ -193,7 +193,7 @@ def test_discard_without_leftover_host_completes_and_deletes_the_record(
     assert status_response.status_code == 200
     assert status_response.get_json()["is_done"] is True
     assert store.read_record(create_attempt_id) is None
-    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
     assert read_discard(create_attempt_id, paths) is None
     # A later poll of the finalized discard reads as unknown.
     assert client.get(f"/api/v1/workspaces/operations/create-attempt-discard/{create_attempt_id}").status_code == 404
@@ -220,7 +220,7 @@ def test_discard_with_leftover_labeled_host_destroys_it_and_finalizes(
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """The labeled-provider (lima) path end to end: the route looks the
-    leftover host up by its workspace-id label, spawns the detached destroy,
+    leftover host up by its create-attempt-id label, spawns the detached destroy,
     and the first DONE status read finalizes (record + discard dir gone)."""
     create_attempt_id = _create_attempt_id()
     mngr_binary, calls_path = _write_fake_listing_mngr(
@@ -232,7 +232,7 @@ def test_discard_with_leftover_labeled_host_destroys_it_and_finalizes(
                     "name": "row-test-name",
                     "provider": "lima",
                     "state": "BUILDING",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                 }
             ]
         },
@@ -253,7 +253,7 @@ def test_discard_with_leftover_labeled_host_destroys_it_and_finalizes(
     assert post_response.status_code == 202
 
     # The detached destroy is a real subprocess: wait for it to finish.
-    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         record = read_discard(create_attempt_id, paths)
@@ -301,7 +301,7 @@ def test_discard_of_a_done_record_is_refused_with_409(
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """A DONE record's workspace exists (its host still carries the
-    workspace-id label), so a discard would destroy a healthy workspace; the
+    create-attempt-id label), so a discard would destroy a healthy workspace; the
     route must refuse and leave the record to the discovery sweep."""
     client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
     create_attempt_id = _create_attempt_id()
@@ -319,7 +319,7 @@ def test_discard_of_a_done_record_is_refused_with_409(
     assert response.status_code == 409
     assert store.read_record(create_attempt_id) is not None
     # No discard was started for it either.
-    assert read_discard(create_attempt_id, WorkspacePaths(data_dir=tmp_path / "minds")) is None
+    assert read_discard(create_attempt_id, InstallationPaths(data_dir=tmp_path / "minds")) is None
 
 
 def test_discard_of_unknown_create_attempt_returns_404(
@@ -345,7 +345,7 @@ def test_discard_status_reports_failed_without_finalizing_when_the_wrapper_died(
     store.write_record(_record(create_attempt_id, PendingCreateAttemptState.IN_FLIGHT))
     # Simulate a discard whose wrapper died without writing an exit code:
     # derived status FAILED, never finalized, record kept.
-    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
     discard_dir = paths.data_dir / "discarding_create_attempts" / create_attempt_id
     discard_dir.mkdir(parents=True)
     (discard_dir / "output.log").write_text("partial output\n")
@@ -381,7 +381,7 @@ def test_create_operation_log_stream_replays_history_for_every_reader(
     log_sink.put("second history line")
     log_sink.put(LOG_SENTINEL)
     creator = _FixedLogSinkAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -394,7 +394,7 @@ def test_create_operation_log_stream_replays_history_for_every_reader(
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
         http_client=None,
         agent_creator=creator,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
     )
     client = app.test_client()

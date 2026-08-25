@@ -816,8 +816,8 @@ sudo poweroff
 
             # When running the agent as root, mint this host's own client keypair and
             # pass its public key into the provisioning script so mngr can ssh in as
-            # root (per-host, so no provider-wide key ever needs to enter a synced
-            # workspace record).
+            # root (per-host, so no provider-wide key is ever exported with a
+            # host's credentials).
             if self.config.is_run_as_root:
                 _root_key_path, root_authorized_public_key = self._create_per_host_root_ssh_keypair(host_id)
             else:

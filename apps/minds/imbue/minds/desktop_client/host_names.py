@@ -34,7 +34,7 @@ def normalize_host_name_slug(text: str) -> HostName:
     collapsed = _NON_SLUG_CHARS_RE.sub("-", lowered).strip("-")
     truncated = collapsed[:_MINDS_HOST_NAME_SLUG_MAX_LENGTH].strip("-")
     if not truncated:
-        raise InvalidName("Machine name must include at least one letter or number.")
+        raise InvalidName("Workspace name must include at least one letter or number.")
     return HostName(truncated)
 
 

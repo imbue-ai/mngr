@@ -5,7 +5,7 @@ import pytest
 from flask.testing import FlaskClient
 from openapi_spec_validator import validate
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.api_schema import _ROUTE_MODELS
 from imbue.minds.desktop_client.api_schema import _flask_path_to_openapi
 from imbue.minds.desktop_client.api_schema import _is_gateway_reachable_path
@@ -26,7 +26,7 @@ def _schema_client(tmp_path: Path) -> FlaskClient:
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=make_resolver_with_data(),
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
     )
     return app.test_client()

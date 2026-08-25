@@ -396,7 +396,11 @@ def _enable_sharing_with_cli(
     preferred_region = _pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None
     try:
         share = cli.create_share(
-            account=account_email, host_id=host_id, entry_label=entry_label, preferred_region=preferred_region
+            account=account_email,
+            host_id=host_id,
+            entry_label=entry_label,
+            preferred_region=preferred_region,
+            workspace_id=str(agent_id),
         )
     except ImbueCloudCliError as exc:
         raise SharingError(f"Could not enable sharing: {describe_connector_failure(exc)}") from exc

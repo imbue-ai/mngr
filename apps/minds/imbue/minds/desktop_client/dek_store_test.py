@@ -7,7 +7,7 @@ from argon2 import PasswordHasher
 from pydantic import SecretStr
 
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
 from imbue.minds.desktop_client.dek_store import convert_legacy_password_files
 from imbue.minds.desktop_client.dek_store import dek_file_path
@@ -24,15 +24,15 @@ from imbue.minds.errors import SyncCryptoError
 
 
 @pytest.fixture
-def paths(tmp_path: Path) -> WorkspacePaths:
-    return WorkspacePaths(data_dir=tmp_path)
+def paths(tmp_path: Path) -> InstallationPaths:
+    return InstallationPaths(data_dir=tmp_path)
 
 
 def _user_id() -> str:
     return uuid4().hex
 
 
-def test_ensure_dek_creates_a_0600_file_and_is_stable(paths: WorkspacePaths) -> None:
+def test_ensure_dek_creates_a_0600_file_and_is_stable(paths: InstallationPaths) -> None:
     user_id = _user_id()
     dek = ensure_dek(paths, user_id)
 
@@ -44,12 +44,12 @@ def test_ensure_dek_creates_a_0600_file_and_is_stable(paths: WorkspacePaths) -> 
     assert is_account_unlocked(paths, user_id)
 
 
-def test_load_dek_returns_none_when_locked(paths: WorkspacePaths) -> None:
+def test_load_dek_returns_none_when_locked(paths: InstallationPaths) -> None:
     assert load_dek(paths, _user_id()) is None
     assert not is_account_unlocked(paths, _user_id())
 
 
-def test_load_dek_raises_a_typed_error_for_a_corrupt_file(paths: WorkspacePaths) -> None:
+def test_load_dek_raises_a_typed_error_for_a_corrupt_file(paths: InstallationPaths) -> None:
     # A truncated DEK must raise (typed) rather than read as locked: treating
     # it as absent would let ensure_dek mint a fresh DEK and fork the account's
     # key lineage away from the server bundle and other devices.
@@ -63,7 +63,7 @@ def test_load_dek_raises_a_typed_error_for_a_corrupt_file(paths: WorkspacePaths)
         ensure_dek(paths, user_id)
 
     # Re-unlocking with the wrapped bundle rewrites a valid DEK over the wreck.
-    other_device = WorkspacePaths(data_dir=paths.data_dir / "other-device")
+    other_device = InstallationPaths(data_dir=paths.data_dir / "other-device")
     dek = ensure_dek(other_device, user_id)
     bundle = set_master_password_for_account(other_device, user_id, SecretStr("hunter2"))
     assert bundle is not None
@@ -71,7 +71,7 @@ def test_load_dek_raises_a_typed_error_for_a_corrupt_file(paths: WorkspacePaths)
     assert load_dek(paths, user_id) == dek
 
 
-def test_set_master_password_writes_bundle_and_verification_works(paths: WorkspacePaths) -> None:
+def test_set_master_password_writes_bundle_and_verification_works(paths: InstallationPaths) -> None:
     user_id = _user_id()
     bundle = set_master_password_for_account(paths, user_id, SecretStr("hunter2"))
 
@@ -84,7 +84,7 @@ def test_set_master_password_writes_bundle_and_verification_works(paths: Workspa
     assert unwrap_bundle_json(bundle, SecretStr("hunter2")) == load_dek(paths, user_id)
 
 
-def test_empty_password_state_verifies_only_the_empty_password(paths: WorkspacePaths) -> None:
+def test_empty_password_state_verifies_only_the_empty_password(paths: InstallationPaths) -> None:
     user_id = _user_id()
     ensure_dek(paths, user_id)
 
@@ -93,7 +93,7 @@ def test_empty_password_state_verifies_only_the_empty_password(paths: WorkspaceP
     assert not verify_master_password_for_account(paths, user_id, SecretStr("anything"))
 
 
-def test_clearing_the_password_deletes_the_bundle_mirror(paths: WorkspacePaths) -> None:
+def test_clearing_the_password_deletes_the_bundle_mirror(paths: InstallationPaths) -> None:
     user_id = _user_id()
     set_master_password_for_account(paths, user_id, SecretStr("hunter2"))
 
@@ -105,7 +105,7 @@ def test_clearing_the_password_deletes_the_bundle_mirror(paths: WorkspacePaths) 
     assert load_dek(paths, user_id) is not None
 
 
-def test_password_change_rewraps_without_changing_the_dek(paths: WorkspacePaths) -> None:
+def test_password_change_rewraps_without_changing_the_dek(paths: InstallationPaths) -> None:
     user_id = _user_id()
     first_bundle = set_master_password_for_account(paths, user_id, SecretStr("old"))
     dek_before = load_dek(paths, user_id)
@@ -120,15 +120,15 @@ def test_password_change_rewraps_without_changing_the_dek(paths: WorkspacePaths)
         unwrap_bundle_json(second_bundle, SecretStr("old"))
 
 
-def test_unlock_account_with_bundle_installs_dek_and_mirror(paths: WorkspacePaths) -> None:
+def test_unlock_account_with_bundle_installs_dek_and_mirror(paths: InstallationPaths) -> None:
     # Simulate device A wrapping, then device B (fresh paths) unlocking.
     user_id = _user_id()
-    device_a = WorkspacePaths(data_dir=paths.data_dir / "device-a")
+    device_a = InstallationPaths(data_dir=paths.data_dir / "device-a")
     dek = ensure_dek(device_a, user_id)
     bundle = set_master_password_for_account(device_a, user_id, SecretStr("hunter2"))
     assert bundle is not None
 
-    device_b = WorkspacePaths(data_dir=paths.data_dir / "device-b")
+    device_b = InstallationPaths(data_dir=paths.data_dir / "device-b")
     with pytest.raises(SecretWrappingError):
         unlock_account_with_bundle(device_b, user_id, bundle, SecretStr("wrong"))
     unlocked = unlock_account_with_bundle(device_b, user_id, bundle, SecretStr("hunter2"))
@@ -138,7 +138,7 @@ def test_unlock_account_with_bundle_installs_dek_and_mirror(paths: WorkspacePath
     assert read_bundle_mirror(device_b, user_id) == bundle
 
 
-def test_convert_legacy_files_carries_over_a_saved_password(paths: WorkspacePaths) -> None:
+def test_convert_legacy_files_carries_over_a_saved_password(paths: InstallationPaths) -> None:
     user_id = _user_id()
     (paths.data_dir / "backup_password").write_text("legacy-pass\n")
     (paths.data_dir / "backup_password_hash").write_text(PasswordHasher().hash("legacy-pass"))
@@ -153,7 +153,7 @@ def test_convert_legacy_files_carries_over_a_saved_password(paths: WorkspacePath
     assert (paths.data_dir / "backup_password_hash.pre-sync").exists()
 
 
-def test_convert_legacy_files_carries_over_a_pre_hash_plaintext_password(paths: WorkspacePaths) -> None:
+def test_convert_legacy_files_carries_over_a_pre_hash_plaintext_password(paths: InstallationPaths) -> None:
     # The pre-hash layout: only the plaintext file exists. The retired
     # ensure_backup_password_hash seeded the hash from it, so the plaintext
     # IS the master password and must carry over.
@@ -167,7 +167,7 @@ def test_convert_legacy_files_carries_over_a_pre_hash_plaintext_password(paths: 
     assert (paths.data_dir / "backup_password.pre-sync").exists()
 
 
-def test_convert_legacy_files_with_empty_password_seed_sets_no_password(paths: WorkspacePaths) -> None:
+def test_convert_legacy_files_with_empty_password_seed_sets_no_password(paths: InstallationPaths) -> None:
     user_id = _user_id()
     (paths.data_dir / "backup_password_hash").write_text(PasswordHasher().hash(""))
 
@@ -178,7 +178,7 @@ def test_convert_legacy_files_with_empty_password_seed_sets_no_password(paths: W
     assert not (paths.data_dir / "backup_password_hash").exists()
 
 
-def test_convert_legacy_files_with_unknowable_password_starts_fresh(paths: WorkspacePaths) -> None:
+def test_convert_legacy_files_with_unknowable_password_starts_fresh(paths: InstallationPaths) -> None:
     user_id = _user_id()
     (paths.data_dir / "backup_password_hash").write_text(PasswordHasher().hash("forgotten"))
 
@@ -189,7 +189,7 @@ def test_convert_legacy_files_with_unknowable_password_starts_fresh(paths: Works
     assert (paths.data_dir / "backup_password_hash.pre-sync").exists()
 
 
-def test_convert_legacy_files_is_a_no_op_without_accounts(paths: WorkspacePaths) -> None:
+def test_convert_legacy_files_is_a_no_op_without_accounts(paths: InstallationPaths) -> None:
     (paths.data_dir / "backup_password_hash").write_text(PasswordHasher().hash("keep-me"))
 
     convert_legacy_password_files(paths, [])
@@ -198,7 +198,7 @@ def test_convert_legacy_files_is_a_no_op_without_accounts(paths: WorkspacePaths)
     assert (paths.data_dir / "backup_password_hash").exists()
 
 
-def test_convert_legacy_files_is_idempotent(paths: WorkspacePaths) -> None:
+def test_convert_legacy_files_is_idempotent(paths: InstallationPaths) -> None:
     user_id = _user_id()
     (paths.data_dir / "backup_password").write_text("legacy-pass\n")
     (paths.data_dir / "backup_password_hash").write_text(PasswordHasher().hash("legacy-pass"))
@@ -210,7 +210,7 @@ def test_convert_legacy_files_is_idempotent(paths: WorkspacePaths) -> None:
     assert read_bundle_mirror(paths, user_id) == bundle_after_first
 
 
-def test_unwrap_bundle_json_raises_typed_error_for_malformed_bundles(paths: WorkspacePaths) -> None:
+def test_unwrap_bundle_json_raises_typed_error_for_malformed_bundles(paths: InstallationPaths) -> None:
     # A bundle written by an unknown client version (or a corrupt connector
     # row) must surface as SecretWrappingError, never KeyError/ValueError.
     user_id = _user_id()
@@ -232,7 +232,7 @@ def test_unwrap_bundle_json_raises_typed_error_for_malformed_bundles(paths: Work
         unwrap_bundle_json(bad_cost, SecretStr("hunter2"))
 
 
-def test_verify_master_password_returns_false_for_a_wrong_shaped_mirror(paths: WorkspacePaths) -> None:
+def test_verify_master_password_returns_false_for_a_wrong_shaped_mirror(paths: InstallationPaths) -> None:
     # Valid JSON dict, wrong shape: verification must fail closed, not raise.
     user_id = _user_id()
     ensure_dek(paths, user_id)
@@ -242,7 +242,7 @@ def test_verify_master_password_returns_false_for_a_wrong_shaped_mirror(paths: W
     assert not verify_master_password_for_account(paths, user_id, SecretStr("x"))
 
 
-def test_corrupt_bundle_mirror_is_treated_as_no_password(paths: WorkspacePaths) -> None:
+def test_corrupt_bundle_mirror_is_treated_as_no_password(paths: InstallationPaths) -> None:
     user_id = _user_id()
     ensure_dek(paths, user_id)
     bundle_mirror_path(paths, user_id).parent.mkdir(parents=True, exist_ok=True)

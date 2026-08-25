@@ -8,7 +8,7 @@ from flask.testing import FlaskClient
 from pydantic import Field
 
 from imbue.imbue_common.model_update import to_update
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.ai_keys import AiKeyMintError
 from imbue.minds.desktop_client.ai_keys import build_credential_blob
 from imbue.minds.desktop_client.ai_keys import mint_workspace_credential_blob
@@ -44,7 +44,7 @@ class _FixedEmailSessionStore(MultiAccountSessionStore):
 def _make_record_store(tmp_path: Path) -> WorkspaceRecordStore:
     # cli=None keeps every mutation local (no push subprocess).
     return WorkspaceRecordStore(
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         cli=None,
         device_id=device_id_for_test("ai-keys"),
         device_label="test-device",
@@ -119,16 +119,16 @@ def test_mint_workspace_credential_blob_fixes_workspace_identity_on_the_key(tmp_
     cli = RecordingImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
 
     blob = mint_workspace_credential_blob(
-        workspace_host_id="host-abc", account_email="alice@example.com", imbue_cloud_cli=cli
+        workspace_id="agent-abc", account_email="alice@example.com", imbue_cloud_cli=cli
     )
 
     assert len(cli.create_calls) == 1
     call = cli.create_calls[0]
     assert call["account"] == "alice@example.com"
-    assert call["alias"] == "workspace-host-abc"
+    assert call["alias"] == "workspace-agent-abc"
     assert call["max_budget"] == 100.0
     assert call["budget_duration"] == "1d"
-    assert call["metadata"] == {"workspace_host_id": "host-abc", "source": "ai-keys-page"}
+    assert call["metadata"] == {"workspace_id": "agent-abc", "source": "ai-keys-page"}
     assert "ANTHROPIC_API_KEY=sk-fake-litellm-key" in blob
     assert "ANTHROPIC_BASE_URL=https://litellm.example.com/" in blob
 
@@ -141,9 +141,7 @@ def test_mint_requests_single_invocation_rotation(tmp_path: Path) -> None:
     # quadrupled the wall time under load).
     cli = RecordingImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
 
-    mint_workspace_credential_blob(
-        workspace_host_id="host-abc", account_email="alice@example.com", imbue_cloud_cli=cli
-    )
+    mint_workspace_credential_blob(workspace_id="agent-abc", account_email="alice@example.com", imbue_cloud_cli=cli)
 
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["is_rotate_on_exists"] is True
@@ -154,7 +152,7 @@ def test_mint_wraps_cli_failures_in_aikeyminterror(tmp_path: Path) -> None:
 
     with pytest.raises(AiKeyMintError, match="Failed to create the key"):
         mint_workspace_credential_blob(
-            workspace_host_id="host-abc", account_email="alice@example.com", imbue_cloud_cli=cli
+            workspace_id="agent-abc", account_email="alice@example.com", imbue_cloud_cli=cli
         )
 
 
@@ -272,7 +270,7 @@ def test_mint_returns_credential_blob_for_associated_workspace(tmp_path: Path) -
     assert "ANTHROPIC_API_KEY=sk-fake-litellm-key" in credentials
     assert "ANTHROPIC_BASE_URL=https://litellm.example.com/" in credentials
     assert len(cli.create_calls) == 1
-    assert cli.create_calls[0]["alias"] == "workspace-host-abc"
+    assert cli.create_calls[0]["alias"] == "workspace-agent-1"
 
 
 def test_mint_maps_cli_failure_to_502(tmp_path: Path) -> None:

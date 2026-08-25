@@ -143,10 +143,10 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
 
         work_dir = tmp_path / "work"
         init_git_repo(work_dir, initial_commit=True)
-        return AgentReleaseContext(env=env, workspace=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
+        return AgentReleaseContext(env=env, project_dir=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
-        return ["--no-ensure-clean", "--source", str(ctx.workspace)]
+        return ["--no-ensure-clean", "--source", str(ctx.project_dir)]
 
     def run_mngr(self, ctx: AgentReleaseContext, *args: str, timeout: float) -> subprocess.CompletedProcess[str]:
         return run_mngr_subprocess(*args, env=dict(ctx.env), timeout=timeout)

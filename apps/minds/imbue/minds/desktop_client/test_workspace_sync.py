@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from pydantic import SecretStr
 
 from imbue.imbue_common.model_update import to_update
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -50,8 +50,8 @@ _PASSWORD = "correct horse battery staple"
 
 def _make_device(
     base: Path, name: str, cli: FakeImbueCloudCli
-) -> tuple[WorkspacePaths, WorkspaceRecordStore, MultiAccountSessionStore]:
-    paths = WorkspacePaths(data_dir=base / name)
+) -> tuple[InstallationPaths, WorkspaceRecordStore, MultiAccountSessionStore]:
+    paths = InstallationPaths(data_dir=base / name)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     record_store = WorkspaceRecordStore(
         paths=paths,
@@ -85,7 +85,7 @@ def test_two_device_sync_round_trip_with_unlock_and_env_materialization(tmp_path
     resolver_a = _resolver_with_workspace(agent_id, host_id, "my-workspace")
     session_a.associate_workspace(_USER_ID, str(agent_id), resolver_a)
 
-    pushed = cli.sync_records_by_email[_EMAIL][str(host_id)]
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
     assert pushed["encrypted_secrets"] is not None
     # The secrets on the wire are ciphertext, never the plaintext env.
     assert "ws-random-pass" not in str(pushed["encrypted_secrets"])
@@ -133,7 +133,7 @@ def test_empty_password_account_syncs_metadata_but_never_secrets(tmp_path: Path)
     resolver = _resolver_with_workspace(agent_id, host_id, "metadata-only")
     session_a.associate_workspace(_USER_ID, str(agent_id), resolver)
 
-    pushed = cli.sync_records_by_email[_EMAIL][str(host_id)]
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
     assert pushed["display_name"] == "metadata-only"
     # No master password -> the metadata-only tier: nothing secret on the wire.
     assert pushed["encrypted_secrets"] is None
@@ -150,7 +150,7 @@ def test_setting_a_password_later_pushes_the_pending_secrets(tmp_path: Path) -> 
     write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:x\nRESTIC_PASSWORD=y\n")
     resolver = _resolver_with_workspace(agent_id, host_id, "upgraded")
     session_a.associate_workspace(_USER_ID, str(agent_id), resolver)
-    assert cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"] is None
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["encrypted_secrets"] is None
 
     # The empty -> non-empty transition (the settings-page flow): wrap, push
     # the bundle, then push all pending secrets.
@@ -159,7 +159,7 @@ def test_setting_a_password_later_pushes_the_pending_secrets(tmp_path: Path) -> 
     cli.sync_bundle_push(_EMAIL, bundle)
     store_a.push_all_secrets(_USER_ID, _EMAIL, resolver)
 
-    assert cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"] is not None
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["encrypted_secrets"] is not None
 
 
 def test_password_change_does_not_degrade_other_device_secrets(tmp_path: Path) -> None:
@@ -176,7 +176,7 @@ def test_password_change_does_not_degrade_other_device_secrets(tmp_path: Path) -
     write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:x\nRESTIC_PASSWORD=y\n")
     resolver_a = _resolver_with_workspace(agent_id, host_id, "hosted-on-laptop")
     session_a.associate_workspace(_USER_ID, str(agent_id), resolver_a)
-    original_blob = cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"]
+    original_blob = cli.sync_records_by_email[_EMAIL][str(agent_id)]["encrypted_secrets"]
     assert original_blob is not None
 
     # Device B pulls, unlocks, and materializes the env, so partial secret
@@ -196,7 +196,7 @@ def test_password_change_does_not_degrade_other_device_secrets(tmp_path: Path) -
     resolver_b = _resolver_with_workspace(agent_id, host_id, "hosted-on-laptop")
     store_b.push_all_secrets(_USER_ID, _EMAIL, resolver_b)
 
-    assert cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"] == original_blob
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["encrypted_secrets"] == original_blob
 
 
 def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_path: Path) -> None:
@@ -218,7 +218,7 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
     # The association migrated into a pushed record and the legacy file retired.
     assert store.associations_view() == {_USER_ID: [str(agent_id)]}
     assert not (paths.data_dir / "workspace_associations.json").exists()
-    assert str(host_id) in cli.sync_records_by_email[_EMAIL]
+    assert str(agent_id) in cli.sync_records_by_email[_EMAIL]
     # The carried-over legacy password's bundle must reach the connector too:
     # without it no other device can ever unlock the synced secrets.
     assert _EMAIL in cli.sync_bundle_by_email
@@ -235,7 +235,7 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
     )
     scheduler_after = WorkspaceSyncScheduler(record_store=store, session_store=session, resolver=empty_resolver)
     scheduler_after.run_one_pass()
-    assert cli.sync_records_by_email[_EMAIL][str(host_id)]["state"] == "destroyed"
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["state"] == "destroyed"
 
 
 # -- SSH material materialization (cloud rows accessible from any install) ----
@@ -243,9 +243,9 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
 
 def _make_profiled_device(
     base: Path, name: str, cli: FakeImbueCloudCli
-) -> tuple[WorkspacePaths, WorkspaceRecordStore, MultiAccountSessionStore, Path]:
+) -> tuple[InstallationPaths, WorkspaceRecordStore, MultiAccountSessionStore, Path]:
     """A device whose mngr profile dir exists (SSH material collection + materialization need it)."""
-    paths = WorkspacePaths(data_dir=base / name)
+    paths = InstallationPaths(data_dir=base / name)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     mngr_host_dir = base / name / "mngr"
     profile_id = uuid4().hex
@@ -292,7 +292,7 @@ def _cloud_resolver_with_workspace(agent_id: AgentId, host_id: HostId, name: str
 
 
 def _provision_cloud_workspace(
-    paths: WorkspacePaths, session: MultiAccountSessionStore, profile_dir: Path, cli: FakeImbueCloudCli
+    paths: InstallationPaths, session: MultiAccountSessionStore, profile_dir: Path, cli: FakeImbueCloudCli
 ) -> tuple[AgentId, HostId, str, str]:
     """Lease a cloud machine on the given device: per-host key on disk, record pushed with full secrets."""
     bundle = set_master_password_for_account(paths, _USER_ID, SecretStr(_PASSWORD))
@@ -310,7 +310,7 @@ def _provision_cloud_workspace(
 
     resolver = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     session.associate_workspace(_USER_ID, str(agent_id), resolver)
-    pushed = cli.sync_records_by_email[_EMAIL][str(host_id)]
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
     assert pushed["encrypted_secrets"] is not None
     assert pushed["hosting_device_id"] is None
     return agent_id, host_id, private_key, known_hosts_line
@@ -390,7 +390,7 @@ def test_materializer_replaces_a_placeholder_keypair(tmp_path: Path) -> None:
 def test_sweep_removes_key_dirs_for_tombstoned_records_but_keeps_owned_leases(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
-    _, host_id, _, _ = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+    agent_id, host_id, _, _ = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
     _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
@@ -400,7 +400,7 @@ def test_sweep_removes_key_dirs_for_tombstoned_records_but_keeps_owned_leases(tm
     assert key_dir_b.is_dir()
 
     # The workspace is destroyed from another install; B pulls the tombstone.
-    server_record = cli.sync_records_by_email[_EMAIL][str(host_id)]
+    server_record = cli.sync_records_by_email[_EMAIL][str(agent_id)]
     server_record["state"] = "destroyed"
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
 
@@ -432,16 +432,16 @@ def test_producer_repushes_secrets_when_the_material_changes(tmp_path: Path) -> 
     write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:v1\n")
     resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     session_a.associate_workspace(_USER_ID, str(agent_id), resolver_a)
-    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"]))
+    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"]))
 
     # Unchanged material: a reconcile pushes nothing new.
     store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
-    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) == revision_before
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"])) == revision_before
 
     # The backup env rotates; the next reconcile re-pushes the secrets.
     write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:v2-rotated\n")
     store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
-    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) > revision_before
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"])) > revision_before
 
     # A fresh install decrypts the rotated env.
     paths_b, store_b, _, _ = _make_profiled_device(tmp_path, "desktop", cli)
@@ -458,7 +458,7 @@ def test_non_contributor_never_clobbers_anothers_secrets_with_partial_material(t
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     agent_id, host_id, _, _ = _provision_cloud_workspace_on_device_a(tmp_path, cli)
-    blob_before = cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"]
+    blob_before = cli.sync_records_by_email[_EMAIL][str(agent_id)]["encrypted_secrets"]
 
     # Device B is unlocked, sees the cloud workspace in its own discovery, and
     # holds only PARTIAL local material (a backup env, no SSH key). Its
@@ -471,7 +471,7 @@ def test_non_contributor_never_clobbers_anothers_secrets_with_partial_material(t
     resolver_b = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
 
-    assert cli.sync_records_by_email[_EMAIL][str(host_id)]["encrypted_secrets"] == blob_before
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["encrypted_secrets"] == blob_before
 
 
 def test_desktop_push_in_a_cas_window_rebases_once_and_converges(tmp_path: Path) -> None:
@@ -494,12 +494,12 @@ def test_desktop_push_in_a_cas_window_rebases_once_and_converges(tmp_path: Path)
     resolver = _resolver_with_workspace(agent_id, host_id, "crossed-edit-ws")
     session_a.associate_workspace(_USER_ID, str(agent_id), resolver)
     server_rows = cli.sync_records_by_email[_EMAIL]
-    assert int(str(server_rows[str(host_id)]["revision"])) == 1
+    assert int(str(server_rows[str(agent_id)]["revision"])) == 1
 
     # The web chrome edits the record concurrently: revision 2 with a color
     # the desktop's replica has never seen.
-    server_rows[str(host_id)] = {
-        **server_rows[str(host_id)],
+    server_rows[str(agent_id)] = {
+        **server_rows[str(agent_id)],
         "revision": 2,
         "color": "#ff0000",
         "display_name": "web-name",
@@ -514,7 +514,7 @@ def test_desktop_push_in_a_cas_window_rebases_once_and_converges(tmp_path: Path)
     )
     store_a.upsert_local_record(_USER_ID, _EMAIL, renamed)
 
-    stored_row = server_rows[str(host_id)]
+    stored_row = server_rows[str(agent_id)]
     assert int(str(stored_row["revision"])) == 3
     assert stored_row["display_name"] == "desktop-name"
     # Last-actor-wins is deliberate: the desktop's full local content replaced
@@ -584,7 +584,7 @@ def test_a_metadata_only_revision_advance_does_not_clobber_a_local_rotation(tmp_
     access: the host already serves the rotated one)."""
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
-    _, host_id, _, old_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+    agent_id, host_id, _, old_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
     _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
@@ -599,7 +599,7 @@ def test_a_metadata_only_revision_advance_does_not_clobber_a_local_rotation(tmp_
     pin_host_key(key_dir_b / "known_hosts", "198.51.100.7", 22001, rotated_pin, host_id, HostKeyOrigin.USER)
 
     # Another device pushes a rename: the revision advances, the secrets do not.
-    wire = cli.sync_records_by_email[_EMAIL][str(host_id)]
+    wire = cli.sync_records_by_email[_EMAIL][str(agent_id)]
     wire["display_name"] = "renamed-elsewhere"
     wire["revision"] = int(str(wire["revision"])) + 1
 
@@ -640,9 +640,9 @@ def test_a_drifted_local_env_is_converged_to_the_record_and_never_pushed(tmp_pat
     assert read_canonical_env(paths_b, agent_id) == record_env
 
     # And B's reconcile pushes nothing: local now equals the record.
-    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"]))
+    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"]))
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
-    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) == revision_before
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"])) == revision_before
     synced = next(record for record in store_b.list_records(_USER_ID) if record.host_id == str(host_id))
     payload = store_b.decrypt_record_secrets(_USER_ID, synced)
     assert payload is not None
@@ -788,11 +788,11 @@ def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
-    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"]))
+    revision_before = int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"]))
 
     # A stable pass first: parity means nothing to push.
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
-    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) == revision_before
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"])) == revision_before
 
     # B rotates locally: new client key on disk, new user-origin endpoint pin.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
@@ -803,7 +803,7 @@ def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_
 
     # B's next reconcile detects the drift from its parity stamp and re-pushes.
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
-    assert int(str(cli.sync_records_by_email[_EMAIL][str(host_id)]["revision"])) > revision_before
+    assert int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"])) > revision_before
 
     # A fresh third device materializes the rotated material, not the original.
     _, store_c, _, profile_c = _make_profiled_device(tmp_path, "tablet", cli)

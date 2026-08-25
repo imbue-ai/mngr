@@ -46,7 +46,7 @@ from imbue.imbue_common.secret_wrapping import generate_dek
 from imbue.imbue_common.secret_wrapping import generate_kdf_parameters
 from imbue.imbue_common.secret_wrapping import unwrap_dek
 from imbue.imbue_common.secret_wrapping import wrap_dek
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.errors import SyncCryptoError
 
 _KEYS_DIRNAME = "keys"
@@ -57,16 +57,16 @@ _LEGACY_RETIRED_SUFFIX = ".pre-sync"
 _PASSWORD_HASHER = PasswordHasher()
 
 
-def keys_dir(paths: WorkspacePaths) -> Path:
+def keys_dir(paths: InstallationPaths) -> Path:
     """Return the directory holding per-account DEK + bundle-mirror files."""
     return paths.data_dir / _KEYS_DIRNAME
 
 
-def dek_file_path(paths: WorkspacePaths, user_id: str) -> Path:
+def dek_file_path(paths: InstallationPaths, user_id: str) -> Path:
     return keys_dir(paths) / f"{user_id}.dek"
 
 
-def bundle_mirror_path(paths: WorkspacePaths, user_id: str) -> Path:
+def bundle_mirror_path(paths: InstallationPaths, user_id: str) -> Path:
     return keys_dir(paths) / f"{user_id}.bundle.json"
 
 
@@ -85,7 +85,7 @@ def _write_secret_bytes(path: Path, content: bytes) -> None:
         raise SyncCryptoError(f"Could not write {path}: {e}") from e
 
 
-def load_dek(paths: WorkspacePaths, user_id: str) -> bytes | None:
+def load_dek(paths: InstallationPaths, user_id: str) -> bytes | None:
     """Return the account's raw DEK, or None when this device is locked for it.
 
     A present-but-wrong-length file (truncated write, disk corruption) raises
@@ -108,7 +108,7 @@ def load_dek(paths: WorkspacePaths, user_id: str) -> bytes | None:
     return dek
 
 
-def ensure_dek(paths: WorkspacePaths, user_id: str) -> bytes:
+def ensure_dek(paths: InstallationPaths, user_id: str) -> bytes:
     """Return the account's DEK, generating and persisting a fresh one if absent."""
     existing = load_dek(paths, user_id)
     if existing is not None:
@@ -119,12 +119,12 @@ def ensure_dek(paths: WorkspacePaths, user_id: str) -> bytes:
     return dek
 
 
-def is_account_unlocked(paths: WorkspacePaths, user_id: str) -> bool:
+def is_account_unlocked(paths: InstallationPaths, user_id: str) -> bool:
     """Whether this device holds the account's DEK (day-to-day secrets access works)."""
     return dek_file_path(paths, user_id).is_file()
 
 
-def delete_dek(paths: WorkspacePaths, user_id: str) -> None:
+def delete_dek(paths: InstallationPaths, user_id: str) -> None:
     """Remove the account's local DEK file (used only by tests / explicit lock flows)."""
     try:
         dek_file_path(paths, user_id).unlink(missing_ok=True)
@@ -175,7 +175,7 @@ def unwrap_bundle_json(bundle: Mapping[str, object], password: SecretStr) -> byt
     return unwrap_dek(kek, wrapped)
 
 
-def read_bundle_mirror(paths: WorkspacePaths, user_id: str) -> dict[str, object] | None:
+def read_bundle_mirror(paths: InstallationPaths, user_id: str) -> dict[str, object] | None:
     """Return the locally-mirrored bundle JSON, or None when no master password is set."""
     path = bundle_mirror_path(paths, user_id)
     if not path.is_file():
@@ -194,23 +194,23 @@ def read_bundle_mirror(paths: WorkspacePaths, user_id: str) -> dict[str, object]
     return parsed if isinstance(parsed, dict) else None
 
 
-def write_bundle_mirror(paths: WorkspacePaths, user_id: str, bundle: Mapping[str, object]) -> None:
+def write_bundle_mirror(paths: InstallationPaths, user_id: str, bundle: Mapping[str, object]) -> None:
     _write_secret_bytes(bundle_mirror_path(paths, user_id), json.dumps(dict(bundle), indent=2).encode("utf-8"))
 
 
-def delete_bundle_mirror(paths: WorkspacePaths, user_id: str) -> None:
+def delete_bundle_mirror(paths: InstallationPaths, user_id: str) -> None:
     try:
         bundle_mirror_path(paths, user_id).unlink(missing_ok=True)
     except OSError as e:
         raise SyncCryptoError(f"Could not delete the bundle mirror for {user_id}: {e}") from e
 
 
-def is_master_password_set_for_account(paths: WorkspacePaths, user_id: str) -> bool:
+def is_master_password_set_for_account(paths: InstallationPaths, user_id: str) -> bool:
     """Whether the account has a non-empty master password (a bundle exists exactly then)."""
     return bundle_mirror_path(paths, user_id).is_file()
 
 
-def verify_master_password_for_account(paths: WorkspacePaths, user_id: str, candidate: SecretStr) -> bool:
+def verify_master_password_for_account(paths: InstallationPaths, user_id: str, candidate: SecretStr) -> bool:
     """Check ``candidate`` by attempting the unwrap; no bundle means only the empty password matches."""
     bundle = read_bundle_mirror(paths, user_id)
     if bundle is None:
@@ -223,7 +223,7 @@ def verify_master_password_for_account(paths: WorkspacePaths, user_id: str, cand
 
 
 def set_master_password_for_account(
-    paths: WorkspacePaths, user_id: str, new_password: SecretStr
+    paths: InstallationPaths, user_id: str, new_password: SecretStr
 ) -> dict[str, object] | None:
     """(Re)wrap the account's DEK under ``new_password`` and update the local mirror.
 
@@ -243,7 +243,7 @@ def set_master_password_for_account(
 
 
 def unlock_account_with_bundle(
-    paths: WorkspacePaths, user_id: str, bundle: Mapping[str, object], password: SecretStr
+    paths: InstallationPaths, user_id: str, bundle: Mapping[str, object], password: SecretStr
 ) -> bytes:
     """Unwrap a (server-fetched) bundle and persist both the DEK and the mirror.
 
@@ -261,11 +261,11 @@ def unlock_account_with_bundle(
 # ---------------------------------------------------------------------------
 
 
-def _legacy_password_path(paths: WorkspacePaths) -> Path:
+def _legacy_password_path(paths: InstallationPaths) -> Path:
     return paths.data_dir / _LEGACY_PASSWORD_FILENAME
 
 
-def _legacy_hash_path(paths: WorkspacePaths) -> Path:
+def _legacy_hash_path(paths: InstallationPaths) -> Path:
     return paths.data_dir / _LEGACY_PASSWORD_HASH_FILENAME
 
 
@@ -279,7 +279,7 @@ def _matches_legacy_hash(stored_hash: str, candidate: str) -> bool:
     return True
 
 
-def _read_legacy_master_password(paths: WorkspacePaths) -> SecretStr | None:
+def _read_legacy_master_password(paths: InstallationPaths) -> SecretStr | None:
     """Recover the legacy master password when it is knowable, else None.
 
     Knowable means: the plaintext convenience copy exists and matches the
@@ -321,7 +321,7 @@ def _retire_legacy_file(path: Path) -> None:
         logger.warning("Could not retire the legacy password file {}: {}", path, e)
 
 
-def convert_legacy_password_files(paths: WorkspacePaths, user_ids: Sequence[str]) -> None:
+def convert_legacy_password_files(paths: InstallationPaths, user_ids: Sequence[str]) -> None:
     """One-shot conversion of the legacy per-install password files into per-account bundles.
 
     For each signed-in account: ensure a DEK exists, and -- when the legacy

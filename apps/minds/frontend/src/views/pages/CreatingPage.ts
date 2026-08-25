@@ -36,7 +36,7 @@ interface CreatingState {
 }
 
 function enterWorkspaceFromRedirect(redirectUrl: string): void {
-  // redirect_url is the /goto/<host-id>/ URL; the shell resolves either
+  // redirect_url is the /goto/<workspace-id>/ URL; the shell resolves either
   // coordinate, so extract the id and enter in-app.
   const match = redirectUrl.match(/\/goto\/((?:agent|host)-[a-f0-9]+)\//i);
   if (match) {

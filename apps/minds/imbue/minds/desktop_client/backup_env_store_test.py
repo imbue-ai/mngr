@@ -5,10 +5,11 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_env_store import archive_canonical_env
 from imbue.minds.desktop_client.backup_env_store import canonical_env_path
 from imbue.minds.desktop_client.backup_env_store import env_content_sha256
+from imbue.minds.desktop_client.backup_env_store import full_backup_bucket_name_from_env
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
@@ -16,8 +17,8 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.mngr.primitives import AgentId
 
 
-def _paths(tmp_path: Path) -> WorkspacePaths:
-    return WorkspacePaths(data_dir=tmp_path)
+def _paths(tmp_path: Path) -> InstallationPaths:
+    return InstallationPaths(data_dir=tmp_path)
 
 
 def test_read_returns_none_when_absent(tmp_path: Path) -> None:
@@ -66,6 +67,15 @@ def test_parse_restic_env_handles_export_quotes_and_comments() -> None:
         "AWS_ACCESS_KEY_ID": "a b",
         "RESTIC_PASSWORD": "p",
     }
+
+
+def test_full_backup_bucket_name_from_env_identifies_imbue_cloud_and_byo() -> None:
+    r2_env = "RESTIC_REPOSITORY=s3:https://acct.r2.cloudflarestorage.com/abc123--agent-9c35\nRESTIC_PASSWORD=pw\n"
+    byo_env = "RESTIC_REPOSITORY=s3:https://s3.amazonaws.com/my-own-bucket\nRESTIC_PASSWORD=pw\n"
+    separatorless_env = "RESTIC_REPOSITORY=s3:https://acct.r2.cloudflarestorage.com/plainbucket\nRESTIC_PASSWORD=pw\n"
+    assert full_backup_bucket_name_from_env(r2_env) == "abc123--agent-9c35"
+    assert full_backup_bucket_name_from_env(byo_env) is None
+    assert full_backup_bucket_name_from_env(separatorless_env) is None
 
 
 def test_env_content_sha256_is_stable_hex() -> None:

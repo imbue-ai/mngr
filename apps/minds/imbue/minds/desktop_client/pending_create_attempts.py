@@ -20,6 +20,7 @@ ids; the record now only awaits discovery confirmation before deletion).
 """
 
 import threading
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -93,7 +94,9 @@ class PendingCreateAttemptRecord(FrozenModel):
     # the first launch after a downgrade).
     model_config = ConfigDict(extra="ignore")
 
-    create_attempt_id: str = Field(description="Opaque create attempt id; also the host's workspace-id label value")
+    create_attempt_id: str = Field(
+        description="Opaque create attempt id; also the host's create-attempt-id label value"
+    )
     state: PendingCreateAttemptState = Field(description="Lifecycle state of this record")
     provider_instance_name: str = Field(
         default="", description="mngr provider instance the create targets (the host-name uniqueness scope)"
@@ -121,7 +124,21 @@ FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES: Final[int] = 1000
 # hosts. It is the only thing stamped on the host: account and display
 # metadata stay in the local record. The startup reconcile joins hosts to
 # records through this label.
-WORKSPACE_ID_HOST_LABEL: Final[str] = "workspace-id"
+CREATE_ATTEMPT_ID_HOST_LABEL: Final[str] = "create-attempt-id"
+
+# CLEANUP: drop the legacy label (and read_create_attempt_id_label's fallback to
+# it) once no supported install still has Lima / Docker hosts stamped by a minds
+# version that wrote it -- it held a create-attempt id but was misleadingly
+# named after the workspace.
+LEGACY_CREATE_ATTEMPT_ID_HOST_LABEL: Final[str] = "workspace-id"
+
+
+def read_create_attempt_id_label(labels: Mapping[str, str]) -> str | None:
+    """The create-attempt id stamped on a host, reading the legacy label as a fallback."""
+    new_value = labels.get(CREATE_ATTEMPT_ID_HOST_LABEL)
+    if new_value is not None:
+        return new_value
+    return labels.get(LEGACY_CREATE_ATTEMPT_ID_HOST_LABEL)
 
 
 class PendingCreateAttemptStore(MutableModel):

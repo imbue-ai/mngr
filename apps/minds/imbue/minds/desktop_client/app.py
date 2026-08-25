@@ -30,7 +30,7 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import ClientEnvConfig
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -233,7 +233,7 @@ def _handle_forward_bridge() -> Response:
     through here first: minds verifies its own session, then 302s to the
     plugin's ``/_bridge`` with the spawn-time secret, which sets the plugin's
     bare-origin session cookie and redirects onward to ``next`` (normally a
-    ``/goto/<host-id>/`` workspace entry).
+    ``/goto/<workspace-id>/`` workspace entry).
     """
     token = get_state().mngr_forward_browser_bridge_token
     if token is None:
@@ -369,7 +369,7 @@ def _handle_backup_password_change() -> Response:
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
-    paths: WorkspacePaths | None = get_state().api_v1_paths
+    paths: InstallationPaths | None = get_state().api_v1_paths
     session_store = get_state().session_store
     if paths is None or session_store is None or session_store.record_store is None:
         return make_response(
@@ -519,11 +519,11 @@ def _handle_remove_workspace_record() -> Response:
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict) or not str(body.get("host_id") or ""):
+    coordinate = str((body.get("workspace_id") or body.get("host_id") or "") if isinstance(body, dict) else "")
+    if not coordinate:
         return make_response(
-            status_code=400, content='{"error": "host_id is required"}', media_type="application/json"
+            status_code=400, content='{"error": "workspace_id is required"}', media_type="application/json"
         )
-    host_id = str(body["host_id"])
     session_store = get_state().session_store
     if session_store is None or session_store.record_store is None:
         return make_response(
@@ -531,11 +531,20 @@ def _handle_remove_workspace_record() -> Response:
         )
     record_store = session_store.record_store
     for account in session_store.list_accounts():
-        owns_host = any(record.host_id == host_id for record in record_store.list_records(str(account.user_id)))
-        if not owns_host:
+        # The coordinate is the workspace id; a legacy host id (an older
+        # window's persisted state) resolves through the record's host column.
+        matching = next(
+            (
+                record
+                for record in record_store.list_records(str(account.user_id))
+                if coordinate in (record.agent_id, record.host_id)
+            ),
+            None,
+        )
+        if matching is None:
             continue
         try:
-            record_store.remove_record_or_raise(str(account.user_id), str(account.email), host_id)
+            record_store.remove_record_or_raise(str(account.user_id), str(account.email), matching.agent_id)
         except WorkspaceSyncError as exc:
             return make_response(
                 status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json"
@@ -859,7 +868,7 @@ def _handle_post_login_redirect() -> Response:
 
 
 def _finalize_and_mark_destroying(
-    paths: WorkspacePaths | None,
+    paths: InstallationPaths | None,
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
@@ -895,7 +904,7 @@ def _finalize_and_mark_destroying(
 
 def _finalize_destroyed_workspace(
     agent_id: AgentId,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     session_store: MultiAccountSessionStore | None,
     imbue_cloud_cli: ImbueCloudCli | None,
 ) -> None:
@@ -1132,10 +1141,9 @@ def _build_workspace_list(
         accent = _resolved_workspace_color(backend_resolver, aid)
         entry: dict[str, str] = {
             "id": str(aid),
-            # Workspace content URLs (``/goto/<host-id>/`` and the
-            # ``host-<hex>.localhost`` origins) are keyed by host id; the UI
-            # needs both coordinates to navigate and to match either back to
-            # this row.
+            # Content URLs are keyed by the workspace id itself; host_id (the
+            # current machine) rides along for legacy-coordinate resolution
+            # and machine-scoped affordances.
             "host_id": str(info.host_id) if info is not None else "",
             "name": ws_name,
             "accent": accent,
@@ -1276,7 +1284,7 @@ def _handle_account_trim_backups(user_id: str) -> Response:
         return make_response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = get_state().session_store
     cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
-    paths: WorkspacePaths | None = get_state().api_v1_paths
+    paths: InstallationPaths | None = get_state().api_v1_paths
     account = next(
         (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
         None,
@@ -1388,21 +1396,22 @@ def _workspace_record_store() -> WorkspaceRecordStore | None:
 def _handle_mint_ai_key() -> Response:
     """Mint a LiteLLM key for a workspace (POST /settings/ai-keys/mint).
 
-    JSON body: ``{"workspace": "<host_id>"}``. Returns ``{"credentials": ...}``
-    (the env-var-style blob the workspace modal expects) on success, or
-    ``{"error": ...}`` with a matching status code.
+    JSON body: ``{"workspace": "<workspace_id>"}`` (a machine's host id is
+    also accepted while in-workspace deep links transition). Returns
+    ``{"credentials": ...}`` (the env-var-style blob the workspace modal
+    expects) on success, or ``{"error": ...}`` with a matching status code.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True) or {}
-    workspace_host_id = str(body.get("workspace", "")).strip()
-    if not workspace_host_id:
+    workspace_coordinate = str(body.get("workspace", "")).strip()
+    if not workspace_coordinate:
         return make_response(
             status_code=400,
-            content=json.dumps({"error": "Missing 'workspace' (the machine host id)"}),
+            content=json.dumps({"error": "Missing 'workspace' (the workspace id)"}),
             media_type="application/json",
         )
-    resolved = resolve_workspace_account(workspace_host_id, _workspace_record_store(), get_state().session_store)
+    resolved = resolve_workspace_account(workspace_coordinate, _workspace_record_store(), get_state().session_store)
     if resolved is None:
         return make_response(
             status_code=400,
@@ -1423,12 +1432,12 @@ def _handle_mint_ai_key() -> Response:
         )
     try:
         credential_blob = mint_workspace_credential_blob(
-            workspace_host_id=workspace_host_id,
+            workspace_id=resolved.workspace_id,
             account_email=resolved.account_email,
             imbue_cloud_cli=imbue_cloud_cli,
         )
     except AiKeyMintError as exc:
-        logger.warning("LiteLLM key mint failed for machine {}: {}", workspace_host_id, exc)
+        logger.warning("LiteLLM key mint failed for workspace {}: {}", resolved.workspace_id, exc)
         return make_response(status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json")
     return make_response(
         status_code=200, content=json.dumps({"credentials": credential_blob}), media_type="application/json"
@@ -1893,7 +1902,7 @@ def _derive_ui_workspaces_message(
     app: Flask,
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
-    paths: WorkspacePaths | None,
+    paths: InstallationPaths | None,
 ) -> UiWorkspacesMessage:
     with app.app_context():
         rows = _build_workspace_list(
@@ -2042,7 +2051,7 @@ class _LegacyUiStateDeriver(MutableModel):
     flask_app: Flask = Field(frozen=True, description="App whose context the derive helpers need")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Discovery resolver")
     session_store: MultiAccountSessionStore | None = Field(frozen=True, description="Account sessions")
-    paths: WorkspacePaths | None = Field(frozen=True, description="Workspace data paths")
+    paths: InstallationPaths | None = Field(frozen=True, description="Workspace data paths")
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = Field(
         frozen=True, description="Per-workspace health tracker"
     )
@@ -2083,7 +2092,7 @@ def _create_ui_state_publisher(
     broadcaster: UiChannelBroadcaster,
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
-    paths: WorkspacePaths | None,
+    paths: InstallationPaths | None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None,
     connectivity_detector: ConnectivityDetector | None,
@@ -2147,7 +2156,7 @@ def create_desktop_client(
     agent_creator: AgentCreator | None = None,
     imbue_cloud_cli: ImbueCloudCli | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
-    paths: WorkspacePaths | None = None,
+    paths: InstallationPaths | None = None,
     minds_config: MindsConfig | None = None,
     client_env_config: ClientEnvConfig | None = None,
     envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
@@ -2648,20 +2657,15 @@ def _run_system_interface_health_probe_loop(
                 # measures.
                 sleep_tracker.record_heartbeat()
             for aid in tracker.snapshot_probe_targets():
-                # Workspace origins are keyed by host id; an agent whose host
-                # coordinate discovery hasn't supplied yet cannot be probed and
-                # counts as failing (matching what the plugin would answer).
-                # Require the real host-<hex> shape: the resolver interface's
-                # placeholder ("localhost") would probe the unroutable vhost
-                # localhost.localhost.
-                display_info = backend_resolver.get_agent_display_info(aid)
-                if display_info is None or not str(display_info.host_id).startswith("host-"):
-                    tracker.record_probe_failure(aid)
-                    continue
+                # Workspace origins are keyed by the workspace id (the services
+                # agent's id), so the probe target needs no coordinate lookup:
+                # an agent the plugin cannot resolve (discovery still warming
+                # up, or the agent gone) answers with its 503 loader, which
+                # records as a failure below.
                 probe_status = probe_workspace_through_plugin(
                     mngr_forward_port=mngr_forward_port,
                     preauth_cookie=mngr_forward_preauth_cookie,
-                    workspace_host_id=str(display_info.host_id),
+                    workspace_id=str(aid),
                     probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
                     client=probe_client,
                 )

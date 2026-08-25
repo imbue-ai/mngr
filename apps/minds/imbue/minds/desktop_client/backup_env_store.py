@@ -17,8 +17,10 @@ import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Final
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.imbue_common.pure import pure
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 
@@ -28,22 +30,22 @@ _BACKUP_ENV_DIRNAME = "backup_envs"
 ENV_ARCHIVE_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
-def backup_env_dir(paths: WorkspacePaths) -> Path:
+def backup_env_dir(paths: InstallationPaths) -> Path:
     """Return the directory holding the canonical per-workspace restic env files."""
     return paths.data_dir / _BACKUP_ENV_DIRNAME
 
 
-def canonical_env_path(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+def canonical_env_path(paths: InstallationPaths, agent_id: AgentId) -> Path:
     """Return the path of the canonical restic.env for ``agent_id``."""
     return backup_env_dir(paths) / f"{agent_id}.env"
 
 
-def has_canonical_env(paths: WorkspacePaths, agent_id: AgentId) -> bool:
+def has_canonical_env(paths: InstallationPaths, agent_id: AgentId) -> bool:
     """Return whether a canonical restic.env exists for ``agent_id``."""
     return canonical_env_path(paths, agent_id).is_file()
 
 
-def read_canonical_env(paths: WorkspacePaths, agent_id: AgentId) -> str | None:
+def read_canonical_env(paths: InstallationPaths, agent_id: AgentId) -> str | None:
     """Return the canonical restic.env contents for ``agent_id``, or None if absent."""
     path = canonical_env_path(paths, agent_id)
     if not path.is_file():
@@ -54,7 +56,7 @@ def read_canonical_env(paths: WorkspacePaths, agent_id: AgentId) -> str | None:
         raise BackupProvisioningError(f"Could not read canonical restic.env at {path}: {e}") from e
 
 
-def write_canonical_env(paths: WorkspacePaths, agent_id: AgentId, content: str) -> None:
+def write_canonical_env(paths: InstallationPaths, agent_id: AgentId, content: str) -> None:
     """Write (overwriting) the canonical restic.env for ``agent_id``, mode 0600."""
     path = canonical_env_path(paths, agent_id)
     try:
@@ -78,7 +80,7 @@ def env_content_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def archive_canonical_env(paths: WorkspacePaths, agent_id: AgentId, *, now: datetime) -> Path | None:
+def archive_canonical_env(paths: InstallationPaths, agent_id: AgentId, *, now: datetime) -> Path | None:
     """Move the canonical restic.env aside to ``<agent_id>.env.<timestamp>``.
 
     Used before re-provisioning a workspace against a new destination so the
@@ -94,6 +96,39 @@ def archive_canonical_env(paths: WorkspacePaths, agent_id: AgentId, *, now: date
     except OSError as e:
         raise BackupProvisioningError(f"Could not archive canonical restic.env at {path}: {e}") from e
     return archive_path
+
+
+# The R2 endpoint marker identifying an imbue_cloud-provisioned repository.
+_R2_ENDPOINT_MARKER: Final[str] = ".r2.cloudflarestorage.com"
+
+
+@pure
+def split_backup_bucket_name_from_env(env_content: str) -> tuple[str, str] | None:
+    """``(owner_prefix, short_name)`` of the backup bucket from a canonical env, or None for BYO backends.
+
+    imbue_cloud repositories look like
+    ``s3:https://<acct>.r2.cloudflarestorage.com/<owner-prefix>--<short-name>``;
+    anything without the R2 endpoint marker (or the owner-prefix separator) is
+    a bring-your-own backend, which has no minds-managed bucket.
+    """
+    repository = parse_restic_env(env_content).get("RESTIC_REPOSITORY", "")
+    if _R2_ENDPOINT_MARKER not in repository:
+        return None
+    bucket_name = repository.rstrip("/").rsplit("/", 1)[-1]
+    if "--" not in bucket_name:
+        return None
+    owner_prefix, _, short_name = bucket_name.partition("--")
+    return owner_prefix, short_name
+
+
+@pure
+def full_backup_bucket_name_from_env(env_content: str) -> str | None:
+    """The full R2 backup bucket name from a canonical env, or None for BYO backends."""
+    parsed = split_backup_bucket_name_from_env(env_content)
+    if parsed is None:
+        return None
+    owner_prefix, short_name = parsed
+    return f"{owner_prefix}--{short_name}"
 
 
 def parse_restic_env(content: str) -> dict[str, str]:

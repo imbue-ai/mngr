@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.create_attempt_discard import CreateAttemptDiscardStatus
 from imbue.minds.desktop_client.create_attempt_discard import delete_discard
 from imbue.minds.desktop_client.create_attempt_discard import read_discard
@@ -12,8 +12,8 @@ from imbue.minds.desktop_client.create_attempt_discard import start_discard_of_h
 from imbue.minds.desktop_client.create_attempt_discard import start_discard_without_host
 
 
-def _paths(tmp_path: Path) -> WorkspacePaths:
-    return WorkspacePaths(data_dir=tmp_path / "minds-data")
+def _paths(tmp_path: Path) -> InstallationPaths:
+    return InstallationPaths(data_dir=tmp_path / "minds-data")
 
 
 def _create_attempt_id() -> str:
@@ -30,7 +30,7 @@ def _write_fake_mngr(tmp_path: Path, exit_code: int) -> tuple[str, Path]:
     return str(script_path), calls_path
 
 
-def _wait_for_terminal_status(create_attempt_id: str, paths: WorkspacePaths, deadline_seconds: float = 10.0) -> str:
+def _wait_for_terminal_status(create_attempt_id: str, paths: InstallationPaths, deadline_seconds: float = 10.0) -> str:
     deadline = time.monotonic() + deadline_seconds
     while time.monotonic() < deadline:
         record = read_discard(create_attempt_id, paths)

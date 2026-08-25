@@ -15,7 +15,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
@@ -35,7 +35,7 @@ class CanonicalRepositoryAccess(FrozenModel):
     password: str | None = Field(description="The RESTIC_PASSWORD, when one is set")
 
 
-def load_canonical_repository_access(paths: WorkspacePaths, agent_id: AgentId) -> CanonicalRepositoryAccess:
+def load_canonical_repository_access(paths: InstallationPaths, agent_id: AgentId) -> CanonicalRepositoryAccess:
     """Parse the workspace's canonical restic.env into repository coordinates.
 
     Raises ``BackupProvisioningError`` when no backups are configured (no
@@ -55,7 +55,7 @@ def load_canonical_repository_access(paths: WorkspacePaths, agent_id: AgentId) -
 
 
 def list_workspace_snapshots(
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     agent_id: AgentId,
     *,
     parent_cg: ConcurrencyGroup | None = None,
@@ -79,7 +79,7 @@ def list_workspace_snapshots(
 
 
 def list_workspace_snapshot_directory(
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     agent_id: AgentId,
     *,
     snapshot_id: str,
@@ -101,7 +101,7 @@ def list_workspace_snapshot_directory(
 
 
 def is_workspace_backing_up(
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     agent_id: AgentId,
     *,
     now: datetime,

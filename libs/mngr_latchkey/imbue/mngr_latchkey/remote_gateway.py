@@ -500,7 +500,7 @@ def services_granted_to_any_host(latchkey_directory: Path, host_ids: Iterable[Ho
     """Union the canonical service names granted by any of ``host_ids``.
 
     A service reaches a VPS only because some host's permissions grant it, so
-    this is the set whose credentials remote workspaces actually depend on.
+    this is the set whose credentials remote hosts actually depend on.
     Resolved per host through the same permissions-to-services mapping
     :func:`sync_credentials` uses, so the two cannot disagree about what a host
     is entitled to. A host with no permissions file contributes nothing.

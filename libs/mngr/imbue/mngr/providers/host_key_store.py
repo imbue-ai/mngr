@@ -313,7 +313,7 @@ def move_host_endpoint_pins(
     """Relocate ``host_id``'s pins from one endpoint to another and re-render the known_hosts file.
 
     For hosts whose keys survive a move but whose address/port change (e.g. a
-    stopped imbue_cloud workspace restored onto a different box): the same
+    stopped host whose disks a provider restores at a new endpoint): the same
     public keys are re-pinned at the new endpoint with their origins intact --
     so a user-origin pin stays user-origin and no re-trust decision is made --
     and the dead endpoint's pins are dropped. A no-op when the host has no pins

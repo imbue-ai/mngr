@@ -402,7 +402,7 @@ def test_ai_keys_context_explains_when_no_workspace_is_given(tmp_path: Path) -> 
 
     assert response.status_code == 200
     payload = json.loads(response.data)
-    assert payload["workspace_host_id"] == ""
+    assert payload["workspace_id"] == ""
     assert "opened from a machine" in payload["error_message"]
 
 
@@ -413,7 +413,7 @@ def test_ai_keys_context_reports_a_missing_account_association(tmp_path: Path) -
 
     assert response.status_code == 200
     payload = json.loads(response.data)
-    assert payload["workspace_host_id"] == "host-00000000000000000000000000000abc"
+    assert payload["workspace_id"] == "host-00000000000000000000000000000abc"
     assert "no associated Imbue account" in payload["error_message"]
 
 

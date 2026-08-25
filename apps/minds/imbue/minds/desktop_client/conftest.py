@@ -17,7 +17,7 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -226,7 +226,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
     # -- In-memory workspace-sync backend (mirrors the connector's semantics) --
 
     sync_records_by_email: dict[str, dict[str, dict[str, object]]] = Field(
-        default_factory=dict, description="email -> host_id -> wire record (the fake server state)"
+        default_factory=dict, description="email -> workspace id -> wire record (the fake server state)"
     )
     sync_bundle_by_email: dict[str, dict[str, object]] = Field(
         default_factory=dict, description="email -> key bundle (the fake server state)"
@@ -243,28 +243,31 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
     def sync_record_push(self, account: str, record: Mapping[str, object]) -> dict[str, object]:
         self._check_sync_online("sync records push")
-        by_host = self.sync_records_by_email.setdefault(account, {})
-        host_id = str(record["host_id"])
-        existing = by_host.get(host_id)
+        # Mirrors the workspace-keyed connector: one row per workspace id,
+        # host_id is a mutable attribute, CAS on the row's revision.
+        by_workspace = self.sync_records_by_email.setdefault(account, {})
+        workspace_id = str(record["agent_id"])
+        existing = by_workspace.get(workspace_id)
         pushed_revision = int(str(record["revision"]))
         if existing is not None and pushed_revision != int(str(existing["revision"])) + 1:
             conflict = ImbueCloudSyncConflictCliError("sync records push: revision conflict")
             conflict.stored_record = dict(existing)
             raise conflict
-        if str(record.get("state")) == "active":
-            for other_host_id, other in by_host.items():
-                is_other = other_host_id != host_id
-                if is_other and other.get("agent_id") == record.get("agent_id") and other.get("state") == "active":
-                    agent_conflict = ImbueCloudSyncConflictCliError("sync records push: active agent conflict")
-                    agent_conflict.stored_record = None
-                    raise agent_conflict
         stored = dict(record)
-        by_host[host_id] = stored
+        by_workspace[workspace_id] = stored
         return dict(stored)
 
-    def sync_record_delete(self, account: str, host_id: str) -> None:
+    def sync_record_delete(self, account: str, record_id: str) -> None:
         self._check_sync_online("sync records delete")
-        self.sync_records_by_email.get(account, {}).pop(host_id, None)
+        by_workspace = self.sync_records_by_email.get(account, {})
+        if record_id in by_workspace:
+            del by_workspace[record_id]
+            return
+        # Legacy host-id addressing resolves through the row's host column.
+        for workspace_id, record in list(by_workspace.items()):
+            if record.get("host_id") == record_id:
+                del by_workspace[workspace_id]
+                return
 
     def sync_scrub_secrets(self, account: str) -> int:
         self._check_sync_online("sync scrub-secrets")
@@ -298,9 +301,11 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
     recorded for seam assertions.
     """
 
-    create_share_calls: list[tuple[str, str, str | None, str | None]] = Field(
+    create_share_calls: list[tuple[str, str, str | None, str | None, str | None]] = Field(
         default_factory=list,
-        description="(account email, host id, entry label, preferred region) for every create_share call, in order",
+        description=(
+            "(account email, host id, entry label, preferred region, workspace id) for every create_share call, in order"
+        ),
     )
 
     def create_share(
@@ -310,8 +315,9 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
         host_id: str,
         entry_label: str | None = None,
         preferred_region: str | None = None,
+        workspace_id: str | None = None,
     ) -> ShareCliInfo:
-        self.create_share_calls.append((account, host_id, entry_label, preferred_region))
+        self.create_share_calls.append((account, host_id, entry_label, preferred_region, workspace_id))
         self.add_share(account, host_id)
         return ShareCliInfo(
             host_id=host_id,
@@ -404,7 +410,7 @@ def make_session_store_for_test(
     """
     effective_cli = cli or make_fake_imbue_cloud_cli()
     record_store = WorkspaceRecordStore(
-        paths=WorkspacePaths(data_dir=data_dir),
+        paths=InstallationPaths(data_dir=data_dir),
         cli=effective_cli,
         device_id=device_id_for_test("session-store"),
         device_label="test-device",

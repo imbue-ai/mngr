@@ -121,8 +121,8 @@ def get_active_profile_dir(default_host_dir: Path) -> Path:
 
     Raises ``ImbueCloudError`` if mngr hasn't been initialized in this
     host_dir yet -- there's nothing to attach plugin state to -- and for an
-    unreadable or malformed root config, so callers (including the minds
-    desktop client's render-path identity cache) only ever have to handle
+    unreadable or malformed root config, so callers (including a desktop
+    client's render-path identity cache) only ever have to handle
     ``ImbueCloudError``.
     """
     expanded = default_host_dir.expanduser()

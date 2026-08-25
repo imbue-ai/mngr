@@ -58,7 +58,7 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
 
 # Every SPA route (the hub pages and the ``/workspace/<id>`` workspace
 # surface) is served from the backend's bare-localhost origin. We match those
-# backend pages, not the ``host-<id>.localhost`` proxy.
+# backend pages, not the ``agent-<id>.localhost`` proxy.
 # The capturing group exposes the bare origin (``http://localhost:<port>``)
 # so :func:`_backend_origin_from_page` can reuse the same pattern instead of
 # re-encoding the localhost-origin contract a second time.
@@ -68,9 +68,11 @@ _BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhos
 # the mngr_forward plugin, so the port may differ from the bare backend. The
 # scheme is ``https`` when the proxy serves TLS + HTTP/2 (the default) and
 # ``http`` otherwise, so accept both. (The bare minds backend origin stays
-# plain ``http`` -- see ``_BACKEND_ORIGIN_PATTERN``.)
+# plain ``http`` -- see ``_BACKEND_ORIGIN_PATTERN``.) New origins carry the
+# workspace id (``agent-<hex>``); ``host-<hex>`` covers pre-existing
+# workspaces still on the legacy machine-keyed origin.
 _AGENT_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^https?://(?:[a-z0-9_-]+\.)*host-[a-f0-9]+\.localhost:\d+(?:/|$)"
+    r"^https?://(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.localhost:\d+(?:/|$)"
 )
 
 # Default env identity when nothing is activated: a dedicated, inert
@@ -630,7 +632,7 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
     form is submitted:
 
     - **success**: the ready workspace opens inside the chrome page's sandboxed
-      content iframe on the ``host-<id>.localhost`` origin. The SPA creating page
+      content iframe on the ``agent-<id>.localhost`` origin. The SPA creating page
       extracts the workspace coordinate from the ready workspace's ``/goto``
       URL and enters it in-app on the ``/workspace/<id>`` route, arming the
       iframe. This scans every page's FRAMES for the one that reached the
@@ -973,7 +975,7 @@ _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 # Terminal panels are cross-origin iframes at the terminal service's own
 # origin (service-per-origin): the terminal's origin label is ``terminal-<rand>``
 # (a random per-service suffix), so the origin is
-# https://terminal-<rand>.host-<hex>.localhost:<port>/. Match the ``terminal-``
+# https://terminal-<rand>.agent-<hex>.localhost:<port>/. Match the ``terminal-``
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
@@ -1085,25 +1087,30 @@ def drive_create_docker_imbue_workspace(
     return workspace_page
 
 
-def _host_id_from_subdomain(url: str) -> str:
-    """Extract the ``host-<hex>`` workspace coordinate from a workspace-origin URL."""
+def _workspace_coordinate_from_subdomain(url: str) -> str:
+    """Extract the workspace coordinate label from a workspace-origin URL.
+
+    New origins carry the workspace id (``agent-<hex>``); a pre-existing
+    workspace may still be on the legacy machine-keyed ``host-<hex>`` origin.
+    """
     if _AGENT_SUBDOMAIN_PATTERN.match(url) is None:
         raise WorkspaceFlowError(f"Not a workspace-origin URL: {url!r}")
-    # host is e.g. ``[<service>.]host-<hex>.localhost:<port>``; the workspace
-    # coordinate is the ``host-`` label.
     netloc = url.split("://", 1)[1].split("/", 1)[0]
     for label in netloc.split("."):
-        if label.startswith("host-"):
+        if label.startswith(("host-", "agent-")):
             return label
-    raise WorkspaceFlowError(f"No host-<hex> label in workspace-origin URL: {url!r}")
+    raise WorkspaceFlowError(f"No workspace coordinate label in workspace-origin URL: {url!r}")
 
 
-def _agent_id_for_host(content_page: Page, backend_origin: str, host_id: str) -> str:
-    """Resolve the agent id for ``host_id`` via ``GET /api/v1/workspaces``.
+def _agent_id_for_coordinate(content_page: Page, backend_origin: str, coordinate: str) -> str:
+    """Resolve the agent id for a workspace-origin coordinate.
 
-    Content URLs carry the host coordinate while the v1 API and the settings
-    routes are agent-keyed, so the flow needs this translation once.
+    An ``agent-<hex>`` coordinate already IS the workspace's agent id; a legacy
+    ``host-<hex>`` coordinate needs the one host->agent translation (the v1 API
+    and the settings routes are agent-keyed).
     """
+    if coordinate.startswith("agent-"):
+        return coordinate
     content_page.goto(backend_origin + "/", wait_until="domcontentloaded")
     rows = content_page.evaluate(
         """(args) =>
@@ -1114,9 +1121,9 @@ def _agent_id_for_host(content_page: Page, backend_origin: str, host_id: str) ->
         {"origin": backend_origin},
     )
     for row in rows if isinstance(rows, list) else []:
-        if isinstance(row, dict) and row.get("host_id") == host_id and row.get("agent_id"):
+        if isinstance(row, dict) and row.get("host_id") == coordinate and row.get("agent_id"):
             return str(row["agent_id"])
-    raise WorkspaceFlowError(f"No workspace with host id {host_id!r} in /api/v1/workspaces")
+    raise WorkspaceFlowError(f"No workspace with host id {coordinate!r} in /api/v1/workspaces")
 
 
 def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
@@ -1333,10 +1340,10 @@ def run_full_workspace_flow(
                     browser, content_page, default_workspace_template_path, workspace_name
                 )
                 results["STEP 1 create"] = "PASS"
-                workspace_host_id = _host_id_from_subdomain(workspace_page.url)
-                logger.info("Machine host id (from subdomain): {}", workspace_host_id)
-                agent_id = _agent_id_for_host(content_page, backend_origin, workspace_host_id)
-                logger.info("Machine agent id (via /api/v1/workspaces): {}", agent_id)
+                workspace_coordinate = _workspace_coordinate_from_subdomain(workspace_page.url)
+                logger.info("Workspace coordinate (from subdomain): {}", workspace_coordinate)
+                agent_id = _agent_id_for_coordinate(content_page, backend_origin, workspace_coordinate)
+                logger.info("Workspace agent id: {}", agent_id)
 
                 _run_flow_step(
                     results,

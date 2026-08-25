@@ -78,7 +78,7 @@ function unconnectableTitle(displayName: string): string {
 
 export interface PermissionsTabAttrs {
   model: PermissionsModel;
-  /** Machine name for the heading; '' when the options load has not landed. */
+  /** Workspace name for the heading; '' when the options load has not landed. */
   workspaceName: string;
   /** ?section from the URL, or null for "whatever is first". */
   requestedSection: string | null;

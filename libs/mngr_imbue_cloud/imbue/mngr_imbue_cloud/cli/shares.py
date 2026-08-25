@@ -2,12 +2,15 @@
 
 import click
 
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.mngr_imbue_cloud.cli._common import emit_json
+from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import handle_imbue_cloud_errors
 from imbue.mngr_imbue_cloud.cli._common import make_connector_client
 from imbue.mngr_imbue_cloud.cli._common import make_session_store
 from imbue.mngr_imbue_cloud.cli._common import resolve_account_or_active
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
+from imbue.mngr_imbue_cloud.primitives import WorkspaceId
 from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 
 
@@ -54,6 +57,15 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
         "Ignored for pool hosts, unknown regions, and re-shares (the existing region sticks)."
     ),
 )
+@click.option(
+    "--workspace-id",
+    default=None,
+    help=(
+        "The workspace's id (agent-<hex>). When given, the share is workspace-keyed: its domain "
+        "leads with a minted, persisted share label instead of the host id, and re-shares resolve "
+        "through the workspace id."
+    ),
+)
 @handle_imbue_cloud_errors
 def create_share(
     host_id: str,
@@ -61,13 +73,28 @@ def create_share(
     connector_url: str | None,
     entry_label: str | None,
     preferred_region: str | None,
+    workspace_id: str | None,
 ) -> None:
-    """Enable sharing for the given workspace host id (prints the one-time relay token)."""
+    """Enable sharing for the given workspace (prints the one-time relay token).
+
+    HOST_ID is the machine the workspace currently runs on; pass
+    --workspace-id to key the share by the workspace itself.
+    """
+    if workspace_id is not None:
+        # Reject malformed (or machine-shaped) ids here rather than letting
+        # them ride to the connector: a workspace id is always the workspace's
+        # agent-<32hex> services-agent id.
+        try:
+            WorkspaceId(workspace_id)
+        except InvalidRandomIdError as exc:
+            fail_with_json(f"invalid workspace id: {exc}", error_class="UsageError", exit_code=2)
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    info = client.create_share(token, host_id, entry_label=entry_label, preferred_region=preferred_region)
+    info = client.create_share(
+        token, host_id, entry_label=entry_label, preferred_region=preferred_region, workspace_id=workspace_id
+    )
     emit_json(_share_to_json(info, include_token=True))
 
 

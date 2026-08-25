@@ -1731,7 +1731,9 @@ def test_await_system_interface_ready_reports_a_slow_boot_that_answers() -> None
     """The wait polls past not-ready responses and reports READY on the first 200."""
     with scripted_workspace_probe_server(not_ready_count=2) as port:
         with ConcurrencyGroup(name="test-wait") as cg:
-            outcome = _await_system_interface_ready(str(HostId.generate()), port, "cookie", 30.0, concurrency_group=cg)
+            outcome = _await_system_interface_ready(
+                str(AgentId.generate()), port, "cookie", 30.0, concurrency_group=cg
+            )
     assert outcome is RestartReadinessOutcome.READY
 
 
@@ -1739,7 +1741,7 @@ def test_await_system_interface_ready_times_out_when_nothing_ever_answers() -> N
     """A budget that elapses with no answer is a TIMED_OUT verdict (the real failure)."""
     with ConcurrencyGroup(name="test-wait") as cg:
         # Port 1 refuses connections, so every poll fails fast.
-        outcome = _await_system_interface_ready(str(HostId.generate()), 1, "cookie", 0.1, concurrency_group=cg)
+        outcome = _await_system_interface_ready(str(AgentId.generate()), 1, "cookie", 0.1, concurrency_group=cg)
     assert outcome is RestartReadinessOutcome.TIMED_OUT
 
 
@@ -1756,7 +1758,7 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
         started = time.monotonic()
         # Port 1 refuses connections, so only the shutdown check can end this.
         outcome = _await_system_interface_ready(
-            str(HostId.generate()), 1, "cookie", _HOST_RESTART_STARTUP_WAIT_SECONDS, concurrency_group=cg
+            str(AgentId.generate()), 1, "cookie", _HOST_RESTART_STARTUP_WAIT_SECONDS, concurrency_group=cg
         )
         elapsed = time.monotonic() - started
 

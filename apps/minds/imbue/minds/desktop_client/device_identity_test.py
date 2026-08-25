@@ -7,7 +7,7 @@ import pytest
 from imbue.minds.desktop_client.device_identity import DEVICE_ID_FILENAME
 from imbue.minds.desktop_client.device_identity import get_or_create_device_id
 from imbue.minds.errors import DeviceIdError
-from imbue.mngr.primitives import HostId
+from imbue.minds.primitives import DeviceId
 
 
 def test_mints_and_persists_a_fresh_device_id(tmp_path: Path) -> None:
@@ -16,14 +16,14 @@ def test_mints_and_persists_a_fresh_device_id(tmp_path: Path) -> None:
 
     device_id = get_or_create_device_id(data_dir, mngr_host_dir)
 
-    assert HostId(device_id) == device_id
+    assert DeviceId(device_id) == device_id
     assert (data_dir / DEVICE_ID_FILENAME).read_text() == device_id
     # A second read returns the persisted id rather than minting a new one.
     assert get_or_create_device_id(data_dir, mngr_host_dir) == device_id
 
 
 def test_adopts_the_legacy_mngr_host_id_and_leaves_the_original(tmp_path: Path) -> None:
-    legacy_host_id = HostId.generate()
+    legacy_host_id = DeviceId.generate()
     mngr_host_dir = tmp_path / "mngr"
     mngr_host_dir.mkdir()
     (mngr_host_dir / "host_id").write_text(f"{legacy_host_id}\n")
@@ -37,8 +37,8 @@ def test_adopts_the_legacy_mngr_host_id_and_leaves_the_original(tmp_path: Path) 
 
 
 def test_an_existing_minds_device_id_wins_over_the_legacy_file(tmp_path: Path) -> None:
-    minds_device_id = HostId.generate()
-    legacy_host_id = HostId.generate()
+    minds_device_id = DeviceId.generate()
+    legacy_host_id = DeviceId.generate()
     data_dir = tmp_path / "minds"
     data_dir.mkdir()
     (data_dir / DEVICE_ID_FILENAME).write_text(minds_device_id)
@@ -74,7 +74,7 @@ def test_concurrent_first_creations_converge_on_a_single_id(tmp_path: Path) -> N
     thread_count = 8
     barrier = threading.Barrier(thread_count)
 
-    def create_after_barrier() -> HostId:
+    def create_after_barrier() -> DeviceId:
         barrier.wait()
         return get_or_create_device_id(data_dir, mngr_host_dir)
 

@@ -13,7 +13,7 @@ import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
 
 interface AiKeysContext {
-  workspace_host_id: string;
+  workspace_id: string;
   workspace_display_name: string;
   account_email: string;
   error_message: string;
@@ -57,7 +57,7 @@ class AiKeysMintModel {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace: context.workspace_host_id }),
+        body: JSON.stringify({ workspace: context.workspace_id }),
       });
       const data = (await response.json().catch(() => ({}))) as {
         credentials?: string;

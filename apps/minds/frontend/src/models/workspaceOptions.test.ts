@@ -109,6 +109,27 @@ function sharingResponse(
   };
 }
 
+describe("ShareModel sharing API coordinate", () => {
+  it("keys the sharing API by the workspace id when one is known", async () => {
+    const { model, requests } = makeShareModel(
+      () => ({ ok: true, status: 200, body: sharingResponse() }),
+      { agentId: "agent-" + "b".repeat(32) },
+    );
+    await model.load();
+    expect(requests[0].url).toBe("/api/v1/workspace-sharing/agent-" + "b".repeat(32));
+  });
+
+  it("falls back to the legacy host id when no workspace id is known", async () => {
+    const { model, requests } = makeShareModel(() => ({
+      ok: true,
+      status: 200,
+      body: sharingResponse(),
+    }));
+    await model.load();
+    expect(requests[0].url).toBe("/api/v1/workspace-sharing/host-" + "a".repeat(32));
+  });
+});
+
 describe("ShareModel grants document building", () => {
   it("always writes the owner into an enabled scope and splits emails from domains", async () => {
     const { model } = makeShareModel(() => ({

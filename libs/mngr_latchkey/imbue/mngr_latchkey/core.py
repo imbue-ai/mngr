@@ -250,7 +250,7 @@ LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
 # instead mints a fresh access token from the app's client id and secret, but
 # expires and is renewed the same way. A future latchkey credential kind that
 # gains ``refreshCredentials`` has to be added here, or it will never be renewed
-# for remote workspaces.
+# for remote hosts.
 LATCHKEY_CREDENTIAL_TYPE_OAUTH: Final[str] = "oauth"
 LATCHKEY_CREDENTIAL_TYPE_ZOOM_SERVER_TO_SERVER: Final[str] = "zoomServerToServer"
 LATCHKEY_RENEWABLE_CREDENTIAL_TYPES: Final[frozenset[str]] = frozenset(

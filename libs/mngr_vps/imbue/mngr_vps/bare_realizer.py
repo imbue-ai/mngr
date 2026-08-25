@@ -183,8 +183,8 @@ class BareRealizer(HostRealizer):
         # Mint this host's own agent client key and authorize it alongside any
         # caller-provided keys. The provider-wide vps key (already authorized by
         # cloud-init) stays the management key; the agent connection uses this
-        # per-host key, so no provider-wide material ever needs to enter a
-        # synced workspace record.
+        # per-host key, so no provider-wide material is ever exported with a
+        # host's credentials.
         _per_host_key_path, per_host_public_key = self._create_per_host_agent_ssh_keypair(ctx.host_id)
         authorized_keys_cmd = build_add_authorized_keys_command(
             _BARE_AGENT_SSH_USER, tuple(ctx.authorized_keys or ()) + (per_host_public_key,)

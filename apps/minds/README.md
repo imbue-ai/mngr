@@ -7,7 +7,7 @@ Run persistent, autonomous AI agents with web access and global forwarding.
 The minds app creates and manages persistent Claude agents running in Docker containers. Each agent gets:
 
 - A local web interface accessible through the desktop client
-- Optional machine-level sharing over a self-hosted relay, with TLS terminated inside the workspace
+- Optional workspace sharing over a self-hosted relay, with TLS terminated inside the workspace
 - Apps (terminal, etc.) and background services supervised by supervisord
 - The ability to expose app ports via both local and global URLs
 
@@ -30,7 +30,7 @@ app prints on startup.
    - A web UI for creating agents from template repositories
    - Reverse proxying to agent web servers (HTTP + WebSocket)
    - A servers page showing local and shared URLs per agent
-   - Controls for enabling/disabling machine-level sharing (a per-workspace share on a self-hosted relay)
+   - Controls for enabling/disabling sharing (a per-workspace share on a self-hosted relay)
 
 2. **Agents** are created from template repositories (like [default-workspace-template](https://github.com/imbue-ai/default-workspace-template)) using `mngr create`. The template's `.mngr/settings.toml` drives all configuration.
 

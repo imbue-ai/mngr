@@ -113,7 +113,7 @@ def has_mngr_entry_points(package_name: str) -> bool:
     """Return whether an installed package registers any ``mngr`` entry points.
 
     This is what distinguishes an actual mngr plugin from a plain library: the
-    uv-tool receipt's extras include every ``--with`` dependency (e.g. workspace
+    uv-tool receipt's extras include every ``--with`` dependency (e.g. uv-workspace
     libraries like ``imbue-common`` or ``concurrency-group``), but only packages
     that declare ``mngr``-group entry points are plugins. Returns False if the
     package is not installed.

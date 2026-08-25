@@ -13,6 +13,7 @@ from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.backup_reaper import ReapCandidate
 from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_env
 from imbue.minds.desktop_client.backup_reaper import bucket_short_name_from_env
+from imbue.minds.desktop_client.backup_reaper import candidate_bucket_short_name
 from imbue.minds.desktop_client.backup_reaper import collect_destroyed_candidates
 from imbue.minds.desktop_client.backup_reaper import evict_oldest_reapable_backup
 from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
@@ -107,6 +108,30 @@ def test_bucket_name_parsing_from_env_identifies_imbue_cloud_and_byo() -> None:
 
 def test_user_id_prefix_matches_connector_derivation() -> None:
     assert user_id_prefix_for("12345678-1234-5678-1234-567812345678") == "1234567812345678"
+
+
+def test_candidate_bucket_short_name_resolution_order() -> None:
+    def _candidate(backup_bucket: str | None) -> ReapCandidate:
+        return ReapCandidate(
+            user_id="user-1",
+            account_email="a@b.com",
+            agent_id=_AGENT_OLD,
+            host_id="host-legacy",
+            backup_bucket=backup_bucket,
+            display_name="ws",
+            destroyed_at=datetime.now(timezone.utc),
+        )
+
+    env = _R2_ENV.format(prefix="abc123", host_id="host-from-env")
+    # The record's explicit bucket wins over a divergent env.
+    assert candidate_bucket_short_name(_candidate(f"abc123--{_AGENT_OLD}"), env) == _AGENT_OLD
+    # A bucket name without the owner separator is unusable; fall through to the env.
+    assert candidate_bucket_short_name(_candidate("separatorless-bucket"), env) == "host-from-env"
+    # No explicit bucket: the env decides, and a BYO env means no bucket at all.
+    assert candidate_bucket_short_name(_candidate(None), env) == "host-from-env"
+    assert candidate_bucket_short_name(_candidate(None), _BYO_ENV) is None
+    # No bucket and no env: legacy records assume the bucket is named by the host id.
+    assert candidate_bucket_short_name(_candidate(None), None) == "host-legacy"
 
 
 def test_collect_destroyed_candidates_sorts_oldest_first_and_skips_unstamped(tmp_path: Path) -> None:

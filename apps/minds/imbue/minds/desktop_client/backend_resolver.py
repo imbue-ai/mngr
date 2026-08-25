@@ -138,10 +138,11 @@ class BackendResolverInterface(MutableModel, ABC):
     def list_restorable_workspace_host_ids(self) -> tuple[str, ...]:
         """Host coordinates (``host-<hex>``) of the restorable workspaces.
 
-        Workspace content URLs -- and therefore the window URLs Electron
-        persists (``/goto/<host-id>/``) -- are keyed by host id, while
-        :meth:`list_restorable_workspace_ids` stays agent-keyed. The restore
-        filter needs both coordinates to recognize a persisted window.
+        Content URLs are keyed by the workspace id, but window URLs Electron
+        persisted before the agent keying (``/goto/<host-id>/``) carry host
+        coordinates, so the restore filter needs both to recognize an older
+        persisted window. CLEANUP: drop this (and its ui_api consumer) once
+        no supported install still has host-keyed persisted window state.
 
         Default: the display-info host ids of the restorable agents. Only
         real ``host-`` coordinates are returned -- placeholder host ids (e.g.

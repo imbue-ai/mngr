@@ -901,7 +901,7 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
     what earns them that phase: paramiko would otherwise report the missing key
     only during authentication, after the host has answered, where it is
     indistinguishable from the host rejecting us and would be read as the
-    workspace's fault. A key that is present but no longer accepted (rotated
+    host's fault. A key that is present but no longer accepted (rotated
     out) cannot be told from a rejection without asking the host, so it stays
     ``CONNECT_ERROR``.
 

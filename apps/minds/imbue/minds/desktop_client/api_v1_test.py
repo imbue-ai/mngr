@@ -26,7 +26,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.config.data_types import ClientEnvConfig
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptInfo
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
@@ -98,7 +98,7 @@ def _client_with_workspace(tmp_path: Path, agent_id: AgentId) -> FlaskClient:
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=resolver,
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
         # A recording caller so routes that shell out (e.g. the version route's
         # in-workspace git read) are fast in-memory no-ops, never spawning a
@@ -197,7 +197,7 @@ def _client_with_agent_creator(
         resolver = StaticBackendResolver(url_by_agent_and_service={})
     if agent_creator is None:
         agent_creator = AgentCreator(
-            paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+            paths=InstallationPaths(data_dir=tmp_path / "minds"),
             root_concurrency_group=root_concurrency_group,
             notification_dispatcher=notification_dispatcher,
             system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -208,7 +208,7 @@ def _client_with_agent_creator(
         http_client=None,
         agent_creator=agent_creator,
         session_store=session_store,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
     )
     return app.test_client()
@@ -220,7 +220,7 @@ def _make_recording_creator(
     notification_dispatcher: NotificationDispatcher,
 ) -> _RecordingAgentCreator:
     return _RecordingAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -257,7 +257,7 @@ def test_list_workspaces_accepts_session_cookie(tmp_path: Path) -> None:
         auth_store=auth_store,
         backend_resolver=resolver,
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
     )
     client = app.test_client()
@@ -367,7 +367,7 @@ def test_get_workspace_surfaces_git_url_and_branch_from_labels(tmp_path: Path) -
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=resolver,
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
     )
 
@@ -451,7 +451,7 @@ def test_workspace_backups_lists_snapshots_newest_first(tmp_path: Path) -> None:
     password = "workspace-key"
     restic_cli.init_repo(repository=repo, backend_env={}, password=password)
     write_canonical_env(
-        WorkspacePaths(data_dir=tmp_path / "minds"),
+        InstallationPaths(data_dir=tmp_path / "minds"),
         agent_id,
         f"RESTIC_REPOSITORY={repo}\nRESTIC_PASSWORD={password}\n",
     )
@@ -478,7 +478,7 @@ def test_workspace_backups_limit_and_offset_page_the_newest_first_window(tmp_pat
     password = "workspace-key"
     restic_cli.init_repo(repository=repo, backend_env={}, password=password)
     write_canonical_env(
-        WorkspacePaths(data_dir=tmp_path / "minds"),
+        InstallationPaths(data_dir=tmp_path / "minds"),
         agent_id,
         f"RESTIC_REPOSITORY={repo}\nRESTIC_PASSWORD={password}\n",
     )
@@ -587,7 +587,7 @@ def test_workspaces_backups_stream_fans_out_over_the_concurrency_group(
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
         mngr_caller=RecordingMngrCaller(),
         root_concurrency_group=root_concurrency_group,
@@ -617,7 +617,7 @@ def test_workspaces_backups_stream_degrades_non_agent_ids_without_failing_the_ba
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
         mngr_caller=RecordingMngrCaller(),
         root_concurrency_group=root_concurrency_group,
@@ -677,7 +677,7 @@ def test_workspaces_backups_stream_emits_degraded_rows_when_workers_cannot_spawn
     lines = [
         json.loads(line)
         for line in _stream_workspace_backup_summaries(
-            WorkspacePaths(data_dir=tmp_path / "minds"),
+            InstallationPaths(data_dir=tmp_path / "minds"),
             (str(agent_id), str(other_id)),
             {},
             closed_group,
@@ -702,7 +702,7 @@ def test_workspaces_backups_stream_without_a_concurrency_group_still_yields_one_
     lines = [
         json.loads(line)
         for line in _stream_workspace_backup_summaries(
-            WorkspacePaths(data_dir=tmp_path / "minds"),
+            InstallationPaths(data_dir=tmp_path / "minds"),
             (str(agent_id), str(other_id)),
             {str(agent_id): "2026-07-01T00:00:00+00:00", str(other_id): None},
             None,
@@ -723,7 +723,7 @@ def test_workspaces_backups_stream_marks_probe_failures_with_an_error(tmp_path: 
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     write_canonical_env(
-        WorkspacePaths(data_dir=tmp_path / "minds"),
+        InstallationPaths(data_dir=tmp_path / "minds"),
         agent_id,
         f"RESTIC_REPOSITORY={tmp_path / 'no-such-repo'}\nRESTIC_PASSWORD=workspace-key\n",
     )
@@ -859,7 +859,7 @@ def test_create_operation_status_includes_status_text(
     # caption the creating page renders), derived from status + launch_mode.
     create_attempt_id = CreateAttemptId()
     creator = _StatusReportingAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -897,7 +897,7 @@ def test_create_operation_status_carries_error_kind_for_classified_failures(
     # guidance on it.
     create_attempt_id = CreateAttemptId()
     creator = _StatusReportingAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -1519,7 +1519,7 @@ def _build_client(
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=resolver,
         http_client=http_client,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
         root_concurrency_group=root_concurrency_group,
         mngr_binary=mngr_binary,
@@ -1581,6 +1581,7 @@ class FakeSharingCli(FakeImbueCloudCli):
         host_id: str,
         entry_label: str | None = None,
         preferred_region: str | None = None,
+        workspace_id: str | None = None,
     ) -> ShareCliInfo:
         if self.create_share_error is not None:
             raise ImbueCloudCliError(self.create_share_error)
@@ -2738,7 +2739,7 @@ def test_workspace_backup_check_reports_disabled_verification_without_exec(
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
-    set_backup_verification_enabled(WorkspacePaths(data_dir=tmp_path / "minds"), agent_id, False)
+    set_backup_verification_enabled(InstallationPaths(data_dir=tmp_path / "minds"), agent_id, False)
 
     response = client.get(f"/api/v1/workspaces/{agent_id}/backup-check", headers=_auth_header())
 
@@ -2897,7 +2898,7 @@ def test_backup_restore_conflicts_with_a_running_operation(
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
     write_canonical_env(
-        WorkspacePaths(data_dir=tmp_path / "minds"),
+        InstallationPaths(data_dir=tmp_path / "minds"),
         agent_id,
         "RESTIC_REPOSITORY=/tmp/repo\nRESTIC_PASSWORD=pw\n",
     )
@@ -3184,7 +3185,7 @@ def test_backup_operation_status_surfaces_blocked_chats(tmp_path: Path) -> None:
 def test_backup_verification_toggle_round_trips(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
-    paths = WorkspacePaths(data_dir=tmp_path / "minds")
+    paths = InstallationPaths(data_dir=tmp_path / "minds")
     toggle_url = f"/api/v1/workspaces/{agent_id}/backup-service/verification"
 
     disabled = client.post(toggle_url, headers=_auth_header(), json={"enabled": False})
@@ -3290,7 +3291,7 @@ def test_create_workspace_in_flight_name_conflict_returns_409(
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
     creator = _NameConflictAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -3334,7 +3335,7 @@ def test_create_workspace_auto_namer_avoids_in_flight_names(
         make_agents_json(existing_id, labels={"is_primary": "true"}, host_name="workspace-1"),
     )
     creator = _InFlightNamesRecordingCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -3437,3 +3438,45 @@ def test_describe_mngr_exec_failure_falls_back_when_no_agent_carries_a_reason() 
     envelope = json.dumps({"results": [], "failed_agents": [], "total_executed": 0, "total_failed": 0})
 
     assert _describe_mngr_exec_failure(envelope, "something went wrong") == "something went wrong"
+
+
+def test_workspace_sharing_routes_resolve_the_workspace_to_its_machine(tmp_path: Path) -> None:
+    """The workspace-keyed sharing routes serve the same documents as the host-keyed shims."""
+    agent_id = AgentId()
+    client = _sharing_client(tmp_path, agent_id, _fake_sharing_cli())
+
+    by_workspace = client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
+    assert by_workspace.status_code == 200
+    assert json.loads(by_workspace.data)["enabled"] is False
+
+    # A legacy host coordinate is accepted at the same route.
+    by_host = client.get(f"/api/v1/workspace-sharing/{_TEST_HOST_ID}", headers=_auth_header())
+    assert by_host.status_code == 200
+
+    unknown = client.get(f"/api/v1/workspace-sharing/{AgentId()}", headers=_auth_header())
+    assert unknown.status_code == 404
+
+
+def test_workspace_sharing_put_delete_and_readiness_accept_the_workspace_coordinate(tmp_path: Path) -> None:
+    """The mutating and readiness workspace-keyed routes resolve to the same machine as the shims."""
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    enabled = client.put(
+        f"/api/v1/workspace-sharing/{agent_id}",
+        headers=_auth_header(),
+        json={"workspace": {"emails": ["viewer@example.com"]}},
+    )
+    assert enabled.status_code == 200
+    assert json.loads(enabled.data)["enabled"] is True
+    assert cli.created_shares == [_TEST_HOST_ID]
+
+    readiness = client.get(f"/api/v1/workspace-sharing/{agent_id}/readiness", headers=_auth_header())
+    assert readiness.status_code == 200
+    assert json.loads(readiness.data)["ready"] is False
+
+    disabled = client.delete(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
+    assert disabled.status_code == 200
+    assert json.loads(disabled.data)["enabled"] is False
+    assert cli.deleted_shares == [_TEST_HOST_ID]

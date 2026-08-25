@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { buildEmbedHandlers, requestIdFromMessage } from "./WorkspaceFrame";
+import {
+  WORKSPACE_ORIGIN_FAMILY,
+  buildEmbedHandlers,
+  requestIdFromMessage,
+} from "./WorkspaceFrame";
+
+describe("WORKSPACE_ORIGIN_FAMILY", () => {
+  it("accepts the canonical agent-keyed content origins", () => {
+    expect(
+      WORKSPACE_ORIGIN_FAMILY.test("agent-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost"),
+    ).toBe(true);
+    expect(
+      WORKSPACE_ORIGIN_FAMILY.test(
+        "system_interface-x1y2.agent-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost",
+      ),
+    ).toBe(true);
+  });
+
+  it("still accepts a legacy host-keyed origin awaiting the redirect heal", () => {
+    expect(
+      WORKSPACE_ORIGIN_FAMILY.test("host-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost"),
+    ).toBe(true);
+  });
+
+  it("rejects origins outside the workspace families", () => {
+    expect(WORKSPACE_ORIGIN_FAMILY.test("localhost")).toBe(false);
+    expect(WORKSPACE_ORIGIN_FAMILY.test("evil-agent-abc.example.com")).toBe(false);
+    expect(WORKSPACE_ORIGIN_FAMILY.test("agent-abc.localhost.example.com")).toBe(false);
+  });
+});
 
 // The live pattern from the embed contract module (served by Flask at
 // /_static/embed_contract.js, so it cannot be imported into the bundle):
@@ -52,7 +81,6 @@ function makeContract() {
 }
 
 const WORKSPACE_AGENT_ID = "agent-ab12";
-const WORKSPACE_HOST_ID = "host-ab12";
 
 function makeHandlers() {
   const contract = makeContract();
@@ -68,7 +96,6 @@ function makeHandlers() {
       frontCount += 1;
     },
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
-    workspaceHostId: () => WORKSPACE_HOST_ID,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
   });
   return {
@@ -100,12 +127,13 @@ describe("buildEmbedHandlers", () => {
   });
 
   it("acknowledges the AI-keys page only after routing to it", () => {
-    // The mint endpoint keys on the HOST id: the one the workspace sent wins,
-    // else the mounted surface's.
+    // The mint endpoint keys on the workspace id: the coordinate the
+    // workspace sent wins (older template code sends its host id, which the
+    // page dual-accepts), else the mounted surface's workspace id.
     const { contract, handlers, navigations, acks } = makeHandlers();
     handlers[contract.OPEN_AI_KEYS_PAGE]({});
     expect(navigations).toEqual([
-      { path: "/settings/ai-keys", params: { workspace: WORKSPACE_HOST_ID } },
+      { path: "/settings/ai-keys", params: { workspace: WORKSPACE_AGENT_ID } },
     ]);
     expect(acks).toEqual([contract.OPEN_AI_KEYS_ACK]);
 

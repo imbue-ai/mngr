@@ -7,7 +7,7 @@ from loguru import logger
 
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.errors import DeviceIdError
-from imbue.mngr.primitives import HostId
+from imbue.minds.primitives import DeviceId
 
 DEVICE_ID_FILENAME: Final[str] = "device_id"
 # Installs that predate the minds-owned device id file used the mngr local
@@ -15,12 +15,12 @@ DEVICE_ID_FILENAME: Final[str] = "device_id"
 _LEGACY_MNGR_HOST_ID_FILENAME: Final[str] = "host_id"
 
 
-def get_or_create_device_id(data_dir: Path, mngr_host_dir: Path) -> HostId:
+def get_or_create_device_id(data_dir: Path, mngr_host_dir: Path) -> DeviceId:
     """Return this install's stable device id, creating ``<data_dir>/device_id`` on first use.
 
     The device id stamps locally-hosted workspace records (``hosting_device_id``)
-    so the sync reconcile can recognize this install's own rows. It is
-    ``HostId``-shaped (a user's machine is a host). First creation adopts the
+    so the sync reconcile can recognize this install's own rows. Its value is
+    host-id-shaped for historical reasons (see ``DeviceId``). First creation adopts the
     legacy mngr ``host_id`` value when that file exists (copying it -- the
     original is left in place for mngr's local provider) so previously-synced
     records stay attributed to this install; otherwise a fresh id is minted.
@@ -49,7 +49,7 @@ def get_or_create_device_id(data_dir: Path, mngr_host_dir: Path) -> HostId:
         adopted_device_id = _read_host_id_shaped_file(
             mngr_host_dir / _LEGACY_MNGR_HOST_ID_FILENAME, "legacy mngr host id"
         )
-        new_device_id = adopted_device_id if adopted_device_id is not None else HostId.generate()
+        new_device_id = adopted_device_id if adopted_device_id is not None else DeviceId.generate()
 
         # Persist it atomically; losing the first-creation race means another
         # process just wrote the file, so loop back and read the winner's value.
@@ -91,11 +91,11 @@ def get_or_create_device_id(data_dir: Path, mngr_host_dir: Path) -> HostId:
     raise DeviceIdError(f"Could not read the device id file at {device_id_path} after losing the creation race twice")
 
 
-def _read_host_id_shaped_file(path: Path, file_description: str) -> HostId | None:
-    """Read and validate a ``HostId`` from a file, returning None when the file is absent.
+def _read_host_id_shaped_file(path: Path, file_description: str) -> DeviceId | None:
+    """Read and validate a ``DeviceId`` from a file, returning None when the file is absent.
 
     Raises ``DeviceIdError`` when the file exists but cannot be read or does
-    not hold a valid ``HostId``.
+    not hold a valid ``DeviceId``.
     """
     if not path.is_file():
         return None
@@ -104,9 +104,9 @@ def _read_host_id_shaped_file(path: Path, file_description: str) -> HostId | Non
     except OSError as e:
         raise DeviceIdError(f"Could not read the {file_description} file at {path}: {e}") from e
     try:
-        return HostId(raw_value)
+        return DeviceId(raw_value)
     except InvalidRandomIdError as e:
         raise DeviceIdError(
-            f"The {file_description} file at {path} does not contain a valid host id: {e}. "
+            f"The {file_description} file at {path} does not contain a valid device id: {e}. "
             "Fix or delete the file, then restart minds."
         ) from e

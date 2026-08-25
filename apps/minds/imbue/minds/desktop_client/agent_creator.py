@@ -46,8 +46,8 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import configure_backups_for_host
@@ -57,7 +57,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.labeled_hosts import ListedHost
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
-from imbue.minds.desktop_client.labeled_hosts import find_host_by_workspace_id_label
+from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
@@ -65,12 +65,12 @@ from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.pending_create_attempts import CREATE_ATTEMPT_ID_HOST_LABEL
 from imbue.minds.desktop_client.pending_create_attempts import FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
-from imbue.minds.desktop_client.pending_create_attempts import WORKSPACE_ID_HOST_LABEL
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
@@ -129,7 +129,7 @@ def make_workspace_probe_client(preauth_cookie: str, probe_timeout_seconds: floa
     of letting the helper construct a one-shot client per call.
 
     The proxy serves TLS (HTTP/2), so cert verification is disabled: these
-    probes dial ``127.0.0.1`` with a ``Host: host-<hex>.localhost`` header, so
+    probes dial ``127.0.0.1`` with a ``Host: agent-<hex>.localhost`` header, so
     hostname verification could never pass, and the cert is a self-signed
     ephemeral one the probe is not positioned to validate anyway. Loopback-only.
     """
@@ -145,7 +145,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) ->
     """Issue a single GET through ``probe_client`` and return the status code.
 
     ``probe_url`` targets loopback directly; ``host_header`` carries the
-    ``host-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
+    ``agent-<hex>.localhost`` vhost the plugin routes on. Sending the subdomain
     as an explicit ``Host`` header rather than in the URL keeps the probe from
     depending on ``*.localhost`` name resolution, which is not available on a
     bare Linux host (only loopback ``localhost`` itself reliably resolves).
@@ -165,7 +165,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) ->
 def probe_workspace_through_plugin(
     mngr_forward_port: int,
     preauth_cookie: str,
-    workspace_host_id: str,
+    workspace_id: str,
     probe_timeout_seconds: float,
     client: httpx.Client | None = None,
 ) -> int | None:
@@ -178,8 +178,10 @@ def probe_workspace_through_plugin(
     (create attempt flow) and the system-interface-health tracker's background
     probe loop so both paths agree on what "ready" means.
 
-    ``workspace_host_id`` is the mngr host id (``host-<hex>``) the plugin
-    routes workspace origins on.
+    ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
+    agent's id) -- the canonical vhost the plugin routes workspace origins on.
+    Legacy ``host-<hex>`` vhosts must not be probed: the plugin only ever
+    redirects or refuses those, so they can never answer 200.
 
     Pass a pre-constructed ``client`` (via ``make_workspace_probe_client``)
     to reuse the connection pool across a tight poll loop. When omitted, a
@@ -187,7 +189,7 @@ def probe_workspace_through_plugin(
     one-off / sporadic callers but wasteful in a loop.
     """
     probe_url = f"{_MNGR_FORWARD_SCHEME}://127.0.0.1:{mngr_forward_port}{_WORKSPACE_PROBE_PATH}"
-    host_header = f"{workspace_host_id}.localhost"
+    host_header = f"{workspace_id}.localhost"
     if client is not None:
         return _probe_once(client, probe_url, host_header)
     with make_workspace_probe_client(
@@ -1028,7 +1030,7 @@ def _build_mngr_create_command(
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_raw_path: Path | None = None,
-    workspace_id_label: str | None = None,
+    create_attempt_id_label: str | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -1069,8 +1071,8 @@ def _build_mngr_create_command(
     forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
     create`` invocations from outside minds too.
 
-    ``workspace_id_label`` is the opaque pending-create-attempt id stamped on the
-    new HOST as a ``workspace-id`` host label (LIMA and DOCKER only -- the
+    ``create_attempt_id_label`` is the opaque pending-create-attempt id stamped on the
+    new HOST as a ``create-attempt-id`` host label (LIMA and DOCKER only -- the
     callers pass None for the other modes). It is what lets the startup
     reconcile re-associate a host with its pending-create-attempt record after a
     crash or quit mid-create; account/display metadata deliberately stays in
@@ -1205,14 +1207,14 @@ def _build_mngr_create_command(
     # the provider-specific knobs (idle_mode, pass_host_env, build_arg, ...)
     # while runtime-only knobs that vary per-invocation (``--new-host``,
     # ``-b lease_attributes``) stay inline.
-    # The opaque pending-create-attempt id rides on the host as a ``workspace-id``
+    # The opaque pending-create-attempt id rides on the host as a ``create-attempt-id``
     # host label so the startup reconcile can re-attach an orphaned host to its
     # local pending-create-attempt record. Only the local-VM modes get it (the
     # callers pass None otherwise): Modal sandboxes self-expire and imbue_cloud
     # pool hosts have their own reconcile.
-    workspace_id_host_label_args: list[str] = []
-    if workspace_id_label:
-        workspace_id_host_label_args = ["--host-label", f"{WORKSPACE_ID_HOST_LABEL}={workspace_id_label}"]
+    create_attempt_host_label_args: list[str] = []
+    if create_attempt_id_label:
+        create_attempt_host_label_args = ["--host-label", f"{CREATE_ATTEMPT_ID_HOST_LABEL}={create_attempt_id_label}"]
 
     match launch_mode:
         case LaunchMode.DOCKER:
@@ -1223,11 +1225,11 @@ def _build_mngr_create_command(
                 # default, so RUNC needs no extra template.
                 mngr_command.extend(["--template", "docker_runsc"])
             mngr_command.extend(_remote_host_env_flags())
-            mngr_command.extend(workspace_id_host_label_args)
+            mngr_command.extend(create_attempt_host_label_args)
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
-            mngr_command.extend(workspace_id_host_label_args)
+            mngr_command.extend(create_attempt_host_label_args)
             # Point Lima at the baked raw image via the provider's existing per-arch
             # image-url override, so the VM boots the baked toolchain instead of building it.
             if prebaked_lima_image_raw_path is not None:
@@ -1483,7 +1485,7 @@ def run_mngr_create(
     original_minds_version: str | None = None,
     original_branch: str | None = None,
     prebaked_lima_image_raw_path: Path | None = None,
-    workspace_id_label: str | None = None,
+    create_attempt_id_label: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -1526,7 +1528,7 @@ def run_mngr_create(
         original_minds_version=original_minds_version,
         original_branch=original_branch,
         prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
-        workspace_id_label=workspace_id_label,
+        create_attempt_id_label=create_attempt_id_label,
     )
 
     # The command carries the latchkey gateway password + permissions-override
@@ -1698,9 +1700,9 @@ class _MngrCreateAttemptParams(FrozenModel):
     original_branch: str | None
     # Resolved ready pre-baked Lima raw image path, or None to build in-VM.
     prebaked_lima_image_raw_path: Path | None = None
-    # Opaque pending-create-attempt id stamped on the host as a ``workspace-id``
+    # Opaque pending-create-attempt id stamped on the host as a ``create-attempt-id``
     # label (LIMA / DOCKER only), or None for the other modes.
-    workspace_id_label: str | None = None
+    create_attempt_id_label: str | None = None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -1739,7 +1741,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         original_minds_version=params.original_minds_version,
         original_branch=params.original_branch,
         prebaked_lima_image_raw_path=params.prebaked_lima_image_raw_path,
-        workspace_id_label=params.workspace_id_label,
+        create_attempt_id_label=params.create_attempt_id_label,
         parent_cg=params.parent_cg,
     )
 
@@ -1770,7 +1772,7 @@ class AgentCreator(MutableModel):
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
 
-    paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
+    paths: InstallationPaths = Field(frozen=True, description="Filesystem paths for minds data")
     server_port: int = Field(
         default=0,
         frozen=True,
@@ -2621,11 +2623,11 @@ class AgentCreator(MutableModel):
                     original_branch=branch or None,
                     prebaked_lima_image_raw_path=prebaked_lima_image_raw_path,
                     # The pending-create-attempt id rides on LIMA / DOCKER hosts as a
-                    # ``workspace-id`` host label so the startup reconcile can
+                    # ``create-attempt-id`` host label so the startup reconcile can
                     # re-attach an orphaned host to its record. Modal is excluded
                     # (sandboxes self-expire) and imbue_cloud pool hosts have
                     # their own reconcile.
-                    workspace_id_label=(
+                    create_attempt_id_label=(
                         str(create_attempt_id) if launch_mode in (LaunchMode.LIMA, LaunchMode.DOCKER) else None
                     ),
                 )
@@ -2721,7 +2723,7 @@ class AgentCreator(MutableModel):
                     canonical_id, time.monotonic() + ready_timeout_seconds
                 )
                 try:
-                    self._wait_for_workspace_ready(canonical_id, canonical_host_id, log_sink, ready_timeout_seconds)
+                    self._wait_for_workspace_ready(canonical_id, log_sink, ready_timeout_seconds)
                 finally:
                     self.system_interface_health_tracker.end_create_attempt_grace(canonical_id)
 
@@ -2733,7 +2735,7 @@ class AgentCreator(MutableModel):
                 # would land on FastAPI's default ``{"detail":"Not Found"}``
                 # response instead of being bridged into the agent
                 # subdomain. The plugin owns ``/goto/<agent>/``.
-                redirect_url = self._build_redirect_url(canonical_host_id)
+                redirect_url = self._build_redirect_url(canonical_id)
 
                 # Publish DONE + redirect_url atomically so the UI sees both
                 # at once (the canonical agent id was already published when
@@ -2806,7 +2808,7 @@ class AgentCreator(MutableModel):
 
         A dead create attempt is a pending record that is not DONE and has no live
         create attempt behind it (interrupted by a restart, or failed). Its leftover
-        half-built host -- found through the ``workspace-id`` host label on the
+        half-built host -- found through the ``create-attempt-id`` host label on the
         labeled providers -- is destroyed and its record deleted, so the fresh
         create does not trip mngr's host-name conflict pre-flight. A failed
         cleanup keeps the record (its row stays for a manual discard) and lets
@@ -2851,7 +2853,7 @@ class AgentCreator(MutableModel):
                 return
 
         for record in dead_records:
-            leftover = find_host_by_workspace_id_label(leftover_hosts, record.create_attempt_id)
+            leftover = find_host_by_create_attempt_id_label(leftover_hosts, record.create_attempt_id)
             if leftover is not None:
                 log_sink.put(
                     f"[minds] Cleaning up the previous attempt's unfinished host '{leftover.name}' ({leftover.id})..."
@@ -2976,7 +2978,6 @@ class AgentCreator(MutableModel):
                     _log_backup_attempt(agent_id, attempt.retry_state)
                     configure_backups_for_host(
                         agent_id=agent_id,
-                        host_id=host_id,
                         request=backup_request,
                         imbue_cloud_cli=self.imbue_cloud_cli,
                         paths=self.paths,
@@ -3001,23 +3002,22 @@ class AgentCreator(MutableModel):
                 agent_display_name=str(agent_id)[:8],
             )
 
-    def _build_redirect_url(self, host_id: HostId) -> str:
+    def _build_redirect_url(self, agent_id: AgentId) -> str:
         """Build the absolute URL the UI should navigate to after the create attempt.
 
-        Always points at the plugin's ``/goto/<host-id>/`` route, never minds'
-        bare origin -- minds doesn't serve ``/goto/`` and would 404. When
-        ``mngr_forward_port`` isn't configured (test fixtures, etc.), falls
-        back to the relative form so legacy callers that don't set the field
-        keep working.
+        Always points at the plugin's ``/goto/<workspace-id>/`` route, never
+        minds' bare origin -- minds doesn't serve ``/goto/`` and would 404.
+        When ``mngr_forward_port`` isn't configured (test fixtures, etc.),
+        falls back to the relative form so legacy callers that don't set the
+        field keep working.
         """
         if self.mngr_forward_port == 0:
-            return f"/goto/{host_id}/"
-        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{host_id}/"
+            return f"/goto/{agent_id}/"
+        return f"{_MNGR_FORWARD_SCHEME}://localhost:{self.mngr_forward_port}/goto/{agent_id}/"
 
     def _wait_for_workspace_ready(
         self,
         agent_id: AgentId,
-        host_id: HostId,
         log_sink: CreateAttemptLogSink,
         # The readiness window for this create: ``workspace_ready_timeout_seconds``
         # normally, or the longer build-in-VM window for an imageless Lima create.
@@ -3025,7 +3025,7 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Poll the agent's system_interface through the plugin until it responds 200.
 
-        Probes the plugin on loopback (with the workspace's ``host-<hex>.localhost``
+        Probes the plugin on loopback (with the workspace's ``agent-<hex>.localhost``
         vhost in the ``Host`` header) and the preauth cookie set, treating any
         200 as ready. Other status codes (typically
         503 from the plugin's auto-refresh page when the system_interface
@@ -3055,7 +3055,7 @@ class AgentCreator(MutableModel):
                 status = probe_workspace_through_plugin(
                     mngr_forward_port=self.mngr_forward_port,
                     preauth_cookie=self.mngr_forward_preauth_cookie,
-                    workspace_host_id=str(host_id),
+                    workspace_id=str(agent_id),
                     probe_timeout_seconds=self.workspace_ready_probe_timeout_seconds,
                     client=probe_client,
                 )

@@ -49,11 +49,11 @@ def test_session_cookie_preauth_mismatch_falls_back_to_signature() -> None:
 
 def test_subdomain_auth_token_round_trip() -> None:
     key = CookieSigningKey("test-key")
-    token = create_subdomain_auth_token(signing_key=key, workspace_host_id="host-abc")
-    assert verify_subdomain_auth_token(token=token, signing_key=key, workspace_host_id="host-abc") is True
+    token = create_subdomain_auth_token(signing_key=key, origin_coordinate="host-abc")
+    assert verify_subdomain_auth_token(token=token, signing_key=key, origin_coordinate="host-abc") is True
 
 
 def test_subdomain_auth_token_audience_binding() -> None:
     key = CookieSigningKey("test-key")
-    token = create_subdomain_auth_token(signing_key=key, workspace_host_id="host-abc")
-    assert verify_subdomain_auth_token(token=token, signing_key=key, workspace_host_id="host-other") is False
+    token = create_subdomain_auth_token(signing_key=key, origin_coordinate="host-abc")
+    assert verify_subdomain_auth_token(token=token, signing_key=key, origin_coordinate="host-other") is False

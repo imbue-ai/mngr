@@ -12,7 +12,7 @@ from uuid import uuid4
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -29,7 +29,7 @@ from imbue.mngr.primitives import HostId
 def _make_device(
     base: Path, name: str, cli: FakeImbueCloudCli
 ) -> tuple[WorkspaceRecordStore, MultiAccountSessionStore]:
-    paths = WorkspacePaths(data_dir=base / name)
+    paths = InstallationPaths(data_dir=base / name)
     paths.data_dir.mkdir(parents=True, exist_ok=True)
     record_store = WorkspaceRecordStore(
         paths=paths,

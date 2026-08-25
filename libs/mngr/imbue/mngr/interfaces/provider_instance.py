@@ -341,7 +341,7 @@ def _discover_agents_on_host_with_offline_fallback(
     The host was reachable enough to be discovered, but enumerating its agents
     over SSH failed (sshd crashed, SSH banner read failure, auth failure, ...). Rather than
     fail the whole provider, recover the host's agents from the provider's
-    persisted/offline records so its workspaces stay visible. Mirrors the
+    persisted/offline records so its agents stay visible. Mirrors the
     inline recovery in ``discover_hosts_and_agents``.
 
     ``timeout_seconds``, when set, bounds the online read (a per-host-timeout hit
@@ -727,7 +727,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 # ...). Rather than let that bubble up to
                 # _construct_and_discover_for_provider -- which records a
                 # per-provider error and reports agents=[] / hosts=[] for the
-                # WHOLE provider, making every workspace on it unreachable via
+                # WHOLE provider, making every agent on it unreachable via
                 # mngr_forward -- recover the host's agents from the provider's
                 # offline view.
                 #
@@ -740,7 +740,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 # The offline view recovers the host's persisted records: a docker
                 # container that is RUNNING but whose sshd has died still exposes
                 # its agent records via the docker daemon (labels + on-host-volume
-                # data), so its workspaces stay visible -- matching the behavior of
+                # data), so its agents stay visible -- matching the behavior of
                 # a fully-stopped container.
                 #
                 # Any provider whose hosts can raise HostConnectionError is assumed

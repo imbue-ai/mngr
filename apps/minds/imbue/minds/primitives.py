@@ -130,6 +130,19 @@ CONFIGURED_AZURE_REGIONS: Final[tuple[str, ...]] = (
 DEFAULT_AZURE_REGION: Final[str] = "eastus2"
 
 
+class DeviceId(RandomId):
+    """Stable identity of one minds installation (one data directory on one device).
+
+    Stamped on locally-hosted workspace records (``hosting_device_id``) so the
+    sync reconcile can recognize this install's own rows. Values keep the legacy
+    ``host-<32hex>`` shape -- early installs adopted the mngr local provider's
+    host id as their device identity -- but a device id is NOT an mngr host id
+    and must never be typed as one.
+    """
+
+    PREFIX = "host"
+
+
 class CreateAttemptId(RandomId):
     """Minds-internal handle for an in-flight ``mngr create`` invocation.
 

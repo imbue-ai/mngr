@@ -23,7 +23,7 @@ from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
@@ -57,7 +57,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
     port = _find_free_port()
     code = OneTimeCode("test-sse-code-abc123")
 
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     auth_store.add_one_time_code(code=code)
     resolver = MngrCliBackendResolver()

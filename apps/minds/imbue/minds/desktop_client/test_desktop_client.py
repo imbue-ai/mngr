@@ -29,7 +29,7 @@ from imbue.imbue_common.sentry.testing import TEST_S3_BUCKET
 from imbue.imbue_common.sentry.testing import capturing_sentry_client
 from imbue.imbue_common.sentry.testing import recording_s3_bucket
 from imbue.imbue_common.sentry.testing import registered_attachments_uploader
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
@@ -611,7 +611,7 @@ def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> Non
     failed destroy id whose marker dir exists on disk.
     """
     agent_id = AgentId()
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     destroying_dir = tmp_path / "destroying" / str(agent_id)
     destroying_dir.mkdir(parents=True)
     # The current process pid is alive, so the helper sees the destroy as
@@ -628,12 +628,12 @@ def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> Non
 
 
 def test_destroying_marker_returns_empty_when_paths_is_none() -> None:
-    """The test-server helper builds a minimal app without WorkspacePaths;
+    """The test-server helper builds a minimal app without InstallationPaths;
     the helper must tolerate that without raising."""
     assert _finalize_and_mark_destroying(None, StaticBackendResolver(url_by_agent_and_service={}), None, None) == {}
 
 
-def _write_dead_destroy_dir(paths: WorkspacePaths, agent_id: AgentId, host_id: HostId) -> None:
+def _write_dead_destroy_dir(paths: InstallationPaths, agent_id: AgentId, host_id: HostId) -> None:
     """Create a destroying/<agent_id>/ dir whose wrapper pid is already dead.
 
     Spawns and reaps a trivial child so its pid is reliably not alive, then
@@ -658,7 +658,7 @@ def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -
     intact) so the machine's backups stay reachable, but it no longer
     reads as the machine's owner.
     """
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     _write_dead_destroy_dir(paths, agent_id, HostId.generate())
     cli = make_fake_imbue_cloud_cli()
@@ -694,7 +694,7 @@ def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: 
     The machine must remain visible and owned so the user can retry, instead
     of vanishing while its host keeps running (and billing).
     """
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     _write_dead_destroy_dir(paths, agent_id, HostId.generate())
     cli = make_fake_imbue_cloud_cli()
@@ -853,7 +853,7 @@ def _create_test_client_with_stores(
         session_store=session_store,
         minds_config=minds_config,
         request_inbox=request_inbox,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         mngr_caller=mngr_caller,
         imbue_cloud_cli=imbue_cloud_cli,
         sync_scheduler=sync_scheduler,
@@ -1061,7 +1061,7 @@ def test_backup_password_change_rejects_mismatched_confirmation(tmp_path: Path) 
     response = client.post("/_chrome/backup-password", json={"new_password": "one", "new_password_confirm": "two"})
     assert response.status_code == 400
     assert "match" in response.get_json()["error"]
-    assert not bundle_mirror_path(WorkspacePaths(data_dir=tmp_path), "user-1").exists()
+    assert not bundle_mirror_path(InstallationPaths(data_dir=tmp_path), "user-1").exists()
 
 
 def test_backup_password_change_requires_a_signed_in_account(tmp_path: Path) -> None:
@@ -1077,7 +1077,7 @@ def test_backup_password_change_wraps_the_dek_and_pushes_the_bundle(tmp_path: Pa
     cli.add_account(user_id="user-1", email="a@b.com")
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
 
     response = client.post(
         "/_chrome/backup-password",
@@ -1099,7 +1099,7 @@ def test_backup_password_change_may_return_to_the_empty_password(tmp_path: Path)
     cli.add_account(user_id="user-1", email="a@b.com")
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     assert (
         client.post(
             "/_chrome/backup-password", json={"new_password": "temp", "new_password_confirm": "temp"}
@@ -1123,7 +1123,7 @@ def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path:
     cli.add_account(user_id="user-1", email="a@b.com")
     # Another device set a password and synced a secrets-carrying record; this
     # device has no DEK for the account (it is locked here).
-    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    other_device = InstallationPaths(data_dir=tmp_path / "other-device")
     bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
     assert bundle is not None
     cli.sync_bundle_push("a@b.com", bundle)
@@ -1136,7 +1136,7 @@ def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path:
         device_label="other-device",
         encrypted_secrets="b3BhcXVl",
     )
-    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+    cli.sync_records_by_email["a@b.com"] = {remote.agent_id: remote.to_wire(1)}
 
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
@@ -1157,7 +1157,7 @@ def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path:
     # The server bundle (wrapping the real DEK) is untouched and no divergent
     # local DEK was minted.
     assert cli.sync_bundle_by_email["a@b.com"] == bundle_before
-    assert not is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
+    assert not is_account_unlocked(InstallationPaths(data_dir=tmp_path), "user-1")
 
 
 # -- get-help / report-a-bug tests --
@@ -1234,7 +1234,7 @@ def test_help_report_accepts_a_description(tmp_path: Path) -> None:
 
 def _write_console_tail(tmp_path: Path, contents: str) -> Path:
     """Write the rolling console tail the Electron shell keeps, as the route expects to find it."""
-    log_dir = WorkspacePaths(data_dir=tmp_path).log_dir
+    log_dir = InstallationPaths(data_dir=tmp_path).log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     tail_path = log_dir / ELECTRON_CONSOLE_TAIL_FILENAME
     tail_path.write_text(contents)
@@ -1258,7 +1258,7 @@ def test_help_report_outside_a_workspace_still_attaches_the_captured_console(tmp
         with capturing_sentry_client() as captured_events:
             response = client.post("/help/report", json={"description": "the app froze", "include_logs": True})
     assert response.status_code == 200
-    staged_consoles = list(WorkspacePaths(data_dir=tmp_path).log_dir.glob("bug-report-*-console.log"))
+    staged_consoles = list(InstallationPaths(data_dir=tmp_path).log_dir.glob("bug-report-*-console.log"))
     assert len(staged_consoles) == 1, staged_consoles
     assert staged_consoles[0].read_text(encoding="utf-8") == tail_text
     report = _submitted_report(captured_events[0])
@@ -1293,7 +1293,7 @@ def test_help_report_leaves_another_reports_staged_file_alone(tmp_path: Path) ->
     """
     client, _ = _create_test_client_with_stores(tmp_path)
     tail_path = _write_console_tail(tmp_path, "2026-01-01T00:00:00Z [console:WARNING] hmm (app.js:2)\n")
-    log_dir = WorkspacePaths(data_dir=tmp_path).log_dir
+    log_dir = InstallationPaths(data_dir=tmp_path).log_dir
     other_report_file = log_dir / build_staged_diagnostics_filename(CONSOLE_ATTACHMENT_KEY, "0" * 32)
     other_report_file.write_text("collected for a report that is still uploading\n")
 
@@ -1322,7 +1322,7 @@ def test_help_report_never_attaches_a_file_for_an_unticked_box(tmp_path: Path) -
     failure of the collection that did run.
     """
     client, _ = _create_test_client_with_stores(tmp_path)
-    logs_dir = WorkspacePaths(data_dir=tmp_path).log_dir
+    logs_dir = InstallationPaths(data_dir=tmp_path).log_dir
     logs_dir.mkdir(parents=True, exist_ok=True)
     opted_out_zip = logs_dir / build_staged_diagnostics_filename(WORKSPACE_ZIP_ATTACHMENT_KEY, "1" * 32)
     with zipfile.ZipFile(opted_out_zip, "w") as archive:
@@ -1427,7 +1427,7 @@ def test_help_report_hands_the_captured_console_tail_to_the_collection(
         WORKSPACE_LOGS_ATTACHMENT_KEY: "exec_failed",
         TRANSCRIPT_ATTACHMENT_KEY: "not_requested",
     }
-    staged_consoles = list(WorkspacePaths(data_dir=tmp_path).log_dir.glob("bug-report-*-console.log"))
+    staged_consoles = list(InstallationPaths(data_dir=tmp_path).log_dir.glob("bug-report-*-console.log"))
     assert len(staged_consoles) == 1, staged_consoles
     assert staged_consoles[0].read_text(encoding="utf-8") == tail_text
 
@@ -1644,7 +1644,7 @@ def _create_test_client_with_api_key(tmp_path: Path, api_key: str) -> FlaskClien
         http_client=None,
         session_store=session_store,
         minds_config=minds_config,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         minds_api_key=api_key,
     )
     return app.test_client()
@@ -1771,7 +1771,7 @@ def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=resolver,
         http_client=None,
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
         system_interface_health_tracker=tracker,
         root_concurrency_group=root_concurrency_group,
         # Fails the restart's ``mngr start`` outright, so the dispatch reaches a
@@ -1841,7 +1841,7 @@ def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> No
     # Another device set a password and synced a workspace with secrets: the
     # bundle + a secret-carrying record exist on the (fake) connector, but
     # this device has no DEK file.
-    other_device = WorkspacePaths(data_dir=tmp_path / "other-device")
+    other_device = InstallationPaths(data_dir=tmp_path / "other-device")
     bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
     assert bundle is not None
     cli.sync_bundle_push("a@b.com", bundle)
@@ -1854,7 +1854,7 @@ def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> No
         device_label="other-device",
         encrypted_secrets="b3BhcXVl",
     )
-    cli.sync_records_by_email["a@b.com"] = {"host-remote-1": remote.to_wire(1)}
+    cli.sync_records_by_email["a@b.com"] = {remote.agent_id: remote.to_wire(1)}
 
     client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
@@ -1872,7 +1872,7 @@ def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> No
     body = response.get_json()
     assert body["ok"] is True
     assert body["unlocked"] == ["a@b.com"]
-    assert is_account_unlocked(WorkspacePaths(data_dir=tmp_path), "user-1")
+    assert is_account_unlocked(InstallationPaths(data_dir=tmp_path), "user-1")
 
 
 def test_sync_unlock_requires_auth(tmp_path: Path) -> None:
@@ -1887,20 +1887,23 @@ def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
     _authenticate_client(client, auth_store)
     session_store = get_state(client.application).session_store
     assert session_store is not None
+    workspace_id = str(AgentId.generate())
     session_store.associate_created_workspace(
         user_id="user-1",
-        agent_id=str(AgentId.generate()),
+        agent_id=workspace_id,
         host_id="host-remove-me",
         display_name="stale",
         color=None,
         is_cloud_row=False,
     )
-    assert "host-remove-me" in cli.sync_records_by_email["a@b.com"]
+    assert workspace_id in cli.sync_records_by_email["a@b.com"]
 
+    # Removal still addresses the row by its legacy host id; the fake resolves
+    # it through the row's host column, like the connector's compat shim.
     response = client.post("/_chrome/workspaces/remove-record", json={"host_id": "host-remove-me"})
 
     assert response.status_code == 200
-    assert "host-remove-me" not in cli.sync_records_by_email["a@b.com"]
+    assert workspace_id not in cli.sync_records_by_email["a@b.com"]
     assert session_store.record_store is not None
     assert session_store.record_store.list_records("user-1") == []
 
@@ -1921,7 +1924,7 @@ def test_finalize_and_mark_destroying_deletes_the_machines_share(tmp_path: Path)
     relay hostname reserved and counts against a quota measured in machines
     ever created rather than live ones.
     """
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     host_id = HostId.generate()
     _write_dead_destroy_dir(paths, agent_id, host_id)
@@ -1951,7 +1954,7 @@ def test_finalize_and_mark_destroying_tombstones_even_if_the_share_delete_fails(
     A share that survives is litter; a machine that cannot be retired is a
     stuck row the user cannot clear.
     """
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     host_id = HostId.generate()
     _write_dead_destroy_dir(paths, agent_id, host_id)

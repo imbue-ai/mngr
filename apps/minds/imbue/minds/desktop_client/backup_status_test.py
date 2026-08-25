@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_status import is_workspace_backing_up
@@ -21,8 +21,8 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 
 
-def _paths(tmp_path: Path) -> WorkspacePaths:
-    return WorkspacePaths(data_dir=tmp_path)
+def _paths(tmp_path: Path) -> InstallationPaths:
+    return InstallationPaths(data_dir=tmp_path)
 
 
 def _now() -> datetime:

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -34,7 +34,7 @@ def test_restore_fails_for_an_unknown_snapshot_without_dispatching_a_worker(tmp_
     # before the gate waits, before the workspace is touched at all. Nothing
     # here can reach a workspace, so a run that got as far as dispatching an
     # exec would fail loudly rather than pass.
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     repository = str(tmp_path / "repo")
     password = "workspace-key"
@@ -70,7 +70,7 @@ def test_restore_fails_for_an_unknown_snapshot_without_dispatching_a_worker(tmp_
     assert record.is_mutating is False
 
 
-def _write_env_for_local_repo(paths: WorkspacePaths, agent_id: AgentId, repository: Path) -> None:
+def _write_env_for_local_repo(paths: InstallationPaths, agent_id: AgentId, repository: Path) -> None:
     write_canonical_env(paths, agent_id, f"RESTIC_REPOSITORY={repository}\nRESTIC_PASSWORD=workspace-key\n")
 
 
@@ -82,7 +82,7 @@ def _backup_tree(repository: Path, source: Path) -> None:
 def test_resolve_restore_subpath_uses_the_snapshot_root_for_current_layout_snapshots(tmp_path: Path) -> None:
     # Current layout: the snapshot root is the unified /home/user tree, whose
     # repo checkout is a workspace/ child; the subpath is the recorded root.
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     repository = tmp_path / "repo"
     restic_cli.init_repo(repository=str(repository), backend_env={}, password="workspace-key")
@@ -105,7 +105,7 @@ def test_resolve_restore_subpath_uses_the_snapshot_root_for_current_layout_snaps
 def test_resolve_restore_subpath_uses_the_snapshot_root_for_plain_snapshots(tmp_path: Path) -> None:
     # Legacy plain-docker shape: the snapshot root is the host dir itself (it
     # carries code/ directly), so the subpath is just the recorded root.
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     repository = tmp_path / "repo"
     restic_cli.init_repo(repository=str(repository), backend_env={}, password="workspace-key")
@@ -128,7 +128,7 @@ def test_resolve_restore_subpath_descends_into_the_nested_host_dir(tmp_path: Pat
     # Btrfs-volume shape: the snapshot root carries volume-level entries next
     # to a host_dir/ child holding the workspace; the subpath must point at
     # that child, never the volume level.
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     repository = tmp_path / "repo"
     restic_cli.init_repo(repository=str(repository), backend_env={}, password="workspace-key")
@@ -152,7 +152,7 @@ def test_resolve_restore_subpath_descends_into_the_nested_host_dir(tmp_path: Pat
 def test_resolve_restore_subpath_rejects_a_snapshot_without_a_workspace(tmp_path: Path) -> None:
     # A snapshot with no workspace/ or code/ checkout anywhere cannot be
     # restored; the dispatch must fail before the workspace is touched, not after.
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     repository = tmp_path / "repo"
     restic_cli.init_repo(repository=str(repository), backend_env={}, password="workspace-key")
@@ -170,7 +170,7 @@ def test_resolve_restore_subpath_rejects_a_snapshot_without_a_workspace(tmp_path
         _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
 
 
-def _only_snapshot_id(paths: WorkspacePaths, agent_id: AgentId) -> str:
+def _only_snapshot_id(paths: InstallationPaths, agent_id: AgentId) -> str:
     snapshots = backup_status.list_workspace_snapshots(paths, agent_id, parent_cg=None)
     assert len(snapshots) == 1
     return snapshots[0].snapshot_id

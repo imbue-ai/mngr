@@ -6,6 +6,7 @@ from typing import Self
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
 
@@ -101,6 +102,21 @@ def is_box_exclusive_to_tier(*, authorized_key_count: int, foreign_tier_slice_co
     owning tier's pool key and carries no slice stamped for an env in another tier.
     """
     return authorized_key_count == EXPECTED_AUTHORIZED_KEY_COUNT and foreign_tier_slice_count == 0
+
+
+class WorkspaceId(RandomId):
+    """The durable identity of a workspace: the id of its ``system-services`` agent.
+
+    A workspace is the logical unit a user works out of (permissions, apps, data);
+    the machine it currently runs on is a swappable attribute (an mngr host id).
+    No separate id space exists -- the value IS the services agent's ``agent-<32hex>``
+    id -- but workspace-level code types it as ``WorkspaceId`` so a machine id can
+    never be passed where the workspace's identity belongs. The connector
+    cannot import this type (its container ships standalone) and validates
+    the same shape by convention.
+    """
+
+    PREFIX = "agent"
 
 
 class SuperTokensUserId(NonEmptyStr):

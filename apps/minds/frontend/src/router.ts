@@ -205,11 +205,11 @@ export function parseWorkspaceIdFromUrl(urlString: string): string | null {
         : "http://localhost";
     const parsed = new URL(urlString, base);
     const hostMatch = parsed.hostname.match(
-      /^(?:[a-z0-9_-]+\.)*(host-[a-f0-9]+)\.localhost$/i,
+      /^(?:[a-z0-9_-]+\.)*((?:agent|host)-[a-f0-9]+)\.localhost$/i,
     );
     if (hostMatch) return hostMatch[1];
     const pathMatch = (parsed.pathname + parsed.search).match(
-      /^\/(?:goto|forward-bridge)(?:[/?]\S*?)?\/?(host-[a-f0-9]+)(?:\/|$|%2F)/i,
+      /^\/(?:goto|forward-bridge)(?:[/?]\S*?)?\/?((?:agent|host)-[a-f0-9]+)(?:\/|$|%2F)/i,
     );
     if (pathMatch) return pathMatch[1];
     const plainGoto = parsed.pathname.match(

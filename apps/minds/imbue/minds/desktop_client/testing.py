@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
+from imbue.minds.primitives import DeviceId
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PersistedProviderInstanceConfig
@@ -66,9 +67,9 @@ from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_latchkey.core import LatchkeyError
 
 
-def device_id_for_test(name: str) -> HostId:
-    """Deterministic ``HostId``-shaped device id for a named fake device in tests."""
-    return HostId(f"host-{hashlib.sha256(name.encode()).hexdigest()[:32]}")
+def device_id_for_test(name: str) -> DeviceId:
+    """Deterministic device id for a named fake device in tests (legacy host-id-shaped values)."""
+    return DeviceId(f"host-{hashlib.sha256(name.encode()).hexdigest()[:32]}")
 
 
 # -- Connectivity, without a network --

@@ -756,6 +756,16 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         """
         ...
 
+    @abstractmethod
+    def remove_agent_data(self, agent_id: AgentId) -> None:
+        """Remove agent data from external storage (the inverse of save_agent_data).
+
+        Called when an agent's id no longer identifies state on this host (the
+        agent was destroyed or its state was re-keyed). A no-op for providers
+        without an external agent store, or when no copy exists for the id.
+        """
+        ...
+
     # =========================================================================
     # Outer Host Access
     # =========================================================================

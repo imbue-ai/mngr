@@ -88,7 +88,7 @@ _OBSERVER_STOP_TIMEOUT_SECONDS: float = 5.0
 
 # How much wall-clock passes between two credential-refresh probes. latchkey
 # only refreshes a token that has *already* expired, so this is also the
-# worst-case window in which a remote workspace's calls fail as expired before
+# worst-case window in which a remote host's calls fail as expired before
 # the desktop renews them -- traded against one validation round-trip per
 # renewable-credential service per probe.
 _CREDENTIAL_REFRESH_INTERVAL_SECONDS: Final[float] = 300.0
@@ -145,14 +145,14 @@ def _is_renewal_pass_due(
     every :data:`_CREDENTIAL_REFRESH_INTERVAL_SECONDS` thereafter. Waiting out
     an interval before the *first* pass would strand a freshly-started
     supervisor: nothing renewed the credentials while it was down, so its
-    remote workspaces start out holding a copy that has almost certainly
+    remote hosts start out holding a copy that has almost certainly
     expired.
 
     Knowing no remote host is not a pass -- it leaves the interval unstarted
     rather than consuming it. The supervisor starts this loop before it starts
     the discovery consumer that registers hosts, so a pass that merely observed
     the empty startup registry must not push the first real pass a full
-    interval past the moment a remote workspace actually appeared.
+    interval past the moment a remote host actually appeared.
     """
     if not is_any_remote_host_known:
         return False
@@ -207,7 +207,7 @@ class _LatchkeyStateChangeHandler(FrozenModel, FileSystemEventHandler):
 
 
 class _GatewayRoute(FrozenModel):
-    """Successfully-resolved gateway route for one workspace host."""
+    """Successfully-resolved gateway route for one host."""
 
     outer_ssh_info: RemoteSSHInfo | None = Field(
         description="Remote outer-host SSH endpoint, or None when the workspace uses the desktop gateway directly"
@@ -403,9 +403,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
     def _remove_stale_desktop_to_container_tunnel(
         self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo, host_side_port: int
     ) -> None:
-        """Drop the desktop->container tunnel an earlier cycle may have opened for a VPS workspace.
+        """Drop the desktop->container tunnel an earlier cycle may have opened for a VPS host.
 
-        A cycle that wired this workspace to the desktop gateway (e.g. before
+        A cycle that wired this host to the desktop gateway (e.g. before
         a provider reload revealed its outer host) left a tunnel holding 1989
         in the container, where the VPS->container tunnel must bind. Removal is
         keyed by the container endpoint rather than the agent tag: the
@@ -564,7 +564,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         return True
 
     def _resolve_gateway_route(self, host_id: HostId, provider_name: str) -> _GatewayRoute | None:
-        """Resolve whether the workspace uses the desktop or VPS gateway.
+        """Resolve whether the host uses the desktop or VPS gateway.
 
         Returns ``None`` when the answer is not knowable *yet*; that is never
         cached, so the next discovery cycle retries. Only answers derived from an
@@ -597,7 +597,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # some providers cache their whole host/lease listing on it with
                 # no expiry (e.g. imbue_cloud's ``_leased_hosts_cache``). A host
                 # leased *after* that listing was taken is then permanently
-                # invisible: every new workspace would fall back to the desktop
+                # invisible: every new host would fall back to the desktop
                 # gateway (and never get a VPS gateway) until the app restarts.
                 # So treat "not found" as "our listing may be older than this
                 # host" and look again on fresh data.
@@ -748,7 +748,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
           VPS->container tunnel has to bind, so provisioning then has to tear
           down a tunnel we opened ourselves.
 
-        Resolution normally succeeds on the first try for desktop workspaces
+        Resolution normally succeeds on the first try for desktop hosts
         (their providers answer without network I/O), so "unresolved" almost
         always means the provider lookup itself failed -- i.e. we know nothing
         about this host, and wiring nothing is the honest response.
@@ -946,14 +946,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
             )
 
     def _refresh_remote_credentials_until_shutdown(self, shutdown_event: threading.Event) -> None:
-        """Re-probe the remote workspaces' expiring credentials until shutdown is signalled.
+        """Re-probe the remote hosts' expiring credentials until shutdown is signalled.
 
-        Remote workspaces call third parties from their VPS-resident gateway,
+        Remote hosts call third parties from their VPS-resident gateway,
         which runs with ``LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`` so it never
         races the desktop to rotate a shared OAuth refresh token. That leaves
         the desktop as the only party able to renew one -- and the desktop
         latchkey only renews lazily, when a request happens to pass through it.
-        A service used *only* by remote workspaces therefore has no reason to
+        A service used *only* by remote hosts therefore has no reason to
         ever be renewed, and its access token dies an hour after whatever last
         touched it. This loop supplies that reason.
 
@@ -987,7 +987,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         try:
             self._probe_expiring_credentials_for_remote_hosts()
         except (LatchkeyError, OSError) as e:
-            logger.opt(exception=e).error("Could not renew remote workspaces' credentials this pass: {}", e)
+            logger.opt(exception=e).error("Could not renew remote hosts' credentials this pass: {}", e)
 
     def _probe_expiring_credentials_for_remote_hosts(self) -> None:
         """Probe every renewable credential some remote host holds a copy of, renewing what has expired.
@@ -1031,7 +1031,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             # Debug, not trace: the supervisor's structured log (the only record
             # of a detached daemon's behaviour) is written at debug level, so a
             # trace line would leave renewal with no evidence it ever ran.
-            logger.debug("Probing {} so the desktop renews it for remote workspaces", service_name)
+            logger.debug("Probing {} so the desktop renews it for remote hosts", service_name)
             self.latchkey.services_info(service_name)
 
     def _known_remote_host_ids(self) -> frozenset[str]:

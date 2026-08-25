@@ -35,7 +35,7 @@ from playwright.sync_api import sync_playwright
 from werkzeug.serving import make_server
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CreateAttemptLogSink
@@ -101,7 +101,7 @@ def _creating_page_in_browser(tmp_path: Path) -> Iterator[Page]:
     host = "127.0.0.1"
     port = find_free_port()
     code = OneTimeCode("test-creating-layout-code")
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     auth_store.add_one_time_code(code=code)
 

@@ -1,6 +1,6 @@
 """Local replica + sync engine for per-account workspace records.
 
-The connector holds one record per (account, host): plaintext metadata (name,
+The connector holds one record per (account, workspace): plaintext metadata (name,
 color, provider, location, lifecycle state) plus an opaque secrets blob
 encrypted under the account's DEK (see ``dek_store``). This module owns the
 minds side of that: a per-account on-disk replica (the offline cache and
@@ -47,9 +47,10 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.imbue_common.secret_wrapping import decrypt_secrets
 from imbue.imbue_common.secret_wrapping import encrypt_secrets
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import dek_store
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backup_env_store import full_backup_bucket_name_from_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.destroying import has_destroying_marker
@@ -60,6 +61,7 @@ from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
+from imbue.minds.primitives import DeviceId
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderNotAuthorizedError
 from imbue.mngr.primitives import AgentId
@@ -164,8 +166,8 @@ def secrets_payload_content_hash(payload: WorkspaceSecretsPayload) -> str:
 class ReplicaRecord(FrozenModel):
     """One workspace record as held in the local replica (wire fields + the dirty flag)."""
 
-    host_id: str = Field(description="Host the workspace is on (PK with the account)")
-    agent_id: str = Field(description="Logical workspace id")
+    host_id: str = Field(description="The workspace's current machine (mutable attribute)")
+    agent_id: str = Field(description="Workspace id (the record's key with the account)")
     display_name: str = Field(default="", description="Workspace display name")
     color: str | None = Field(default=None, description="Workspace accent color")
     provider_kind: str = Field(default="", description="mngr provider instance name")
@@ -179,7 +181,14 @@ class ReplicaRecord(FrozenModel):
             "stamped locally at tombstone time so offline rows still age toward the backup reaper"
         ),
     )
-    restored_from_host_id: str | None = Field(default=None, description="Lineage link for restorations")
+    restored_from_host_id: str | None = Field(default=None, description="Machine-lineage link for restorations")
+    backup_bucket: str | None = Field(
+        default=None,
+        description=(
+            "Full R2 bucket name holding this workspace's backups (from the canonical env); "
+            "consumed server-side by the retention reaper"
+        ),
+    )
     encrypted_secrets: str | None = Field(default=None, description="Base64 AEAD blob under the account DEK")
     revision: int = Field(default=0, description="Last server-acknowledged revision (0 = never pushed)")
     record_format: int = Field(
@@ -218,6 +227,7 @@ class ReplicaRecord(FrozenModel):
             "device_label": self.device_label,
             "state": self.state,
             "restored_from_host_id": self.restored_from_host_id,
+            "backup_bucket": self.backup_bucket,
             "encrypted_secrets": self.encrypted_secrets,
             "revision": push_revision,
             "record_format": self.record_format,
@@ -239,6 +249,7 @@ def replica_record_from_wire(wire: dict[str, object]) -> ReplicaRecord:
         restored_from_host_id=(
             str(wire["restored_from_host_id"]) if wire.get("restored_from_host_id") is not None else None
         ),
+        backup_bucket=(str(wire["backup_bucket"]) if wire.get("backup_bucket") is not None else None),
         encrypted_secrets=(str(wire["encrypted_secrets"]) if wire.get("encrypted_secrets") is not None else None),
         revision=int(str(wire.get("revision", 0))),
         record_format=int(str(wire.get("record_format", 1))),
@@ -393,7 +404,7 @@ class WorkspaceRecordStore(MutableModel):
     outside the lock so a slow connector round-trip never blocks readers.
     """
 
-    paths: WorkspacePaths = Field(frozen=True, description="Minds data dir (replica + keys live under it)")
+    paths: InstallationPaths = Field(frozen=True, description="Minds data dir (replica + keys live under it)")
     mngr_host_dir: Path | None = Field(
         default=None,
         frozen=True,
@@ -403,7 +414,7 @@ class WorkspaceRecordStore(MutableModel):
         ),
     )
     cli: ImbueCloudCli | None = Field(default=None, frozen=True, description="Transport; None disables pushes/pulls")
-    device_id: HostId = Field(
+    device_id: DeviceId = Field(
         frozen=True, description="This install's stable device id (record provenance; see device_identity)"
     )
     device_label: str = Field(frozen=True, description="This device's human-readable name")
@@ -445,7 +456,9 @@ class WorkspaceRecordStore(MutableModel):
                     logger.warning("Ignoring unreadable workspace-record replica {}: {}", path, e)
                     continue
                 entries = raw.get("records", []) if isinstance(raw, dict) else []
-                by_host: dict[str, ReplicaRecord] = {}
+                # Replica files persist a plain record list, so re-keying on
+                # load is what migrates host-keyed replicas from older builds.
+                by_workspace: dict[str, ReplicaRecord] = {}
                 for entry in entries:
                     if not isinstance(entry, dict):
                         continue
@@ -454,16 +467,26 @@ class WorkspaceRecordStore(MutableModel):
                     except ValueError as e:
                         logger.warning("Skipping malformed replica record in {}: {}", path, e)
                         continue
-                    by_host[record.host_id] = record
-                self._records_by_user_id[user_id] = by_host
+                    # A legacy host-keyed replica can carry two rows for one
+                    # workspace (a machine move leaves a tombstoned old-host
+                    # row); keep the ACTIVE row, as the server-side dedup does.
+                    existing = by_workspace.get(record.agent_id)
+                    if (
+                        existing is not None
+                        and existing.state == RECORD_STATE_ACTIVE
+                        and record.state != RECORD_STATE_ACTIVE
+                    ):
+                        continue
+                    by_workspace[record.agent_id] = record
+                self._records_by_user_id[user_id] = by_workspace
         self._is_loaded = True
 
     def _save_unlocked(self, user_id: str) -> None:
         records_dir = self._records_dir()
         records_dir.mkdir(parents=True, exist_ok=True)
         path = self._replica_path(user_id)
-        by_host = self._records_by_user_id.get(user_id, {})
-        payload = {"records": [record.model_dump(mode="json") for record in by_host.values()]}
+        by_workspace = self._records_by_user_id.get(user_id, {})
+        payload = {"records": [record.model_dump(mode="json") for record in by_workspace.values()]}
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(payload, indent=2))
         tmp_path.chmod(0o600)
@@ -471,14 +494,14 @@ class WorkspaceRecordStore(MutableModel):
 
     def _set_record_unlocked(self, user_id: str, record: ReplicaRecord) -> None:
         self._load_unlocked()
-        self._records_by_user_id.setdefault(user_id, {})[record.host_id] = record
+        self._records_by_user_id.setdefault(user_id, {})[record.agent_id] = record
         self._save_unlocked(user_id)
 
-    def _drop_record_unlocked(self, user_id: str, host_id: str) -> None:
+    def _drop_record_unlocked(self, user_id: str, workspace_id: str) -> None:
         self._load_unlocked()
-        by_host = self._records_by_user_id.get(user_id, {})
-        if host_id in by_host:
-            del by_host[host_id]
+        by_workspace = self._records_by_user_id.get(user_id, {})
+        if workspace_id in by_workspace:
+            del by_workspace[workspace_id]
             self._save_unlocked(user_id)
 
     # -- Read API -------------------------------------------------------------
@@ -625,10 +648,15 @@ class WorkspaceRecordStore(MutableModel):
         is_cloud_row = provider_kind.startswith(_CLOUD_PROVIDER_PREFIX)
         with self._lock:
             self._load_unlocked()
-            previous = self._records_by_user_id.get(user_id, {}).get(info.host_id)
+            previous = self._records_by_user_id.get(user_id, {}).get(str(agent_id))
         built_secrets = self.build_encrypted_secrets(
             user_id, agent_id, info.host_id, previous.encrypted_secrets if previous is not None else None
         )
+        # The explicit backup-bucket association rides on the record (the
+        # server-side reaper consumes it); derived from the canonical env, the
+        # single source of truth for where this workspace's backups live.
+        env_content = read_canonical_env(self.paths, AgentId(agent_id))
+        backup_bucket = full_backup_bucket_name_from_env(env_content) if env_content is not None else None
         return ReplicaRecord(
             host_id=info.host_id,
             agent_id=str(agent_id),
@@ -638,6 +666,7 @@ class WorkspaceRecordStore(MutableModel):
             hosting_device_id=None if is_cloud_row else self.device_id,
             device_label=self.device_label,
             state=state,
+            backup_bucket=backup_bucket,
             encrypted_secrets=built_secrets.encrypted if built_secrets is not None else None,
             revision=0,
             is_dirty=True,
@@ -727,7 +756,7 @@ class WorkspaceRecordStore(MutableModel):
             )
         with self._lock:
             self._load_unlocked()
-            previous = self._records_by_user_id.get(user_id, {}).get(record.host_id)
+            previous = self._records_by_user_id.get(user_id, {}).get(record.agent_id)
         if previous is not None:
             if is_record_too_new(previous):
                 raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
@@ -750,11 +779,11 @@ class WorkspaceRecordStore(MutableModel):
         if self.cli is None:
             raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
         try:
-            self.cli.sync_record_delete(account_email, record.host_id)
+            self.cli.sync_record_delete(account_email, record.agent_id)
         except ImbueCloudCliError as e:
             raise WorkspaceSyncError(f"could not remove the record from the connector: {e}") from e
         with self._lock:
-            self._drop_record_unlocked(user_id, record.host_id)
+            self._drop_record_unlocked(user_id, record.agent_id)
 
     def tombstone_record(self, user_id: str, account_email: str, agent_id: str) -> None:
         """Mark ``agent_id``'s record DESTROYED (kept, with secrets, for backup access).
@@ -783,21 +812,21 @@ class WorkspaceRecordStore(MutableModel):
         except (ImbueCloudCliError, WorkspaceSyncError) as e:
             logger.warning("Queued tombstone for {} (push failed: {})", agent_id, e)
 
-    def remove_record_or_raise(self, user_id: str, account_email: str, host_id: str) -> None:
-        """Remove a record outright by host id (the manual remove-from-list escape hatch)."""
+    def remove_record_or_raise(self, user_id: str, account_email: str, workspace_id: str) -> None:
+        """Remove a record outright by workspace id (the manual remove-from-list escape hatch)."""
         with self._lock:
             self._load_unlocked()
-            existing = self._records_by_user_id.get(user_id, {}).get(host_id)
+            existing = self._records_by_user_id.get(user_id, {}).get(workspace_id)
         if existing is not None and is_record_too_new(existing):
             raise WorkspaceRecordTooNewError(RECORD_TOO_NEW_MESSAGE)
         if self.cli is None:
             raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
         try:
-            self.cli.sync_record_delete(account_email, host_id)
+            self.cli.sync_record_delete(account_email, workspace_id)
         except ImbueCloudCliError as e:
             raise WorkspaceSyncError(f"could not remove the record from the connector: {e}") from e
         with self._lock:
-            self._drop_record_unlocked(user_id, host_id)
+            self._drop_record_unlocked(user_id, workspace_id)
 
     def pull(self, user_id: str, account_email: str) -> bool:
         """Merge the server's records into the replica (local dirty rows win until pushed).
@@ -816,12 +845,12 @@ class WorkspaceRecordStore(MutableModel):
             return False
         with self._lock:
             self._load_unlocked()
-            by_host = self._records_by_user_id.setdefault(user_id, {})
-            server_host_ids = set()
+            by_workspace = self._records_by_user_id.setdefault(user_id, {})
+            server_workspace_ids = set()
             for wire in wire_records:
                 record = replica_record_from_wire(wire)
-                server_host_ids.add(record.host_id)
-                local = by_host.get(record.host_id)
+                server_workspace_ids.add(record.agent_id)
+                local = by_workspace.get(record.agent_id)
                 if local is not None and local.is_dirty:
                     if not is_record_too_new(record):
                         continue
@@ -850,12 +879,12 @@ class WorkspaceRecordStore(MutableModel):
                             record.field_ref().last_applied_secrets_revision, local.last_applied_secrets_revision
                         ),
                     )
-                by_host[record.host_id] = record
+                by_workspace[record.agent_id] = record
             # A row the server no longer has (deleted elsewhere) drops out of
             # the replica unless it has unpushed local changes.
-            for host_id in list(by_host.keys()):
-                if host_id not in server_host_ids and not by_host[host_id].is_dirty:
-                    del by_host[host_id]
+            for workspace_id in list(by_workspace.keys()):
+                if workspace_id not in server_workspace_ids and not by_workspace[workspace_id].is_dirty:
+                    del by_workspace[workspace_id]
             self._save_unlocked(user_id)
         return True
 

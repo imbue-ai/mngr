@@ -2,16 +2,17 @@
 
 The workspace's in-UI Claude sign-in modal links to the desktop client's
 mint page (GET /settings/ai-keys, handlers in ``app.py``) when the user
-picks "Sign in with Imbue". The page is keyed by the workspace's mngr
-**host id** (``?workspace=<host_id>``): the workspace knows its own host
-id, and workspace records are keyed by it, so the owning account is
-resolved from the workspace-record store (association IS record
-existence). With no associated account the page errors and points the
-user at the workspace's settings page to associate one.
+picks "Sign in with Imbue". The page is keyed by the workspace's id
+(``?workspace=<workspace_id>``; the machine's host id is also accepted
+while in-workspace deep links transition): records are keyed by workspace
+id, so the owning account is resolved from the workspace-record store
+(association IS record existence). With no associated account the page
+errors and points the user at the workspace's settings page to associate
+one.
 
 Mint-only by design: one action mints a LiteLLM virtual key against the
-owning account -- with the workspace host id baked into the key's alias
-and metadata, so keys are attributable without any editable input -- and
+owning account -- with the workspace id baked into the key's alias and
+metadata, so keys are attributable without any editable input -- and
 produces an env-var-style credential blob (``ANTHROPIC_BASE_URL`` +
 ``ANTHROPIC_API_KEY``) for pasting back into the workspace modal. Key
 listing/revocation stays a CLI concern
@@ -41,36 +42,42 @@ class AiKeyMintError(MindError):
 
 
 class ResolvedWorkspaceAccount(FrozenModel):
-    """The owning account (and display name) resolved for a workspace host id."""
+    """The owning account (and display name) resolved for a workspace coordinate."""
 
     user_id: str = Field(description="The owning account's user id")
     account_email: str = Field(description="The owning account's email")
-    workspace_display_name: str = Field(description="The workspace's display name (falls back to the host id)")
+    workspace_id: str = Field(description="The workspace's id (the record's key)")
+    workspace_display_name: str = Field(description="The workspace's display name (falls back to its id)")
 
 
 def resolve_workspace_account(
-    workspace_host_id: str,
+    workspace_coordinate: str,
     record_store: WorkspaceRecordStore | None,
     session_store: MultiAccountSessionStore | None,
 ) -> ResolvedWorkspaceAccount | None:
-    """Resolve the account owning ``workspace_host_id`` from the record store.
+    """Resolve the account owning the workspace named by ``workspace_coordinate``.
 
-    Association IS record existence: a workspace belongs to the account whose
-    replica holds its ACTIVE record. Returns None when no account is
-    associated (or the record store is unavailable).
+    The coordinate is the workspace id; a machine's host id is also accepted
+    (in-workspace deep links from templates that predate workspace ids) and
+    resolves through the record's host column. Association IS record
+    existence: a workspace belongs to the account whose replica holds its
+    ACTIVE record. Returns None when no account is associated (or the record
+    store is unavailable).
     """
     if record_store is None or session_store is None:
         return None
     for user_id, records in record_store.list_all_records().items():
         for record in records:
-            if record.host_id == workspace_host_id and record.state == RECORD_STATE_ACTIVE:
+            is_match = workspace_coordinate in (record.agent_id, record.host_id)
+            if is_match and record.state == RECORD_STATE_ACTIVE:
                 account_email = session_store.get_account_email(user_id)
                 if not account_email:
                     continue
                 return ResolvedWorkspaceAccount(
                     user_id=user_id,
                     account_email=account_email,
-                    workspace_display_name=record.display_name or workspace_host_id,
+                    workspace_id=record.agent_id,
+                    workspace_display_name=record.display_name or record.agent_id,
                 )
     return None
 
@@ -82,14 +89,14 @@ def build_credential_blob(api_key: str, base_url: str) -> str:
 
 
 def mint_workspace_credential_blob(
-    workspace_host_id: str,
+    workspace_id: str,
     account_email: str,
     imbue_cloud_cli: ImbueCloudCli,
 ) -> str:
     """Mint (or rotate) the workspace's LiteLLM key and return the paste-ready blob.
 
-    The key's alias and metadata carry the workspace host id, fixed
-    server-side -- there is deliberately no user-editable naming input.
+    The key's alias and metadata carry the workspace id, fixed server-side --
+    there is deliberately no user-editable naming input.
 
     The alias is deterministic and LiteLLM enforces unique aliases, so a key
     minted earlier -- including one whose create response was lost (LiteLLM
@@ -106,13 +113,13 @@ def mint_workspace_credential_blob(
     try:
         key_material = imbue_cloud_cli.create_litellm_key(
             account=account_email,
-            alias=f"workspace-{workspace_host_id}",
+            alias=f"workspace-{workspace_id}",
             max_budget=_MINT_MAX_BUDGET_DOLLARS,
             budget_duration=_MINT_BUDGET_DURATION,
-            metadata={"workspace_host_id": workspace_host_id, "source": "ai-keys-page"},
+            metadata={"workspace_id": workspace_id, "source": "ai-keys-page"},
             is_rotate_on_exists=True,
         )
     except ImbueCloudCliError as exc:
         raise AiKeyMintError(f"Failed to create the key: {exc}") from exc
-    logger.info("Minted LiteLLM key for machine {} (account {})", workspace_host_id, account_email)
+    logger.info("Minted LiteLLM key for workspace {} (account {})", workspace_id, account_email)
     return build_credential_blob(api_key=key_material.key.get_secret_value(), base_url=str(key_material.base_url))

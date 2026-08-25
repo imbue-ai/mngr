@@ -112,7 +112,7 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
 
         work_dir = tmp_path / "work"
         init_git_repo(work_dir, initial_commit=True)
-        return AgentReleaseContext(env=env, workspace=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
+        return AgentReleaseContext(env=env, project_dir=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
         # auto_allow_permissions injects a wildcard permission allow so the forced bash
@@ -120,7 +120,7 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
         return [
             "--no-ensure-clean",
             "--source",
-            str(ctx.workspace),
+            str(ctx.project_dir),
             "-S",
             "agent_types.opencode.auto_allow_permissions=true",
         ]

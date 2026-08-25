@@ -479,9 +479,9 @@ def get_default_cli_events_log_dir(default_host_dir: Path) -> Path:
 
     Mirrors ``setup_logging``'s default file-sink path resolution
     (``<host_dir>/events/logs/mngr/events.jsonl``) for consumers that need to
-    locate the CLI's file logs without loading a logging config -- e.g. the
-    minds bug-report attachment sweep, which uploads this log so a spawned
-    ``mngr`` subprocess's step timeline is available when diagnosing a report.
+    locate the CLI's file logs without loading a logging config -- e.g. a
+    diagnostics collector that ships this log so a spawned ``mngr``
+    subprocess's step timeline is available when investigating a failure.
     """
     config = LoggingConfig()
     return _resolve_log_dir(config.log_dir, default_host_dir) / str(config.event_source)

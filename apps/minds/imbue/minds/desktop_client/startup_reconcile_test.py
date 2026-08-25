@@ -17,7 +17,7 @@ from uuid import uuid4
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
@@ -114,7 +114,7 @@ def _make_reconciler(
     live_create_attempt_ids: tuple[str, ...] = (),
 ) -> StartupHostReconciler:
     creator = _LiveIdsAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds-data"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds-data"),
         root_concurrency_group=concurrency_group,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -145,7 +145,7 @@ def test_reconcile_destroys_labeled_half_built_host_past_grace(
                     "name": "foo",
                     "provider": "lima",
                     "state": "RUNNING",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [],
                 }
             ],
@@ -181,7 +181,7 @@ def test_reconcile_leaves_half_built_host_within_grace(
                     "name": "foo",
                     "provider": "lima",
                     "state": "RUNNING",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [],
                 }
             ],
@@ -212,7 +212,7 @@ def test_reconcile_destroys_labeled_half_built_host_with_no_record(
                     "name": "bar",
                     "provider": "docker",
                     "state": "RUNNING",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [],
                 }
             ],
@@ -266,7 +266,7 @@ def test_reconcile_skips_hosts_of_live_in_flight_create_attempts(
                     "name": "foo",
                     "provider": "lima",
                     "state": "RUNNING",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [],
                 }
             ],
@@ -298,7 +298,7 @@ def test_reconcile_skips_failed_and_destroyed_host_records(
                     "name": "failed-host",
                     "provider": "lima",
                     "state": "FAILED",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [],
                 },
                 {
@@ -306,7 +306,7 @@ def test_reconcile_skips_failed_and_destroyed_host_records(
                     "name": "destroyed-host",
                     "provider": "lima",
                     "state": "DESTROYED",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [],
                 },
             ],
@@ -337,7 +337,7 @@ def test_reconcile_adopts_completed_host_and_restores_association(
                     "name": "foo",
                     "provider": "lima",
                     "state": "RUNNING",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [{"id": services_agent_id, "name": "system-services"}],
                 }
             ],
@@ -384,7 +384,7 @@ def test_reconcile_adopts_completed_host_without_record_as_private(
                     "name": "foo",
                     "provider": "lima",
                     "state": "RUNNING",
-                    "labels": {"workspace-id": create_attempt_id},
+                    "labels": {"create-attempt-id": create_attempt_id},
                     "agents": [{"id": f"agent-{uuid4().hex}", "name": "system-services"}],
                 }
             ],

@@ -43,8 +43,8 @@ from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
@@ -213,7 +213,7 @@ def run(
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
-    paths = WorkspacePaths(data_dir=data_directory)
+    paths = InstallationPaths(data_dir=data_directory)
 
     # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
@@ -966,7 +966,7 @@ class _StreamedPermissionRequestHandler(FrozenModel):
 def _resolve_backup_quota_evictor(
     session_store: MultiAccountSessionStore,
     workspace_record_store: WorkspaceRecordStore,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     imbue_cloud_cli: ImbueCloudCli,
     account_email: str,
 ) -> Callable[[], bool] | None:

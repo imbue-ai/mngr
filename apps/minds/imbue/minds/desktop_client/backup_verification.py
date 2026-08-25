@@ -40,7 +40,7 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.minds.build_info import resolve_release_id
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
@@ -274,7 +274,7 @@ def _decode_adoptable_env(env_info: dict[str, object]) -> str | None:
 
 
 def check_backup_service_for_workspace(
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     agent_id: AgentId,
     *,
     resolver: BackendResolverInterface,

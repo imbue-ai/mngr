@@ -9,18 +9,18 @@ from pydantic import AnyUrl
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import OriginsConfig
 from imbue.minds.config.data_types import PlanQuotasConfig
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.mngr.primitives import AgentId
 
 
-def test_workspace_paths_workspace_dir_uses_agent_id(tmp_path: Path) -> None:
+def test_installation_paths_workspace_dir_uses_agent_id(tmp_path: Path) -> None:
     """Verify workspace_dir incorporates the agent_id into the path."""
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId()
 
     result = paths.workspace_dir(agent_id)
@@ -28,13 +28,13 @@ def test_workspace_paths_workspace_dir_uses_agent_id(tmp_path: Path) -> None:
     assert str(agent_id) in str(result)
 
 
-def test_workspace_paths_auth_dir_is_under_data_dir(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+def test_installation_paths_auth_dir_is_under_data_dir(tmp_path: Path) -> None:
+    paths = InstallationPaths(data_dir=tmp_path)
     assert paths.auth_dir == tmp_path / "auth"
 
 
-def test_workspace_paths_mngr_host_dir_is_under_data_dir(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+def test_installation_paths_mngr_host_dir_is_under_data_dir(tmp_path: Path) -> None:
+    paths = InstallationPaths(data_dir=tmp_path)
     assert paths.mngr_host_dir == tmp_path / "mngr"
 
 

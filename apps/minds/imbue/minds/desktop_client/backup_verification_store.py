@@ -13,27 +13,27 @@ and never auto-deleted on destroy (consistent with the canonical env store).
 
 from pathlib import Path
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.errors import BackupProvisioningError
 from imbue.mngr.primitives import AgentId
 
 _VERIFICATION_DISABLED_DIRNAME = "backup_verification_disabled"
 
 
-def _verification_disabled_dir(paths: WorkspacePaths) -> Path:
+def _verification_disabled_dir(paths: InstallationPaths) -> Path:
     return paths.data_dir / _VERIFICATION_DISABLED_DIRNAME
 
 
-def _marker_path(paths: WorkspacePaths, agent_id: AgentId) -> Path:
+def _marker_path(paths: InstallationPaths, agent_id: AgentId) -> Path:
     return _verification_disabled_dir(paths) / str(agent_id)
 
 
-def is_backup_verification_enabled(paths: WorkspacePaths, agent_id: AgentId) -> bool:
+def is_backup_verification_enabled(paths: InstallationPaths, agent_id: AgentId) -> bool:
     """Return whether backup verification is enabled for this workspace (default True)."""
     return not _marker_path(paths, agent_id).exists()
 
 
-def set_backup_verification_enabled(paths: WorkspacePaths, agent_id: AgentId, is_enabled: bool) -> None:
+def set_backup_verification_enabled(paths: InstallationPaths, agent_id: AgentId, is_enabled: bool) -> None:
     """Persist the verification flag; enabling removes the marker, disabling creates it."""
     marker = _marker_path(paths, agent_id)
     try:

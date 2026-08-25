@@ -8,7 +8,7 @@ Every agent-type plugin ships a ``@pytest.mark.release`` test that drives the re
            -> adopt the preserved session into a fresh agent -> recall again
 
 The arc and its assertions are identical across agents; only the *plumbing* differs
-(how the binary is launched and authenticated, how the workspace is seeded, which
+(how the binary is launched and authenticated, how the project_dir is seeded, which
 flags ``create`` needs, how tmux is isolated). This module owns the arc and the
 shared assertions; each plugin supplies an :class:`AgentReleaseProfile` that owns its
 plumbing. A single ``run_agent_release_lifecycle(profile, tmp_path)`` call is then the
@@ -65,7 +65,7 @@ _LIFECYCLE_TIMEOUT_SECONDS = 150.0
 class AgentReleaseContext(BaseModel):
     """Per-run plumbing produced by a profile's ``setup`` and consumed by the harness.
 
-    ``env`` is how the harness invokes ``mngr`` (via ``profile.run_mngr``); ``workspace``
+    ``env`` is how the harness invokes ``mngr`` (via ``profile.run_mngr``); ``project_dir``
     is the git source/work dir (passed as ``--source`` or used as the ``mngr`` cwd, per
     profile); ``host_dir`` is the isolated ``MNGR_HOST_DIR`` the harness reads the agent's
     state (marker + transcript) out of. ``teardown`` runs in a ``finally`` after destroy --
@@ -77,7 +77,7 @@ class AgentReleaseContext(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     env: Mapping[str, str]
-    workspace: Path
+    project_dir: Path
     host_dir: Path
     teardown: Callable[[], None] | None = None
 
@@ -136,7 +136,7 @@ class AgentReleaseProfile(abc.ABC):
 
     @abc.abstractmethod
     def setup(self, tmp_path: Path) -> AgentReleaseContext:
-        """Seed the workspace/auth/env and return the run context (incl. teardown)."""
+        """Seed the project_dir/auth/env and return the run context (incl. teardown)."""
 
     @abc.abstractmethod
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
@@ -172,10 +172,10 @@ class AgentReleaseProfile(abc.ABC):
         native session file/dir under ``preserved_dir``.
         """
 
-    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+    def prepare_adoption_project_dir(self, work_dir: Path) -> None:
         """Seed the fresh worktree the adopting agent is created against.
 
-        A *distinct* dir from the original workspace, so adoption must rebind the native
+        A *distinct* dir from the original project_dir, so adoption must rebind the native
         session's original-cwd binding rather than getting it for free. Defaults to an
         empty git repo; override to add agent-specific trust inputs.
         """
@@ -340,10 +340,10 @@ def _adopt_preserved_and_recall(
     """
     host_dir = ctx.host_dir
     adopt_work = tmp_path / "adopt_work"
-    profile.prepare_adoption_workspace(adopt_work)
+    profile.prepare_adoption_project_dir(adopt_work)
     # Reconstruct (rather than model_copy(update=...)) so the new context is re-validated:
     # same plumbing as the source run, but pointed at the fresh adoption worktree.
-    adopt_ctx = AgentReleaseContext(env=ctx.env, workspace=adopt_work, host_dir=ctx.host_dir, teardown=ctx.teardown)
+    adopt_ctx = AgentReleaseContext(env=ctx.env, project_dir=adopt_work, host_dir=ctx.host_dir, teardown=ctx.teardown)
     adopt_name = f"{profile.agent_type.replace('-', '')}-adopt-{get_short_random_string()}"
     created = False
     try:

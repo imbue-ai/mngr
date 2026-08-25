@@ -5,7 +5,7 @@ subprocess; a crash orphans it) leaves one of two things behind: a half-built
 host that burns CPU forever (Lima workspaces run with idle shutdown disabled),
 or a finished workspace whose account association was never recorded. This
 module runs once per app startup, after discovery is available, and repairs
-both -- driven by the ``workspace-id`` host label the create stamps on every
+both -- driven by the ``create-attempt-id`` host label the create stamps on every
 Lima / Docker host and the local pending-create-attempt records behind it.
 
 Policy (see the lima-workspace-reliability decision log):
@@ -53,15 +53,16 @@ from imbue.minds.desktop_client.labeled_hosts import ListedHost
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
+from imbue.minds.desktop_client.pending_create_attempts import CREATE_ATTEMPT_ID_HOST_LABEL
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
-from imbue.minds.desktop_client.pending_create_attempts import WORKSPACE_ID_HOST_LABEL
+from imbue.minds.desktop_client.pending_create_attempts import read_create_attempt_id_label
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import WorkspaceSyncError
 
 # The providers whose hosts the reconcile owns: exactly the ones whose hosts
-# carry the ``workspace-id`` label (see ``labeled_hosts`` for the exclusion
+# carry the ``create-attempt-id`` label (see ``labeled_hosts`` for the exclusion
 # rationale).
 RECONCILED_PROVIDER_NAMES: Final[tuple[str, ...]] = WORKSPACE_ID_LABELED_PROVIDER_NAMES
 
@@ -192,10 +193,10 @@ class StartupHostReconciler(MutableModel):
         if host.state in ("FAILED", "DESTROYED"):
             return
 
-        workspace_id = host.labels.get(WORKSPACE_ID_HOST_LABEL)
+        create_attempt_id = read_create_attempt_id_label(host.labels)
         has_system_services = any(agent.name == SYSTEM_SERVICES_AGENT_NAME for agent in host.agents)
 
-        if workspace_id is None:
+        if create_attempt_id is None:
             # Never touch a host minds didn't stamp. Pre-existing orphans (from
             # before the label existed) stay until cleaned up manually.
             if not host.agents:
@@ -205,7 +206,7 @@ class StartupHostReconciler(MutableModel):
                     host.provider,
                     host.name,
                     host.id,
-                    WORKSPACE_ID_HOST_LABEL,
+                    CREATE_ATTEMPT_ID_HOST_LABEL,
                     host.id,
                     host.provider,
                 )
@@ -213,10 +214,10 @@ class StartupHostReconciler(MutableModel):
 
         # A create attempt running in THIS process is not an orphan, whatever its
         # host currently looks like.
-        if workspace_id in self.agent_creator.live_in_flight_create_attempt_ids():
+        if create_attempt_id in self.agent_creator.live_in_flight_create_attempt_ids():
             return
 
-        record = self.pending_create_attempt_store.read_record(workspace_id)
+        record = self.pending_create_attempt_store.read_record(create_attempt_id)
         if has_system_services:
             self._adopt_completed_host(host, record)
         else:
@@ -304,7 +305,7 @@ class StartupHostReconciler(MutableModel):
             host.provider,
             host.name,
             host.id,
-            host.labels.get(WORKSPACE_ID_HOST_LABEL),
+            read_create_attempt_id_label(host.labels),
         )
         try:
             run_mngr_to_completion(

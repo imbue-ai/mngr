@@ -285,7 +285,7 @@ def test_via_desktop_prefix_is_not_treated_as_a_secret() -> None:
 
 def test_prepare_vps_gateway_rejects_on_host_mode(tmp_path: Path) -> None:
     fake = _full_fake(tmp_path)
-    with pytest.raises(LatchkeyError, match="requires a tunneled workspace"):
+    with pytest.raises(LatchkeyError, match="requires a tunneled host"):
         prepare_agent_latchkey(
             fake,
             is_tunneled=False,

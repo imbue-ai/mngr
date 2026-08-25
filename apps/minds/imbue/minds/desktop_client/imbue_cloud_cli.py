@@ -684,6 +684,7 @@ class ImbueCloudCli(MutableModel):
         host_id: str,
         entry_label: str | None = None,
         preferred_region: str | None = None,
+        workspace_id: str | None = None,
     ) -> ShareCliInfo:
         """Enable sharing for a workspace host; the returned relay token is only ever returned here.
 
@@ -695,6 +696,8 @@ class ImbueCloudCli(MutableModel):
         keeps an existing share's region.
         """
         args = ["shares", "create", host_id, "--account", account]
+        if workspace_id:
+            args.extend(["--workspace-id", workspace_id])
         if entry_label:
             args.extend(["--entry-label", entry_label])
         if preferred_region:
@@ -904,9 +907,10 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "sync records push")
         return body if isinstance(body, dict) else {}
 
-    def sync_record_delete(self, account: str, host_id: str) -> None:
+    def sync_record_delete(self, account: str, record_id: str) -> None:
+        """Delete one record by workspace id (``agent-<hex>``, preferred) or host id."""
         result = self._run(
-            ["sync", "records", "delete", host_id, "--account", account],
+            ["sync", "records", "delete", record_id, "--account", account],
             cg_name="imbue-cloud-sync-record-delete",
         )
         self._expect_success(result, "sync records delete")

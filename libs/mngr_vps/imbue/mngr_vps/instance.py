@@ -488,8 +488,8 @@ class VpsProvider(BaseProviderInstance):
         """Load or create the provider-wide management keypair for authenticating to VPS roots.
 
         This key opens every VPS this provider instance ordered (discovery must
-        reach a VPS before knowing which host lives on it). It never enters a
-        synced workspace record -- the agent connection uses per-host client
+        reach a VPS before knowing which host lives on it). It is never exported
+        with a host's credentials -- the agent connection uses per-host client
         keys resolved by the realizers.
         """
         return load_or_create_ssh_keypair(self._key_dir(), VPS_SSH_KEY_NAME)
@@ -913,7 +913,7 @@ class VpsProvider(BaseProviderInstance):
         rebuilds it under the same ``host_id``. Each step is best-effort and
         logged; a missing resource is a no-op.
         """
-        # Remove every workspace container identified by its host-id label.
+        # Remove every host container identified by its host-id label.
         list_result = outer.execute_idempotent_command(
             f"docker ps -aq --filter label={LABEL_HOST_ID}={shlex.quote(str(host_id))}"
         )

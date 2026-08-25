@@ -95,7 +95,7 @@ _PERM_MINDS_APP_VERSION: Final[str] = "minds-app-version-read"
 _MINDS_API_TIMEZONE_INBOUND_PATH: Final[str] = "/minds-api-proxy/api/v1/timezone"
 _PERM_MINDS_API_TIMEZONE: Final[str] = "minds-api-timezone-read"
 
-# Desktop egress: a remote workspace asks for a third-party request to leave
+# Desktop egress: a remote host asks for a third-party request to leave
 # from the user's own machine (rather than from its VPS) by prefixing the target
 # URL with ``/via-desktop``, which the VPS gateway's forwarding extension
 # unwraps onto the desktop gateway's native ``/gateway/<url>`` endpoint. This

@@ -27,19 +27,22 @@ function notificationsMessage(ids: string[]): UiNotificationsMessage {
 }
 
 describe("WorkspacesStore", () => {
-  it("maps between agent and host coordinates from the list message", () => {
+  it("resolves legacy host coordinates to the agent id from the list message", () => {
     const store = new WorkspacesStore();
     store.applyWorkspacesMessage(workspacesMessage());
     expect(store.toAgentScopedId("host-bb22")).toBe("agent-aa11");
-    expect(store.toHostScopedId("agent-aa11")).toBe("host-bb22");
     expect(store.toAgentScopedId("agent-unknown")).toBe("agent-unknown");
   });
 
-  it("builds host-scoped forward-bridge frame URLs", () => {
+  it("builds workspace-scoped forward-bridge frame URLs (host input resolves through the alias)", () => {
     const store = new WorkspacesStore();
     store.applyWorkspacesMessage(workspacesMessage());
+    // Content URLs are keyed by the workspace id, so they survive machine changes.
     expect(store.workspaceFrameUrl("agent-aa11")).toBe(
-      "/forward-bridge?next=" + encodeURIComponent("/goto/host-bb22/"),
+      "/forward-bridge?next=" + encodeURIComponent("/goto/agent-aa11/"),
+    );
+    expect(store.workspaceFrameUrl("host-bb22")).toBe(
+      "/forward-bridge?next=" + encodeURIComponent("/goto/agent-aa11/"),
     );
   });
 

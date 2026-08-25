@@ -7,7 +7,7 @@ import pytest
 from pydantic import AnyUrl
 from pydantic import Field
 
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.backup_trim import BackupTrimState
@@ -52,7 +52,7 @@ def test_select_snapshot_ids_to_forget_takes_oldest_half_never_latest() -> None:
 
 
 def test_collect_trimmable_repos_parses_canonical_envs(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId()
     write_canonical_env(
         paths,
@@ -68,7 +68,7 @@ def test_collect_trimmable_repos_parses_canonical_envs(tmp_path: Path) -> None:
     assert repo.password == "secret"
     assert repo.backend_env == {"AWS_ACCESS_KEY_ID": "akid", "AWS_SECRET_ACCESS_KEY": "sk"}
     # A machine with no env dir has no trimmable repos.
-    assert collect_trimmable_repos(WorkspacePaths(data_dir=tmp_path / "empty")) == {}
+    assert collect_trimmable_repos(InstallationPaths(data_dir=tmp_path / "empty")) == {}
 
 
 def test_run_backup_trim_short_circuits_when_already_under_quota(tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ def test_run_backup_trim_short_circuits_when_already_under_quota(tmp_path: Path)
     is_under, detail = run_backup_trim(
         account_email="a@example.com",
         cli=cli,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         report_progress=lambda _detail: None,
         list_snapshots_fn=list_snapshots,
         forget_snapshots_fn=forget_snapshots,
@@ -88,7 +88,7 @@ def test_run_backup_trim_short_circuits_when_already_under_quota(tmp_path: Path)
 
 
 def test_run_backup_trim_forgets_oldest_half_and_finishes_when_under(tmp_path: Path) -> None:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId()
     write_canonical_env(
         paths,
@@ -152,7 +152,7 @@ def test_run_backup_trim_reports_untrimmable_buckets_when_still_over(tmp_path: P
     is_under, detail = run_backup_trim(
         account_email="a@example.com",
         cli=cli,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         report_progress=lambda _detail: None,
         list_snapshots_fn=list_snapshots,
         forget_snapshots_fn=forget_snapshots,
@@ -214,7 +214,7 @@ def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: P
         user_id="user-1",
         account_email="a@example.com",
         cli=cli,
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         notification_dispatcher=dispatcher,
     )
     assert started is True
@@ -230,7 +230,7 @@ def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) 
         user_id="user-1",
         account_email="a@example.com",
         cli=make_fake_imbue_cloud_cli(),
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         notification_dispatcher=None,
     )
     assert started is False
@@ -248,7 +248,7 @@ def test_backup_trim_manager_records_failure_and_notifies(tmp_path: Path) -> Non
         user_id="user-1",
         account_email="a@example.com",
         cli=make_fake_imbue_cloud_cli(),
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         notification_dispatcher=dispatcher,
     )
     status = manager.get_status("user-1")
@@ -267,7 +267,7 @@ def test_backup_trim_manager_flips_unexpected_crash_to_failed(tmp_path: Path) ->
             user_id="user-1",
             account_email="a@example.com",
             cli=_CrashingImbueCloudCli(connector_url=AnyUrl("http://connector.invalid")),
-            paths=WorkspacePaths(data_dir=tmp_path),
+            paths=InstallationPaths(data_dir=tmp_path),
             notification_dispatcher=None,
         )
     status = manager.get_status("user-1")

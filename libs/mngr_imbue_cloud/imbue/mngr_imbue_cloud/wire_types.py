@@ -396,6 +396,14 @@ class SyncWorkspaceRecord(WireModel):
     device_label: str = Field(default="", description="Human-readable device name")
     state: str = Field(description="Lifecycle state: 'active' or 'destroyed' (tombstone)")
     restored_from_host_id: str | None = Field(default=None, description="Lineage link for restored workspaces")
+    backup_bucket: str | None = Field(
+        default=None,
+        description=(
+            "Full R2 bucket name holding this workspace's backups. Sent on pushes by backup "
+            "provisioning; servers begin serving it back once the pre-tolerant strict client "
+            "fleet is out of the support window (absent until then)."
+        ),
+    )
     encrypted_secrets: str | None = Field(
         default=None, description="Base64 of the client-encrypted secrets blob (opaque here)"
     )

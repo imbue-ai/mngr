@@ -267,7 +267,7 @@ def test_associate_created_workspace_seeds_a_queued_record(tmp_path: Path) -> No
     session = store.get_session("user-1")
     assert session is not None
     assert session.workspace_ids == ["agent-new"]
-    pushed = cli.sync_records_by_email["a@b.com"]["host-new"]
+    pushed = cli.sync_records_by_email["a@b.com"]["agent-new"]
     assert pushed["display_name"] == "my new machine"
     assert pushed["color"] == "#112233"
     assert pushed["hosting_device_id"] == device_id_for_test("session-store")

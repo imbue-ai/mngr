@@ -18,7 +18,7 @@ from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import ClientEnvConfig
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -272,7 +272,7 @@ def _build_auth_test_client(
         imbue_cloud_cli=cli,
         minds_config=minds_config,
         session_store=make_session_store_for_test(tmp_path / "session-store", cli),
-        paths=WorkspacePaths(data_dir=tmp_path / "data"),
+        paths=InstallationPaths(data_dir=tmp_path / "data"),
         client_env_config=ClientEnvConfig(
             connector_url=FAKE_CONNECTOR_URL,
             litellm_proxy_url=AnyUrl("https://test--llm.modal.run"),

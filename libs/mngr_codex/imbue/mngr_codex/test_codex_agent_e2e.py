@@ -172,7 +172,7 @@ class _CodexReleaseProfile(AgentReleaseProfile):
 
         repo = tmp_path / "repo"
         init_git_repo(repo)
-        return AgentReleaseContext(env=env, workspace=repo, host_dir=Path(env["MNGR_HOST_DIR"]))
+        return AgentReleaseContext(env=env, project_dir=repo, host_dir=Path(env["MNGR_HOST_DIR"]))
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
         # Pass the work dir via --source (rather than the mngr cwd) so ``mngr`` can run from
@@ -182,7 +182,7 @@ class _CodexReleaseProfile(AgentReleaseProfile):
         return [
             "--no-ensure-clean",
             "--source",
-            str(ctx.workspace),
+            str(ctx.project_dir),
             "-S",
             f"agent_types.codex.model={_CODEX_MODEL}",
             "-S",

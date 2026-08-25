@@ -1,7 +1,7 @@
-"""CLI-backed host inventory for the workspace-id-labeled Lima / Docker hosts.
+"""CLI-backed host inventory for the create-attempt-labeled Lima / Docker hosts.
 
-Minds stamps every Lima / Docker workspace host with a ``workspace-id`` label
-(the opaque pending-create-attempt id) at create time. Both the startup reconcile
+Minds stamps every Lima / Docker workspace host with a ``create-attempt-id``
+label at create time. Both the startup reconcile
 and the create attempt discard / retry flows need to walk that inventory -- listing
 one provider's hosts (agent-less ones included) through ``mngr list --hosts``
 and joining them back to pending-create-attempt records through the label. This
@@ -18,9 +18,9 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
-from imbue.minds.desktop_client.pending_create_attempts import WORKSPACE_ID_HOST_LABEL
+from imbue.minds.desktop_client.pending_create_attempts import read_create_attempt_id_label
 
-# The provider instances whose hosts carry the ``workspace-id`` label (the
+# The provider instances whose hosts carry the ``create-attempt-id`` label (the
 # create stamps it only for the local-VM modes): the scope of both the startup
 # reconcile and the create attempt discard flows. Modal is excluded (sandboxes
 # self-expire within ~a day), imbue_cloud pool hosts have their own reconcile,
@@ -88,8 +88,8 @@ def list_provider_hosts(
     return parse_hosts_listing(stdout)
 
 
-def find_host_by_workspace_id_label(hosts: list[ListedHost], workspace_id: str) -> ListedHost | None:
-    """Find the host carrying ``workspace_id`` as its ``workspace-id`` label, if any.
+def find_host_by_create_attempt_id_label(hosts: list[ListedHost], create_attempt_id: str) -> ListedHost | None:
+    """Find the host carrying ``create_attempt_id`` as its create-attempt label, if any.
 
     Terminal (FAILED / DESTROYED) host records are skipped: they are dead
     state a gc sweep owns, not a live host a discard needs to tear down.
@@ -97,6 +97,6 @@ def find_host_by_workspace_id_label(hosts: list[ListedHost], workspace_id: str) 
     for host in hosts:
         if host.state in ("FAILED", "DESTROYED"):
             continue
-        if host.labels.get(WORKSPACE_ID_HOST_LABEL) == workspace_id:
+        if read_create_attempt_id_label(host.labels) == create_attempt_id:
             return host
     return None

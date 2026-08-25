@@ -105,7 +105,7 @@ class SliceVpsDockerProviderConfig(VpsProviderConfig):
         default=None,
         description=(
             "Path (on the machine running the bake) to the pool management private key used to SSH the box "
-            "for the limactl carve. Set by the operator pool bake (``minds-admin pool create``)."
+            "for the limactl carve. Set by the operator pool bake (``pool create``)."
         ),
     )
     slice_base_image_url: str | None = Field(
@@ -121,7 +121,7 @@ class SliceVpsDockerProviderConfig(VpsProviderConfig):
         description=(
             "Pool management public key to authorize for the slice's VM root and inner container, so the "
             "connector can inject the leasing user's key at lease time and reach the VM at release time. "
-            "Set by the operator pool bake (``minds-admin pool create``)."
+            "Set by the operator pool bake (``pool create``)."
         ),
     )
     box_host_public_key: str | None = Field(
@@ -305,7 +305,7 @@ class SliceVpsDockerProvider(VpsProvider):
         ):
             raise MngrError(
                 "slice_vcpus / slice_memory_mib / slice_disk_gib / slice_slot_count / slice_port_range_* must all "
-                "be set to carve a slice (they are computed per box by the operator pool bake, `minds-admin pool create`)"
+                "be set to carve a slice (they are computed per box by the operator pool bake, `pool create`)"
             )
         region = self._resolved_region()
         # The pool management key (when configured) is authorized on both the VM

@@ -74,13 +74,13 @@ class _PiReleaseProfile(AgentReleaseProfile):
         run_git_command(work_dir, "add", ".gitignore", ".agents")
         run_git_command(work_dir, "commit", "-m", "add gitignore and .agents/skills")
 
-        return AgentReleaseContext(env=env, workspace=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
+        return AgentReleaseContext(env=env, project_dir=work_dir, host_dir=Path(env["MNGR_HOST_DIR"]))
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
         return [
             "--no-ensure-clean",
             "--source",
-            str(ctx.workspace),
+            str(ctx.project_dir),
             "--pass-env",
             "ANTHROPIC_API_KEY",
             "--",
@@ -107,7 +107,7 @@ class _PiReleaseProfile(AgentReleaseProfile):
         )
         return str(matches[0])
 
-    def prepare_adoption_workspace(self, work_dir: Path) -> None:
+    def prepare_adoption_project_dir(self, work_dir: Path) -> None:
         """Seed the fresh adoption worktree with the same trust inputs the base source has.
 
         A ``.agents/skills`` dir gives the worktree pi "project trust inputs"; ``mngr

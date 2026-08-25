@@ -3,7 +3,7 @@
 A host is baked with one layout and keeps it for life, while the provider config
 resolved in the current context is free to name the other: an account-wide
 provider block moved generations under the user, and a project
-``.mngr/settings.toml`` applies from the workspace clone but not from ``$HOME``.
+``.mngr/settings.toml`` applies from the project clone but not from ``$HOME``.
 Addressing a host at the wrong layout reads no certified data (the host sits
 UNKNOWN) and resolves agent state dirs to nothing, so ``mngr exec`` and
 ``mngr start`` fail with "Agent not found on host" against a healthy container.

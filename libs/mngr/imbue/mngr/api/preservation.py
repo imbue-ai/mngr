@@ -195,7 +195,7 @@ def adopt_sessions(
 
     - ``--adopt`` names a session explicitly, so an unknown/unusable id is a hard error
       (``copy_explicit`` raises ``UserInputError``).
-    - ``--from`` is fundamentally a workspace clone; carrying the session forward is a bonus, so a
+    - ``--from`` is fundamentally a work-dir clone; carrying the session forward is a bonus, so a
       source with no resumable session is a warning, not an error -- ``copy_clone`` returns ``None``.
 
     The session actually resumed (via ``resume``) is the clone's when ``--from`` yielded one,
@@ -222,7 +222,7 @@ def transfer_cloned_agent_session_store(
 ) -> bool:
     """Copy a cloned source agent's native session store into the destination agent (``--from``).
 
-    A generic ``--from`` clone copies the source *workspace* but not the source agent's
+    A generic ``--from`` clone copies the source *work dir* but not the source agent's
     *state dir*, so an agent that wants the clone to resume the source's conversation
     transfers just its native session store (``store_relpath``, the same relpath it
     preserves and scans) from the source state dir into its own. The agent then rebinds

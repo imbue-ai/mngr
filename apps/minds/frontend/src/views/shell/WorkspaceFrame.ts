@@ -30,7 +30,12 @@ interface EmbedContractModule {
   }): { send(type: string, payload?: Record<string, unknown>): void; dispose(): void };
 }
 
-const WORKSPACE_ORIGIN_FAMILY = /^(?:[a-z0-9_-]+\.)*host-[a-f0-9]+\.(?:localhost|127\.0\.0\.1)$/i;
+// The canonical content origin is agent-keyed (the workspace id); host-keyed
+// origins are the legacy shape a stale frame may still sit on before the
+// plugin's redirect heals it, so both families are expected senders. Exported
+// for tests only.
+export const WORKSPACE_ORIGIN_FAMILY =
+  /^(?:[a-z0-9_-]+\.)*(?:host|agent)-[a-f0-9]+\.(?:localhost|127\.0\.0\.1)$/i;
 
 async function loadEmbedContract(): Promise<EmbedContractModule> {
   // Runtime URL import (the module is served by Flask, not bundled); the
@@ -65,12 +70,9 @@ export interface EmbedHandlerDeps {
   navigate: (path: string, params?: Record<string, string>) => void;
   sendAck: (type: string) => void;
   bringAppToFront: () => void;
-  /** The mounted machine's agent-scoped id, for the ?workspace= an overlay
-   * floats over. */
+  /** The mounted workspace's id, for the ?workspace= an overlay floats
+   * over. */
   workspaceAgentId: () => string;
-  /** The mounted machine's host-scoped id: the AI-keys mint endpoint resolves
-   * the owning account from it. */
-  workspaceHostId: () => string;
   openRequestPopup: (requestId: string | null) => void;
 }
 
@@ -80,7 +82,7 @@ export interface EmbedHandlerDeps {
 export function buildEmbedHandlers(
   deps: EmbedHandlerDeps,
 ): Record<string, (message: Record<string, unknown>) => void> {
-  const { contract, navigate, sendAck, bringAppToFront, workspaceAgentId, workspaceHostId, openRequestPopup } =
+  const { contract, navigate, sendAck, bringAppToFront, workspaceAgentId, openRequestPopup } =
     deps;
   const handlers: Record<string, (message: Record<string, unknown>) => void> = {};
   handlers[contract.OPEN_REQUEST_MODAL] = (message) => {
@@ -92,12 +94,13 @@ export function buildEmbedHandlers(
     navigate("/help", { workspace: workspaceAgentId() });
   };
   handlers[contract.OPEN_AI_KEYS_PAGE] = (message) => {
-    // Float the AI-keys mint dialog over this machine (kept mounted), matching
-    // OPEN_HELP above. The mint page keys on the HOST id (ai_keys.py resolves
-    // the owning account from the workspace record's host_id): prefer the host
-    // id the workspace sent, else derive it from the mounted surface.
-    const messageHostId = typeof message.hostId === "string" ? message.hostId : null;
-    navigate("/settings/ai-keys", { workspace: messageHostId ?? workspaceHostId() });
+    // Float the AI-keys mint dialog over this workspace (kept mounted),
+    // matching OPEN_HELP above. The mint page keys on the workspace id
+    // (ai_keys.py dual-accepts a legacy host id too, which is what workspaces
+    // running pre-workspace-id template code still send in `hostId`): prefer
+    // the coordinate the workspace sent, else this surface's workspace id.
+    const messageCoordinate = typeof message.hostId === "string" && message.hostId ? message.hostId : null;
+    navigate("/settings/ai-keys", { workspace: messageCoordinate ?? workspaceAgentId() });
     sendAck(contract.OPEN_AI_KEYS_ACK);
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
@@ -160,9 +163,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       };
       shell.workspaceFrame = frameHandle;
 
-      // A frame armed before the workspace list arrives may be keyed by an
-      // agent id with no host mapping yet (/goto/ only routes host ids);
-      // re-arm when the mapping lands and the URL therefore changes.
+      // A frame armed before the workspace list arrives may be keyed by a
+      // legacy host id with no alias mapping yet; re-arm when the mapping
+      // lands and the URL therefore changes to the workspace-id form.
       unsubscribeWorkspaces = shell.stores.workspaces.onChanged(() => {
         if (armedWorkspaceAnyId !== null) armFrame(shell, armedWorkspaceAnyId);
       });
@@ -180,7 +183,6 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           sendAck: (type) => endpoint?.send(type),
           bringAppToFront: () => electronBridge.bringAppToFront(),
           workspaceAgentId: () => shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
-          workspaceHostId: () => shell.stores.workspaces.toHostScopedId(mountedAnyId()),
           openRequestPopup: (requestId) => {
             shell.openInbox(requestId === null ? {} : { selected: requestId });
             m.redraw();

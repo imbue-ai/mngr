@@ -4,11 +4,10 @@
 //
 // Entries key on `id` (the workspace's agent_id -- its stable, singular
 // identity), and carry `host_id` (the logical machine currently running it:
-// VM / container / remote host). The two are mostly 1:1 today but diverge
-// under future operations: "clone" mints a new agent_id AND host_id, while
-// "move" mints a new host_id but preserves the agent_id. UI state therefore
-// keys on agent_id everywhere, and host_id is used only to build content
-// URLs (`/goto/<host-id>/`, the `host-<hex>.localhost` origin family).
+// VM / container / remote host). Content URLs (`/goto/<workspace-id>/`, the
+// `agent-<hex>.localhost` origin family) are keyed by the workspace id too,
+// so they survive the workspace changing machines; host_id remains only for
+// legacy-coordinate resolution.
 
 import type { UiWorkspaceEntry, UiWorkspacesMessage } from "../channel/messages";
 
@@ -25,7 +24,6 @@ export class WorkspacesStore {
 
   private accentByAnyId = new Map<string, AccentCacheEntry>();
   private agentIdByHostId = new Map<string, string>();
-  private hostIdByAgentId = new Map<string, string>();
   private listeners = new Set<() => void>();
 
   applyWorkspacesMessage(message: UiWorkspacesMessage): void {
@@ -42,7 +40,6 @@ export class WorkspacesStore {
       if (entry.host_id) {
         this.accentByAnyId.set(entry.host_id, cached);
         this.agentIdByHostId.set(entry.host_id, entry.id);
-        this.hostIdByAgentId.set(entry.id, entry.host_id);
       }
     }
     this.emitChanged();
@@ -69,14 +66,12 @@ export class WorkspacesStore {
     return this.agentIdByHostId.get(anyId) ?? anyId;
   }
 
-  /** Translate either coordinate to the host id content URLs need. */
-  toHostScopedId(anyId: string): string {
-    return this.hostIdByAgentId.get(anyId) ?? anyId;
-  }
-
   workspaceFrameUrl(anyId: string): string {
-    const hostScoped = this.toHostScopedId(anyId);
-    return "/forward-bridge?next=" + encodeURIComponent("/goto/" + hostScoped + "/");
+    // Content URLs are keyed by the workspace id (the /goto/ bridge and the
+    // origin family both route it); a host id from persisted state resolves
+    // through the alias map.
+    const workspaceScoped = this.toAgentScopedId(anyId);
+    return "/forward-bridge?next=" + encodeURIComponent("/goto/" + workspaceScoped + "/");
   }
 
   isDestroying(anyId: string): boolean {

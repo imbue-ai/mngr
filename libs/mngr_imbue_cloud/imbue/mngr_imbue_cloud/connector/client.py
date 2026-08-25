@@ -853,6 +853,7 @@ class ImbueCloudConnectorClient(MutableModel):
         host_id: str,
         entry_label: str | None = None,
         preferred_region: str | None = None,
+        workspace_id: str | None = None,
     ) -> ShareInfo:
         """Enable sharing for one workspace; the returned relay token is only ever returned here.
 
@@ -866,6 +867,10 @@ class ImbueCloudConnectorClient(MutableModel):
         keeps an existing share's region.
         """
         body_json: dict[str, str] = {"host_id": host_id}
+        if workspace_id:
+            # Workspace-keyed sharing: the connector mints (and persists) the
+            # share label so the domain follows the workspace, not the machine.
+            body_json["workspace_id"] = workspace_id
         if entry_label:
             body_json["entry_label"] = entry_label
         if preferred_region:
@@ -1309,12 +1314,24 @@ class ImbueCloudConnectorClient(MutableModel):
         """
         response = self._send(
             "PUT",
-            self._url(f"/sync/records/{record.host_id}"),
+            self._url(f"/sync/records/by-workspace/{record.agent_id}"),
             exc_cls=ImbueCloudSyncError,
             headers=self._bearer(access_token),
             json=record.model_dump(mode="json"),
             timeout=self.timeout_seconds,
         )
+        if response.status_code == 404:
+            # CLEANUP: drop this fallback once every supported connector serves
+            # the workspace-keyed sync routes (a 404 here can only be a server
+            # from before they existed -- the route itself never 404s).
+            response = self._send(
+                "PUT",
+                self._url(f"/sync/records/{record.host_id}"),
+                exc_cls=ImbueCloudSyncError,
+                headers=self._bearer(access_token),
+                json=record.model_dump(mode="json"),
+                timeout=self.timeout_seconds,
+            )
         if response.status_code == 409:
             detail_message = _detail_from_response(response)
             detail = _detail_dict_from_response(response)
@@ -1332,7 +1349,7 @@ class ImbueCloudConnectorClient(MutableModel):
         return validate_wire(SyncWorkspaceRecord, body)
 
     def delete_sync_record(self, access_token: SecretStr, host_id: str) -> None:
-        """Remove one workspace record outright (disassociation; idempotent)."""
+        """Remove one workspace record by its current host id (disassociation; idempotent)."""
         response = self._send(
             "DELETE",
             self._url(f"/sync/records/{host_id}"),
@@ -1340,6 +1357,31 @@ class ImbueCloudConnectorClient(MutableModel):
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
         )
+        self._check(response, ImbueCloudSyncError)
+
+    def delete_sync_record_by_workspace(self, access_token: SecretStr, workspace_id: str) -> None:
+        """Remove one workspace record by its workspace id (disassociation; idempotent).
+
+        Against a connector from before the workspace-keyed routes, resolves
+        the workspace's current host id through the record listing and deletes
+        by host instead.
+        """
+        response = self._send(
+            "DELETE",
+            self._url(f"/sync/records/by-workspace/{workspace_id}"),
+            exc_cls=ImbueCloudSyncError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            # CLEANUP: drop this fallback once every supported connector serves
+            # the workspace-keyed sync routes. The listing round-trip is the
+            # only way to recover the host coordinate the old route needs.
+            for record in self.list_sync_records(access_token):
+                if record.agent_id == workspace_id:
+                    self.delete_sync_record(access_token, record.host_id)
+                    return
+            return
         self._check(response, ImbueCloudSyncError)
 
     def scrub_sync_secrets(self, access_token: SecretStr) -> int:

@@ -1498,6 +1498,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Persist agent data to external storage via the provider."""
         self.provider_instance.persist_agent_data(self.id, agent_data)
 
+    def remove_agent_data(self, agent_id: AgentId) -> None:
+        """Remove agent data from external storage via the provider."""
+        self.provider_instance.remove_persisted_agent_data(self.id, agent_id)
+
     def get_agents(self) -> list[AgentInterface]:
         """Get all agents on this host."""
         agents_dir = get_agents_root_dir(self.host_dir)
@@ -3110,7 +3114,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
                 # Remove persisted agent data from external storage (e.g., Modal volume).
                 try:
-                    self.provider_instance.remove_persisted_agent_data(self.id, agent.id)
+                    self.remove_agent_data(agent.id)
                 except MngrError as e:
                     logger.warning(
                         "Failed to remove persisted data for agent {} on host {}: {}", agent.name, self.id, e
@@ -3524,7 +3528,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         when its environ carries the marker. The server hosts *every* agent's session
         on the host, so it is never a legitimate member of one agent's process tree --
         but it inherits the environment of whichever process happens to fork it, and
-        when that was an agent-context ``mngr start`` (e.g. the workspace template's
+        when that was an agent-context ``mngr start`` (e.g. a project template's
         boot units, which source the system-services agent's env before relaunching
         it), the marker brands the server as that agent's. Sweeping it up then kills
         every agent on the host, and when the sweep was requested from inside one of

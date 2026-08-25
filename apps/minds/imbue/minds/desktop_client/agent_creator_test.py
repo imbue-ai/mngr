@@ -25,8 +25,8 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
-from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES
@@ -1112,7 +1112,7 @@ def _make_test_creator(
     mngr_binary: str | None = None,
     on_create_attempts_changed: Callable[[], None] | None = None,
 ) -> AgentCreator:
-    paths = WorkspacePaths(data_dir=tmp_path)
+    paths = InstallationPaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
     cg.__enter__()
     return AgentCreator(
@@ -1167,9 +1167,8 @@ def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None
     creator = _make_test_creator(tmp_path, mngr_forward_port=0, preauth_cookie="anything")
     log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
-    host_id = HostId.generate()
     started = time.monotonic()
-    creator._wait_for_workspace_ready(aid, host_id, log_sink, creator.workspace_ready_timeout_seconds)
+    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
     # Returns immediately -- no network calls, no log lines.
     assert time.monotonic() - started < 0.1
     assert log_sink.appended_line_count == 0
@@ -1180,9 +1179,8 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
     creator = _make_test_creator(tmp_path, mngr_forward_port=8421, preauth_cookie="")
     log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
-    host_id = HostId.generate()
     started = time.monotonic()
-    creator._wait_for_workspace_ready(aid, host_id, log_sink, creator.workspace_ready_timeout_seconds)
+    creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
     assert time.monotonic() - started < 0.1
     assert log_sink.appended_line_count == 0
 
@@ -1204,7 +1202,7 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
         # answers it without any ``*.localhost`` name resolution. Construct a
         # plausible-looking AgentId so the Host header is well-formed.
         aid = AgentId.generate()
-        creator._wait_for_workspace_ready(aid, HostId.generate(), log_sink, creator.workspace_ready_timeout_seconds)
+        creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
     drained = list(log_sink.read_chunk(0, timeout_seconds=0.0).lines)
     assert any("Waiting for system interface" in line for line in drained)
     # Assert the *success* line specifically -- the timeout-warning line also
@@ -1240,9 +1238,7 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
             probe_timeout_seconds=0.5,
             system_interface_health_tracker=tracker,
         )
-        creator._wait_for_workspace_ready(
-            aid, HostId.generate(), CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds
-        )
+        creator._wait_for_workspace_ready(aid, CreateAttemptLogSink(), creator.workspace_ready_timeout_seconds)
     # ``record_probe_success`` de-enrolled the agent, so it is no longer a
     # probe target and the background loop will stop polling it.
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
@@ -1264,12 +1260,12 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
         captured.append(request)
         return httpx.Response(200, text="ok")
 
-    host_id = HostId.generate()
+    workspace_id = AgentId.generate()
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
         status = probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
-            workspace_host_id=str(host_id),
+            workspace_id=str(workspace_id),
             probe_timeout_seconds=0.5,
             client=client,
         )
@@ -1278,8 +1274,10 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
     assert len(captured) == 1
     assert captured[0].url.path == "/"
     # The workspace vhost rides the Host header, not the URL host, so the
-    # probe does not depend on ``*.localhost`` resolution.
-    assert captured[0].headers["host"] == f"{host_id}.localhost"
+    # probe does not depend on ``*.localhost`` resolution. It is the
+    # agent-keyed canonical origin: the plugin only redirects or refuses the
+    # legacy host-keyed vhosts, so probing those could never see a 200.
+    assert captured[0].headers["host"] == f"{workspace_id}.localhost"
 
 
 def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
@@ -1299,7 +1297,7 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
         status = probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
-            workspace_host_id=str(HostId.generate()),
+            workspace_id=str(AgentId.generate()),
             probe_timeout_seconds=0.5,
             client=client,
         )
@@ -1324,7 +1322,7 @@ def test_probe_workspace_uses_https_scheme() -> None:
         probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
-            workspace_host_id=str(HostId.generate()),
+            workspace_id=str(AgentId.generate()),
             probe_timeout_seconds=0.5,
             client=client,
         )
@@ -1334,11 +1332,11 @@ def test_probe_workspace_uses_https_scheme() -> None:
 
 
 def test_build_redirect_url_uses_https_scheme(tmp_path) -> None:
-    """The /goto redirect URL the UI navigates to uses the proxy's https scheme and the host id."""
+    """The /goto redirect URL the UI navigates to uses the proxy's https scheme and the workspace id."""
     creator = _make_test_creator(tmp_path, mngr_forward_port=8421)
-    host_id = HostId.generate()
-    url = creator._build_redirect_url(host_id)
-    assert url == f"https://localhost:8421/goto/{host_id}/"
+    agent_id = AgentId.generate()
+    url = creator._build_redirect_url(agent_id)
+    assert url == f"https://localhost:8421/goto/{agent_id}/"
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
@@ -1355,7 +1353,7 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
         log_sink = CreateAttemptLogSink()
         aid = AgentId.generate()
         started = time.monotonic()
-        creator._wait_for_workspace_ready(aid, HostId.generate(), log_sink, creator.workspace_ready_timeout_seconds)
+        creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
         elapsed = time.monotonic() - started
     # The probe should give up around the timeout; allow a generous margin
     # so we don't flake under load.
@@ -1386,7 +1384,7 @@ def _make_creator_with_cli(tmp_path: Path, cli: RecordingImbueCloudCli) -> Agent
     cg = ConcurrencyGroup(name="agent-creator-test")
     cg.__enter__()
     return AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path),
+        paths=InstallationPaths(data_dir=tmp_path),
         root_concurrency_group=cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         imbue_cloud_cli=cli,
@@ -1518,27 +1516,27 @@ def test_build_mngr_create_command_no_extra_pass_host_env_when_unset(monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# Pending-create-attempt records, workspace-id host label, and in-flight name guard
+# Pending-create-attempt records, create-attempt-id host label, and in-flight name guard
 # ---------------------------------------------------------------------------
 
 
-def test_build_mngr_create_command_stamps_workspace_id_host_label_for_lima() -> None:
+def test_build_mngr_create_command_stamps_create_attempt_id_host_label_for_lima() -> None:
     command = _build_mngr_create_command(
-        LaunchMode.LIMA, HostName("test-agent"), workspace_id_label="create-attempt-abc123"
+        LaunchMode.LIMA, HostName("test-agent"), create_attempt_id_label="create-attempt-abc123"
     )
     label_idx = command.index("--host-label")
-    assert command[label_idx + 1] == "workspace-id=create-attempt-abc123"
+    assert command[label_idx + 1] == "create-attempt-id=create-attempt-abc123"
 
 
-def test_build_mngr_create_command_stamps_workspace_id_host_label_for_docker() -> None:
+def test_build_mngr_create_command_stamps_create_attempt_id_host_label_for_docker() -> None:
     command = _build_mngr_create_command(
-        LaunchMode.DOCKER, HostName("test-agent"), workspace_id_label="create-attempt-abc123"
+        LaunchMode.DOCKER, HostName("test-agent"), create_attempt_id_label="create-attempt-abc123"
     )
     label_idx = command.index("--host-label")
-    assert command[label_idx + 1] == "workspace-id=create-attempt-abc123"
+    assert command[label_idx + 1] == "create-attempt-id=create-attempt-abc123"
 
 
-def test_build_mngr_create_command_omits_workspace_id_host_label_when_unset() -> None:
+def test_build_mngr_create_command_omits_create_attempt_id_host_label_when_unset() -> None:
     for launch_mode in (LaunchMode.LIMA, LaunchMode.DOCKER):
         command = _build_mngr_create_command(launch_mode, HostName("test-agent"))
         assert "--host-label" not in command
@@ -1615,7 +1613,7 @@ def _make_parked_creator(
     cg = ConcurrencyGroup(name="agent-creator-test")
     cg.__enter__()
     return _ParkedAgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds-data"),
+        paths=InstallationPaths(data_dir=tmp_path / "minds-data"),
         root_concurrency_group=cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -1904,7 +1902,7 @@ def test_implicit_discard_destroys_leftover_host_and_deletes_dead_record(tmp_pat
                     "name": "retry-name-90210",
                     "provider": "lima",
                     "state": "BUILDING",
-                    "labels": {"workspace-id": dead_record.create_attempt_id},
+                    "labels": {"create-attempt-id": dead_record.create_attempt_id},
                 }
             ]
         },
@@ -1936,7 +1934,7 @@ def test_implicit_discard_keeps_record_when_the_destroy_fails(tmp_path: Path) ->
                     "id": "host-leftover",
                     "name": "retry-name-90211",
                     "provider": "lima",
-                    "labels": {"workspace-id": dead_record.create_attempt_id},
+                    "labels": {"create-attempt-id": dead_record.create_attempt_id},
                 }
             ]
         },

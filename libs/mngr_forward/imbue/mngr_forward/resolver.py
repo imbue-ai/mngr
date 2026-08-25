@@ -246,8 +246,29 @@ class ForwardResolver(MutableModel):
         with self._lock:
             self._ssh_by_instance[str(instance_key)] = ssh_info
 
+    def resolve_instance_for_coordinate(self, coordinate: str) -> AgentInstanceKey | None:
+        """Map an origin coordinate to the agent instance that serves it.
+
+        The canonical coordinate is the agent id itself; a legacy
+        ``host-<hex>`` coordinate (URLs minted before the agent keying)
+        resolves through :meth:`resolve_agent_for_host`.
+        """
+        if coordinate.startswith("agent-"):
+            with self._lock:
+                candidates = sorted(
+                    instance_str
+                    for instance_str in self._known_agent_instances
+                    if AgentInstanceKey(instance_str).agent_id == coordinate
+                )
+            if not candidates:
+                return None
+            # The same agent id can exist on two hosts during a migration
+            # window; the pick is deterministic (smallest instance key).
+            return AgentInstanceKey(candidates[0])
+        return self.resolve_agent_for_host(coordinate)
+
     def resolve_agent_for_host(self, host_id_str: str) -> AgentInstanceKey | None:
-        """Map a Host-header ``host-<hex>`` coordinate to the agent instance that serves it.
+        """Map a legacy Host-header ``host-<hex>`` coordinate to the agent instance that serves it.
 
         The instance key carries the host coordinate, so membership alone
         answers this. When several known agents share the host (possible in

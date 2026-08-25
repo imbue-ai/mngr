@@ -8,7 +8,7 @@ The retention window is a fixed constant served by the connector (`GET /policies
 
 A destroyed workspace's backup consists of three things:
 
-- its R2 **bucket** (imbue_cloud backups only; named `<account-prefix>--<host-id>`),
+- its R2 **bucket** (imbue_cloud backups only; named `<account-prefix>--<workspace-id>` -- buckets provisioned before workspace-keyed naming carry `<account-prefix>--<host-id>` and are grandfathered),
 
 - its synced **workspace record** (the tombstone, `state = destroyed`, stamped with `destroyed_at` by the connector),
 

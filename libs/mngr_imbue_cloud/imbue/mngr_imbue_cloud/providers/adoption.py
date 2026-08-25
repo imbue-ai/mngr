@@ -731,7 +731,7 @@ def _is_rsa_private_key(private_key_text: str) -> bool:
 def ensure_client_key_current(access: SliceVmAccessInterface, target: SliceAdoptionTarget) -> None:
     """Resume an in-flight client-key rotation, and rotate a legacy RSA client key to Ed25519.
 
-    Subsumes the retired minds-side RSA -> Ed25519 migration for slices: hosts
+    Subsumes the retired client-side RSA -> Ed25519 migration for slices: hosts
     leased before the Ed25519 keygen switch hold RSA-4096 client keys, which
     keep working for SSH but cannot sign the owner-exec envelopes the hosted
     web chrome uses. Rotating through the reconciler desired state (unlike the

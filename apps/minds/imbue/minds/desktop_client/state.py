@@ -24,7 +24,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import ClientEnvConfig
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -95,7 +95,7 @@ class DesktopClientState(MutableModel):
             "derive; wired by create_desktop_client (None only for apps constructed without it)"
         ),
     )
-    api_v1_paths: WorkspacePaths | None = Field(
+    api_v1_paths: InstallationPaths | None = Field(
         default=None, frozen=True, description="Workspace data paths; gates the /api/v1 mount"
     )
     minds_config: MindsConfig | None = Field(default=None, frozen=True, description="Per-user minds config store")

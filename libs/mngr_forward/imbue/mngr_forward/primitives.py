@@ -68,17 +68,23 @@ class ServiceLabel(NonEmptyStr):
 
 # Host-header pattern for the forwarding middleware. Coordinates:
 #
-# - bare workspace origin: ``host-<32hex>.localhost(:port)?`` -> the shell
-# - service origin: ``<name>.host-<32hex>.localhost(:port)?`` -> that service
-# - deeper labels (``sub.<name>.host-<32hex>.localhost``) route to the same
-#   service: the LAST label before the host id is the service name; the rest
+# - bare agent origin: ``agent-<32hex>.localhost(:port)?`` -> the shell
+# - service origin: ``<name>.agent-<32hex>.localhost(:port)?`` -> that service
+# - deeper labels (``sub.<name>.agent-<32hex>.localhost``) route to the same
+#   service: the LAST label before the agent id is the service name; the rest
 #   is the service's own sub-origin space (multi-origin apps).
 #
-# ``127.0.0.1`` stays a synonym for ``localhost``. The host id requires the
-# full 32 hex characters so malformed hosts fall through to the bare-origin
+# The agent id is the canonical origin coordinate: an origin belongs to the
+# agent whose services it serves, and it survives the agent moving to a
+# different host. Legacy ``host-<32hex>`` coordinates (URLs minted before the
+# agent keying) still parse; HTML navigations to them are redirected to the
+# canonical agent origin (see the server's legacy-coordinate handling).
+#
+# ``127.0.0.1`` stays a synonym for ``localhost``. The id requires the full
+# 32 hex characters so malformed hosts fall through to the bare-origin
 # routes instead of being half-parsed.
 FORWARD_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(?:(?P<labels>[a-z0-9_-]+(?:\.[a-z0-9_-]+)*)\.)?(?P<host>host-[a-f0-9]{32})\.(?P<suffix>localhost|127\.0\.0\.1)(?::\d+)?$",
+    r"^(?:(?P<labels>[a-z0-9_-]+(?:\.[a-z0-9_-]+)*)\.)?(?P<coordinate>(?:host|agent)-[a-f0-9]{32})\.(?P<suffix>localhost|127\.0\.0\.1)(?::\d+)?$",
     re.IGNORECASE,
 )
 
@@ -87,25 +93,32 @@ class ParsedForwardHost(FrozenModel):
     """The coordinates parsed from a forward Host header.
 
     ``service_labels`` is None for the bare workspace origin (the shell);
-    otherwise it is the full dotted label chain before the host id, whose
+    otherwise it is the full dotted label chain before the coordinate, whose
     last label selects the service (deeper labels are that service's own
-    sub-origin space). ``workspace_domain`` is the ``host-<hex>.<suffix>``
+    sub-origin space). ``workspace_domain`` is the ``<coordinate>.<suffix>``
     base shared by the shell and every service origin -- the scope of the
     workspace session cookie.
     """
 
-    host_id_str: NonEmptyStr = Field(description="The host-<hex> coordinate from the Host header")
+    coordinate: NonEmptyStr = Field(
+        description="The origin coordinate from the Host header: an agent id, or a legacy host id"
+    )
     service_labels: str | None = Field(
         default=None,
-        description="Full dotted label chain before the host id (e.g. 'sub.svc'); None for the bare origin",
+        description="Full dotted label chain before the coordinate (e.g. 'sub.svc'); None for the bare origin",
     )
     workspace_domain: NonEmptyStr = Field(
-        description="host-<hex>.<localhost|127.0.0.1> -- cookie Domain scope for the workspace",
+        description="<coordinate>.<localhost|127.0.0.1> -- cookie Domain scope for the workspace",
     )
 
     @property
+    def is_legacy_host_coordinate(self) -> bool:
+        """Whether the origin used a pre-agent-keying ``host-<hex>`` coordinate."""
+        return str(self.coordinate).startswith("host-")
+
+    @property
     def service_name(self) -> str | None:
-        """Service label (last label before the host id); None for the bare origin."""
+        """Service label (last label before the coordinate); None for the bare origin."""
         if self.service_labels is None:
             return None
         return self.service_labels.rsplit(".", 1)[-1]
@@ -114,9 +127,10 @@ class ParsedForwardHost(FrozenModel):
 def parse_forward_host(host_header: str) -> ParsedForwardHost | None:
     """Parse a Host header into its workspace/service coordinates, or None.
 
-    Returns None when the host is not an ``[<labels>.]host-<hex>.localhost``
-    shape at all. Labels are lowercased (DNS names are case-insensitive;
-    registration only accepts lowercase labels).
+    Returns None when the host is not an ``[<labels>.]<coordinate>.localhost``
+    shape at all (the coordinate being an agent id or a legacy host id).
+    Labels are lowercased (DNS names are case-insensitive; registration only
+    accepts lowercase labels).
     """
     if not host_header:
         return None
@@ -124,12 +138,12 @@ def parse_forward_host(host_header: str) -> ParsedForwardHost | None:
     if match is None:
         return None
     labels = match.group("labels")
-    host = match.group("host").lower()
+    coordinate = match.group("coordinate").lower()
     suffix = match.group("suffix").lower()
     return ParsedForwardHost(
-        host_id_str=NonEmptyStr(host),
+        coordinate=NonEmptyStr(coordinate),
         service_labels=labels.lower() if labels else None,
-        workspace_domain=NonEmptyStr(f"{host}.{suffix}"),
+        workspace_domain=NonEmptyStr(f"{coordinate}.{suffix}"),
     )
 
 

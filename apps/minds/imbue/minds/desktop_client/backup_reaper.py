@@ -38,11 +38,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_env_store import backup_env_dir
 from imbue.minds.desktop_client.backup_env_store import canonical_env_path
-from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_env_store import split_backup_bucket_name_from_env
 from imbue.minds.desktop_client.backup_export import is_export_in_flight
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -68,10 +68,6 @@ _RETENTION_POLICY_PATH: Final[str] = "/policies/destroyed-workspace-backups"
 _RETENTION_FETCH_TIMEOUT_SECONDS: Final[float] = 10.0
 _RETENTION_CACHE_TTL_SECONDS: Final[float] = 60.0 * 60.0
 
-# An imbue_cloud backup repository lives on R2; anything else is a BYO
-# backend whose storage is not ours to delete.
-_R2_ENDPOINT_MARKER: Final[str] = ".r2.cloudflarestorage.com"
-
 # Events land under events/<source>/events.jsonl in the minds data dir.
 _EVENT_SOURCE: Final[str] = "backup_reaper"
 
@@ -85,8 +81,9 @@ class ReapCandidate(FrozenModel):
 
     user_id: str = Field(description="Owning account's user id")
     account_email: str = Field(description="Owning account's email (CLI --account)")
-    agent_id: str = Field(description="Workspace agent id (keys the local env file)")
-    host_id: str = Field(description="Workspace host id (names the backup bucket)")
+    agent_id: str = Field(description="Workspace id (keys the record and the local env file)")
+    host_id: str = Field(description="The workspace's machine id (names legacy backup buckets)")
+    backup_bucket: str | None = Field(default=None, description="Full backup bucket name from the record, when known")
     display_name: str = Field(description="Workspace display name (for logs/events)")
     destroyed_at: datetime = Field(description="When the workspace was tombstoned")
 
@@ -104,34 +101,16 @@ def parse_destroyed_at(value: str | None) -> datetime | None:
 
 
 @pure
-def _split_backup_bucket_name_from_env(env_content: str) -> tuple[str, str] | None:
-    """``(owner_prefix, short_name)`` of the backup bucket from a canonical env, or None for BYO backends.
-
-    imbue_cloud repositories look like
-    ``s3:https://<acct>.r2.cloudflarestorage.com/<user-prefix>--<host-id>``;
-    the short name is everything after the owner-prefix separator.
-    """
-    repository = parse_restic_env(env_content).get("RESTIC_REPOSITORY", "")
-    if _R2_ENDPOINT_MARKER not in repository:
-        return None
-    bucket_name = repository.rstrip("/").rsplit("/", 1)[-1]
-    if "--" not in bucket_name:
-        return None
-    owner_prefix, _, short_name = bucket_name.partition("--")
-    return owner_prefix, short_name
-
-
-@pure
 def bucket_short_name_from_env(env_content: str) -> str | None:
-    """The backup bucket's short name (its host id) from a canonical env, or None for BYO backends."""
-    parsed = _split_backup_bucket_name_from_env(env_content)
+    """The backup bucket's short name from a canonical env, or None for BYO backends."""
+    parsed = split_backup_bucket_name_from_env(env_content)
     return parsed[1] if parsed is not None else None
 
 
 @pure
 def bucket_owner_prefix_from_env(env_content: str) -> str | None:
     """The backup bucket's owner prefix from a canonical env, or None for BYO backends."""
-    parsed = _split_backup_bucket_name_from_env(env_content)
+    parsed = split_backup_bucket_name_from_env(env_content)
     return parsed[0] if parsed is not None else None
 
 
@@ -164,7 +143,7 @@ def fetch_retention_seconds(connector_url: str) -> float | None:
     return float(raw_value)
 
 
-def append_reaper_event(paths: WorkspacePaths, event_type: str, payload: Mapping[str, object]) -> None:
+def append_reaper_event(paths: InstallationPaths, event_type: str, payload: Mapping[str, object]) -> None:
     """Append one event to events/backup_reaper/events.jsonl (best-effort)."""
     events_path = paths.data_dir / "events" / _EVENT_SOURCE / "events.jsonl"
     envelope: dict[str, object] = {
@@ -204,6 +183,7 @@ def collect_destroyed_candidates(
                     account_email=account_email,
                     agent_id=record.agent_id,
                     host_id=record.host_id,
+                    backup_bucket=record.backup_bucket,
                     display_name=record.display_name,
                     destroyed_at=destroyed_at,
                 )
@@ -211,11 +191,26 @@ def collect_destroyed_candidates(
     return sorted(candidates, key=lambda candidate: candidate.destroyed_at)
 
 
+@pure
+def candidate_bucket_short_name(candidate: ReapCandidate, env_content: str | None) -> str | None:
+    """The short name of the candidate's backup bucket, or None for BYO backends.
+
+    Resolution order: the record's explicit ``backup_bucket``, then the local
+    canonical env's repository, then the legacy assumption that the bucket is
+    named by the machine's host id (records that predate both sources).
+    """
+    if candidate.backup_bucket and "--" in candidate.backup_bucket:
+        return candidate.backup_bucket.split("--", 1)[1]
+    if env_content is not None:
+        return bucket_short_name_from_env(env_content)
+    return candidate.host_id
+
+
 def _is_bucket_not_found_error(error: ImbueCloudCliError) -> bool:
     return _BUCKET_NOT_FOUND_SIGNAL.lower() in f"{error.stderr} {error}".lower()
 
 
-def list_orphan_env_agent_ids(paths: WorkspacePaths, record_store: WorkspaceRecordStore) -> list[AgentId]:
+def list_orphan_env_agent_ids(paths: InstallationPaths, record_store: WorkspaceRecordStore) -> list[AgentId]:
     """Agent ids of canonical env files referenced by no record of any account, oldest file first."""
     env_dir = backup_env_dir(paths)
     if not env_dir.is_dir():
@@ -233,7 +228,7 @@ class BackupReaperManager(MutableModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    paths: WorkspacePaths = Field(frozen=True, description="The minds data-dir layout")
+    paths: InstallationPaths = Field(frozen=True, description="The minds data-dir layout")
     record_store: WorkspaceRecordStore = Field(frozen=True, description="The workspace-record replica")
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         frozen=True, default=None, description="CLI for bucket destroys; None disables bucket reaping"
@@ -344,10 +339,7 @@ class BackupReaperManager(MutableModel):
             logger.debug("Backup reaper: skipping {} (export in flight)", candidate.agent_id)
             return False
         env_content = read_canonical_env(self.paths, agent_id)
-        bucket_short_name = bucket_short_name_from_env(env_content) if env_content is not None else None
-        if bucket_short_name is None and env_content is None:
-            # No local env: the bucket (if any) is named by the host id.
-            bucket_short_name = candidate.host_id
+        bucket_short_name = candidate_bucket_short_name(candidate, env_content)
         if bucket_short_name is not None and self.imbue_cloud_cli is not None:
             try:
                 self.imbue_cloud_cli.destroy_bucket_force(candidate.account_email, bucket_short_name)
@@ -361,7 +353,7 @@ class BackupReaperManager(MutableModel):
                     )
                     return False
         try:
-            self.record_store.remove_record_or_raise(candidate.user_id, candidate.account_email, candidate.host_id)
+            self.record_store.remove_record_or_raise(candidate.user_id, candidate.account_email, candidate.agent_id)
         except WorkspaceSyncError as e:
             logger.debug("Backup reaper: record removal for {} failed: {}", candidate.agent_id, e)
             append_reaper_event(
@@ -455,7 +447,7 @@ class BackupReaperManager(MutableModel):
 def evict_oldest_reapable_backup(
     *,
     record_store: WorkspaceRecordStore,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     imbue_cloud_cli: ImbueCloudCli,
     user_id: str,
     account_email: str,
@@ -480,7 +472,7 @@ def evict_oldest_reapable_backup(
             logger.debug("Quota eviction: skipping {} (export in flight)", candidate.agent_id)
             continue
         env_content = read_canonical_env(paths, agent_id)
-        bucket_short_name = bucket_short_name_from_env(env_content) if env_content is not None else candidate.host_id
+        bucket_short_name = candidate_bucket_short_name(candidate, env_content)
         if bucket_short_name is None:
             # BYO backend: destroying it would not free imbue_cloud quota.
             continue
@@ -495,7 +487,7 @@ def evict_oldest_reapable_backup(
             continue
         # Bucket destroyed: finish the atomic early-delete (record + env).
         try:
-            record_store.remove_record_or_raise(user_id, account_email, candidate.host_id)
+            record_store.remove_record_or_raise(user_id, account_email, candidate.agent_id)
         except WorkspaceSyncError as e:
             logger.warning("Evicted {}'s bucket but could not remove its record: {}", candidate.agent_id, e)
         canonical_env_path(paths, agent_id).unlink(missing_ok=True)
@@ -523,7 +515,7 @@ def evict_oldest_reapable_backup(
 def make_quota_evictor(
     *,
     record_store: WorkspaceRecordStore,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     imbue_cloud_cli: ImbueCloudCli,
     user_id: str,
     account_email: str,

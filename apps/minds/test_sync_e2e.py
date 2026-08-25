@@ -54,7 +54,7 @@ from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import _backend_origin_from_page
-from imbue.minds.desktop_client.e2e_workspace_runner import _host_id_from_subdomain
+from imbue.minds.desktop_client.e2e_workspace_runner import _workspace_coordinate_from_subdomain
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import electron_app_session
@@ -329,26 +329,30 @@ def _unwrapped_dek(bundle: SyncKeyBundle, password: str) -> bytes:
 def _create_unassociated_workspace(runtime: _SyncE2ERuntime) -> str:
     """Drive the real create form (signed out, local preset) and return the agent id."""
     workspace_name = f"synce2e-{get_short_random_string()}"
-    created_host_ids: list[str] = []
+    created_coordinates: list[str] = []
     create_workspace_via_electron(
         runtime.template_path,
         workspace_name,
         find_free_port(),
         host_config_dir=runtime.host_config_root,
-        on_workspace_ready=lambda page: created_host_ids.append(_host_id_from_subdomain(page.url)),
+        on_workspace_ready=lambda page: created_coordinates.append(_workspace_coordinate_from_subdomain(page.url)),
     )
-    assert created_host_ids, "The create flow finished without a workspace URL"
-    agent_id = _agent_id_for_host_id(runtime, created_host_ids[0])
-    logger.info("Created workspace {} -> {} (host {})", workspace_name, agent_id, created_host_ids[0])
+    assert created_coordinates, "The create flow finished without a workspace URL"
+    agent_id = _agent_id_for_coordinate(runtime, created_coordinates[0])
+    logger.info("Created workspace {} -> {} (coordinate {})", workspace_name, agent_id, created_coordinates[0])
     return agent_id
 
 
-def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
-    """Map the workspace host coordinate (from content URLs) to its agent id via ``mngr list``.
+def _agent_id_for_coordinate(runtime: _SyncE2ERuntime, coordinate: str) -> str:
+    """Map a content-URL origin coordinate to its agent id.
 
-    Content URLs are host-keyed while the app's records, settings routes, and
-    sync records stay agent-keyed, so the flow needs this translation once.
+    New content URLs carry the workspace's agent id directly; a legacy
+    ``host-<hex>`` coordinate needs the one host->agent translation via
+    ``mngr list`` (the app's records, settings routes, and sync records are
+    agent-keyed).
     """
+    if coordinate.startswith("agent-"):
+        return coordinate
     # ``--on-error continue`` with the provider-inaccessible exit code (6)
     # tolerated: the offload sandbox runs as root, where limactl refuses to
     # start, so the configured lima provider is always inaccessible there; the
@@ -377,9 +381,9 @@ def _agent_id_for_host_id(runtime: _SyncE2ERuntime, host_id: str) -> str:
     data = json.loads(result.stdout)
     for raw in data.get("agents", []) if isinstance(data, dict) else []:
         host = raw.get("host") if isinstance(raw.get("host"), dict) else {}
-        if host.get("id") == host_id and raw.get("id"):
+        if host.get("id") == coordinate and raw.get("id"):
             return str(raw["id"])
-    raise AssertionError(f"No agent on host {host_id!r} in `mngr list` output:\n{result.stdout[:4000]}")
+    raise AssertionError(f"No agent on host {coordinate!r} in `mngr list` output:\n{result.stdout[:4000]}")
 
 
 def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password: str) -> str:

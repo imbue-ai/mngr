@@ -22,7 +22,7 @@ from pathlib import Path
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.backup_env_store import read_canonical_env
@@ -113,7 +113,7 @@ def is_export_in_flight(agent_id: AgentId) -> bool:
 
 def export_snapshot_zip(
     *,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     agent_id: AgentId,
     host_id: str,
     snapshot: str = "latest",
@@ -133,7 +133,7 @@ def export_snapshot_zip(
 
 def _export_snapshot_zip_inner(
     *,
-    paths: WorkspacePaths,
+    paths: InstallationPaths,
     agent_id: AgentId,
     host_id: str,
     snapshot: str,

@@ -35,7 +35,7 @@ from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.imbue_common.sentry.core import get_attachments_uploader
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
-from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.console_log_staging import read_console_tail
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -277,7 +277,7 @@ def submit_bug_report_from_body(
     body: Mapping[str, Any],
     session_store: MultiAccountSessionStore | None,
     backend_resolver: BackendResolverInterface | None,
-    paths: WorkspacePaths | None,
+    paths: InstallationPaths | None,
     attachment_omissions: Mapping[str, str],
     report_file_paths: Mapping[str, Path] = _NO_REPORT_FILE_PATHS,
     report_file_uris: Mapping[str, str | None] = _NO_REPORT_FILE_URIS,

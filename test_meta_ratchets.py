@@ -12,8 +12,10 @@ import yaml
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing.common_ratchets import RegexRatchetRule
+from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule
 from imbue.imbue_common.ratchet_testing.common_ratchets import check_ratchet_rule_all_files
 from imbue.imbue_common.ratchet_testing.core import BINARY_FILE_EXCLUSION
+from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
 from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_import_lint_errors
 from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
@@ -402,7 +404,7 @@ def test_prevent_bash_without_strict_mode() -> None:
     violations = [
         v for v in find_bash_scripts_without_strict_mode(_REPO_ROOT) if Path(v).resolve().is_relative_to(checkout_root)
     ]
-    assert len(violations) <= snapshot(12), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
+    assert len(violations) <= snapshot(8), "Bash scripts missing 'set -euo pipefail':\n" + "\n".join(
         f"  - {v}" for v in violations
     )
 
@@ -1266,3 +1268,75 @@ def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
         "Every class in a wire_types.py must inherit WireModel or WireEnum (directly or transitively) "
         "so connector response shapes stay forward compatible:\n" + "\n".join(f"  - {v}" for v in violations)
     )
+
+
+# --- Machine/workspace terminology (see specs/machine-workspace-naming/decisions.md) ---
+
+# Non-test .py files under these globs are mngr-level: they speak host/agent and must
+# not use the minds-level machine/workspace vocabulary or reference minds itself.
+_MNGR_LEVEL_DIR_GLOB = "libs/mngr*"
+
+# Test-infrastructure files are exempt: they may exercise higher-level scenarios and
+# uv-workspace tooling, and their prose is not part of the shipped vocabulary.
+_TERMINOLOGY_TEST_EXCLUSIONS: tuple[str, ...] = ("*_test.py", "test_*.py", "conftest.py", "testing.py")
+
+# mngr_imbue_cloud carve-outs: the wire layer (and the primitives feeding it) mirrors
+# the connector's own vocabulary, which says "workspace"; the bake/slice/admin-CLI
+# operator tooling is minds-level infrastructure living in the plugin until it moves
+# (https://github.com/imbue-ai/mngr-internal/issues/461).
+_IMBUE_CLOUD_TERMINOLOGY_EXEMPT: tuple[str, ...] = (
+    "wire.py",
+    "wire_types.py",
+    "primitives.py",
+    "bake/*.py",
+    "slices/*.py",
+    "cli/*.py",
+    "connector/*.py",
+)
+
+_PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE = RegexRatchetRule(
+    rule_name="workspace vocabulary in mngr-level code",
+    rule_description=(
+        "mngr-level code (libs/mngr and the mngr plugins) speaks host/agent; 'workspace' is the "
+        "minds-level term for the logical unit identified by its system-services agent id. Say "
+        "host, agent, work dir, or project as appropriate (see "
+        "specs/machine-workspace-naming/decisions.md). The uv sense must be spelled 'uv-workspace'."
+    ),
+    # The uv sense is allowed when spelled "uv-workspace" (the lookbehind).
+    pattern_string=r"(?i)(?<!uv-)\bworkspaces?\b",
+)
+
+_PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE = RegexRatchetRule(
+    rule_name="minds references in mngr-level code",
+    rule_description=(
+        "mngr-level code must not reference minds, default-workspace-template, or the "
+        "/home/user/workspace container path -- those are higher-level concerns layered on top "
+        "of mngr (see specs/machine-workspace-naming/decisions.md). Describe the behavior "
+        "generically (e.g. 'a caller may...') instead of naming the higher-level product."
+    ),
+    pattern_string=r"(?i)\bminds\b|default[-_]workspace[-_]template|/home/user/workspace",
+)
+
+
+def _mngr_level_terminology_chunks(rule: RegexRatchetRule) -> list[RatchetMatchChunk]:
+    chunks: list[RatchetMatchChunk] = []
+    for level_dir in sorted(_REPO_ROOT.glob(_MNGR_LEVEL_DIR_GLOB)):
+        if not level_dir.is_dir():
+            continue
+        exclusions = _TERMINOLOGY_TEST_EXCLUSIONS
+        if level_dir.name == "mngr_imbue_cloud":
+            exclusions = exclusions + _IMBUE_CLOUD_TERMINOLOGY_EXEMPT
+        chunks.extend(check_ratchet_rule(rule, level_dir, exclusions))
+    return chunks
+
+
+def test_prevent_workspace_vocabulary_in_mngr_level_code() -> None:
+    """Keep the minds-level 'workspace' vocabulary out of mngr-level code (count may only fall)."""
+    chunks = _mngr_level_terminology_chunks(_PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE)
+    assert len(chunks) <= snapshot(370), _PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))
+
+
+def test_prevent_minds_references_in_mngr_level_code() -> None:
+    """Keep minds / default-workspace-template references out of mngr-level code (count may only fall)."""
+    chunks = _mngr_level_terminology_chunks(_PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE)
+    assert len(chunks) <= snapshot(352), _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))
