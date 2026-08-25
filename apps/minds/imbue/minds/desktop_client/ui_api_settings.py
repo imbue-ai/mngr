@@ -1,22 +1,24 @@
 """/ui/api routes owned by tranche T2 (Settings / Accounts / AI keys).
 
 JSON twins of the data that used to be server-rendered into the Settings,
-Accounts, and AI-keys pages, plus the one settings write the SPA performs
-directly (the error-reporting opt-out). Mutating flows the legacy POST
-routes already implement (permission revokes, connector add/disconnect,
-plan switch, trim, set-default, logout, key mint, master-password change)
-are reused by the SPA as-is and stay in ``app.py``.
+Accounts, and AI-keys pages, plus the settings writes the SPA performs
+directly (the error-reporting opt-out and the notification preferences).
+Mutating flows the legacy POST routes already implement (permission revokes,
+connector add/disconnect, plan switch, trim, set-default, logout, key mint,
+master-password change) are reused by the SPA as-is and stay in ``app.py``.
 
-The error-reporting write is a minds-owned record, so it carries the
-optimistic-concurrency contract: ``GET /ui/api/settings`` returns a
-``version`` derived from the stored value, and the write requires that
-version in ``If-Match`` (412 on mismatch, 428 when absent) so a stale
-window can never silently clobber a newer change.
+The error-reporting and notification-prefs writes are minds-owned records,
+so each carries the optimistic-concurrency contract: ``GET /ui/api/settings``
+returns a per-record ``version`` derived from that record's stored values,
+and the write requires that version in ``If-Match`` (412 on mismatch, 428
+when absent) so a stale window can never silently clobber a newer change.
 """
 
 import hashlib
 import json
 import os
+from typing import Callable
+from typing import TypeVar
 
 from flask import Blueprint
 from flask import Response
@@ -42,10 +44,35 @@ from imbue.minds.desktop_client.latchkey.permission_overview import WorkspaceFil
 from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
 from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
+from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
+from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.mngr_settings.imbue_cloud_accounts import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+
+_WriteT = TypeVar("_WriteT", bound=FrozenModel)
+
+
+class UiNotificationPrefs(FrozenModel):
+    """The notification-prefs record on the settings overview."""
+
+    is_enabled: bool = Field(description="Master notifications toggle (gates every OS nudge the app sends)")
+    style: NotificationStyle = Field(description="Delivery style for feed-backed notifications")
+    is_os_hint_dismissed: bool = Field(description="Whether the one-time OS-notification hint was dismissed")
+    os_permission_confirmed: bool = Field(
+        description="Whether the desktop app has ever confirmed native OS notification permission is granted"
+    )
+    version: str = Field(description="If-Match version for the notification-prefs write")
+
+
+class UiNotificationPrefsWrite(FrozenModel):
+    """Body of the notification-prefs write."""
+
+    is_enabled: bool = Field(description="New master-toggle value")
+    style: NotificationStyle = Field(description="New delivery style")
+    is_os_hint_dismissed: bool = Field(description="New hint-dismissed value")
 
 
 class UiSettingsOverview(FrozenModel):
@@ -60,6 +87,9 @@ class UiSettingsOverview(FrozenModel):
     is_master_password_set: bool = Field(description="Whether any signed-in account has a master password")
     report_unexpected_errors: bool = Field(description="The per-machine error-reporting opt-out state")
     version: str = Field(description="If-Match version for the error-reporting write")
+    notification_prefs: UiNotificationPrefs = Field(
+        description="Notification preferences, carrying their own If-Match version"
+    )
 
 
 class UiErrorReportingWrite(FrozenModel):
@@ -168,6 +198,39 @@ def compute_error_reporting_version(report_unexpected_errors: bool) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
+def compute_notification_prefs_version(is_enabled: bool, style: str, is_os_hint_dismissed: bool) -> str:
+    """The If-Match version of the notification-prefs record: a hash of its stored values.
+
+    A per-record version (rather than folding these values into the
+    error-reporting version) keeps each record's writes from 412-ing pages
+    that only touched the other record.
+    """
+    canonical = json.dumps(
+        {"is_enabled": is_enabled, "is_os_hint_dismissed": is_os_hint_dismissed, "style": style},
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _current_notification_prefs() -> UiNotificationPrefs:
+    """The stored notification-prefs record (defaults when no MindsConfig is wired)."""
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        is_enabled = True
+        style: NotificationStyle = DEFAULT_NOTIFICATION_STYLE
+        is_os_hint_dismissed = False
+        os_permission_confirmed = False
+    else:
+        is_enabled, style, is_os_hint_dismissed, os_permission_confirmed = minds_config.get_notification_prefs()
+    return UiNotificationPrefs(
+        is_enabled=is_enabled,
+        style=style,
+        is_os_hint_dismissed=is_os_hint_dismissed,
+        os_permission_confirmed=os_permission_confirmed,
+        version=compute_notification_prefs_version(is_enabled, style, is_os_hint_dismissed),
+    )
+
+
 def _find_permission_grant_handler() -> LatchkeyPermissionGrantHandler | None:
     for handler in get_state().request_event_handlers:
         if isinstance(handler, LatchkeyPermissionGrantHandler):
@@ -231,8 +294,63 @@ def _handle_settings_overview() -> Response:
         is_master_password_set=_is_any_account_master_password_set(),
         report_unexpected_errors=report_unexpected_errors,
         version=compute_error_reporting_version(report_unexpected_errors),
+        notification_prefs=_current_notification_prefs(),
     )
     return _json_response(overview)
+
+
+def _handle_if_match_write(
+    minds_config: MindsConfig,
+    write_model_type: type[_WriteT],
+    apply_versioned_write: Callable[[MindsConfig, _WriteT, str], str | None],
+) -> Response:
+    """Shared If-Match-guarded settings write: parse the body, compare-and-swap, respond.
+
+    ``apply_versioned_write`` performs the version check AND the persistence (plus any
+    side effects) atomically -- under one MindsConfig lock hold, not two separate calls --
+    and returns the record's new version, or None on a version mismatch. Shared across
+    every minds-owned settings record so each one doesn't reimplement the same
+    parse/validate/If-Match/compare-and-swap skeleton.
+    """
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _error_response("Invalid JSON body", 400)
+    try:
+        write = write_model_type.model_validate(body)
+    except ValidationError as e:
+        logger.debug("Rejected a malformed settings write body: {}", e)
+        return _error_response("Invalid JSON body", 400)
+    provided_version = request.headers.get("If-Match")
+    if provided_version is None:
+        return _error_response("If-Match header is required for this write", 428)
+    new_version = apply_versioned_write(minds_config, write, provided_version)
+    if new_version is None:
+        return _error_response("The setting changed since this page loaded", 412)
+    return Response(json.dumps({"version": new_version}), mimetype="application/json")
+
+
+def _apply_error_reporting_write(
+    minds_config: MindsConfig, write: UiErrorReportingWrite, expected_version: str
+) -> str | None:
+    # Compare-and-swap under one MindsConfig lock hold: checking the version and applying
+    # the write as two separate locked calls would let a concurrent writer starting from
+    # the same version slip in between them and silently clobber this write with no
+    # conflict reported to either side.
+    new_version = minds_config.set_report_unexpected_errors_if_version_matches(
+        expected_version=expected_version,
+        compute_version=compute_error_reporting_version,
+        enabled=write.report_unexpected_errors,
+    )
+    if new_version is None:
+        return None
+    # Mirror the change into the detached ``mngr latchkey forward`` daemon's
+    # live consent file (read per event) so the opt-out takes effect without
+    # an app restart, exactly as the legacy /_chrome/error-reporting write did.
+    write_latchkey_forward_sentry_consent(
+        latchkey_forward_sentry_consent_path(minds_config.data_dir),
+        is_error_reporting_enabled=write.report_unexpected_errors,
+    )
+    return new_version
 
 
 def _handle_error_reporting_write() -> Response:
@@ -242,30 +360,77 @@ def _handle_error_reporting_write() -> Response:
     minds_config = get_state().minds_config
     if minds_config is None:
         return _error_response("Settings storage is not configured", 503)
+    return _handle_if_match_write(
+        minds_config=minds_config,
+        write_model_type=UiErrorReportingWrite,
+        apply_versioned_write=_apply_error_reporting_write,
+    )
+
+
+def _apply_notification_prefs_write(
+    minds_config: MindsConfig, write: UiNotificationPrefsWrite, expected_version: str
+) -> str | None:
+    # Compare-and-swap under one MindsConfig lock hold, same rationale as
+    # _apply_error_reporting_write above: the version check and the write must not be two
+    # separate locked calls, or a concurrent writer starting from the same version could
+    # slip in between them and silently clobber this write.
+    return minds_config.set_notification_prefs_if_version_matches(
+        expected_version=expected_version,
+        compute_version=compute_notification_prefs_version,
+        is_enabled=write.is_enabled,
+        style=write.style,
+        is_os_hint_dismissed=write.is_os_hint_dismissed,
+    )
+
+
+def _handle_notification_prefs_write() -> Response:
+    """POST /ui/api/settings/notifications: If-Match-guarded notification-prefs write."""
+    if not _is_settings_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    return _handle_if_match_write(
+        minds_config=minds_config,
+        write_model_type=UiNotificationPrefsWrite,
+        apply_versioned_write=_apply_notification_prefs_write,
+    )
+
+
+class UiNotificationOsPermissionWrite(FrozenModel):
+    """Body of the OS-notification-permission-confirmed write."""
+
+    os_permission_confirmed: bool = Field(
+        description="Whether native OS notification permission was just confirmed granted"
+    )
+
+
+def _handle_notification_os_permission_write() -> Response:
+    """POST /ui/api/settings/notification-os-permission: records the desktop app's own
+    best-effort observation of whether native OS notification permission is granted.
+
+    Electron exposes no permission-status API on macOS, so this is set from a
+    probe notification's 'show' event actually firing (or not) -- the one
+    signal available. Deliberately unguarded by If-Match: this is
+    system-observed state the app derives for itself, not a user-typed
+    preference, so a lost update under a race just means probing once more
+    than strictly necessary, never a torn record.
+    """
+    if not _is_settings_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
         return _error_response("Invalid JSON body", 400)
     try:
-        write = UiErrorReportingWrite.model_validate(body)
+        write = UiNotificationOsPermissionWrite.model_validate(body)
     except ValidationError as e:
-        logger.debug("Rejected a malformed error-reporting write body: {}", e)
+        logger.debug("Rejected a malformed notification-os-permission write body: {}", e)
         return _error_response("Invalid JSON body", 400)
-    provided_version = request.headers.get("If-Match")
-    if provided_version is None:
-        return _error_response("If-Match header is required for this write", 428)
-    current_version = compute_error_reporting_version(minds_config.get_report_unexpected_errors())
-    if provided_version != current_version:
-        return _error_response("The setting changed since this page loaded", 412)
-    minds_config.set_report_unexpected_errors(write.report_unexpected_errors)
-    # Mirror the change into the detached ``mngr latchkey forward`` daemon's
-    # live consent file (read per event) so the opt-out takes effect without
-    # an app restart, exactly as the legacy /_chrome/error-reporting write did.
-    write_latchkey_forward_sentry_consent(
-        latchkey_forward_sentry_consent_path(minds_config.data_dir),
-        is_error_reporting_enabled=write.report_unexpected_errors,
-    )
-    new_version = compute_error_reporting_version(write.report_unexpected_errors)
-    return Response(json.dumps({"version": new_version}), mimetype="application/json")
+    minds_config.set_notification_os_permission_confirmed(write.os_permission_confirmed)
+    return Response(status=204)
 
 
 def _handle_accounts_detail() -> Response:
@@ -388,6 +553,12 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
     blueprint.add_url_rule("/api/settings", view_func=_handle_settings_overview)
     blueprint.add_url_rule("/api/settings/error-reporting", view_func=_handle_error_reporting_write, methods=["POST"])
+    blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
+    blueprint.add_url_rule(
+        "/api/settings/notification-os-permission",
+        view_func=_handle_notification_os_permission_write,
+        methods=["POST"],
+    )
     blueprint.add_url_rule("/api/accounts", view_func=_handle_accounts_detail)
     blueprint.add_url_rule("/api/accounts/<user_id>/plan", view_func=_handle_account_plan)
     blueprint.add_url_rule("/api/ai-keys", view_func=_handle_ai_keys_context)

@@ -270,7 +270,13 @@ def run(
 
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
-    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
+    # The master notifications toggle is read live on every dispatch, so a
+    # Settings change silences (or re-enables) every producer without a
+    # restart -- agent-sent notifications and backup failures included.
+    notification_dispatcher = NotificationDispatcher.create(
+        is_electron=is_electron,
+        is_enabled_provider=minds_config.get_notifications_enabled,
+    )
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )

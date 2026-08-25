@@ -813,3 +813,54 @@ def test_dispatcher_returns_400_when_no_handler_claims_request_type(tmp_path: Pa
     response = client.post(f"/requests/{other_request.event_id}/grant")
     assert response.status_code == 400
     assert permission_handler.grant_calls == []
+
+
+def test_notifications_snapshot_tracks_a_request_from_arrival_to_approval(tmp_path: Path) -> None:
+    """The channel snapshot's notifications frame is derived end-to-end from the request inbox.
+
+    Covers the real wiring behind ``derive_notifications``: the displayable
+    pending set, the inbox-card display derivation (catalog title, workspace
+    attribution, brand-mark service), and resolution via a recorded response.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="Needs to read the team channel.",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
+    state = get_state(client.application)
+    publisher = state.ui_publisher
+    assert publisher is not None
+
+    snapshot = publisher.build_snapshot()
+
+    assert snapshot.notifications.unresolved_count == 1
+    (entry,) = snapshot.notifications.entries
+    assert entry.id == str(request.event_id)
+    assert entry.request_id == str(request.event_id)
+    assert entry.is_resolved is False
+    assert entry.outcome is None
+    assert entry.title == "Slack"
+    assert entry.body == "Needs to read the team channel."
+    assert entry.workspace_name == f"ws-{agent_id}"
+    assert entry.workspace_agent_id == str(agent_id)
+    assert entry.service_name == "slack"
+
+    response_event = create_request_response_event(
+        request_event_id=str(request.event_id),
+        status=RequestStatus.GRANTED,
+        agent_id=str(agent_id),
+        request_type=str(RequestType.LATCHKEY_PERMISSION),
+        scope="slack-api",
+    )
+    state.request_inbox = inbox.add_response(response_event)
+
+    resolved_snapshot = publisher.build_snapshot()
+
+    assert resolved_snapshot.notifications.unresolved_count == 0
+    (resolved_entry,) = resolved_snapshot.notifications.entries
+    assert resolved_entry.is_resolved is True
+    assert resolved_entry.outcome == "approved"

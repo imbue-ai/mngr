@@ -11,10 +11,11 @@ export function formatBadgeCount(count: number): string {
 }
 
 /**
- * Notification badge (Badge.jinja). Two shapes chosen by whether `count` is
- * provided: a solid important pill with the number (grows for wider numbers,
- * 99+ cap), or the bare 8px dot for presence-without-a-number. Carries no
- * position of its own -- the caller places it.
+ * Notification badge (Badge.jinja). Three shapes chosen by `count`: the bare
+ * 8px dot for presence-without-a-number, a perfect 14px circle for a single
+ * digit (1-9), or a pill that widens for two-or-more characters (10-99+) --
+ * only the wider counts need the oval shape at all. Carries no position of
+ * its own -- the caller places it.
  */
 export function Badge(): m.Component<BadgeAttrs> {
   return {
@@ -27,14 +28,18 @@ export function Badge(): m.Component<BadgeAttrs> {
           ...passthrough,
         });
       }
+      const label = formatBadgeCount(count);
+      const isSingleDigit = label.length === 1;
       return m(
         "span",
         {
           class:
-            "inline-flex items-center justify-center align-middle min-w-[16px] px-1 py-px rounded-full bg-important text-white type-badge whitespace-nowrap overflow-hidden",
+            "inline-flex items-center justify-center align-middle h-[14px] rounded-full bg-important " +
+            "text-white type-badge whitespace-nowrap overflow-hidden " +
+            (isSingleDigit ? "w-[14px]" : "min-w-[16px] px-1"),
           ...passthrough,
         },
-        formatBadgeCount(count),
+        label,
       );
     },
   };

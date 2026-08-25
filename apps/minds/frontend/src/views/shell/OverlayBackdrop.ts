@@ -14,9 +14,11 @@ export interface OverlayBackdropAttrs {
   onDismiss: () => void;
   backdropId: string;
   // App-level modals cover the whole window -- dim over the titlebar too and
-  // centered in the full height, like the legacy full-window settings modal
-  // (z above the titlebar's z-100). The workspace options overlay stays below
-  // the titlebar (default) so its titlebar tabs remain clickable.
+  // hang from the top of the full height, like the legacy full-window
+  // settings modal (z above the titlebar's z-100). The workspace options
+  // overlay stays below the titlebar (default) so its titlebar tabs remain
+  // clickable, and stays centered there -- it is a docked panel, not a card
+  // reading as "hung from the top" the way the app-level modals do.
   fullWindow?: boolean;
 }
 
@@ -26,11 +28,19 @@ export function OverlayBackdrop(): m.Component<OverlayBackdropAttrs> {
       const positionClass = vnode.attrs.fullWindow
         ? "inset-0 z-[110]"
         : "left-0 right-0 top-[38px] bottom-0 z-[90]";
+      const alignClass = vnode.attrs.fullWindow
+        ? "items-start"
+        : "items-center";
       return m(
         "div",
         {
           id: vnode.attrs.backdropId,
-          class: "fixed " + positionClass + " bg-black/20 flex items-center justify-center p-4",
+          class:
+            "fixed " +
+            positionClass +
+            " bg-black/20 flex " +
+            alignClass +
+            " justify-center p-4",
           onclick: (event: MouseEvent) => {
             if (event.target === event.currentTarget) vnode.attrs.onDismiss();
           },

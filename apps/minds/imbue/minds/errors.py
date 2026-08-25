@@ -91,6 +91,12 @@ class MindsConfigError(MindError):
     ...
 
 
+class NaiveTimestampError(MindError, ValueError):
+    """Raised when a timezone-aware datetime is required but a naive one was passed."""
+
+    ...
+
+
 class WorkspaceNameInUseError(MindError, ValueError):
     """Raised when a create targets a workspace name an in-flight create attempt already holds.
 

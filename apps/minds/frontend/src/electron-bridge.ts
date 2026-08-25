@@ -67,6 +67,14 @@ interface MindsNativeSurface {
    * preload, where it started as the error takeover's button. */
   retry(): void;
   showFilePicker(options: FilePickerOptions): Promise<string | null>;
+  /** Ask the OS for native-notification permission by actually attempting to
+   * show one -- Electron exposes no separate "request" or "check status"
+   * call on macOS. Resolves to whether the OS confirmed it displayed it. */
+  probeNotificationPermission(): Promise<boolean>;
+  /** Open the OS's own notification-settings pane -- no app can force a
+   * re-prompt once permission is declined, so this is the escape hatch.
+   * Resolves to whether it actually opened. */
+  openNotificationSettings(): Promise<boolean>;
   bringAppToFront(): void;
   openWorkspaceInNewWindow(agentId: string): void;
   onNavigate(callback: (url: string) => void): void;
@@ -121,6 +129,16 @@ export const electronBridge = {
     const surface = native();
     if (surface === null) return null;
     return surface.showFilePicker(options);
+  },
+  async probeNotificationPermission(): Promise<boolean> {
+    const surface = native();
+    if (surface === null) return false;
+    return surface.probeNotificationPermission();
+  },
+  async openNotificationSettings(): Promise<boolean> {
+    const surface = native();
+    if (surface === null) return false;
+    return surface.openNotificationSettings();
   },
   bringAppToFront(): void {
     native()?.bringAppToFront();

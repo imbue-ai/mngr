@@ -1,6 +1,7 @@
 const { BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen, nativeImage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 const paths = require('./paths');
 const { initElectronLogging } = require('./logger');
 const { initSentry, captureManualReport } = require('./sentry');
@@ -10,7 +11,7 @@ const { decideStartupRoute } = require('./startup-routing');
 const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
-const { parseWorkspaceId } = require('./surface-routing');
+const { parseWorkspaceId, parseSpaWorkspaceRouteId } = require('./surface-routing');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
 const updater = require('./updater');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
@@ -205,6 +206,19 @@ function findBundlesForWorkspace(workspaceId) {
   return found;
 }
 
+// The most-recently-focused window currently showing ``workspaceId``, or null.
+// Unlike ``findBundlesForWorkspace``, which scans ``bundles`` (Set insertion /
+// window-creation order), this scans ``mruWindows`` (kept in actual
+// most-recently-focused order) -- the ordering a "focus the window already
+// showing this" gesture needs when more than one window is showing it.
+function mostRecentBundleForWorkspace(workspaceId) {
+  if (!workspaceId) return null;
+  for (const b of mruWindows) {
+    if (!b.window.isDestroyed() && sameWorkspaceId(b.currentWorkspaceId, workspaceId)) return b;
+  }
+  return null;
+}
+
 function getBundleFromEvent(event) {
   if (!event || !event.sender) return null;
   const senderId = event.sender.id;
@@ -263,6 +277,25 @@ function focusBundle(bundle) {
   if (bundle.window.isMinimized()) bundle.window.restore();
   if (!bundle.window.isVisible()) bundle.window.show();
   bundle.window.focus();
+}
+
+// focusBundle alone only focuses among the app's OWN windows -- on macOS it
+// does not reliably activate the app over whichever other app currently has
+// focus. Stealing focus first (mac only; the concept doesn't exist on other
+// platforms, where a window-level focus is already enough) covers both the
+// renderer-triggered 'bring-app-to-front' IPC and a notification click: both
+// are the reader acting from OUTSIDE the app, so bringing "a" window to
+// front is not enough if the app itself never comes forward.
+function stealFocusAndFocusBundle(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isMac) app.focus({ steal: true });
+  focusBundle(bundle);
+}
+
+// A notification click needs the same treatment as bring-app-to-front (see
+// stealFocusAndFocusBundle) -- the reader clicked from outside the app.
+function focusBundleFromNotificationClick(bundle) {
+  stealFocusAndFocusBundle(bundle);
 }
 
 // -- Title handling --
@@ -1121,6 +1154,12 @@ function handleShellEvent(evt, senderBundle) {
     if (evt.agent_id && systemInterfaceStatusByAgent.get(String(evt.agent_id)) !== 'restarting') {
       detachWindowsForWorkspace(String(evt.agent_id));
     }
+  } else if (evt.type === 'notifications_count') {
+    // Unresolved-notification count for the macOS dock / Linux launcher (a
+    // no-op on Windows; the in-app bell suffices there). Idempotent, so the
+    // every-window relay of the same broadcast needs no dedupe.
+    const count = Math.max(0, Math.floor(Number(evt.count)) || 0);
+    app.setBadgeCount(count);
   } else if (evt.type === 'open_help') {
     // An in-workspace /assist agent asked to open the report-a-bug modal with
     // its diagnosis. Surface it in ONE window: the one showing that workspace,
@@ -1128,7 +1167,7 @@ function handleShellEvent(evt, senderBundle) {
     const description = typeof evt.description === 'string' ? evt.description : '';
     const wsId = evt.workspace_agent_id ? String(evt.workspace_agent_id) : '';
     if (isDuplicateShellEvent('open_help:' + wsId + ':' + description)) return;
-    const target = (wsId && findBundlesForWorkspace(wsId)[0]) || getMostRecentWindow();
+    const target = (wsId && mostRecentBundleForWorkspace(wsId)) || getMostRecentWindow();
     if (target && !target.window.isDestroyed() && !target.window.webContents.isDestroyed()) {
       target.window.webContents.send('open-overlay', { kind: 'help', workspace: wsId, description });
     }
@@ -1145,6 +1184,7 @@ const KNOWN_SHELL_EVENT_TYPES = new Set([
   'health',
   'workspace_stopped',
   'open_help',
+  'notifications_count',
 ]);
 
 // Only the SPA page itself may drive window management: the sender must be a
@@ -1904,15 +1944,42 @@ function flushPendingDeeplink() {
 function handleNotification(event) {
   const agentName = event.agent_name || 'Agent';
   const title = event.title || `Notification from ${agentName}`;
+  console.log(`[notification] received: title=${JSON.stringify(title)} agent=${agentName}`);
+  if (!Notification.isSupported()) {
+    // No JS-level "ask for permission" exists for Electron's native
+    // Notification module -- macOS owns that decision entirely (System
+    // Settings > Notifications) and never surfaces the verdict back to app
+    // code. isSupported() is the one thing we CAN check: false means this
+    // platform/session cannot show native notifications at all (e.g. no
+    // Notification Center backend available), so show() would silently do
+    // nothing. Log it so "notifications aren't working" is at least
+    // distinguishable from "the OS declined to display it" (unobservable)
+    // versus a real bug upstream of this point.
+    console.warn('[notification] Notification.isSupported() is false -- the OS cannot show native notifications here; skipping .show()');
+    return;
+  }
   const notification = new Notification({
     title,
     body: event.message,
+  });
+  // 'show' fires once the OS has actually presented the banner -- the one
+  // signal that distinguishes "displayed" from "silently declined" (macOS
+  // exposes no permission-check API to app code, so this is the closest
+  // thing to a confirmation we get).
+  notification.on('show', () => {
+    console.log(`[notification] shown by the OS: ${JSON.stringify(title)}`);
+  });
+  // A definitive OS-reported failure (see probeNotificationPermission's own
+  // 'failed' handler) -- distinct from getting neither 'show' nor 'failed'
+  // at all, which the generic hint after .show() below already covers.
+  notification.on('failed', () => {
+    console.warn(`[notification] failed to display (OS-reported): ${JSON.stringify(title)}`);
   });
   notification.on('click', () => {
     const url = event.url;
     if (!url) {
       const mru = getMostRecentWindow();
-      if (mru) focusBundle(mru);
+      if (mru) focusBundleFromNotificationClick(mru);
       return;
     }
     const absolute = toAbsoluteUrl(url);
@@ -1920,22 +1987,155 @@ function handleNotification(event) {
     if (agentId) {
       // The most-recently-focused window already showing this workspace, else
       // navigate the most recent window (never auto-open a new one).
-      const showing = findBundlesForWorkspace(agentId);
-      const target = showing[0] || getMostRecentWindow();
+      const showingBundle = mostRecentBundleForWorkspace(agentId);
+      const target = showingBundle || getMostRecentWindow();
       if (target) {
-        focusBundle(target);
-        if (!showing.includes(target)) navigateBundle(target, absolute);
+        focusBundleFromNotificationClick(target);
+        if (showingBundle === null) navigateBundle(target, absolute);
       }
     } else {
-      const mru = getMostRecentWindow();
-      if (mru) {
-        focusBundle(mru);
-        navigateBundle(mru, absolute);
+      // Notification deep links use the SPA's /workspace/<agent-id>?review=
+      // route -- a chrome-page path, not a workspace origin, so
+      // parseWorkspaceId above cannot see it. Match the path id against each
+      // window's tracked workspace so the window already on that workspace is
+      // the one focused -- and still navigated: it needs the ?review= param
+      // to open the review popup. Anything else falls back to the MRU window.
+      const routeId = parseSpaWorkspaceRouteId(absolute);
+      const target = (routeId && mostRecentBundleForWorkspace(routeId)) || getMostRecentWindow();
+      if (target) {
+        focusBundleFromNotificationClick(target);
+        navigateBundle(target, absolute);
       }
     }
   });
   notification.show();
+  console.log(`[notification] .show() called for ${JSON.stringify(title)} -- if no banner appeared, check System Settings > Notifications for this app`);
 }
+
+// How long to wait for the OS to confirm a probe notification was actually
+// displayed before concluding permission is not granted, on top of the
+// definitive 'failed' event below. Real headroom, not just enough for the
+// typical case: 'show' firing is intermittently slow under an unsigned dev
+// build (see probeNotificationPermission's own comment), observed timing
+// out under 4s and then firing normally moments later with no permission
+// change in between.
+const NOTIFICATION_PERMISSION_PROBE_TIMEOUT_MS = 10000;
+
+// Ask the OS for native-notification permission the only way Electron allows
+// on macOS: by actually attempting to show one. There is no separate
+// "request permission" call -- posting a notification for the first time IS
+// the request, and the system's own "Would You Like to Allow Notifications"
+// dialog appears before the banner does. Resolves true if the OS confirmed
+// it displayed the probe ('show' fired in time), false on a definitive
+// 'failed' event or on timing out unseen (denied, or simply not decided fast
+// enough -- Electron cannot tell the two apart). The probe self-dismisses as
+// soon as it is resolved either way.
+//
+// On macOS, the underlying UNNotification API requires the app to be
+// code-signed for 'show' to fire reliably at all -- an unsigned build (any
+// local dev run of this app, including via `pnpm start`) instead gets an
+// intermittent mix of a delayed 'show', an explicit 'failed', or neither
+// within the timeout, even though the OS's own notification permission is
+// genuinely granted and a banner may visibly appear. This is a real Electron
+// limitation of unsigned binaries (see electronjs.org/docs/latest/api/notification),
+// not a bug in this probe: a packaged, signed build does not have it.
+function probeNotificationPermission() {
+  if (!Notification.isSupported()) {
+    console.warn('[notification] permission probe skipped: Notification.isSupported() is false');
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const notification = new Notification({
+      title: 'Notifications enabled',
+      body: 'minds will notify you here when a machine needs your attention.',
+      silent: true,
+    });
+    let settled = false;
+    const settle = (granted, reason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      notification.close();
+      console.log(`[notification] permission probe ${reason}`);
+      resolve(granted);
+    };
+    const timer = setTimeout(() => settle(false, 'timed out -- treating as declined'), NOTIFICATION_PERMISSION_PROBE_TIMEOUT_MS);
+    notification.on('show', () => settle(true, 'confirmed shown'));
+    // An unsigned build (see this function's own comment) reliably gets this
+    // instead of 'show' -- resolve it immediately rather than waiting out
+    // the full timeout for a verdict the OS already gave.
+    notification.on('failed', () => settle(false, 'failed (likely an unsigned build -- see this function\'s comment)'));
+    notification.show();
+  });
+}
+
+ipcMain.handle('probe-notification-permission', () => probeNotificationPermission());
+
+// Open the OS's own notification-settings pane so the reader can flip the
+// permission back on themselves after declining it -- no app can force a
+// re-prompt once the OS has decided (see probeNotificationPermission).
+// Deliberately opens the general pane rather than deep-linking to this app's
+// own row: on macOS, every locally-run unpackaged dev build shares one
+// "com.github.Electron" identity in the OS's eyes (Electron.app's own
+// Info.plist, regardless of which project's checkout is running), and a
+// packaged build's real bundle id isn't available to look up here anyway.
+function openExternalBestEffort(url) {
+  return shell.openExternal(url).then(
+    () => true,
+    (err) => {
+      console.warn('[notification] failed to open OS notification settings:', err && err.message);
+      return false;
+    },
+  );
+}
+
+// Linux has no cross-desktop-environment URI for this the way macOS has
+// x-apple.systempreferences: -- ms-settings: (the previous fallback here) is
+// a Windows-only scheme that does nothing on Linux, one of the two platforms
+// this app commits to supporting (see CLAUDE.md). Try each desktop
+// environment's own settings command in turn, GNOME first as the most
+// common target, then KDE Plasma, resolving on the first one that actually
+// launches. Spawned detached/unref'd rather than waited on to exit: these
+// are GUI apps the reader may leave open for a while.
+const LINUX_NOTIFICATION_SETTINGS_COMMANDS = [
+  ['gnome-control-center', ['notifications']],
+  ['systemsettings5', ['kcm_notifications']],
+  // KDE dropped the "5" suffix from KF6-based tool binaries (see KDE's own
+  // T14763), so Plasma 6 ships `systemsettings` rather than `systemsettings5`.
+  // Tried after the Plasma 5 name so neither desktop's fallback regresses.
+  ['systemsettings', ['kcm_notifications']],
+];
+
+function trySpawnDetached(command, args) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (ok) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+    child.once('error', () => settle(false));
+    child.once('spawn', () => {
+      child.unref();
+      settle(true);
+    });
+  });
+}
+
+async function openLinuxNotificationSettings() {
+  for (const [command, args] of LINUX_NOTIFICATION_SETTINGS_COMMANDS) {
+    if (await trySpawnDetached(command, args)) return true;
+  }
+  console.warn('[notification] no known Linux notification-settings command was found');
+  return false;
+}
+
+ipcMain.handle('open-notification-settings', () => {
+  if (isMac) return openExternalBestEffort('x-apple.systempreferences:com.apple.preference.notifications');
+  if (process.platform === 'linux') return openLinuxNotificationSettings();
+  return openExternalBestEffort('ms-settings:notifications');
+});
 
 // Trust the forward proxy's CA-signed leaf certs for its loopback origins.
 // The CA is local to this machine (under the plugin state dir) and only
@@ -2032,8 +2232,7 @@ ipcMain.on('bring-app-to-front', (event) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.window.isFocused()) return;
-  if (isMac) app.focus({ steal: true });
-  focusBundle(bundle);
+  stealFocusAndFocusBundle(bundle);
 });
 
 ipcMain.handle('report-error', () => {

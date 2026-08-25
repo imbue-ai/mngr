@@ -26,6 +26,7 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import UiAccountsPermissionDetail
 from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
 from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.mngr.primitives import AgentId
 
@@ -256,3 +257,49 @@ def test_inbox_card_names_the_workspace_not_the_agent_that_filed_the_request(tmp
     assert response.status_code == 200
     card = response.get_json()["cards"][0]
     assert card["workspace_agent_id"] == str(workspace_agent_id)
+
+
+def test_build_notification_card_mirrors_the_inbox_card_derivation() -> None:
+    """The feed-input card carries the same display fields the inbox card renders."""
+    agent_id = AgentId()
+    resolver = _KnownAgentsResolver(url_by_agent_and_service={}, known_agent_ids=(agent_id,))
+    req = _make_stub_request(str(agent_id))
+
+    card = build_notification_card(req, (_StubDetailHandler(),), resolver, {})
+
+    assert card.request_id == str(req.event_id)
+    # The request event's own timestamp rides along so the feed can stamp
+    # entries with when the request was filed (not when it was reconciled).
+    assert card.requested_at == str(req.timestamp)
+    assert card.title == "Stub Service"
+    # The stub kind carries no rationale, so the body is empty.
+    assert card.body == ""
+    assert card.workspace_name == f"ws-{str(agent_id)[:8]}"
+    # No primary agent shares the workspace name, so agent id and accent degrade.
+    assert card.workspace_agent_id == ""
+    assert card.workspace_accent == DEFAULT_WORKSPACE_COLOR
+    assert card.service_name == ""
+
+
+def test_build_notification_card_falls_back_to_the_kind_label_for_unknown_kinds() -> None:
+    """An unclaimed request kind still gets a non-empty headline (the generic kind label)."""
+    agent_id = AgentId()
+    resolver = _KnownAgentsResolver(url_by_agent_and_service={}, known_agent_ids=(agent_id,))
+    req = _make_stub_request(str(agent_id))
+
+    card = build_notification_card(req, (), resolver, {})
+
+    assert card.title == "request"
+
+
+def test_build_notification_card_uses_the_request_rationale_as_the_body() -> None:
+    agent_id = AgentId()
+    resolver = _KnownAgentsResolver(url_by_agent_and_service={}, known_agent_ids=(agent_id,))
+    req = create_latchkey_accounts_permission_request_event(
+        agent_id=str(agent_id),
+        rationale="Needs your device accounts to hand off work.",
+    )
+
+    card = build_notification_card(req, (), resolver, {})
+
+    assert card.body == "Needs your device accounts to hand off work."

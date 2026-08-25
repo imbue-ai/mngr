@@ -28,6 +28,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic import TypeAdapter
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
@@ -156,6 +157,65 @@ class UiRequestsMessage(FrozenModel):
     request_ids: tuple[str, ...] = Field(description="Pending request event ids in deterministic order")
 
 
+class NotificationOutcome(LowerCaseStrEnum):
+    """How a feed entry's request resolved (the lowercase values are the wire strings).
+
+    CLOSED is the feed's own outcome for a request that vanished without a
+    recorded response (e.g. its workspace was destroyed); grant/deny
+    responses only ever record APPROVED or DENIED.
+    """
+
+    APPROVED = auto()
+    DENIED = auto()
+    CLOSED = auto()
+
+
+class UiNotificationEntry(FrozenModel):
+    """One durable entry in the notification feed.
+
+    Display fields are snapshotted at creation so a row still renders after
+    the source request is gone (resolved, or its workspace destroyed).
+    """
+
+    id: str = Field(description="The request event id; unique per entry")
+    kind: Literal["permission_request"] = Field(
+        default="permission_request",
+        description="What produced the entry; permission requests are the only kind today",
+    )
+    created_at: str = Field(
+        description="ISO-8601 UTC timestamp of when the underlying request was filed "
+        "(the request event's own timestamp, so ordering and relative times survive restarts)"
+    )
+    is_resolved: bool = Field(description="Whether the underlying request has been resolved")
+    outcome: NotificationOutcome | None = Field(
+        description="How the request resolved; None while unresolved, "
+        "closed when it was auto-resolved because the request vanished (e.g. workspace destroyed)"
+    )
+    title: str = Field(description="Headline snapshotted at creation (matches the review dialog's)")
+    body: str = Field(description="Secondary line snapshotted at creation; may be empty")
+    request_id: str = Field(description="The originating request event id; opens the review flow while pending")
+    workspace_agent_id: str = Field(description="Origin workspace's agent id; '' when unresolvable")
+    workspace_name: str = Field(description="Origin workspace's display name, snapshotted at creation")
+    workspace_accent: str = Field(description="Origin workspace's ``#rrggbb`` accent, snapshotted at creation")
+    service_name: str = Field(description="Catalog service for the brand mark; '' when none")
+
+
+class UiNotificationsMessage(FrozenModel):
+    """Full notification-feed state (always the complete feed, never a delta).
+
+    Wire order IS display order: unresolved entries first, then resolved,
+    each newest-first.
+    """
+
+    type: Literal["notifications"] = "notifications"
+    entries: tuple[UiNotificationEntry, ...] = Field(description="Every feed entry, in display order")
+    unresolved_count: int = Field(description="Number of unresolved entries")
+    is_snapshot: bool = Field(
+        default=False,
+        description="Whether this frame is the connect-time replay of current state rather than a live edge",
+    )
+
+
 class UiHealthMessage(FrozenModel):
     """One workspace's system-interface health state."""
 
@@ -240,6 +300,10 @@ class UiClientStateMessage(FrozenModel):
     client_id: str = Field(description="Stable per-window id chosen by the client")
     route: str = Field(description="Current SPA route path")
     workspace_agent_id: str | None = Field(default=None, description="Displayed workspace's agent id, if any")
+    has_focus: bool = Field(
+        default=True,
+        description="Whether this window currently has OS/browser focus (resent on every focus/blur)",
+    )
 
 
 # Everything the server may send. The discriminator makes both pydantic
@@ -250,6 +314,7 @@ UiServerMessage = Annotated[
     | UiAccountsMessage
     | UiProvidersMessage
     | UiRequestsMessage
+    | UiNotificationsMessage
     | UiHealthMessage
     | UiDiscoveryHealthMessage
     | UiWorkspaceStoppedMessage
@@ -273,6 +338,7 @@ class UiSnapshot(FrozenModel):
     accounts: UiAccountsMessage = Field(description="Current account-launcher identity")
     providers: UiProvidersMessage = Field(description="Current providers panel state")
     requests: UiRequestsMessage = Field(description="Current inbox summary")
+    notifications: UiNotificationsMessage = Field(description="Current notification feed")
     health: tuple[UiHealthMessage, ...] = Field(description="Per-workspace health states (only tracked workspaces)")
     discovery_health: UiDiscoveryHealthMessage = Field(description="Current discovery pipeline health")
 
@@ -509,6 +575,7 @@ class UiWireSchema(FrozenModel):
     accounts: UiAccountsMessage = Field(description="accounts frame")
     providers: UiProvidersMessage = Field(description="providers frame")
     requests: UiRequestsMessage = Field(description="requests frame")
+    notifications: UiNotificationsMessage = Field(description="notifications frame")
     health: UiHealthMessage = Field(description="health frame")
     discovery_health: UiDiscoveryHealthMessage = Field(description="discovery_health frame")
     workspace_stopped: UiWorkspaceStoppedMessage = Field(description="workspace_stopped frame")

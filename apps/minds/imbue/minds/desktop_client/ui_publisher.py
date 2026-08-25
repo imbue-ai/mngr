@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
 from imbue.minds.desktop_client.ui_models import UiHelloMessage
+from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiReloadMessage
@@ -64,6 +65,9 @@ class UiStatePublisher(MutableModel):
         frozen=True, description="Current providers panel state"
     )
     derive_requests: Callable[[], UiRequestsMessage] = Field(frozen=True, description="Current inbox summary")
+    derive_notifications: Callable[[], UiNotificationsMessage] = Field(
+        frozen=True, description="Current notification feed"
+    )
     derive_discovery_health: Callable[[], UiDiscoveryHealthMessage] = Field(
         frozen=True, description="Current discovery pipeline health"
     )
@@ -115,6 +119,7 @@ class UiStatePublisher(MutableModel):
             accounts=self.derive_accounts(),
             providers=self.derive_providers(),
             requests=self.derive_requests(),
+            notifications=self.derive_notifications(),
             health=self.derive_health_states(),
             discovery_health=self.derive_discovery_health(),
         )
@@ -134,6 +139,10 @@ class UiStatePublisher(MutableModel):
             marked = health_message.model_copy_update(to_update(health_message.field_ref().is_snapshot, True))
             frames.append(marked.model_dump_json())
         frames.append(snapshot.discovery_health.model_dump_json())
+        marked_notifications = snapshot.notifications.model_copy_update(
+            to_update(snapshot.notifications.field_ref().is_snapshot, True)
+        )
+        frames.append(marked_notifications.model_dump_json())
         return frames
 
     def publish_now(self) -> None:
@@ -145,6 +154,7 @@ class UiStatePublisher(MutableModel):
                 | UiAccountsMessage
                 | UiProvidersMessage
                 | UiRequestsMessage
+                | UiNotificationsMessage
                 | UiDiscoveryHealthMessage,
             ],
             ...,
@@ -153,6 +163,7 @@ class UiStatePublisher(MutableModel):
             self.derive_accounts,
             self.derive_providers,
             self.derive_requests,
+            self.derive_notifications,
             self.derive_discovery_health,
         )
         for derive in derives:

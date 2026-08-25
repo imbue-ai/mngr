@@ -6,6 +6,7 @@ notifications, or a tkinter toast popup depending on the runtime context.
 
 import platform
 import threading
+from collections.abc import Callable
 from enum import auto
 from types import ModuleType
 from typing import Any
@@ -100,6 +101,7 @@ def _dispatch_electron_notification(
         data["title"] = request.title
     if request.url is not None:
         data["url"] = request.url
+    logger.debug("Emitting notification event for Electron: title={!r} agent={}", request.title, agent_display_name)
     emit_event("notification", data, OutputFormat.JSONL)
 
 
@@ -237,16 +239,26 @@ def _run_macos_notification_subprocess(script: str) -> None:
         logger.warning("Failed to show macOS notification: {}", e)
 
 
+def _escape_applescript_text(value: str) -> str:
+    """Escape text for embedding in an AppleScript double-quoted string literal.
+
+    Backslashes must be escaped BEFORE double quotes: otherwise text containing
+    a backslash-quote sequence would end up with an escaped backslash followed
+    by a bare quote, terminating the literal early and letting the rest of the
+    (agent-controlled) text run as AppleScript code.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _build_osascript_notification(
     request: NotificationRequest,
     agent_display_name: str,
 ) -> str:
     """Build the AppleScript command that displays a native macOS notification."""
     display_title = request.title or f"Notification from {agent_display_name}"
-    # Escape double quotes for AppleScript string literals
-    escaped_title = display_title.replace('"', '\\"')
-    escaped_message = request.message.replace('"', '\\"')
-    escaped_subtitle = f"From: {agent_display_name}".replace('"', '\\"')
+    escaped_title = _escape_applescript_text(display_title)
+    escaped_message = _escape_applescript_text(request.message)
+    escaped_subtitle = _escape_applescript_text(f"From: {agent_display_name}")
     return f'display notification "{escaped_message}" with title "{escaped_title}" subtitle "{escaped_subtitle}"'
 
 
@@ -274,6 +286,10 @@ class NotificationDispatcher(FrozenModel):
     # module-level _TKINTER value, or injected via NotificationDispatcher.create()
     # to allow testing without tkinter side effects.
     _tk: ModuleType | None = PrivateAttr(default=None)
+    # The master notifications toggle, consulted live on every dispatch (so a
+    # Settings change applies without a restart). None means always enabled,
+    # which keeps minimal apps and tests working without a MindsConfig.
+    _is_enabled_provider: Callable[[], bool] | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: object) -> None:
         """Resolve the tkinter module from the module-level auto-detection."""
@@ -285,14 +301,20 @@ class NotificationDispatcher(FrozenModel):
         is_electron: bool,
         tkinter_module: ModuleType | None = _TKINTER,
         is_macos: bool = _IS_MACOS,
+        is_enabled_provider: Callable[[], bool] | None = None,
     ) -> "NotificationDispatcher":
         """Create a NotificationDispatcher with explicit platform overrides.
 
         Pass tkinter_module=None to disable tkinter toasts (e.g. in tests or on
         headless servers where tkinter is unavailable).
+
+        ``is_enabled_provider`` is the user's master notifications toggle,
+        consulted before every dispatch; when it returns False the
+        notification is silently dropped. None means always enabled.
         """
         dispatcher = cls(is_electron=is_electron, is_macos=is_macos)
         dispatcher._tk = tkinter_module
+        dispatcher._is_enabled_provider = is_enabled_provider
         return dispatcher
 
     def dispatch(
@@ -302,8 +324,12 @@ class NotificationDispatcher(FrozenModel):
     ) -> None:
         """Send a notification to the user via the appropriate channel.
 
-        Priority: Electron > macOS native > tkinter toast.
+        Returns without dispatching when the injected master toggle says
+        notifications are disabled. Priority: Electron > macOS native >
+        tkinter toast.
         """
+        if self._is_enabled_provider is not None and not self._is_enabled_provider():
+            return
         channel = _select_dispatch_channel(is_electron=self.is_electron, is_macos=self.is_macos)
         match channel:
             case DispatchChannel.ELECTRON:

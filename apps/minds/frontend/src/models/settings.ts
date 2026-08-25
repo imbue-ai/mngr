@@ -1,8 +1,8 @@
 // Settings page model: loads the app-level settings payload from
 // /ui/api/settings, tracks the active section + revoke dialog, and performs
 // the page's writes (legacy POST routes for revokes/connectors/master
-// password; the new If-Match-guarded /ui/api endpoint for the
-// error-reporting toggle).
+// password; the If-Match-guarded /ui/api endpoints for the error-reporting
+// toggle and the notification prefs).
 //
 // It also holds the release-channel state behind the Updates panel
 // (updateState, peekedChannels, pendingChannelSwitch). That comes from the
@@ -14,9 +14,15 @@
 // frames; see the tranche report).
 
 import m from "mithril";
-
 import { electronBridge } from "../electron-bridge";
 import type { PeekedChannel, UpdateChannel, UpdateState, UpdateStatus } from "../electron-bridge";
+import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
+import {
+  DEFAULT_NOTIFICATION_PREFS,
+  applyNotificationPrefs,
+  currentNotificationPrefs,
+  postNotificationPrefsWrite,
+} from "./notificationsUi";
 
 export interface GrantedPermission {
   label: string;
@@ -51,7 +57,9 @@ export interface ServicePermissionOverview {
  * The action is latchkey's browser sign-in, so a service without one (AWS,
  * Coolify, ...) has nothing for it to do; the dialog says so on hover instead
  * of failing after the click. */
-export function addAccountBlockedReason(service: ServicePermissionOverview): string | null {
+export function addAccountBlockedReason(
+  service: ServicePermissionOverview,
+): string | null {
   if (service.is_browser_sign_in_supported) return null;
   return `${service.display_name} does not support signing in through a browser.`;
 }
@@ -90,6 +98,14 @@ export interface SettingsOverview {
   permissions_unavailable: boolean;
   is_master_password_set: boolean;
   report_unexpected_errors: boolean;
+  /** Optional only for version skew: an already-running backend from before
+   * this field existed (a not-yet-restarted process, a stale cached
+   * Electron bundle talking to it) can still serve this SPA. Absent reads
+   * as the defaults (enabled + both) and writes then surface the server's
+   * error. CLEANUP: make this required (and drop the
+   * DEFAULT_NOTIFICATION_PREFS fallbacks reading it) once no such backend
+   * can still be running. */
+  notification_prefs?: NotificationPrefs;
   version: string;
 }
 
@@ -97,6 +113,7 @@ export type SettingsSection =
   | "connectors"
   | "file-sharing"
   | "workspace-delegation"
+  | "notifications"
   | "error-reporting"
   | "updates"
   | "backups";
@@ -109,6 +126,7 @@ export const SETTINGS_SECTIONS: {
   { name: "connectors", label: "Connectors", group: "Permissions" },
   { name: "file-sharing", label: "Local files", group: "Permissions" },
   { name: "workspace-delegation", label: "Machines", group: "Permissions" },
+  { name: "notifications", label: "Notifications", group: "Other" },
   { name: "error-reporting", label: "Error reporting", group: "Other" },
   { name: "updates", label: "Updates", group: "Other" },
   { name: "backups", label: "Master password", group: "Other" },
@@ -188,6 +206,12 @@ export class SettingsModel {
   isUpdateBusy = false;
   updateError = "";
   errorReportingError = "";
+  notificationPrefsError = "";
+  /** Set after a failed openNotificationOsSettings() call (e.g. no known
+   * settings command found on this Linux desktop environment), so the panel
+   * can tell the reader the automatic open didn't work rather than leaving
+   * the button looking like it silently did nothing. */
+  notificationOsSettingsOpenFailed = false;
   masterPasswordError = "";
   masterPasswordResults: MasterPasswordResult[] | null = null;
   isMasterPasswordAllOk = false;
@@ -199,7 +223,10 @@ export class SettingsModel {
   // The default wraps the global fetch in a plain call: passing `fetch`
   // itself would invoke it as `this.fetchImpl(...)` with the model as its
   // receiver, which browsers reject with "Illegal invocation".
-  constructor(fetchImpl: FetchLike = (input, init) => fetch(input, init), redraw: () => void = m.redraw) {
+  constructor(
+    fetchImpl: FetchLike = (input, init) => fetch(input, init),
+    redraw: () => void = m.redraw,
+  ) {
     this.fetchImpl = fetchImpl;
     this.redraw = redraw;
   }
@@ -212,10 +239,19 @@ export class SettingsModel {
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       this.overview = (await response.json()) as SettingsOverview;
+      // Keep the app-wide applied prefs (which gate notification arrivals)
+      // in step with what this window just learned; a no-op when absent.
+      applyNotificationPrefs(this.overview.notification_prefs);
     } catch {
       this.isLoadFailed = true;
     }
     this.redraw();
+  }
+
+  /** The notification prefs to render: the loaded ones, else the defaults
+   * (enabled + both) the backend also assumes before any write. */
+  notificationPrefs(): NotificationPrefs {
+    return this.overview?.notification_prefs ?? DEFAULT_NOTIFICATION_PREFS;
   }
 
   selectSection(name: SettingsSection): void {
@@ -322,8 +358,14 @@ export class SettingsModel {
       }
       if (response.ok) {
         const result = (await response.json()) as { version: string };
+        // Merge onto the CURRENT overview, not the pre-await `overview`
+        // snapshot: a concurrent write (e.g. setNotificationPrefs) may have
+        // already landed its own field on `this.overview` while this request
+        // was in flight, and spreading the stale snapshot would clobber it.
+        const latest = this.overview;
+        if (latest === null) return;
         this.overview = {
-          ...overview,
+          ...latest,
           report_unexpected_errors: isEnabled,
           version: result.version,
         };
@@ -342,8 +384,100 @@ export class SettingsModel {
     } catch {
       // Network failure: nothing was persisted; say so rather than
       // snapping the checkbox back silently.
-      this.errorReportingError = "Could not update error reporting (network error).";
+      this.errorReportingError =
+        "Could not update error reporting (network error).";
     }
+    this.redraw();
+  }
+
+  /** Write the notification prefs through the If-Match-guarded endpoint,
+   * mirroring `setReportUnexpectedErrors`: a 412 (another window changed them
+   * first) rebases by reloading rather than clobbering, and a refusal leaves
+   * the model state standing with a stated reason. The If-Match token is the
+   * PREFS' own version (the write endpoint guards the prefs record). */
+  async setNotificationPrefs(next: {
+    is_enabled: boolean;
+    style: NotificationStyle;
+    is_os_hint_dismissed: boolean;
+  }): Promise<void> {
+    const overview = this.overview;
+    if (overview === null) return;
+    this.notificationPrefsError = "";
+    const current = overview.notification_prefs ?? DEFAULT_NOTIFICATION_PREFS;
+    try {
+      const response = await postNotificationPrefsWrite(
+        this.fetchImpl,
+        current.version,
+        next,
+      );
+      if (response.status === 412) {
+        // Another window changed the prefs first: rebase on the newer state.
+        await this.load();
+        return;
+      }
+      if (response.ok) {
+        const result = (await response.json()) as { version: string };
+        // os_permission_confirmed is system-observed, not part of this
+        // write's payload: carry the prior value forward untouched.
+        const applied: NotificationPrefs = {
+          ...current,
+          ...next,
+          version: result.version,
+        };
+        // Merge onto the CURRENT overview, not the pre-await `overview`
+        // snapshot: a concurrent write (e.g. setReportUnexpectedErrors) may
+        // have already landed its own field on `this.overview` while this
+        // request was in flight, and spreading the stale snapshot would
+        // clobber it.
+        const latest = this.overview;
+        if (latest === null) return;
+        this.overview = { ...latest, notification_prefs: applied };
+        applyNotificationPrefs(applied);
+      } else {
+        // Persisted nothing; the unchanged model state stands, and the
+        // snapped-back control needs a stated reason.
+        let message = `Could not update notifications (HTTP ${response.status}).`;
+        try {
+          const data = (await response.json()) as { error?: string };
+          if (data.error) message = data.error;
+        } catch {
+          // Non-JSON error body: keep the status-based message.
+        }
+        this.notificationPrefsError = message;
+      }
+    } catch {
+      // Network failure: nothing was persisted; say so rather than snapping
+      // the control back silently.
+      this.notificationPrefsError =
+        "Could not update notifications (network error).";
+    }
+    this.redraw();
+  }
+
+  /** Sync the model's notification-prefs copy from the shared applied-prefs
+   * cell (kept current by setNotificationPrefs above and by
+   * maybeProbeDesktopNotificationPermission's own writes). Local only -- no
+   * network request -- so a probe's server-side style downgrade can be
+   * reflected without risking the isLoadFailed error state a full reload
+   * would risk over a background refresh unrelated to what just landed. */
+  syncNotificationPrefsFromApplied(): void {
+    const overview = this.overview;
+    if (overview === null) return;
+    this.overview = {
+      ...overview,
+      notification_prefs: currentNotificationPrefs(),
+    };
+    this.redraw();
+  }
+
+  /** Open the OS's notification-settings pane, tracking whether it actually
+   * worked (e.g. no known settings command found on this Linux desktop
+   * environment) so the panel can say so rather than leaving the button
+   * looking like it silently did nothing. */
+  async openNotificationOsSettings(): Promise<void> {
+    this.notificationOsSettingsOpenFailed = false;
+    const opened = await electronBridge.openNotificationSettings();
+    this.notificationOsSettingsOpenFailed = !opened;
     this.redraw();
   }
 

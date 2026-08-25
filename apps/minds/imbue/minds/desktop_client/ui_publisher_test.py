@@ -12,6 +12,7 @@ from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
+from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
@@ -45,6 +46,7 @@ def _build_publisher(source: _MutableWorkspaceSource) -> tuple[UiStatePublisher,
         derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
         derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
         derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
+        derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_health_states=lambda: (),
     )
@@ -59,7 +61,7 @@ def test_publish_now_broadcasts_every_message_type_on_first_pass() -> None:
     publisher.publish_now()
 
     types = [frame["type"] for frame in drain_ui_channel_frames(client_queue)]
-    assert sorted(types) == ["accounts", "discovery_health", "providers", "requests", "workspaces"]
+    assert sorted(types) == ["accounts", "discovery_health", "notifications", "providers", "requests", "workspaces"]
 
 
 def test_publish_now_suppresses_unchanged_frames_on_second_pass() -> None:
@@ -154,6 +156,7 @@ def test_publish_loop_survives_an_unexpected_derive_exception() -> None:
         derive_accounts=publisher.derive_accounts,
         derive_providers=publisher.derive_providers,
         derive_requests=publisher.derive_requests,
+        derive_notifications=publisher.derive_notifications,
         derive_discovery_health=publisher.derive_discovery_health,
         derive_health_states=publisher.derive_health_states,
     )
@@ -198,6 +201,7 @@ def test_replayed_health_frames_say_they_are_a_replay() -> None:
         derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
         derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
         derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
+        derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_health_states=lambda: (failed,),
     )
@@ -226,4 +230,19 @@ def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> Non
         "providers",
         "requests",
         "discovery_health",
+        "notifications",
     ]
+
+
+def test_snapshot_notifications_frame_says_it_is_a_replay() -> None:
+    """Same contract as health: the snapshot's notifications frame is marked, a live publish is not."""
+    source = _MutableWorkspaceSource()
+    publisher, client_queue = _build_publisher(source)
+
+    snapshot_frames = [json.loads(frame) for frame in publisher.build_snapshot_frames()]
+    publisher.publish_now()
+
+    snapshot_notifications = [frame for frame in snapshot_frames if frame["type"] == "notifications"]
+    assert [frame["is_snapshot"] for frame in snapshot_notifications] == [True]
+    live_notifications = [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "notifications"]
+    assert [frame["is_snapshot"] for frame in live_notifications] == [False]

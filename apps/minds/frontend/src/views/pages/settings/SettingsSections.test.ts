@@ -3,11 +3,21 @@
 // that serves nothing, that the click never reaches the model at all.
 
 import m from "mithril";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PeekedChannel, UpdateState, UpdateStatus } from "../../../electron-bridge";
-import { SETTINGS_SECTIONS, SettingsModel } from "../../../models/settings";
+import { resetNotificationPrefsForTests } from "../../../models/notificationsUi";
+import {
+  SETTINGS_SECTIONS,
+  SettingsModel,
+  type SettingsOverview,
+} from "../../../models/settings";
+import { SettingsSections } from "./SettingsSections";
+import { Button } from "../../components/Button";
+import { jsonResponse } from "../../../testing";
 import type { AnyVnode } from "../../../testing";
 import {
+  allText,
+  attrsOf,
   classTokensOf,
   collectText,
   collectVnodes,
@@ -15,7 +25,12 @@ import {
   renderedText,
   withMindsNative,
 } from "../../../testing";
-import { SettingsSections } from "./SettingsSections";
+
+afterEach(() => {
+  resetNotificationPrefsForTests();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 const ON_STABLE: UpdateState = {
   channel: "stable",
@@ -361,10 +376,14 @@ describe("the Updates panel", () => {
 /** The sections view, rendered from a bare model: every panel guards on a
  * null overview and renders nothing, so the layout is exercised without a
  * payload fixture or any network. */
-function renderSections(): AnyVnode[] {
+function renderSections(
+  model: SettingsModel = new SettingsModel(),
+): AnyVnode[] {
   const instance = SettingsSections() as unknown as m.Component;
-  const vnode = m(instance, { model: new SettingsModel() } as unknown as m.Attributes) as m.Vnode;
-  const rendered = (instance.view as unknown as (v: m.Vnode) => m.Children).call(instance, vnode);
+  const vnode = m(instance, { model } as unknown as m.Attributes) as m.Vnode;
+  const rendered = (
+    instance.view as unknown as (v: m.Vnode) => m.Children
+  ).call(instance, vnode);
   return rendered as unknown as AnyVnode[];
 }
 
@@ -450,5 +469,221 @@ describe("SettingsSections layout", () => {
         );
       }
     });
+  });
+});
+
+const NOTIFICATIONS_OVERVIEW: SettingsOverview = {
+  services_overview: [],
+  file_sharing_grants: [],
+  workspace_delegation_grants: [],
+  permissions_unavailable: false,
+  is_master_password_set: false,
+  report_unexpected_errors: true,
+  notification_prefs: {
+    is_enabled: true,
+    style: "cards",
+    is_os_hint_dismissed: false,
+    os_permission_confirmed: false,
+    version: "np-1",
+  },
+  version: "v-one",
+};
+
+/** A model on the Notifications section with the given overview loaded. */
+async function notificationsModel(
+  onWrite: (body: unknown) => Response = () =>
+    jsonResponse({ version: "np-2" }),
+): Promise<SettingsModel> {
+  const model = new SettingsModel(
+    async (input, init) =>
+      String(input).endsWith("/settings/notifications")
+        ? onWrite(JSON.parse(String(init?.body)))
+        : jsonResponse(NOTIFICATIONS_OVERVIEW),
+    () => {},
+  );
+  await model.load();
+  model.selectSection("notifications");
+  return model;
+}
+
+describe("SettingsSections notifications panel", () => {
+  it("offers the master toggle and the three-style radio, current style checked", async () => {
+    vi.stubGlobal("window", {});
+    const panel = renderSections(await notificationsModel());
+    const toggle = collectVnodes(panel).find(
+      (vnode) => attrsOf(vnode).id === "notifications-enabled-toggle",
+    );
+    expect(toggle).toBeDefined();
+    expect(attrsOf(toggle as AnyVnode).checked).toBe(true);
+
+    const group = collectVnodes(panel).find(
+      (vnode) => attrsOf(vnode).role === "radiogroup",
+    );
+    expect(group).toBeDefined();
+    const radios = collectVnodes(group).filter(
+      (vnode) => attrsOf(vnode).role === "radio",
+    );
+    expect(radios.map((radio) => attrsOf(radio).id)).toEqual([
+      "notification-style-cards",
+      "notification-style-os",
+      "notification-style-both",
+    ]);
+    expect(radios.map((radio) => attrsOf(radio)["aria-checked"])).toEqual([
+      "true",
+      "false",
+      "false",
+    ]);
+    expect(allText(group)).toContain("In-app cards");
+    expect(allText(group)).toContain("System notifications");
+    expect(allText(group)).toContain("Both");
+  });
+
+  it("hides the style radio while the master toggle is off", async () => {
+    vi.stubGlobal("window", {});
+    const model = await notificationsModel();
+    (model.overview as SettingsOverview).notification_prefs = {
+      is_enabled: false,
+      style: "both",
+      is_os_hint_dismissed: false,
+      os_permission_confirmed: false,
+      version: "np-1",
+    };
+    const panel = renderSections(model);
+    expect(
+      collectVnodes(panel).some(
+        (vnode) => attrsOf(vnode).role === "radiogroup",
+      ),
+    ).toBe(false);
+  });
+
+  it("writes the picked style and asks the browser for permission in browser mode", async () => {
+    // Browser mode: no window.mindsNative. Permission undecided.
+    vi.stubGlobal("window", {});
+    const requestPermission = vi.fn(async () => "granted");
+    vi.stubGlobal("Notification", { permission: "default", requestPermission });
+    const writtenBodies: unknown[] = [];
+    const model = await notificationsModel((body) => {
+      writtenBodies.push(body);
+      return jsonResponse({ version: "np-2" });
+    });
+    const panel = renderSections(model);
+    const osRadio = collectVnodes(panel).find(
+      (vnode) => attrsOf(vnode).id === "notification-style-os",
+    );
+    (attrsOf(osRadio as AnyVnode).onclick as () => void)();
+    expect(writtenBodies).toEqual([
+      { is_enabled: true, style: "os", is_os_hint_dismissed: false },
+    ]);
+    expect(requestPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers to open OS notification settings in desktop mode when permission isn't confirmed", async () => {
+    const openNotificationSettings = vi.fn(async () => true);
+    vi.stubGlobal("window", {
+      mindsNative: { platform: "darwin", openNotificationSettings },
+    });
+    const model = await notificationsModel();
+    (model.overview as SettingsOverview).notification_prefs = {
+      is_enabled: true,
+      style: "both",
+      is_os_hint_dismissed: false,
+      os_permission_confirmed: false,
+      version: "np-1",
+    };
+
+    const panel = renderSections(model);
+
+    const notice = collectVnodes(panel).find((vnode) =>
+      allText(vnode).includes("Open System Settings"),
+    );
+    expect(notice).toBeDefined();
+    const button = collectVnodes(panel).find((vnode) => vnode.tag === Button);
+    expect(button).toBeDefined();
+    (attrsOf(button as AnyVnode).onclick as () => void)();
+    expect(openNotificationSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the failure inline when opening OS settings doesn't work (e.g. an unsupported Linux desktop environment)", async () => {
+    vi.stubGlobal("window", {
+      mindsNative: {
+        platform: "linux",
+        openNotificationSettings: vi.fn(async () => false),
+      },
+    });
+    const model = await notificationsModel();
+    (model.overview as SettingsOverview).notification_prefs = {
+      is_enabled: true,
+      style: "both",
+      is_os_hint_dismissed: false,
+      os_permission_confirmed: false,
+      version: "np-1",
+    };
+
+    expect(allText(renderSections(model))).not.toContain(
+      "Couldn't open System Settings",
+    );
+
+    await model.openNotificationOsSettings();
+
+    expect(allText(renderSections(model))).toContain(
+      "Couldn't open System Settings",
+    );
+  });
+
+  it.each([
+    [
+      "permission is already confirmed",
+      { os_permission_confirmed: true, style: "both" as const },
+    ],
+    ["the style is cards-only", { os_permission_confirmed: false, style: "cards" as const }],
+  ])("does not offer to open OS settings when %s", async (_label, overrides) => {
+    vi.stubGlobal("window", {
+      mindsNative: { platform: "darwin", openNotificationSettings: vi.fn() },
+    });
+    const model = await notificationsModel();
+    (model.overview as SettingsOverview).notification_prefs = {
+      is_enabled: true,
+      is_os_hint_dismissed: false,
+      version: "np-1",
+      ...overrides,
+    };
+
+    const panel = renderSections(model);
+
+    expect(allText(panel)).not.toContain("Open System Settings");
+  });
+
+  it("does not offer to open OS settings in browser mode", async () => {
+    vi.stubGlobal("window", {});
+    const model = await notificationsModel();
+    (model.overview as SettingsOverview).notification_prefs = {
+      is_enabled: true,
+      style: "both",
+      is_os_hint_dismissed: false,
+      os_permission_confirmed: false,
+      version: "np-1",
+    };
+
+    const panel = renderSections(model);
+
+    expect(allText(panel)).not.toContain("Open System Settings");
+  });
+
+  it("surfaces a failed write beside the controls", async () => {
+    vi.stubGlobal("window", {});
+    const model = await notificationsModel(() =>
+      jsonResponse({ error: "nope" }, 500),
+    );
+    await model.setNotificationPrefs({
+      is_enabled: false,
+      style: "cards",
+      is_os_hint_dismissed: false,
+    });
+    const panel = renderSections(model);
+    const alert = collectVnodes(panel).find(
+      (vnode) => attrsOf(vnode).role === "alert",
+    );
+    expect(alert).toBeDefined();
+    expect(allText(alert)).toBe("nope");
   });
 });

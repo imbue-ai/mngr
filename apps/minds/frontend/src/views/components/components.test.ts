@@ -69,6 +69,24 @@ describe("Badge", () => {
     const root = renderRoot(Badge, {}) as unknown as ElementVnode;
     expect(String(root.attrs.className)).toContain("w-2 h-2 rounded-full");
   });
+
+  it("is a perfect circle for a single digit", () => {
+    const root = renderRoot(Badge, { count: 7 }) as unknown as ElementVnode;
+    const className = String(root.attrs.className);
+    expect(className).toContain("w-[14px]");
+    expect(className).toContain("h-[14px]");
+    expect(className).not.toContain("min-w-[16px]");
+  });
+
+  it("widens into a pill once the count needs two or more characters", () => {
+    for (const count of [10, 99, 100]) {
+      const root = renderRoot(Badge, { count }) as unknown as ElementVnode;
+      const className = String(root.attrs.className);
+      expect(className).toContain("min-w-[16px]");
+      expect(className).toContain("px-1");
+      expect(className).not.toContain("w-[14px]");
+    }
+  });
 });
 
 describe("class builders keep the legacy recipes", () => {
@@ -213,6 +231,7 @@ describe("icon catalogs", () => {
       "menu",
       "home",
       "inbox",
+      "bell",
       "bug",
       "share",
       "settings",

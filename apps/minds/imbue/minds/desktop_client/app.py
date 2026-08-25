@@ -72,12 +72,16 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_servi
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
+from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
+from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_bug_report_from_body
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -101,12 +105,16 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
 from imbue.minds.desktop_client.ui_api import serve_spa_index
+from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
+from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
+from imbue.minds.desktop_client.ui_models import NotificationOutcome
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
+from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
@@ -1929,6 +1937,48 @@ def _derive_ui_requests_message(
         return UiRequestsMessage(count=payload["count"], request_ids=tuple(payload["request_ids"]))
 
 
+# How a recorded response's status becomes a feed outcome. A status outside
+# this mapping (malformed on-disk event) maps to no outcome at all, which
+# leaves the entry to close via the vanished-request rule.
+_RESOLVED_OUTCOME_BY_RESPONSE_STATUS: Final[dict[str, NotificationOutcome]] = {
+    str(RequestStatus.GRANTED): NotificationOutcome.APPROVED,
+    str(RequestStatus.DENIED): NotificationOutcome.DENIED,
+}
+
+
+def _derive_ui_notifications_message(
+    app: Flask,
+    backend_resolver: BackendResolverInterface,
+) -> UiNotificationsMessage:
+    """Reconcile the notification feed against the current pending-request view.
+
+    Uses the same displayable-pending set as the requests frame (so the feed
+    and the badge always agree on what exists) and the same card derivation
+    as the inbox list (so a feed entry renders exactly like its inbox row).
+    """
+    with app.app_context():
+        state = get_state()
+        feed = state.notification_feed
+        if feed is None:
+            return UiNotificationsMessage(entries=(), unresolved_count=0)
+        inbox = state.request_inbox
+        pending = _displayable_pending_requests(inbox, backend_resolver)
+        primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
+        pending_cards = tuple(
+            build_notification_card(req, state.request_event_handlers, backend_resolver, primary_agent_id_by_ws_name)
+            for req in pending
+        )
+        responses_by_request_id: dict[str, NotificationOutcome] = {}
+        for response in inbox.responses if inbox is not None else ():
+            outcome = _RESOLVED_OUTCOME_BY_RESPONSE_STATUS.get(response.status)
+            if outcome is not None:
+                responses_by_request_id[response.request_event_id] = outcome
+        return feed.reconcile(
+            pending_cards=pending_cards,
+            responses_by_request_id=responses_by_request_id,
+        )
+
+
 def _derive_ui_discovery_health_message(
     discovery_health_watchdog: DiscoveryHealthWatchdog | None,
 ) -> UiDiscoveryHealthMessage:
@@ -1981,6 +2031,9 @@ class _LegacyUiStateDeriver(MutableModel):
     def derive_requests(self) -> UiRequestsMessage:
         return _derive_ui_requests_message(self.flask_app, self.backend_resolver)
 
+    def derive_notifications(self) -> UiNotificationsMessage:
+        return _derive_ui_notifications_message(self.flask_app, self.backend_resolver)
+
     def derive_discovery_health(self) -> UiDiscoveryHealthMessage:
         return _derive_ui_discovery_health_message(self.discovery_health_watchdog)
 
@@ -2012,6 +2065,7 @@ def _create_ui_state_publisher(
         derive_accounts=deriver.derive_accounts,
         derive_providers=deriver.derive_providers,
         derive_requests=deriver.derive_requests,
+        derive_notifications=deriver.derive_notifications,
         derive_discovery_health=deriver.derive_discovery_health,
         derive_health_states=deriver.derive_health_states,
     )
@@ -2149,6 +2203,18 @@ def create_desktop_client(
         discovery_health_watchdog=discovery_health_watchdog,
     )
 
+    # The durable notification feed behind the channel's notifications frame,
+    # reconciled by the notifications derive on every publish tick. Its OS
+    # dispatch consults the stored preferences live, so a Settings change
+    # applies without a restart; without a MindsConfig the defaults apply.
+    notification_feed = NotificationFeed(
+        notification_dispatcher=notification_dispatcher,
+        get_dispatch_preferences=_NotificationDispatchPreferencesReader(minds_config=minds_config),
+        get_connected_focused_workspace_agent_ids=_ConnectedFocusedWorkspaceAgentIdsReader(
+            broadcaster=ui_channel_broadcaster
+        ),
+    )
+
     state = DesktopClientState(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
@@ -2179,6 +2245,7 @@ def create_desktop_client(
         sync_scheduler=sync_scheduler,
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
+        notification_feed=notification_feed,
     )
     set_state(app, state)
 
@@ -2358,6 +2425,48 @@ def create_desktop_client(
     )
 
     return app
+
+
+class _NotificationDispatchPreferencesReader(FrozenModel):
+    """Live reader of the stored notification preferences for the feed's OS dispatch.
+
+    Reads MindsConfig on every call so a Settings change applies without an
+    app restart; without a MindsConfig (minimal test apps) the defaults apply.
+    """
+
+    minds_config: MindsConfig | None = Field(frozen=True, description="Preference store; None means defaults.")
+
+    def __call__(self) -> NotificationDispatchPreferences:
+        if self.minds_config is None:
+            return NotificationDispatchPreferences(is_enabled=True, style=DEFAULT_NOTIFICATION_STYLE)
+        # One atomic read (not two separate locked getters): a concurrent
+        # set_notification_prefs() write landing between two separate calls could
+        # otherwise produce an (is_enabled, style) pair never actually persisted together.
+        is_enabled, style, _is_os_hint_dismissed, _os_permission_confirmed = self.minds_config.get_notification_prefs()
+        return NotificationDispatchPreferences(is_enabled=is_enabled, style=style)
+
+
+class _ConnectedFocusedWorkspaceAgentIdsReader(FrozenModel):
+    """Live reader of the workspace agent ids a *focused* connected UI window is displaying.
+
+    Consulted by the notification feed at dispatch time so a request from the
+    workspace the user is actually looking at right now stays silent (the
+    in-app review popup covers it) -- distinct from the in-app toast's own
+    on-screen check, which does not require OS/browser focus: a window can be
+    displaying the right workspace while alt-tabbed away or behind another
+    app, in which case the reader is not looking at the in-app popup and
+    should still get an OS banner. Windows report their route/workspace/focus
+    over the /ui/ws channel's client_state frames.
+    """
+
+    broadcaster: UiChannelBroadcaster = Field(frozen=True, description="The /ui/ws fan-out holding per-window state.")
+
+    def __call__(self) -> tuple[str, ...]:
+        return tuple(
+            state.workspace_agent_id
+            for state in self.broadcaster.get_connected_client_states()
+            if state.workspace_agent_id and state.has_focus
+        )
 
 
 class _WorkspaceViewRefresher(FrozenModel):

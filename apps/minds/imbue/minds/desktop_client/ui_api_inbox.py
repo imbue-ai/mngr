@@ -23,6 +23,12 @@ from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.notification_feed import PendingNotificationCard
+from imbue.minds.desktop_client.request_events import LatchkeyAccountsPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
@@ -124,11 +130,10 @@ def _resolved_workspace_accent(backend_resolver: BackendResolverInterface, agent
 
 def _build_inbox_card(
     req: RequestEvent,
-    handlers: tuple[RequestEventHandler, ...],
+    handler: RequestEventHandler | None,
     backend_resolver: BackendResolverInterface,
     primary_agent_id_by_ws_name: dict[str, str],
 ) -> UiInboxCard:
-    handler = find_handler_for_event(handlers, req)
     if handler is not None:
         kind_label = handler.kind_label()
         display_name = handler.display_name_for_event(req)
@@ -161,6 +166,79 @@ def _build_inbox_card(
     )
 
 
+def primary_agent_ids_by_workspace_name(backend_resolver: BackendResolverInterface) -> dict[str, str]:
+    """First-seen primary agent id per workspace name.
+
+    Latchkey requests are filed by the workspace's system-services sibling
+    agent, so card derivations resolve accent and deep-link identity through
+    the user-facing primary agent that shares the workspace name.
+    """
+    primary_agent_id_by_ws_name: dict[str, str] = {}
+    for aid in backend_resolver.list_known_workspace_ids():
+        wn = backend_resolver.get_workspace_name(aid)
+        if wn and wn not in primary_agent_id_by_ws_name:
+            primary_agent_id_by_ws_name[wn] = str(aid)
+    return primary_agent_id_by_ws_name
+
+
+def _request_rationale(req: RequestEvent) -> str:
+    """The request's human-readable rationale line; '' for kinds that carry none."""
+    if isinstance(
+        req,
+        (
+            LatchkeyPredefinedPermissionRequestEvent,
+            LatchkeyFileSharingPermissionRequestEvent,
+            LatchkeyWorkspacePermissionRequestEvent,
+            LatchkeyAccountsPermissionRequestEvent,
+        ),
+    ):
+        return req.rationale
+    return ""
+
+
+def _request_service_name(req: RequestEvent, handler: RequestEventHandler | None) -> str:
+    """The catalog service name for the brand mark; '' for kinds that have none.
+
+    Mirrors the ``service_name`` derivation of the Permissions pane's
+    "Waiting on you" rows: only predefined-permission requests resolve to a
+    catalog service.
+    """
+    if not isinstance(req, LatchkeyPredefinedPermissionRequestEvent):
+        return ""
+    if not isinstance(handler, LatchkeyPermissionGrantHandler):
+        return ""
+    info = handler.services_catalog.get_by_scope(req.scope)
+    return info.name if info is not None else ""
+
+
+def build_notification_card(
+    req: RequestEvent,
+    handlers: tuple[RequestEventHandler, ...],
+    backend_resolver: BackendResolverInterface,
+    primary_agent_id_by_ws_name: dict[str, str],
+) -> PendingNotificationCard:
+    """Feed-input display fields for one displayable pending request.
+
+    Composes the inbox-card derivation (title, workspace name, accent, agent
+    id) with the rationale and brand-mark service the feed rows additionally
+    render, so a notification entry always matches the inbox card it mirrors.
+    """
+    handler = find_handler_for_event(handlers, req)
+    card = _build_inbox_card(req, handler, backend_resolver, primary_agent_id_by_ws_name)
+    return PendingNotificationCard(
+        request_id=card.id,
+        requested_at=str(req.timestamp),
+        # display_name is empty only for unknown request kinds; the kind label
+        # ("request") keeps those rows from rendering a blank headline.
+        title=card.display_name or card.kind_label,
+        body=_request_rationale(req),
+        workspace_agent_id=card.workspace_agent_id,
+        workspace_name=card.ws_name,
+        workspace_accent=card.accent,
+        service_name=_request_service_name(req, handler),
+    )
+
+
 def _handle_inbox_list() -> Response:
     if not _is_inbox_request_authenticated():
         return _json_error("Not authenticated", status_code=401)
@@ -168,12 +246,11 @@ def _handle_inbox_list() -> Response:
     backend_resolver = state.backend_resolver
     handlers: tuple[RequestEventHandler, ...] = state.request_event_handlers
     pending = displayable_pending_requests(state.request_inbox, backend_resolver)
-    primary_agent_id_by_ws_name: dict[str, str] = {}
-    for aid in backend_resolver.list_known_workspace_ids():
-        wn = backend_resolver.get_workspace_name(aid)
-        if wn and wn not in primary_agent_id_by_ws_name:
-            primary_agent_id_by_ws_name[wn] = str(aid)
-    cards = tuple(_build_inbox_card(req, handlers, backend_resolver, primary_agent_id_by_ws_name) for req in pending)
+    primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
+    cards = tuple(
+        _build_inbox_card(req, find_handler_for_event(handlers, req), backend_resolver, primary_agent_id_by_ws_name)
+        for req in pending
+    )
     return _json_response(UiInboxListResponse(cards=cards))
 
 

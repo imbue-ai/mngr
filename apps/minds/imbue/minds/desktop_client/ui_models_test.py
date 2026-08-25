@@ -88,6 +88,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
         [
             "AgentHealth",
             "DiscoveryHealth",
+            "NotificationOutcome",
             "ProviderPanelStatus",
             "UiAccountsMessage",
             "UiAvailableConnection",
@@ -102,6 +103,8 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiDiscoveryHealthMessage",
             "UiHealthMessage",
             "UiHelloMessage",
+            "UiNotificationEntry",
+            "UiNotificationsMessage",
             "UiOpenHelpMessage",
             "UiPermissionConnection",
             "UiPermissionGrantGroup",

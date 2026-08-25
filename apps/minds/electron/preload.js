@@ -33,6 +33,15 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // Native file/directory picker (the file-sharing permission dialog).
   showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
 
+  // Ask the OS for native-notification permission by actually attempting to
+  // show one (main.js's probeNotificationPermission -- Electron exposes no
+  // separate "request" or "check status" call on macOS). Resolves to
+  // whether the OS confirmed it displayed the probe.
+  probeNotificationPermission: () => ipcRenderer.invoke('probe-notification-permission'),
+  // Open the OS's own notification-settings pane (no app can force a
+  // re-prompt once declined -- the reader has to flip it back on there).
+  openNotificationSettings: () => ipcRenderer.invoke('open-notification-settings'),
+
   // Bring the app back in front after an external-browser OAuth hop.
   bringAppToFront: () => ipcRenderer.send('bring-app-to-front'),
 
@@ -52,7 +61,8 @@ contextBridge.exposeInMainWorld('mindsNative', {
 
   // The renderer owns the /ui/ws channel; the few events main still acts on
   // (workspaces summaries for OS titles + destroyed-window detach,
-  // system-interface health, workspace_stopped, open_help routing) are
+  // system-interface health, workspace_stopped, open_help routing, the
+  // notification feed's unresolved count for the dock/taskbar badge) are
   // relayed up through this one channel.
   sendShellEvent: (event) => ipcRenderer.send('shell-event', event),
 

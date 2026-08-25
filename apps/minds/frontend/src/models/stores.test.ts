@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type { UiRequestsMessage } from "../channel/messages";
-import { workspacesMessage } from "../testing";
+import type { UiNotificationsMessage, UiRequestsMessage } from "../channel/messages";
+import { notificationEntry, workspacesMessage } from "../testing";
 import { applySnapshotToStores, bootFromBootstrap, createEmptyStores } from "./boot";
 import { HealthStore } from "./health";
+import { NotificationsStore } from "./notifications";
 import { RequestsStore } from "./requests";
 import { WorkspacesStore } from "./workspaces";
 
 function requestsMessage(ids: string[]): UiRequestsMessage {
   return { type: "requests", count: ids.length, request_ids: ids };
+}
+
+function notificationsMessage(ids: string[]): UiNotificationsMessage {
+  return { type: "notifications", entries: ids.map((id) => notificationEntry(id)), unresolved_count: ids.length };
 }
 
 describe("WorkspacesStore", () => {
@@ -153,6 +158,18 @@ describe("RequestsStore", () => {
   });
 });
 
+describe("NotificationsStore", () => {
+  it("mirrors the feed and unresolved count, replacing both wholesale on every message", () => {
+    const store = new NotificationsStore();
+    store.applyNotificationsMessage(notificationsMessage(["evt-1", "evt-2"]));
+    expect(store.entries.map((entry) => entry.id)).toEqual(["evt-1", "evt-2"]);
+    expect(store.unresolvedCount).toBe(2);
+    store.applyNotificationsMessage(notificationsMessage([]));
+    expect(store.entries).toEqual([]);
+    expect(store.unresolvedCount).toBe(0);
+  });
+});
+
 describe("boot seeding", () => {
   it("seeds every store from the bootstrap snapshot", () => {
     const boot = bootFromBootstrap({
@@ -163,6 +180,7 @@ describe("boot seeding", () => {
         accounts: { type: "accounts", has_accounts: true, account_email: "a@b.c", extra_account_count: 1 },
         providers: { type: "providers", providers: [], last_event_at: null, last_full_snapshot_at: null },
         requests: requestsMessage(["evt-9"]),
+        notifications: notificationsMessage(["evt-9"]),
         health: [{ type: "health", agent_id: "agent-aa11", status: "restarting", error: null }],
         discovery_health: { type: "discovery_health", state: "healthy" },
       },
@@ -171,6 +189,7 @@ describe("boot seeding", () => {
     expect(boot.stores.workspaces.workspaces).toHaveLength(1);
     expect(boot.stores.accounts.accountEmail).toBe("a@b.c");
     expect(boot.stores.requests.requestIds).toEqual(["evt-9"]);
+    expect(boot.stores.notifications.entries.map((entry) => entry.id)).toEqual(["evt-9"]);
     expect(boot.stores.health.statusFor("agent-aa11")).toBe("restarting");
   });
 
@@ -182,11 +201,13 @@ describe("boot seeding", () => {
         accounts: { type: "accounts", has_accounts: true, account_email: "a@b.c", extra_account_count: 0 },
         providers: { type: "providers", providers: [], last_event_at: null, last_full_snapshot_at: null },
         requests: requestsMessage(["evt-1"]),
+        notifications: notificationsMessage(["evt-1"]),
         health: [],
         discovery_health: { type: "discovery_health", state: "healthy" },
       },
     });
     expect(stores.requests.requestIds).toEqual(["evt-1"]);
+    expect(stores.notifications.unresolvedCount).toBe(1);
     expect(stores.accounts.hasAccounts).toBe(true);
     expect(stores.accounts.accountEmail).toBe("a@b.c");
   });

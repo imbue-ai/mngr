@@ -1,7 +1,42 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PeekedChannel, UpdateChannel, UpdateState, UpdateStatus } from "../electron-bridge";
 import { jsonResponse, settingsOverview, settle, withMindsNative, withReceiverGuardedGlobalFetch } from "../testing";
-import { SettingsModel, addAccountBlockedReason, type ServicePermissionOverview } from "./settings";
+import {
+  DEFAULT_NOTIFICATION_PREFS,
+  applyNotificationPrefs,
+  currentNotificationPrefs,
+  resetNotificationPrefsForTests,
+  type NotificationPrefs,
+} from "./notificationsUi";
+import {
+  SettingsModel,
+  addAccountBlockedReason,
+  type ServicePermissionOverview,
+  type SettingsOverview,
+} from "./settings";
+
+const BASE_OVERVIEW: SettingsOverview = {
+  services_overview: [],
+  file_sharing_grants: [],
+  workspace_delegation_grants: [],
+  permissions_unavailable: false,
+  is_master_password_set: false,
+  report_unexpected_errors: true,
+  version: "v-one",
+};
+
+const BASE_PREFS: NotificationPrefs = {
+  is_enabled: true,
+  style: "both",
+  is_os_hint_dismissed: false,
+  os_permission_confirmed: false,
+  version: "np-1",
+};
+
+afterEach(() => {
+  resetNotificationPrefsForTests();
+  vi.unstubAllGlobals();
+});
 
 describe("SettingsModel", () => {
   it("invokes the default fetch as a plain call (Illegal-invocation regression guard)", async () => {
@@ -179,6 +214,238 @@ describe("SettingsModel", () => {
 
     expect(model.pendingRevoke).toBeNull();
     expect(loadCount).toBe(2);
+  });
+
+  it("reads notification prefs as the defaults while the backend omits the field", async () => {
+    const model = new SettingsModel(
+      async () => jsonResponse(BASE_OVERVIEW),
+      () => {},
+    );
+    await model.load();
+    expect(model.notificationPrefs()).toEqual(DEFAULT_NOTIFICATION_PREFS);
+  });
+
+  it("writes notification prefs with the prefs' own If-Match token and applies the new version", async () => {
+    const writes: { url: string; ifMatch: string | null; body: unknown }[] = [];
+    const model = new SettingsModel(
+      async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/settings/notifications")) {
+          writes.push({
+            url,
+            ifMatch: new Headers(init?.headers).get("If-Match"),
+            body: JSON.parse(String(init?.body)),
+          });
+          return jsonResponse({ version: "np-2" });
+        }
+        return jsonResponse({
+          ...BASE_OVERVIEW,
+          notification_prefs: BASE_PREFS,
+        });
+      },
+      () => {},
+    );
+    await model.load();
+
+    await model.setNotificationPrefs({
+      is_enabled: true,
+      style: "os",
+      is_os_hint_dismissed: false,
+    });
+
+    expect(writes).toEqual([
+      {
+        url: "/ui/api/settings/notifications",
+        ifMatch: "np-1",
+        body: { is_enabled: true, style: "os", is_os_hint_dismissed: false },
+      },
+    ]);
+    expect(model.notificationPrefs()).toEqual({
+      is_enabled: true,
+      style: "os",
+      is_os_hint_dismissed: false,
+      os_permission_confirmed: false,
+      version: "np-2",
+    });
+    // The app-wide applied prefs (which gate arrivals) follow the write.
+    expect(currentNotificationPrefs().style).toBe("os");
+  });
+
+  it("rebases notification prefs on a 412 conflict by reloading instead of clobbering", async () => {
+    let served: NotificationPrefs = BASE_PREFS;
+    const model = new SettingsModel(
+      async (input) => {
+        const url = String(input);
+        if (url.endsWith("/settings/notifications"))
+          return jsonResponse({ error: "stale" }, 412);
+        return jsonResponse({ ...BASE_OVERVIEW, notification_prefs: served });
+      },
+      () => {},
+    );
+    await model.load();
+    // Another window changed the prefs; the server now serves the newer state.
+    served = {
+      is_enabled: false,
+      style: "cards",
+      is_os_hint_dismissed: true,
+      os_permission_confirmed: false,
+      version: "np-9",
+    };
+
+    await model.setNotificationPrefs({
+      is_enabled: true,
+      style: "both",
+      is_os_hint_dismissed: false,
+    });
+
+    expect(model.notificationPrefs()).toEqual(served);
+    expect(currentNotificationPrefs()).toEqual(served);
+  });
+
+  it("surfaces a network failure of the notification-prefs write and clears it on success", async () => {
+    let isServerUp = false;
+    const model = new SettingsModel(
+      async (input) => {
+        const url = String(input);
+        if (url.endsWith("/settings/notifications")) {
+          if (!isServerUp) throw new TypeError("Failed to fetch");
+          return jsonResponse({ version: "np-2" });
+        }
+        return jsonResponse({
+          ...BASE_OVERVIEW,
+          notification_prefs: BASE_PREFS,
+        });
+      },
+      () => {},
+    );
+    await model.load();
+
+    await model.setNotificationPrefs({
+      is_enabled: false,
+      style: "both",
+      is_os_hint_dismissed: false,
+    });
+    expect(model.notificationPrefsError).toContain("network error");
+
+    isServerUp = true;
+    await model.setNotificationPrefs({
+      is_enabled: false,
+      style: "both",
+      is_os_hint_dismissed: false,
+    });
+    expect(model.notificationPrefsError).toBe("");
+    expect(model.notificationPrefs().is_enabled).toBe(false);
+  });
+
+  it("surfaces a refused notification-prefs write and leaves the model standing", async () => {
+    const model = new SettingsModel(
+      async (input) => {
+        const url = String(input);
+        if (url.endsWith("/settings/notifications"))
+          return jsonResponse(
+            { error: "notifications are not available yet" },
+            404,
+          );
+        return jsonResponse({
+          ...BASE_OVERVIEW,
+          notification_prefs: BASE_PREFS,
+        });
+      },
+      () => {},
+    );
+    await model.load();
+
+    await model.setNotificationPrefs({
+      is_enabled: false,
+      style: "both",
+      is_os_hint_dismissed: false,
+    });
+
+    expect(model.notificationPrefsError).toBe(
+      "notifications are not available yet",
+    );
+    expect(model.notificationPrefs().is_enabled).toBe(true);
+  });
+
+  it("syncs the notification-prefs copy from the applied-prefs cell with no network request", async () => {
+    // Regression guard: this used to be a full model.load(), which could
+    // flip isLoadFailed (blanking the whole Settings modal) over a transient
+    // failure in what is only a best-effort background refresh.
+    const model = new SettingsModel(
+      async (input) => {
+        if (String(input).endsWith("/settings/notifications")) {
+          throw new Error("must not write during a local sync");
+        }
+        return jsonResponse({
+          ...BASE_OVERVIEW,
+          notification_prefs: BASE_PREFS,
+        });
+      },
+      () => {},
+    );
+    await model.load();
+
+    applyNotificationPrefs({
+      is_enabled: true,
+      style: "cards",
+      is_os_hint_dismissed: false,
+      os_permission_confirmed: false,
+      version: "np-9",
+    });
+    model.syncNotificationPrefsFromApplied();
+
+    expect(model.notificationPrefs()).toEqual({
+      is_enabled: true,
+      style: "cards",
+      is_os_hint_dismissed: false,
+      os_permission_confirmed: false,
+      version: "np-9",
+    });
+    expect(model.isLoadFailed).toBe(false);
+  });
+
+  it("does nothing before the overview has loaded", () => {
+    const model = new SettingsModel(
+      async () => jsonResponse(BASE_OVERVIEW),
+      () => {},
+    );
+    model.syncNotificationPrefsFromApplied();
+    expect(model.overview).toBeNull();
+  });
+
+  it("clears the open-failed flag on a successful OS-settings open", async () => {
+    vi.stubGlobal("window", {
+      mindsNative: {
+        platform: "darwin",
+        openNotificationSettings: vi.fn(async () => true),
+      },
+    });
+    const model = new SettingsModel(
+      async () => jsonResponse(BASE_OVERVIEW),
+      () => {},
+    );
+    model.notificationOsSettingsOpenFailed = true;
+
+    await model.openNotificationOsSettings();
+
+    expect(model.notificationOsSettingsOpenFailed).toBe(false);
+  });
+
+  it("records the failure when the OS settings pane does not open (e.g. an unsupported Linux desktop environment)", async () => {
+    vi.stubGlobal("window", {
+      mindsNative: {
+        platform: "linux",
+        openNotificationSettings: vi.fn(async () => false),
+      },
+    });
+    const model = new SettingsModel(
+      async () => jsonResponse(BASE_OVERVIEW),
+      () => {},
+    );
+
+    await model.openNotificationOsSettings();
+
+    expect(model.notificationOsSettingsOpenFailed).toBe(true);
   });
 
   it("surfaces a mismatch error without posting when master passwords differ", async () => {
@@ -535,10 +802,17 @@ describe("addAccountBlockedReason", () => {
   };
 
   it("blocks the action, with a reason, for a service that has no browser sign-in", () => {
-    expect(addAccountBlockedReason(SERVICE)).toBe("AWS does not support signing in through a browser.");
+    expect(addAccountBlockedReason(SERVICE)).toBe(
+      "AWS does not support signing in through a browser.",
+    );
   });
 
   it("allows the action for a service that signs in through a browser", () => {
-    expect(addAccountBlockedReason({ ...SERVICE, is_browser_sign_in_supported: true })).toBeNull();
+    expect(
+      addAccountBlockedReason({
+        ...SERVICE,
+        is_browser_sign_in_supported: true,
+      }),
+    ).toBeNull();
   });
 });

@@ -37,9 +37,11 @@ second gateway URL or a different agent skill.
    anything by itself: it waits behind the chat card's "Review & respond"
    relay and the "Waiting on you" rows in a machine's Permissions tab.
    Either one opens the permission popup as a **centered dialog** over the
-   current window, on a dim backdrop. There is no inbox drawer, no request
-   list page, and no titlebar Requests button: the popup is the only review
-   surface, and those two are the only ways in. It is not a route -- it
+   current window, on a dim backdrop. The popup is the only review
+   surface; the other ways in all lead back to it: the titlebar bell's
+   notification feed (whose pending rows carry the request), its toast
+   cards, and OS-notification clicks each jump to the asking workspace and
+   open the same popup there. It is not a route -- it
    stacks over whatever is on screen, including the workspace-options panel
    -- so dismissing it via Approve/Deny, the close button, a backdrop
    click, or Escape returns the user to their work with nothing changed

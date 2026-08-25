@@ -9,6 +9,7 @@
 import m from "mithril";
 import type {
   UiHealthMessage,
+  UiNotificationsMessage,
   UiOpenHelpMessage,
   UiServerMessage,
   UiWorkspaceRefreshMessage,
@@ -17,6 +18,7 @@ import type {
 import { parseServerMessage } from "./messages";
 import type { AppStores } from "../models/boot";
 import { VISIBLE_AFTER_FAILURES, backoffDelayMs } from "./backoff";
+import { resolveWindowFocus } from "../window-focus";
 
 const SCHEMA_RELOAD_GUARD_KEY = "minds-ui-schema-reloaded";
 
@@ -44,6 +46,10 @@ export interface ChannelOptions {
   /** Called after each health message lands. The message's own ``is_snapshot``
    * tells a connect-time replay of current state apart from a live edge. */
   onHealthChanged?: (message: UiHealthMessage) => void;
+  /** Called after each notifications message lands (the store already holds
+   * it). Same ``is_snapshot`` convention as health: the arrival controller
+   * uses it to seed silently on connect-time replays. */
+  onNotificationsChanged?: (message: UiNotificationsMessage) => void;
   /** A fresh snapshot is about to replay: the per-workspace health store has
    * just been cleared and everything after this is the server restating the
    * world. */
@@ -57,11 +63,15 @@ export interface ChannelOptions {
   redraw?: () => void;
   /** Injected in tests; defaults to window.sessionStorage. */
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+  /** Injected in tests; defaults to document.hasFocus(). */
+  hasWindowFocus?: () => boolean;
 }
 
 export function defaultChannelSocketFactory(): ChannelSocketLike {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  return new WebSocket(`${scheme}://${location.host}/ui/ws`) as unknown as ChannelSocketLike;
+  return new WebSocket(
+    `${scheme}://${location.host}/ui/ws`,
+  ) as unknown as ChannelSocketLike;
 }
 
 export class UiChannelClient {
@@ -89,6 +99,10 @@ export class UiChannelClient {
     return this.options.storage ?? sessionStorage;
   }
 
+  private hasFocus(): boolean {
+    return resolveWindowFocus(this.options.hasWindowFocus);
+  }
+
   start(): void {
     this.connect();
   }
@@ -101,16 +115,31 @@ export class UiChannelClient {
 
   /** True once enough consecutive failures accrued to surface the indicator. */
   get isVisiblyReconnecting(): boolean {
-    return !this.isConnected && this.consecutiveFailures >= VISIBLE_AFTER_FAILURES;
+    return (
+      !this.isConnected && this.consecutiveFailures >= VISIBLE_AFTER_FAILURES
+    );
   }
 
   setClientState(route: string, workspaceAgentId: string | null): void {
     // Called from the route resolver's render, i.e. on EVERY redraw; only an
     // actual change warrants a frame. Reconnect registration is unaffected:
     // the onopen path calls sendClientState directly.
-    if (route === this.currentRoute && workspaceAgentId === this.currentWorkspaceAgentId) return;
+    if (
+      route === this.currentRoute &&
+      workspaceAgentId === this.currentWorkspaceAgentId
+    )
+      return;
     this.currentRoute = route;
     this.currentWorkspaceAgentId = workspaceAgentId;
+    this.sendClientState();
+  }
+
+  /** Re-registers client_state on a bare focus/blur (route and workspace
+   * unchanged, so setClientState's own dedup would otherwise never resend):
+   * the server's OS-dispatch gate needs this window's current focus, not just
+   * what it is displaying, and there is no other route/workspace change to
+   * piggyback the frame on when the reader just alt-tabs away and back. */
+  notifyFocusChanged(): void {
     this.sendClientState();
   }
 
@@ -154,6 +183,7 @@ export class UiChannelClient {
         client_id: this.clientId,
         route: this.currentRoute,
         workspace_agent_id: this.currentWorkspaceAgentId,
+        has_focus: this.hasFocus(),
       }),
     );
   }
@@ -192,6 +222,10 @@ export class UiChannelClient {
         break;
       case "requests":
         stores.requests.applyRequestsMessage(message);
+        break;
+      case "notifications":
+        stores.notifications.applyNotificationsMessage(message);
+        this.options.onNotificationsChanged?.(message);
         break;
       case "health":
         stores.health.applyHealthMessage(message);

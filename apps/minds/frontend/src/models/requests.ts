@@ -1,12 +1,17 @@
 // The pending permission requests, as last pushed over the channel.
 //
 // A pending request never opens anything on its own: it waits behind the
-// in-chat card's "Review & respond" button and the Permissions tab's
-// "Waiting on you" rows. This store is only the live set those surfaces (and
-// the popup's own reconciliation) read.
+// in-chat card's "Review & respond" button, the Permissions tab's "Waiting
+// on you" rows, and the notification feed's rows and toasts (whose display
+// state lives in NotificationsStore; only the review gesture's is-it-still-
+// pending check reads this set). This store is only the live set those
+// surfaces (and the popup's own reconciliation) read.
 
 import type { UiRequestsMessage } from "../channel/messages";
-import { retainWarmedRequestDetails, warmRequestDetail } from "./requestDetailPrefetch";
+import {
+  retainWarmedRequestDetails,
+  warmRequestDetail,
+} from "./requestDetailPrefetch";
 
 export class RequestsStore {
   requestIds: readonly string[] = [];

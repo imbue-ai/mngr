@@ -30,6 +30,24 @@ function parseWorkspaceId(url) {
   }
 }
 
+// Extract the workspace id from the SPA's own /workspace/<id> route path --
+// the shape notification deep links use (/workspace/<agent-id>?review=...).
+// Distinct from parseWorkspaceId: these are chrome-page routes, not workspace
+// origins, so the origin//goto matcher above cannot see them. Path-only on
+// purpose (callers only consult it for URLs parseWorkspaceId rejected);
+// workspace-SCOPED sub-screens like /workspace/<id>/settings do not count.
+function parseSpaWorkspaceRouteId(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/workspace\/((?:agent|host)-[a-f0-9]+)\/?$/i);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   parseWorkspaceId,
+  parseSpaWorkspaceRouteId,
 };

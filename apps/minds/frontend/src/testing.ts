@@ -2,7 +2,10 @@
 // Deliberately NOT named *.test.ts so vitest does not collect it as a suite.
 
 import m from "mithril";
-import type { UiWorkspacesMessage } from "./channel/messages";
+import type {
+  UiNotificationEntry,
+  UiWorkspacesMessage,
+} from "./channel/messages";
 import type { SettingsOverview } from "./models/settings";
 
 /** Render a component to its root vnode by instantiating the closure and
@@ -56,6 +59,30 @@ export function workspacesMessage(overrides: Partial<UiWorkspacesMessage> = {}):
     destroying_agent_ids: [],
     restorable_workspace_ids: ["agent-aa11", "host-bb22"],
     remote_workspace_states: {},
+    ...overrides,
+  };
+}
+
+/** One notification-feed entry as the wire carries it: an unresolved
+ * permission ask from the workspacesMessage workspace (alpha / agent-aa11),
+ * with every field overridable per test. */
+export function notificationEntry(
+  id: string,
+  overrides: Partial<UiNotificationEntry> = {},
+): UiNotificationEntry {
+  return {
+    id,
+    kind: "permission_request",
+    created_at: "2026-08-18T00:00:00Z",
+    is_resolved: false,
+    outcome: null,
+    title: "Slack access",
+    body: "wants to read messages",
+    request_id: `req-${id}`,
+    workspace_agent_id: "agent-aa11",
+    workspace_name: "alpha",
+    workspace_accent: "#aabbcc",
+    service_name: "",
     ...overrides,
   };
 }

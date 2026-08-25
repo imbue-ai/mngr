@@ -31,7 +31,9 @@ function shellWithFrameOn(armedAnyId: string | null): {
  * its way through, which is all it needs of the document. */
 function stubAccentPainting(): void {
   vi.stubGlobal("document", {
-    documentElement: { style: { setProperty: () => undefined, removeProperty: () => undefined } },
+    documentElement: {
+      style: { setProperty: () => undefined, removeProperty: () => undefined },
+    },
     getElementById: () => null,
   });
 }
@@ -61,7 +63,9 @@ function makeShell(): ShellState {
   // Accent painting writes to the document; these cases are about routing, so
   // the writes go to a stub rather than pulling a DOM into the suite.
   vi.stubGlobal("document", {
-    documentElement: { style: { setProperty: () => undefined, removeProperty: () => undefined } },
+    documentElement: {
+      style: { setProperty: () => undefined, removeProperty: () => undefined },
+    },
     getElementById: () => null,
   });
   const shell = new ShellState(createEmptyStores());
@@ -77,16 +81,57 @@ function land(shell: ShellState, route: string): void {
   shell.handleRouteChanged(path, search);
 }
 
-
 describe("ShellState.openInbox", () => {
   it("floats the popup over the workspace on screen, which stays mounted", () => {
     const shell = makeShell();
     land(shell, `/workspace/${WORKSPACE_ID}`);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     shell.openInbox({ selected: "evt-a" });
 
-    expect(routeSet).toHaveBeenCalledWith("/inbox", { selected: "evt-a", workspace: WORKSPACE_ID }, undefined);
+    expect(routeSet).toHaveBeenCalledWith(
+      "/inbox",
+      { selected: "evt-a", workspace: WORKSPACE_ID },
+      undefined,
+    );
+  });
+
+  it("never stacks a second /inbox push for the same request racing to open it", () => {
+    // Regression test for the reported stale-duplicate-popup bug: two
+    // callers racing to open the SAME request (a toast and a feed row, an
+    // embed-contract message and a notification click, or simply a double
+    // click) can both read the route as "not /inbox yet" and both push --
+    // openInbox's own replace-in-place logic only kicks in once the FIRST
+    // push has actually landed on /inbox, which does not happen
+    // synchronously. The dedup guard closes that window regardless of the
+    // exact source of the second call.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openInbox({ selected: "evt-a" });
+    // Still reads as /workspace/WORKSPACE_ID: the mocked route.set never
+    // actually lands, exactly the race window this guards.
+    shell.openInbox({ selected: "evt-a" });
+
+    expect(routeSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not dedup two DIFFERENT requests racing at once", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openInbox({ selected: "evt-a" });
+    shell.openInbox({ selected: "evt-b" });
+
+    expect(routeSet).toHaveBeenCalledTimes(2);
   });
 
   it("remembers the Permissions pane it was opened from", () => {
@@ -168,14 +213,41 @@ describe("ShellState.rememberPageBehindOverlay", () => {
 });
 
 describe("ShellState.closeAppOverlay", () => {
-  it("does not fire a second history.back() when Escape is held down", () => {
-    // history.back() does not land synchronously, and the router re-runs
-    // handleRouteChanged on every redraw -- so the guard must survive a redraw
-    // on the route being left. Key repeat is ~30ms; one back() too many
-    // carries the reader past the machine they opened the request from.
+  it("routes /inbox directly to its named workspace, never through history.back()", () => {
+    // /inbox can be reached by a multi-push notification jump (workspace,
+    // THEN the popup), which breaks history.back()'s "undo exactly one push"
+    // assumption -- it would land on whatever was on screen BEFORE the jump,
+    // not the workspace the popup was actually reviewing. Routing to the
+    // ?workspace= the popup already names is correct regardless of how many
+    // entries getting here pushed.
     const shell = makeShell();
     const back = vi.fn();
     vi.stubGlobal("window", { history: { length: 5, back } });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).not.toHaveBeenCalled();
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+  });
+
+  it("does not fire a second dismissal when Escape is held down", () => {
+    // The router re-runs handleRouteChanged on every redraw, and the
+    // dismissal's own route.set does not land synchronously -- so the guard
+    // must survive a redraw on the route still being left, or a held Escape
+    // (repeating every ~30ms) would fire the dismissal a second time.
+    const shell = makeShell();
+    vi.stubGlobal("window", { history: { length: 5, back: vi.fn() } });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
     land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
 
     expect(shell.closeAppOverlay()).toBe(true);
@@ -183,15 +255,17 @@ describe("ShellState.closeAppOverlay", () => {
     land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
     expect(shell.closeAppOverlay()).toBe(true);
 
-    expect(back).toHaveBeenCalledTimes(1);
+    expect(routeSet).toHaveBeenCalledTimes(1);
   });
 
   it("closes again once the dismissal has actually landed", () => {
     // The guard is not a one-way latch: arriving somewhere new clears it, so a
     // later overlay still closes.
     const shell = makeShell();
-    const back = vi.fn();
-    vi.stubGlobal("window", { history: { length: 5, back } });
+    vi.stubGlobal("window", { history: { length: 5, back: vi.fn() } });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
     land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
     expect(shell.closeAppOverlay()).toBe(true);
 
@@ -199,7 +273,233 @@ describe("ShellState.closeAppOverlay", () => {
     land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
     expect(shell.closeAppOverlay()).toBe(true);
 
-    expect(back).toHaveBeenCalledTimes(2);
+    expect(routeSet).toHaveBeenCalledTimes(2);
+  });
+
+  it("still prefers history.back() for an app overlay with no workspace to name (e.g. Get help)", () => {
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, "/help");
+
+    expect(shell.closeAppOverlay()).toBe(true);
+
+    expect(back).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ShellState review deep link", () => {
+  // consumeReviewParam runs from inside the router's render() (Mithril
+  // resolving the ?review= navigation), so its m.route.set calls are queued
+  // past this microtask tick rather than issued inline -- a route change
+  // issued synchronously from there would be a NESTED one, reentering
+  // Mithril's render while it is still committing the current one (this is
+  // what produced a stale duplicate popup live). One microtask flush lets a
+  // queued consumption run to completion.
+  const flush = () => Promise.resolve();
+
+  it("consumes ?review= once: strips it by replacement, then opens the popup for a pending request", async () => {
+    const shell = makeShell();
+    shell.stores.requests.requestIds = ["evt-1"];
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-1`);
+    await flush();
+
+    expect(routeSet).toHaveBeenNthCalledWith(
+      1,
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      {
+        replace: true,
+      },
+    );
+    expect(routeSet).toHaveBeenNthCalledWith(
+      2,
+      "/inbox",
+      { selected: "evt-1", workspace: WORKSPACE_ID },
+      undefined,
+    );
+
+    // The stripping set lands a tick later, so redraws still see the review
+    // route; none of them may consume it again.
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-1`);
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-1`);
+    await flush();
+    expect(routeSet).toHaveBeenCalledTimes(2);
+  });
+
+  it("lands a still-creating machine's deep link on its creating page, popup deferred", async () => {
+    const shell = makeShell();
+    const base = workspacesMessage().workspaces[0];
+    shell.stores.workspaces.applyWorkspacesMessage(
+      workspacesMessage({
+        workspaces: [
+          {
+            ...base,
+            id: WORKSPACE_ID,
+            host_id: "host-cd34",
+            create_attempt_state: "creating",
+          },
+        ],
+      }),
+    );
+    shell.stores.requests.requestIds = ["evt-1"];
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-1`);
+    await flush();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      `/creating/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+    // Never the popup: /inbox over a creating machine would background to
+    // Home; the ask stays in the bell until the machine is up.
+    expect(routeSet).not.toHaveBeenCalledWith("/inbox", expect.anything());
+    expect(routeSet.mock.calls.some(([path]) => path === "/inbox")).toBe(false);
+  });
+
+  it("strips a resolved or unknown review id without opening the popup", async () => {
+    const shell = makeShell();
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-gone`);
+    await flush();
+
+    expect(routeSet).toHaveBeenCalledTimes(1);
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+  });
+
+  it("consumes a later deep link afresh once the stripped route has landed", async () => {
+    const shell = makeShell();
+    shell.stores.requests.requestIds = ["evt-1"];
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-1`);
+    await flush();
+    // Simulate the popup's own landing and dismissal (m.route.set is mocked
+    // to a no-op above, so nothing gets here on its own): openInbox's dedup
+    // guard is keyed on actually having left /inbox, not merely on time, so
+    // a realistic close-then-reopen cycle has to walk through it to prove
+    // the SECOND consumption is treated as fresh rather than a duplicate of
+    // the first.
+    land(shell, `/inbox?selected=evt-1&workspace=${WORKSPACE_ID}`);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-1`);
+    await flush();
+
+    // Two full consumptions: strip + open, twice.
+    expect(routeSet).toHaveBeenCalledTimes(4);
+  });
+
+  it("ignores ?review= off the workspace surface", async () => {
+    const shell = makeShell();
+    shell.stores.requests.requestIds = ["evt-1"];
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, "/create?review=evt-1");
+    await flush();
+
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("never leaves a second popup behind: a nested route.set during the landing render does not double-resolve", async () => {
+    // Regression test for the reported "double popup, stale one below" bug:
+    // consumeReviewParam must not call m.route.set synchronously from within
+    // handleRouteChanged (itself invoked from the router's render()), since a
+    // route change issued there reenters Mithril mid-render. Simulate that
+    // reentrancy directly -- land() while still "inside" a route resolution
+    // (i.e. before any microtask has flushed) -- and assert nothing routes
+    // until the render this consumption belongs to has fully committed.
+    const shell = makeShell();
+    shell.stores.requests.requestIds = ["evt-1"];
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?review=evt-1`);
+    // Still synchronous: nothing has routed yet, so nothing CAN double-render.
+    expect(routeSet).not.toHaveBeenCalled();
+
+    await flush();
+    expect(routeSet).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ShellState notifications popover", () => {
+  it("opens as local state over the current surface, never a navigation", () => {
+    const shell = makeShell();
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    land(shell, "/create");
+
+    shell.openNotifications();
+
+    expect(shell.isNotificationsOpen).toBe(true);
+    // The surface underneath is untouched: no route change at all.
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("retires the floating toasts the moment it opens", () => {
+    const shell = makeShell();
+    let cleared = 0;
+    shell.notificationsUi = {
+      clearLiveToasts: () => (cleared += 1),
+    } as unknown as NonNullable<ShellState["notificationsUi"]>;
+
+    shell.openNotifications();
+
+    expect(cleared).toBe(1);
+  });
+
+  it("toggles from the bell, and Escape closes it first without touching history", () => {
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+
+    shell.toggleNotifications();
+    expect(shell.isNotificationsOpen).toBe(true);
+    // The popover sits on top, so Escape takes it -- not the app overlay it
+    // was opened over, which would have fired history.back().
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.isNotificationsOpen).toBe(false);
+    expect(back).not.toHaveBeenCalled();
+
+    shell.toggleNotifications();
+    shell.toggleNotifications();
+    expect(shell.isNotificationsOpen).toBe(false);
+  });
+
+  it("closes on any navigation, like a dropdown would", () => {
+    const shell = makeShell();
+    land(shell, "/create");
+    shell.openNotifications();
+
+    // A redraw on the same route is not a navigation: still open.
+    land(shell, "/create");
+    expect(shell.isNotificationsOpen).toBe(true);
+
+    // Leaving the surface (a feed row's jump to a machine) closes it.
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isNotificationsOpen).toBe(false);
   });
 });
 
@@ -207,7 +507,10 @@ describe("ShellState.returnToPanelAfterRequest", () => {
   const PANEL_ROUTE = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
 
   function listWith(count: number): WaitingRequestList {
-    return { forgetWaitingRequest: () => undefined, hasWaitingRequests: () => count > 0 };
+    return {
+      forgetWaitingRequest: () => undefined,
+      hasWaitingRequests: () => count > 0,
+    };
   }
 
   it("hands the pane back on its own list while other requests are still waiting", () => {
@@ -216,7 +519,9 @@ describe("ShellState.returnToPanelAfterRequest", () => {
     const shell = makeShell();
     shell.panelRouteBehindOverlay = PANEL_ROUTE;
     shell.registerWaitingRequestList(listWith(1));
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     expect(shell.returnToPanelAfterRequest()).toBe(true);
 
@@ -229,7 +534,9 @@ describe("ShellState.returnToPanelAfterRequest", () => {
     const shell = makeShell();
     shell.panelRouteBehindOverlay = PANEL_ROUTE;
     shell.registerWaitingRequestList(listWith(0));
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     expect(shell.returnToPanelAfterRequest()).toBe(true);
 
@@ -242,7 +549,9 @@ describe("ShellState.returnToPanelAfterRequest", () => {
     // it; Add connection is the safe landing, never a section that is gone.
     const shell = makeShell();
     shell.panelRouteBehindOverlay = PANEL_ROUTE;
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     expect(shell.returnToPanelAfterRequest()).toBe(true);
 
@@ -268,7 +577,11 @@ describe("ShellState waiting-request list", () => {
       hasWaitingRequests: () => false,
     });
 
-    shell.notifyRequestResolved({ requestId: "evt-a", agentId: "agent-other", verdict: "granted" });
+    shell.notifyRequestResolved({
+      requestId: "evt-a",
+      agentId: "agent-other",
+      verdict: "granted",
+    });
 
     // Unconditional, unlike the relay: the list is this window's own, whichever
     // machine the request belongs to.
@@ -288,7 +601,11 @@ describe("ShellState waiting-request list", () => {
       forgetWaitingRequest: () => undefined,
       hasWaitingRequests: () => false,
     });
-    shell.notifyRequestResolved({ requestId: "evt-a", agentId: null, verdict: "denied" });
+    shell.notifyRequestResolved({
+      requestId: "evt-a",
+      agentId: null,
+      verdict: "denied",
+    });
 
     expect(forgotten).toEqual(["evt-a"]);
   });
@@ -309,10 +626,15 @@ describe("ShellState displayed workspace", () => {
 
 describe("ShellState permission-resolution relay", () => {
   /** A shell showing `displayed`, with a mounted frame's sender registered. */
-  function relayOver(displayed: string | null): { shell: ShellState; sent: [string, string][] } {
+  function relayOver(displayed: string | null): {
+    shell: ShellState;
+    sent: [string, string][];
+  } {
     const shell = makeShell();
     const sent: [string, string][] = [];
-    shell.registerPermissionResolvedSender((requestId, verdict) => sent.push([requestId, verdict]));
+    shell.registerPermissionResolvedSender((requestId, verdict) =>
+      sent.push([requestId, verdict]),
+    );
     shell.displayedWorkspaceAnyId = displayed;
     return { shell, sent };
   }
@@ -320,7 +642,11 @@ describe("ShellState permission-resolution relay", () => {
   it("tells the workspace the resolved request belongs to", () => {
     const { shell, sent } = relayOver(WORKSPACE_ID);
 
-    shell.notifyRequestResolved({ requestId: "evt-a", agentId: WORKSPACE_ID, verdict: "granted" });
+    shell.notifyRequestResolved({
+      requestId: "evt-a",
+      agentId: WORKSPACE_ID,
+      verdict: "granted",
+    });
 
     expect(sent).toEqual([["evt-a", "granted"]]);
   });
@@ -328,18 +654,30 @@ describe("ShellState permission-resolution relay", () => {
   it("says nothing to a workspace that did not ask", () => {
     const { shell, sent } = relayOver(WORKSPACE_ID);
 
-    shell.notifyRequestResolved({ requestId: "evt-a", agentId: "agent-other", verdict: "denied" });
+    shell.notifyRequestResolved({
+      requestId: "evt-a",
+      agentId: "agent-other",
+      verdict: "denied",
+    });
 
     expect(sent).toEqual([]);
   });
 
   it("says nothing with no workspace on screen, or no workspace on the card", () => {
     const offScreen = relayOver(null);
-    offScreen.shell.notifyRequestResolved({ requestId: "evt-a", agentId: WORKSPACE_ID, verdict: "denied" });
+    offScreen.shell.notifyRequestResolved({
+      requestId: "evt-a",
+      agentId: WORKSPACE_ID,
+      verdict: "denied",
+    });
     expect(offScreen.sent).toEqual([]);
 
     const unresolved = relayOver(WORKSPACE_ID);
-    unresolved.shell.notifyRequestResolved({ requestId: "evt-a", agentId: null, verdict: "denied" });
+    unresolved.shell.notifyRequestResolved({
+      requestId: "evt-a",
+      agentId: null,
+      verdict: "denied",
+    });
     expect(unresolved.sent).toEqual([]);
   });
 
@@ -347,7 +685,11 @@ describe("ShellState permission-resolution relay", () => {
     const { shell, sent } = relayOver(WORKSPACE_ID);
 
     shell.unregisterPermissionResolvedSender(() => undefined);
-    shell.notifyRequestResolved({ requestId: "evt-a", agentId: WORKSPACE_ID, verdict: "denied" });
+    shell.notifyRequestResolved({
+      requestId: "evt-a",
+      agentId: WORKSPACE_ID,
+      verdict: "denied",
+    });
 
     expect(sent).toEqual([["evt-a", "denied"]]);
   });
@@ -485,13 +827,19 @@ describe("recovery card openness", () => {
     // through the forward the dead consumer feeds -- so it would offer
     // "Restart Machine" over a band correctly saying only the app restart helps.
     displaying(shell, AGENT);
-    shell.stores.health.applyDiscoveryHealthMessage({ type: "discovery_health", state: "blocked" });
+    shell.stores.health.applyDiscoveryHealthMessage({
+      type: "discovery_health",
+      state: "blocked",
+    });
     shell.handleHealthChanged(AGENT, "restart_failed", false);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 
   it("still opens on request while the consumer is dead", () => {
-    shell.stores.health.applyDiscoveryHealthMessage({ type: "discovery_health", state: "blocked" });
+    shell.stores.health.applyDiscoveryHealthMessage({
+      type: "discovery_health",
+      state: "blocked",
+    });
     shell.openRecoveryModal(AGENT);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
   });
@@ -623,5 +971,31 @@ describe("ShellState.handleEscape", () => {
 
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
-});
 
+  it("gives the key to the notification feed over an open card", () => {
+    // The feed is the other surface that can open ON TOP of the card (see
+    // handleEscape's own doc comment), so it takes the keypress first and the
+    // card must survive it.
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.openNotifications();
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(shell.isNotificationsOpen).toBe(false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+
+  it("closes the card once the feed above it is gone", () => {
+    // The keypress after the one the feed took: the card is next in line, not
+    // skipped over because the feed was there first.
+    displaying(shell, AGENT);
+    shell.openRecoveryModal(AGENT);
+    shell.openNotifications();
+    shell.handleEscape();
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+});

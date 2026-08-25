@@ -53,7 +53,10 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   // host-scoped id before the snapshot provides the alias mapping.
   { path: "/workspace/:workspaceId", component: LandingPage },
   // Legacy URL: redirects into the options overlay's settings tab.
-  { path: "/workspace/:agentId/settings", component: WorkspaceSettingsRedirect },
+  {
+    path: "/workspace/:agentId/settings",
+    component: WorkspaceSettingsRedirect,
+  },
   // The options overlay: rendered by the Shell OVER the workspace surface.
   { path: "/workspace/:agentId/options", component: WorkspaceOptionsPage },
   { path: "/workspace/:agentId/backups", component: WorkspaceBackupsPage },
@@ -99,8 +102,13 @@ export function mountRouter(root: Element, shell: ShellState): void {
         // The Home surface an app-level modal (settings/accounts/help) floats
         // over when no workspace is behind it; the router owns page identity.
         homeContent: m(LandingPage),
-        behindContent: recoveryWorkspaceIdFromPath(pagePath) !== null ? m(RecoveryPage) : null,
-        optionsContent: isWorkspaceOverlayPath(panelPath) ? m(WorkspaceOptionsPage) : null,
+        behindContent:
+          recoveryWorkspaceIdFromPath(pagePath) !== null
+            ? m(RecoveryPage)
+            : null,
+        optionsContent: isWorkspaceOverlayPath(panelPath)
+          ? m(WorkspaceOptionsPage)
+          : null,
       });
     },
   });
@@ -121,7 +129,11 @@ export function mountRouter(root: Element, shell: ShellState): void {
 export function navigateExternalUrl(shell: ShellState, url: string): void {
   const workspaceAnyId = parseWorkspaceIdFromUrl(url);
   if (workspaceAnyId !== null) {
-    shell.enterWorkspace(workspaceAnyId);
+    // An OS-notification click deep-links /workspace/<id>?review=<request-id>,
+    // and enterWorkspace routes with no query -- so the review param must be
+    // forwarded here or the click could never open the request it names (the
+    // shell's route-changed handling consumes it).
+    shell.enterWorkspace(workspaceAnyId, reviewQueryOf(url));
     return;
   }
   try {
@@ -144,7 +156,11 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
     // the displayed machine is the same signal, captured before we navigate.)
     const gitUrl = parsed.searchParams.get("git_url");
     const displayed = shell.displayedWorkspaceAnyId;
-    if (parsed.pathname === "/create/template" && gitUrl && displayed !== null) {
+    if (
+      parsed.pathname === "/create/template" &&
+      gitUrl &&
+      displayed !== null
+    ) {
       const query: Record<string, string> = {
         workspace: shell.stores.workspaces.toAgentScopedId(displayed),
         git_url: gitUrl,
@@ -160,24 +176,52 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
   }
 }
 
+/** The ``?review=`` param to carry into the workspace route, when `urlString`
+ * is a workspace-display deep link that names one; empty otherwise. Scoped to
+ * the display shape on purpose: the other URL shapes parseWorkspaceIdFromUrl
+ * accepts (workspace origins, /goto bridges) are not SPA routes and a review
+ * param on them means nothing here. */
+function reviewQueryOf(urlString: string): Record<string, string> {
+  try {
+    const base =
+      typeof window !== "undefined"
+        ? window.location.origin
+        : "http://localhost";
+    const parsed = new URL(urlString, base);
+    if (workspaceDisplayIdFromPath(parsed.pathname) === null) return {};
+    const review = parsed.searchParams.get("review");
+    return review === null || review === "" ? {} : { review };
+  } catch {
+    return {};
+  }
+}
+
 export function parseWorkspaceIdFromUrl(urlString: string): string | null {
   if (!urlString) return null;
   try {
-    const base = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+    const base =
+      typeof window !== "undefined"
+        ? window.location.origin
+        : "http://localhost";
     const parsed = new URL(urlString, base);
-    const hostMatch = parsed.hostname.match(/^(?:[a-z0-9_-]+\.)*(host-[a-f0-9]+)\.localhost$/i);
+    const hostMatch = parsed.hostname.match(
+      /^(?:[a-z0-9_-]+\.)*(host-[a-f0-9]+)\.localhost$/i,
+    );
     if (hostMatch) return hostMatch[1];
     const pathMatch = (parsed.pathname + parsed.search).match(
       /^\/(?:goto|forward-bridge)(?:[/?]\S*?)?\/?(host-[a-f0-9]+)(?:\/|$|%2F)/i,
     );
     if (pathMatch) return pathMatch[1];
-    const plainGoto = parsed.pathname.match(/^\/goto\/((?:agent|host)-[a-f0-9]+)(?:\/|$)/i);
+    const plainGoto = parsed.pathname.match(
+      /^\/goto\/((?:agent|host)-[a-f0-9]+)(?:\/|$)/i,
+    );
     if (plainGoto) return plainGoto[1];
     const displayMatch = workspaceDisplayIdFromPath(parsed.pathname);
     if (displayMatch !== null) return displayMatch;
     // Stale persisted URLs from pre-SPA sessions still carry the old wrapper
     // shape; accept them so restore never drops a window on upgrade.
-    const chromeMatch = parsed.pathname === "/_chrome" ? parsed.searchParams.get("agent") : null;
+    const chromeMatch =
+      parsed.pathname === "/_chrome" ? parsed.searchParams.get("agent") : null;
     return chromeMatch;
   } catch {
     return null;

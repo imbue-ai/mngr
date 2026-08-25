@@ -24,6 +24,7 @@ from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -41,6 +42,35 @@ from imbue.mngr_forward.tls import generate_server_credentials
 def device_id_for_test(name: str) -> HostId:
     """Deterministic ``HostId``-shaped device id for a named fake device in tests."""
     return HostId(f"host-{hashlib.sha256(name.encode()).hexdigest()[:32]}")
+
+
+class WriteCountingMindsConfig(MindsConfig):
+    """MindsConfig double that counts config-file writes (each is one atomic replace)."""
+
+    _write_count: int = PrivateAttr(default=0)
+
+    def _write_raw(self, data: dict[str, object]) -> None:
+        self._write_count += 1
+        super()._write_raw(data)
+
+    @property
+    def write_count(self) -> int:
+        return self._write_count
+
+
+class ReadCountingMindsConfig(MindsConfig):
+    """MindsConfig double that counts config-file reads: each is one lock-guarded load, so counting
+    them proves whether a multi-field getter reads its fields under one lock acquisition or several."""
+
+    _read_count: int = PrivateAttr(default=0)
+
+    def _read_raw(self) -> dict[str, object]:
+        self._read_count += 1
+        return super()._read_raw()
+
+    @property
+    def read_count(self) -> int:
+        return self._read_count
 
 
 def is_workspace_options_pane_hidden(html: str, pane: str) -> bool:

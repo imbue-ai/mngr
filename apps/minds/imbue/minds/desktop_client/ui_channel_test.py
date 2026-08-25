@@ -19,6 +19,7 @@ import httpx
 from simple_websocket import Client as WebSocketClient
 from simple_websocket import ConnectionClosed
 
+from imbue.minds.desktop_client.app import _ConnectedFocusedWorkspaceAgentIdsReader
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -108,6 +109,29 @@ def test_broadcaster_records_client_state_only_for_registered_queues() -> None:
     assert broadcaster.get_connected_client_states() == [state]
 
 
+def test_connected_focused_workspace_agent_ids_excludes_unfocused_windows() -> None:
+    # The notification feed's OS-dispatch gate: a workspace displayed in an
+    # unfocused window (alt-tabbed away, behind another app) must not count as
+    # "on screen" for OS-dispatch purposes, even though it does for the
+    # in-app toast's own (focus-agnostic) on-screen check.
+    broadcaster = UiChannelBroadcaster()
+    focused_queue = broadcaster.register()
+    unfocused_queue = broadcaster.register()
+    broadcaster.set_client_state(
+        focused_queue,
+        UiClientStateMessage(client_id="win-focused", route="/", workspace_agent_id="agent-focused", has_focus=True),
+    )
+    broadcaster.set_client_state(
+        unfocused_queue,
+        UiClientStateMessage(
+            client_id="win-unfocused", route="/", workspace_agent_id="agent-unfocused", has_focus=False
+        ),
+    )
+    reader = _ConnectedFocusedWorkspaceAgentIdsReader(broadcaster=broadcaster)
+
+    assert reader() == ("agent-focused",)
+
+
 # -- Full-path integration over real cheroot --
 
 
@@ -164,7 +188,7 @@ def test_ws_connect_receives_hello_then_full_snapshot(tmp_path: Path) -> None:
     with _serve_ws_capable_app(tmp_path) as (port, cookie, _state):
         client = _connect_ws(port, cookie)
         try:
-            frames = [json.loads(client.receive(timeout=5)) for _ in range(6)]
+            frames = [json.loads(client.receive(timeout=5)) for _ in range(7)]
         finally:
             client.close()
         assert frames[0]["type"] == "hello"
@@ -175,6 +199,7 @@ def test_ws_connect_receives_hello_then_full_snapshot(tmp_path: Path) -> None:
             "providers",
             "requests",
             "discovery_health",
+            "notifications",
         ]
 
 
@@ -182,7 +207,7 @@ def test_broadcast_after_connect_reaches_the_ws_client(tmp_path: Path) -> None:
     with _serve_ws_capable_app(tmp_path) as (port, cookie, state):
         client = _connect_ws(port, cookie)
         try:
-            for _ in range(6):
+            for _ in range(7):
                 client.receive(timeout=5)
             assert state.ui_publisher is not None
             state.ui_publisher.publish_one_shot(UiReloadMessage())

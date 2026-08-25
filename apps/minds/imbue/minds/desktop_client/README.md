@@ -8,8 +8,9 @@ The local desktop client is a Flask app that handles authentication and traffic 
 > time). Flask serves the SPA's `index.html` for every hub route and exposes a
 > session-authed JSON surface at `/ui/api/*` plus one WebSocket per window at
 > `/ui/ws`. The WebSocket carries all live state (workspaces, accounts,
-> providers, requests, per-workspace health, discovery health, and one-shot
-> events) from a single edge-driven publisher (`ui_publisher.py`) through a
+> providers, requests, the notification feed, per-workspace health, discovery
+> health, and one-shot events) from a single edge-driven publisher
+> (`ui_publisher.py`) through a
 > per-client-queue broadcaster (`ui_channel.py`); the handshake is driven
 > directly with `simple_websocket` (no flask-sock, so the session check runs
 > before the socket is hijacked) on top of the cheroot gateway adapter in

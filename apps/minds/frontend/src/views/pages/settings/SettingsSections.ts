@@ -1,8 +1,9 @@
 // The app-level settings sections: left nav + the shared revoke dialog + one
-// panel each for connectors, local files, machines, error reporting, updates,
-// and the master password. Port of templates/AppSettingsSections.jinja with the
-// interactivity of static/app_settings.js folded into the SettingsModel; the
-// Updates panel is desktop-only and has no jinja original.
+// panel each for connectors, local files, machines, notifications, error
+// reporting, updates, and the master password. Port of
+// templates/AppSettingsSections.jinja with the interactivity of
+// static/app_settings.js folded into the SettingsModel; the Updates panel is
+// desktop-only and has no jinja original.
 
 import m from "mithril";
 import type { UpdateChannel, UpdateState } from "../../../electron-bridge";
@@ -15,8 +16,17 @@ import type {
   WorkspaceDelegationGrant,
   WorkspaceFileSharingGrant,
 } from "../../../models/settings";
-import { CHANNEL_COPY, addAccountBlockedReason } from "../../../models/settings";
+import {
+  CHANNEL_COPY,
+  addAccountBlockedReason,
+} from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
+import type { NotificationStyle } from "../../../models/notificationsUi";
+import {
+  maybeProbeDesktopNotificationPermission,
+  maybeRequestOsPermissionForStyle,
+} from "../../../models/notificationsUi";
+import { electronBridge } from "../../../electron-bridge";
 import { Button } from "../../components/Button";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
@@ -189,12 +199,18 @@ function accountSubsection(
  * nothing to click: the button is disabled and says why on hover. The title
  * sits on a wrapper because a disabled button gets no mouse events, and so no
  * tooltip, in Chromium. */
-function addAccountButton(model: SettingsModel, service: ServicePermissionOverview): m.Children {
+function addAccountButton(
+  model: SettingsModel,
+  service: ServicePermissionOverview,
+): m.Children {
   const isBusy = model.addAccountBusyService === service.service_name;
   const blockedReason = addAccountBlockedReason(service);
   return m(
     "span",
-    { class: "shrink-0", ...(blockedReason === null ? {} : { title: blockedReason }) },
+    {
+      class: "shrink-0",
+      ...(blockedReason === null ? {} : { title: blockedReason }),
+    },
     m(
       Button,
       {
@@ -203,7 +219,9 @@ function addAccountButton(model: SettingsModel, service: ServicePermissionOvervi
         id: `add-account-${service.service_name}`,
         disabled: isBusy || blockedReason !== null,
         onclick: async () => {
-          const errorMessage = await model.addConnectorAccount(service.service_name);
+          const errorMessage = await model.addConnectorAccount(
+            service.service_name,
+          );
           if (errorMessage !== null) window.alert(errorMessage);
         },
       },
@@ -489,6 +507,213 @@ function delegationPanel(model: SettingsModel): m.Children {
             { variant: "info" },
             "No machine management has been delegated to agents yet.",
           ),
+  ]);
+}
+
+/** The three delivery styles, with the words a reader picks between. */
+const NOTIFICATION_STYLE_OPTIONS: {
+  value: NotificationStyle;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "cards",
+    label: "In-app cards",
+    description: "Floating cards in the corner of the window.",
+  },
+  {
+    value: "os",
+    label: "System notifications",
+    description:
+      "Banners from your operating system, even when Minds is in the background.",
+  },
+  {
+    value: "both",
+    label: "Both",
+    description: "Cards in the window plus system banners.",
+  },
+];
+
+/** No app can force a re-prompt once native OS notification permission is
+ * declined (see maybeProbeDesktopNotificationPermission): this is the
+ * escape hatch, pointing the reader at the OS's own settings pane. Surfaces
+ * the open itself failing (e.g. no known settings command on this Linux
+ * desktop environment) rather than leaving the button looking like it
+ * silently did nothing. */
+function notificationOsPermissionNotice(model: SettingsModel): m.Vnode {
+  return m(
+    Notice,
+    { variant: "warn", extra: "flex flex-col gap-2" },
+    m(
+      "div",
+      { class: "flex items-center justify-between gap-3" },
+      [
+        m(
+          "span",
+          {},
+          "This computer's OS notifications for minds may be turned off, " +
+            "so system banners might not appear.",
+        ),
+        m(
+          Button,
+          {
+            variant: "secondary",
+            size: "md",
+            extra: "shrink-0",
+            onclick: () => void model.openNotificationOsSettings(),
+          },
+          "Open System Settings",
+        ),
+      ],
+    ),
+    model.notificationOsSettingsOpenFailed
+      ? m(
+          "span",
+          { class: "type-helper", role: "alert" },
+          "Couldn't open System Settings automatically — check your OS's " +
+            "notification settings for minds.",
+        )
+      : null,
+  );
+}
+
+function notificationsPanel(model: SettingsModel): m.Children {
+  const overview = model.overview;
+  if (overview === null) return null;
+  const prefs = model.notificationPrefs();
+  const write = (next: {
+    is_enabled: boolean;
+    style: NotificationStyle;
+  }): void => {
+    // An OS-reaching choice is the user gesture the browser permission
+    // prompt needs (plain-browser mode only): must fire synchronously with
+    // the click, not after the write's await below, or the browser may no
+    // longer treat it as within the same user-activation window.
+    if (next.is_enabled) maybeRequestOsPermissionForStyle(next.style);
+    void (async () => {
+      await model.setNotificationPrefs({
+        ...next,
+        is_os_hint_dismissed: prefs.is_os_hint_dismissed,
+      });
+      if (!next.is_enabled) return;
+      // Desktop: (re-)ask the OS, regardless of whether an earlier probe
+      // already confirmed it granted -- covers the first time this style is
+      // picked and a retry after the reader flipped it in System Settings
+      // (in either direction) since that probe. No gesture constraint here
+      // (Electron's native API has none), so this can safely wait for the
+      // write to land first. A denial downgrades the style server-side;
+      // sync the model's local copy from the applied-prefs cell the probe
+      // itself just updated, rather than reloading the whole settings
+      // payload -- a transient failure in an unrelated background refresh
+      // must never blank the entire modal over a write that already
+      // succeeded (see SettingsPage.ts's isLoadFailed handling).
+      await maybeProbeDesktopNotificationPermission();
+      model.syncNotificationPrefsFromApplied();
+    })();
+  };
+  return m("section", [
+    m("h2", { class: "type-heading-lg text-primary mb-2" }, "Notifications"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      "Applies to this device, regardless of which account is signed in.",
+    ),
+    m(
+      "label",
+      {
+        class:
+          "flex items-start justify-between gap-3 py-3 border-b border-subtle cursor-pointer",
+      },
+      [
+        m("span", [
+          m(
+            "span",
+            { class: "type-body text-primary font-semibold" },
+            "Notify me when a machine needs me",
+          ),
+          m(
+            "span",
+            { class: "block type-helper text-tertiary" },
+            "When an agent asks for a permission, surface it beyond its machine's own chat. " +
+              "The bell's feed and count always record it either way.",
+          ),
+        ]),
+        m("input", {
+          type: "checkbox",
+          id: "notifications-enabled-toggle",
+          class: "mt-1 shrink-0",
+          checked: prefs.is_enabled,
+          onchange: (event: Event) => {
+            const target = event.target as HTMLInputElement;
+            write({ is_enabled: target.checked, style: prefs.style });
+          },
+        }),
+      ],
+    ),
+    prefs.is_enabled
+      ? m(
+          "div",
+          {
+            role: "radiogroup",
+            "aria-label": "Notification style",
+            class: "flex flex-col",
+          },
+          NOTIFICATION_STYLE_OPTIONS.map((option) => {
+            const isSelected = prefs.style === option.value;
+            return m(
+              "button",
+              {
+                type: "button",
+                role: "radio",
+                id: `notification-style-${option.value}`,
+                "aria-checked": isSelected ? "true" : "false",
+                class:
+                  "flex w-full items-start gap-3 py-3 text-left cursor-pointer border-b border-subtle",
+                onclick: () => write({ is_enabled: true, style: option.value }),
+              },
+              [
+                m(
+                  "span",
+                  {
+                    class:
+                      "mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border " +
+                      (isSelected ? "border-accent" : "border-strong"),
+                    "aria-hidden": "true",
+                  },
+                  isSelected
+                    ? m("span", { class: "h-2 w-2 rounded-full bg-accent" })
+                    : null,
+                ),
+                m("span", [
+                  m(
+                    "span",
+                    { class: "block type-body text-primary font-semibold" },
+                    option.label,
+                  ),
+                  m(
+                    "span",
+                    { class: "block type-helper text-tertiary" },
+                    option.description,
+                  ),
+                ]),
+              ],
+            );
+          }),
+        )
+      : null,
+    electronBridge.isDesktop &&
+    prefs.is_enabled &&
+    prefs.style !== "cards" &&
+    !prefs.os_permission_confirmed
+      ? notificationOsPermissionNotice(model)
+      : null,
+    model.notificationPrefsError !== ""
+      ? m(
+          "p",
+          { class: "type-body text-important mt-3", role: "alert" },
+          model.notificationPrefsError,
+        )
+      : null,
   ]);
 }
 
@@ -1005,12 +1230,17 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
             ]),
           ),
           content: [
-            model.activeSection === "connectors" ? connectorsPanel(model) : null,
+            model.activeSection === "connectors"
+              ? connectorsPanel(model)
+              : null,
             model.activeSection === "file-sharing"
               ? fileSharingPanel(model)
               : null,
             model.activeSection === "workspace-delegation"
               ? delegationPanel(model)
+              : null,
+            model.activeSection === "notifications"
+              ? notificationsPanel(model)
               : null,
             model.activeSection === "error-reporting"
               ? errorReportingPanel(model)

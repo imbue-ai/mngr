@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BACKOFF_CAP_MS, VISIBLE_AFTER_FAILURES, backoffDelayMs } from "./backoff";
+import {
+  BACKOFF_CAP_MS,
+  VISIBLE_AFTER_FAILURES,
+  backoffDelayMs,
+} from "./backoff";
 import { parseServerMessage } from "./messages";
+import type { UiNotificationsMessage } from "./messages";
 import {
   SCHEMA_RELOAD_GUARD_KEY_FOR_TESTS,
   UiChannelClient,
@@ -50,29 +55,45 @@ describe("backoffDelayMs", () => {
 
 describe("parseServerMessage", () => {
   it("accepts known types and rejects junk and unknown types", () => {
-    expect(parseServerMessage(JSON.stringify({ type: "hello", schema_version: 1 }))).toEqual({
+    expect(
+      parseServerMessage(JSON.stringify({ type: "hello", schema_version: 1 })),
+    ).toEqual({
       type: "hello",
       schema_version: 1,
     });
     expect(parseServerMessage("not json")).toBeNull();
-    expect(parseServerMessage(JSON.stringify({ type: "workspace_refresh", agent_id: "agent-1" }))).toEqual({
+    expect(
+      parseServerMessage(
+        JSON.stringify({ type: "workspace_refresh", agent_id: "agent-1" }),
+      ),
+    ).toEqual({
       type: "workspace_refresh",
       agent_id: "agent-1",
     });
-    expect(parseServerMessage(JSON.stringify({ type: "later_addition" }))).toBeNull();
+    expect(
+      parseServerMessage(JSON.stringify({ type: "later_addition" })),
+    ).toBeNull();
     expect(parseServerMessage(JSON.stringify({ no_type: true }))).toBeNull();
   });
 });
 
 describe("UiChannelClient", () => {
-  function makeClient(overrides: { expectedSchemaVersion?: number | null; seededLatch?: boolean } = {}) {
+  function makeClient(
+    overrides: {
+      expectedSchemaVersion?: number | null;
+      seededLatch?: boolean;
+      hasWindowFocus?: () => boolean;
+      onNotificationsChanged?: (message: UiNotificationsMessage) => void;
+    } = {},
+  ) {
     const stores = createEmptyStores();
     const sockets: FakeSocket[] = [];
     const reloads: number[] = [];
     const refreshedAgentIds: string[] = [];
     const relayedTypes: string[] = [];
     const storageMap = new Map<string, string>();
-    if (overrides.seededLatch === true) storageMap.set(SCHEMA_RELOAD_GUARD_KEY_FOR_TESTS, "1");
+    if (overrides.seededLatch === true)
+      storageMap.set(SCHEMA_RELOAD_GUARD_KEY_FOR_TESTS, "1");
     const storage = {
       getItem: (key: string) => storageMap.get(key) ?? null,
       setItem: (key: string, value: string) => void storageMap.set(key, value),
@@ -80,7 +101,10 @@ describe("UiChannelClient", () => {
     };
     const client = new UiChannelClient({
       stores,
-      expectedSchemaVersion: overrides.expectedSchemaVersion === undefined ? 1 : overrides.expectedSchemaVersion,
+      expectedSchemaVersion:
+        overrides.expectedSchemaVersion === undefined
+          ? 1
+          : overrides.expectedSchemaVersion,
       createSocket: () => {
         const socket = new FakeSocket();
         sockets.push(socket);
@@ -92,8 +116,18 @@ describe("UiChannelClient", () => {
       jitter01: () => 0.5,
       redraw: () => undefined,
       storage,
+      hasWindowFocus: overrides.hasWindowFocus,
+      onNotificationsChanged: overrides.onNotificationsChanged,
     });
-    return { client, stores, sockets, reloads, refreshedAgentIds, relayedTypes, storageMap };
+    return {
+      client,
+      stores,
+      sockets,
+      reloads,
+      refreshedAgentIds,
+      relayedTypes,
+      storageMap,
+    };
   }
 
   it("sends client_state on open and on route changes", () => {
@@ -101,7 +135,9 @@ describe("UiChannelClient", () => {
     client.start();
     sockets[0].open();
     client.setClientState("/settings", null);
-    const frames = sockets[0].sent.map((raw) => JSON.parse(raw) as { type: string; route: string });
+    const frames = sockets[0].sent.map(
+      (raw) => JSON.parse(raw) as { type: string; route: string },
+    );
     expect(frames.every((frame) => frame.type === "client_state")).toBe(true);
     expect(frames.at(-1)?.route).toBe("/settings");
   });
@@ -122,6 +158,48 @@ describe("UiChannelClient", () => {
     expect(sockets[0].sent.length).toBe(framesAfterOpen + 2);
   });
 
+  it("reports the window's live focus state on client_state frames", () => {
+    let hasFocus = true;
+    const { client, sockets } = makeClient({
+      hasWindowFocus: () => hasFocus,
+    });
+    client.start();
+    sockets[0].open();
+    const opened = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {
+      has_focus: boolean;
+    };
+    expect(opened.has_focus).toBe(true);
+
+    hasFocus = false;
+    client.setClientState("/settings", null);
+    const afterBlur = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {
+      has_focus: boolean;
+    };
+    expect(afterBlur.has_focus).toBe(false);
+  });
+
+  it("notifyFocusChanged resends client_state even with route and workspace unchanged", () => {
+    // A bare focus/blur changes neither: setClientState's own dedup would
+    // otherwise swallow it, leaving the server's OS-dispatch gate reading a
+    // stale focus state until some other navigation happens to occur.
+    let hasFocus = true;
+    const { client, sockets } = makeClient({
+      hasWindowFocus: () => hasFocus,
+    });
+    client.start();
+    sockets[0].open();
+    const framesAfterOpen = sockets[0].sent.length;
+
+    hasFocus = false;
+    client.notifyFocusChanged();
+
+    expect(sockets[0].sent.length).toBe(framesAfterOpen + 1);
+    const frame = JSON.parse(sockets[0].sent.at(-1) ?? "{}") as {
+      has_focus: boolean;
+    };
+    expect(frame.has_focus).toBe(false);
+  });
+
   it("dispatches workspaces frames into the store", () => {
     const { client, stores, sockets } = makeClient();
     client.start();
@@ -134,6 +212,56 @@ describe("UiChannelClient", () => {
       remote_workspace_states: {},
     });
     expect(stores.workspaces.destroyingAgentIds).toEqual(["agent-1"]);
+  });
+
+  it("dispatches notifications frames into the store without relaying them to main", () => {
+    const { client, stores, sockets, relayedTypes } = makeClient();
+    client.start();
+    sockets[0].open();
+    sockets[0].receive({
+      type: "notifications",
+      entries: [],
+      unresolved_count: 3,
+      is_snapshot: false,
+    });
+    expect(stores.notifications.unresolvedCount).toBe(3);
+    expect(relayedTypes).toEqual([]);
+  });
+
+  it("hands each notifications frame to onNotificationsChanged after the store applied it", () => {
+    // The arrival controller diffs frames for flash decisions; it must see
+    // every frame, snapshot replays included (it reads is_snapshot itself).
+    const seen: {
+      count: number;
+      isSnapshot: boolean | undefined;
+      storeCountAtCallback: number;
+    }[] = [];
+    const { client, stores, sockets } = makeClient({
+      onNotificationsChanged: (message) =>
+        seen.push({
+          count: message.unresolved_count,
+          isSnapshot: message.is_snapshot,
+          storeCountAtCallback: stores.notifications.unresolvedCount,
+        }),
+    });
+    client.start();
+    sockets[0].open();
+    sockets[0].receive({
+      type: "notifications",
+      entries: [],
+      unresolved_count: 2,
+      is_snapshot: true,
+    });
+    sockets[0].receive({
+      type: "notifications",
+      entries: [],
+      unresolved_count: 5,
+      is_snapshot: false,
+    });
+    expect(seen).toEqual([
+      { count: 2, isSnapshot: true, storeCountAtCallback: 2 },
+      { count: 5, isSnapshot: false, storeCountAtCallback: 5 },
+    ]);
   });
 
   it("hands workspace_refresh to the shell without relaying it to main", () => {
@@ -155,7 +283,12 @@ describe("UiChannelClient", () => {
     client.start();
     sockets[0].open();
     sockets[0].receive({ type: "hello", schema_version: 1 });
-    sockets[0].receive({ type: "health", agent_id: "agent-1", status: "stuck", error: null });
+    sockets[0].receive({
+      type: "health",
+      agent_id: "agent-1",
+      status: "stuck",
+      error: null,
+    });
     expect(stores.health.statusFor("agent-1")).toBe("stuck");
 
     // The agent recovers while the socket is down; the reconnect snapshot
@@ -238,7 +371,9 @@ describe("UiChannelClient", () => {
   });
 
   it("hard-reloads once on schema mismatch and latches", () => {
-    const { client, sockets, reloads, storageMap } = makeClient({ expectedSchemaVersion: 1 });
+    const { client, sockets, reloads, storageMap } = makeClient({
+      expectedSchemaVersion: 1,
+    });
     client.start();
     sockets[0].open();
     sockets[0].receive({ type: "hello", schema_version: 2 });
@@ -249,7 +384,9 @@ describe("UiChannelClient", () => {
   });
 
   it("never reloads when there is no expected schema version (no bootstrap)", () => {
-    const { client, sockets, reloads, storageMap } = makeClient({ expectedSchemaVersion: null });
+    const { client, sockets, reloads, storageMap } = makeClient({
+      expectedSchemaVersion: null,
+    });
     client.start();
     sockets[0].open();
     sockets[0].receive({ type: "hello", schema_version: 7 });
@@ -258,7 +395,10 @@ describe("UiChannelClient", () => {
   });
 
   it("clears the reload latch when versions match again", () => {
-    const { client, sockets, storageMap } = makeClient({ expectedSchemaVersion: 1, seededLatch: true });
+    const { client, sockets, storageMap } = makeClient({
+      expectedSchemaVersion: 1,
+      seededLatch: true,
+    });
     client.start();
     sockets[0].open();
     sockets[0].receive({ type: "hello", schema_version: 1 });

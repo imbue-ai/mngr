@@ -268,6 +268,70 @@ def test_build_osascript_notification_escapes_double_quotes() -> None:
     assert '"Title with "quotes""' not in script
 
 
+def _scan_applescript(script: str) -> tuple[list[str], list[str]]:
+    """Split a script the way AppleScript's lexer would: (unescaped string literals, code between them).
+
+    Inside a double-quoted literal, a backslash escapes the next character;
+    an unescaped double quote ends the literal. Whatever falls outside the
+    literals is code AppleScript would execute.
+    """
+    literals: list[str] = []
+    code_segments: list[str] = []
+    current_code: list[str] = []
+    index = 0
+    while index < len(script):
+        if script[index] != '"':
+            current_code.append(script[index])
+            index += 1
+            continue
+        code_segments.append("".join(current_code))
+        current_code = []
+        index += 1
+        literal_chars: list[str] = []
+        while index < len(script) and script[index] != '"':
+            if script[index] == "\\" and index + 1 < len(script):
+                literal_chars.append(script[index + 1])
+                index += 2
+            else:
+                literal_chars.append(script[index])
+                index += 1
+        index += 1
+        literals.append("".join(literal_chars))
+    code_segments.append("".join(current_code))
+    return literals, code_segments
+
+
+def test_backslash_quote_payloads_stay_inside_the_applescript_string_literals() -> None:
+    """A payload ending in backslash-quote must not terminate the literal early.
+
+    Escaping only the quote turns ``\\"`` into ``\\\\"`` (escaped backslash,
+    then a bare quote): the literal ends mid-payload and the rest runs as
+    AppleScript code. Backslashes must be escaped first.
+    """
+    hostile_message = 'end\\" with title "pwned" sound name "x'
+    hostile_title = 'title\\"'
+    request = NotificationRequest(message=hostile_message, title=hostile_title)
+
+    script = _build_osascript_notification(request, 'agent\\"name')
+
+    literals, code_segments = _scan_applescript(script)
+    # Each hostile payload round-trips intact as exactly one string literal...
+    assert literals == [hostile_message, hostile_title, 'From: agent\\"name']
+    # ...and the code outside the literals is exactly the fixed skeleton.
+    assert code_segments == ["display notification ", " with title ", " subtitle ", ""]
+
+
+def test_a_do_shell_script_payload_is_data_not_code() -> None:
+    hostile_message = 'x\\" with title (do shell script "open -a Calculator") \\"'
+    request = NotificationRequest(message=hostile_message, title="benign")
+
+    script = _build_osascript_notification(request, "agent")
+
+    literals, code_segments = _scan_applescript(script)
+    assert hostile_message in literals
+    assert not any("do shell script" in segment for segment in code_segments)
+
+
 @pytest.mark.parametrize(
     "is_electron,is_macos,expected",
     [
@@ -390,3 +454,43 @@ def test_run_tkinter_toast_with_fake_tk_succeeds() -> None:
         agent_display_name="test-agent",
         tk=tk,
     )
+
+
+def test_dispatch_is_skipped_when_the_enabled_provider_says_disabled(capsys: pytest.CaptureFixture[str]) -> None:
+    """The master toggle silences every channel: a disabled provider means no dispatch at all."""
+    dispatcher = NotificationDispatcher.create(is_electron=True, is_enabled_provider=lambda: False)
+    dispatcher.dispatch(NotificationRequest(message="should not appear"), "agent-x")
+
+    assert capsys.readouterr().out == ""
+
+
+def test_dispatch_proceeds_when_the_enabled_provider_says_enabled(capsys: pytest.CaptureFixture[str]) -> None:
+    dispatcher = NotificationDispatcher.create(is_electron=True, is_enabled_provider=lambda: True)
+    dispatcher.dispatch(NotificationRequest(message="enabled message"), "agent-x")
+
+    event = json.loads(capsys.readouterr().out.strip())
+    assert event["message"] == "enabled message"
+
+
+def test_dispatch_proceeds_when_no_enabled_provider_is_injected(capsys: pytest.CaptureFixture[str]) -> None:
+    """Absent provider = always enabled, so minimal apps and tests keep working."""
+    dispatcher = NotificationDispatcher.create(is_electron=True)
+    dispatcher.dispatch(NotificationRequest(message="default enabled"), "agent-x")
+
+    event = json.loads(capsys.readouterr().out.strip())
+    assert event["message"] == "default enabled"
+
+
+def test_enabled_provider_is_consulted_live_on_every_dispatch(capsys: pytest.CaptureFixture[str]) -> None:
+    """A settings flip between dispatches takes effect without rebuilding the dispatcher."""
+    is_enabled_holder = {"is_enabled": True}
+    dispatcher = NotificationDispatcher.create(
+        is_electron=True, is_enabled_provider=lambda: is_enabled_holder["is_enabled"]
+    )
+
+    dispatcher.dispatch(NotificationRequest(message="first"), "agent-x")
+    is_enabled_holder["is_enabled"] = False
+    dispatcher.dispatch(NotificationRequest(message="second"), "agent-x")
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert [json.loads(line)["message"] for line in lines] == ["first"]

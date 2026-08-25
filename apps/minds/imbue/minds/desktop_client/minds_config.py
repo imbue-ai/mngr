@@ -10,17 +10,52 @@ only for genuinely user-personal preferences and never carries tier state.
 """
 
 import threading
+from enum import auto
 from pathlib import Path
+from typing import Callable
 from typing import Final
 
 import tomlkit
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
+
+
+class NotificationStyle(LowerCaseStrEnum):
+    """Delivery style for feed-backed notifications: in-app toast cards, OS notifications, or both.
+
+    The lowercase values are the wire strings the settings API serves and
+    accepts verbatim (and what ``config.toml`` stores).
+    """
+
+    CARDS = auto()
+    OS = auto()
+    BOTH = auto()
+
+
+DEFAULT_NOTIFICATION_STYLE: Final[NotificationStyle] = NotificationStyle.BOTH
+
+
+def _bool_from_raw(data: dict[str, object], key: str, default: bool) -> bool:
+    """Read a top-level boolean out of an already-loaded config dict, or ``default`` when unset/malformed."""
+    value = data.get(key)
+    return value if isinstance(value, bool) else default
+
+
+def _style_from_raw(data: dict[str, object]) -> NotificationStyle:
+    """Read the notification style out of an already-loaded config dict, or the default when unset/malformed."""
+    value = data.get("notification_style")
+    if isinstance(value, str):
+        try:
+            return NotificationStyle(value)
+        except ValueError:
+            pass
+    return DEFAULT_NOTIFICATION_STYLE
 
 
 def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
@@ -127,10 +162,7 @@ class MindsConfig(MutableModel):
         """Read a top-level boolean setting, returning ``default`` when unset or malformed."""
         with self._lock:
             data = self._read_raw()
-            value = data.get(key)
-            if isinstance(value, bool):
-                return value
-            return default
+            return _bool_from_raw(data, key, default)
 
     def _set_bool(self, key: str, value: bool) -> None:
         """Persist a top-level boolean setting."""
@@ -167,3 +199,137 @@ class MindsConfig(MutableModel):
     def set_report_unexpected_errors(self, enabled: bool) -> None:
         """Set whether unexpected errors are reported to Sentry automatically."""
         self._set_bool("report_unexpected_errors", enabled)
+
+    def set_report_unexpected_errors_if_version_matches(
+        self,
+        expected_version: str,
+        compute_version: Callable[[bool], str],
+        enabled: bool,
+    ) -> str | None:
+        """Atomically compare-and-swap the error-reporting flag under one lock hold.
+
+        Checks ``expected_version`` against the version ``compute_version``
+        derives from the flag's CURRENT stored value, and only then writes --
+        both the check and the write inside one lock acquisition. Unlike
+        calling :meth:`get_report_unexpected_errors` and
+        :meth:`set_report_unexpected_errors` separately (two lock
+        acquisitions with a gap between them), this closes the window where
+        two concurrent writers starting from the same version could both pass
+        the check and the second would silently clobber the first with no
+        conflict reported to either. Returns the new version, or None on a
+        version mismatch (the caller should treat this as a conflict).
+        """
+        with self._lock:
+            data = self._read_raw()
+            current_enabled = _bool_from_raw(data, "report_unexpected_errors", True)
+            if compute_version(current_enabled) != expected_version:
+                return None
+            data["report_unexpected_errors"] = enabled
+            self._write_raw(data)
+            return compute_version(enabled)
+
+    def get_notifications_enabled(self) -> bool:
+        """Return whether notification nudges are enabled at all. Default: True.
+
+        The master switch for every OS notification the app sends (feed-backed
+        request nudges, agent-sent notifications, backup failures). Read live
+        at dispatch time so a Settings change applies without an app restart.
+        The feed itself always records entries regardless of this switch.
+        """
+        return self._get_bool("notifications_enabled", default=True)
+
+    def get_notification_prefs(self) -> tuple[bool, NotificationStyle, bool, bool]:
+        """Return ``(is_enabled, style, is_os_hint_dismissed, os_permission_confirmed)`` from one atomic read.
+
+        Reading the fields via separate locked calls (as each getter does on
+        its own) could observe a concurrent writer's update to only some of
+        them -- a combination that :meth:`set_notification_prefs` never
+        actually persisted together. One lock acquisition here mirrors that
+        write's atomicity on the read side. ``os_permission_confirmed`` is
+        read alongside the other three purely to share this one lock
+        acquisition; it is written independently (see
+        :meth:`set_notification_os_permission_confirmed`), not by
+        :meth:`set_notification_prefs`.
+        """
+        with self._lock:
+            data = self._read_raw()
+            return (
+                _bool_from_raw(data, "notifications_enabled", True),
+                _style_from_raw(data),
+                _bool_from_raw(data, "notification_os_hint_dismissed", False),
+                _bool_from_raw(data, "notification_os_permission_confirmed", False),
+            )
+
+    def set_notification_prefs(
+        self,
+        is_enabled: bool,
+        style: NotificationStyle,
+        is_os_hint_dismissed: bool,
+    ) -> None:
+        """Persist all three notification preferences in one read-modify-write.
+
+        A single lock acquisition and a single atomic file write, so two
+        concurrent writers can never interleave into a record that mixes one
+        writer's toggle with the other's style.
+        """
+        with self._lock:
+            data = self._read_raw()
+            data["notifications_enabled"] = is_enabled
+            data["notification_style"] = str(style)
+            data["notification_os_hint_dismissed"] = is_os_hint_dismissed
+            self._write_raw(data)
+
+    def set_notification_prefs_if_version_matches(
+        self,
+        expected_version: str,
+        compute_version: Callable[[bool, NotificationStyle, bool], str],
+        is_enabled: bool,
+        style: NotificationStyle,
+        is_os_hint_dismissed: bool,
+    ) -> str | None:
+        """Atomically compare-and-swap the notification-prefs record under one lock hold.
+
+        Checks ``expected_version`` against the version ``compute_version``
+        derives from the record's CURRENT stored values, and only then
+        writes -- both the check and the write inside one lock acquisition.
+        Unlike calling :meth:`get_notification_prefs` and
+        :meth:`set_notification_prefs` separately (two lock acquisitions
+        with a gap between them), this closes the window where two
+        concurrent writers starting from the same version could both pass
+        the check and the second would silently clobber the first with no
+        conflict reported to either. Returns the new version, or None on a
+        version mismatch (the caller should treat this as a conflict).
+        """
+        with self._lock:
+            data = self._read_raw()
+            current_is_enabled = _bool_from_raw(data, "notifications_enabled", True)
+            current_style = _style_from_raw(data)
+            current_is_os_hint_dismissed = _bool_from_raw(data, "notification_os_hint_dismissed", False)
+            if compute_version(current_is_enabled, current_style, current_is_os_hint_dismissed) != expected_version:
+                return None
+            data["notifications_enabled"] = is_enabled
+            data["notification_style"] = str(style)
+            data["notification_os_hint_dismissed"] = is_os_hint_dismissed
+            self._write_raw(data)
+            return compute_version(is_enabled, style, is_os_hint_dismissed)
+
+    def get_notification_os_permission_confirmed(self) -> bool:
+        """Return whether the desktop app has ever confirmed native OS notification
+        permission is granted. Default: False.
+
+        Desktop-only (Electron's native Notification module exposes no
+        permission-status API; this is our own best-effort memory of the one
+        signal it does give -- a probe notification's 'show' event actually
+        firing). This is a status snapshot only, not a gate: the app always
+        re-verifies against current OS truth on every launch and settings
+        save regardless of this stored value (see
+        maybeProbeDesktopNotificationPermission in notificationsUi.ts),
+        since the reader can revoke permission in System Settings at any
+        time with no other way for the app to notice. The stored value
+        exists so the settings UI has something to render between probes.
+        """
+        return self._get_bool("notification_os_permission_confirmed", default=False)
+
+    def set_notification_os_permission_confirmed(self, confirmed: bool) -> None:
+        """Record whether native OS notification permission was last confirmed granted."""
+        self._set_bool("notification_os_permission_confirmed", confirmed)

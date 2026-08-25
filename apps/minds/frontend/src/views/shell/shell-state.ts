@@ -8,19 +8,24 @@ import type { AppStores } from "../../models/boot";
 import type { WorkspaceHealth } from "../../models/health";
 import type { UiChannelClient } from "../../channel/client";
 import type { RequestVerdict, ResolvedRequest } from "../../models/inbox";
+import type { NotificationsUiController } from "../../models/notificationsUi";
 import {
   accentSourceForRoute,
   isAppOverlayPath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
   recoveryWorkspaceIdFromPath,
+  workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
 
 /** Posts one permission-resolution message into the mounted workspace frame
  * over the embed contract. Registered by WorkspaceFrame, which owns the
  * contract endpoint; the shell only decides whether the message is due. */
-export type PermissionResolvedSender = (requestId: string, verdict: RequestVerdict) => void;
+export type PermissionResolvedSender = (
+  requestId: string,
+  verdict: RequestVerdict,
+) => void;
 
 /** The mounted Permissions pane's waiting list, as the shell addresses it. */
 export interface WaitingRequestList {
@@ -42,10 +47,23 @@ export interface WorkspaceFrameHandle {
 export class ShellState {
   readonly stores: AppStores;
   channel: UiChannelClient | null = null;
+  /** The notification arrival controller (toasts, badge relay, OS hint),
+   * installed by index.ts like the channel; null only before boot wiring. */
+  notificationsUi: NotificationsUiController | null = null;
   isMac = false;
   mngrForwardOrigin = "";
+  /** The bell's notification feed: local overlay state, not a route, so it
+   * pops over whatever surface is on screen (a hub page, the create form, a
+   * machine) without navigating and without swapping what is painted behind
+   * it -- a route-based app modal over a hub page would fall back to Home. */
+  isNotificationsOpen = false;
   isSidebarOpen = false;
-  sidebarAnchor: { x: number; y: number; width: number; height: number } | null = null;
+  sidebarAnchor: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null = null;
   /** The workspace whose CONTENT is displayed (null on hub pages). */
   displayedWorkspaceAnyId: string | null = null;
   /** The workspace-options route an app modal was opened over, so the Shell can
@@ -75,7 +93,8 @@ export class ShellState {
    * The isAutoRaised bit decides one thing: whether the card leaves on its own
    * when the machine comes back.
    */
-  private openRecovery: { agentId: string; isAutoRaised: boolean } | null = null;
+  private openRecovery: { agentId: string; isAutoRaised: boolean } | null =
+    null;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
@@ -89,6 +108,25 @@ export class ShellState {
   /** The path the last `handleRouteChanged` saw, so a redraw on the route the
    * window is already on is not mistaken for a navigation to it. */
   private lastHandledRoutePath: string | null = null;
+  /** The ``?review=`` deep link already consumed, keyed by route+id.
+   * `handleRouteChanged` runs on EVERY redraw and its stripping route-set
+   * lands a tick later, so without this every interim redraw would re-consume
+   * the same param and re-open the popup. Cleared once a review-less route is
+   * seen (i.e. the strip landed), so a later deep link consumes afresh. */
+  private consumedReviewKey: string | null = null;
+  /** The last ``selected`` request id `openInbox` pushed a NEW /inbox entry
+   * for, and when. `openInbox` already replaces in place once the route IS
+   * `/inbox` -- this guards the window before that lands: `currentRoutePath`
+   * reads Mithril's resolved route, which can still report the PRE-popup path
+   * for a beat after `m.route.set` fires, so two callers racing to open the
+   * same request (a toast and a feed row, an embed-contract message and a
+   * notification click, or any other double-fire) can both see "not on
+   * /inbox yet" and both push -- stacking a second, stale popup that a single
+   * dismissal then leaves behind. A short in-memory dedup, independent of the
+   * route read, closes that window regardless of where the duplicate call
+   * came from. */
+  private lastOpenedInboxSelectedId: string | null = null;
+  private lastOpenedInboxAtMs = 0;
 
   private permissionResolvedSender: PermissionResolvedSender | null = null;
   /** The mounted Permissions pane's live list, registered while one is up. The
@@ -120,10 +158,12 @@ export class ShellState {
     return route.split("?")[1] ?? "";
   }
 
-  /** Enter a workspace: route to the content surface for its identity. */
-  enterWorkspace(anyId: string): void {
+  /** Enter a workspace: route to the content surface for its identity.
+   * `query` carries route params along (the ``?review=`` deep link an
+   * OS-notification click arrives with); empty adds nothing. */
+  enterWorkspace(anyId: string, query: Record<string, string> = {}): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
-    m.route.set(`/workspace/${agentScoped}`);
+    m.route.set(`/workspace/${agentScoped}`, query);
   }
 
   /** Open the request-review popup over the current surface: forward the
@@ -138,17 +178,39 @@ export class ShellState {
    * down and rebuilt around the popup. */
   openInbox(params: Record<string, string> = {}): void {
     const path = this.currentRoutePath();
+    const selected = params.selected;
+    if (selected !== undefined) {
+      // Idempotent open (see lastOpenedInboxSelectedId's comment): a second
+      // trigger for the SAME request within this window is a no-op rather
+      // than a second push, however it got here.
+      const isDuplicate =
+        this.lastOpenedInboxSelectedId === selected &&
+        Date.now() - this.lastOpenedInboxAtMs < 1500;
+      if (isDuplicate) return;
+      this.lastOpenedInboxSelectedId = selected;
+      this.lastOpenedInboxAtMs = Date.now();
+    }
     // Only ever set here (handleRouteChanged clears it), so a second request
     // arriving while the popup is already up does not drop the panel it floats
     // over -- the route is /inbox by then, which names no panel.
-    if (isWorkspaceOverlayPath(path)) this.panelRouteBehindOverlay = m.route.get() ?? null;
+    if (isWorkspaceOverlayPath(path))
+      this.panelRouteBehindOverlay = m.route.get() ?? null;
     const displayed = this.displayedWorkspaceAnyId;
     const query =
-      displayed === null ? params : { ...params, workspace: this.stores.workspaces.toAgentScopedId(displayed) };
+      displayed === null
+        ? params
+        : {
+            ...params,
+            workspace: this.stores.workspaces.toAgentScopedId(displayed),
+          };
     // Swinging the OPEN popup onto another request replaces its history entry
     // rather than stacking a second one, so one dismissal still lands back on
     // the surface the popup was opened over instead of on the request before it.
-    m.route.set("/inbox", query, path === "/inbox" ? { replace: true } : undefined);
+    m.route.set(
+      "/inbox",
+      query,
+      path === "/inbox" ? { replace: true } : undefined,
+    );
   }
 
   /**
@@ -192,7 +254,8 @@ export class ShellState {
   /** Drop `sender` if it is still the registered one (a frame torn down after
    * its successor registered must not clear the successor's). */
   unregisterPermissionResolvedSender(sender: PermissionResolvedSender): void {
-    if (this.permissionResolvedSender === sender) this.permissionResolvedSender = null;
+    if (this.permissionResolvedSender === sender)
+      this.permissionResolvedSender = null;
   }
 
   /** Tell the workspace that asked that its request now has a verdict, so its
@@ -221,8 +284,10 @@ export class ShellState {
     this.forgetWaitingRequest(resolved.requestId);
     const sender = this.permissionResolvedSender;
     const displayed = this.displayedWorkspaceAnyId;
-    if (sender === null || displayed === null || resolved.agentId === null) return;
-    if (this.stores.workspaces.toAgentScopedId(displayed) !== resolved.agentId) return;
+    if (sender === null || displayed === null || resolved.agentId === null)
+      return;
+    if (this.stores.workspaces.toAgentScopedId(displayed) !== resolved.agentId)
+      return;
     sender(resolved.requestId, resolved.verdict);
   }
 
@@ -240,7 +305,19 @@ export class ShellState {
    * Accounts, Get help), returning to the surface it was opened over, and
    * report whether there was one. Prefers history so the opener (Home, Create,
    * the workspace, or its options panel) is restored exactly; falls back to
-   * routing to the base when there is no history (a cold-start deep link). */
+   * routing to the base when there is no history (a cold-start deep link).
+   *
+   * The request popup (/inbox) is the one exception: routed there directly
+   * (from the workspace already on screen), history.back()'s "undo exactly
+   * one push" assumption holds. But a notification click for a DIFFERENT
+   * workspace hops there first and THEN opens the popup over it -- two
+   * pushes, not one -- and history.back() only undoes the popup, landing
+   * back on the ORIGINAL screen rather than the workspace the popup was
+   * actually reviewing (and, depending on exactly how those two pushes
+   * landed, could leave the popup itself still on screen). /inbox always
+   * names its workspace explicitly (?workspace=, forwarded by openInbox), so
+   * dismissing it routes there directly instead of trusting history depth --
+   * correct regardless of how many entries getting here actually pushed. */
   closeAppOverlay(): boolean {
     const path = this.currentRoutePath();
     const search = this.currentRouteSearch();
@@ -249,7 +326,8 @@ export class ShellState {
     // (?workspace=) -- with none it is a redirect, not an overlay.
     const isCloseable =
       isAppOverlayPath(path) ||
-      (path === "/create/template" && overlayBehindWorkspaceId(path, search) !== null);
+      (path === "/create/template" &&
+        overlayBehindWorkspaceId(path, search) !== null);
     if (!isCloseable) return false;
     // history.back() does not update the route synchronously, so a second
     // dismissal arriving before it lands (a repeated Escape) would fire
@@ -257,6 +335,17 @@ export class ShellState {
     // even so: the key belongs to the overlay that is still on its way out.
     if (this.isAppOverlayClosing) return true;
     this.isAppOverlayClosing = true;
+    if (path === "/inbox") {
+      // Replace, not push: this collapses the popup's own entry into the
+      // workspace view rather than adding a further forward step, so the
+      // popup is not left sitting one Back away and the stack this
+      // dismissal walks away from does not grow on every review.
+      const behind = overlayBehindWorkspaceId(path, search);
+      m.route.set(behind !== null ? `/workspace/${behind}` : "/", undefined, {
+        replace: true,
+      });
+      return true;
+    }
     if (window.history.length > 1) {
       window.history.back();
       return true;
@@ -343,7 +432,8 @@ export class ShellState {
     if (panelRoute === null) return false;
     // Asked after the answer, and the pane drops an answered request the
     // moment it is answered, so "any left" is already the list without it.
-    if (this.waitingRequestList?.hasWaitingRequests() === true) return this.returnToPanelBehindOverlay();
+    if (this.waitingRequestList?.hasWaitingRequests() === true)
+      return this.returnToPanelBehindOverlay();
     const [path, query = ""] = panelRoute.split("?");
     const params = new URLSearchParams(query);
     params.set("tab", "permissions");
@@ -359,8 +449,9 @@ export class ShellState {
    * plain ordered list rather than something the surfaces negotiate through
    * listener registration order (which follows mount order, not z-order).
    *
-   * The switcher popover leads: it is the only surface that can open over the
-   * recovery card. The card comes before the two route-based overlays because
+   * The switcher popover and the notification feed lead: they are the only
+   * surfaces that can open over the recovery card. The card comes before the
+   * two route-based overlays because
    * it is not one -- it can be raised over the workspace options overlay, and
    * it sits above it. It is never raised over an app-level modal, so this never
    * has to choose between those two. The two route-based closers gate on the
@@ -372,7 +463,15 @@ export class ShellState {
       this.closeSidebar();
       return true;
     }
-    return this.closeOpenRecoveryModal() || this.closeWorkspaceOverlay() || this.dismissAppOverlay();
+    if (this.isNotificationsOpen) {
+      this.closeNotifications();
+      return true;
+    }
+    return (
+      this.closeOpenRecoveryModal() ||
+      this.closeWorkspaceOverlay() ||
+      this.dismissAppOverlay()
+    );
   }
 
   /** Route-change hook: track displayed workspace, repaint accent, register. */
@@ -396,6 +495,16 @@ export class ShellState {
     // Escape (repeating every ~30ms) would fire a second back(), carrying the
     // reader past the surface the popup was opened over.
     if (!isSameRoute) this.isAppOverlayClosing = false;
+    // The feed is a popover over the surface it was opened on; leaving that
+    // surface (a feed row's jump to a machine, the sidebar, anything) closes
+    // it, like a dropdown would.
+    if (!isSameRoute) this.isNotificationsOpen = false;
+    // The dedup guard (see lastOpenedInboxSelectedId) only needs to survive
+    // the race right at open time; once a real navigation lands away from
+    // /inbox, the popup is confirmed gone and a later re-open of the SAME
+    // request is a fresh, legitimate ask, not a duplicate.
+    if (!isSameRoute && path !== "/inbox")
+      this.lastOpenedInboxSelectedId = null;
     // The panel (or page) underneath belongs to the modal that was opened over
     // it; once the route is no longer a modal's, it is (or is not) the route.
     if (!isSameRoute && !isAppOverlayPath(path)) {
@@ -410,7 +519,8 @@ export class ShellState {
     // workspace -- which is what addresses a verdict to the machine that asked
     // while its request popup is the current route.
     this.displayedWorkspaceAnyId =
-      workspaceSurfaceIdFromPath(path) ?? overlayBehindWorkspaceId(path, search);
+      workspaceSurfaceIdFromPath(path) ??
+      overlayBehindWorkspaceId(path, search);
     this.paintAccent(accentSource);
     const agentScoped =
       this.displayedWorkspaceAnyId === null
@@ -426,13 +536,74 @@ export class ShellState {
     // keeps its surface mounted behind the backdrop, and the Shell renders no
     // card while one is up but expects it back on the way out. The card's own
     // "Report a problem" opens exactly such a modal.
-    const heldWorkspaceAnyId = this.displayedWorkspaceAnyId ?? overlayBehindWorkspaceId(path, search);
+    const heldWorkspaceAnyId =
+      this.displayedWorkspaceAnyId ?? overlayBehindWorkspaceId(path, search);
     const heldAgentScoped =
-      heldWorkspaceAnyId === null ? null : this.stores.workspaces.toAgentScopedId(heldWorkspaceAnyId);
-    if (this.openRecovery !== null && this.openRecovery.agentId !== heldAgentScoped) {
+      heldWorkspaceAnyId === null
+        ? null
+        : this.stores.workspaces.toAgentScopedId(heldWorkspaceAnyId);
+    if (
+      this.openRecovery !== null &&
+      this.openRecovery.agentId !== heldAgentScoped
+    ) {
       this.openRecovery = null;
     }
+    this.consumeReviewParam(path, search);
     this.channel?.setClientState(path, agentScoped);
+  }
+
+  /** Consume a ``?review=<request-id>`` param on the workspace surface -- the
+   * landing half of the uniform review gesture (toast click, feed row, Web
+   * Notification click, and the Electron OS-notification deep link all route
+   * to ``/workspace/<id>?review=<request-id>``).
+   *
+   * Consumed exactly ONCE per landing (see ``consumedReviewKey``): the param
+   * is stripped with a history-REPLACING route set, so Back from wherever the
+   * gesture leads never returns to a URL that would re-run it, and then the
+   * review popup opens over the workspace if the request is still pending.
+   * A resolved or unknown id just leaves the workspace on screen -- the hop
+   * itself is still the right landing for a stale click.
+   *
+   * The actual ``m.route.set`` calls are queued past this render (see the
+   * inline comment) rather than issued here: this method runs from inside
+   * the router's own ``render()`` (called synchronously while Mithril is
+   * resolving the ``?review=`` navigation), and a route change issued
+   * synchronously from there is a NESTED one -- it stacks a second resolve
+   * on top of the one still committing, which left a stale duplicate popup
+   * on screen (the first resolve's card, mid-exit-animation, peeking out
+   * from under the second's). Deferring lets this render finish and commit
+   * first, so the follow-up navigation behaves like any ordinary
+   * click-issued one instead of a reentrant one. */
+  private consumeReviewParam(path: string, search: string): void {
+    const review = new URLSearchParams(search).get("review");
+    if (review === null || review === "") {
+      this.consumedReviewKey = null;
+      return;
+    }
+    const workspaceAnyId = workspaceDisplayIdFromPath(path);
+    if (workspaceAnyId === null) return;
+    const key = `${path}?review=${review}`;
+    if (this.consumedReviewKey === key) return;
+    this.consumedReviewKey = key;
+    const agentScoped = this.stores.workspaces.toAgentScopedId(workspaceAnyId);
+    const entry = this.stores.workspaces.entryByAnyId(agentScoped);
+    queueMicrotask(() => {
+      if (entry !== null && (entry.create_attempt_state ?? "") !== "") {
+        // The machine is still setting up: /workspace/<id> would render the
+        // Home-looking fallback page, so the deep link lands on the
+        // machine's own creating page instead. The ask stays in the bell.
+        m.route.set(`/creating/${agentScoped}`, undefined, { replace: true });
+        return;
+      }
+      m.route.set(`/workspace/${agentScoped}`, undefined, { replace: true });
+      if (this.stores.requests.requestIds.includes(review)) {
+        // Lands as a second history entry over the stripped workspace route
+        // (openInbox pushes), so dismissing the popup goes back to the
+        // machine. Re-read fresh: the request may have resolved while this
+        // microtask was queued.
+        this.openInbox({ selected: review });
+      }
+    });
   }
 
   paintAccent(workspaceAnyId: string | null): void {
@@ -452,18 +623,25 @@ export class ShellState {
 
   /** Re-derive the accent for the current route (list updates, previews). */
   repaintAccentForCurrentRoute(): void {
-    this.paintAccent(accentSourceForRoute(this.currentRoutePath(), this.currentRouteSearch()));
+    this.paintAccent(
+      accentSourceForRoute(this.currentRoutePath(), this.currentRouteSearch()),
+    );
   }
 
   private setTitlebarSurface(isOn: boolean): void {
-    document.getElementById("minds-titlebar")?.classList.toggle("titlebar-surface", isOn);
+    document
+      .getElementById("minds-titlebar")
+      ?.classList.toggle("titlebar-surface", isOn);
   }
 
   /** Publish the failure band's measured height so the workspace surface can
    * shrink by it (see .workspace-surface). A CSS variable rather than view
    * state: nothing needs to re-render for the surface to follow. */
   setNoticeBandHeight(height: number): void {
-    document.documentElement.style.setProperty("--notice-band-height", `${height}px`);
+    document.documentElement.style.setProperty(
+      "--notice-band-height",
+      `${height}px`,
+    );
   }
 
   /** Whether the recovery card is up over `agentId`. */
@@ -473,7 +651,9 @@ export class ShellState {
 
   /** Whether the card that is up was raised by the shell rather than asked for. */
   isRecoveryModalAutoRaised(agentId: string): boolean {
-    return this.openRecovery?.agentId === agentId && this.openRecovery.isAutoRaised;
+    return (
+      this.openRecovery?.agentId === agentId && this.openRecovery.isAutoRaised
+    );
   }
 
   /** The user asked for the card, from the band's "Open recovery". */
@@ -514,7 +694,12 @@ export class ShellState {
   closeOpenRecoveryModal(): boolean {
     const displayed = this.displayedWorkspaceAnyId;
     if (displayed === null) return false;
-    if (!this.isRecoveryModalOpenFor(this.stores.workspaces.toAgentScopedId(displayed))) return false;
+    if (
+      !this.isRecoveryModalOpenFor(
+        this.stores.workspaces.toAgentScopedId(displayed),
+      )
+    )
+      return false;
     this.closeRecoveryModal();
     return true;
   }
@@ -554,25 +739,58 @@ export class ShellState {
    * A card the user opened stays up when the machine answers -- they asked to
    * be there, and it gets to tell them how it ended.
    */
-  handleHealthChanged(agentId: string, health: WorkspaceHealth, isSnapshotFrame: boolean): void {
+  handleHealthChanged(
+    agentId: string,
+    health: WorkspaceHealth,
+    isSnapshotFrame: boolean,
+  ): void {
     if (health === "healthy") {
-      if (this.openRecovery?.agentId === agentId && this.openRecovery.isAutoRaised) this.finishRecovery();
+      if (
+        this.openRecovery?.agentId === agentId &&
+        this.openRecovery.isAutoRaised
+      )
+        this.finishRecovery();
       return;
     }
     if (isSnapshotFrame || health !== "restart_failed") return;
     if (this.openRecovery !== null) return;
     if (this.stores.health.discoveryHealth === "blocked") return;
     const displayed = this.displayedWorkspaceAnyId;
-    if (displayed === null || this.stores.workspaces.toAgentScopedId(displayed) !== agentId) return;
+    if (
+      displayed === null ||
+      this.stores.workspaces.toAgentScopedId(displayed) !== agentId
+    )
+      return;
     this.openRecovery = { agentId, isAutoRaised: true };
   }
 
-  openSidebar(anchor: { x: number; y: number; width: number; height: number }): void {
+  openSidebar(anchor: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): void {
     this.sidebarAnchor = anchor;
     this.isSidebarOpen = true;
   }
 
   closeSidebar(): void {
     this.isSidebarOpen = false;
+  }
+
+  /** Open the bell's feed over the current surface. Opening acknowledges the
+   * floating toasts (the feed is their durable home), so they retire. */
+  openNotifications(): void {
+    this.isNotificationsOpen = true;
+    this.notificationsUi?.clearLiveToasts();
+  }
+
+  closeNotifications(): void {
+    this.isNotificationsOpen = false;
+  }
+
+  toggleNotifications(): void {
+    if (this.isNotificationsOpen) this.closeNotifications();
+    else this.openNotifications();
   }
 }

@@ -12,6 +12,8 @@ import type {
   UiDiscoveryHealthMessage,
   UiHealthMessage,
   UiHelloMessage,
+  UiNotificationEntry,
+  UiNotificationsMessage,
   UiOpenHelpMessage,
   UiProvidersMessage,
   UiReloadMessage,
@@ -29,6 +31,8 @@ export type {
   UiDiscoveryHealthMessage,
   UiHealthMessage,
   UiHelloMessage,
+  UiNotificationEntry,
+  UiNotificationsMessage,
   UiOpenHelpMessage,
   UiProvidersMessage,
   UiReloadMessage,
@@ -51,6 +55,7 @@ export type UiServerMessage =
   | Framed<UiAccountsMessage, "accounts">
   | Framed<UiProvidersMessage, "providers">
   | Framed<UiRequestsMessage, "requests">
+  | Framed<UiNotificationsMessage, "notifications">
   | Framed<UiHealthMessage, "health">
   | Framed<UiDiscoveryHealthMessage, "discovery_health">
   | Framed<UiWorkspaceStoppedMessage, "workspace_stopped">
@@ -63,6 +68,7 @@ export interface UiClientState {
   client_id: string;
   route: string;
   workspace_agent_id: string | null;
+  has_focus: boolean;
 }
 
 /** Parse one channel frame; null for frames that are not a known server message. */
@@ -82,6 +88,7 @@ export function parseServerMessage(raw: string): UiServerMessage | null {
     case "accounts":
     case "providers":
     case "requests":
+    case "notifications":
     case "health":
     case "discovery_health":
     case "workspace_stopped":
