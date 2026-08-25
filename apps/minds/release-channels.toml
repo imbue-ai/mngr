@@ -18,16 +18,16 @@
 # for withdrawing a build.
 
 [channels.stable]
-build_id = "26081836c9ajpkh"
-version = "0.4.1"
-fallback_branch = "minds-v0.4.1"
+build_id = "260825un55i8ix7"
+version = "0.4.2"
+fallback_branch = "minds-v0.4.2"
 
 [channels.beta]
-build_id = "26081836c9ajpkh"
-version = "0.4.1"
-fallback_branch = "minds-v0.4.1"
+build_id = "260825un55i8ix7"
+version = "0.4.2"
+fallback_branch = "minds-v0.4.2"
 
 [channels.alpha]
-build_id = "26081836c9ajpkh"
-version = "0.4.1"
-fallback_branch = "minds-v0.4.1"
+build_id = "260825un55i8ix7"
+version = "0.4.2"
+fallback_branch = "minds-v0.4.2"
