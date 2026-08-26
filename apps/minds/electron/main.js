@@ -23,6 +23,9 @@ const {
   shouldOpenWindowOnActivate,
   decideNewWindowTarget,
 } = require('./lifecycle-policy');
+// Right-click (context) menu logic lives in ./context-menu so it can be
+// unit-tested under plain node (main.js can't be required outside Electron).
+const { registerContextMenuFor } = require('./context-menu');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
 // page is the minds SPA (titlebar + hub pages + the sandboxed workspace
@@ -88,7 +91,6 @@ const CHROME_CRASHED_PAGE_FILE = path.join(__dirname, 'chrome-crashed.html');
 const CHROME_LOAD_MAX_RETRIES = 2;
 const CHROME_LOAD_RETRY_DELAY_MS = 500;
 
-// -- Per-window bundle registry --
 const bundles = new Set();
 const mruWindows = []; // most recently focused first
 let appMenuInstalled = false;
@@ -303,8 +305,6 @@ function focusBundleFromNotificationClick(bundle) {
   stealFocusAndFocusBundle(bundle);
 }
 
-// -- Title handling --
-
 function computeTitleFor(bundle) {
   const agentId = bundle.currentWorkspaceId;
   if (agentId) {
@@ -343,8 +343,6 @@ function detachWindowsForWorkspace(workspaceId) {
   }
 }
 
-// -- Window navigation --
-//
 // The SPA owns in-app navigation; main only drives windows for its own flows
 // (startup routing, session restore, deeplinks, notifications, detaches
 // triggered by relayed shell events). A live SPA page gets a 'shell-navigate'
@@ -375,8 +373,6 @@ function navigateBundle(bundle, url) {
   const loadTarget = workspaceId ? wrapperUrlForWorkspace(workspaceId) : absolute;
   if (loadTarget) bundle.window.webContents.loadURL(loadTarget).catch(() => {});
 }
-
-// -- Bundle lifecycle --
 
 function buildBundleWindowOptions() {
   const windowOptions = {
@@ -430,6 +426,7 @@ function createBundle() {
   wireBundleWindowEvents(bundle);
   wireBundleNavigationEvents(bundle);
   registerShortcutsFor(bundle, win.webContents);
+  registerContextMenuFor(win, win.webContents, Menu);
   wireBundleShowLogic(bundle);
 
   win.webContents.on('did-finish-load', () => {
@@ -834,8 +831,6 @@ function openOrFocusWindow() {
   return openTakeoverWindow();
 }
 
-// -- Error / retry flow --
-
 // The error currently taking every window over, replayed into any window
 // opened afterwards. Cleared once a backend start succeeds.
 //
@@ -898,8 +893,6 @@ function reloadAllWindowsAfterRetry() {
   }
 }
 
-// -- Quitting takeover --
-
 let latestQuittingStatus = 'Quitting…';
 
 function showQuittingInAllWindows() {
@@ -948,8 +941,6 @@ function readLastLogLines(lineCount) {
   }
 }
 
-// -- Session state --
-//
 // On-disk shape is ``{ windows: [{ url, x, y, width, height, displayId },
 // ...] }``. A workspace window persists as the port-independent
 // ``/goto/<host-id>/`` path and is restored through the SPA's
@@ -1111,7 +1102,6 @@ function restoreWindowBounds(bundle, entry) {
   bundle.window.setBounds(savedBounds);
 }
 
-// ---------- Renderer-relayed shell events ----------
 // Each window's SPA owns its own /ui/ws channel and relays the events main
 // still acts on. Every window relays the same broadcasts, so handlers must be
 // idempotent; genuinely once-only reactions dedupe via recentShellEventKeys.
@@ -1233,8 +1223,6 @@ ipcMain.on('shell-event', (event, evt) => {
     console.warn('[shell-event] handler failed:', err);
   }
 });
-
-// ---------- Mind shutdown on quit ----------
 
 const MIND_HTTP_TIMEOUT_MS = 10000;
 const MIND_COMMAND_TIMEOUT_MS = 150000;
@@ -1494,8 +1482,6 @@ function fetchAppStatus(timeoutMs = 25000) {
     req.end();
   });
 }
-
-// -- Deeplinks (minds://) protocol registration + single instance lock --
 
 if (process.defaultApp) {
   if (process.argv.length >= 2) {
@@ -1894,8 +1880,6 @@ async function startBackendWithRetry() {
   }
 }
 
-// -- Deeplinks (minds://) --
-
 function handleDeeplink(rawUrl) {
   console.log(`[deeplink] received: ${String(rawUrl).slice(0, 256)}`);
   const mru = getMostRecentWindow();
@@ -2220,8 +2204,6 @@ function handleAuthEvent(event) {
   }
 }
 
-// -- IPC handlers --
-
 ipcMain.handle('get-update-state', () => updater.describe());
 
 // Returns what each channel currently serves, for the switch confirmation.
@@ -2345,8 +2327,6 @@ ipcMain.on('window-close', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && !bundle.window.isDestroyed()) bundle.window.close();
 });
-
-// -- App lifecycle --
 
 function initiateFullQuit() {
   app.quit();
