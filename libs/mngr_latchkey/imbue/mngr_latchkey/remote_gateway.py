@@ -142,8 +142,10 @@ _CREDENTIALS_FILENAME: Final[str] = CREDENTIALS_STORE_FILENAME
 
 # Name of the latchkey directory on the VPS, under the remote user's home. The
 # remote latchkey CLI runs as that user, so ``$HOME/.latchkey`` is the
-# LATCHKEY_DIRECTORY it reads its credentials and permissions from.
-_REMOTE_LATCHKEY_DIR_NAME: Final[str] = ".latchkey"
+# LATCHKEY_DIRECTORY it reads its credentials and permissions from. Public
+# because consumers outside this plugin read the gateway's logs at this
+# location.
+REMOTE_LATCHKEY_DIR_NAME: Final[str] = ".latchkey"
 
 # Filename the remote latchkey gateway reads its permissions config from. The
 # local per-host file is named ``latchkey_permissions.json``; on the VPS it
@@ -163,8 +165,9 @@ _REMOTE_FILE_MODE: Final[str] = "0600"
 
 # Filenames (under the remote ``$HOME/.latchkey`` directory) for the
 # supervisord-managed gateway and reverse-tunnel programs' stdout/stderr logs.
-_REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
-_REMOTE_TUNNEL_LOG_FILENAME: Final[str] = "tunnel.log"
+# Public for the same reason as :data:`REMOTE_LATCHKEY_DIR_NAME`.
+REMOTE_GATEWAY_LOG_FILENAME: Final[str] = "gateway.log"
+REMOTE_TUNNEL_LOG_FILENAME: Final[str] = "tunnel.log"
 
 # PID files a *pre-supervisord* build wrote under ``$HOME/.latchkey`` when it
 # launched the gateway and reverse tunnel detached via ``nohup``. A VPS
@@ -454,7 +457,7 @@ def _resolve_remote_latchkey_directory(host: OuterHostInterface) -> Path:
                 host.get_name(), result.stderr.strip() or result.stdout.strip() or "empty $HOME"
             )
         )
-    return Path(home) / _REMOTE_LATCHKEY_DIR_NAME
+    return Path(home) / REMOTE_LATCHKEY_DIR_NAME
 
 
 def _default_permissions_json() -> str:
@@ -1074,7 +1077,7 @@ def _ensure_latchkey_gateway_running(
     password_file_path = _TMPFS_SECRETS_DIR / _GATEWAY_PASSWORD_FILENAME
     desktop_permissions_override_file_path = _TMPFS_SECRETS_DIR / _DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
     run_script_path = remote_dir / _GATEWAY_RUN_SCRIPT_FILENAME
-    log_path = remote_dir / _REMOTE_GATEWAY_LOG_FILENAME
+    log_path = remote_dir / REMOTE_GATEWAY_LOG_FILENAME
     conf_path = _SUPERVISOR_CONFD_DIR / _GATEWAY_CONF_FILENAME
     host_name = host.get_name()
 
@@ -1206,7 +1209,7 @@ def _ensure_latchkey_gateway_reachable_from_container(
         inner_port=AGENT_SIDE_LATCHKEY_PORT,
         outer_port=OUTER_PORT,
     )
-    log_path = _resolve_remote_latchkey_directory(host) / _REMOTE_TUNNEL_LOG_FILENAME
+    log_path = _resolve_remote_latchkey_directory(host) / REMOTE_TUNNEL_LOG_FILENAME
     conf_path = _SUPERVISOR_CONFD_DIR / _TUNNEL_CONF_FILENAME
     conf = _build_supervisor_program_config(
         _TUNNEL_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_TUNNEL_START_RETRIES

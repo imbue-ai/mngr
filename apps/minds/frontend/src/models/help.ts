@@ -52,7 +52,13 @@ export interface HelpModelOptions {
   onClose?: () => void;
   redraw?: () => void;
   storage?: Pick<Storage, "getItem" | "setItem">;
+  /** Injectable clipboard write, for tests; defaults to navigator.clipboard. */
+  clipboardWrite?: (text: string) => Promise<void>;
 }
+
+// How long the report-ID chip flashes its copied confirmation, matching the
+// share-link chip's flash.
+const COPY_FLASH_MS = 1200;
 
 export class HelpModel {
   launch: HelpLaunchContext = EMPTY_LAUNCH;
@@ -66,6 +72,8 @@ export class HelpModel {
   isStatusError = false;
   agentErrorMessage = "";
   sentEventId: string | null = null;
+  isReportIdCopied = false;
+  private copyFlashTimer: ReturnType<typeof setTimeout> | null = null;
   isSubmitBusy = false;
   /** True only while a report POST is in flight. Narrower than isSubmitBusy
    * (which also covers the assist spawn, whose success closes the surface
@@ -132,6 +140,31 @@ export class HelpModel {
       STICKY_INCLUDE_TRANSCRIPT_KEY,
       value ? "true" : "false",
     );
+  }
+
+  async copyReportId(): Promise<void> {
+    if (this.sentEventId === null) return;
+    try {
+      await this.clipboardWrite(this.sentEventId);
+    } catch {
+      // The ID is on screen and quotable either way; no confirmation flash.
+      return;
+    }
+    this.isReportIdCopied = true;
+    if (this.copyFlashTimer !== null) clearTimeout(this.copyFlashTimer);
+    this.copyFlashTimer = setTimeout(() => {
+      this.copyFlashTimer = null;
+      this.isReportIdCopied = false;
+      this.redraw();
+    }, COPY_FLASH_MS);
+    this.redraw();
+  }
+
+  private clipboardWrite(text: string): Promise<void> {
+    if (this.options.clipboardWrite) return this.options.clipboardWrite(text);
+    const clipboard = navigator.clipboard;
+    if (!clipboard) return Promise.reject(new Error("clipboard unavailable"));
+    return clipboard.writeText(text);
   }
 
   backToReportFromError(): void {

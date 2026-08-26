@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 
+import pytest
 from loguru import logger as loguru_logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -27,6 +28,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
@@ -574,11 +576,41 @@ def write_stub_mngr(tmp_path: Path, name: str, body: str) -> str:
     return str(script)
 
 
+def install_stub_mngr_on_path(bin_dir: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> str:
+    """Install an executable ``mngr`` stub in ``bin_dir``, first on ``PATH``, and return its path.
+
+    For the desktop-client paths that resolve ``mngr`` the way production does
+    -- via ``PATH`` -- so a test can shape what the real subprocess invocation
+    sees without threading a binary path through the code under test.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    script = write_stub_mngr(bin_dir, MNGR_BINARY, body)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return script
+
+
 # Iterations of the blocking stub's 0.05s poll before it gives up on its release
 # file. Bounded because a pytest run killed mid-test orphans this detached shell
 # with nothing left to write the file it waits for. Well clear of
 # SUPPRESSION_WAIT_SECONDS, so only an abandoned run reaches the ceiling.
 _BLOCKING_STUB_MAX_POLLS: Final[int] = 1200
+
+
+def blocking_release_wait_body(release_path: Path) -> str:
+    """Shell lines that poll for ``release_path``, exiting 1 at the bounded ceiling.
+
+    The one release-wait fragment every blocking stub shares: the bound is what
+    keeps a pytest run killed mid-test from leaving the orphaned, detached stub
+    shell polling forever (see ``_BLOCKING_STUB_MAX_POLLS``).
+    """
+    return (
+        "polls=0\n"
+        f'while [ ! -f "{release_path}" ]; do\n'
+        "  polls=$((polls + 1))\n"
+        f"  [ $polls -ge {_BLOCKING_STUB_MAX_POLLS} ] && exit 1\n"
+        "  sleep 0.05\n"
+        "done"
+    )
 
 
 def write_blocking_stub_mngr(tmp_path: Path, name: str, release_path: Path) -> str:
@@ -588,16 +620,7 @@ def write_blocking_stub_mngr(tmp_path: Path, name: str, release_path: Path) -> s
     the machine's system interface is already gone -- the window in which the
     intentional-stop mark has to hold.
     """
-    body = (
-        "polls=0\n"
-        f'while [ ! -f "{release_path}" ]; do\n'
-        "  polls=$((polls + 1))\n"
-        f"  [ $polls -ge {_BLOCKING_STUB_MAX_POLLS} ] && exit 1\n"
-        "  sleep 0.05\n"
-        "done\n"
-        "exit 0"
-    )
-    return write_stub_mngr(tmp_path, name, body)
+    return write_stub_mngr(tmp_path, name, blocking_release_wait_body(release_path) + "\nexit 0")
 
 
 # Ceiling on "the blocking command has reached the point where it marks the
@@ -711,6 +734,17 @@ def scripted_workspace_probe_server(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def exec_json_envelope(
+    remote_stdout: str, *, success: bool = True, stderr: str = "", results_key: str = "results"
+) -> str:
+    """The ``mngr exec --format json`` envelope wrapping one remote result.
+
+    ``results_key`` is ``"results"`` for in-container execs and
+    ``"outer_results"`` for ``--outer`` ones, mirroring mngr's own output.
+    """
+    return json.dumps({results_key: [{"stdout": remote_stdout, "stderr": stderr, "success": success}]})
 
 
 # -- Discovery-health watchdog, for its state machine and its loop --

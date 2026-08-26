@@ -76,14 +76,6 @@ test('a multi-line message stays one record, so a reader counts messages', async
   assert.match(contents, /\[console:ERROR\] Error: boom\\n {2}at a\.js:1\\n {2}at b\.js:2 \(a\.js:1\)/);
 });
 
-test('one oversized message cannot make a record unbounded', () => {
-  delete require.cache[capturePath];
-  const capture = require(capturePath);
-  const line = capture.formatConsoleLine({ message: 'x'.repeat(50000), level: 'info', sourceId: 's.js', lineNumber: 9 });
-  assert.ok(line.length < capture.CONSOLE_MESSAGE_MAX_CHARS + 200, `record was ${line.length} chars`);
-  assert.match(line, /\.\.\. \[truncated, 50000 chars\]/);
-});
-
 test('the console log rotates instead of growing without bound', async () => {
   const dir = tempDir();
   // A tiny bound stands in for the real 10MB so the test does not have to write

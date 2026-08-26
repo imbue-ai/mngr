@@ -29,11 +29,6 @@ const { formatTimestampedLine } = require('./log-timestamp');
 // name that a report attaches.
 const CONSOLE_TAIL_FILENAME = 'console-tail.log';
 
-// Rotation bounds the file, but a single console message can be arbitrarily
-// large (a dumped object, a long data URL) and one unbounded record would still
-// make the report's excerpt unreadable, so each record keeps its own cap.
-const CONSOLE_MESSAGE_MAX_CHARS = 2000;
-
 let stream = null;
 
 /**
@@ -74,11 +69,6 @@ function initConsoleCapture(logDir, bounds) {
   }
 }
 
-function truncateMessage(message) {
-  if (message.length <= CONSOLE_MESSAGE_MAX_CHARS) return message;
-  return `${message.slice(0, CONSOLE_MESSAGE_MAX_CHARS)}... [truncated, ${message.length} chars]`;
-}
-
 /**
  * Format one console message as a single timestamped record.
  *
@@ -90,7 +80,7 @@ function truncateMessage(message) {
 function formatConsoleLine(details, now) {
   const level = String(details.level || 'info').toUpperCase();
   const source = details.sourceId ? `${details.sourceId}:${details.lineNumber}` : 'unknown';
-  const message = truncateMessage(String(details.message).replace(/\r?\n/g, '\\n'));
+  const message = String(details.message).replace(/\r?\n/g, '\\n');
   return formatTimestampedLine(`[console:${level}] ${message} (${source})`, now);
 }
 
@@ -126,5 +116,4 @@ module.exports = {
   closeConsoleCapture,
   formatConsoleLine,
   CONSOLE_TAIL_FILENAME,
-  CONSOLE_MESSAGE_MAX_CHARS,
 };

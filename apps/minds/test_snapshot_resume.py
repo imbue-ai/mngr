@@ -18,12 +18,10 @@ of sandbox.
 """
 
 import bz2
-import configparser
 import hashlib
 import json
 import os
 import pwd
-import re
 import shutil
 import subprocess
 import zipfile
@@ -77,14 +75,9 @@ from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_def
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
-from imbue.minds.desktop_client.workspace_diagnostics import CONSOLE_ATTACHMENT_KEY
-from imbue.minds.desktop_client.workspace_diagnostics import TRANSCRIPT_ATTACHMENT_KEY
+from imbue.minds.desktop_client.workspace_diagnostics import STAGED_ZIP_FILENAME
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_COLLECTOR_PATH
-from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_LOGS_ATTACHMENT_KEY
-from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_ZIP_ATTACHMENT_KEY
-from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceDiagnosticsOmissionReason
-from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceDiagnosticsResult
-from imbue.minds.desktop_client.workspace_diagnostics import build_staged_diagnostics_filename
+from imbue.minds.desktop_client.workspace_diagnostics import WorkspaceCollectionResult
 from imbue.minds.desktop_client.workspace_diagnostics import collect_workspace_diagnostics
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
@@ -1303,22 +1296,15 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
 # halves of that exchange are unit-tested against fixture trees and a fake
 # mngr; what only a real workspace can show is that the collector's assumptions
 # about the workspace still hold -- that it is installed at the contract path,
-# where supervisord writes its logs, how the workspace marks a user-created
-# app, that the baked scan gate runs to completion in there against the real
-# collected text, and that the whole round trip fits the collection budget. The
+# where supervisord writes its logs, that the baked scan gate runs to
+# completion in there against the real collected text, and that the whole
+# round trip fits the collection budget. The
 # tests below therefore drive the real `collect_workspace_diagnostics` from the
 # sandbox host, exactly as the desktop client does.
 
-_SUPERVISORD_CONF_PATH: Final[str] = "/home/user/workspace/system/supervisord.conf"
 _SUPERVISOR_LOG_DIR: Final[str] = "/var/log/supervisor"
 _SUPERVISORCTL_STATUS_HEADING: Final[str] = "=== supervisorctl status ==="
 _SYSTEM_INTERFACE_PROGRAM_NAME: Final[str] = "system_interface"
-# The workspace wraps every service it starts in ``oom_tag_service.py <band>``
-# and marks a user-created app with the literal band ``user``. That argument is
-# what the collector reads to tell diagnostics apart from workspace content, so
-# the expected set is derived from the container's own config below rather than
-# from a list of service names that would rot as the template changes.
-_USER_BAND_COMMAND_PATTERN: Final[re.Pattern[str]] = re.compile(r"oom_tag_service\.py\s+user(\s|$)")
 # Every common-transcript event names the event source it was converted from, as
 # ``<source>/common_transcript``. ``logs`` is the converter's own stdout stream,
 # which sits alongside the real harness transcripts and is written *after* each
@@ -1337,7 +1323,6 @@ _IN_CONTAINER_SCRATCH_GLOB: Final[str] = "/tmp/bug-report-scan-*/bug-report-*.st
 _IN_CONTAINER_MNGR_AGENTS_DIR: Final[str] = "/home/user/.mngr/agents"
 # Stands in for a collection's slug while a staged filename's fixed halves are
 # read back off the production builder; no real slug (a uuid4 hex) contains it.
-_STAGED_SLUG_PLACEHOLDER: Final[str] = "COLLECTION-SLUG"
 # The members of the staged workspace archive, as the collection contract names
 # them: the logs member, and one ``chats/<agent-id>-<harness>.jsonl`` per chat.
 _METADATA_MEMBER_NAME: Final[str] = "metadata.json"
@@ -1381,10 +1366,12 @@ def _chat_agents_in_container(container_name: str) -> list[tuple[str, str]]:
     the archive member the collector writes is named for the agent's NAME, so a
     fixture plants by one and asserts on the other.
 
-    The collector asks mngr what its chats are, so a fixture has to plant into an
+    The collector asks mngr what agents exist, so a fixture has to plant into an
     agent mngr already knows about: a hand-made agent directory is invisible to
     ``mngr list``, and its transcript is therefore never fetched however
-    convincing the files look.
+    convincing the files look. Narrowing to chats (not the services agent, not a
+    spawned worker) is this fixture's own choice of plant target -- the
+    collector itself considers every agent.
     """
     listed = _exec_in_container(
         container_name,
@@ -1415,9 +1402,9 @@ def _plant_transcript_pair_in_container(container_name: str, agent_dir: str, cha
     what was said.
 
     ``agent_dir`` must belong to an agent ``mngr list`` reports (see
-    ``_chat_agent_ids_in_container``). An invented agent directory used to work,
+    ``_chat_agents_in_container``). An invented agent directory used to work,
     when the collector globbed the agent tree itself; it cannot now, because the
-    collector asks mngr which agents are chats and mngr has no record of a
+    collector asks mngr which agents exist and mngr has no record of a
     directory someone made behind its back.
     """
     converter_line = json.dumps(
@@ -1438,20 +1425,6 @@ def _plant_transcript_pair_in_container(container_name: str, agent_dir: str, cha
     assert result.returncode == 0, f"could not plant the transcript fixtures: {result.stderr}"
 
 
-def _user_program_names_in_container(container_name: str) -> frozenset[str]:
-    """The supervisord programs the container's own config marks as user-created."""
-    result = _exec_in_container(container_name, f"cat {_SUPERVISORD_CONF_PATH}", timeout=30)
-    assert result.returncode == 0, f"could not read {_SUPERVISORD_CONF_PATH}: {result.stderr}"
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.read_string(result.stdout)
-    return frozenset(
-        section.removeprefix("program:")
-        for section in parser.sections()
-        if section.startswith("program:")
-        and _USER_BAND_COMMAND_PATTERN.search(parser.get(section, "command", fallback=""))
-    )
-
-
 def _collected_log_program_names(member_names: Iterable[str]) -> frozenset[str]:
     """The supervisord programs the archive carries a log member for.
 
@@ -1466,34 +1439,10 @@ def _collected_log_program_names(member_names: Iterable[str]) -> frozenset[str]:
     )
 
 
-def _staged_filename_bounds(staged_file_key: str) -> tuple[str, str]:
-    """The fixed text on either side of one staged file's per-collection slug.
-
-    Read back off the production builder rather than reassembled from its
-    constants, so a file staging under a different suffix (the workspace
-    archive's ``.zip``) cannot leave these helpers matching an older shape.
-    """
-    before, after = build_staged_diagnostics_filename(staged_file_key, _STAGED_SLUG_PLACEHOLDER).split(
-        _STAGED_SLUG_PLACEHOLDER
-    )
-    return before, after
-
-
-def _matches_staged_filename(path: Path, staged_file_key: str) -> bool:
-    """Whether ``path`` is named the way one collection stages that file.
-
-    The slug in the middle is minted per collection, so only the shape around it
-    can be predicted. A name with no slug at all is rejected: that is the shared
-    literal these names moved away from, under which two concurrent reports
-    would stage over each other.
-    """
-    before, after = _staged_filename_bounds(staged_file_key)
-    return path.name.startswith(before) and path.name.endswith(after) and len(path.name) > len(before) + len(after)
-
-
-def _staged_files_in(logs_dir: Path, staged_file_key: str) -> list[Path]:
-    """Every staged file in ``logs_dir`` for one staged-file key, from any collection."""
-    return sorted(path for path in logs_dir.iterdir() if _matches_staged_filename(path, staged_file_key))
+def _staged_archive_in(staging_dir: Path) -> Path | None:
+    """The staged workspace archive in a report's private staging dir, if it exists."""
+    path = staging_dir / STAGED_ZIP_FILENAME
+    return path if path.exists() else None
 
 
 def _read_zip_members(staged_zip: Path) -> dict[str, str]:
@@ -1534,24 +1483,24 @@ def _collect_diagnostics_from_workspace(
     running_workspace: _ResumedWorkspace,
     *,
     include_transcript: bool,
-    logs_dir: Path,
-    baked_mngr_host_dir: Path,
+    staging_dir: Path,
     concurrency_group: ConcurrencyGroup,
-    console_text: str | None = None,
-) -> WorkspaceDiagnosticsResult:
-    """Run the desktop client's real collection against the resumed workspace."""
+) -> WorkspaceCollectionResult:
+    """Run the desktop client's real collection against the resumed workspace.
+
+    Collection resolves ``mngr`` via PATH and reads ``MNGR_HOST_DIR`` from the
+    environment, exactly like the production exec paths -- which is why every
+    caller runs ``_point_desktop_mngr_at_the_baked_workspace`` first.
+    """
     _warm_host_side_mngr()
     return collect_workspace_diagnostics(
         AgentId(running_workspace.services_agent_id),
         include_logs=True,
         include_transcript=include_transcript,
-        logs_dir=logs_dir,
+        staging_dir=staging_dir,
         host_state=None,
-        mngr_binary=MNGR_BINARY,
-        mngr_host_dir=baked_mngr_host_dir,
         concurrency_group=concurrency_group,
         timeout_seconds=_SANDBOX_COLLECTION_TIMEOUT_SECONDS,
-        console_text=console_text,
     )
 
 
@@ -1573,13 +1522,10 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     """A report filed against the resumed workspace stages its real logs and transcript.
 
     Everything the workspace returns arrives as ONE staged archive. Its logs
-    member must carry what the bug report is for -- the workspace's current
-    service status and the tail of each *system* service's log -- and must not
-    carry a user-created app's logs, which are workspace content rather than
-    diagnostics. Both the collected set and the excluded set are read back out
-    of the container (its supervisord config and the logs member's own section
-    headers) so the assertions survive the template gaining or renaming
-    services.
+    members must carry what the bug report is for -- the workspace's current
+    service status and the tail of every program's log, deliberately
+    unfiltered by owner or stream: any app or service's log can carry the
+    bug, and the user consented via the logs checkbox.
 
     The transcript half runs against a planted pair of transcript files (see
     ``_plant_transcript_pair_in_container``): the archive must hold the chat as
@@ -1588,18 +1534,15 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     absence assertions are worthless against the archive's raw bytes, which
     match no substring.
 
-    The console half INVERTS what the retired design pinned here: the console
-    now attaches UNSCANNED, staged app-side, so a rule-matching fake key fed
-    into the tail must ARRIVE in the staged console file. That is the user's
-    explicit decision -- the console matches ``electron.log`` and ``minds.log``,
-    which already upload unscanned on every event -- and this assertion is what
-    stops anyone silently re-adding a scan-or-drop for it. The in-workspace
-    scan still guards the workspace content; the chat-side proof lives in
-    ``test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret``.
+    The console does not appear here at all: it is the shell's own output,
+    staged app-side by ``report_collector`` without any workspace involvement
+    (its coverage lives in ``test_desktop_client``). Neither does the latchkey
+    gateway tail: collection mirrors it into the latchkey plugin data dir for
+    the ordinary attachment-group sweep, outside this result entirely.
     """
-    baked_mngr_host_dir = _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
-    logs_dir = tmp_path / "minds-logs"
-    logs_dir.mkdir()
+    _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
+    staging_dir = tmp_path / "bug-report-staging"
+    staging_dir.mkdir()
     # Dated far ahead so the planted chat outranks any real chat the workspace
     # holds: selection prefers the transcript whose USER last spoke (the file
     # mtimes only break ties and cover transcripts with no user message).
@@ -1611,31 +1554,21 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
             "message": f"planted-chat-{get_short_random_string()}",
         }
     )
-    # mngr is the collector's source of truth for what a chat is, so the plant
-    # goes into an agent it already reports rather than an invented directory.
+    # mngr is the collector's source of truth for what agents exist, so the
+    # plant goes into an agent it already reports rather than an invented
+    # directory.
     chat_agents = _chat_agents_in_container(running_workspace.container_name)
     assert chat_agents, "the workspace reports no chat agents to plant a transcript into"
     planted_agent_id, planted_agent_name = chat_agents[0]
     planted_agent_dir = f"{_IN_CONTAINER_MNGR_AGENTS_DIR}/{planted_agent_id}"
     _plant_transcript_pair_in_container(running_workspace.container_name, planted_agent_dir, chat_line)
 
-    fake_api_key = _fake_anthropic_api_key()
-    console_text = "\n".join(
-        [
-            f"renderer ready {get_short_random_string()}",
-            f"leaked into the console: {fake_api_key}",
-            "shutting down cleanly",
-        ]
-    )
-
     try:
         result = _collect_diagnostics_from_workspace(
             running_workspace,
             include_transcript=True,
-            logs_dir=logs_dir,
-            baked_mngr_host_dir=baked_mngr_host_dir,
+            staging_dir=staging_dir,
             concurrency_group=cg,
-            console_text=console_text,
         )
     finally:
         # Only the planted event streams: the directory belongs to a real agent
@@ -1647,11 +1580,10 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
             timeout=30,
         )
 
-    assert WORKSPACE_LOGS_ATTACHMENT_KEY not in result.attachment_omissions, dict(result.attachment_omissions)
-    assert TRANSCRIPT_ATTACHMENT_KEY not in result.attachment_omissions, dict(result.attachment_omissions)
-    staged_zip = result.staged_paths[WORKSPACE_ZIP_ATTACHMENT_KEY]
-    assert staged_zip.parent == logs_dir
-    assert _matches_staged_filename(staged_zip, WORKSPACE_ZIP_ATTACHMENT_KEY), staged_zip.name
+    assert result.note is None, result.note
+    staged_zip = result.staged_zip_path
+    assert staged_zip is not None
+    assert staged_zip == staging_dir / STAGED_ZIP_FILENAME
     # The suffix is the whole contract with the upload path, which reads it to
     # know this attachment is already compressed and must not be gzipped again.
     assert staged_zip.suffix == ".zip", staged_zip.name
@@ -1667,14 +1599,7 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
 
     collected_programs = _collected_log_program_names(member_text_by_name)
     assert _SYSTEM_INTERFACE_PROGRAM_NAME in collected_programs, sorted(collected_programs)
-    user_programs = _user_program_names_in_container(running_workspace.container_name)
-    leaked = collected_programs & user_programs
-    assert not leaked, f"user-created app logs are workspace content and must not be collected: {sorted(leaked)}"
-    logger.info(
-        "Collected log sections for {}; the workspace marks {} as user-created",
-        sorted(collected_programs),
-        sorted(user_programs) or "nothing",
-    )
+    logger.info("Collected log sections for {}", sorted(collected_programs))
 
     # The planted pair makes the transcript assertions unconditional: a chat
     # exists, so the archive owes that chat's content under a member named for
@@ -1696,23 +1621,6 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     )
     assert not any("Converted 1 new event(s)" in text for text in member_text_by_name.values()), (
         "the converter's own log rode along in the workspace archive"
-    )
-
-    # INVERTED from the retired design: the console attaches unscanned, so the
-    # rule-matching key fed into the tail must arrive verbatim in the staged
-    # console file. Under the old scan-or-drop this exact tail cost the report
-    # its console (secrets_found); a reappearing omission here means someone
-    # re-added a scan the user explicitly decided against.
-    assert CONSOLE_ATTACHMENT_KEY not in result.attachment_omissions, dict(result.attachment_omissions)
-    staged_console = result.staged_paths[CONSOLE_ATTACHMENT_KEY]
-    assert staged_console.parent == logs_dir
-    assert _matches_staged_filename(staged_console, CONSOLE_ATTACHMENT_KEY), staged_console.name
-    assert fake_api_key in staged_console.read_text(encoding="utf-8"), (
-        "the console tail did not arrive intact in the staged console file"
-    )
-    # ...while the unscanned tail must not have leaked into the scanned archive.
-    assert not any(fake_api_key in text for text in member_text_by_name.values()), (
-        "the console tail leaked into the workspace archive"
     )
 
 
@@ -1741,9 +1649,9 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
     assertion. The finding names a chat, not the logs, so the logs member still
     attaches: one secret costs the chats, not the whole report.
     """
-    baked_mngr_host_dir = _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
-    logs_dir = tmp_path / "minds-logs"
-    logs_dir.mkdir()
+    _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
+    staging_dir = tmp_path / "bug-report-staging"
+    staging_dir.mkdir()
     fake_api_key = _fake_anthropic_api_key()
     clean_marker = f"planted-clean-chat-{get_short_random_string()}"
     clean_chat_line = json.dumps(
@@ -1776,8 +1684,7 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
         result = _collect_diagnostics_from_workspace(
             running_workspace,
             include_transcript=True,
-            logs_dir=logs_dir,
-            baked_mngr_host_dir=baked_mngr_host_dir,
+            staging_dir=staging_dir,
             concurrency_group=cg,
         )
     finally:
@@ -1791,13 +1698,13 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
             timeout=30,
         )
 
-    assert result.attachment_omissions.get(TRANSCRIPT_ATTACHMENT_KEY) == (
-        WorkspaceDiagnosticsOmissionReason.SECRETS_FOUND
-    ), dict(result.attachment_omissions)
-    assert WORKSPACE_LOGS_ATTACHMENT_KEY not in result.attachment_omissions, dict(result.attachment_omissions)
-    staged_zip = result.staged_paths[WORKSPACE_ZIP_ATTACHMENT_KEY]
-    member_text_by_name = _read_zip_members(staged_zip)
+    assert result.note is None, result.note
+    assert result.staged_zip_path is not None
+    member_text_by_name = _read_zip_members(result.staged_zip_path)
     assert _METADATA_MEMBER_NAME in member_text_by_name, sorted(member_text_by_name)
+    # The withheld chats announce themselves inside the archive itself.
+    notes_text = member_text_by_name.get("collection-notes.txt", "")
+    assert "recent chats" in notes_text and "secret scan" in notes_text, sorted(member_text_by_name)
     assert not any(name.startswith(_CHAT_MEMBER_DIR_PREFIX) for name in member_text_by_name), (
         f"a chat member survived a secret finding in another chat: {sorted(member_text_by_name)}"
     )
@@ -1821,19 +1728,17 @@ def test_bug_report_diagnostics_report_collector_unavailable_when_the_workspace_
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
 ) -> None:
-    """A workspace without the resident collector answers ``collector_unavailable``.
+    """A workspace without the resident collector resolves to a plain failure note.
 
     Workspaces built from templates that predate the collection contract have
-    no script at the contract path, and the probe's MISSING sentinel is how a
-    report tells that apart from broken exec plumbing. Moving the real
-    collector aside turns this live workspace into exactly one of them. The
-    workspace content reports ``collector_unavailable`` -- while the console,
-    which never depends on the workspace, still stages.
+    no script at the contract path, so the exec's remote command fails and the
+    note quotes what python3 said -- readable enough to tell an old template
+    from broken plumbing. Moving the real collector aside turns this live
+    workspace into exactly one of them.
     """
-    baked_mngr_host_dir = _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
-    logs_dir = tmp_path / "minds-logs"
-    logs_dir.mkdir()
-    console_text = f"console captured by the shell {get_short_random_string()}\n"
+    _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
+    staging_dir = tmp_path / "bug-report-staging"
+    staging_dir.mkdir()
     moved_aside_path = WORKSPACE_COLLECTOR_PATH + _COLLECTOR_MOVED_ASIDE_SUFFIX
     moved = _exec_in_container(
         running_workspace.container_name, f"mv {WORKSPACE_COLLECTOR_PATH} {moved_aside_path}", timeout=30
@@ -1843,10 +1748,8 @@ def test_bug_report_diagnostics_report_collector_unavailable_when_the_workspace_
         result = _collect_diagnostics_from_workspace(
             running_workspace,
             include_transcript=True,
-            logs_dir=logs_dir,
-            baked_mngr_host_dir=baked_mngr_host_dir,
+            staging_dir=staging_dir,
             concurrency_group=cg,
-            console_text=console_text,
         )
     finally:
         restored = _exec_in_container(
@@ -1857,12 +1760,8 @@ def test_bug_report_diagnostics_report_collector_unavailable_when_the_workspace_
             f"would wrongly read collector-less: {restored.stderr}"
         )
 
-    assert result.attachment_omissions == {
-        WORKSPACE_LOGS_ATTACHMENT_KEY: WorkspaceDiagnosticsOmissionReason.COLLECTOR_UNAVAILABLE,
-        TRANSCRIPT_ATTACHMENT_KEY: WorkspaceDiagnosticsOmissionReason.COLLECTOR_UNAVAILABLE,
-    }, dict(result.attachment_omissions)
-    assert set(result.staged_paths) == {CONSOLE_ATTACHMENT_KEY}, dict(result.staged_paths)
-    assert result.staged_paths[CONSOLE_ATTACHMENT_KEY].read_text(encoding="utf-8") == console_text
+    assert result.staged_zip_path is None
+    assert result.note is not None and result.note.startswith("workspace collection failed"), result.note
 
 
 @pytest.mark.release
@@ -1875,16 +1774,12 @@ def test_bug_report_diagnostics_stage_beside_an_earlier_reports_files(
     monkeypatch: pytest.MonkeyPatch,
     cg: ConcurrencyGroup,
 ) -> None:
-    """A collection stages under its own name and leaves nothing behind in the workspace.
+    """A collection touches only its own private staging dir and leaves nothing in the workspace.
 
-    Reports are submitted immediately and their attachments uploaded in the
-    background, so two collections can overlap and an earlier report's staged
-    files may still be being read. Each collection therefore stages under its own
-    slug: the earlier report's files must survive untouched -- clobbering or
-    deleting them would corrupt a report still uploading -- while this
-    collection's own archive is a different path holding freshly collected
-    content. Neither can ride along on the other regardless, because attachments
-    are named one by one, by exact path. The other half of the property is
+    Each report stages into its own fresh directory, so an earlier report's
+    files -- possibly still being read by its background upload -- are simply
+    out of reach: nothing is deleted or clobbered up front, and attachments are
+    named one by one, by exact path. The other half of the property is
     inside the workspace: the collector stages each payload as plaintext into a
     temp dir there so its scan gate can read it, and a report must not leave the
     user's own logs sitting in their workspace.
@@ -1897,30 +1792,26 @@ def test_bug_report_diagnostics_stage_beside_an_earlier_reports_files(
     exercising only half the property. The success path itself is covered by
     ``test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript``.
     """
-    baked_mngr_host_dir = _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
-    logs_dir = tmp_path / "minds-logs"
-    logs_dir.mkdir()
+    _point_desktop_mngr_at_the_baked_workspace(tmp_path, monkeypatch)
+    staging_dir = tmp_path / "bug-report-staging"
+    staging_dir.mkdir()
+    # An earlier report's staging dir, still being read by its background
+    # upload: a later collection must not touch it.
     earlier_marker = f"from-an-earlier-report-{get_short_random_string()}"
-    earlier_slug = get_short_random_string()
-    earlier_zip = logs_dir / build_staged_diagnostics_filename(WORKSPACE_ZIP_ATTACHMENT_KEY, earlier_slug)
-    earlier_console = logs_dir / build_staged_diagnostics_filename(CONSOLE_ATTACHMENT_KEY, earlier_slug)
-    for earlier_path in (earlier_zip, earlier_console):
-        earlier_path.write_text(earlier_marker, encoding="utf-8")
+    earlier_staging_dir = tmp_path / "earlier-staging"
+    earlier_staging_dir.mkdir()
+    earlier_zip = earlier_staging_dir / STAGED_ZIP_FILENAME
+    earlier_zip.write_text(earlier_marker, encoding="utf-8")
 
     result = _collect_diagnostics_from_workspace(
         running_workspace,
         include_transcript=False,
-        logs_dir=logs_dir,
-        baked_mngr_host_dir=baked_mngr_host_dir,
+        staging_dir=staging_dir,
         concurrency_group=cg,
     )
 
-    # An unticked box collects nothing, and the earlier report's files are
-    # neither attached to this collection nor taken away from it.
-    assert result.attachment_omissions.get(TRANSCRIPT_ATTACHMENT_KEY) == (
-        WorkspaceDiagnosticsOmissionReason.NOT_REQUESTED
-    ), dict(result.attachment_omissions)
-    assert earlier_console.read_text(encoding="utf-8") == earlier_marker
+    # The earlier report's staging is untouched.
+    assert earlier_zip.read_text(encoding="utf-8") == earlier_marker
 
     # Read unconditionally, so this test exercises docker (and honors its mark)
     # on either outcome. Only a collection that finished owes the workspace-side
@@ -1928,10 +1819,9 @@ def test_bug_report_diagnostics_stage_beside_an_earlier_reports_files(
     # cleanup, and leftovers are then the timeout's doing rather than a defect.
     leftover_scratch = _leftover_collection_scratch_in_container(running_workspace.container_name)
 
-    staged_zip = result.staged_paths.get(WORKSPACE_ZIP_ATTACHMENT_KEY)
+    staged_zip = result.staged_zip_path
     if staged_zip is not None:
         assert staged_zip != earlier_zip
-        assert earlier_zip.read_text(encoding="utf-8") == earlier_marker
         member_text_by_name = _read_zip_members(staged_zip)
         # The unticked transcript contributed nothing to the archive either:
         # metadata plus service logs, and no chats/ member at all.
@@ -1947,13 +1837,13 @@ def test_bug_report_diagnostics_stage_beside_an_earlier_reports_files(
             f"collection left the workspace holding its own scratch copies: {leftover_scratch}"
         )
     else:
-        assert result.attachment_omissions.get(WORKSPACE_LOGS_ATTACHMENT_KEY) in (
-            WorkspaceDiagnosticsOmissionReason.EXEC_TIMEOUT,
-            WorkspaceDiagnosticsOmissionReason.SCANNER_UNAVAILABLE,
-        ), (
-            "collection degraded for a reason other than sandbox load, "
-            f"which means the exec plumbing is broken, not slow: {dict(result.attachment_omissions)}"
+        # The only tolerated no-archive outcome here is the sandbox budget
+        # expiring; anything else means the exec plumbing is broken, not slow.
+        # (A slow scan no longer costs the archive: the collector ships what it
+        # has plus a notes member instead.)
+        assert result.note is not None and "timed out" in result.note, (
+            f"collection degraded for a reason other than sandbox load: {result.note}"
         )
-        assert _staged_files_in(logs_dir, WORKSPACE_ZIP_ATTACHMENT_KEY) == [earlier_zip], (
-            f"collection staged no archive ({dict(result.attachment_omissions)}) but wrote a file for it anyway"
+        assert _staged_archive_in(staging_dir) is None, (
+            f"collection staged no archive ({result.note}) but wrote a file for it anyway"
         )

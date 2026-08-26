@@ -60,8 +60,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
-from imbue.minds.desktop_client.mngr_command import format_output_tail
-from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
+from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -71,7 +70,6 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.errors import MindError
 from imbue.minds.errors import MngrCommandError
-from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
@@ -95,13 +93,6 @@ HOST_ACCESS_REJECTED_REASON: Final[str] = (
 # How long a single workspace probe through the plugin is allowed to hang.
 # Short and snappy so a wedged workspace doesn't gate the recovery UI.
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
-# Default hard timeout for an ``mngr`` subprocess run via ``_run_mngr``. A
-# "definitely wedged" ceiling, not an estimate -- generous for quick calls like
-# a container bounce. The restart sequence's host stop/start steps do NOT use
-# it: a host stop can mirror state for minutes (BYO cloud) and a host start can
-# restore a workspace from object storage (imbue_cloud), so those steps pass
-# the shared ``workspace_lifecycle`` budgets explicitly.
-_MNGR_COMMAND_TIMEOUT_SECONDS: Final[float] = 120.0
 # How long we wait for the system interface to answer again after a restart.
 # ``mngr start`` cold-boots the container, so this waits for exactly the event
 # the create flow's readiness wait already measures -- a cold-booted workspace's
@@ -702,69 +693,6 @@ def _did_start_boot_a_host(stdout: str) -> bool | None:
     return bool(parsed["was_host_started"])
 
 
-def _run_mngr(
-    concurrency_group: ConcurrencyGroup,
-    argv: list[str],
-    env: dict[str, str],
-    timeout_seconds: float = _MNGR_COMMAND_TIMEOUT_SECONDS,
-) -> str:
-    """Run an ``mngr`` subprocess to completion and return its stdout on a clean exit.
-
-    Raises ``MngrCommandError`` for every non-clean outcome (a timeout surfaces as
-    the ``MngrCommandTimeoutError`` subclass, a nonzero exit and a launch failure
-    as a bare ``MngrCommandError``), so callers catch a single domain error.
-    """
-    stdout, returncode, stderr = _run_mngr_capturing(concurrency_group, argv, env, timeout_seconds=timeout_seconds)
-    if returncode != 0:
-        # Only mngr's verdict rides the message (see ``mngr_failure_verdict``);
-        # the timeline it printed getting there rides the tail, exactly as the
-        # timeout path below does.
-        raise MngrCommandError(
-            f"exited {returncode}: {mngr_failure_verdict(stderr)}",
-            output_tail=format_output_tail(stdout, stderr),
-        )
-    return stdout
-
-
-def _run_mngr_capturing(
-    concurrency_group: ConcurrencyGroup,
-    argv: list[str],
-    env: dict[str, str],
-    timeout_seconds: float = _MNGR_COMMAND_TIMEOUT_SECONDS,
-) -> tuple[str, int, str]:
-    """Run an ``mngr`` subprocess, returning ``(stdout, returncode, stderr)`` without raising on nonzero exit.
-
-    A nonzero exit is reported through the returned ``returncode`` rather than
-    raised, so stdout is preserved for the caller to inspect. A failure to launch
-    the process raises ``MngrCommandError``; a timeout raises the more specific
-    ``MngrCommandTimeoutError``.
-    """
-    try:
-        finished = concurrency_group.run_process_to_completion(
-            argv,
-            timeout=timeout_seconds,
-            is_checked_after=False,
-            env=env,
-        )
-    except (OSError, ConcurrencyGroupError) as exc:
-        # The command never ran (a fork/exec failure, or a concurrency-group
-        # setup/strand/shutdown failure). Callers handle failure locally, so we
-        # wrap it as the single MngrCommandError they already catch.
-        raise MngrCommandError(str(exc)) from exc
-    if finished.is_timed_out:
-        # A killed subprocess never printed a verdict, so its captured output is
-        # the only record of which step it died in; carry it on the error
-        # (bounded, out of the message) instead of discarding it.
-        raise MngrCommandTimeoutError(
-            f"timed out after {int(timeout_seconds)}s",
-            output_tail=format_output_tail(finished.stdout, finished.stderr),
-        )
-    # A finished, non-timed-out process always carries a returncode; the Optional
-    # is for the not-yet-finished case, which this branch has ruled out.
-    returncode = finished.returncode if finished.returncode is not None else 1
-    return finished.stdout, returncode, finished.stderr
-
-
 class RestartReadinessOutcome(UpperCaseStrEnum):
     """How the post-restart wait for the system interface ended."""
 
@@ -1236,7 +1164,7 @@ def run_restart_sequence(
     else:
         registry.append_log(workspace_agent_id, "Stopping the system-services agent.")
         try:
-            _run_mngr(
+            run_mngr_to_completion(
                 concurrency_group,
                 _build_mngr_stop_argv(mngr_binary, services_agent_address),
                 env,
@@ -1274,7 +1202,7 @@ def run_restart_sequence(
 
     registry.append_log(workspace_agent_id, "Starting the system-services agent.")
     try:
-        start_stdout = _run_mngr(
+        start_stdout = run_mngr_to_completion(
             concurrency_group,
             _build_mngr_start_argv(mngr_binary, services_agent_address),
             env,

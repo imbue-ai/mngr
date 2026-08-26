@@ -32,6 +32,8 @@ from imbue.minds.desktop_client.environment_signals import ConnectivityFacet
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
 from imbue.minds.desktop_client.mngr_command import OUTPUT_TAIL_MAX_CHARS
+from imbue.minds.desktop_client.mngr_command import run_mngr_capturing
+from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import ManualClock
@@ -70,8 +72,6 @@ from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outa
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.workspace_recovery import _report_restart_step_failure
-from imbue.minds.desktop_client.workspace_recovery import _run_mngr
-from imbue.minds.desktop_client.workspace_recovery import _run_mngr_capturing
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
@@ -315,7 +315,7 @@ def test_run_mngr_capturing_timeout_carries_the_output_tail(tmp_path: Path) -> N
     caught: MngrCommandTimeoutError | None = None
     with ConcurrencyGroup(name="test-timeout-tail") as cg:
         try:
-            _run_mngr_capturing(cg, [str(script), "start", "agent-x"], env={}, timeout_seconds=2.0)
+            run_mngr_capturing(cg, [str(script), "start", "agent-x"], env={}, timeout_seconds=2.0)
         except MngrCommandTimeoutError as exc:
             caught = exc
 
@@ -356,7 +356,7 @@ def _run_failing_mngr_stub(cg: ConcurrencyGroup, script: Path, stderr_script_bod
     script.write_text(f"#!/bin/sh\n{stderr_script_body}exit 1\n")
     script.chmod(0o755)
     with pytest.raises(MngrCommandError) as exc_info:
-        _run_mngr(cg, [str(script), "stop", "agent-x"], env={})
+        run_mngr_to_completion(cg, [str(script), "stop", "agent-x"], env={})
     return exc_info.value
 
 
@@ -614,7 +614,7 @@ def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp
 def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
     """A launch failure (missing ``mngr`` binary) surfaces as RESTART_FAILED naming the stop step.
 
-    Exercises the path where ``_run_mngr`` wraps the ``OSError`` from the failed
+    Exercises the path where ``run_mngr_to_completion`` wraps the ``OSError`` from the failed
     fork/exec into a ``MngrCommandError`` and the restart sequence catches that
     single domain error at the call site.
     """

@@ -12,7 +12,6 @@ from pathlib import Path
 
 from imbue.minds.desktop_client.console_log_staging import ELECTRON_CONSOLE_TAIL_FILENAME
 from imbue.minds.desktop_client.console_log_staging import MAX_CONSOLE_TAIL_BYTES
-from imbue.minds.desktop_client.console_log_staging import MAX_CONSOLE_TAIL_LINES
 from imbue.minds.desktop_client.console_log_staging import read_console_tail
 
 
@@ -72,17 +71,20 @@ def test_a_record_torn_by_the_seek_is_dropped_rather_than_reported_as_a_message(
     assert tail.splitlines() == ["intact message"]
 
 
-def test_the_newest_records_are_kept_when_there_are_more_than_the_line_cap(tmp_path: Path) -> None:
-    total = MAX_CONSOLE_TAIL_LINES + 500
-    _write_console(tmp_path, "".join(f"msg-{index}\n" for index in range(total)))
+def test_the_excerpt_is_bounded_by_bytes_alone_keeping_the_newest_records(tmp_path: Path) -> None:
+    """The one bound is the byte cap -- a file-size-style limit, with no count of
+    lines or per-message characters layered on top."""
+    record = "msg-{index:07d}" + "." * 100
+    total = (MAX_CONSOLE_TAIL_BYTES // len(record)) + 500
+    _write_console(tmp_path, "".join(record.format(index=index) + "\n" for index in range(total)))
 
     tail = read_console_tail(tmp_path)
 
     assert tail is not None
+    assert len(tail.encode("utf-8")) <= MAX_CONSOLE_TAIL_BYTES
     lines = tail.splitlines()
-    assert len(lines) == MAX_CONSOLE_TAIL_LINES
-    assert lines[-1] == f"msg-{total - 1}"
-    assert lines[0] == f"msg-{total - MAX_CONSOLE_TAIL_LINES}"
+    assert lines[-1].startswith(f"msg-{total - 1:07d}")
+    assert len(lines) > 1
 
 
 def test_an_unreadable_console_costs_the_attachment_rather_than_the_report(tmp_path: Path) -> None:

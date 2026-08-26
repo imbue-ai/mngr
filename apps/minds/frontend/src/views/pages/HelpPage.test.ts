@@ -163,8 +163,10 @@ describe("HelpPage report form", () => {
       collectVnodes(formPhase(new HelpModel({ storage: memoryStorage() }))),
     );
 
-    expect(rendered).toContain("We'll need these to send a fix.");
+    // Both boxes exist for the same reason -- diagnosing the issue -- and no
+    // consent reassurance rides along: ticking the box IS the consent.
     expect(rendered).toContain("We'll need these to diagnose the issue.");
+    expect(rendered).not.toContain("We will never access them");
     // The trailing prose block these reasons replaced is gone.
     expect(rendered).not.toContain("App diagnostics (app version");
   });
@@ -184,31 +186,10 @@ describe("HelpPage sent screen", () => {
     return collectVnodes(sentPhase(model));
   }
 
-  it("says the included diagnostics are still uploading behind the report ID", () => {
-    // The ID lands as soon as the report is filed; the machine's logs and chats
-    // are collected and uploaded after that, so the screen must not read as done.
+  it("shows the report ID as a click-to-copy chip once sent", () => {
     const nodes = renderSent("agent-1");
 
-    expect(findById(nodes, "help-diagnostics-pending")).toBeDefined();
     expect(JSON.stringify(nodes)).toContain("abc123");
-  });
-
-  it("says nothing about uploads when no diagnostics were included", () => {
-    expect(
-      findById(
-        renderSent("agent-1", {
-          isLogsIncluded: false,
-          isTranscriptIncluded: false,
-        }),
-        "help-diagnostics-pending",
-      ),
-    ).toBeUndefined();
-  });
-
-  it("says nothing about uploads for a report not scoped to a machine", () => {
-    // Outside a machine there is nothing to collect, so nothing is pending.
-    expect(
-      findById(renderSent(""), "help-diagnostics-pending"),
-    ).toBeUndefined();
+    expect(findById(nodes, "help-report-id")).toBeDefined();
   });
 });

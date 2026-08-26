@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { jsonResponse, memoryStorage } from "../testing";
 import { HelpModel, setPendingHelpLaunch, takePendingHelpLaunch } from "./help";
 
@@ -184,5 +184,40 @@ describe("HelpModel", () => {
       include_logs: true,
       include_transcript: false,
     });
+  });
+});
+
+describe("HelpModel report-ID copy", () => {
+  it("flashes the copied confirmation and clears it after the flash window", async () => {
+    vi.useFakeTimers();
+    try {
+      const model = new HelpModel({
+        storage: memoryStorage(),
+        clipboardWrite: () => Promise.resolve(),
+      });
+      model.sentEventId = "abc123";
+
+      await model.copyReportId();
+
+      expect(model.isReportIdCopied).toBe(true);
+      vi.runAllTimers();
+      expect(model.isReportIdCopied).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows no confirmation when the clipboard write is rejected", async () => {
+    // An insecure context or denied permission: the ID stays visible and
+    // quotable, so the failure costs only the flash.
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      clipboardWrite: () => Promise.reject(new Error("denied")),
+    });
+    model.sentEventId = "abc123";
+
+    await model.copyReportId();
+
+    expect(model.isReportIdCopied).toBe(false);
   });
 });

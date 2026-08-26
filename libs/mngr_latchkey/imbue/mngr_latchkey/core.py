@@ -786,7 +786,7 @@ def _log_gateway_output_line(line: str, is_stdout: bool) -> None:
     own rotating, timestamped JSONL log -- the same ``make_jsonl_file_sink``
     every other mngr/minds log uses -- so gateway output is timestamped and
     size-rotated like the rest of the logs. ``mngr latchkey forward`` points
-    that log at ``<plugin_data_dir>/forward_logs/events.jsonl`` so the gateway's
+    that log at ``<plugin_data_dir>/events.jsonl`` so the gateway's
     (potentially chatty) output stays in one dedicated, rotated file.
     """
     del is_stdout

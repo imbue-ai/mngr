@@ -573,10 +573,10 @@ def _handle_help_report() -> Response:
     rather than submitting, so the human-reviewed send always flows through this collector.
 
     The workspace's own logs and chat transcript are opt-out, so this route attaches them from inside
-    the container, along with the shell's captured console. It never waits on that: the attachments
-    are reserved and collected on a background strand while the user gets their report id now.
-    Collection never fails the report either -- whatever it could not produce travels as a reason
-    code instead, and that reason lands in the status document the event points at.
+    the container, along with the shell's captured console. It never waits on that: the archive's
+    upload is reserved and collected on a background strand while the user gets their report id now.
+    Collection never fails the report either -- when there is no archive, a one-line note (and the
+    status document the event points at) says why.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):

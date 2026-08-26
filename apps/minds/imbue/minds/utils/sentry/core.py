@@ -85,15 +85,13 @@ _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str | Non
 # The live/current files are uncompressed on disk (compressed on upload); the rotated ``*.gz``
 # files are already gzipped by the Electron rotation helper, so they are uploaded as-is.
 #
-# A manual bug report additionally *stages* up to two files into that same folder immediately
-# before it submits: ``bug-report-<collection slug>-workspace.zip`` (the archive the in-workspace
-# collector hands back, holding the workspace logs plus one ``.jsonl`` per recent chat -- staged
-# already compressed rather than as bare ``.jsonl`` files the backend-log groups above would sweep)
-# and ``bug-report-<collection slug>-console.log`` (the shell's captured console tail, staged
-# app-side). No group's glob matches either name -- ``*.jsonl`` and ``*.jsonl.*`` need a ``.jsonl``
-# that neither the ``.zip`` nor the ``.log`` has, and the remaining four are anchored on the exact
-# stems ``minds.log`` or ``electron.log`` -- so a staged file never joins a group and reaches only
-# the one report it was staged for (see the note below the groups).
+# A manual bug report's own files (the in-workspace archive and the shell's captured console
+# tail) are deliberately NOT in this folder: each report stages them into its own private temp
+# directory, so no group's glob can ever sweep one onto an unrelated event and concurrent reports
+# cannot touch each other's files (see the note below the groups). The workspace outer host's
+# latchkey gateway tail takes the opposite route: collection mirrors it into the latchkey plugin
+# data dir, where the ``latchkey_raw_logs`` group below sweeps it onto every event exactly like
+# the desktop gateway's own logs.
 _MINDS_LOG_ATTACHMENT_GROUPS = (
     # The live Python backend jsonl log (mutable -- re-upload on every report).
     LogAttachmentGroup(
@@ -145,8 +143,8 @@ _MINDS_LOG_ATTACHMENT_GROUPS = (
     ),
 )
 
-# The bug-report staged files (``bug-report-<collection slug>-workspace.zip``
-# and its ``-console.log`` sibling) are deliberately NOT attachment groups:
+# The bug-report staged files (the workspace archive and the console tail, each
+# in its report's own temp staging dir) are deliberately NOT attachment groups:
 # groups are process-global and swept onto every event, so a group matching them
 # would carry one report's consented files onto every unrelated automatic error
 # for as long as they sat on disk. They reach exactly one event instead --

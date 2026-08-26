@@ -20,7 +20,6 @@ need shell quoting.
 
 import base64
 import binascii
-import json
 import threading
 from typing import Final
 
@@ -30,6 +29,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
 
@@ -255,7 +255,7 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
     if result.returncode != 0:
         logger.debug("Share state probe failed for agent {}: {}", agent_id, result.stderr.strip())
         return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
-    stdout = _extract_exec_stdout(result.stdout)
+    stdout = extract_exec_stdout(result.stdout)
     if stdout is None:
         return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
     value_by_prefix: dict[str, str] = {}
@@ -304,26 +304,6 @@ def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller)
         logger.warning("Failed to clear share materials from agent {}: {}", agent_id, result.stderr.strip())
 
 
-def _extract_exec_stdout(exec_json_stdout: str) -> str | None:
-    """Unwrap the remote command's own stdout from ``mngr exec --format json`` output.
-
-    Returns None (with a warning logged) when the envelope is unparseable or
-    reports the remote command as failed -- callers treat that as "the read
-    never landed", never as file content.
-    """
-    try:
-        envelope = json.loads(exec_json_stdout)
-    except json.JSONDecodeError as exc:
-        logger.warning("Unparseable mngr exec JSON envelope ({}): {}", exc, exec_json_stdout[:200])
-        return None
-    results = envelope.get("results") if isinstance(envelope, dict) else None
-    first = results[0] if isinstance(results, list) and results else None
-    if not isinstance(first, dict) or not isinstance(first.get("stdout"), str) or first.get("success") is not True:
-        logger.warning("Unexpected mngr exec JSON envelope shape: {}", exec_json_stdout[:200])
-        return None
-    return first["stdout"]
-
-
 def read_share_grants_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> str | None:
     """Read the grants document back from the agent; None when absent.
 
@@ -347,7 +327,7 @@ def read_share_grants_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> 
         raise ShareInjectionError(
             f"Could not read share grants from agent {agent_id}: {result.stderr.strip() or 'exec failed'}"
         )
-    grants_text = _extract_exec_stdout(result.stdout)
+    grants_text = extract_exec_stdout(result.stdout)
     if grants_text is None:
         raise ShareInjectionError(f"Could not read share grants from agent {agent_id}: unrecognized exec output")
     return grants_text if grants_text.strip() else None
