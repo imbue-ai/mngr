@@ -8,6 +8,7 @@ To run these tests locally:
     just test libs/mngr_kanpan/imbue/mngr_kanpan/test_fetcher_acceptance.py
 """
 
+import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from imbue.mngr.cli.testing import create_test_agent_state
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -33,6 +35,8 @@ from imbue.mngr_kanpan.data_source import FIELD_COMMITS_AHEAD
 from imbue.mngr_kanpan.data_source import FIELD_MUTED
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import PLUGIN_NAME
+from imbue.mngr_kanpan.data_source import is_muted
 from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.git_info import CommitsAheadField
 from imbue.mngr_kanpan.data_sources.git_info import GitInfoDataSource
@@ -132,11 +136,14 @@ def work_dir(tmp_path: Path) -> Path:
     return d
 
 
-def _read_persisted_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
-    """Read the mute flag back out of the agent's certified plugin data."""
-    result = fetch_board_snapshot(mngr_ctx, [], {})
-    entry = {e.name: e for e in result.snapshot.entries}[agent_name]
-    return entry.is_muted
+def _read_persisted_mute(agent: AgentInterface) -> bool:
+    """Read the mute flag straight from the agent's certified plugin data.
+
+    Deliberately not via a board fetch: a fetch probes each agent's tmux lifecycle,
+    which a write-semantics check does not need and which makes it timeout-flaky
+    under load.
+    """
+    return is_muted(agent.get_plugin_data(PLUGIN_NAME))
 
 
 def _ctx_with_failing_provider(mngr_ctx: MngrContext) -> MngrContext:
@@ -312,31 +319,38 @@ def test_fetch_local_snapshot_skips_remote_sources(
 
 
 @pytest.mark.acceptance
-@pytest.mark.tmux
 def test_set_agent_mute_writes_the_state_it_is_given(
     local_host: Host,
     work_dir: Path,
     temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each call persists its argument, so repeating one is a no-op rather than a flip.
-
-    The board decides which way a keypress goes from what it is showing; were the write
-    to flip what is stored instead, the two would disagree whenever the board had not yet
-    caught up, and a second keypress would undo the first.
-    """
+    """Each call persists exactly the value it is given, so repeating a call is a no-op, not a flip."""
     agent = create_test_agent_state(local_host, work_dir, "set-mute-agent")
-    name = AgentName("set-mute-agent")
+
+    # A fake `tmux` on PATH records whenever tmux runs. Reading the mute back from disk uses no
+    # tmux; a board fetch would. So if the marker file never appears, the read didn't fall back
+    # to a board fetch.
+    tmux_probe_marker = tmp_path / "tmux_probed"
+    fake_bin = tmp_path / "fake_bin"
+    fake_bin.mkdir()
+    fake_tmux = fake_bin / "tmux"
+    fake_tmux.write_text(f'#!/bin/sh\ntouch "{tmux_probe_marker}"\nexit 1\n')
+    fake_tmux.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
 
     set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, True)
-    assert _read_persisted_mute(temp_mngr_ctx, name) is True
+    assert _read_persisted_mute(agent) is True
     set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, True)
-    assert _read_persisted_mute(temp_mngr_ctx, name) is True
+    assert _read_persisted_mute(agent) is True
     set_agent_mute(temp_mngr_ctx, agent.id, local_host.id, local_host.provider_instance.name, False)
-    assert _read_persisted_mute(temp_mngr_ctx, name) is False
+    assert _read_persisted_mute(agent) is False
+
+    assert not tmux_probe_marker.exists(), "set/read of persisted mute must not probe tmux (MIND-198)"
 
 
 @pytest.mark.acceptance
-@pytest.mark.tmux
 def test_set_agent_mute_touches_only_the_agents_own_provider(
     local_host: Host,
     work_dir: Path,
@@ -349,12 +363,11 @@ def test_set_agent_mute_touches_only_the_agents_own_provider(
     cross-provider discovery it would build that provider and fail the whole lookup.
     """
     agent = create_test_agent_state(local_host, work_dir, "scoped-mute-agent")
-    name = AgentName("scoped-mute-agent")
     ctx_with_broken_other_provider = _ctx_with_failing_provider(temp_mngr_ctx)
 
     set_agent_mute(ctx_with_broken_other_provider, agent.id, local_host.id, local_host.provider_instance.name, True)
 
-    assert _read_persisted_mute(temp_mngr_ctx, name) is True
+    assert _read_persisted_mute(agent) is True
 
 
 @pytest.mark.acceptance
