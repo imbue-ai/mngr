@@ -1,6 +1,6 @@
 # The minds embed contract
 
-Version: 2 (tracks `CONTRACT_VERSION` in
+Version: 3 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The minds chrome (the "embedder") displays workspace content in a
@@ -45,7 +45,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v2)
+## Message inventory (v3)
 
 ### workspace -> embedder
 
@@ -55,6 +55,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-help` | `{ agentId? }` | Open the get-help / report-a-bug modal, optionally scoped to a workspace. |
 | `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
+| `minds:open-share-settings` | `{ serviceName }` | Open the shell's workspace-options panel on its Share tab, focused on that service. Fire-and-forget (no ack). |
 
 ### embedder -> workspace
 
@@ -118,3 +119,8 @@ payloads -- to the console.
   restoring the instant in-chat card flip that the deleted Electron content
   relay used to carry. Same postMessage path in Electron and plain browser;
   no Electron IPC is involved.
+- **3** -- added `open-share-settings` (workspace -> embedder), replacing the
+  workspace's instructional share popup with a deep link to the shell's Share
+  tab. A well-shaped name for a service the shell does not recognize falls
+  back to the whole-machine share (`ShareModel.selectTarget`'s existing
+  behavior for an unknown target).

@@ -271,7 +271,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                               "share",
                             ),
                         },
-                        m(Icon16, { name: "share" }),
+                        m(Icon16, { name: "user-plus" }),
                       ),
                     ],
                   ),

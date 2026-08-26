@@ -138,6 +138,7 @@ test('embedder endpoint validates payload shapes before dispatch', () => {
       [contract.OPEN_REQUEST_MODAL]: (msg) => seen.push(['request', msg.requestId]),
       [contract.OPEN_HELP]: (msg) => seen.push(['help', msg.agentId]),
       [contract.OPEN_AI_KEYS_PAGE]: (msg) => seen.push(['keys', msg.hostId]),
+      [contract.OPEN_SHARE_SETTINGS]: (msg) => seen.push(['share', msg.serviceName]),
     },
   });
   const from = (data) => win.deliver({ source: frameWin, origin: 'o', data });
@@ -145,16 +146,23 @@ test('embedder endpoint validates payload shapes before dispatch', () => {
   from({ type: contract.OPEN_REQUEST_MODAL });
   from({ type: contract.OPEN_HELP, agentId: 'agent-XYZ!' });
   from({ type: contract.OPEN_AI_KEYS_PAGE, hostId: 'agent-abc123' });
+  // serviceName is required: absent, off-shape, and over-length are dropped.
+  from({ type: contract.OPEN_SHARE_SETTINGS });
+  from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: '' });
+  from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: 'web/../admin' });
+  from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: 'a'.repeat(65) });
   assert.deepStrictEqual(seen, []);
   from({ type: contract.OPEN_HELP, agentId: 'agent-abc123' });
   from({ type: contract.OPEN_HELP });
   from({ type: contract.OPEN_AI_KEYS_PAGE, hostId: 'host-abc123' });
   from({ type: contract.OPEN_AI_KEYS_PAGE, hostId: '' });
+  from({ type: contract.OPEN_SHARE_SETTINGS, serviceName: 'system_interface' });
   assert.deepStrictEqual(seen, [
     ['help', 'agent-abc123'],
     ['help', undefined],
     ['keys', 'host-abc123'],
     ['keys', ''],
+    ['share', 'system_interface'],
   ]);
 });
 

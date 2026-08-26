@@ -71,8 +71,9 @@ _ADDITIONAL_SERVICES_FILENAME: Final[str] = "additional_services.json"
 # The service names latchkey accepts (``canonicalizeServiceName`` rejects
 # anything else). We write the registration into ``config.json`` ourselves
 # rather than shelling out to ``latchkey services register``, so this is where
-# an unusable name in the bundled file is caught.
-_SERVICE_NAME_PATTERN: Final[str] = r"^[a-z0-9][a-z0-9_-]*$"
+# an unusable name in the bundled file is caught. Downstream wire checks
+# mirror this shape; an alignment test there keeps the two in step.
+SERVICE_NAME_PATTERN: Final[str] = r"^[a-z0-9][a-z0-9_-]*$"
 
 
 class AdditionalServicesCatalogError(RuntimeError):
@@ -129,7 +130,7 @@ class _AdditionalServiceEntry(FrozenModel):
 # The catalog is a JSON object keyed by canonical service name; a module-level
 # adapter validates the bundled file, names included.
 _ADDITIONAL_SERVICES_ADAPTER: Final = TypeAdapter(
-    dict[Annotated[str, StringConstraints(pattern=_SERVICE_NAME_PATTERN)], _AdditionalServiceEntry]
+    dict[Annotated[str, StringConstraints(pattern=SERVICE_NAME_PATTERN)], _AdditionalServiceEntry]
 )
 
 

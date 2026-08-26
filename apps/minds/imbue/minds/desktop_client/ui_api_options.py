@@ -58,6 +58,33 @@ _NON_APP_SHARE_SERVICES: Final[frozenset[str]] = frozenset(
 # A per-app share link is a real origin, so only DNS-label-safe names qualify.
 _DNS_SAFE_SERVICE_NAME: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
+# App icons are SVG markup authored inside the workspace -- untrusted content
+# headed for the trusted shell's DOM. This is the server-side backstop
+# (mirroring the workspace registry's own ``_accepted_icon`` in
+# default-workspace-template's agent_manager.py); the frontend additionally
+# DOMPurify-sanitizes before inlining.
+_MAX_ICON_LENGTH: Final[int] = 16384
+_FORBIDDEN_ICON_SUBSTRINGS: Final[tuple[str, ...]] = ("<script", "<style", "<foreignobject", "javascript:", "<!", "<?")
+# An ``on*=`` attribute anywhere in a tag, e.g. ``<svg onload="...">``.
+_ICON_EVENT_HANDLER_PATTERN: Final[re.Pattern[str]] = re.compile(r"<[^>]*\son[a-z]+\s*=", re.IGNORECASE)
+
+
+@pure
+def accepted_service_icon(raw_icon: str) -> str:
+    """Return ``raw_icon`` when it is safe to serve as an app icon, else ''."""
+    icon = raw_icon.strip()
+    if not icon or len(icon) > _MAX_ICON_LENGTH:
+        return ""
+    if not icon.startswith("<svg") or not icon.endswith(">"):
+        return ""
+    lowered = icon.lower()
+    if any(forbidden in lowered for forbidden in _FORBIDDEN_ICON_SUBSTRINGS):
+        return ""
+    if _ICON_EVENT_HANDLER_PATTERN.search(icon) is not None:
+        return ""
+    return icon
+
+
 # Hosts leased from Imbue Cloud surface under per-account provider instances
 # with this prefix; their account link is fixed.
 _IMBUE_CLOUD_PROVIDER_PREFIX: Final[str] = "imbue_cloud_"
@@ -87,6 +114,10 @@ class WorkspaceOptionsData(FrozenModel):
     accounts: tuple[WorkspaceOptionsAccount, ...] = Field(description="Every signed-in account (Associate prompt)")
     app_services: tuple[str, ...] = Field(description="Per-app share targets (DNS-safe, non-interface services)")
     service_labels: dict[str, str] = Field(description="Public origin label per share target (absent = no label yet)")
+    service_icons: dict[str, str] = Field(
+        default_factory=dict,
+        description="Registered SVG icon markup per app share target (absent = none registered)",
+    )
     whole_service: str = Field(description="The share target name that grants the whole machine")
 
 
@@ -211,7 +242,13 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         str(service): label
         for service, label in backend_resolver.list_service_labels_for_agent(parsed_agent_id).items()
     }
+    icons = {
+        str(service): icon for service, icon in backend_resolver.list_service_icons_for_agent(parsed_agent_id).items()
+    }
     app_services, whole_service = split_share_targets(services)
+    service_icons = {
+        service: accepted for service in app_services if (accepted := accepted_service_icon(icons.get(service, "")))
+    }
 
     data = WorkspaceOptionsData(
         agent_id=agent_id,
@@ -227,6 +264,7 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         accounts=tuple(_account_entry(account) for account in accounts),
         app_services=tuple(app_services),
         service_labels=share_target_labels(app_services, labels),
+        service_icons=service_icons,
         whole_service=whole_service,
     )
     return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")

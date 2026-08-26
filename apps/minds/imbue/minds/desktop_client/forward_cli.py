@@ -256,6 +256,9 @@ class EnvelopeStreamConsumer(MutableModel):
     # the agents on each host when building the resolver's view.
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    # Parallel to _services_by_agent: {agent_id_str: {service_name: registered
+    # SVG icon markup}}. Untrusted workspace content, sanitized by consumers.
+    _icons_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     # Parallel to _services_by_agent: {agent_id_str: {service_name: origin label}}.
     # Carries each service's public origin hostname label (``<name>-<rand>``) so
     # the resolver -- and thus the Share tab -- can build per-service share links.
@@ -627,6 +630,7 @@ class EnvelopeStreamConsumer(MutableModel):
             with self._lock:
                 self._services_by_agent.pop(str(agent_id), None)
                 self._labels_by_agent.pop(str(agent_id), None)
+                self._icons_by_agent.pop(str(agent_id), None)
             self.resolver.update_services(agent_id, {})
             self._fire_destroyed(agent_id)
         for instance_key in delta.added_agent_instances:
@@ -701,18 +705,25 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             services = self._services_by_agent.setdefault(aid_str, {})
             labels = self._labels_by_agent.setdefault(aid_str, {})
+            icons = self._icons_by_agent.setdefault(aid_str, {})
             if isinstance(record, ServiceDeregisteredRecord):
                 services.pop(str(record.service), None)
                 labels.pop(str(record.service), None)
+                icons.pop(str(record.service), None)
             else:
                 services[str(record.service)] = record.url
                 if record.label:
                     labels[str(record.service)] = record.label
                 else:
                     labels.pop(str(record.service), None)
+                if record.icon:
+                    icons[str(record.service)] = record.icon
+                else:
+                    icons.pop(str(record.service), None)
             services_snapshot = dict(services)
             labels_snapshot = dict(labels)
-        self.resolver.update_services(agent_id, services_snapshot, labels_snapshot)
+            icons_snapshot = dict(icons)
+        self.resolver.update_services(agent_id, services_snapshot, labels_snapshot, icons_snapshot)
 
     # -- Forward-stream payloads ------------------------------------------
 

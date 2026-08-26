@@ -5,11 +5,13 @@ from pathlib import Path
 
 from pydantic import Field
 
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.ui_api_options import WHOLE_MACHINE_SERVICE
 from imbue.minds.desktop_client.ui_api_options import _workspace_host_coordinate_for_options
+from imbue.minds.desktop_client.ui_api_options import accepted_service_icon
 from imbue.minds.desktop_client.ui_api_options import share_target_labels
 from imbue.minds.desktop_client.ui_api_options import split_share_targets
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -22,11 +24,12 @@ _HOST_ID = "host-" + "f" * 32
 
 
 class _OptionsSeededResolver(StaticBackendResolver):
-    """Static resolver carrying the display info + labels the options endpoint reads."""
+    """Static resolver carrying the display info + labels + icons the options endpoint reads."""
 
     display_info_by_agent_id: dict[str, AgentDisplayInfo] = Field(default_factory=dict, frozen=True)
     color_by_agent_id: dict[str, str] = Field(default_factory=dict, frozen=True)
     labels_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
+    icons_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
     errored_providers: tuple[str, ...] = Field(default=(), frozen=True)
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
@@ -37,6 +40,9 @@ class _OptionsSeededResolver(StaticBackendResolver):
 
     def list_service_labels_for_agent(self, agent_id: AgentId) -> dict:
         return dict(self.labels_by_agent_id.get(str(agent_id), {}))
+
+    def list_service_icons_for_agent(self, agent_id: AgentId) -> dict:
+        return dict(self.icons_by_agent_id.get(str(agent_id), {}))
 
     def get_provider_errors(self) -> dict:
         return {ProviderInstanceName(name): object() for name in self.errored_providers}
@@ -145,6 +151,51 @@ def test_share_target_labels_cover_targets_and_shell_only() -> None:
     )
 
     assert labels == {"web": "web-r4nd", "system_interface": "shell-r4nd"}
+
+
+def test_options_data_serves_only_gate_passing_app_icons(tmp_path: Path) -> None:
+    # The icons are workspace-authored markup headed for the trusted shell's
+    # DOM: only well-shaped, non-executable svg reaches the payload, and only
+    # for the rendered app targets.
+    good_icon = '<svg viewBox="0 0 24 24"><path d="M2 2h20"/></svg>'
+    base = _seeded_resolver()
+    resolver = base.model_copy_update(
+        to_update(
+            base.field_ref().icons_by_agent_id,
+            {
+                _AGENT_ID: {
+                    "web": good_icon,
+                    "terminal": good_icon,
+                    "system_interface": '<svg onload="x()"></svg>',
+                }
+            },
+        )
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=resolver
+    )
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/options")
+
+    data = json.loads(response.get_data(as_text=True))
+    # terminal is an interface (not an app target) and system_interface's
+    # markup fails the gate; only web's icon is served.
+    assert data["service_icons"] == {"web": good_icon}
+
+
+def test_accepted_service_icon_refuses_anything_executable() -> None:
+    good = '<svg viewBox="0 0 24 24"><path d="M2 2h20"/></svg>'
+    assert accepted_service_icon(good) == good
+    assert accepted_service_icon("  " + good + "  ") == good
+    assert accepted_service_icon("") == ""
+    assert accepted_service_icon("not an svg") == ""
+    assert accepted_service_icon('<div><svg viewBox="0 0 24 24"></svg></div>') == ""
+    assert accepted_service_icon('<svg onload="x()"></svg>') == ""
+    assert accepted_service_icon("<svg><script>1</script></svg>") == ""
+    assert accepted_service_icon('<svg><a href="javascript:alert(1)">x</a></svg>') == ""
+    assert accepted_service_icon("<svg><style>svg{}</style></svg>") == ""
+    assert accepted_service_icon("<svg><foreignObject/></svg>") == ""
+    assert accepted_service_icon("<svg>" + "a" * 16400 + "</svg>") == ""
 
 
 # -- _workspace_host_coordinate_for_options ---------------------------------

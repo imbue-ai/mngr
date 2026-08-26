@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
 import { ShellState } from "../shell/shell-state";
-import { panelRoute, rememberInUrl } from "./WorkspaceOptionsPage";
+import { applyRequestedTarget, panelRoute, rememberInUrl } from "./WorkspaceOptionsPage";
 
 const PANEL_ROUTE = "/workspace/agent-ab12/options?tab=permissions&section=conn:slack:";
 
@@ -74,5 +74,48 @@ describe("options panel param routing", () => {
     const { routeSets } = withRoutes(PANEL_ROUTE, null);
     rememberInUrl({ tab: "permissions" });
     expect(routeSets).toEqual([]);
+  });
+});
+
+const SHARE_ROUTE = "/workspace/agent-ab12/options?tab=share&target=web";
+
+function makeShare(): { share: { selectTarget(target: string): void }; selected: string[] } {
+  const selected: string[] = [];
+  return { share: { selectTarget: (target: string) => selected.push(target) }, selected };
+}
+
+describe("applyRequestedTarget", () => {
+  it("holds the param until the share model exists, then selects it", () => {
+    // The share model is only created once the options load completes, so the
+    // deep link's target must survive the renders before that.
+    withRoutes(SHARE_ROUTE, null);
+    expect(applyRequestedTarget(null, null)).toBeNull();
+    const { share, selected } = makeShare();
+    expect(applyRequestedTarget(share, null)).toBe("web");
+    expect(selected).toEqual(["web"]);
+  });
+
+  it("re-selects only when the param's value changes", () => {
+    // A deep link can land while the panel is already open and loaded; the
+    // user's own target navigation never touches the URL, so an unchanged
+    // param must not fight it by re-selecting every render.
+    withRoutes(SHARE_ROUTE, null);
+    const { share, selected } = makeShare();
+    let applied = applyRequestedTarget(share, null);
+    applied = applyRequestedTarget(share, applied);
+    expect(selected).toEqual(["web"]);
+    vi.spyOn(m.route, "get").mockReturnValue("/workspace/agent-ab12/options?tab=share&target=docs");
+    applied = applyRequestedTarget(share, applied);
+    expect(applied).toBe("docs");
+    expect(selected).toEqual(["web", "docs"]);
+  });
+
+  it("consumes a dropped param without selecting anything", () => {
+    // The titlebar's openOptionsTab routes with only ?tab: the pane keeps its
+    // selection, and a later deep link back to the same target still lands.
+    withRoutes("/workspace/agent-ab12/options?tab=share", null);
+    const { share, selected } = makeShare();
+    expect(applyRequestedTarget(share, "web")).toBeNull();
+    expect(selected).toEqual([]);
   });
 });

@@ -14,7 +14,7 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import type { OptionsTab, SettingsGroup } from "../../models/workspaceOptions";
+import type { OptionsTab, SettingsGroup, ShareModel } from "../../models/workspaceOptions";
 import { WorkspaceOptionsModel, toOptionsTab } from "../../models/workspaceOptions";
 import { PermissionsModel } from "../../models/workspacePermissions";
 import { isWorkspaceOverlayPath, workspaceSurfaceIdFromPath } from "../shell/classify";
@@ -60,6 +60,22 @@ function requestedSection(): string | null {
   return section !== null && section !== "" ? section : null;
 }
 
+/** Apply the share target the URL asks for, returning the value now applied.
+ *
+ * Runs every render: a share deep link can land while this panel is already
+ * open, and the share model only exists once the load completes. Only a
+ * CHANGE in the param's value selects -- the user's own target navigation
+ * never touches the URL, so reapplying an unchanged param would fight it. */
+export function applyRequestedTarget(
+  share: Pick<ShareModel, "selectTarget"> | null,
+  appliedTarget: string | null,
+): string | null {
+  const target = panelParam("target");
+  if (share === null || target === appliedTarget) return appliedTarget;
+  if (target) share.selectTarget(target);
+  return target;
+}
+
 /** Keep ?tab=/?group=/?section= pointing at what is on screen (replace, no
  * history entry).
  *
@@ -95,6 +111,9 @@ export function rememberInUrl(changes: Record<string, string | null>): void {
 export const WorkspaceOptionsPage: m.ClosureComponent = () => {
   let model: WorkspaceOptionsModel | null = null;
   let permissions: PermissionsModel | null = null;
+  // The ?target value applyRequestedTarget last consumed (null until the
+  // share model exists to consume one).
+  let appliedTarget: string | null = null;
   function ensureModelsForRouteAgent(): { model: WorkspaceOptionsModel; permissions: PermissionsModel } {
     const agentId = requestedAgentId();
     // Route param changes preserve this component instance, so a navigation
@@ -103,14 +122,11 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
       model.dispose();
       model = null;
       permissions = null;
+      appliedTarget = null;
     }
     if (model === null) {
-      const created = new WorkspaceOptionsModel(agentId);
-      model = created;
-      void created.load().then(() => {
-        const target = panelParam("target");
-        if (target && created.share) created.share.selectTarget(target);
-      });
+      model = new WorkspaceOptionsModel(agentId);
+      void model.load();
     }
     if (permissions === null) {
       // Constructed but not loaded: the Permissions tab reads on its first
@@ -133,6 +149,7 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
     },
     view() {
       const { model: currentModel, permissions: currentPermissions } = ensureModelsForRouteAgent();
+      appliedTarget = applyRequestedTarget(currentModel.share, appliedTarget);
       // Every channel `requests` frame redraws mithril, so reconciling here
       // keeps the Permissions pane live without its own subscription -- and it
       // has to be here rather than in the tab, because the panel stays mounted

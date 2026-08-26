@@ -20,6 +20,7 @@ interface EmbedContractModule {
   OPEN_AI_KEYS_PAGE: string;
   OPEN_AI_KEYS_ACK: string;
   BRING_APP_TO_FRONT: string;
+  OPEN_SHARE_SETTINGS: string;
   CLOSE_ACTIVE_TAB: string;
   PERMISSION_REQUEST_RESOLVED: string;
   REQUEST_ID_PATTERN: RegExp;
@@ -102,6 +103,16 @@ export function buildEmbedHandlers(
     const messageCoordinate = typeof message.hostId === "string" && message.hostId ? message.hostId : null;
     navigate("/settings/ai-keys", { workspace: messageCoordinate ?? workspaceAgentId() });
     sendAck(contract.OPEN_AI_KEYS_ACK);
+  };
+  handlers[contract.OPEN_SHARE_SETTINGS] = (message) => {
+    // Float the options panel's Share tab over this machine (kept mounted),
+    // focused on the asking app. A name the share pane does not recognize
+    // falls back to the whole-machine share (ShareModel.selectTarget).
+    const serviceName = typeof message.serviceName === "string" ? message.serviceName : null;
+    navigate(
+      `/workspace/${workspaceAgentId()}/options`,
+      serviceName === null ? { tab: "share" } : { tab: "share", target: serviceName },
+    );
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
   return handlers;

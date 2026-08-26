@@ -3,6 +3,7 @@
 // copy confirmation, and the provisioning notice. View over ShareModel.
 
 import m from "mithril";
+import { shareTargetIconMarkup } from "../../components/appIcon";
 import { Button } from "../../components/Button";
 import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
@@ -115,7 +116,7 @@ function renderTargetNav(
   const targetButton = (
     target: string,
     label: string,
-    icon: string,
+    icon: m.Children,
   ): m.Children =>
     m(
       "button",
@@ -130,10 +131,17 @@ function renderTargetNav(
           share.selectTarget(target);
         },
       },
-      [
-        m(Icon16, { name: icon, extra: "shrink-0" }),
-        m("span", { class: "truncate" }, label),
-      ],
+      [icon, m("span", { class: "truncate" }, label)],
+    );
+
+  // Each app wears the icon it registered (sanitized) or its monogram --
+  // exactly how the workspace itself draws it -- so the share list reads as
+  // the same apps the user already knows.
+  const appIcon = (service: string): m.Children =>
+    m(
+      "span",
+      { class: "shrink-0 inline-flex" },
+      m.trust(shareTargetIconMarkup(share.targetIcon(service), service, 16)),
     );
 
   return [
@@ -142,12 +150,12 @@ function renderTargetNav(
           m(
             "div",
             { class: "flex flex-col gap-0.5" },
-            appServices.map((service) => targetButton(service, service, "box")),
+            appServices.map((service) => targetButton(service, service, appIcon(service))),
           ),
           m("div", { class: "my-1.5 h-px bg-subtle" }),
         ]
       : null,
-    targetButton(wholeService, "Whole machine", "panels-top-left"),
+    targetButton(wholeService, "Whole machine", m(Icon16, { name: "panels-top-left", extra: "shrink-0" })),
   ];
 }
 

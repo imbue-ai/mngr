@@ -122,6 +122,19 @@ def test_parse_service_log_records_captures_the_origin_label() -> None:
     assert records[0].label == "terminal-x7k9q2w1"
 
 
+def test_parse_service_log_records_captures_the_registered_icon() -> None:
+    text = '{"service": "notes", "url": "http://127.0.0.1:9100", "icon": "<svg viewBox=\\"0 0 24 24\\"></svg>"}\n'
+    records = parse_service_log_records(text)
+
+    assert len(records) == 1
+    assert isinstance(records[0], ServiceLogRecord)
+    assert records[0].icon == '<svg viewBox="0 0 24 24"></svg>'
+    # No ``icon`` in the row -> empty (an app that registered none).
+    bare = parse_service_log_records('{"service": "web", "url": "http://127.0.0.1:9101"}\n')
+    assert isinstance(bare[0], ServiceLogRecord)
+    assert bare[0].icon == ""
+
+
 def test_parse_service_log_records_returns_empty_for_empty_input() -> None:
     assert parse_service_log_records("") == []
     assert parse_service_log_records("\n") == []

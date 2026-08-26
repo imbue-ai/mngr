@@ -56,7 +56,7 @@ export interface WorkspaceOptionsOverlayAttrs {
 export const DOCKED_TABS: { id: OptionsTab; icon: string; label: string }[] = [
   { id: "permissions", icon: "key", label: "Permissions" },
   { id: "settings", icon: "settings", label: "Machine settings" },
-  { id: "share", icon: "share", label: "Share machine" },
+  { id: "share", icon: "user-plus", label: "Share machine" },
 ];
 
 /** Gutter kept clear on both sides of the card at small window sizes. */

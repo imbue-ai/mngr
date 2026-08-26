@@ -29,7 +29,7 @@
 // contract by ADDING types, never by changing the meaning or payload of an
 // existing one. CONTRACT_VERSION below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "2";
+export const CONTRACT_VERSION = "3";
 
 // -- Message types ----------------------------------------------------------
 
@@ -49,6 +49,9 @@ export const OPEN_AI_KEYS_PAGE = "minds:open-ai-keys-page";
 // shell to bring the app window back to the front. A no-op in plain-browser
 // chrome (there is no window to raise). Payload: {}.
 export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
+// workspace -> embedder: open the shell's workspace-options panel on its
+// Share tab, focused on that app. Payload: { serviceName }.
+export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the active dockview tab. Payload: {}.
@@ -73,6 +76,9 @@ export const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 // own side as well (never trust the sender).
 export const AGENT_ID_PATTERN = /^(?:agent|host)-[a-f0-9]{1,64}$/i;
 export const HOST_ID_PATTERN = /^host-[a-f0-9]{1,64}$/i;
+// Superset (plus a length cap) of the canonical registry rule, mngr_latchkey's
+// SERVICE_NAME_PATTERN; an alignment test keeps the two in step.
+export const SERVICE_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 function isOptionalIdValid(value, pattern) {
   if (value === undefined || value === '') return true;
@@ -94,6 +100,9 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   },
   [BRING_APP_TO_FRONT]: function () {
     return true;
+  },
+  [OPEN_SHARE_SETTINGS]: function (data) {
+    return typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName);
   },
 };
 

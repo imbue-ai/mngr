@@ -75,6 +75,7 @@ function makeContract() {
     OPEN_AI_KEYS_PAGE: "minds:open-ai-keys-page",
     OPEN_AI_KEYS_ACK: "minds:open-ai-keys-ack",
     BRING_APP_TO_FRONT: "minds:bring-app-to-front",
+    OPEN_SHARE_SETTINGS: "minds:open-share-settings",
     CLOSE_ACTIVE_TAB: "minds:close-active-tab",
     REQUEST_ID_PATTERN,
   } as Parameters<typeof buildEmbedHandlers>[0]["contract"];
@@ -142,6 +143,29 @@ describe("buildEmbedHandlers", () => {
       path: "/settings/ai-keys",
       params: { workspace: "host-cd34" },
     });
+  });
+
+  it("floats the Share tab over this workspace, focused on the asking app", () => {
+    // No ack: with no minds chrome present the Share click is simply a no-op.
+    const { contract, handlers, navigations, acks } = makeHandlers();
+    handlers[contract.OPEN_SHARE_SETTINGS]({ serviceName: "web" });
+    expect(navigations).toEqual([
+      {
+        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
+        params: { tab: "share", target: "web" },
+      },
+    ]);
+    expect(acks).toEqual([]);
+  });
+
+  it("lands the Share tab untargeted when the name is absent", () => {
+    // Unreachable through the real endpoint (the validator requires
+    // serviceName); pins the handler's own tolerance.
+    const { contract, handlers, navigations } = makeHandlers();
+    handlers[contract.OPEN_SHARE_SETTINGS]({});
+    expect(navigations).toEqual([
+      { path: `/workspace/${WORKSPACE_AGENT_ID}/options`, params: { tab: "share" } },
+    ]);
   });
 
   it("floats help over this workspace, without opening the popup", () => {
