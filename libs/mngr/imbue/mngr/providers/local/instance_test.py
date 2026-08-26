@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+import psutil
 import pytest
 
 from imbue.mngr.config.consts import PROFILES_DIRNAME
@@ -26,6 +27,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.local.instance import _read_cpu_frequency_ghz
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import make_local_provider
 
@@ -266,6 +268,28 @@ def test_get_host_resources_returns_valid_resources(local_provider: LocalProvide
 
     assert resources.cpu.count >= 1
     assert resources.memory_gb >= 0
+
+
+def test_read_cpu_frequency_ghz_returns_none_when_reader_raises_system_error() -> None:
+    def read_raising_system_error() -> float | None:
+        raise SystemError("<built-in function cpu_freq> returned a result with an exception set")
+
+    assert _read_cpu_frequency_ghz(read_raising_system_error) is None
+
+
+def test_read_cpu_frequency_ghz_returns_none_when_reader_raises_psutil_error() -> None:
+    def read_raising_psutil_error() -> float | None:
+        raise psutil.Error()
+
+    assert _read_cpu_frequency_ghz(read_raising_psutil_error) is None
+
+
+def test_read_cpu_frequency_ghz_converts_mhz_to_ghz() -> None:
+    assert _read_cpu_frequency_ghz(lambda: 2400.0) == 2.4
+
+
+def test_read_cpu_frequency_ghz_returns_none_when_frequency_unreported() -> None:
+    assert _read_cpu_frequency_ghz(lambda: None) is None
 
 
 def test_host_has_local_connector(local_provider: LocalProviderInstance) -> None:

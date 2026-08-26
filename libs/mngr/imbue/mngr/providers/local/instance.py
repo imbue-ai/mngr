@@ -1,6 +1,7 @@
 import json
 import shutil
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
@@ -78,6 +79,32 @@ def get_or_create_local_host_id(base_dir: Path) -> HostId:
     atomic_write(host_id_path, new_host_id)
     logger.debug("Generated new local host id={}", new_host_id)
     return new_host_id
+
+
+def _read_current_cpu_frequency_mhz_via_psutil() -> float | None:
+    """Read the current CPU frequency in MHz via psutil, or None if unreported.
+
+    The underlying psutil call raises on some platforms, so callers must guard it.
+    """
+    cpu_freq = psutil.cpu_freq() if hasattr(psutil, "cpu_freq") else None
+    return cpu_freq.current if cpu_freq else None
+
+
+def _read_cpu_frequency_ghz(
+    read_current_cpu_frequency_mhz: Callable[[], float | None],
+) -> float | None:
+    """Return the CPU frequency in GHz, or None when it cannot be determined.
+
+    psutil.cpu_freq() is known to raise SystemError on some macOS / Apple-Silicon
+    setups; treat that (and any other psutil error) as "frequency unknown"
+    instead of fabricating a value or letting it propagate.
+    """
+    try:
+        current_mhz = read_current_cpu_frequency_mhz()
+    except (SystemError, psutil.Error) as e:
+        logger.debug("Skipped CPU frequency detection; psutil.cpu_freq() raised: {}", e)
+        return None
+    return current_mhz / 1000 if current_mhz is not None else None
 
 
 class LocalProviderInstance(BaseProviderInstance):
@@ -484,8 +511,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """
         # Get CPU count and frequency
         cpu_count = psutil.cpu_count(logical=True) or 1
-        cpu_freq = psutil.cpu_freq() if hasattr(psutil, "cpu_freq") else None
-        cpu_freq_ghz = cpu_freq.current / 1000 if cpu_freq else None
+        cpu_freq_ghz = _read_cpu_frequency_ghz(_read_current_cpu_frequency_mhz_via_psutil)
 
         # Get memory in GB
         memory = psutil.virtual_memory()
@@ -495,7 +521,8 @@ class LocalProviderInstance(BaseProviderInstance):
         try:
             disk = psutil.disk_usage("/")
             disk_gb = disk.total / (1024**3)
-        except OSError:
+        except OSError as e:
+            logger.debug("Skipped disk space detection; psutil.disk_usage() raised: {}", e)
             disk_gb = None
 
         return HostResources(
