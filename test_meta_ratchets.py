@@ -940,6 +940,150 @@ def _find_ci_path_gate(workflow: dict, project_dir: Path) -> str | None:
     return None
 
 
+# ty logs this instead of a diagnostic when every path it was handed is excluded.
+# It is the only thing that distinguishes "checked, and clean" from "not checked at
+# all", both of which otherwise print "All checks passed!" and exit 0.
+_TY_NO_FILES_FOUND = "No python files found under the given path(s)"
+
+
+def _run_root_ty_probe(path: Path, is_force_exclude_enabled: bool) -> str:
+    """Run the root workspace's ty over a single path and return everything it printed.
+
+    ty ignores `[tool.ty.src].exclude` for paths named on the command line unless
+    `--force-exclude` is passed, so this asks ty's own matcher whether the path is
+    covered instead of reimplementing its gitignore-style glob semantics. Passing
+    ``is_force_exclude_enabled=False`` asks the complementary question: whether ty
+    finds the file at all once the exclude list no longer applies to it.
+    """
+    command = ["uv", "run", "ty", "check", "--output-format=concise"]
+    if is_force_exclude_enabled:
+        command.append("--force-exclude")
+    result = subprocess.run([*command, str(path)], cwd=_REPO_ROOT, capture_output=True, text=True)
+    # 0 is a clean check and 1 is diagnostics found; anything else is ty never getting
+    # as far as reading the file, whose output the caller would otherwise read as
+    # "this path was checked".
+    assert result.returncode in (0, 1), f"ty exited {result.returncode} for {path}:\n{result.stdout}{result.stderr}"
+    return result.stdout + result.stderr
+
+
+def _get_root_ty_excluded_python_files() -> tuple[Path, ...]:
+    """Return the Python files the root's own ``[tool.ty.src].exclude`` names.
+
+    Entries that are globs, or that no longer resolve on disk, are skipped: this is a
+    source of paths ty is known to exclude, not an audit of the list.
+    """
+    root_exclude = tomlkit.parse((_REPO_ROOT / "pyproject.toml").read_text())["tool"]["ty"]["src"]["exclude"]
+    excluded_files: list[Path] = []
+    for entry in root_exclude:
+        if "*" in str(entry):
+            continue
+        path = _REPO_ROOT / str(entry)
+        if path.is_dir():
+            excluded_files.extend(_get_all_files_with_extension(path, ".py"))
+        elif path.is_file() and path.suffix == ".py":
+            excluded_files.append(path)
+    return tuple(excluded_files)
+
+
+def _assert_root_ty_probe_can_see_exclusions(paths_that_must_stay_checked: frozenset[Path]) -> None:
+    """Fail unless the probe can still tell an excluded path from a checked one.
+
+    "Not checked" reaches the probe as a log line rather than an exit code, so a ty
+    release that reworded or dropped that line would silently turn every clean probe
+    result into a vacuous pass. The control is a Python file the root's own
+    `[tool.ty.src].exclude` names, probed twice: without `--force-exclude` ty must
+    find it, with `--force-exclude` ty must not. That covers both halves of what
+    callers rely on -- the marker still means what they read it to mean, and ty still
+    applies its *configured* exclude list to a path named on the command line. A
+    control excluded by `--exclude` on the command line would show only the first
+    half, and stay green through a ty release that stopped honouring the config.
+
+    ``paths_that_must_stay_checked`` are paths the caller is about to assert ty does
+    check; none of them can double as the control, since the two assertions would
+    then contradict each other and the caller's failure is the one worth reading.
+    """
+    candidates = [path for path in _get_root_ty_excluded_python_files() if path not in paths_that_must_stay_checked]
+    assert candidates, (
+        "no entry in the root [tool.ty.src] exclude resolves to a Python file usable as a control, "
+        "so there is no way left to show that ty still reports an excluded path as unchecked. Add a "
+        "non-glob entry naming a path that exists, or teach _get_root_ty_excluded_python_files to "
+        "expand glob entries."
+    )
+    control = min(candidates)
+
+    unforced_output = _run_root_ty_probe(control, is_force_exclude_enabled=False)
+    assert _TY_NO_FILES_FOUND not in unforced_output, (
+        f"{control.relative_to(_REPO_ROOT)} was picked as a control because the root "
+        "[tool.ty.src] excludes it, but ty does not find it even with the exclude list switched "
+        f"off, so it proves nothing about exclusion:\n{unforced_output}"
+    )
+
+    forced_output = _run_root_ty_probe(control, is_force_exclude_enabled=True)
+    assert _TY_NO_FILES_FOUND in forced_output, (
+        f"cannot tell whether ty checked a path: the root [tool.ty.src] excludes "
+        f"{control.relative_to(_REPO_ROOT)}, yet probing it did not produce {_TY_NO_FILES_FOUND!r}. "
+        "Either ty stopped applying its configured excludes under --force-exclude or it reworded "
+        f"that line; either way this check is now blind:\n{forced_output}"
+    )
+
+
+@pytest.mark.timeout(120)
+def test_standalone_project_ty_carve_outs_are_checked_by_the_root_workspace() -> None:
+    """Whatever a standalone project excludes from its own type check must be checked here.
+
+    A standalone project excludes a path when its own venv cannot resolve that path's
+    imports -- typically because the file is shipped elsewhere and runs against the
+    monorepo venv, which is this workspace. That makes the root the only place left
+    that can check it, and nothing fails if the root stops: the file is type-checked
+    nowhere while both projects stay green. Each side's exclude reads as reasonable on
+    its own; only the pair is wrong, so only a check that spans both can see it.
+
+    This has to live at the repo root rather than in the standalone project, because
+    the project's CI job is path-gated on the project's own directory and its in-repo
+    dependencies -- an edit to the root exclude alone would never run it.
+    """
+    carve_out_files: list[Path] = []
+    unprobeable: list[str] = []
+    for project_dir in _get_standalone_project_dirs():
+        tool_config = tomlkit.parse((project_dir / "pyproject.toml").read_text()).get("tool", {})
+        for entry in tool_config.get("ty", {}).get("src", {}).get("exclude", []):
+            # An entry has to name a path that can be handed straight back to ty. A
+            # glob would have to be expanded first, and guessing at how ty expands it
+            # is the reimplementation this check exists to avoid. A carve-out this
+            # check cannot probe is a carve-out it cannot guard, so it is reported.
+            carve_out = project_dir / str(entry)
+            if carve_out.is_dir():
+                carve_out_files.extend(_get_all_files_with_extension(carve_out, ".py"))
+            elif carve_out.is_file():
+                # A non-Python file is not something either type check would read.
+                if carve_out.suffix == ".py":
+                    carve_out_files.append(carve_out)
+            else:
+                unprobeable.append(f"{project_dir.relative_to(_REPO_ROOT)}: {entry}")
+
+    assert not unprobeable, (
+        "these [tool.ty.src] exclude entries do not name an existing directory or file, so this "
+        "check cannot hand them to ty and cannot tell whether the root workspace still covers "
+        "them. Respell each as a path, or teach this check to expand the pattern:\n"
+        + "\n".join(f"  - {entry}" for entry in unprobeable)
+    )
+    assert carve_out_files, (
+        "no standalone project excludes a path from its own [tool.ty.src] any more; "
+        "this check has nothing left to guard and should be deleted with the last carve-out"
+    )
+
+    _assert_root_ty_probe_can_see_exclusions(frozenset(carve_out_files))
+
+    unchecked = [
+        f for f in carve_out_files if _TY_NO_FILES_FOUND in _run_root_ty_probe(f, is_force_exclude_enabled=True)
+    ]
+    assert not unchecked, (
+        "the root [tool.ty.src] exclude covers files that their own standalone project also "
+        "excludes, so they are type-checked nowhere:\n"
+        + "\n".join(f"  - {f.relative_to(_REPO_ROOT)}" for f in sorted(unchecked))
+    )
+
+
 def test_top_level_coverage_omit_covers_subproject_omits() -> None:
     """For every file in a subproject's package tree that the subproject's
     `[tool.coverage.run].omit` patterns exclude, the top-level
