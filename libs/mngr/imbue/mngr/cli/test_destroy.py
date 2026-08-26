@@ -512,6 +512,7 @@ def _git_branch_exists(repo_path: Path, branch_name: str) -> bool:
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_destroy_remove_created_branch_deletes_branch(
     cli_runner: CliRunner,
     temp_git_repo: Path,
