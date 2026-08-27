@@ -7,9 +7,13 @@
 #   1. Find the build id (the `build` job's summary in minds-launch-to-msg, or
 #      the ToDesktop dashboard).
 #   2. Edit the channel below.
-#   3. Open a PR. CI dry-runs every gate against it, so review sees whether it
+#   3. For `stable` only, bump `_DEFAULT_TARGET_BY_PLATFORM[_MAC_ARM64_PLATFORM]`
+#      in `apps/remote_service_connector/imbue/remote_service_connector/accounts_web.py`
+#      to the build being promoted: that constant is what the public download
+#      link serves while the update feed is down.
+#   4. Open a PR. CI dry-runs every gate against it, so review sees whether it
 #      would actually publish.
-#   4. Merge. CI publishes.
+#   5. Merge. CI publishes.
 #
 # Removing an entry withdraws nothing: no manifest is ever deleted, so the
 # channel keeps serving its last build and the run reports that rather than a
