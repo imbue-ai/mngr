@@ -12,6 +12,14 @@ from imbue.imbue_common.pure import pure
 
 IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
+# The pre-baked agent every pool host carries, whose id is the pool row's
+# ``agent_id`` and the workspace's durable identity (see ``WorkspaceId``).
+POOL_HOST_SERVICES_AGENT_NAME: Final[str] = "system-services"
+# The agent label minds stamps on that agent and by which every consumer
+# (minds' workspace list, the forward's ``has(agent.labels.is_primary)`` filter)
+# recognizes a workspace's primary agent.
+WORKSPACE_PRIMARY_AGENT_LABEL: Final[str] = "is_primary"
+
 # The minds environment tiers. Every env name maps to exactly one tier, and every
 # bare-metal box belongs to exactly one tier. Tiers are isolated by construction --
 # each has its own pool-management SSH keypair, and there is meant to be zero

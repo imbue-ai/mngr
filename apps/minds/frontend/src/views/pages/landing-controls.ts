@@ -102,3 +102,97 @@ export function healthBadgeLabelFor(
   if (health === "restarting") return isRestartStartOnly === false ? "Restarting..." : "Reconnecting...";
   return isRestartANoOp ? "Not responding" : "Restart failed";
 }
+
+/** The location badge of a remote row: a cloud workspace is named by its
+ * provider (it lives there, not on any device); an other-device machine by
+ * the device that hosts it. */
+export function remoteLocationBadgeFor(
+  entry: Pick<UiWorkspaceEntry, "remote_kind" | "location">,
+): string {
+  const location = entry.location ?? "";
+  return (entry.remote_kind ?? "") === "cloud" ? location : `on ${location}`;
+}
+
+export interface RemoteStateChip {
+  label: string;
+  /** Whether the chip reports a problem (rendered in the important tone). */
+  isImportant: boolean;
+  /** Whether clicking the chip should take the user to the Accounts page (the remedy for a signed-out provider). */
+  isAccountsLink: boolean;
+}
+
+/** The chip a remote row shows for its derived access state, or null for the plain state. */
+export function remoteStateChipFor(
+  remoteState: string,
+): RemoteStateChip | null {
+  switch (remoteState) {
+    case "signed_out":
+      return { label: "Signed out", isImportant: true, isAccountsLink: true };
+    case "connecting":
+      return {
+        label: "connecting…",
+        isImportant: false,
+        isAccountsLink: false,
+      };
+    case "unreachable":
+      return { label: "unreachable", isImportant: true, isAccountsLink: false };
+    case "error":
+      return { label: "sync error", isImportant: true, isAccountsLink: false };
+    default:
+      return null;
+  }
+}
+
+export interface BackupsControl {
+  isShown: boolean;
+  isEnabled: boolean;
+  tooltip: string;
+}
+
+const BACKUPS_HIDDEN: BackupsControl = {
+  isShown: false,
+  isEnabled: false,
+  tooltip: "",
+};
+
+/**
+ * Whether a row offers its Backups button, and whether it is usable.
+ *
+ * The backups page runs restic from this device, so it needs no live
+ * workspace: a remote row offers it whenever this device can read the
+ * credentials, and explains itself (disabled) when it cannot -- locked behind
+ * the master password, or never synced here. A live row offers it while the
+ * machine is STOPPED, when the workspace's own settings (the other way in) are
+ * unreachable.
+ */
+export function backupsControlFor(
+  entry: Pick<UiWorkspaceEntry, "is_remote" | "backup_access">,
+  liveness: string,
+): BackupsControl {
+  if (entry.is_remote ?? false) {
+    switch (entry.backup_access ?? "") {
+      case "available":
+        return { isShown: true, isEnabled: true, tooltip: "Backups" };
+      case "locked":
+        return {
+          isShown: true,
+          isEnabled: false,
+          tooltip:
+            "Unlock this account with your master password to access this machine's backups",
+        };
+      case "unavailable":
+        return {
+          isShown: true,
+          isEnabled: false,
+          tooltip:
+            "Backups aren't reachable from this device. Set a master password on the device that created " +
+            "this machine to access them from other devices.",
+        };
+      default:
+        return BACKUPS_HIDDEN;
+    }
+  }
+  return liveness === "STOPPED"
+    ? { isShown: true, isEnabled: true, tooltip: "Backups" }
+    : BACKUPS_HIDDEN;
+}

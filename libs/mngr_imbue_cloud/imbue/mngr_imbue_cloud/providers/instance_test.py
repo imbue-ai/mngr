@@ -1559,3 +1559,47 @@ def test_move_host_pins_is_a_noop_without_persisted_lease_meta(tmp_path: Path, t
     record = load_host_key_record(known_hosts, host_id)
     assert record is not None
     assert [(pin.address, pin.port) for pin in record.pins] == [("198.51.100.9", 22010)]
+
+
+class _CannedLifecycleProvider(ImbueCloudProvider):
+    """Provider stub whose lifecycle listing reports canned non-running workspaces and no leases."""
+
+    _workspaces: list[WorkspaceInfo] = []
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return []
+
+    def _list_workspaces_cached(self) -> list[WorkspaceInfo] | None:
+        return list(self._workspaces)
+
+
+def test_stopped_workspace_never_listed_here_is_discovered_as_a_labelled_services_agent(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A stopped workspace this install has no cached agents for still surfaces its primary agent.
+
+    The pool row's agent is the pre-baked ``system-services`` agent, so the
+    stub carries that name and the ``is_primary`` label; a bare, label-less stub
+    would be dropped by every consumer that recognizes a workspace by the label,
+    making a stopped workspace vanish from the workspace list.
+    """
+    host_id = HostId.generate()
+    workspace = _make_workspace_info("stopped", with_placement=False)
+    stopped_workspace = workspace.model_copy_update(
+        to_update(workspace.field_ref().host_id, str(host_id)),
+        to_update(workspace.field_ref().agent_id, str(AgentId.generate())),
+    )
+    provider = _CannedLifecycleProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _workspaces=[stopped_workspace],
+    )
+
+    host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert host_ref.host_state == HostState.STOPPED
+    assert [str(agent.agent_id) for agent in agents] == [stopped_workspace.agent_id]
+    assert str(agents[0].agent_name) == "system-services"
+    assert agents[0].labels == {"is_primary": "true"}
+    # A stub is a live statement about the row, not a replayed cache entry.
+    assert "stale" not in agents[0].certified_data

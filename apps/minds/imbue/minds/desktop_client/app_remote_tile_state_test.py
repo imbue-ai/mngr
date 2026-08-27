@@ -58,7 +58,7 @@ def test_cloud_tile_state_is_plain_before_any_key_is_materialized(tmp_path: Path
     record = _cloud_record(email, f"host-{uuid4().hex}", f"agent-{uuid4().hex}")
     resolver = make_resolver_with_data()
 
-    assert _compute_cloud_tile_state(resolver, store, email, record) == ("", None)
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True) == ("", None)
 
 
 def test_cloud_tile_state_is_connecting_until_a_snapshot_newer_than_the_key(tmp_path: Path) -> None:
@@ -73,7 +73,7 @@ def test_cloud_tile_state_is_connecting_until_a_snapshot_newer_than_the_key(tmp_
     provider_name = ProviderInstanceName(imbue_cloud_provider_name_for_account(email))
 
     # No snapshot at all yet: connecting.
-    assert _compute_cloud_tile_state(resolver, store, email, record) == ("connecting", None)
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True) == ("connecting", None)
 
     # A snapshot from before the key appeared does not resolve it.
     resolver.update_providers(
@@ -82,7 +82,7 @@ def test_cloud_tile_state_is_connecting_until_a_snapshot_newer_than_the_key(tmp_
         error=None,
         last_snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=5),
     )
-    assert _compute_cloud_tile_state(resolver, store, email, record) == ("connecting", None)
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True) == ("connecting", None)
 
 
 def test_cloud_tile_state_is_unreachable_once_a_newer_healthy_snapshot_lacks_the_host(tmp_path: Path) -> None:
@@ -102,7 +102,7 @@ def test_cloud_tile_state_is_unreachable_once_a_newer_healthy_snapshot_lacks_the
         last_snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=5),
     )
 
-    assert _compute_cloud_tile_state(resolver, store, email, record) == ("unreachable", None)
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True) == ("unreachable", None)
 
     # An errored provider poll downgrades the verdict back to connecting: an
     # unreachable claim needs a healthy snapshot behind it.
@@ -112,7 +112,7 @@ def test_cloud_tile_state_is_unreachable_once_a_newer_healthy_snapshot_lacks_the
         error=DiscoveryError(type_name="RuntimeError", message="boom", provider_name=provider_name),
         last_snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=6),
     )
-    assert _compute_cloud_tile_state(resolver, store, email, record) == ("connecting", None)
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True) == ("connecting", None)
 
 
 def test_cloud_tile_state_reports_materialization_errors(tmp_path: Path) -> None:
@@ -144,7 +144,7 @@ def test_cloud_tile_state_reports_materialization_errors(tmp_path: Path) -> None
     assert store.materialize_account_synced_secrets(user_id, email) is False
 
     record = store.list_records(user_id)[0]
-    state, detail = _compute_cloud_tile_state(resolver, store, email, record)
+    state, detail = _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True)
     assert state == "error"
     assert detail is not None and "decrypt" in detail
 
@@ -177,7 +177,7 @@ def test_cloud_tile_state_stays_connecting_when_a_dropped_pre_start_error_set_no
         last_snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         is_snapshot_state_current=False,
     )
-    assert _compute_cloud_tile_state(resolver, store, email, record) == ("connecting", None)
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True) == ("connecting", None)
 
     # A genuine post-start snapshot does record freshness, so the verdict can advance.
     resolver.update_providers(
@@ -186,4 +186,25 @@ def test_cloud_tile_state_stays_connecting_when_a_dropped_pre_start_error_set_no
         error=None,
         last_snapshot_at=datetime.now(timezone.utc) + timedelta(minutes=6),
     )
-    assert _compute_cloud_tile_state(resolver, store, email, record) == ("unreachable", None)
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=True) == ("unreachable", None)
+
+
+def test_cloud_tile_state_is_signed_out_while_the_account_provider_is_disabled(tmp_path: Path) -> None:
+    """A disabled provider block hides the workspace from discovery, and the chip must say so.
+
+    Suppressing the chip here left a stopped cloud workspace as an inert grey
+    tile with nothing telling the user that signing in again is the remedy.
+    """
+    email = f"tile-{uuid4().hex}@example.com"
+    store = _make_profiled_store(tmp_path, make_fake_imbue_cloud_cli())
+    record = _cloud_record(email, f"host-{uuid4().hex}", f"agent-{uuid4().hex}")
+    key_path = store.imbue_cloud_host_ssh_key_path(email, record.host_id)
+    assert key_path is not None
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text("materialized-key")
+    resolver = make_resolver_with_data()
+
+    assert _compute_cloud_tile_state(resolver, store, email, record, is_provider_enabled=False) == (
+        "signed_out",
+        None,
+    )

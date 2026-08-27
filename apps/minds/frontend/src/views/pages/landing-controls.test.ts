@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { healthBadgeLabelFor, isMachineStateKnown, mindControlsFor, rowClickActionFor } from "./landing-controls";
+import {
+  backupsControlFor,
+  healthBadgeLabelFor,
+  isMachineStateKnown,
+  mindControlsFor,
+  remoteLocationBadgeFor,
+  remoteStateChipFor,
+  rowClickActionFor,
+} from "./landing-controls";
 
 describe("mindControlsFor", () => {
   it("offers only Start for a shutdown-capable stopped machine", () => {
@@ -132,5 +140,98 @@ describe("healthBadgeLabelFor", () => {
     // The card withholds the device verdict over a healthy machine for the same
     // reason: whatever could not connect, it is connecting now.
     expect(healthBadgeLabelFor("healthy", false, null, true)).toBeNull();
+  });
+});
+
+describe("remoteLocationBadgeFor", () => {
+  it("names the provider for a cloud workspace, never a device", () => {
+    expect(
+      remoteLocationBadgeFor({ remote_kind: "cloud", location: "Imbue Cloud" }),
+    ).toBe("Imbue Cloud");
+  });
+
+  it("names the hosting device for an other-device machine", () => {
+    expect(
+      remoteLocationBadgeFor({ remote_kind: "other_device", location: "mac" }),
+    ).toBe("on mac");
+    expect(remoteLocationBadgeFor({ location: "mac" })).toBe("on mac");
+  });
+});
+
+describe("remoteStateChipFor", () => {
+  it("shows nothing for the plain state", () => {
+    expect(remoteStateChipFor("")).toBeNull();
+  });
+
+  it("points a signed-out provider at the Accounts page", () => {
+    expect(remoteStateChipFor("signed_out")).toEqual({
+      label: "Signed out",
+      isImportant: true,
+      isAccountsLink: true,
+    });
+  });
+
+  it("reports the access states with their tones", () => {
+    expect(remoteStateChipFor("connecting")).toEqual({
+      label: "connecting…",
+      isImportant: false,
+      isAccountsLink: false,
+    });
+    expect(remoteStateChipFor("unreachable")).toEqual({
+      label: "unreachable",
+      isImportant: true,
+      isAccountsLink: false,
+    });
+    expect(remoteStateChipFor("error")).toEqual({
+      label: "sync error",
+      isImportant: true,
+      isAccountsLink: false,
+    });
+  });
+});
+
+describe("backupsControlFor", () => {
+  it("offers usable backups on a remote row whose credentials are on this device", () => {
+    expect(
+      backupsControlFor({ is_remote: true, backup_access: "available" }, ""),
+    ).toEqual({
+      isShown: true,
+      isEnabled: true,
+      tooltip: "Backups",
+    });
+  });
+
+  it("explains a locked or never-synced remote row instead of hiding the button", () => {
+    const locked = backupsControlFor(
+      { is_remote: true, backup_access: "locked" },
+      "",
+    );
+    expect(locked.isShown).toBe(true);
+    expect(locked.isEnabled).toBe(false);
+    expect(locked.tooltip).toContain("master password");
+    const unavailable = backupsControlFor(
+      { is_remote: true, backup_access: "unavailable" },
+      "",
+    );
+    expect(unavailable.isShown).toBe(true);
+    expect(unavailable.isEnabled).toBe(false);
+    expect(unavailable.tooltip).toContain("device that created this machine");
+  });
+
+  it("hides the button on a remote row with no computed access", () => {
+    expect(backupsControlFor({ is_remote: true }, "").isShown).toBe(false);
+  });
+
+  it("offers backups on a live row only while it is stopped", () => {
+    expect(backupsControlFor({ is_remote: false }, "STOPPED")).toEqual({
+      isShown: true,
+      isEnabled: true,
+      tooltip: "Backups",
+    });
+    for (const liveness of ["RUNNING", "STOPPING", "STARTING", "UNKNOWN", ""]) {
+      expect(backupsControlFor({ is_remote: false }, liveness).isShown).toBe(
+        false,
+      );
+    }
   });
 });

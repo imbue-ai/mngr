@@ -94,8 +94,26 @@ class UiWorkspaceEntry(FrozenModel):
     create_attempt_state: str = Field(
         default="", description="creating / interrupted / failed for create-attempt rows; empty for real workspaces"
     )
-    is_remote: bool = Field(default=False, description="Known only from synced records (hosted on another device)")
-    location: str = Field(default="", description="Human label for where a remote workspace lives")
+    is_remote: bool = Field(default=False, description="Known only from synced records (not in local discovery)")
+    remote_kind: str = Field(
+        default="",
+        description=(
+            "For remote rows: 'other_device' (hosted by another install) or 'cloud' (a cloud workspace this "
+            "device cannot currently see); empty for live rows"
+        ),
+    )
+    location: str = Field(
+        default="",
+        description="Human label for where a remote workspace lives: the device label, or the cloud provider name",
+    )
+    backup_access: str = Field(
+        default="",
+        description=(
+            "For remote rows: 'available' when this device can read the workspace's backups now, 'locked' when "
+            "the synced credentials need the master password here, 'unavailable' when no credentials reach this "
+            "device; empty for live rows"
+        ),
+    )
 
 
 class UiHelloMessage(FrozenModel):

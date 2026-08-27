@@ -45,12 +45,16 @@ from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
 from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
+from imbue.minds.desktop_client.data_types import BackupAccessState
+from imbue.minds.desktop_client.data_types import RemoteWorkspaceKind
 from imbue.minds.desktop_client.data_types import RemoteWorkspaceTile
+from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import delete_destroying
@@ -756,6 +760,7 @@ def _compute_cloud_tile_state(
     record_store: WorkspaceRecordStore,
     account_email: str,
     record: ReplicaRecord,
+    is_provider_enabled: bool,
 ) -> tuple[str, str | None]:
     """Derive the access state for one cloud row that is not in local discovery.
 
@@ -763,8 +768,10 @@ def _compute_cloud_tile_state(
     the provider's latest snapshot, the in-memory materialization error) --
     no stored flags:
 
-    - ``""`` (plain remote): chips are suppressed while the account's provider
-      block is disabled, and nothing is shown before any key is materialized
+    - ``"signed_out"``: the account's provider block is disabled, so discovery
+      never polls it -- the workspace is invisible here until the user signs
+      in again, which is what the chip says.
+    - ``""`` (plain remote): nothing is shown before any key is materialized
       (locked account / no synced key).
     - ``"error"``: the last materialization attempt failed (detail in tooltip).
     - ``"connecting"``: a key exists but no healthy provider snapshot has
@@ -772,8 +779,8 @@ def _compute_cloud_tile_state(
     - ``"unreachable"``: a healthy snapshot newer than the key lacks the host
       (the lease expired/was released, or the key does not grant access).
     """
-    if not is_imbue_cloud_provider_enabled_for_account(account_email, root=MindsRoot.from_environment()):
-        return "", None
+    if not is_provider_enabled:
+        return "signed_out", None
     error_detail = record_store.ssh_material_errors().get(record.agent_id)
     if error_detail is not None:
         return "error", error_detail
@@ -792,6 +799,35 @@ def _compute_cloud_tile_state(
     return "unreachable", None
 
 
+def _compute_backup_access(
+    record_store: WorkspaceRecordStore, user_id: str, record: ReplicaRecord
+) -> BackupAccessState:
+    """Whether this device can read the record's backups right now.
+
+    Mirrors the credential resolution the backups routes perform: this
+    device's own canonical env first (the device that created the machine
+    always has it), then the record's synced secrets decrypted under the
+    account's DEK. A blob this device cannot decrypt means the master password
+    has not been entered here; no blob at all means the credentials never left
+    the creating device (metadata-only tier) or backups were never configured.
+    """
+    try:
+        agent_id = AgentId(record.agent_id)
+    except InvalidRandomIdError:
+        logger.debug("Skipped the backup-access check for record {}: not a valid agent id", record.agent_id)
+        return BackupAccessState.UNAVAILABLE
+    if read_canonical_env(record_store.paths, agent_id) is not None:
+        return BackupAccessState.AVAILABLE
+    if record.encrypted_secrets is None:
+        return BackupAccessState.UNAVAILABLE
+    if not is_account_unlocked(record_store.paths, user_id):
+        return BackupAccessState.LOCKED
+    payload = record_store.decrypt_record_secrets(user_id, record)
+    if payload is None or payload.restic_env is None:
+        return BackupAccessState.UNAVAILABLE
+    return BackupAccessState.AVAILABLE
+
+
 def _collect_remote_workspace_tiles(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
@@ -808,6 +844,9 @@ def _collect_remote_workspace_tiles(
     tiles: list[RemoteWorkspaceTile] = []
     seen_agent_ids: set[str] = set()
     for account in session_store.list_accounts():
+        is_provider_enabled = is_imbue_cloud_provider_enabled_for_account(
+            str(account.email), root=MindsRoot.from_environment()
+        )
         for record in session_store.record_store.list_records(str(account.user_id)):
             is_remote_active = (
                 record.state == RECORD_STATE_ACTIVE
@@ -817,21 +856,35 @@ def _collect_remote_workspace_tiles(
             if not is_remote_active:
                 continue
             seen_agent_ids.add(record.agent_id)
-            location = record.device_label or record.provider_kind or "another device"
-            state, state_detail = ("", None)
-            if is_cloud_provider_kind(record.provider_kind):
+            # A cloud workspace lives with its provider, not on the device that
+            # happened to create it -- so its badge names the provider, never
+            # the creating device's hostname the record carries.
+            is_cloud_row = is_cloud_provider_kind(record.provider_kind)
+            if is_cloud_row:
+                kind = RemoteWorkspaceKind.CLOUD
+                location = friendly_provider_label(record.provider_kind)
                 state, state_detail = _compute_cloud_tile_state(
-                    backend_resolver, session_store.record_store, str(account.email), record
+                    backend_resolver,
+                    session_store.record_store,
+                    str(account.email),
+                    record,
+                    is_provider_enabled=is_provider_enabled,
                 )
+            else:
+                kind = RemoteWorkspaceKind.OTHER_DEVICE
+                location = record.device_label or record.provider_kind or "another device"
+                state, state_detail = ("", None)
             tiles.append(
                 RemoteWorkspaceTile(
                     agent_id=record.agent_id,
                     name=record.display_name or record.agent_id,
                     accent=record.color or DEFAULT_WORKSPACE_COLOR,
+                    kind=kind,
                     location=location,
                     host_id=record.host_id,
                     state=state,
                     state_detail=state_detail,
+                    backup_access=_compute_backup_access(session_store.record_store, str(account.user_id), record),
                 )
             )
     return tiles
@@ -1201,15 +1254,18 @@ def _build_workspace_list(
     for create_attempt_row in create_attempt_rows or ():
         workspaces.append(_create_attempt_row_entry(create_attempt_row))
     # Append workspaces known only from synced records (hosted on another
-    # device). They render greyed and non-navigable; ``location`` names where
-    # they live.
+    # device, or a cloud workspace this device cannot currently see). They
+    # render greyed and non-navigable; ``location`` names where they live and
+    # ``backup_access`` whether their backups are reachable from here.
     for tile in _collect_remote_workspace_tiles(backend_resolver, session_store):
         remote_entry: dict[str, str] = {
             "id": tile.agent_id,
             "name": tile.name,
             "accent": tile.accent,
             "is_remote": "true",
+            "remote_kind": tile.kind.value,
             "location": tile.location,
+            "backup_access": tile.backup_access.value,
         }
         owner = session_store.get_account_for_workspace(tile.agent_id) if session_store is not None else None
         if owner is not None:
@@ -1895,7 +1951,9 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         account=entry.get("account", ""),
         create_attempt_state=entry.get("create_attempt_state", ""),
         is_remote=entry.get("is_remote") == "true",
+        remote_kind=entry.get("remote_kind", ""),
         location=entry.get("location", ""),
+        backup_access=entry.get("backup_access", ""),
     )
 
 

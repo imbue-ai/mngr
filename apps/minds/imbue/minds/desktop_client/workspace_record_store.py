@@ -165,6 +165,11 @@ def secrets_payload_content_hash(payload: WorkspaceSecretsPayload) -> str:
     return hashlib.sha256(payload.model_dump_json(exclude={"payload_format"}).encode("utf-8")).hexdigest()
 
 
+def encode_encrypted_secrets(dek: bytes, plaintext: bytes) -> str:
+    """The base64 AEAD blob a record's ``encrypted_secrets`` carries for ``plaintext`` under the account DEK."""
+    return b64encode(encrypt_secrets(dek, plaintext)).decode("ascii")
+
+
 class ReplicaRecord(FrozenModel):
     """One workspace record as held in the local replica (wire fields + the dirty flag)."""
 
@@ -586,9 +591,9 @@ class WorkspaceRecordStore(MutableModel):
                 return None
         own_fields = json.loads(payload.model_dump_json())
         merged = {**(existing_raw or {}), **own_fields}
-        blob = encrypt_secrets(dek, json.dumps(merged, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        plaintext = json.dumps(merged, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return BuiltRecordSecrets(
-            encrypted=b64encode(blob).decode("ascii"),
+            encrypted=encode_encrypted_secrets(dek, plaintext),
             content_hash=secrets_payload_content_hash(payload),
         )
 

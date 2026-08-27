@@ -31,7 +31,11 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     snapshot field the older server does not send at all; and to 7 when the
     environment frame's state gained ``UNKNOWN`` (an unmeasured device is no
     longer reported as a fine one), which an older client would fail to parse
-    and read as no condition at all."""
+    and read as no condition at all -- the same bump also carried the workspace
+    entries' new ``remote_kind`` and ``backup_access``, which the machines list
+    reads to badge a cloud record by its provider and to offer (or explain) its
+    Backups button, so a window from before would keep rendering every remote
+    record as "on <device>" with no way in."""
     assert UI_SCHEMA_VERSION == 7
 
 

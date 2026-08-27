@@ -96,6 +96,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -133,6 +134,8 @@ from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FAST_PATH_ADOPTABLE_START_ARGS
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
+from imbue.mngr_imbue_cloud.primitives import POOL_HOST_SERVICES_AGENT_NAME
+from imbue.mngr_imbue_cloud.primitives import WORKSPACE_PRIMARY_AGENT_LABEL
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
@@ -313,6 +316,32 @@ WORKSPACE_HOST_STATE_BY_STATUS: Final[dict[WorkspaceStatus, HostState]] = {
     # observed but not actionable, and never treated as absent.
     WorkspaceStatus.UNKNOWN: HostState.UNKNOWN,
 }
+
+
+@pure
+def _synthesize_services_agent_for_lifecycle_entry(
+    entry: WorkspaceInfo, host_id: HostId, provider_name: ProviderInstanceName
+) -> DiscoveredAgent:
+    """The services-agent stub for a non-running host this install has never listed.
+
+    The pool row's ``agent_id`` is the host's pre-baked ``system-services`` agent
+    by construction, so the stub can honestly carry that agent's name and its
+    ``is_primary`` label. Without the label, consumers that recognize a host's
+    primary agent by it (e.g. a ``has(agent.labels.is_primary)`` agent filter)
+    would drop a stopped host that was never seen running from this install,
+    even though the lifecycle listing reports it.
+    """
+    return DiscoveredAgent(
+        agent_id=AgentId(entry.agent_id),
+        agent_name=AgentName(POOL_HOST_SERVICES_AGENT_NAME),
+        host_id=host_id,
+        provider_name=provider_name,
+        certified_data={
+            "id": entry.agent_id,
+            "name": POOL_HOST_SERVICES_AGENT_NAME,
+            "labels": {WORKSPACE_PRIMARY_AGENT_LABEL: "true"},
+        },
+    )
 
 
 @pure
@@ -994,12 +1023,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 host_state=WORKSPACE_HOST_STATE_BY_STATUS[workspace.status],
             )
             result[host_ref] = self._load_last_known_agents(host_id) or [
-                DiscoveredAgent(
-                    agent_id=AgentId(workspace.agent_id),
-                    agent_name=AgentName(workspace.agent_id),
-                    host_id=host_id,
-                    provider_name=self.name,
-                )
+                _synthesize_services_agent_for_lifecycle_entry(workspace, host_id, self.name)
             ]
         return result
 

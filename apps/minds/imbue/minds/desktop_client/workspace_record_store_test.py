@@ -1,6 +1,5 @@
 import json
 from base64 import b64decode
-from base64 import b64encode
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -13,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.secret_wrapping import decrypt_secrets
-from imbue.imbue_common.secret_wrapping import encrypt_secrets
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -32,6 +30,7 @@ from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordSto
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import collect_ssh_key_material
 from imbue.minds.desktop_client.workspace_record_store import derive_openssh_public_key_line
+from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
 from imbue.minds.desktop_client.workspace_record_store import replica_record_from_wire
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
@@ -995,9 +994,9 @@ def test_build_encrypted_secrets_refuses_a_newer_payload_format(paths: Installat
     write_canonical_env(paths, agent_id, "RESTIC_REPOSITORY=x\nRESTIC_PASSWORD=y\n")
     dek = load_dek(paths, user_id)
     assert dek is not None
-    newer_blob = b64encode(
-        encrypt_secrets(dek, json.dumps({"payload_format": 2, "from_the_future": "keep"}).encode("utf-8"))
-    ).decode("ascii")
+    newer_blob = encode_encrypted_secrets(
+        dek, json.dumps({"payload_format": 2, "from_the_future": "keep"}).encode("utf-8")
+    )
 
     built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", newer_blob)
 
@@ -1015,7 +1014,7 @@ def test_build_encrypted_secrets_round_trips_unknown_payload_keys(paths: Install
     dek = load_dek(paths, user_id)
     assert dek is not None
     existing_payload = {"payload_format": 1, "restic_env": "old", "added_by_a_newer_client": "must-survive"}
-    existing_blob = b64encode(encrypt_secrets(dek, json.dumps(existing_payload).encode("utf-8"))).decode("ascii")
+    existing_blob = encode_encrypted_secrets(dek, json.dumps(existing_payload).encode("utf-8"))
 
     built = store.build_encrypted_secrets(user_id, str(agent_id), "host-1", existing_blob)
 
