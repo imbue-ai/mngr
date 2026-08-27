@@ -55,6 +55,8 @@ function runEnvSetup(onProgress) {
       'imbue-mngr-modal',
       'imbue-mngr-ovh',
       'imbue-mngr-pi-coding',
+      'imbue-mngr-opencode',
+      'imbue-mngr-antigravity',
       'imbue-mngr-vps',
       'imbue-common',
       'concurrency-group',

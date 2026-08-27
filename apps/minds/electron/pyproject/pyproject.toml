@@ -23,6 +23,8 @@ dependencies = [
     "imbue-mngr-modal>=0.2.0",
     "imbue-mngr-ovh>=0.1.0",
     "imbue-mngr-pi-coding>=0.1.0",
+    "imbue-mngr-opencode>=0.1.0",
+    "imbue-mngr-antigravity>=0.1.0",
     "imbue-mngr-vps>=0.1.0",
     "imbue-common>=0.1.0",
     "concurrency-group>=0.1.0",
@@ -52,6 +54,8 @@ imbue-mngr-lima = { path = "../../../../libs/mngr_lima", editable = true }
 imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
 imbue-mngr-ovh = { path = "../../../../libs/mngr_ovh", editable = true }
 imbue-mngr-pi-coding = { path = "../../../../libs/mngr_pi_coding", editable = true }
+imbue-mngr-opencode = { path = "../../../../libs/mngr_opencode", editable = true }
+imbue-mngr-antigravity = { path = "../../../../libs/mngr_antigravity", editable = true }
 imbue-mngr-vps = { path = "../../../../libs/mngr_vps", editable = true }
 imbue-common = { path = "../../../../libs/imbue_common", editable = true }
 concurrency-group = { path = "../../../../libs/concurrency_group", editable = true }

@@ -32,6 +32,8 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import OutputStyleName
+from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
@@ -42,9 +44,11 @@ from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
 from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
+from imbue.mngr_opencode.opencode_config import get_opencode_agents_md_path
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_file_path
 from imbue.mngr_opencode.opencode_config import get_opencode_db_path_for_data_home
+from imbue.mngr_opencode.opencode_config import get_opencode_output_styles_dir
 from imbue.mngr_opencode.opencode_config import get_opencode_plugin_path
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.plugin import OpenCodeAgent
@@ -234,8 +238,13 @@ def test_assemble_command_runs_launch_script_with_isolation_and_server_env(openc
     command = str(opencode_agent.assemble_command(opencode_agent.host, (), command_override=None))
     config_dir = str(opencode_agent._get_opencode_config_dir())
     data_home = str(opencode_agent._get_opencode_data_home())
+    tmp_dir = str(opencode_agent._get_opencode_tmp_dir())
     assert f"OPENCODE_CONFIG_DIR={config_dir}" in command
     assert f"XDG_DATA_HOME={data_home}" in command
+    # TMPDIR points at a per-agent exec-capable dir (not the image's noexec /tmp) so opencode's
+    # Bun/OpenTUI native library can be extracted and mapped executable.
+    assert f"TMPDIR={tmp_dir}" in command
+    assert tmp_dir != "/tmp"
     assert "MNGR_OPENCODE_BIN=opencode" in command
     # Port 0 -> the server binds an OS-assigned free port (the script records it).
     assert "MNGR_OPENCODE_PORT=0" in command
@@ -862,3 +871,68 @@ def test_waiting_reason_returns_none_when_active(opencode_agent: OpenCodeAgent) 
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).touch()
     assert _waiting_reason(opencode_agent, opencode_agent.host) is None
+
+
+# --- output_style / append_system_prompt -> AGENTS.md ---------------------------
+
+
+def _write_output_style(work_dir: Path, name: str, body: str) -> None:
+    styles_dir = get_opencode_output_styles_dir(work_dir)
+    styles_dir.mkdir(parents=True, exist_ok=True)
+    (styles_dir / "style.md").write_text(f"---\nname: {name}\n---\n{body}")
+
+
+def test_build_agent_rules_text_is_none_when_no_role_contributes(opencode_agent: OpenCodeAgent) -> None:
+    assert opencode_agent._build_agent_rules_text(opencode_agent.host) is None
+
+
+def test_provision_writes_agents_md_from_append_system_prompt(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_opencode_agent(
+        local_provider,
+        tmp_path,
+        OpenCodeAgentConfig(append_system_prompt=(SystemPromptText("HELLO_RULE"),)),
+    )
+    agent._provision_agent_instructions(agent.host)
+    assert get_opencode_agents_md_path(agent._get_opencode_config_dir()).read_text() == "HELLO_RULE"
+
+
+def test_provision_joins_stacked_prompts_with_blank_lines(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_opencode_agent(
+        local_provider,
+        tmp_path,
+        OpenCodeAgentConfig(append_system_prompt=(SystemPromptText("BLOCK_A"), SystemPromptText("BLOCK_B"))),
+    )
+    agent._provision_agent_instructions(agent.host)
+    assert get_opencode_agents_md_path(agent._get_opencode_config_dir()).read_text() == "BLOCK_A\n\nBLOCK_B"
+
+
+def test_provision_omits_agents_md_when_no_role_contributes(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_opencode_agent(local_provider, tmp_path, OpenCodeAgentConfig())
+    agent._provision_agent_instructions(agent.host)
+    assert not get_opencode_agents_md_path(agent._get_opencode_config_dir()).exists()
+
+
+def test_output_style_body_follows_the_append_prompt_blocks(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    # append_system_prompt blocks come first (in order), then the output-style file's body.
+    agent = _make_opencode_agent(
+        local_provider,
+        tmp_path,
+        OpenCodeAgentConfig(
+            append_system_prompt=(SystemPromptText("PROMPT_BLOCK"),),
+            output_style=OutputStyleName("Test Style"),
+        ),
+    )
+    _write_output_style(agent.work_dir, "Test Style", "STYLE_BODY")
+    agent._provision_agent_instructions(agent.host)
+    written = get_opencode_agents_md_path(agent._get_opencode_config_dir()).read_text()
+    assert written.startswith("PROMPT_BLOCK\n\n")
+    assert "STYLE_BODY" in written
+    assert written.index("PROMPT_BLOCK") < written.index("STYLE_BODY")

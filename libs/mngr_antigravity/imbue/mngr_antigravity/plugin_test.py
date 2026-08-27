@@ -30,6 +30,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import OutputStyleName
+from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
@@ -38,6 +40,7 @@ from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_global_rules_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
@@ -428,9 +431,23 @@ def test_assemble_command_launches_agy_under_per_agent_home(antigravity_agent: A
     agent = antigravity_agent
     command = str(agent.assemble_command(agent.host, (), command_override=None))
     home = str(agent._get_agy_home_dir())
-    assert f"env HOME={home} agy " in command
-    # HOME relocation comes after the cd into the workspace symlink, right before agy.
+    # Asserted as "on the same env prefix as agy", not as adjacency: the prefix also carries
+    # the policy-shim PATH entry, and pinning the exact spacing makes an unrelated addition to
+    # that prefix look like a broken HOME relocation.
+    assert f"env HOME={home} " in command
+    # HOME relocation comes after the cd into the workspace symlink, and before agy.
     assert command.index(f"env HOME={home}") < command.index(" agy ")
+
+
+def test_assemble_command_puts_the_policy_shim_ahead_of_bash(antigravity_agent: AntigravityAgent) -> None:
+    """agy resolves `bash` from PATH for every tool call, which is where the work dir's own
+    command guards run -- it has no usable PreToolUse hook. The entry must be on the agy
+    process only: setting it through the agent env file would follow the user into every
+    terminal they open in this agent's tmux session."""
+    agent = antigravity_agent
+    command = str(agent.assemble_command(agent.host, (), command_override=None))
+    assert "/system/scripts/agy_shim:$PATH" in command
+    assert command.index("agy_shim") < command.index(" agy ")
 
 
 def test_assemble_command_does_not_add_hooks_via_add_dir(antigravity_agent: AntigravityAgent) -> None:
@@ -1711,3 +1728,86 @@ def test_on_before_create_noop_for_non_antigravity_agent(
         create_work_dir=True,
     )
     assert on_before_create(args, local_provider.mngr_ctx) is None
+
+
+def test_output_style_and_stacked_prompts_reach_the_rules_text(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """agy has no output-style concept, so the style body and the append-prompt blocks share
+    one channel (the GEMINI.md rule). Blocks come first in stack order, style body last and
+    verbatim -- three sentinels, so a dropped or reordered piece is visible."""
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(
+            output_style=OutputStyleName("Engineering Subordinate"),
+            append_system_prompt=(SystemPromptText("SENTINEL_A"), SystemPromptText("SENTINEL_B")),
+        ),
+    )
+    styles_dir = Path(agent.work_dir) / ".agents" / "output-styles"
+    styles_dir.mkdir(parents=True)
+    (styles_dir / "engineering-subordinate.md").write_text(
+        "---\nname: Engineering Subordinate\n---\nSENTINEL_C", encoding="utf-8"
+    )
+
+    text = agent._build_agent_rules_text(agent.host)
+
+    assert text is not None
+    for sentinel in ("SENTINEL_A", "SENTINEL_B", "SENTINEL_C"):
+        assert sentinel in text, f"{sentinel} missing from the rules text"
+    assert text.index("SENTINEL_A") < text.index("SENTINEL_B") < text.index("SENTINEL_C")
+
+
+def test_rules_text_is_none_when_no_role_contributed_anything(antigravity_agent: AntigravityAgent) -> None:
+    assert antigravity_agent._build_agent_rules_text(antigravity_agent.host) is None
+
+
+def test_provision_writes_the_rules_file_from_a_role(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A role's appended prompt lands in the per-agent GEMINI.md rule."""
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(append_system_prompt=(SystemPromptText("HELLO_RULE"),)),
+    )
+    agy_home = tmp_path / "agy_home"
+    agent._provision_agent_instructions(agent.host, agy_home)
+    assert get_antigravity_global_rules_path(agy_home).read_text() == "HELLO_RULE"
+
+
+def test_provision_omits_the_rules_file_when_no_role_contributes(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A bare agent (no role output_style / append_system_prompt) writes no GEMINI.md."""
+    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig())
+    agy_home = tmp_path / "agy_home"
+    agent._provision_agent_instructions(agent.host, agy_home)
+    assert not get_antigravity_global_rules_path(agy_home).exists()
+
+
+def test_provision_still_writes_the_rules_file_when_over_the_soft_limit(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Exceeding agy's 12k rule-file limit warns but never blocks the write (non-fatal)."""
+    big = "x" * 13000
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(append_system_prompt=(SystemPromptText(big),)),
+    )
+    agy_home = tmp_path / "agy_home"
+    agent._provision_agent_instructions(agent.host, agy_home)
+    assert get_antigravity_global_rules_path(agy_home).read_text() == big
+
+
+def test_assemble_command_stamps_the_process_started_marker(antigravity_agent: AntigravityAgent) -> None:
+    """Every launch/resume touches ``antigravity_process_started`` BEFORE agy runs.
+
+    Its mtime is what the workspace uses to bound transcript staleness: agy resumes from its
+    own store, so after a mid-turn restart the previous process's tail is still there --
+    including an unmatched tool call nothing will ever close -- and the chat's activity
+    indicator would latch on it. Ordering matters (the touch precedes the agy invocation), so
+    the marker can never be older than the process it stands for.
+    """
+    command = str(antigravity_agent.assemble_command(antigravity_agent.host, (), command_override=None))
+    assert "antigravity_process_started" in command
+    assert command.index("touch ") < command.index(" agy ")

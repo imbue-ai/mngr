@@ -10,7 +10,7 @@ Per-agent ``$HOME`` (the core mechanism)
 ----------------------------------------
 ``agy`` resolves its entire config/permission/auth/session tree from
 ``$HOME/.gemini`` and has **no** config-dir override env var and no
-per-workspace settings/permission loading (``--add-dir`` does not load
+per-project settings/permission loading (``--add-dir`` does not load
 settings/permissions/model from the added dir). The only lever that yields a
 per-agent ``settings.json`` -- and therefore per-agent permissions, per-agent
 model, and isolated transcripts/conversations -- is a **per-agent ``$HOME``**.
@@ -35,7 +35,7 @@ agy process; mngr-owned files rewritten idempotently each ``provision``)::
       config/hooks.json
 
 where ``settings.json`` is a copy of the user's settings (when
-``sync_home_settings``) plus the workspace trust, ``settings_overrides``, and
+``sync_home_settings``) plus the project trust, ``settings_overrides``, and
 the mngr-owned lifecycle ``statusLine`` (applied last so it wins);
 ``cache/onboarding.json`` is the NUX seed that skips the first-run theme/ToS
 flow; ``antigravity-oauth-token`` is a symlink to the user's shared file token
@@ -108,6 +108,8 @@ from imbue.mngr.agents.common_transcript import maybe_provision_common_transcrip
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.installation import ensure_cli_installed
+from imbue.mngr.agents.output_styles import read_output_style_files
+from imbue.mngr.agents.output_styles import resolve_output_style
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import SubmissionConfirmationPolicy
 from imbue.mngr.agents.tui_utils import SubmissionEvidenceProbe
@@ -148,6 +150,8 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import OutputStyleName
+from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr_antigravity import resources as _antigravity_resources
 from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
@@ -164,9 +168,11 @@ from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
 from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_conversations_dir
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_global_rules_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_output_styles_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
@@ -179,6 +185,16 @@ from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_sett
 # does not actually gate the run_command confirmation dialog -- see the
 # ``auto_allow_permissions`` field comment and ``build_antigravity_hooks_config``.
 _DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions"
+
+# The role instruction blocks (append_system_prompt, then the output-style body) are
+# joined with a blank line before being written to the per-agent GEMINI.md rule, matching
+# codex's DEVELOPER_INSTRUCTIONS_SEPARATOR so a style reads identically across harnesses.
+_INSTRUCTIONS_SEPARATOR: Final[str] = "\n\n"
+
+# agy documents a 12,000-char limit per rule file. In practice agy 1.1.10 reads larger
+# files in full, so exceeding it is a non-fatal warning rather than an error (a guard
+# against stricter future agy versions, not a known failure).
+_RULES_FILE_SOFT_LIMIT: Final[int] = 12_000
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 # The python converter common_transcript.sh invokes (python3
@@ -218,26 +234,39 @@ _AGY_LOG_FILE_RELATIVE_PATH: Final[str] = "logs/agy_cli.log"
 
 # Per-agent $HOME for the agy process, under the agent state dir. agy resolves
 # ``GeminiDir = $HOME/.gemini`` from it (works under this dotted ``~/.mngr/...``
-# path -- agy only rejects dot-prefixed *workspace*/``--add-dir`` paths, not its
+# path -- agy only rejects dot-prefixed *project folder*/``--add-dir`` paths, not its
 # own config dir). Mirrors mngr_claude's per-agent ``get_claude_config_dir``.
 _AGY_HOME_RELATIVE_PATH: Final[tuple[str, ...]] = ("plugin", "antigravity", "home")
 
 # Parent directory for the per-agent symlinks that work around agy's
 # refusal to treat hidden paths (anything with a dot-prefixed segment, like
-# ``.mngr/...``) as a workspace. agy logs ``Failed to add workspace folder
+# ``.mngr/...``) as a project folder. agy logs ``Failed to add workspace folder
 # /path/.mngr/...: is hidden: ignore uri`` and falls back to the user's
-# home directory as the project root, which means workspace-scoped tooling
+# home directory as the project root, which means project-scoped tooling
 # (file search, project_id, .agents/) operates against the wrong tree.
 #
 # Verified via google-forum bug report (no flag override exists) and
 # confirmed live: launching agy with cwd set to a /tmp symlink that targets
 # the dotted ``work_dir`` produces ``project: using project "/tmp/..."``
-# (the symlink path, not the resolved target), and the workspace-add error
+# (the symlink path, not the resolved target), and the folder-add error
 # disappears. The symlink is recreated on every ``assemble_command`` call
 # via ``mkdir -p`` + ``ln -sfn`` so /tmp wipes self-repair on next launch.
 # (HOME isolation does not change this: the work_dir is still a hidden path
-# agy refuses as a *workspace*, even though it accepts a hidden config dir.)
+# agy refuses as a *project folder*, even though it accepts a hidden config dir.)
 _AGY_WORKSPACE_SYMLINK_PARENT: Final[str] = "/tmp/mngr_antigravity_workspaces"
+
+# Touched in the agent state dir on every launch/resume. Its mtime is how the system interface
+# bounds transcript staleness: after a mid-turn restart the previous process's tail is still
+# in agy's store -- including an unmatched tool call no later event will ever close -- and
+# without this the chat's activity indicator latches on it and never clears. The peer
+# harnesses each write their own (claude_process_started / codex_process_started /
+# pi_process_started); this is agy's.
+_PROCESS_STARTED_MARKER_FILENAME: Final[str] = "antigravity_process_started"
+
+# agy's busy marker, maintained by its statusLine. Cleared at launch (see assemble_command):
+# a process killed mid-turn cannot run the statusLine's idle branch, so it would otherwise
+# leave this behind forever.
+_ACTIVE_MARKER_FILENAME: Final[str] = "active"
 
 # OS-specific subpath (under ``$HOME``) of agy's ms-playwright-go cache. agy
 # downloads heavy playwright + browser binaries there on first real use; a fully
@@ -383,6 +412,28 @@ def _resolve_adopt_session(adopt_arg: str, mngr_ctx: MngrContext) -> tuple[str, 
 class AntigravityAgentConfig(AgentTypeConfig):
     """Config for the antigravity agent type."""
 
+    # --- role behaviour, set by a create template and applied by this harness ---
+    #
+    # Both are harness-neutral *intent*: a role (e.g. `-t chat`) states them once and each
+    # harness applies them its own way. They live on the harness subclasses rather than
+    # AgentTypeConfig so a harness that cannot honour them has no field to route to -- the
+    # create then fails naming the template, instead of launching an agent that quietly
+    # ignores its role. agy has no output-style concept and no config-level system-prompt
+    # channel, so both reach it as instruction text in the per-agent global GEMINI.md rule
+    # (see ``_build_agent_rules_text`` / ``_provision_agy_home``).
+    output_style: OutputStyleName | None = Field(
+        default=None,
+        description="Name of an output style to launch with, matched against the `name:` "
+        "frontmatter of a file in the work dir's output-style directory. Scalar: the last "
+        "template in the stack to set it wins.",
+    )
+    append_system_prompt: tuple[SystemPromptText, ...] = Field(
+        default=(),
+        description="Blocks to append to the agent's system prompt, in stack order. Aggregate: "
+        "write `append_system_prompt__extend = [...]` in a template so stacked roles each "
+        "contribute a block instead of the last one replacing the rest.",
+    )
+
     command: CommandString = Field(
         default=CommandString("agy"),
         description="Command to run the antigravity agent. The Antigravity 2.0 desktop app "
@@ -464,7 +515,7 @@ class AntigravityAgentConfig(AgentTypeConfig):
     # Why default off: the global file is shared user state, and we should never
     # silently let an agent run on untrusted code -- trusting the repo is an
     # explicit choice. Why gate at all: the per-agent settings.json trusts the
-    # agent's workspace so the running agy doesn't show its dialog, but granting
+    # agent's project folder so the running agy doesn't show its dialog, but granting
     # that trust must still be a deliberate acknowledgment.
     auto_dismiss_dialogs: bool = Field(
         default=False,
@@ -737,7 +788,7 @@ class AntigravityAgent(
         - ``--adopt`` (alias ``--adopt-session``): each value (a conversation id or an absolute
           path to a conversations store / ``<id>.db`` file) is resolved and its store copied in
           additively; the resolved id is returned.
-        - ``--from <agent>``: a clone copies the source *workspace* but not its state dir, so
+        - ``--from <agent>``: a clone copies the source *work dir* but not its state dir, so
           ``copy_clone`` transfers just the source's conversation store and returns its root
           conversation id.
 
@@ -772,7 +823,7 @@ class AntigravityAgent(
     def _copy_cloned_session(self, host: OnlineHostInterface, source_location: HostLocation) -> str | None:
         """Transfer a ``--from <agent>`` clone's conversation store and return its resume id.
 
-        A generic clone copies the source *workspace* but not the source agent's *state dir*,
+        A generic clone copies the source *work dir* but not the source agent's *state dir*,
         so the source's agy conversation store is transferred into this agent's home via the
         shared helper (just the ``conversations/`` relpath -- the same one preserved on
         destroy and scanned by ``_resolve_adopt_session``). agy resumes purely by conversation
@@ -784,7 +835,7 @@ class AntigravityAgent(
         ``ROOT_CONVERSATION_FILENAME``); if that pointer is absent or its store did not come
         across, the most-recent transferred ``<id>.db`` is used. Returns ``None`` (after
         warning) when the clone has nothing to resume (no store, or a store with no usable
-        conversation id) -- ``--from`` is fundamentally a workspace clone, so carrying the
+        conversation id) -- ``--from`` is fundamentally a work-dir clone, so carrying the
         source's conversation forward is a bonus, not a requirement; the caller starts fresh.
         """
         transferred = transfer_cloned_agent_session_store(
@@ -864,7 +915,7 @@ class AntigravityAgent(
            ``SystemExit`` if consent is unavailable -- we never silently run an
            agent on untrusted code.
         3. Build the per-agent ``$HOME`` tree (``_provision_agy_home``):
-           settings.json (copy of the user's settings + workspace trust +
+           settings.json (copy of the user's settings + project trust +
            overrides + the mngr-owned lifecycle statusLine), the onboarding NUX
            seed, the conversation-id capture hook, the oauth token symlink/copy,
            the shared playwright-cache symlink, and -- on macOS -- the
@@ -963,6 +1014,59 @@ class AntigravityAgent(
         hooks_path = get_antigravity_hooks_config_path(agy_home)
         with log_span("Installing antigravity hooks at {}", hooks_path):
             host.write_text_file(hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()))
+
+        self._provision_agent_instructions(host, agy_home)
+
+    def _build_agent_rules_text(self, host: OnlineHostInterface) -> str | None:
+        """Join this agent type's role instructions into one blob, or None if there are none.
+
+        The ``append_system_prompt`` blocks come first, in stack order, and the output-style
+        body last. agy has no output-style concept, so ``output_style`` reaches it as
+        instruction text: the style file's body is used **verbatim**, frontmatter included,
+        so a style reads identically whichever harness runs it. Placing it last means it is
+        the nearest instruction to the model, matching how a harness with a real output-style
+        setting applies the style over the prompt. Mirrors codex's ``_build_developer_instructions``.
+
+        The style directory read here is ``.agents/output-styles`` -- the shared source of
+        truth where styles are authored (the same files codex and claude read).
+        """
+        blocks: list[str] = [str(prompt) for prompt in self.agent_config.append_system_prompt]
+        if self.agent_config.output_style is not None:
+            styles_dir = get_antigravity_output_styles_dir(Path(self.work_dir))
+            # Raises UserInputError, listing what is available, when the name has no match.
+            blocks.append(
+                resolve_output_style(self.agent_config.output_style, read_output_style_files(host, styles_dir))
+            )
+        if not blocks:
+            return None
+        return _INSTRUCTIONS_SEPARATOR.join(blocks)
+
+    def _provision_agent_instructions(self, host: OnlineHostInterface, agy_home: Path) -> None:
+        """Write the agent's role instructions to the per-agent global ``GEMINI.md`` rule.
+
+        agy discovers ``$HOME/.gemini/GEMINI.md`` as a global rule across all projects;
+        under the per-agent ``$HOME`` this is a per-agent file that never touches the source
+        repo. It is a *peer* of the repo's own ``AGENTS.md`` (agy documents no precedence
+        between rule sources) rather than a true system-prompt channel -- an accepted
+        tradeoff, since agy exposes no config-level equivalent of codex's
+        ``developer_instructions``. When the agent type contributes no instructions (no role
+        ``output_style`` / ``append_system_prompt``), nothing is written.
+        """
+        instructions = self._build_agent_rules_text(host)
+        if instructions is None:
+            return
+        if len(instructions) > _RULES_FILE_SOFT_LIMIT:
+            logger.warning(
+                "Antigravity GEMINI.md for agent {} is {} chars, over agy's documented "
+                "{}-char rule-file limit; agy 1.1.10 reads it in full, but a stricter agy "
+                "version may truncate it.",
+                self.name,
+                len(instructions),
+                _RULES_FILE_SOFT_LIMIT,
+            )
+        rules_path = get_antigravity_global_rules_path(agy_home)
+        with log_span("Writing antigravity agent instructions to {}", rules_path):
+            host.write_text_file(rules_path, instructions)
 
     def _provision_user_statusline_command(self, host: OnlineHostInterface, user_statusline: Any) -> None:
         """Record a user's own statusLine command for statusline.sh to compose, or clear a stale one.
@@ -1065,7 +1169,7 @@ class AntigravityAgent(
         per-agent cache to the user's real host cache shares the download (agy
         creates/reads it through the symlink, like the oauth token). Done at
         provision time -- the per-agent ``$HOME`` is durable (under the agent state
-        dir), so unlike the ``/tmp`` workspace symlink this needn't be recreated
+        dir), so unlike the ``/tmp`` project symlink this needn't be recreated
         each launch. The OS-specific subpath comes from the host's ``uname``, so it
         is correct on remote hosts too.
         """
@@ -1136,7 +1240,7 @@ class AntigravityAgent(
           a standalone project) is the durable thing worth persisting: once
           trusted, later agents/worktrees of the same repo skip the consent
           prompt. This is what this method records.
-        * **Transient per-agent workspace path -> per-agent settings.json
+        * **Transient per-agent project path -> per-agent settings.json
           (``_provision_agy_home``).** The agy-cwd ``/tmp`` symlink the running
           (isolated) agy exact-matches goes only into the per-agent file, which
           is deleted with the agent -- never into the global file, which would
@@ -1218,7 +1322,7 @@ class AntigravityAgent(
         """Hard-error if ``trustedWorkspaces`` exists but isn't a list.
 
         The ``@pure`` merge helper used to silently coerce non-list values
-        into a fresh array containing only the new workspace, which could
+        into a fresh array containing only the new path, which could
         destroy entries an unknown future agy schema put there. Surfacing
         the schema break is safer than rewriting the file.
         """
@@ -1273,13 +1377,13 @@ class AntigravityAgent(
         return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"
 
     def _get_agy_workspace_symlink_path(self) -> str:
-        """Per-agent symlink target that agy will treat as its workspace.
+        """Per-agent symlink target that agy will treat as its project folder.
 
         Lives under ``/tmp/mngr_antigravity_workspaces/<agent_id>`` -- a
         non-dotted path, which is required because agy refuses to add any
-        path with a dot-prefixed segment as a workspace (see the constant
+        path with a dot-prefixed segment as a project folder (see the constant
         docstring above for the bug background). Per-agent so multiple
-        antigravity agents don't share a workspace identity.
+        antigravity agents don't share a project identity.
         """
         return f"{_AGY_WORKSPACE_SYMLINK_PARENT}/{self.id}"
 
@@ -1297,13 +1401,13 @@ class AntigravityAgent(
         1. ``( bash background_tasks.sh <session> ) &`` -- backgrounded
            supervisor for the transcript streamer + converter.
         2. ``mkdir -p <state>/logs <ws_symlink_parent>`` -- guarantees the agy
-           ``--log-file`` directory and the workspace-symlink parent exist
+           ``--log-file`` directory and the project-symlink parent exist
            before launch.
         3. ``ln -sfn <work_dir> <ws_symlink>`` -- create / refresh the
-           non-dotted ``/tmp`` workspace symlink (works around agy's rejection
-           of dot-prefixed (hidden) paths as workspaces; see
+           non-dotted ``/tmp`` project symlink (works around agy's rejection
+           of dot-prefixed (hidden) paths as project folders; see
            ``_AGY_WORKSPACE_SYMLINK_PARENT``).
-        4. ``cd <ws_symlink>`` -- launches agy with cwd set to the workspace
+        4. ``cd <ws_symlink>`` -- launches agy with cwd set to the project folder
            symlink, so agy's "project: using project ..." log line names the
            symlink path (not the resolved dotted target).
         5. ``{ <resume-prelude>; env HOME=<home> agy <user_args>
@@ -1354,9 +1458,37 @@ class AntigravityAgent(
 
         symlink_path = self._get_agy_workspace_symlink_path()
         mkdir_cmd = f"mkdir -p {shlex.quote(str(log_file_path.parent))} {shlex.quote(_AGY_WORKSPACE_SYMLINK_PARENT)}"
+        # Stamp the process-start marker in the same chain, so its mtime always reflects
+        # THIS process rather than a previous one (see the constant).
+        #
+        # And CLEAR the busy marker, which mngr_claude and mngr_pi_coding both do and agy did
+        # not. Nothing else ever removes it except agy's own statusLine on the idle edge, so a
+        # process killed mid-turn -- `mngr stop`, a stop's restart hammer, a container kill --
+        # left it on disk indefinitely, across restarts. A consumer reading it as "a turn is
+        # open" then held every message sent to a freshly relaunched agent until agy's first
+        # idle sample. Clearing it here makes that whole class of edge disappear rather than be
+        # defended against downstream.
+        marker_path = self._get_agent_dir() / _PROCESS_STARTED_MARKER_FILENAME
+        active_marker_path = self._get_agent_dir() / _ACTIVE_MARKER_FILENAME
+        touch_cmd = (
+            f"rm -f {shlex.quote(str(active_marker_path))} 2>/dev/null || true; touch {shlex.quote(str(marker_path))}"
+        )
         ln_cmd = f"ln -sfn {shlex.quote(str(self.work_dir))} {shlex.quote(symlink_path)}"
         cd_cmd = f"cd {shlex.quote(symlink_path)}"
-        home_prefix = f"env HOME={shlex.quote(str(agy_home))}"
+        # The policy-guard shim, ahead of the real bash on PATH. agy declares PreToolUse but
+        # never fires it, and no hook payload carries a command, so a `bash` shim is the only
+        # place the work dir's guards can see one; agy runs tool commands as `bash -c "..."`,
+        # resolving bash from PATH. The shim itself lives in the WORK DIR (it enforces that
+        # project's own policy and must be editable without a mngr release), so this
+        # contributes only the PATH entry -- a work dir without one just gets a PATH element
+        # that does not exist.
+        #
+        # Set here on the launch command rather than through ``modify_env_vars``: that writes
+        # the agent env file, which the tmux session sources as its default-command, so the
+        # shim would also be inherited by every terminal the USER opens in the agent's session.
+        # ``$PATH`` stays unquoted deliberately -- quoting it would make it a literal.
+        shim_dir = shlex.quote(f"{self.work_dir}/system/scripts/agy_shim")
+        home_prefix = f"env HOME={shlex.quote(str(agy_home))} PATH={shim_dir}:$PATH"
 
         # Resume the agent's main conversation via `agy --conversation`,
         # evaluated here in the shell because the stored command is replayed on
@@ -1378,7 +1510,7 @@ class AntigravityAgent(
         agy_invocation = f"{base_command} {' '.join(extra_args)}"
 
         return CommandString(
-            f"{background_cmd} {mkdir_cmd} && {ln_cmd} && {cd_cmd} "
+            f"{background_cmd} {mkdir_cmd} && {touch_cmd} && {ln_cmd} && {cd_cmd} "
             f'&& {{ {resume_prelude}; {home_prefix} {agy_invocation} "$@" ; }}'
         )
 

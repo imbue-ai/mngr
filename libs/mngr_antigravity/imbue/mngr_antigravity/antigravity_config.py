@@ -16,7 +16,7 @@ This module holds the pure, host-agnostic pieces of that scheme:
   source) and each agent's relocated ``$HOME`` (the destination).
 * ``build_isolated_settings`` -- layers the per-agent ``settings.json`` from a
   base (a copy of the user's real settings when ``sync_home_settings``, else an
-  empty dict), the agent's trusted workspace path, and the per-agent-type
+  empty dict), the agent's trusted project path, and the per-agent-type
   ``settings_overrides`` (applied last, so they win). This is the single data
   builder the spec's "one code path" principle rests on: whether an agent is
   locked down or open is purely whether ``settings_overrides`` carries a
@@ -40,7 +40,7 @@ This module holds the pure, host-agnostic pieces of that scheme:
 Trust: agy suppresses its first-launch "Do you trust this folder?" dialog for
 any path present in its ``settings.json`` ``trustedWorkspaces`` array. The
 running (isolated) agy reads only its per-agent ``settings.json``, so the
-agent's effective workspace path is seeded there. The user's real global
+agent's effective project path is seeded there. The user's real global
 ``settings.json`` is additionally used to *persist* the durable source-repo
 path (so trust isn't re-prompted across agents/worktrees of the same repo);
 ``merge_trusted_workspace`` performs that additive, idempotent global write.
@@ -99,7 +99,7 @@ _OAUTH_TOKEN_FILENAME: str = "antigravity-oauth-token"
 # intercept the first message.
 _ONBOARDING_CACHE_RELATIVE: tuple[str, ...] = ("cache", "onboarding.json")
 
-# agy executes hooks from ``$HOME/.gemini/config/hooks.json`` (and per-workspace
+# agy executes hooks from ``$HOME/.gemini/config/hooks.json`` (and per-project
 # ``.agents/hooks.json``) with no trust prompt. Under a per-agent ``$HOME`` this
 # is the single hooks path -- no ``--add-dir`` symlink workaround needed.
 _HOOKS_CONFIG_RELATIVE: tuple[str, ...] = ("config", "hooks.json")
@@ -133,6 +133,31 @@ def get_antigravity_onboarding_cache_path(home: Path) -> Path:
 def get_antigravity_hooks_config_path(home: Path) -> Path:
     """Return ``<home>/.gemini/config/hooks.json`` -- where agy executes hooks from."""
     return home.joinpath(_GEMINI_DIR_NAME, *_HOOKS_CONFIG_RELATIVE)
+
+
+# agy discovers "global" rules (applied across all projects) from
+# ``$HOME/.gemini/GEMINI.md``. Under the per-agent ``$HOME`` mngr provisions, this is a
+# per-agent file that never touches the source repo, so it is where mngr writes the
+# agent's role instructions (the ``append_system_prompt`` blocks plus the output-style
+# body). Note this is a *peer* of the repo's own ``AGENTS.md`` -- agy documents no
+# precedence between rule sources -- which is an accepted tradeoff: agy exposes no
+# higher-precedence, config-level system-prompt channel like codex's
+# ``developer_instructions``.
+_GLOBAL_RULES_FILENAME: str = "GEMINI.md"
+
+# The shared output-style source of truth, relative to the work dir -- the same files
+# codex and claude read (claude's ``.claude/output-styles`` is a symlink to this).
+_OUTPUT_STYLES_DIR_RELATIVE: str = ".agents/output-styles"
+
+
+def get_antigravity_global_rules_path(home: Path) -> Path:
+    """Return ``<home>/.gemini/GEMINI.md`` -- agy's global (per-agent) rules file."""
+    return home / _GEMINI_DIR_NAME / _GLOBAL_RULES_FILENAME
+
+
+def get_antigravity_output_styles_dir(work_dir: Path) -> Path:
+    """Return ``<work_dir>/.agents/output-styles`` -- where output styles are authored."""
+    return work_dir / _OUTPUT_STYLES_DIR_RELATIVE
 
 
 TRUSTED_WORKSPACES_KEY: str = "trustedWorkspaces"
@@ -190,8 +215,8 @@ def serialize_antigravity_settings(settings: Mapping[str, Any]) -> str:
 def merge_trusted_workspace(settings: Mapping[str, Any], workspace_path: str) -> dict[str, Any] | None:
     """Append ``workspace_path`` to ``trustedWorkspaces``, returning ``None`` if already trusted.
 
-    Returns ``None`` when no change is required (the workspace is already in
-    the trust list); otherwise returns a fresh dict with the workspace
+    Returns ``None`` when no change is required (the path is already in
+    the trust list); otherwise returns a fresh dict with the path
     appended.
 
     The array is preserved exactly as Antigravity writes it -- agy stores
@@ -231,7 +256,7 @@ def build_isolated_settings(
        ``userSettings``, per-project ``config/projects/<uuid>.json``) that the
        caller does not read, so they are not inherited -- per-agent model and
        permissions come from ``settings_overrides`` (step 3).
-    2. ``trusted_workspaces`` -- the agent's effective workspace path(s),
+    2. ``trusted_workspaces`` -- the agent's effective project path(s),
        appended (deduped) to the inherited ``trustedWorkspaces`` list, so the
        isolated agy trusts its own cwd. Pass an empty sequence to leave the
        trust list exactly as the base had it.
@@ -259,7 +284,7 @@ def build_isolated_settings(
         settings,
         settings_overrides,
         allow_narrowing=allow_narrowing,
-        base_description="the per-agent antigravity settings base (synced home settings + workspace trust)",
+        base_description="the per-agent antigravity settings base (synced home settings + project trust)",
     )
 
 

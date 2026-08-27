@@ -20,7 +20,8 @@
 #
 # Environment (set by mngr's assemble_command):
 #   MNGR_AGENT_STATE_DIR   - agent state dir (holds the port/session files, logs)
-#   MNGR_OPENCODE_BIN      - the opencode command (e.g. "opencode")
+#   MNGR_OPENCODE_BIN      - the opencode launch command; may be multi-word
+#                            (e.g. "opencode", or the OOM band wrapper prefix)
 #   MNGR_OPENCODE_PORT     - the per-agent port to ask the server to bind
 #   MNGR_OPENCODE_WORKDIR  - URL-encoded directory for the session-create query
 #                            (mngr encodes it in Python before passing it here)
@@ -29,7 +30,13 @@
 set -uo pipefail
 
 STATE="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
-BIN="${MNGR_OPENCODE_BIN:?MNGR_OPENCODE_BIN must be set}"
+# MNGR_OPENCODE_BIN may be a multi-word LAUNCH COMMAND, not just a binary path: mngr
+# points it at the OOM band wrapper ("python3 .../agent_oom_launch.py opencode"), which
+# tags its own band + pid and then execs opencode in place. Split it into an argv array
+# so both forms work -- a bare "opencode" is simply a one-element array. Quoting the
+# whole value instead would make the shell look for a file literally named
+# "python3 .../agent_oom_launch.py opencode".
+read -r -a BIN_CMD <<<"${MNGR_OPENCODE_BIN:?MNGR_OPENCODE_BIN must be set}"
 PORT="${MNGR_OPENCODE_PORT:?MNGR_OPENCODE_PORT must be set}"
 WORKDIR="${MNGR_OPENCODE_WORKDIR:?MNGR_OPENCODE_WORKDIR must be set}"
 
@@ -39,13 +46,18 @@ READY_SENTINEL="$STATE/opencode_ready"
 SERVER_LOG="$STATE/logs/opencode_server.log"
 mkdir -p "$STATE/logs"
 
+# TMPDIR (set by assemble_command) is a per-agent exec-capable dir: opencode is a Bun
+# binary that extracts its OpenTUI native library to TMPDIR and maps it executable, which
+# the image's noexec /tmp rejects. Ensure it exists before launching serve/attach.
+mkdir -p "${TMPDIR:-/tmp}"
+
 # Clear any stale readiness sentinel from a prior run before we (re)start, so
 # wait_for_ready_signal can't return early against an old marker.
 rm -f "$READY_SENTINEL"
 
 # Start the headless server. MNGR_OPENCODE_ROLE=server is scoped to this command
 # so the lifecycle plugin acts here and stays inert in the attach client below.
-MNGR_OPENCODE_ROLE=server "$BIN" serve --port "$PORT" --hostname 127.0.0.1 >"$SERVER_LOG" 2>&1 &
+MNGR_OPENCODE_ROLE=server "${BIN_CMD[@]}" serve --port "$PORT" --hostname 127.0.0.1 >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 # Stop the server when the foreground client exits (mngr's stop also kills the
@@ -100,7 +112,7 @@ WATCHER_PID=$!
 
 # Attach the TUI client to that session in the foreground. This is the pane the
 # user interacts with via `mngr connect`; messages POSTed to the server render here.
-"$BIN" attach "$BASE_URL" --session "$SESSION_ID" "$@"
+"${BIN_CMD[@]}" attach "$BASE_URL" --session "$SESSION_ID" "$@"
 
 # Normal client quit: stop the watcher (the EXIT trap stops the server).
 kill "$WATCHER_PID" 2>/dev/null || true

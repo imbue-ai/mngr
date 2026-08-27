@@ -53,6 +53,13 @@ _CONFIG_DIR_RELATIVE_PATH: tuple[str, ...] = ("plugin", "opencode", "config")
 # keeps its db/auth/storage/logs under ``<this>/opencode``.
 _DATA_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "opencode", "data")
 
+# Per-agent temp dir (-> TMPDIR), under the agent state dir. opencode's TUI is a Bun
+# binary that extracts its OpenTUI native render library to the temp dir and maps it
+# executable; the default ``/tmp`` is mounted ``noexec`` in this image, which rejects the
+# map ("failed to map segment from shared object"). The agent state dir is on an
+# exec-capable filesystem, so pointing TMPDIR here lets the extracted ``.so`` load.
+_TMP_DIR_RELATIVE_PATH: tuple[str, ...] = ("plugin", "opencode", "tmp")
+
 # OpenCode namespaces everything it writes under ``$XDG_DATA_HOME/opencode``.
 _OPENCODE_APP_DIR_NAME: str = "opencode"
 _AUTH_FILENAME: str = "auth.json"
@@ -65,6 +72,17 @@ _PLUGIN_DIR_NAME: str = "plugin"
 # Auto-loaded by OpenCode; maintains the active marker and writes the raw
 # transcript (see ``resources/mngr_opencode_plugin.ts``).
 PLUGIN_FILENAME: str = "mngr_opencode_plugin.ts"
+
+# opencode auto-reads ``<OPENCODE_CONFIG_DIR>/AGENTS.md`` as its global rules file (verified
+# against opencode's ``session/instruction.ts`` ``systemPaths()``: ``global.config`` resolves
+# from ``OPENCODE_CONFIG_DIR``). The plugin writes the agent's role instructions
+# (``append_system_prompt`` blocks + the output-style body) here so opencode's system prompt
+# carries them -- the opencode analog of agy's GEMINI.md / pi's APPEND_SYSTEM.md.
+AGENTS_MD_FILENAME: str = "AGENTS.md"
+
+# Where output styles are authored, relative to the work dir (mirrors mngr_antigravity /
+# mngr_pi_coding); read via the shared ``output_styles`` helpers.
+_OUTPUT_STYLES_DIR_RELATIVE: str = ".agents/output-styles"
 
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) whose presence
 # ``BaseAgent.get_lifecycle_state`` reads as RUNNING; absence means WAITING. The
@@ -174,6 +192,11 @@ def get_opencode_data_home(agent_state_dir: Path) -> Path:
     return agent_state_dir.joinpath(*_DATA_HOME_RELATIVE_PATH)
 
 
+def get_opencode_tmp_dir(agent_state_dir: Path) -> Path:
+    """Return the per-agent OpenCode temp dir (the ``TMPDIR`` value; exec-capable, unlike /tmp)."""
+    return agent_state_dir.joinpath(*_TMP_DIR_RELATIVE_PATH)
+
+
 def get_opencode_app_data_dir(data_home: Path) -> Path:
     """Return ``<data_home>/opencode`` -- where OpenCode keeps db/auth/storage/logs."""
     return data_home / _OPENCODE_APP_DIR_NAME
@@ -187,6 +210,16 @@ def get_opencode_config_file_path(config_dir: Path) -> Path:
 def get_opencode_plugin_path(config_dir: Path) -> Path:
     """Return the lifecycle-plugin path under an OpenCode config dir's ``plugin/``."""
     return config_dir / _PLUGIN_DIR_NAME / PLUGIN_FILENAME
+
+
+def get_opencode_agents_md_path(config_dir: Path) -> Path:
+    """Return the ``AGENTS.md`` path under an OpenCode config dir (opencode's global rules file)."""
+    return config_dir / AGENTS_MD_FILENAME
+
+
+def get_opencode_output_styles_dir(work_dir: Path) -> Path:
+    """Return ``<work_dir>/.agents/output-styles`` -- where output styles are authored."""
+    return work_dir / _OUTPUT_STYLES_DIR_RELATIVE
 
 
 def get_opencode_auth_path_for_data_home(data_home: Path) -> Path:

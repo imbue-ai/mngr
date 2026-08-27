@@ -47,6 +47,7 @@ fi
 
 marker_file="$MNGR_AGENT_STATE_DIR/active"
 root_file="$MNGR_AGENT_STATE_DIR/root_conversation"
+model_state_file="$MNGR_AGENT_STATE_DIR/model_state.json"
 
 payload=$(cat)
 
@@ -71,6 +72,48 @@ conv_id=$(
 # keeps `root_conversation` pointed at the true root for resume.
 if [ -n "$conv_id" ]; then
     printf '%s' "$conv_id" > "$root_file"
+fi
+
+# Parse the model agy reports and mirror it to the uniform model_state.json the workspace's
+# model bar reads. VERIFIED against a live agy 1.1.19 payload, which carries an OBJECT:
+#
+#   "model":{"id":"Gemini 3.7 Flash (High)","display_name":"...","effort":"high"}
+#
+# so `id` is a DISPLAY NAME, not agy's `gemini-3.7-flash-high` slug. The consumer matches it
+# via the catalog's harness-reported id.
+#
+# `effort` is deliberately NOT written even though the payload carries it: agy has no separate
+# effort axis (the tier is already inside that display name), its catalog options declare no
+# efforts, and a consumer rejects an effort its matched option does not declare -- writing it
+# would make every model unrecognized.
+#
+# Two passes because there is no jq here: isolate the model object (it has no nested braces),
+# then take its `id`. Falls back to a bare string value, so an agy that ever reports
+# "model":"..." still works. Tolerant throughout: no match writes nothing and the bar shows no
+# model, which must never disturb the lifecycle work above.
+agy_model_object=$(
+    printf '%s' "$payload" \
+        | grep -oE '"model"[[:space:]]*:[[:space:]]*\{[^}]*\}' \
+        | head -n 1
+)
+if [ -n "$agy_model_object" ]; then
+    agy_model=$(
+        printf '%s' "$agy_model_object" \
+            | grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | head -n 1 \
+            | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
+    )
+else
+    agy_model=$(
+        printf '%s' "$payload" \
+            | grep -oE '"model"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | head -n 1 \
+            | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
+    )
+fi
+if [ -n "$agy_model" ]; then
+    printf '{"model": "%s"}' "$agy_model" > "$model_state_file.tmp" 2>/dev/null \
+        && mv -f "$model_state_file.tmp" "$model_state_file" 2>/dev/null
 fi
 
 # Shared common-transcript helpers: mngr_common_transcript_flush forces a
