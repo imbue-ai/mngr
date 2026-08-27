@@ -295,8 +295,9 @@ class R2KeyInfo(WireModel):
         default=None,
         description=(
             "Storage-quota enforcement state from the connector: 'read' when the sweep downgraded this "
-            "key because the account is over its storage quota; None when the live token policy matches "
-            "the intended access."
+            "key because the account is over its storage quota; 'pending' while a downgrade/restore is "
+            "in flight (the live token policy is unconfirmed and treated as read-only); None when the "
+            "live token policy matches the intended access."
         ),
     )
 
