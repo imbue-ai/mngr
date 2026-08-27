@@ -445,6 +445,21 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
             return path.exists()
         return self.execute_idempotent_command(f"test -e {shlex.quote(str(path))}", timeout_seconds=5.0).success
 
+    def is_directory(self, path: Path) -> bool:
+        """Whether ``path`` is a directory on this host.
+
+        Uses the local filesystem for local hosts and ``test -d`` over SSH for
+        remote hosts. Implemented on the interface so callers (including plugins)
+        don't have to branch on ``is_local`` themselves.
+
+        Note that this is reachable only where a host models ``is_local``. Code
+        holding an always-remote outer-host double (see ``mngr_vps``) still issues
+        its own ``test -d``.
+        """
+        if self.is_local:
+            return path.is_dir()
+        return self.execute_idempotent_command(f"test -d {shlex.quote(str(path))}", timeout_seconds=5.0).success
+
     def get_directory_size(self, path: Path) -> SizeBytes:
         """Disk space used by ``path`` and its contents, or 0 if it is not a directory.
 

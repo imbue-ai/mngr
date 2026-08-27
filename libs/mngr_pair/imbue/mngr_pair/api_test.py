@@ -1,7 +1,10 @@
 import subprocess
 from pathlib import Path
+from typing import cast
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ConflictMode
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.utils.testing import init_git_repo
@@ -9,6 +12,8 @@ from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_pair.api import GitSyncAction
 from imbue.mngr_pair.api import UnisonSyncer
 from imbue.mngr_pair.api import determine_git_sync_actions
+from imbue.mngr_pair.remote import SshEndpoint
+from imbue.mngr_pair.remote import UnisonRoot
 
 # =============================================================================
 # Test: UnisonSyncer
@@ -23,8 +28,8 @@ def test_unison_syncer_builds_basic_command(tmp_path: Path, cg: ConcurrencyGroup
     target.mkdir()
 
     syncer = UnisonSyncer(
-        source_path=source,
-        target_path=target,
+        source_root=UnisonRoot(path=source),
+        target_root=UnisonRoot(path=target),
         sync_direction=SyncDirection.BOTH,
         conflict_mode=ConflictMode.NEWER,
         cg=cg,
@@ -49,8 +54,8 @@ def test_unison_syncer_builds_command_with_forward_direction(tmp_path: Path, cg:
     target.mkdir()
 
     syncer = UnisonSyncer(
-        source_path=source,
-        target_path=target,
+        source_root=UnisonRoot(path=source),
+        target_root=UnisonRoot(path=target),
         sync_direction=SyncDirection.FORWARD,
         conflict_mode=ConflictMode.NEWER,
         cg=cg,
@@ -71,8 +76,8 @@ def test_unison_syncer_builds_command_with_reverse_direction(tmp_path: Path, cg:
     target.mkdir()
 
     syncer = UnisonSyncer(
-        source_path=source,
-        target_path=target,
+        source_root=UnisonRoot(path=source),
+        target_root=UnisonRoot(path=target),
         sync_direction=SyncDirection.REVERSE,
         conflict_mode=ConflictMode.NEWER,
         cg=cg,
@@ -93,8 +98,8 @@ def test_unison_syncer_builds_command_with_exclude_patterns(tmp_path: Path, cg: 
     target.mkdir()
 
     syncer = UnisonSyncer(
-        source_path=source,
-        target_path=target,
+        source_root=UnisonRoot(path=source),
+        target_root=UnisonRoot(path=target),
         sync_direction=SyncDirection.BOTH,
         conflict_mode=ConflictMode.NEWER,
         exclude_patterns=("*.pyc", "__pycache__"),
@@ -117,8 +122,8 @@ def test_unison_syncer_always_excludes_git_directory(tmp_path: Path, cg: Concurr
     target.mkdir()
 
     syncer = UnisonSyncer(
-        source_path=source,
-        target_path=target,
+        source_root=UnisonRoot(path=source),
+        target_root=UnisonRoot(path=target),
         sync_direction=SyncDirection.BOTH,
         conflict_mode=ConflictMode.NEWER,
         cg=cg,
@@ -138,8 +143,8 @@ def test_unison_syncer_is_not_running_initially(tmp_path: Path, cg: ConcurrencyG
     target.mkdir()
 
     syncer = UnisonSyncer(
-        source_path=source,
-        target_path=target,
+        source_root=UnisonRoot(path=source),
+        target_root=UnisonRoot(path=target),
         sync_direction=SyncDirection.BOTH,
         conflict_mode=ConflictMode.NEWER,
         cg=cg,
@@ -160,7 +165,7 @@ def test_determine_git_sync_returns_none_for_non_git_directories(tmp_path: Path,
     source.mkdir()
     target.mkdir()
 
-    result = determine_git_sync_actions(source, target, cg)
+    result = determine_git_sync_actions(source, target, cast(OnlineHostInterface, FakeHost()), cg)
 
     assert result is None
 
@@ -172,7 +177,7 @@ def test_determine_git_sync_returns_none_when_only_source_is_git(tmp_path: Path,
     init_git_repo(source)
     target.mkdir()
 
-    result = determine_git_sync_actions(source, target, cg)
+    result = determine_git_sync_actions(source, target, cast(OnlineHostInterface, FakeHost()), cg)
 
     assert result is None
 
@@ -184,7 +189,7 @@ def test_determine_git_sync_returns_none_when_only_target_is_git(tmp_path: Path,
     source.mkdir()
     init_git_repo(target)
 
-    result = determine_git_sync_actions(source, target, cg)
+    result = determine_git_sync_actions(source, target, cast(OnlineHostInterface, FakeHost()), cg)
 
     assert result is None
 
@@ -204,7 +209,7 @@ def test_determine_git_sync_returns_no_action_when_both_in_sync(tmp_path: Path, 
         check=True,
     )
 
-    result = determine_git_sync_actions(source, target, cg)
+    result = determine_git_sync_actions(source, target, cast(OnlineHostInterface, FakeHost()), cg)
 
     assert result is not None
     assert result.agent_is_ahead is False
@@ -231,7 +236,39 @@ def test_determine_git_sync_detects_source_ahead(tmp_path: Path, cg: Concurrency
     run_git_command(source, "add", "new_file.txt")
     run_git_command(source, "commit", "-m", "Add new file")
 
-    result = determine_git_sync_actions(source, target, cg)
+    result = determine_git_sync_actions(source, target, cast(OnlineHostInterface, FakeHost()), cg)
+
+    assert result is not None
+    assert result.agent_is_ahead is True
+    assert result.local_is_ahead is False
+
+
+def test_determine_git_sync_detects_source_ahead_from_an_agent_subdirectory(
+    tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """``mngr pair my-agent:/subdir`` pairs a subdirectory, which is not a repository.
+
+    The reconciliation fetch has to name the agent's worktree root: ``git fetch``
+    against a subdirectory fails outright, which would silently downgrade the whole
+    comparison to "neither side is ahead".
+    """
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+
+    init_git_repo(source)
+    subprocess.run(
+        ["git", "clone", str(source), str(target)],
+        capture_output=True,
+        check=True,
+    )
+
+    subdir = source / "subdir"
+    subdir.mkdir()
+    (subdir / "new_file.txt").write_text("new content")
+    run_git_command(source, "add", "subdir/new_file.txt")
+    run_git_command(source, "commit", "-m", "Add new file")
+
+    result = determine_git_sync_actions(subdir, target, cast(OnlineHostInterface, FakeHost()), cg)
 
     assert result is not None
     assert result.agent_is_ahead is True
@@ -260,7 +297,7 @@ def test_determine_git_sync_detects_target_ahead(tmp_path: Path, cg: Concurrency
     run_git_command(target, "add", "new_file.txt")
     run_git_command(target, "commit", "-m", "Add new file")
 
-    result = determine_git_sync_actions(source, target, cg)
+    result = determine_git_sync_actions(source, target, cast(OnlineHostInterface, FakeHost()), cg)
 
     assert result is not None
     assert result.agent_is_ahead is False
@@ -294,7 +331,7 @@ def test_determine_git_sync_detects_both_diverged(tmp_path: Path, cg: Concurrenc
     run_git_command(target, "add", "target_file.txt")
     run_git_command(target, "commit", "-m", "Add target file")
 
-    result = determine_git_sync_actions(source, target, cg)
+    result = determine_git_sync_actions(source, target, cast(OnlineHostInterface, FakeHost()), cg)
 
     assert result is not None
     assert result.agent_is_ahead is True
@@ -318,8 +355,8 @@ def _make_syncer(
     source.mkdir(exist_ok=True)
     target.mkdir(exist_ok=True)
     return UnisonSyncer(
-        source_path=source,
-        target_path=target,
+        source_root=UnisonRoot(path=source),
+        target_root=UnisonRoot(path=target),
         sync_direction=SyncDirection.BOTH,
         conflict_mode=conflict_mode,
         include_patterns=include_patterns,
@@ -328,19 +365,19 @@ def _make_syncer(
 
 
 def test_unison_syncer_builds_command_with_source_conflict_mode(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that UnisonSyncer adds -prefer source_path for SOURCE conflict mode."""
+    """Test that UnisonSyncer adds -prefer <source root> for SOURCE conflict mode."""
     syncer = _make_syncer(tmp_path, cg, conflict_mode=ConflictMode.SOURCE)
     cmd = syncer._build_unison_command()
     assert "-prefer" in cmd
-    assert cmd[cmd.index("-prefer") + 1] == str(syncer.source_path)
+    assert cmd[cmd.index("-prefer") + 1] == str(syncer.source_root.path)
 
 
 def test_unison_syncer_builds_command_with_target_conflict_mode(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that UnisonSyncer adds -prefer target_path for TARGET conflict mode."""
+    """Test that UnisonSyncer adds -prefer <target root> for TARGET conflict mode."""
     syncer = _make_syncer(tmp_path, cg, conflict_mode=ConflictMode.TARGET)
     cmd = syncer._build_unison_command()
     assert "-prefer" in cmd
-    assert cmd[cmd.index("-prefer") + 1] == str(syncer.target_path)
+    assert cmd[cmd.index("-prefer") + 1] == str(syncer.target_root.path)
 
 
 def test_unison_syncer_builds_command_with_include_patterns(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -376,3 +413,76 @@ def test_git_sync_action_default_values() -> None:
     assert action.local_is_ahead is False
     assert action.agent_branch == "main"
     assert action.local_branch == "main"
+
+
+# =============================================================================
+# Test: UnisonSyncer against a remote replica
+# =============================================================================
+
+
+def _remote_syncer(
+    tmp_path: Path, cg: ConcurrencyGroup, conflict_mode: ConflictMode = ConflictMode.NEWER
+) -> UnisonSyncer:
+    """A syncer whose source replica lives on a remote host."""
+    local = tmp_path / "local"
+    local.mkdir(exist_ok=True)
+    endpoint = SshEndpoint(user="root", hostname="10.0.0.4", port=2222, key_path=tmp_path / "id")
+    return UnisonSyncer(
+        source_root=UnisonRoot(path=Path("/work/repo"), ssh=endpoint),
+        target_root=UnisonRoot(path=local),
+        ssh_wrapper_path=tmp_path / "ssh-wrapper.sh",
+        remote_unison_path=Path("/root/.mngr/bin/unison"),
+        sync_direction=SyncDirection.BOTH,
+        conflict_mode=conflict_mode,
+        cg=cg,
+    )
+
+
+def test_remote_syncer_uses_an_ssh_root_and_names_the_transport(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """A remote replica needs the ssh:// root plus both transport flags."""
+    syncer = _remote_syncer(tmp_path, cg)
+
+    cmd = syncer._build_unison_command()
+
+    assert "ssh://root@10.0.0.4//work/repo" in cmd
+    # -sshcmd carries the key and port, which the root syntax cannot express.
+    assert cmd[cmd.index("-sshcmd") + 1] == str(tmp_path / "ssh-wrapper.sh")
+    # -servercmd pins which unison answers, so a too-old one on PATH is never used.
+    assert cmd[cmd.index("-servercmd") + 1] == "/root/.mngr/bin/unison"
+
+
+def test_local_syncer_passes_no_transport_flags(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Both replicas local means a single unison process and no SSH at all."""
+    syncer = _make_syncer(tmp_path, cg)
+
+    cmd = syncer._build_unison_command()
+
+    assert "-sshcmd" not in cmd
+    assert "-servercmd" not in cmd
+
+
+def test_remote_syncer_prefer_names_the_full_ssh_root(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """unison resolves -prefer against the roots it was given, so a bare path would not match."""
+    syncer = _remote_syncer(tmp_path, cg, conflict_mode=ConflictMode.SOURCE)
+
+    cmd = syncer._build_unison_command()
+
+    assert cmd[cmd.index("-prefer") + 1] == "ssh://root@10.0.0.4//work/repo"
+
+
+def test_remote_syncer_force_names_the_full_ssh_root(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Same for -force, which drives --sync-direction."""
+    local = tmp_path / "local"
+    local.mkdir(exist_ok=True)
+    endpoint = SshEndpoint(user="root", hostname="10.0.0.4", port=2222, key_path=tmp_path / "id")
+    syncer = UnisonSyncer(
+        source_root=UnisonRoot(path=Path("/work/repo"), ssh=endpoint),
+        target_root=UnisonRoot(path=local),
+        sync_direction=SyncDirection.FORWARD,
+        conflict_mode=ConflictMode.NEWER,
+        cg=cg,
+    )
+
+    cmd = syncer._build_unison_command()
+
+    assert cmd[cmd.index("-force") + 1] == "ssh://root@10.0.0.4//work/repo"

@@ -188,10 +188,6 @@ def pair(ctx: click.Context, **kwargs) -> None:
         mngr_ctx=mngr_ctx,
     )
 
-    # Only local agents are supported right now
-    if not host.is_local:
-        raise NotImplementedError("Pairing with remote agents is not implemented yet")
-
     # Determine source path (agent's work_dir, potentially with subpath)
     source_path = agent.work_dir
     if source_subpath is not None:
@@ -247,6 +243,17 @@ directory and a local directory. Changes are watched and synced in real-time.
 If git repositories exist on both sides, the command first synchronizes git
 state (branches and commits) before starting the continuous file sync.
 
+Remote agents are supported. unison is a client/server protocol, so pairing
+with a remote agent runs a second unison on the host over mngr's own SSH
+transport. mngr uses whatever usable unison is already installed there, and
+otherwise installs a pinned static build into ~/.mngr/bin on the host. Both
+ends need unison 2.52 or newer -- older versions cannot interoperate at all --
+along with the unison-fsmonitor helper that unison watches for changes
+through. The unison packaged by Debian and Ubuntu has no such helper, so it
+does not count as usable. mngr only installs that build for Linux x86_64
+(upstream publishes no Linux arm64 binary at all), so on any other platform
+both binaries have to be installed by hand.
+
 Press Ctrl+C to stop the sync.
 
 During rapid concurrent edits, changes will be debounced to avoid partial writes [future].""",
@@ -256,6 +263,7 @@ During rapid concurrent edits, changes will be debounced to avoid partial writes
         ("One-way sync (source to target)", "mngr pair my-agent --sync-direction=forward"),
         ("Prefer source on conflicts", "mngr pair my-agent --conflict=source"),
         ("Filter to specific host", "mngr pair my-agent --source-host localhost"),
+        ("Pair with an agent on a remote host", "mngr pair my-agent@my-vps"),
         ("Use --source-agent flag", "mngr pair --source-agent my-agent --target ./local-copy"),
     ),
     see_also=(

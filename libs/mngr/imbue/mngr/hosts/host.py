@@ -748,13 +748,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     # read_file, write_file, read_text_file, write_text_file, _get_file_mtime,
     # and get_file_mtime are inherited unchanged from OuterHost.
 
-    def _is_directory(self, path: Path) -> bool:
-        """Check if a path is a directory on the host."""
-        if self.is_local:
-            return path.is_dir()
-        result = self.execute_idempotent_command(f"test -d '{str(path)}'")
-        return result.success
-
     def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
         """List files in a directory on the host.
 
@@ -1305,8 +1298,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         which causes the agent to launch in the wrong place. This method detects the
         missing directory early and raises a clear error with a recovery command.
         """
-        check = self.execute_idempotent_command(f"test -d {shlex.quote(str(agent.work_dir))}")
-        if check.success:
+        if self.is_directory(agent.work_dir):
             return
 
         branch = agent.get_created_branch_name()
@@ -1359,7 +1351,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def get_reported_plugin_state_files(self, plugin_name: str) -> list[str]:
         """List all plugin state files."""
         plugin_dir = self.host_dir / "plugin" / plugin_name
-        if not self._is_directory(plugin_dir):
+        if not self.is_directory(plugin_dir):
             return []
         return self._list_directory(plugin_dir)
 
@@ -1506,14 +1498,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def get_agents(self) -> list[AgentInterface]:
         """Get all agents on this host."""
         agents_dir = get_agents_root_dir(self.host_dir)
-        if not self._is_directory(agents_dir):
+        if not self.is_directory(agents_dir):
             logger.trace("Failed to find agents directory for host {}", self.id)
             return []
 
         agents: list[AgentInterface] = []
         for agent_id_str in self._list_directory(agents_dir):
             agent_dir = agents_dir / agent_id_str
-            if self._is_directory(agent_dir):
+            if self.is_directory(agent_dir):
                 agent = self._load_agent_from_dir(agent_dir)
                 if agent is not None:
                     agents.append(agent)
@@ -1558,7 +1550,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         else:
                             content = self.read_text_file(data_path)
                     except FileNotFoundError:
-                        if not self._is_directory(agent_dir):
+                        if not self.is_directory(agent_dir):
                             logger.warning("Could not load agent reference from {}", data_path)
                         continue
                     try:

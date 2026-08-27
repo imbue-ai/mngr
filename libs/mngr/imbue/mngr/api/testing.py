@@ -105,6 +105,12 @@ class FakeHost(MutableModel):
         commands = build_source_env_shell_commands(host_env_path, agent_env_path)
         return " && ".join(commands) + " && "
 
+    def is_directory(self, path: Path) -> bool:
+        """Mirror OnlineHostInterface.is_directory for the local-execution double."""
+        if self.is_local:
+            return path.is_dir()
+        return self._execute_command(f"test -d {shlex.quote(str(path))}").success
+
     def execute_idempotent_command(
         self,
         command: str,

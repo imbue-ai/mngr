@@ -42,7 +42,9 @@ from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import SSH
+from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.git_utils import get_current_branch
+from imbue.mngr.utils.git_utils import get_head_commit
 from imbue.mngr.utils.git_utils import is_git_repository
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 
@@ -236,6 +238,19 @@ class GitContextInterface(MutableModel, ABC):
         """Get the current branch name."""
 
     @abstractmethod
+    def get_head_commit(self, path: Path) -> str | None:
+        """Return the HEAD commit hash, or None if the repo has no commits yet."""
+
+    @abstractmethod
+    def get_repo_root(self, path: Path) -> Path | None:
+        """Return the worktree root containing ``path``, or None if it is not in a repo.
+
+        Callers that hand a path to git as a *remote* need this: git resolves a
+        working directory from any subdirectory, but a repository URL has to name
+        the root itself.
+        """
+
+    @abstractmethod
     def is_git_repository(self, path: Path) -> bool:
         """Check if the path is inside a git repository."""
 
@@ -293,6 +308,12 @@ class LocalGitContext(GitContextInterface):
     def get_current_branch(self, path: Path) -> str:
         return get_current_branch(path, self.cg)
 
+    def get_head_commit(self, path: Path) -> str | None:
+        return get_head_commit(path, self.cg)
+
+    def get_repo_root(self, path: Path) -> Path | None:
+        return find_git_worktree_root(path, self.cg)
+
     def is_git_repository(self, path: Path) -> bool:
         return is_git_repository(path, self.cg)
 
@@ -343,7 +364,25 @@ class RemoteGitContext(GitContextInterface):
         result = self._host.execute_idempotent_command("git rev-parse --abbrev-ref HEAD", cwd=path)
         if not result.success:
             raise MngrError(f"Failed to get current branch: {result.stderr}")
+        branch = result.stdout.strip()
+        # ``--abbrev-ref`` prints the literal string "HEAD" when HEAD is detached.
+        # Mirror the local helper (utils/git_utils.get_current_branch) and reject it:
+        # callers want a branch name to build a refspec from, and "HEAD" is not one.
+        if branch == "HEAD":
+            raise MngrError(f"HEAD is detached in {path}. A branch checkout is required for sync operations.")
+        return branch
+
+    def get_head_commit(self, path: Path) -> str | None:
+        result = self._host.execute_idempotent_command("git rev-parse HEAD", cwd=path)
+        if not result.success:
+            return None
         return result.stdout.strip()
+
+    def get_repo_root(self, path: Path) -> Path | None:
+        result = self._host.execute_idempotent_command("git rev-parse --show-toplevel", cwd=path)
+        if not result.success:
+            return None
+        return Path(result.stdout.strip())
 
     def is_git_repository(self, path: Path) -> bool:
         result = self._host.execute_idempotent_command("git rev-parse --git-dir", cwd=path)
@@ -513,21 +552,34 @@ def _default_push_refspec(
     return f"{local_branch}:{result.stdout.strip()}"
 
 
-def _run_git_command(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, run_in_terminal: bool) -> None:
+def _run_git_command(
+    cmd: list[str],
+    env: dict[str, str] | None,
+    cg: ConcurrencyGroup,
+    run_in_terminal: bool,
+    timeout_seconds: float | None = None,
+) -> None:
     """Run ``cmd`` either via cg (captured) or with terminal-stdio passthrough.
 
     In the terminal-passthrough path, stdin is redirected to /dev/null so git
     can't block waiting for input it shouldn't be asking for (e.g. a credential
     prompt against an SSH-keyed remote); stdout/stderr still flow to the
     terminal so progress and error output remain visible.
+
+    Either path reports failure as a ``GitSyncError``, including a timeout: the
+    captured path gets there via ``ProcessError``, the passthrough path via
+    ``subprocess.TimeoutExpired``.
     """
     if run_in_terminal:
-        result = run_interactive_subprocess(cmd, stdin=subprocess.DEVNULL, env=env)
+        try:
+            result = run_interactive_subprocess(cmd, stdin=subprocess.DEVNULL, env=env, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as e:
+            raise GitSyncError(f"git timed out after {timeout_seconds} seconds") from e
         if result.returncode != 0:
             raise GitSyncError(f"git exited with status {result.returncode}")
         return
     try:
-        cg.run_process_to_completion(cmd, env=env)
+        cg.run_process_to_completion(cmd, env=env, timeout=timeout_seconds)
     except ProcessError as e:
         raise GitSyncError(e.stderr) from e
 
@@ -595,3 +647,32 @@ def git_pull(
     cmd = ["git", "-C", str(local_path), "pull", *options, url, *positionals]
     logger.debug("Running git pull: {}", shlex.join(cmd))
     _run_git_command(cmd, env, cg, run_in_terminal)
+
+
+def git_fetch(
+    local_path: Path,
+    remote_host: OnlineHostInterface,
+    remote_path: Path,
+    extra_args: Sequence[str],
+    cg: ConcurrencyGroup,
+    run_in_terminal: bool = False,
+    timeout_seconds: float | None = None,
+) -> None:
+    """Run ``git fetch`` in ``local_path`` from ``remote_path`` on ``remote_host``.
+
+    Same shape as :func:`git_pull` -- mngr builds the URL and SSH environment, and
+    ``extra_args`` is forwarded verbatim (options before the URL, refspecs after).
+    Unlike pull, nothing is merged: this only brings objects and ``FETCH_HEAD``
+    into the local repository.
+
+    That makes it the right primitive for "compare two repositories" work, which
+    needs both sides' commits reachable from one repo before it can ask about
+    ancestry. Fetching *into* the local repo (rather than pushing local objects
+    into the remote one) keeps the write on the side the user owns.
+    """
+    add_safe_directory_on_remote(remote_host, remote_path)
+    url, env = _build_git_url_and_env(remote_host, remote_path, is_push=False)
+    options, positionals = _split_options_and_positionals(extra_args)
+    cmd = ["git", "-C", str(local_path), "fetch", *options, url, *positionals]
+    logger.debug("Running git fetch: {}", shlex.join(cmd))
+    _run_git_command(cmd, env, cg, run_in_terminal, timeout_seconds=timeout_seconds)

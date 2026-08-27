@@ -7,14 +7,17 @@ from typing import cast
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.api.git import GitContextInterface
 from imbue.mngr.api.git import GitSyncError
 from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
 from imbue.mngr.api.git import UncommittedChangesError
 from imbue.mngr.api.git import _build_ssh_git_url
+from imbue.mngr.api.git import _run_git_command
 from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import check_path_repo_gitignore_status
+from imbue.mngr.api.git import git_fetch
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
 from imbue.mngr.api.testing import FakeHost
@@ -312,6 +315,47 @@ def test_git_push_transfers_commit_from_local_to_remote(
     assert (agent_dir / "local_file.txt").read_text() == "local content"
 
 
+def test_git_fetch_brings_remote_objects_without_merging(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """git_fetch makes the agent's commit reachable locally but leaves the branch alone.
+
+    That is the whole point of using fetch rather than pull for the ahead/behind
+    comparison: ancestry needs both sides' objects in one repository, and nothing
+    should be merged to get them there.
+    """
+    local_dir = tmp_path / "local"
+    agent_dir = tmp_path / "agent"
+
+    init_git_repo(local_dir)
+    subprocess.run(["git", "clone", str(local_dir), str(agent_dir)], capture_output=True, check=True)
+    run_git_command(agent_dir, "config", "user.email", "test@example.com")
+    run_git_command(agent_dir, "config", "user.name", "Test User")
+
+    (agent_dir / "agent_file.txt").write_text("agent content")
+    run_git_command(agent_dir, "add", "agent_file.txt")
+    run_git_command(agent_dir, "commit", "-m", "Agent commit")
+    agent_commit = run_git_command(agent_dir, "rev-parse", "HEAD").stdout.strip()
+    local_commit_before = run_git_command(local_dir, "rev-parse", "HEAD").stdout.strip()
+
+    host = cast(OnlineHostInterface, FakeHost(is_local=True))
+    git_fetch(
+        local_path=local_dir,
+        remote_host=host,
+        remote_path=agent_dir,
+        extra_args=("main",),
+        cg=cg,
+    )
+
+    # The agent's commit is now an object in the local repo, so ancestry works.
+    assert run_git_command(local_dir, "cat-file", "-t", agent_commit).stdout.strip() == "commit"
+    assert run_git_command(local_dir, "rev-parse", "FETCH_HEAD").stdout.strip() == agent_commit
+    # ...but nothing was merged.
+    assert run_git_command(local_dir, "rev-parse", "HEAD").stdout.strip() == local_commit_before
+    assert not (local_dir / "agent_file.txt").exists()
+
+
 # === check_path_gitignore_status ===
 #
 # The helper is path-agnostic (it takes any repo-relative path, not just a
@@ -421,3 +465,94 @@ def test_check_path_repo_gitignore_status_passes_through_not_ignored(tmp_path: P
     status, _ = check_path_repo_gitignore_status(host, tmp_path, Path(".config") / "app" / "state.json")
 
     assert status is GitignoreStatus.NOT_IGNORED
+
+
+def test_remote_git_context_get_head_commit_returns_the_current_commit(
+    temp_git_repo: Path,
+) -> None:
+    host = cast(OnlineHostInterface, FakeHost())
+    ctx = RemoteGitContext(host=host)
+
+    head = ctx.get_head_commit(temp_git_repo)
+
+    assert head is not None
+    assert len(head) == 40, f"expected a full sha, got {head!r}"
+
+
+def test_remote_git_context_get_head_commit_returns_none_outside_a_repo(tmp_path: Path) -> None:
+    host = cast(OnlineHostInterface, FakeHost())
+    ctx = RemoteGitContext(host=host)
+
+    assert ctx.get_head_commit(tmp_path) is None
+
+
+def test_remote_git_context_get_current_branch_raises_on_detached_head(
+    temp_git_repo: Path,
+) -> None:
+    """Regression test: this used to return the literal string "HEAD", silently.
+
+    ``git rev-parse --abbrev-ref HEAD`` prints "HEAD" when HEAD is detached, so
+    callers building a refspec from the result got a branch name that is not a
+    branch. The local helper has always raised here; the remote one now matches.
+    """
+    run_git_command(temp_git_repo, "checkout", "--detach", "HEAD")
+    host = cast(OnlineHostInterface, FakeHost())
+    ctx = RemoteGitContext(host=host)
+
+    with pytest.raises(MngrError) as exc_info:
+        ctx.get_current_branch(temp_git_repo)
+
+    assert "detached" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("context_name", ["local", "remote"])
+def test_git_context_get_repo_root_resolves_from_a_subdirectory(
+    temp_git_repo: Path,
+    cg: ConcurrencyGroup,
+    context_name: str,
+) -> None:
+    """Both contexts answer with the worktree root, not the directory they were given.
+
+    Callers need the root because a subdirectory is a fine working directory for git
+    but is not a repository URL: ``git fetch <repo>/sub`` is a hard error.
+    """
+    subdir = temp_git_repo / "sub" / "deeper"
+    subdir.mkdir(parents=True)
+    ctx: GitContextInterface = (
+        LocalGitContext(cg=cg)
+        if context_name == "local"
+        else RemoteGitContext(host=cast(OnlineHostInterface, FakeHost()))
+    )
+
+    root = ctx.get_repo_root(subdir)
+
+    assert root is not None
+    assert root.resolve() == temp_git_repo.resolve()
+
+
+@pytest.mark.parametrize("context_name", ["local", "remote"])
+def test_git_context_get_repo_root_returns_none_outside_a_repo(
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+    context_name: str,
+) -> None:
+    ctx: GitContextInterface = (
+        LocalGitContext(cg=cg)
+        if context_name == "local"
+        else RemoteGitContext(host=cast(OnlineHostInterface, FakeHost()))
+    )
+
+    assert ctx.get_repo_root(tmp_path) is None
+
+
+def test_run_git_command_reports_a_terminal_passthrough_timeout_as_a_git_sync_error(cg: ConcurrencyGroup) -> None:
+    """Both paths of _run_git_command must fail the same way, timeouts included.
+
+    The passthrough path runs git through ``subprocess.run``, whose timeout raises
+    ``TimeoutExpired`` -- not something callers catching ``GitSyncError`` (or even
+    ``MngrError``) would see coming.
+    """
+    with pytest.raises(GitSyncError) as exc_info:
+        _run_git_command(["sleep", "5"], None, cg, run_in_terminal=True, timeout_seconds=0.2)
+
+    assert "timed out" in str(exc_info.value)

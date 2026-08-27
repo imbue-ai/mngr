@@ -81,14 +81,6 @@ def _build_rsync_command(
 # === Helpers ===
 
 
-def _dir_exists(host: OnlineHostInterface, path: Path) -> bool:
-    """Check if a directory exists on the given host."""
-    if host.is_local:
-        return path.is_dir()
-    result = host.execute_idempotent_command(f"test -d {shlex.quote(str(path))}")
-    return result.success
-
-
 def _mkdir_on_host(host: OnlineHostInterface, path: Path) -> None:
     """Idempotently create a directory on the given host."""
     if host.is_local:
@@ -151,7 +143,7 @@ def _do_rsync(
     # CLOBBER skips the git check entirely. Also skip when the destination
     # doesn't yet exist or isn't a git repo.
     if is_push:
-        is_destination_exists = _dir_exists(remote_host, destination_for_git)
+        is_destination_exists = remote_host.is_directory(destination_for_git)
     else:
         is_destination_exists = destination_for_git.is_dir()
     is_destination_git_repo = (
@@ -167,7 +159,7 @@ def _do_rsync(
 
     with stash_cm:
         # Ensure destination directory exists for subdirectory targets. Always
-        # attempt mkdir (idempotent) to avoid TOCTOU race with _dir_exists.
+        # attempt mkdir (idempotent) to avoid TOCTOU race with the is_directory check.
         if is_push:
             _mkdir_on_host(remote_host, destination_for_git)
         else:

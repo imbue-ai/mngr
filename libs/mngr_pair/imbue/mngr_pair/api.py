@@ -1,4 +1,5 @@
 import platform
+import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,8 +16,10 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.api.git import GitContextInterface
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
+from imbue.mngr.api.git import git_fetch
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
 from imbue.mngr.api.git import stash_guard
@@ -27,10 +30,12 @@ from imbue.mngr.primitives import ConflictMode
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import SystemDependency
-from imbue.mngr.utils.git_utils import get_current_branch
-from imbue.mngr.utils.git_utils import get_head_commit
 from imbue.mngr.utils.git_utils import is_ancestor
-from imbue.mngr.utils.git_utils import is_git_repository
+from imbue.mngr_pair.remote import SshEndpoint
+from imbue.mngr_pair.remote import UnisonRoot
+from imbue.mngr_pair.remote import check_local_unison_version
+from imbue.mngr_pair.remote import ensure_remote_unison
+from imbue.mngr_pair.remote import write_ssh_wrapper_script
 
 _GIT_FETCH_TIMEOUT_SECONDS: Final[float] = 30.0
 
@@ -58,8 +63,18 @@ class UnisonSyncer(MutableModel):
     """Manages a unison process for continuous bidirectional file synchronization."""
 
     cg: ConcurrencyGroup = Field(frozen=True, description="Concurrency group for managing the unison process")
-    source_path: Path = Field(frozen=True, description="Source directory to sync from")
-    target_path: Path = Field(frozen=True, description="Target directory to sync to")
+    source_root: UnisonRoot = Field(frozen=True, description="Source replica to sync from (local path or ssh:// root)")
+    target_root: UnisonRoot = Field(frozen=True, description="Target replica to sync to (local path or ssh:// root)")
+    ssh_wrapper_path: Path | None = Field(
+        frozen=True,
+        default=None,
+        description="Executable ssh wrapper passed as -sshcmd; None when both replicas are local",
+    )
+    remote_unison_path: Path | None = Field(
+        frozen=True,
+        default=None,
+        description="Path to unison on the remote host, passed as -servercmd; None when both replicas are local",
+    )
     sync_direction: SyncDirection = Field(
         frozen=True,
         default=SyncDirection.BOTH,
@@ -87,10 +102,12 @@ class UnisonSyncer(MutableModel):
 
     def _build_unison_command(self) -> list[str]:
         """Build the unison command line arguments."""
+        source_arg = self.source_root.as_root_arg()
+        target_arg = self.target_root.as_root_arg()
         cmd = [
             "unison",
-            str(self.source_path),
-            str(self.target_path),
+            source_arg,
+            target_arg,
             "-repeat",
             "watch",
             "-auto",
@@ -99,12 +116,21 @@ class UnisonSyncer(MutableModel):
             "Name .git",
         ]
 
+        # Reaching a remote replica needs both: -sshcmd decides how the connection is
+        # made (the ssh:// root syntax has nowhere to put a port or a key), and
+        # -servercmd decides which unison answers, so a too-old one on the host's PATH
+        # can never be picked up by accident.
+        if self.ssh_wrapper_path is not None:
+            cmd.extend(["-sshcmd", str(self.ssh_wrapper_path)])
+        if self.remote_unison_path is not None:
+            cmd.extend(["-servercmd", str(self.remote_unison_path)])
+
         # Add conflict preference based on mode
         match self.conflict_mode:
             case ConflictMode.SOURCE:
-                cmd.extend(["-prefer", str(self.source_path)])
+                cmd.extend(["-prefer", source_arg])
             case ConflictMode.TARGET:
-                cmd.extend(["-prefer", str(self.target_path)])
+                cmd.extend(["-prefer", target_arg])
             case ConflictMode.NEWER:
                 cmd.extend(["-prefer", "newer"])
             case ConflictMode.ASK:
@@ -114,9 +140,9 @@ class UnisonSyncer(MutableModel):
 
         # Add sync direction constraints
         if self.sync_direction == SyncDirection.FORWARD:
-            cmd.extend(["-force", str(self.source_path)])
+            cmd.extend(["-force", source_arg])
         elif self.sync_direction == SyncDirection.REVERSE:
-            cmd.extend(["-force", str(self.target_path)])
+            cmd.extend(["-force", target_arg])
         else:
             # SyncDirection.BOTH - bidirectional sync, no force flag needed
             pass
@@ -157,15 +183,19 @@ class UnisonSyncer(MutableModel):
             is_output_accumulated=False,
         )
 
-        logger.info("Started continuous sync between {} and {}", self.source_path, self.target_path)
+        logger.info(
+            "Started continuous sync between {} and {}",
+            self.source_root.as_root_arg(),
+            self.target_root.as_root_arg(),
+        )
 
     def stop(self) -> None:
-        """Stop the unison sync process gracefully."""
-        if self._running_process is not None:
-            logger.debug("Stopping unison process")
-            self._running_process.terminate()
-            self._running_process = None
-
+        """Stop the unison sync process gracefully, or do nothing if none is running."""
+        if self._running_process is None:
+            return
+        logger.debug("Stopping unison process")
+        self._running_process.terminate()
+        self._running_process = None
         logger.info("Stopped continuous sync")
 
     def wait(self) -> int:
@@ -197,80 +227,114 @@ _UNISON = SystemDependency(
     binary="unison",
     purpose="pair mode",
     macos_hint="brew install unison",
-    linux_hint="sudo apt-get install unison. On other systems, see: https://github.com/bcpierce00/unison",
+    linux_hint=(
+        "Take unison from a release at https://github.com/bcpierce00/unison/releases. "
+        "The Debian and Ubuntu package is not enough: it ships no unison-fsmonitor, and "
+        "Ubuntu 22.04's unison is 2.51, which cannot talk to a newer one."
+    ),
 )
 _UNISON_FSMONITOR = SystemDependency(
     binary="unison-fsmonitor",
-    purpose="pair mode (file watching on macOS)",
+    purpose="pair mode (the helper unison watches for changes through)",
     macos_hint="brew install autozimu/formulas/unison-fsmonitor",
-    linux_hint="Not required on Linux (inotify provides built-in filesystem monitoring)",
+    linux_hint=(
+        "Take unison-fsmonitor from a release at https://github.com/bcpierce00/unison/releases. "
+        "No Debian or Ubuntu package provides it."
+    ),
 )
 
 
 def require_unison() -> None:
-    """Require unison (and unison-fsmonitor on macOS).
+    """Require unison, plus unison-fsmonitor on macOS.
 
-    On Linux, only unison is required because inotify provides built-in filesystem
-    monitoring. On macOS, unison-fsmonitor is also required for file watching.
+    Continuous sync watches each replica through a unison-fsmonitor helper, on every
+    platform -- unison has no built-in watcher anywhere. Only the macOS requirement is
+    enforced here, so a Linux machine missing the helper still gets as far as unison's
+    own "No file monitoring helper program found".
     """
     _UNISON.require()
     if platform.system() == "Darwin":
         _UNISON_FSMONITOR.require()
 
 
+def git_context_for_host(host: OnlineHostInterface, cg: ConcurrencyGroup) -> GitContextInterface:
+    """Git context for the agent side: local subprocesses for a local host, SSH otherwise."""
+    if host.is_local:
+        return LocalGitContext(cg=cg)
+    return RemoteGitContext(host=host)
+
+
 def determine_git_sync_actions(
     agent_path: Path,
     local_path: Path,
+    host: OnlineHostInterface,
     cg: ConcurrencyGroup,
 ) -> GitSyncAction | None:
     """Determine what git sync actions are needed between agent and local repos.
 
-    Returns None if either path is not a git repository. Fetches objects from
-    local into agent's object store (a read-only side effect on agent's repo)
-    to enable ancestry comparison.
+    Returns None if either side is not a git repository.
+
+    Comparing ancestry needs both sides' commits reachable from one repository.
+    mngr fetches the agent's branch *into the local repo*, over the same URL and
+    SSH transport ``git pull`` uses. The other direction is not an option: the
+    agent's repo may be on another machine, where a local filesystem path names
+    nothing (or worse, names a different repository). Fetching this way also puts
+    the write on the side the user owns rather than in the agent's object store.
+
+    ``agent_path`` may be a subdirectory of the agent's repository (``mngr pair
+    my-agent:/subdir``), so the fetch names that repository's worktree root: a git
+    remote has to be the repository itself, unlike a working directory.
     """
-    if not is_git_repository(agent_path, cg) or not is_git_repository(local_path, cg):
+    agent_git = git_context_for_host(host, cg)
+    local_git = LocalGitContext(cg=cg)
+
+    if not agent_git.is_git_repository(agent_path) or not local_git.is_git_repository(local_path):
         return None
 
-    agent_branch = get_current_branch(agent_path, cg)
-    local_branch = get_current_branch(local_path, cg)
+    agent_branch = agent_git.get_current_branch(agent_path)
+    local_branch = local_git.get_current_branch(local_path)
 
-    agent_commit = get_head_commit(agent_path, cg)
-    local_commit = get_head_commit(local_path, cg)
+    agent_commit = agent_git.get_head_commit(agent_path)
+    local_commit = local_git.get_head_commit(local_path)
 
-    if agent_commit is None or local_commit is None:
+    # Nothing to reconcile when either side has no commits yet, or both are on the
+    # same one -- and this skips the fetch entirely in the common no-op case.
+    if agent_commit is None or local_commit is None or agent_commit == local_commit:
         return GitSyncAction(
             agent_branch=agent_branch,
             local_branch=local_branch,
         )
 
-    if agent_commit == local_commit:
+    agent_repo_root = agent_git.get_repo_root(agent_path)
+    if agent_repo_root is None:
+        logger.warning("Could not find the agent's repository root for {}; skipping git sync", agent_path)
         return GitSyncAction(
             agent_branch=agent_branch,
             local_branch=local_branch,
         )
 
-    # Fetch local refs into agent's object store so we can compare ancestry.
-    # This only adds git objects -- it does not modify branches or working tree.
     try:
-        cg.run_process_to_completion(
-            ["git", "fetch", str(local_path), local_branch],
-            cwd=agent_path,
-            timeout=_GIT_FETCH_TIMEOUT_SECONDS,
+        git_fetch(
+            local_path=local_path,
+            remote_host=host,
+            remote_path=agent_repo_root,
+            extra_args=(agent_branch,),
+            cg=cg,
+            timeout_seconds=_GIT_FETCH_TIMEOUT_SECONDS,
         )
-    except ProcessError as e:
+    except MngrError as e:
         logger.warning(
-            "Failed to fetch from local for git sync comparison: {}",
-            e.stderr.strip(),
+            "Failed to fetch from the agent for git sync comparison: {}",
+            e,
         )
         return GitSyncAction(
             agent_branch=agent_branch,
             local_branch=local_branch,
         )
 
-    # Check ancestry from the agent repo (which now has both sets of objects)
-    agent_ahead = is_ancestor(agent_path, local_commit, agent_commit, cg)
-    local_ahead = is_ancestor(agent_path, agent_commit, local_commit, cg)
+    # Check ancestry from the local repo, which now holds both sets of objects.
+    agent_ahead = is_ancestor(local_path, local_commit, agent_commit, cg)
+    local_ahead = is_ancestor(local_path, agent_commit, local_commit, cg)
 
     if agent_ahead and not local_ahead:
         return GitSyncAction(
@@ -401,6 +465,31 @@ def sync_git_state(
 
 
 @contextmanager
+def _remote_unison_transport(
+    endpoint: SshEndpoint | None,
+    host: OnlineHostInterface,
+    cg: ConcurrencyGroup,
+) -> Iterator[tuple[Path | None, Path | None]]:
+    """Yield the ``-sshcmd`` wrapper path and ``-servercmd`` path for one pairing.
+
+    Both are ``None`` for a local pairing, which runs a single unison process and
+    so needs no transport and no version negotiation at all. For a remote one this
+    checks the local version floor, resolves (installing if need be) a compatible
+    unison on the host, and writes the ssh wrapper into a temporary directory that
+    lives exactly as long as the sync.
+    """
+    if endpoint is None:
+        yield None, None
+        return
+
+    # The version floor only applies once two unisons have to negotiate a protocol.
+    check_local_unison_version(cg)
+    remote_unison_path = ensure_remote_unison(host)
+    with tempfile.TemporaryDirectory(prefix="mngr-pair-") as wrapper_dir:
+        yield write_ssh_wrapper_script(endpoint, Path(wrapper_dir)), remote_unison_path
+
+
+@contextmanager
 def pair_files(
     agent: AgentInterface,
     host: OnlineHostInterface,
@@ -419,28 +508,40 @@ def pair_files(
     This function first synchronizes git state if both paths are git repositories,
     then starts a unison process for continuous file synchronization.
 
+    The agent may be on a remote host. Because unison is a client/server protocol,
+    that case additionally resolves a compatible unison on the host and builds an
+    SSH transport for it; see ``mngr_pair.remote``.
+
     The returned context manager yields a UnisonSyncer that can be used to
     programmatically stop the sync. The sync is automatically stopped when
     the context manager exits.
     """
     require_unison()
 
+    # A remote agent means unison must start a second unison on the far side over
+    # SSH; a local agent is just two paths on this machine.
+    endpoint = SshEndpoint.from_host(host)
+
     # Validate directories exist
-    if not agent_path.is_dir():
+    if not host.is_directory(agent_path):
         raise MngrError(f"Agent directory does not exist: {agent_path}")
     if not local_path.is_dir():
         raise MngrError(f"Local directory does not exist: {local_path}")
 
-    # Validate agent and local are different directories
-    if agent_path.resolve() == local_path.resolve():
+    # Validate agent and local are different directories. Only meaningful when the
+    # agent is on this machine -- an identical path on another host is a different
+    # directory.
+    if host.is_local and agent_path.resolve() == local_path.resolve():
         raise MngrError(
             f"Agent and local are the same directory: {agent_path.resolve()}. "
             "Pair requires two different directories to sync between."
         )
 
     # Check git requirements
-    agent_is_git = is_git_repository(agent_path, cg)
-    local_is_git = is_git_repository(local_path, cg)
+    agent_git = git_context_for_host(host, cg)
+    local_git = LocalGitContext(cg=cg)
+    agent_is_git = agent_git.is_git_repository(agent_path)
+    local_is_git = local_git.is_git_repository(local_path)
 
     if is_require_git and not (agent_is_git and local_is_git):
         missing = []
@@ -453,40 +554,49 @@ def pair_files(
             "Use --no-require-git to sync without git."
         )
 
-    # Determine and perform git sync (skip when --no-require-git is set,
-    # since the user explicitly opted out of git-based behavior)
-    if is_require_git and agent_is_git and local_is_git:
-        git_action = determine_git_sync_actions(agent_path, local_path, cg)
-        if git_action is not None and (git_action.agent_is_ahead or git_action.local_is_ahead):
-            logger.info(
-                "Synchronizing git state (agent_ahead={}, local_ahead={})",
-                git_action.agent_is_ahead,
-                git_action.local_is_ahead,
-            )
-            sync_git_state(
-                agent=agent,
-                host=host,
-                local_path=local_path,
-                git_sync_action=git_action,
-                uncommitted_changes=uncommitted_changes,
-                cg=cg,
-            )
+    # Resolve the transport before touching either repository. On a host mngr cannot
+    # serve -- unison too old on this end, or an architecture upstream publishes no
+    # build for -- pairing is impossible, and discovering that after the git
+    # reconciliation would leave both repositories written to with no sync to show
+    # for it.
+    with _remote_unison_transport(endpoint, host, cg) as (ssh_wrapper_path, remote_unison_path):
+        # Determine and perform git sync (skip when --no-require-git is set,
+        # since the user explicitly opted out of git-based behavior)
+        if is_require_git and agent_is_git and local_is_git:
+            git_action = determine_git_sync_actions(agent_path, local_path, host, cg)
+            if git_action is not None and (git_action.agent_is_ahead or git_action.local_is_ahead):
+                logger.info(
+                    "Synchronizing git state (agent_ahead={}, local_ahead={})",
+                    git_action.agent_is_ahead,
+                    git_action.local_is_ahead,
+                )
+                sync_git_state(
+                    agent=agent,
+                    host=host,
+                    local_path=local_path,
+                    git_sync_action=git_action,
+                    uncommitted_changes=uncommitted_changes,
+                    cg=cg,
+                )
 
-    # Create and start the syncer
-    syncer = UnisonSyncer(
-        source_path=agent_path,
-        target_path=local_path,
-        sync_direction=sync_direction,
-        conflict_mode=conflict_mode,
-        exclude_patterns=exclude_patterns,
-        include_patterns=include_patterns,
-        cg=cg,
-    )
+        syncer = UnisonSyncer(
+            source_root=UnisonRoot(path=agent_path, ssh=endpoint),
+            target_root=UnisonRoot(path=local_path),
+            ssh_wrapper_path=ssh_wrapper_path,
+            remote_unison_path=remote_unison_path,
+            sync_direction=sync_direction,
+            conflict_mode=conflict_mode,
+            exclude_patterns=exclude_patterns,
+            include_patterns=include_patterns,
+            cg=cg,
+        )
 
-    try:
-        syncer.start()
-        yield syncer
-    finally:
-        # Ensure the syncer is stopped when the context exits
-        if syncer.is_running:
+        try:
+            syncer.start()
+            yield syncer
+        finally:
+            # Stop unconditionally rather than on ``is_running``: that property is
+            # False until unison has spoken, so a unison still in the SSH handshake
+            # (and the ssh it spawned) would otherwise be left behind. ``stop`` is a
+            # no-op when nothing was started.
             syncer.stop()
