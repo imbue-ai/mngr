@@ -79,6 +79,11 @@ _NON_SERVICE_FILES: Final[frozenset[str]] = frozenset({"any.json"})
 _AWS_SCHEMA_FILE: Final[str] = "aws.json"
 _AWS_SCOPE_SCHEMAS: Final[frozenset[str]] = frozenset({"aws"})
 
+# Scope schema names conventionally carry an ``-api`` suffix that the permissions
+# under them do not (``fastmail-dav-api`` owns ``fastmail-dav-read-all``), so the
+# suffix is stripped before a permission is matched against a scope by prefix.
+_SCOPE_NAME_SUFFIX: Final[str] = "-api"
+
 # Label for a service as a whole, where that is not just its scope's label.
 # A multi-scope service disambiguates each scope with a parenthetical (``GitHub
 # (REST API)``, ``GitHub (git)``), but one credential backs them all, so the
@@ -129,6 +134,8 @@ _DISPLAY_NAME_BY_SCOPE: Final[Mapping[str, str]] = {
     "huggingface-api": "Hugging Face",
     "openrouter-api": "OpenRouter",
     "tailscale-api": "Tailscale",
+    "fastmail-api": "Fastmail",
+    "fastmail-dav-api": "Fastmail (DAV)",
 }
 
 # Curated order in which services appear in the catalog (and thus in the
@@ -214,16 +221,22 @@ def _select_scope_for_permission(
 ) -> str:
     """Pick the scope a permission belongs to: the longest scope name that prefixes it.
 
-    A permission ``github-git-read`` belongs to scope ``github-git`` (the
-    longest scope whose name prefixes it). Permissions that match no scope name
-    (e.g. ``github-read-all`` under ``github-rest-api``) fall back to the first
-    scope declared in the file, which is the service's primary scope.
+    Scope names are compared with any ``-api`` suffix stripped, since the
+    permissions under a scope drop it: ``fastmail-dav-read-all`` belongs to
+    ``fastmail-dav-api``, and ``github-git-read`` to ``github-git``. The longest
+    matching prefix wins, so a permission under a more specific scope is not
+    claimed by a broader sibling. Permissions that match no scope name (e.g.
+    ``github-read-all`` under ``github-rest-api``) fall back to the first scope
+    declared in the file, which is the service's primary scope.
     """
+    prefix_by_scope = {scope: scope.removesuffix(_SCOPE_NAME_SUFFIX) for scope in scopes_in_order}
     matching_scopes = [
-        scope for scope in scopes_in_order if permission_name == scope or permission_name.startswith(f"{scope}-")
+        scope
+        for scope, prefix in prefix_by_scope.items()
+        if permission_name == prefix or permission_name.startswith(f"{prefix}-")
     ]
     if matching_scopes:
-        return max(matching_scopes, key=lambda scope: len(scope))
+        return max(matching_scopes, key=lambda scope: len(prefix_by_scope[scope]))
     return scopes_in_order[0]
 
 

@@ -1533,6 +1533,98 @@
       ]
     }
   ],
+  "fastmail": [
+    {
+      "scope": "fastmail-api",
+      "display_name": "Fastmail",
+      "description": "Any request to Fastmail's JMAP API or its blob download host. Accounts are homed on regional shards, so the API host may carry a shard prefix (phl.api.fastmail.com) and the blob host may carry a matching one (phl-www.fastmailusercontent.com).",
+      "permissions": [
+        {
+          "name": "fastmail-session",
+          "description": "Fetch the JMAP session document, which names the apiUrl, downloadUrl and account ids. Required for any JMAP client to function; reveals account metadata but no mail, contact or calendar content."
+        },
+        {
+          "name": "fastmail-read-all",
+          "description": "Read anything over JMAP: the session document, any /get, /changes, /query, /queryChanges or /parse method call, and blob downloads. Every method call in the batch must be a read, so a single write anywhere in the envelope fails to match."
+        },
+        {
+          "name": "fastmail-write-all",
+          "description": "Create, update or delete anything over JMAP (any /set, /copy, /import or /upload method call), and upload blobs. Includes sending mail via EmailSubmission/set \u2014 grant fastmail-send-mail alone if that is the only write needed."
+        },
+        {
+          "name": "fastmail-read-mail",
+          "description": "Read mailboxes, threads, messages and search snippets (RFC 8621)."
+        },
+        {
+          "name": "fastmail-write-mail",
+          "description": "Create, update, move or delete mailboxes and messages. Does not include sending \u2014 that is fastmail-send-mail."
+        },
+        {
+          "name": "fastmail-send-mail",
+          "description": "Send mail on the account's behalf (EmailSubmission/set). Separate from fastmail-write-mail because sending is externally visible and irreversible."
+        },
+        {
+          "name": "fastmail-read-contacts",
+          "description": "Read address books and contact cards (RFC 9610), including the legacy Contact and ContactGroup types."
+        },
+        {
+          "name": "fastmail-write-contacts",
+          "description": "Create, update or delete address books and contact cards."
+        },
+        {
+          "name": "fastmail-read-calendars",
+          "description": "Read calendars and calendar events (RFC 8984 / JSCalendar over JMAP)."
+        },
+        {
+          "name": "fastmail-write-calendars",
+          "description": "Create, update or delete calendars and calendar events, including sending invitations to participants."
+        },
+        {
+          "name": "fastmail-download-blobs",
+          "description": "Download message sources and attachments from the blob host named by the session document's downloadUrl."
+        },
+        {
+          "name": "fastmail-upload-blobs",
+          "description": "Upload blobs (attachments, message sources) for later use in a method call."
+        }
+      ]
+    },
+    {
+      "scope": "fastmail-dav-api",
+      "display_name": "Fastmail (DAV)",
+      "description": "Any request to Fastmail's CardDAV or CalDAV hosts. Separate from fastmail-api because these endpoints take an app password over Basic auth rather than the JMAP OAuth token.",
+      "permissions": [
+        {
+          "name": "fastmail-dav-discover",
+          "description": "Discover the authenticated principal and the collections belonging to it (a current-user-principal PROPFIND, RFC 5397). Required before any DAV client can locate an address book or calendar."
+        },
+        {
+          "name": "fastmail-dav-read-all",
+          "description": "Read any DAV resource: PROPFIND and REPORT to enumerate and sync collections, GET to fetch individual vCards or iCalendar objects."
+        },
+        {
+          "name": "fastmail-dav-write-all",
+          "description": "Create, update or delete any DAV resource or collection."
+        },
+        {
+          "name": "fastmail-dav-read-contacts",
+          "description": "Read address books and vCards over CardDAV (RFC 6352)."
+        },
+        {
+          "name": "fastmail-dav-write-contacts",
+          "description": "Create, update or delete address books and vCards over CardDAV."
+        },
+        {
+          "name": "fastmail-dav-read-calendars",
+          "description": "Read calendars and iCalendar objects over CalDAV (RFC 4791)."
+        },
+        {
+          "name": "fastmail-dav-write-calendars",
+          "description": "Create, update or delete calendars and events over CalDAV, including scheduling messages sent to participants."
+        }
+      ]
+    }
+  ],
   "google-slides": [
     {
       "scope": "google-slides-api",
