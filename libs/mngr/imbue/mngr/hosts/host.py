@@ -70,6 +70,7 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import retry_on_transient_ssh_error
+from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -4024,6 +4025,23 @@ def _build_start_agent_shell_command(
     steps.append(f"(tmux source-file {shlex.quote(str(tmux_config_path))} || true)")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=primary_window_name).as_shell_arg()
+
+    # Record the agent pane's ID, so every later send targets THAT pane rather than whichever
+    # pane happens to be active. `session:window` resolves to the active pane, so a single split
+    # sends the message into the new shell instead -- silently, with no error. `session:window.0`
+    # is no better, because panes renumber when one closes. A pane ID is unique for the pane's
+    # life and fails loudly once it is gone, which is the behaviour we want.
+    #
+    # A tmux session user-option is the right home: `@`-prefixed names are tmux's user namespace
+    # (stored, never interpreted), and the value lives and dies with the session -- so there is no
+    # file to go stale, nothing to clean up, and a restarted agent writes a fresh ID rather than
+    # inheriting a dead one. `|| true` because an agent whose pane cannot be read must still
+    # start; the send path falls back to the window target when the option is missing.
+    quoted_exact_agent_session = f"{shlex.quote('=' + session_name + ':')}"
+    steps.append(
+        f"(tmux set-option -t {quoted_exact_agent_session} {AGENT_PANE_ID_OPTION}"
+        f" \"$(tmux display-message -p -t {quoted_exact_agent_window} '#{{pane_id}}')\" || true)"
+    )
 
     # Pin the agent window to a stable, usable geometry. tmux's default window-size
     # policy ("latest") sizes a window to the most recent client -- and a brand-new

@@ -1,4 +1,5 @@
 import re
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -216,12 +217,32 @@ class AgentNotFoundOnHostError(AgentError):
         super().__init__(f"Agent {agent_id} not found on host {host_id}")
 
 
+class SendFailureKind(StrEnum):
+    """What KIND of thing stopped a send, for a client deciding what to offer the user.
+
+    The reason a send failed is written for a human and varies per harness, which makes it
+    useless for choosing between "let them try again" and "only a restart will help". This is
+    the machine-readable half: small, closed, and about the agent rather than about any UI.
+    mngr does not know what a button is, so it names the situation and stops there.
+    """
+
+    # A dialog, shell mode, or anything else holding the TUI's input. Resolvable in place.
+    INPUT_BLOCKED = "input_blocked"
+    # The harness is not accepting messages yet. Worth trying again shortly.
+    NOT_READY = "not_ready"
+    # There is nothing to talk to -- the pane is gone. Trying again cannot help.
+    AGENT_UNREACHABLE = "agent_unreachable"
+    # Unclassified. The default, so an unlabelled failure keeps whatever the client does today.
+    UNKNOWN = "unknown"
+
+
 class SendMessageError(AgentError):
     """Failed to send a message to an agent."""
 
-    def __init__(self, agent_name: str, reason: str) -> None:
+    def __init__(self, agent_name: str, reason: str, kind: SendFailureKind = SendFailureKind.UNKNOWN) -> None:
         self.agent_name = agent_name
         self.reason = reason
+        self.kind = kind
         super().__init__(f"Failed to send message to agent {agent_name}: {reason}")
 
 

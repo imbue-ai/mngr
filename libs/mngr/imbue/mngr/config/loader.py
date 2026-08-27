@@ -831,7 +831,7 @@ def _parse_agent_types(
     for name, raw_config in raw_types.items():
         # Custom types with a parent_type should use the parent's config class,
         # since the parent type defines the valid fields (e.g., ClaudeAgentConfig
-        # has auto_dismiss_dialogs). Without this, unregistered custom type names
+        # has auto_dismiss_dialogs_at_startup). Without this, unregistered custom type names
         # fall back to the base AgentTypeConfig which rejects parent-specific fields.
         # A parent_type may itself be an alias (e.g. parent_type = "agy"), so
         # resolve it to the canonical type before looking up the config class.

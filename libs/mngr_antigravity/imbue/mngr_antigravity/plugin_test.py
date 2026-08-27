@@ -61,10 +61,10 @@ def test_antigravity_agent_config_has_correct_defaults() -> None:
     assert config.cli_args == ()
     assert config.parent_type is None
     assert config.auto_allow_permissions is False
-    # Default-off, matching mngr_claude's auto_dismiss_dialogs posture: trusting
+    # Default-off, matching mngr_claude's auto_dismiss_dialogs_at_startup posture: trusting
     # the source repo (writing to the user's shared global settings) should be an
-    # explicit choice (--yes or auto_dismiss_dialogs=True), not a default.
-    assert config.auto_dismiss_dialogs is False
+    # explicit choice (--yes or auto_dismiss_dialogs_at_startup=True), not a default.
+    assert config.auto_dismiss_dialogs_at_startup is False
     # Per-agent settings default to a copy of the user's real settings (claude-parity).
     assert config.sync_home_settings is True
     # No structured permission schema -- a free-form blob mirroring mngr_claude.
@@ -234,7 +234,7 @@ def test_provision_runs_install_check_when_enabled(
     ``command -v`` probe proves the install-check line executed.
     """
     agent = _make_antigravity_agent(
-        local_provider, tmp_path, AntigravityAgentConfig(check_installation=True, auto_dismiss_dialogs=True)
+        local_provider, tmp_path, AntigravityAgentConfig(check_installation=True, auto_dismiss_dialogs_at_startup=True)
     )
     stub_host: Any = _BinaryPresentStubHost(host_dir=tmp_path, is_local=True)
     agent.provision(
@@ -295,8 +295,10 @@ def antigravity_agent_auto_dismiss(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> AntigravityAgent:
-    """Agent with `auto_dismiss_dialogs=True` so provision() trusts silently."""
-    return _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True))
+    """Agent with `auto_dismiss_dialogs_at_startup=True` so provision() trusts silently."""
+    return _make_antigravity_agent(
+        local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True)
+    )
 
 
 class _ConfirmingAntigravityAgent(AntigravityAgent):
@@ -756,7 +758,7 @@ def test_provision_persists_source_repo_under_auto_dismiss_dialogs(
     antigravity_agent_auto_dismiss: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """`auto_dismiss_dialogs=True` (per-agent-type opt-in) silently trusts the source repo."""
+    """`auto_dismiss_dialogs_at_startup=True` (per-agent-type opt-in) silently trusts the source repo."""
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
     global_settings = _read_global_settings(isolated_home)
@@ -801,10 +803,10 @@ def test_provision_aborts_in_non_interactive_mode_without_opt_in(
     antigravity_agent: AntigravityAgent,
     isolated_home: Path,
 ) -> None:
-    """Non-interactive without --yes or auto_dismiss_dialogs: exit cleanly rather than run untrusted code.
+    """Non-interactive without --yes or auto_dismiss_dialogs_at_startup: exit cleanly rather than run untrusted code.
 
     Default mngr_ctx has is_interactive=False and is_auto_approve=False;
-    the antigravity_agent fixture defaults auto_dismiss_dialogs=False, so
+    the antigravity_agent fixture defaults auto_dismiss_dialogs_at_startup=False, so
     no path to a trust write exists and we must abort.
     """
     with pytest.raises(SystemExit) as excinfo:
@@ -966,7 +968,9 @@ def test_provision_writes_per_agent_settings_with_overrides_and_synced_base(
     )
     overrides = {"model": "Gemini 3.5 Flash (Medium)", "permissions": {"allow": ["command(git)"]}}
     agent = _make_antigravity_agent(
-        local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True, settings_overrides=overrides)
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, settings_overrides=overrides),
     )
 
     _provision(agent)
@@ -987,7 +991,9 @@ def test_provision_per_agent_settings_ignores_user_base_when_sync_disabled(
     """sync_home_settings=False starts from an empty base, not the user's real settings."""
     get_antigravity_settings_path(isolated_home).write_text(json.dumps({"colorScheme": "dark"}))
     agent = _make_antigravity_agent(
-        local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True, sync_home_settings=False)
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, sync_home_settings=False),
     )
 
     _provision(agent)
@@ -1027,7 +1033,9 @@ def test_provision_copies_oauth_token_when_symlink_disabled(
 ) -> None:
     """symlink_oauth_token=False copies the token for full isolation."""
     agent = _make_antigravity_agent(
-        local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True, symlink_oauth_token=False)
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, symlink_oauth_token=False),
     )
     _provision(agent)
     dest = get_antigravity_oauth_token_path(agent._get_agy_home_dir())
@@ -1047,7 +1055,9 @@ def test_provision_symlinks_token_to_shared_path_even_when_shared_absent(
     Does NOT request ``isolated_home`` (so no shared token is seeded); ``$HOME``
     is still the autouse-isolated ``tmp_path``.
     """
-    agent = _make_antigravity_agent(local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True))
+    agent = _make_antigravity_agent(
+        local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True)
+    )
 
     _provision(agent)
 
@@ -1070,7 +1080,9 @@ def test_provision_copy_mode_skips_when_shared_token_absent(
     autouse-isolated ``tmp_path``.
     """
     agent = _make_antigravity_agent(
-        local_provider, tmp_path, AntigravityAgentConfig(auto_dismiss_dialogs=True, symlink_oauth_token=False)
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(auto_dismiss_dialogs_at_startup=True, symlink_oauth_token=False),
     )
 
     _provision(agent)
@@ -1198,7 +1210,7 @@ def test_provision_composes_user_statusline_from_settings_overrides(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(
-            auto_dismiss_dialogs=True,
+            auto_dismiss_dialogs_at_startup=True,
             settings_overrides={"statusLine": {"type": "command", "command": "echo user-owned"}},
         ),
     )
@@ -1224,7 +1236,7 @@ def test_provision_warns_and_drops_non_composable_statusline(
         local_provider,
         tmp_path,
         AntigravityAgentConfig(
-            auto_dismiss_dialogs=True,
+            auto_dismiss_dialogs_at_startup=True,
             settings_overrides={"statusLine": {"type": "static", "text": "unsupported"}},
         ),
     )
@@ -1288,11 +1300,11 @@ def antigravity_agent_without_common_transcript(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
 ) -> AntigravityAgent:
-    """Agent with `auto_dismiss_dialogs=True` so provision() can complete in tests."""
+    """Agent with `auto_dismiss_dialogs_at_startup=True` so provision() can complete in tests."""
     return _make_antigravity_agent(
         local_provider,
         tmp_path,
-        AntigravityAgentConfig(emit_common_transcript=False, auto_dismiss_dialogs=True),
+        AntigravityAgentConfig(emit_common_transcript=False, auto_dismiss_dialogs_at_startup=True),
     )
 
 

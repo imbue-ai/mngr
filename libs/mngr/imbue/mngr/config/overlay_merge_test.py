@@ -91,7 +91,7 @@ class _MngrClaudeLikeConfig(AgentTypeConfig):
     """
 
     settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(default_factory=dict)
-    auto_dismiss_dialogs: bool | None = Field(default=None)
+    auto_dismiss_dialogs_at_startup: bool | None = Field(default=None)
 
 
 @pytest.fixture
@@ -117,12 +117,14 @@ def _registered_mngr_config_classes() -> Iterator[None]:
 def test_mngr_container_entry_subclass_is_preserved() -> None:
     """A ``claude`` (subclass) ``agent_types`` entry round-trips as the subclass
     through ``MngrConfig.merge_with``, so subclass-only fields survive."""
-    base = _base_from_layers({"agent_types": {"c": {"parent_type": "claude", "auto_dismiss_dialogs": True}}})
+    base = _base_from_layers(
+        {"agent_types": {"c": {"parent_type": "claude", "auto_dismiss_dialogs_at_startup": True}}}
+    )
     override = _parse_layer({"agent_types": {"c": {"parent_type": "claude", "cli_args": "--y"}}})
     actual, _ = base.merge_with(override)
     entry = actual.agent_types[AgentTypeName("c")]
     assert type(entry) is _MngrClaudeLikeConfig
-    assert entry.auto_dismiss_dialogs is True
+    assert entry.auto_dismiss_dialogs_at_startup is True
 
 
 class _PluginWithDirectoryConfig(PluginConfig):

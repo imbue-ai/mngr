@@ -2,13 +2,14 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.agents.tui_utils import TUI_READY_TIMEOUT_SECONDS
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_claude.plugin import DialogDetectedError
-from imbue.mngr_claude.plugin import _INPUT_PROMPT_GLYPH
+from imbue.mngr_claude.plugin import INPUT_PROMPT_GLYPH
 from imbue.mngr_claude.plugin_test import make_claude_agent
 
 # The fake tmux sessions these tests drive just need to stay alive long enough
@@ -19,10 +20,25 @@ _KEEP_ALIVE_SLEEP_SECONDS = 847601
 
 @pytest.mark.acceptance
 @pytest.mark.tmux
+# Refusing an unrecognised pane is deliberately not instant: it first waits the readiness
+# window for an input box to appear, since a pane that has not finished drawing looks exactly
+# like one holding something unnameable. So this test spends that window before it can assert,
+# and needs a budget longer than it.
+@pytest.mark.timeout(TUI_READY_TIMEOUT_SECONDS + 30.0)
 def test_send_message_raises_dialog_detected_when_dialog_visible(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """send_message should raise DialogDetectedError when a dialog is blocking the pane."""
+    """A dialog holding the pane refuses the send with an actionable error.
+
+    The trust dialog has no class of its own: it is prevented at launch by
+    ``auto_dismiss_dialogs_at_startup``. If one appears at send time anyway it is a surface
+    mngr does not recognise, and refusing is the safe answer -- pressing keys at an
+    unrecognised prompt is damage nobody can see.
+
+    The refusal comes after the readiness window, not immediately: an unpainted pane is
+    indistinguishable from an unrecognised one, so mngr waits to see whether an input box turns
+    up before concluding that something is holding it.
+    """
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     session_name = agent.session_name
     window_name = agent.mngr_ctx.config.tmux.primary_window_name
@@ -40,7 +56,7 @@ def test_send_message_raises_dialog_detected_when_dialog_visible(
             error_message="Dialog text not visible in pane",
         )
 
-        with pytest.raises(DialogDetectedError, match="trust dialog"):
+        with pytest.raises(DialogDetectedError, match="waiting on something in its terminal"):
             agent.send_message("hello")
     finally:
         cleanup_tmux_session(session_name)
@@ -73,7 +89,7 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
         # be embedded into the pane text directly.)
         # Name the primary window so it matches agent.tmux_target (which targets by name).
         agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'echo \"{_INPUT_PROMPT_GLYPH} Normal output here\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
+            f"tmux new-session -d -s '{session_name}' -n '{window_name}' 'echo \"{INPUT_PROMPT_GLYPH} Normal output here\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
             timeout_seconds=5.0,
         )
 

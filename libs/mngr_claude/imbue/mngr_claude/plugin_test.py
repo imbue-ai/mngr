@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -90,15 +89,19 @@ from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import get_managed_settings_path
+from imbue.mngr_claude.dialogs import EmptyShellMode
+from imbue.mngr_claude.dialogs import PendingShellCommand
+from imbue.mngr_claude.dialogs import classify
+from imbue.mngr_claude.dialogs import has_input_prompt_line
+from imbue.mngr_claude.dialogs import is_pending_shell_command
+from imbue.mngr_claude.dialogs import is_shell_command_message
+from imbue.mngr_claude.dialogs import is_stranded_in_empty_shell_mode
 from imbue.mngr_claude.plugin import CLAUDE_INSTALL_PATH
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
-from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
 from imbue.mngr_claude.plugin import DialogDetectedError
 from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
-from imbue.mngr_claude.plugin import NumberedSelectorDialogIndicator
 from imbue.mngr_claude.plugin import ProvisioningContext
-from imbue.mngr_claude.plugin import ShellCommandPendingError
 from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
@@ -124,12 +127,7 @@ from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
 from imbue.mngr_claude.plugin import compute_claude_json_flags
 from imbue.mngr_claude.plugin import compute_settings_json_flags
-from imbue.mngr_claude.plugin import extract_blocking_selector_block
 from imbue.mngr_claude.plugin import get_files_for_deploy
-from imbue.mngr_claude.plugin import has_input_prompt_line
-from imbue.mngr_claude.plugin import is_pending_shell_command
-from imbue.mngr_claude.plugin import is_shell_command_message
-from imbue.mngr_claude.plugin import is_stranded_in_empty_shell_mode
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import should_trust_work_dir
@@ -1593,14 +1591,27 @@ def test_get_expected_process_name_returns_claude(
 def test_tui_ready_indicator_matches_column_zero_input_prompt_only(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Readiness matches a line beginning with the glyph at column 0, not an indented selector option."""
+    """Readiness is the input box: the glyph at column 0, near the bottom of the pane.
+
+    A predicate rather than a pattern, because the glyph alone does not identify the box --
+    claude draws every past user turn the same way, so a whole-pane match reports ready for
+    any conversation with history however the pane is really occupied.
+    """
     agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     indicator = agent.get_tui_ready_indicator()
-    assert isinstance(indicator, re.Pattern)
+    assert callable(indicator)
     # The input prompt (glyph at column 0) counts as ready.
-    assert indicator.search("some output\n❯ ") is not None
+    assert indicator("some output\n❯ ")
     # An open selector's indented option line (`  ❯ 1. ...`) must NOT count as ready.
-    assert indicator.search("────\n  ❯ 1. Yes, switch\n    2. No") is None
+    assert not indicator("────\n  ❯ 1. Yes, switch\n    2. No")
+    # A past turn echoed above a dialog must NOT count as ready -- the regression this fixes.
+    occupied = "\n".join(
+        ["❯ /theme", "  ⎿  Theme set to dark"]
+        + ["   Settings  Status   Config   Usage   Stats"]
+        + [f"     Some setting {index}   true" for index in range(14)]
+        + ["   Enter/Space to change · / to search · Esc to close"]
+    )
+    assert not indicator(occupied)
 
 
 def _run_content_probe(host: OnlineHostInterface, probe: SubmissionEvidenceProbe, state_dir: Path) -> tuple[str, str]:
@@ -1855,42 +1866,6 @@ _CLEARED_PANE = "● all done\n❯ "
 _TARGET = TmuxWindowTarget(session_name="test-session", window=0)
 
 
-def test_extract_blocking_selector_block_detects_model_switch_dialog() -> None:
-    """The /model confirmation selector is detected and the block spans the rule line to the options."""
-    block = extract_blocking_selector_block(_MODEL_SELECTOR_PANE)
-    assert block is not None
-    assert block.startswith("─")
-    assert "❯ 1. Yes, switch to Fable 5" in block
-    assert "2. No, go back" in block
-    # The command echo above the rule line is not part of the block.
-    assert "/model fable" not in block
-
-
-def test_extract_blocking_selector_block_detects_model_picker() -> None:
-    """The bare-/model picker (▔-ruled) is detected even though its rule glyph differs from ─."""
-    block = extract_blocking_selector_block(_MODEL_PICKER_PANE)
-    assert block is not None
-    assert block.startswith("▔")
-    assert "❯ 5. Haiku ✔" in block
-    # The command echo above the rule line is not part of the block.
-    assert "/model" not in block
-
-
-def test_numbered_selector_indicator_matches_model_picker() -> None:
-    """The picker also registers as a dialog indicator (so the preflight check catches it)."""
-    assert NumberedSelectorDialogIndicator().matches(_MODEL_PICKER_PANE) is True
-
-
-def test_extract_blocking_selector_block_ignores_input_row_and_bare_arrows() -> None:
-    """Detection needs a rule line AND an indented highlighted numbered option -- no false positives."""
-    # Plain input row (glyph at column 0) is not a selector.
-    assert extract_blocking_selector_block("● done\n❯ ") is None
-    # An indented arrow with no preceding rule line / number is not a selector.
-    assert extract_blocking_selector_block("steps:\n  ❯ do the thing\n❯ ") is None
-    # A rule line with no highlighted numbered option is not a selector.
-    assert extract_blocking_selector_block("────────\n  some prose\n❯ ") is None
-
-
 def test_has_input_prompt_line_matches_only_column_zero_glyph() -> None:
     """The input prompt is a column-0 glyph; an indented selector option is not it."""
     assert has_input_prompt_line("output\n❯ ") is True
@@ -1949,19 +1924,6 @@ def test_detect_preexisting_input_text_ignores_selector_option_line(
     assert agent._detect_preexisting_input_text(_SELECTOR_A) is None
 
 
-def test_numbered_selector_indicator_and_preflight_detection(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """The generic selector indicator matches structurally; preflight returns block vs caption."""
-    agent, _ = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
-    assert NumberedSelectorDialogIndicator().matches(_MODEL_SELECTOR_PANE) is True
-    assert NumberedSelectorDialogIndicator().matches("❯ ") is False
-    # The generic selector yields its block; a known caption yields its description.
-    assert agent._detect_preflight_dialog(_MODEL_SELECTOR_PANE) is not None
-    assert agent._detect_preflight_dialog("Yes, I trust this folder") == "trust dialog"
-    assert agent._detect_preflight_dialog("● just a normal turn\n❯ ") is None
-
-
 class _ScriptedPaneClaudeAgent(ClaudeAgent):
     """Test double: pane content is scripted and advances one frame per Enter, which is counted.
 
@@ -1977,8 +1939,23 @@ class _ScriptedPaneClaudeAgent(ClaudeAgent):
     # past) this position (i.e. after enough Enter-accepts). A large value means it never appears.
     session_started_ready_at_position: int = Field(default=0)
 
-    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
+    def _send_target_arg(self, tmux_target: TmuxWindowTarget) -> str:
+        # This double stands in for the pane's CONTENT, not for tmux. Resolving the real pane
+        # would shell out to a tmux server these tests neither have nor want.
+        return tmux_target.as_shell_arg()
+
+    def _clear_pane_modes(self, target_arg: str) -> None:
+        return None
+
+    def _capture_pane_content(
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+    ) -> str | None:
         return self.scripted_panes[min(self.pane_position, len(self.scripted_panes) - 1)]
+
+    def _unpainted_pane_grace_seconds(self) -> float:
+        # Production waits the full readiness window here; a scripted pane never changes, so
+        # waiting it out would only make the suite slow.
+        return 0.1
 
     def _press_enter(self, tmux_target: TmuxWindowTarget) -> None:
         self.enter_press_count = self.enter_press_count + 1
@@ -1995,12 +1972,29 @@ class _ScriptedPaneClaudeAgent(ClaudeAgent):
         return super()._check_file_exists(path)
 
 
+class _PaintsLaterClaudeAgent(_ScriptedPaneClaudeAgent):
+    """Test double whose pane advances once per CAPTURE rather than per Enter.
+
+    Models a TUI that finishes painting a beat after it is first read -- which is what preflight
+    sees on a freshly started agent, since the session_started hook fires when claude starts
+    rather than when its TUI has drawn.
+    """
+
+    def _capture_pane_content(
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+    ) -> str | None:
+        pane = self.scripted_panes[min(self.pane_position, len(self.scripted_panes) - 1)]
+        self.pane_position += 1
+        return pane
+
+
 def _make_scripted_agent(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     panes: list[str | None],
     agent_config: ClaudeAgentConfig | None = None,
+    agent_class: type[_ScriptedPaneClaudeAgent] = _ScriptedPaneClaudeAgent,
 ) -> _ScriptedPaneClaudeAgent:
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
@@ -2008,7 +2002,7 @@ def _make_scripted_agent(
     work_dir.mkdir()
     if agent_config is None:
         agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=False)
-    return _ScriptedPaneClaudeAgent.model_construct(
+    return agent_class.model_construct(
         id=AgentId.generate(),
         name=AgentName("test-agent"),
         agent_type=AgentTypeName("claude"),
@@ -2020,48 +2014,6 @@ def _make_scripted_agent(
         host=host,
         scripted_panes=panes,
     )
-
-
-def test_accept_dialogs_clears_selector_and_records_one_accept(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """One selector, ample depth: one Enter, cleared, one recorded event."""
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_SELECTOR_A, _CLEARED_PANE])
-    remaining = agent._accept_dialogs_up_to_depth(_TARGET, depth=5, detect_dialog=extract_blocking_selector_block)
-    assert remaining is None
-    assert agent.enter_press_count == 1
-    assert agent.recorded_events == [("auto_accepted_dialog", extract_blocking_selector_block(_SELECTOR_A))]
-
-
-def test_accept_dialogs_clears_chained_selectors(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """Two chained selectors clear with two Enters when depth allows."""
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_SELECTOR_A, _SELECTOR_B, _CLEARED_PANE])
-    remaining = agent._accept_dialogs_up_to_depth(_TARGET, depth=5, detect_dialog=extract_blocking_selector_block)
-    assert remaining is None
-    assert agent.enter_press_count == 2
-
-
-def test_accept_dialogs_depth_zero_returns_block_without_pressing_enter(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """At depth 0 a present selector is detected and returned, and no Enter is sent."""
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_SELECTOR_A])
-    remaining = agent._accept_dialogs_up_to_depth(_TARGET, depth=0, detect_dialog=extract_blocking_selector_block)
-    assert remaining == extract_blocking_selector_block(_SELECTOR_A)
-    assert agent.enter_press_count == 0
-
-
-def test_accept_dialogs_exhausts_depth_and_returns_still_blocking(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A dialog that keeps re-chaining past the depth budget is reported as still blocking."""
-    # Distinct frames each step so the change-poll returns immediately (no timeout waits).
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_SELECTOR_A, _SELECTOR_B, _SELECTOR_A])
-    remaining = agent._accept_dialogs_up_to_depth(_TARGET, depth=2, detect_dialog=extract_blocking_selector_block)
-    assert remaining is not None
-    assert agent.enter_press_count == 2
 
 
 def test_post_submit_dialog_observe_seconds_defaults_to_module_constant() -> None:
@@ -2087,66 +2039,14 @@ def test_dialog_observe_window_uses_configured_value(
     assert agent._dialog_observe_window_seconds() == 0.25
 
 
-def test_post_submit_check_raises_when_selector_persists_at_depth_zero(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A message that opens a selector, with auto-accept disabled, raises the delivered-but-blocked error."""
-    config = ClaudeAgentConfig(
-        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_prompt_depth=0
-    )
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE], config)
-    with pytest.raises(MessageDeliveredButBlockedError):
-        agent._run_post_submit_dialog_check(_TARGET)
-    assert agent.enter_press_count == 0
-
-
-def test_post_submit_check_auto_accepts_and_clears(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """With auto-accept enabled, a post-submit selector is cleared and the send does not raise."""
-    config = ClaudeAgentConfig(
-        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_prompt_depth=5
-    )
-    agent = _make_scripted_agent(
-        local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE, _CLEARED_PANE], config
-    )
-    agent._run_post_submit_dialog_check(_TARGET)
-    assert agent.enter_press_count == 1
-
-
-def test_preflight_raises_dialog_detected_for_selector_at_depth_zero(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A selector already present at send start aborts the send with DialogDetectedError when depth is 0."""
-    config = ClaudeAgentConfig(
-        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_preflight_prompt_depth=0
-    )
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE], config)
-    with pytest.raises(DialogDetectedError):
-        agent._preflight_send_message(_TARGET)
-    assert agent.enter_press_count == 0
-
-
-def test_preflight_auto_accepts_preexisting_selector(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A pre-existing selector is auto-accepted (and the send proceeds) when the preflight depth allows."""
-    config = ClaudeAgentConfig(
-        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_preflight_prompt_depth=3
-    )
-    agent = _make_scripted_agent(
-        local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE, _CLEARED_PANE], config
-    )
-    agent._preflight_send_message(_TARGET)
-    assert agent.enter_press_count == 1
-
-
-def test_preflight_permissions_marker_is_hard_raise_never_auto_accepted(
+def test_preflight_permissions_marker_is_hard_raise_even_with_wildcard(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """The permissions_waiting marker is always a hard raise -- never auto-accepted by the depth knob."""
     config = ClaudeAgentConfig(
-        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_preflight_prompt_depth=5
+        check_installation=False,
+        preserve_sessions_on_destroy=False,
+        sensibly_deal_with_dialogs=("ALL_KNOWN_DIALOGS",),
     )
     agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_CLEARED_PANE], config)
     agent_dir = agent._get_agent_dir()
@@ -2167,18 +2067,27 @@ def test_preflight_refuses_a_pending_shell_command(
     """A human's unsubmitted `!<command>` is refused at the send preflight with an actionable error.
 
     Witnesses message-delivery.pending-shell-command-blocks: delivery is blocked by design and
-    surfaced immediately -- the send raises ShellCommandPendingError (naming the recovery) rather
-    than proceeding into the readiness timeout it would otherwise hit while shell mode hides `❯`.
+    surfaced immediately -- the send raises rather than proceeding into the readiness timeout it
+    would otherwise hit while shell mode takes the input box away. The recovery wording comes
+    from the dialog itself, so there is one error type for "something is holding the input".
     """
     agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_COMMAND_SHELL_MODE_PANE])
-    with pytest.raises(ShellCommandPendingError) as exc_info:
+    with pytest.raises(DialogDetectedError) as exc_info:
         agent._preflight_send_message(_TARGET)
     message = str(exc_info.value)
-    assert "mngr connect" in message and "Enter" in message and "Escape" in message
+    # The actionable error the feature promises, and the same recovery PR #397 gave: what state
+    # the agent is in and which keys resolve it. The 'mngr connect' clause #397 also carried is
+    # deliberately gone -- it named a CLI command inside a string a graphical client renders in a
+    # modal next to a terminal tab, and the sentence before it already says to use the terminal.
+    assert "shell mode" in message and "Enter" in message and "Escape" in message
+    assert "mngr connect" not in message
 
-    # A bare-`!` empty strand is auto-recovered after submit, not refused here, so preflight passes.
-    empty_agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_EMPTY_SHELL_MODE_PANE])
-    empty_agent._preflight_send_message(_TARGET)
+    # A bare-`!` empty strand is NOT refused: mngr's own send is the only thing that can
+    # produce it, so preflight backspaces out of it and carries on. It classifies as the
+    # self-clearing kind rather than the blocking one; the keypress itself is covered in
+    # dialogs_test.py, which does not need a live pane.
+    assert isinstance(classify(_EMPTY_SHELL_MODE_PANE), EmptyShellMode)
+    assert isinstance(classify(_COMMAND_SHELL_MODE_PANE), PendingShellCommand)
 
 
 class _BlockedAfterDeliveryClaudeAgent(ClaudeAgent):
@@ -2226,43 +2135,6 @@ def test_send_message_routes_delivered_but_blocked_to_blocked_agents(
     assert [name for name, _error in result.blocked_agents] == ["test-agent"]
     assert result.failed_agents == []
     assert result.successful_agents == []
-
-
-def test_wait_for_ready_signal_auto_accepts_startup_selector(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """On the create path, a selector blocking startup is auto-accepted so readiness then signals.
-
-    This exercises the fix that runs the startup dialog auto-accept even for a freshly created
-    agent: ClaudeAgent skips the base class's generic TUI-ready wait (which would otherwise hang if
-    the selector suppressed the column-0 prompt) and relies on the session_started marker, which
-    here appears only after the selector is accepted.
-    """
-    config = ClaudeAgentConfig(
-        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_preflight_prompt_depth=5
-    )
-    agent = _make_scripted_agent(
-        local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE, _CLEARED_PANE], config
-    )
-    # session_started is absent while the selector is up (position 0) and present after one accept.
-    agent.session_started_ready_at_position = 1
-    agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=lambda: None, timeout=0.3)
-    assert agent.enter_press_count == 1
-
-
-def test_wait_for_ready_signal_raises_dialog_detected_when_startup_selector_persists_at_depth_zero(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """With auto-accept disabled, a selector blocking startup surfaces as DialogDetectedError."""
-    config = ClaudeAgentConfig(
-        check_installation=False, preserve_sessions_on_destroy=False, auto_accept_preflight_prompt_depth=0
-    )
-    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, [_MODEL_SELECTOR_PANE], config)
-    # session_started never appears (the selector keeps blocking it).
-    agent.session_started_ready_at_position = 99
-    with pytest.raises(DialogDetectedError):
-        agent.wait_for_ready_signal(is_readiness_awaited=True, start_action=lambda: None, timeout=0.3)
-    assert agent.enter_press_count == 0
 
 
 def _make_hooks_test_agent(
@@ -2746,13 +2618,13 @@ def test_provision_shared_mode_dismisses_dialogs_in_global_config_but_not_permis
     shared_dir = tmp_path / "shared"
     shared_dir.mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
-    # auto_dismiss_dialogs lets the non-interactive provision silently dismiss dialogs.
+    # auto_dismiss_dialogs_at_startup lets the non-interactive provision silently dismiss dialogs.
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(
-            check_installation=False, isolate_local_config_dir=False, auto_dismiss_dialogs=True
+            check_installation=False, isolate_local_config_dir=False, auto_dismiss_dialogs_at_startup=True
         ),
     )
     _init_git_with_gitignore(agent.work_dir)
@@ -2919,8 +2791,8 @@ def test_provision_skips_trust_when_git_common_dir_is_none(
 def test_provision_trusts_working_directory_when_enabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should add trust for work_dir when auto_dismiss_dialogs is True."""
-    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs=True)
+    """provision should add trust for work_dir when auto_dismiss_dialogs_at_startup is True."""
+    config = ClaudeAgentConfig(check_installation=False, auto_dismiss_dialogs_at_startup=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=config)
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
@@ -2937,7 +2809,7 @@ def test_provision_trusts_working_directory_when_enabled(
 def test_provision_does_not_auto_dismiss_dialogs_when_disabled(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should not add trust when auto_dismiss_dialogs is False (default)."""
+    """provision should not add trust when auto_dismiss_dialogs_at_startup is False (default)."""
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     _write_all_dialogs_dismissed(agent.work_dir)
 
@@ -2945,7 +2817,7 @@ def test_provision_does_not_auto_dismiss_dialogs_when_disabled(
 
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
-    # auto_dismiss_dialogs=False (default) means no additional trust was added.
+    # auto_dismiss_dialogs_at_startup=False (default) means no additional trust was added.
     # The projects map must contain ONLY the pre-existing work_dir entry; an extra
     # key would mean a dialog/trust entry was auto-dismissed despite the flag.
     config_path = Path.home() / ".claude.json"
@@ -2954,9 +2826,9 @@ def test_provision_does_not_auto_dismiss_dialogs_when_disabled(
 
 
 def test_auto_dismiss_dialogs_defaults_to_false() -> None:
-    """Verify that auto_dismiss_dialogs defaults to False for ClaudeAgentConfig."""
+    """Verify that auto_dismiss_dialogs_at_startup defaults to False for ClaudeAgentConfig."""
     config = ClaudeAgentConfig()
-    assert config.auto_dismiss_dialogs is False
+    assert config.auto_dismiss_dialogs_at_startup is False
 
 
 def test_on_before_provisioning_validates_trust_for_worktree(
@@ -4028,44 +3900,6 @@ def test_no_subscription_warning_without_oauth_credentials(
 
 
 # =============================================================================
-# CostThresholdDialogIndicator Tests
-# =============================================================================
-
-
-def test_cost_threshold_indicator_matches_when_both_strings_present() -> None:
-    """CostThresholdDialogIndicator.matches should return True when both strings are present."""
-    indicator = CostThresholdDialogIndicator()
-    content = (
-        "You've spent $5 on the Anthropic API this session.\n\n"
-        "Learn more about how to monitor your spending:\n"
-        "https://code.claude.com/docs/en/costs"
-    )
-    assert indicator.matches(content) is True
-
-
-def test_cost_threshold_indicator_no_match_with_only_spending_text() -> None:
-    """CostThresholdDialogIndicator.matches should return False with only the spending text."""
-    indicator = CostThresholdDialogIndicator()
-    content = "Learn more about how to monitor your spending:\nhttps://example.com"
-    assert indicator.matches(content) is False
-
-
-def test_cost_threshold_indicator_no_match_with_only_url() -> None:
-    """CostThresholdDialogIndicator.matches should return False with only the docs URL."""
-    indicator = CostThresholdDialogIndicator()
-    content = "Visit https://code.claude.com/docs for help"
-    assert indicator.matches(content) is False
-
-
-def test_cost_threshold_indicator_no_match_with_neither_string() -> None:
-    """CostThresholdDialogIndicator.matches should return False with unrelated content."""
-    indicator = CostThresholdDialogIndicator()
-    content = "Claude Code is running normally"
-    assert indicator.matches(content) is False
-
-
-# =============================================================================
-# Dialog Dismissal Tests
 # =============================================================================
 
 
@@ -7153,3 +6987,29 @@ def test_stacked_role_prompts_reach_claude_as_one_flag_carrying_every_block() ->
 def test_claude_emits_no_prompt_flag_when_no_role_contributed_one() -> None:
     agent = ClaudeAgent.model_construct(agent_config=ClaudeAgentConfig(check_installation=False))
     assert agent._build_append_system_prompt_args() == ()
+
+
+def test_preflight_waits_for_an_unpainted_pane_instead_of_refusing(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A pane that has not drawn its input box yet is waited for, not refused.
+
+    `create` delivers a new agent's first message as soon as the session_started hook fires,
+    and that hook runs when claude STARTS, not when its TUI has painted. Preflight runs before
+    the readiness wait, so refusing on the first look would fail the opening message of every
+    new agent -- the `/welcome` chat among them.
+    """
+    blank_then_ready: list[str | None] = ["", _NORMAL_READY_PANE]
+    agent = _make_scripted_agent(
+        local_provider, tmp_path, temp_mngr_ctx, blank_then_ready, agent_class=_PaintsLaterClaudeAgent
+    )
+    agent._preflight_send_message(_TARGET)
+
+
+def test_preflight_still_refuses_a_pane_that_never_paints(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The grace above is a wait, not a bypass: a pane that stays unreadable is still refused."""
+    agent = _make_scripted_agent(local_provider, tmp_path, temp_mngr_ctx, ["something we cannot name"])
+    with pytest.raises(DialogDetectedError):
+        agent._preflight_send_message(_TARGET)

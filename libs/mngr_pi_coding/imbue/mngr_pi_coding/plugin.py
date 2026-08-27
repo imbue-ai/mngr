@@ -191,7 +191,7 @@ _PI_TRUST_FILE_NAME: str = "trust.json"
 # files for this run"). When passed, pi's ``resolveProjectTrusted`` short-circuits to
 # trusted regardless of any ``.pi``/``.agents/skills`` trust inputs in the cwd and
 # without a saved decision, so the interactive trust dialog never appears. mngr adds it
-# to the launch command when ``auto_dismiss_dialogs`` is set, so an unattended agent is
+# to the launch command when ``auto_dismiss_dialogs_at_startup`` is set, so an unattended agent is
 # trusted via pi's own code path rather than relying solely on the seeded trust store.
 _PI_APPROVE_FLAG: str = "--approve"
 
@@ -428,7 +428,7 @@ class PiCodingAgentConfig(AgentTypeConfig):
         default=True,
         description="Capture the raw pi message stream.",
     )
-    auto_dismiss_dialogs: bool = Field(
+    auto_dismiss_dialogs_at_startup: bool = Field(
         default=False,
         description=(
             "Trust the workspace without prompting, suppressing pi's 'Trust project folder?' "
@@ -438,6 +438,7 @@ class PiCodingAgentConfig(AgentTypeConfig):
             "non-interactively."
         ),
     )
+
     preserve_on_destroy: bool = Field(
         default=True,
         description="When destroying this agent, first copy its transcripts and resumable session "
@@ -645,7 +646,7 @@ class PiCodingAgent(
         foreground (and lifecycle-detected) process is plain ``pi``
         (``get_expected_process_name`` pins ``"pi"`` regardless).
 
-        When ``auto_dismiss_dialogs`` is set, ``--approve`` is added so pi
+        When ``auto_dismiss_dialogs_at_startup`` is set, ``--approve`` is added so pi
         auto-trusts the project folder for the run (its native unattended
         path), and the interactive trust dialog never blocks the first message
         even when the cwd carries trust inputs (``.pi``/``.agents/skills``).
@@ -664,7 +665,7 @@ class PiCodingAgent(
         """
         base_command = super().assemble_command(host, agent_args, command_override, initial_message)
         invocation = f"{base_command} -e {shlex.quote(str(self._get_lifecycle_extension_path()))}"
-        if self.agent_config.auto_dismiss_dialogs:
+        if self.agent_config.auto_dismiss_dialogs_at_startup:
             invocation = f"{invocation} {_PI_APPROVE_FLAG}"
         # Stamp the process-start boundary and clear a stale `active` marker on every
         # launch/resume, so the system_interface activity tracker ignores a tail left by a
@@ -957,7 +958,7 @@ class PiCodingAgent(
         run in the repo is likewise trusted. It is written to the user's global
         ``~/.pi/agent/trust.json``.
 
-        Consent gating: source already trusted -> no-op; ``auto_dismiss_dialogs``
+        Consent gating: source already trusted -> no-op; ``auto_dismiss_dialogs_at_startup``
         or ``mngr create --yes`` (``is_auto_approve``) -> silent; interactive ->
         ``click.confirm`` (defaults to no); non-interactive without opt-in, or a
         declined prompt -> ``SystemExit(1)`` (a clean exit, not a traceback).
@@ -976,12 +977,12 @@ class PiCodingAgent(
             logger.debug("pi source repo {} already trusted in {}", source_key, trust_path)
             return
 
-        if not (self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve):
+        if not (self.agent_config.auto_dismiss_dialogs_at_startup or mngr_ctx.is_auto_approve):
             if not mngr_ctx.is_interactive:
                 logger.error(
                     "Source directory {} is not trusted by pi. mngr will not silently run an agent on "
                     "untrusted code. Re-run interactively to be prompted, re-run with `--yes`, or set "
-                    "`auto_dismiss_dialogs = true` on the pi-coding agent type.",
+                    "`auto_dismiss_dialogs_at_startup = true` on the pi-coding agent type.",
                     source_path,
                 )
                 raise SystemExit(1)

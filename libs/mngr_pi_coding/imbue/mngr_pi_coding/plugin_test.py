@@ -678,9 +678,9 @@ def test_assemble_command_preserves_cli_and_agent_args(pi_agent: PiCodingAgent, 
 
 
 def test_assemble_command_adds_approve_when_auto_dismiss_dialogs(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
-    # auto_dismiss_dialogs launches pi with --approve so it auto-trusts the project
+    # auto_dismiss_dialogs_at_startup launches pi with --approve so it auto-trusts the project
     # folder (pi's native unattended path), and the trust dialog never blocks.
-    object.__setattr__(pi_agent, "agent_config", PiCodingAgentConfig(auto_dismiss_dialogs=True))
+    object.__setattr__(pi_agent, "agent_config", PiCodingAgentConfig(auto_dismiss_dialogs_at_startup=True))
     command = str(pi_agent.assemble_command(_fake_host(tmp_path), (), None))
     assert "--approve" in command
 
@@ -859,7 +859,7 @@ def _read_global_trust(home: Path) -> dict[str, bool]:
 
 def test_ensure_source_trusted_auto_dismiss_writes_global(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    agent = _make_trust_agent(_TrustDeclineAgent, tmp_path, auto_dismiss_dialogs=True)
+    agent = _make_trust_agent(_TrustDeclineAgent, tmp_path, auto_dismiss_dialogs_at_startup=True)
     agent._ensure_source_repo_trusted(_make_test_mngr_ctx(tmp_path), home_dir=home)
     assert _read_global_trust(home)[str(agent.work_dir.resolve())] is True
 

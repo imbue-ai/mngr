@@ -26,6 +26,7 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ErrorBehavior
@@ -273,9 +274,17 @@ def _emit_human_output(result: MessageResult) -> None:
         for agent_name, error in result.blocked_agents:
             logger.warning("Message delivered to {} but a blocking dialog remained: {}", agent_name, error)
 
-    if result.failed_agents:
-        for agent_name, error in result.failed_agents:
-            logger.error("Failed to send message to {}: {}", agent_name, error)
+    for failure in result.failures:
+        # The reason says what to fix and that the terminal is where; naming the command that
+        # OPENS that terminal is the CLI's to add, because it is only true here -- a graphical
+        # client reading the same reason has a tab, not a shell. Only for a blocked input,
+        # which is the one kind a person can walk over and clear.
+        hint = (
+            f" Connect with 'mngr connect {failure.agent_name}' to resolve it."
+            if failure.kind == SendFailureKind.INPUT_BLOCKED
+            else ""
+        )
+        logger.error("Failed to send message to {}: {}{}", failure.agent_name, failure.reason, hint)
 
     total_agent_count = len(result.successful_agents) + len(result.blocked_agents) + len(result.failed_agents)
     if total_agent_count == 0:

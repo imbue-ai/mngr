@@ -506,22 +506,23 @@ class AntigravityAgentConfig(AgentTypeConfig):
         description="When True, auto-approve every tool call without prompting "
         "(adds --dangerously-skip-permissions, which overrides any settings_overrides permissions policy).",
     )
-    # auto_dismiss_dialogs is the mngr_claude-style auto-trust knob. When
+    # auto_dismiss_dialogs_at_startup is the mngr_claude-style auto-trust knob. When
     # True (or when ``mngr_ctx.is_auto_approve`` is set, i.e. ``mngr create
     # --yes``), provisioning silently records the source repo in agy's global
     # ``trustedWorkspaces`` without prompting. When False (default), the
     # provisioner asks the user via ``click.confirm`` before mutating the
-    # global config, mirroring ``mngr_claude``'s ``auto_dismiss_dialogs``.
+    # global config, mirroring ``mngr_claude``'s ``auto_dismiss_dialogs_at_startup``.
     # Why default off: the global file is shared user state, and we should never
     # silently let an agent run on untrusted code -- trusting the repo is an
     # explicit choice. Why gate at all: the per-agent settings.json trusts the
     # agent's project folder so the running agy doesn't show its dialog, but granting
     # that trust must still be a deliberate acknowledgment.
-    auto_dismiss_dialogs: bool = Field(
+    auto_dismiss_dialogs_at_startup: bool = Field(
         default=False,
         description="When True, auto-trust the source repo without prompting. "
         "When False (default), the user is prompted interactively.",
     )
+
     check_installation: bool = Field(
         default=True,
         description="Check whether agy is installed and install it if missing (if False, assume it is already present).",
@@ -1247,7 +1248,7 @@ class AntigravityAgent(
           accumulate dead transient paths.
 
         Consent gating mirrors ``mngr_claude``: source already trusted -> no-op;
-        ``auto_dismiss_dialogs`` or ``mngr_ctx.is_auto_approve`` -> silent;
+        ``auto_dismiss_dialogs_at_startup`` or ``mngr_ctx.is_auto_approve`` -> silent;
         interactive -> ``click.confirm``; non-interactive without opt-in, or a
         declined prompt -> ``SystemExit(1)``. We never silently grant trust:
         even though the per-agent settings.json is what suppresses the running
@@ -1272,12 +1273,12 @@ class AntigravityAgent(
             logger.debug("Source {} already trusted in {}", source_path_str, settings_path)
             return
 
-        if not (self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve):
+        if not (self.agent_config.auto_dismiss_dialogs_at_startup or mngr_ctx.is_auto_approve):
             if not mngr_ctx.is_interactive:
                 logger.error(
                     "Source directory {} is not trusted by the Antigravity CLI. mngr will not "
                     "silently run an agent on untrusted code. Re-run interactively to be prompted, "
-                    "re-run with `--yes`, or set `auto_dismiss_dialogs = true` on the antigravity "
+                    "re-run with `--yes`, or set `auto_dismiss_dialogs_at_startup = true` on the antigravity "
                     "agent type.",
                     source_path,
                 )

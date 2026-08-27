@@ -19,7 +19,7 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 - `auto_allow_permissions` — when `true`, sets `approval_policy = "never"` so codex never
   prompts for tool approval (the sandbox still applies). Default: `false`.
 - `config_overrides` — free-form key/values merged last into the per-agent `config.toml`.
-- `auto_dismiss_dialogs` — when `true`, trust the repo and allow the hook bypass without
+- `auto_dismiss_dialogs_at_startup` — when `true`, trust the repo and allow the hook bypass without
   prompting. Default: `false`.
 - `version` — pin the codex CLI version to install (e.g. `"0.139.0"`). When set, installation
   runs `npm i -g @openai/codex@<version>` and provisioning verifies the installed codex matches,

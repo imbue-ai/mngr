@@ -140,7 +140,7 @@ Evidence file references:
 
 - **Status:** investigated
 - **Verdict:** confirmed
-- **Evidence:** `agent_runtime.UNATTENDED_SETTINGS` always applies `auto_dismiss_dialogs`,
+- **Evidence:** `agent_runtime.UNATTENDED_SETTINGS` always applies `auto_dismiss_dialogs_at_startup`,
   `auto_allow_permissions`, `skipDangerousModePermissionPrompt`, `bypassPermissionsModeAccepted`.
   These can override the caller's `permission_mode`, so a `permission_mode="default"` session does
   not gate/prompt the way upstream would.

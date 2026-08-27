@@ -67,7 +67,7 @@ from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr.utils.testing import run_mngr_subprocess
-from imbue.mngr_claude.plugin import extract_blocking_selector_block
+from imbue.mngr_claude.dialogs import classify
 from imbue.mngr_claude.plugin import has_input_prompt_line
 
 # claude's native resumable session store, relative to the agent state dir: the
@@ -280,20 +280,18 @@ _MODEL_PICKER_COMMAND = "/model"
 _MODEL_PICKER_OBSERVE_SECONDS = 4.0
 
 
-def _setup_ctx_with_auto_accept_depth(
-    profile: _ClaudeReleaseProfile, tmp_path: Path, auto_accept_prompt_depth: int
-) -> AgentReleaseContext:
-    """Set up a release ctx whose project config enables (or disables) post-submit auto-accept.
+def _setup_ctx_that_answers_dialogs(profile: _ClaudeReleaseProfile, tmp_path: Path) -> AgentReleaseContext:
+    """Set up a release ctx whose agent answers every dialog mngr has a sensible answer for.
 
-    Reuses the profile's standard setup, then appends an ``[agent_types.claude]`` section so the
-    created agent's config carries the requested depth and a slightly widened observe window.
+    Reuses the profile's standard setup, then appends an ``[agent_types.claude]`` section opting
+    into that, with a slightly widened observe window.
     """
     ctx = profile.setup(tmp_path)
     settings_path = Path(ctx.env["MNGR_PROJECT_CONFIG_DIR"]) / "settings.local.toml"
     with settings_path.open("a") as settings_file:
         settings_file.write(
             f"\n[agent_types.claude]\n"
-            f"auto_accept_prompt_depth = {auto_accept_prompt_depth}\n"
+            f'sensibly_deal_with_dialogs = ["ALL_KNOWN_DIALOGS"]\n'
             f"post_submit_dialog_observe_seconds = {_MODEL_PICKER_OBSERVE_SECONDS}\n"
         )
     return ctx
@@ -340,22 +338,22 @@ def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
     the input until a choice is made, and the real-world manifestation of the bug the dialog
     hardening addresses (a ``/model`` prompt silently blocking the client). Against a real haiku
     agent this asserts the user-facing outcome: the send exits 0, the picker is gone afterward (no
-    blocking selector remains in the pane -- ``extract_blocking_selector_block`` returns None), and
+    blocking selector remains in the pane -- ``classify`` returns None), and
     a subsequent normal message is still delivered and processed. If the picker had wedged the
     agent, the follow-up message would never reach the transcript.
 
     Note on scope: mngr's send-confirmation retry already clears an Enter-dismissable selector like
     the picker, so this exercises the end-to-end "``/model`` does not wedge the agent" outcome
-    rather than the post-submit auto-accept path specifically. The auto-accept mechanics and the
-    delivered-but-blocked (exit 7) surfacing are covered deterministically by the plugin unit tests
-    (see ``plugin_test.py``), which script a selector that persists.
+    rather than the dialog-clearing path specifically. That path -- a dialog present when the NEXT
+    send starts, cleared at preflight or refused -- is covered deterministically by the plugin unit
+    tests (see ``plugin_test.py``), which script a selector that persists.
     """
     profile = _ClaudeReleaseProfile()
     reason = profile.unavailable_reason()
     if reason is not None:
         pytest.skip(reason)
 
-    ctx = _setup_ctx_with_auto_accept_depth(profile, tmp_path, auto_accept_prompt_depth=5)
+    ctx = _setup_ctx_that_answers_dialogs(profile, tmp_path)
     agent_name = _create_model_picker_agent(profile, ctx)
     run_id = get_short_random_string()
     try:
@@ -366,8 +364,10 @@ def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
             f"expected /model to deliver and exit 0, got {result.returncode}:\n{result.stdout}\n{result.stderr}"
         )
         pane = _capture_agent_pane(ctx, agent_name)
-        assert extract_blocking_selector_block(pane) is None, (
-            f"the /model picker was not dismissed; a blocking selector still remains in the pane:\n{pane}"
+        # `classify` is what the send path itself uses to decide whether anything holds the
+        # input, so asserting through it tests the same judgement the product makes.
+        assert classify(pane) is None, (
+            f"the /model picker was not dismissed; something still holds the pane's input:\n{pane}"
         )
         # The agent must still accept and process a normal message -- i.e. it is not wedged on the picker.
         token = f"AFTERMODEL-{run_id}"

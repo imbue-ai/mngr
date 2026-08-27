@@ -412,16 +412,17 @@ class CodexAgentConfig(AgentTypeConfig):
         description="Key-value overrides merged last into the per-agent config.toml. "
         'Example: {"model_provider": "openai", "approval_policy": "on-request"}.',
     )
-    # auto_dismiss_dialogs is the auto-consent knob. When True (or under
+    # auto_dismiss_dialogs_at_startup is the auto-consent knob. When True (or under
     # ``mngr create --yes``), provisioning silently records workspace trust + the
     # hook-bypass consent without prompting. When False (default), the user is
     # prompted via click.confirm before mngr mutates the global config or runs
     # codex with hook review bypassed.
-    auto_dismiss_dialogs: bool = Field(
+    auto_dismiss_dialogs_at_startup: bool = Field(
         default=False,
         description="When True, trust the source repo and allow the codex hook-review bypass "
         "without prompting. When False (default), the user is prompted interactively.",
     )
+
     # update_policy governs how mngr handles an outdated codex CLI at provision. mngr
     # always runs a network-free check (comparing ``codex --version`` to the latest
     # version codex itself recorded in ~/.codex/version.json) -- it is the well-behaved
@@ -1300,7 +1301,7 @@ class CodexAgent(
           codex load any repo-local ``.codex/hooks.json`` unreviewed.
 
         Gating: source already trusted in the user's global ``config.toml`` ->
-        no-op (consent previously given); ``auto_dismiss_dialogs`` or
+        no-op (consent previously given); ``auto_dismiss_dialogs_at_startup`` or
         ``mngr_ctx.is_auto_approve`` -> silent; interactive -> ``click.confirm``
         (default False); non-interactive without opt-in, or declined ->
         ``SystemExit(1)``. We never run an agent on untrusted code, or bypass
@@ -1320,13 +1321,13 @@ class CodexAgent(
             logger.debug("Source {} already trusted in {}", canonical_source, user_config_path)
             return
 
-        if not (self.agent_config.auto_dismiss_dialogs or mngr_ctx.is_auto_approve):
+        if not (self.agent_config.auto_dismiss_dialogs_at_startup or mngr_ctx.is_auto_approve):
             if not mngr_ctx.is_interactive:
                 logger.error(
                     "Source directory {} is not trusted by the Codex CLI. mngr will not silently "
                     "run a codex agent on untrusted code (which also bypasses codex's hook review). "
                     "Re-run interactively to be prompted, re-run with `--yes`, or set "
-                    "`auto_dismiss_dialogs = true` on the codex agent type.",
+                    "`auto_dismiss_dialogs_at_startup = true` on the codex agent type.",
                     canonical_source,
                 )
                 raise SystemExit(1)

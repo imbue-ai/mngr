@@ -166,8 +166,8 @@ def _window_size(session_name: str) -> tuple[int, int]:
 @pytest.mark.parametrize(
     "client_width, client_height, expected_width, expected_height",
     [
-        pytest.param(140, 40, 140, 40, id="real-client-fits-exactly"),
-        pytest.param(2, 1, 80, 24, id="degenerate-client-floored-to-minimum"),
+        pytest.param(140, 40, 140, 39, id="real-client-minus-status-line"),
+        pytest.param(2, 1, 80, 23, id="degenerate-client-floored-to-minimum"),
     ],
 )
 def test_sigwinch_panes_script_fit_mode_resizes_pinned_window_to_client(
@@ -182,8 +182,9 @@ def test_sigwinch_panes_script_fit_mode_resizes_pinned_window_to_client(
 
     The default sizing policy pins the agent window to window-size=manual (so a degenerate
     client on the shared server can never collapse it) and relies on this hook to re-fit the
-    pane to real attaching clients. A real client's geometry is honored exactly; a degenerate
-    (e.g. 2x1) client is floored to a usable minimum (80x24) so Claude Code's TUI still renders.
+    pane to real attaching clients. The window gets the client's geometry minus the status line
+    (which #{client_height} counts but the window cannot use); a degenerate (e.g. 2x1) client is
+    floored to a usable minimum client of 80x24 first, so Claude Code's TUI still renders.
     Fit mode also repaints unconditionally (unlike nudge's manual-pin guard).
     """
     session_name = f"{mngr_test_prefix}sigwinch-fit"
@@ -228,6 +229,9 @@ def test_sigwinch_panes_script_fit_mode_resizes_pinned_window_to_client(
             ["tmux", "set-option", "-t", f"={session_name}:agent", "window-size", "manual"],
             check=True,
         )
+        # Pin the status line to one row so the expected heights below do not depend on the
+        # test server's global `status` setting.
+        subprocess.run(["tmux", "set-option", "-t", session_name, "status", "on"], check=True)
         subprocess.run(
             ["tmux", "resize-window", "-t", f"={session_name}:agent", "-x", "200", "-y", "50"],
             check=True,

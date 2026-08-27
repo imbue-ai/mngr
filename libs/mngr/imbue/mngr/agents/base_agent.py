@@ -29,6 +29,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_probe_result
 from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.tmux import AGENT_PANE_ID_OPTION
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -415,17 +416,77 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         When window is None, captures the agent's primary window (window 0).
         Otherwise, captures the given tmux window (by index or name) in the
         agent's session.
-        """
-        target = (
-            self.tmux_target if window is None else TmuxWindowTarget(session_name=self.session_name, window=window)
-        )
-        return self._capture_pane_content(target, include_scrollback=include_scrollback)
 
-    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
-        """Capture the current pane content, returning None on failure."""
+        A named window is captured as WRITTEN, not resolved to the agent's recorded pane: someone
+        asking for another window means that window, and handing back the agent's pane instead
+        would answer a question they did not ask.
+        """
+        if window is not None:
+            other_window = TmuxWindowTarget(session_name=self.session_name, window=window)
+            return self._capture_pane_content(other_window.as_shell_arg(), include_scrollback=include_scrollback)
+        return self._capture_pane_content(self.tmux_target, include_scrollback=include_scrollback)
+
+    def _send_target_arg(self, tmux_target: TmuxWindowTarget) -> str:
+        """The tmux ``-t`` argument every send should use: the agent's own pane, by ID.
+
+        ``session:window`` resolves to whichever pane is ACTIVE, so one split silently delivers
+        the message into the new shell instead. The pane ID recorded at session creation is
+        unique for that pane's life and fails loudly once it is gone, which is what we want -- a
+        misrouted message is far worse than a refused one.
+
+        Falls back to the window target when the option is absent, which is how a session created
+        before this existed keeps working.
+
+        Only the agent's own window resolves to a pane. A caller asking about another window --
+        `mngr capture -w <window>` -- means that window, and answering with the agent pane would
+        show them the wrong thing entirely.
+
+        Resolved per call, and deliberately not memoised on the agent. A session name is reused when an agent restarts -- which the
+        chat's Force button does on purpose -- so a remembered ID outlives the pane it names, and
+        the next send would type into a pane that no longer exists or into whichever pane
+        inherited that ID. Reading it is one tmux call, and that is the price of addressing the
+        pane that exists now rather than the one that did.
+
+        Callers that read the pane in a loop (the readiness and dialog polls) should resolve once
+        and pass the result down, rather than paying this per iteration.
+        """
+        session_arg = shlex.quote(f"={tmux_target.session_name}:")
+        result = self.host.execute_stateful_command(f"tmux show-options -v -t {session_arg} {AGENT_PANE_ID_OPTION}")
+        pane_id = result.stdout.strip() if result.success else ""
+        return shlex.quote(pane_id) if pane_id else tmux_target.as_shell_arg()
+
+    def _clear_pane_modes(self, target_arg: str) -> None:
+        """Leave copy-mode (or any other mode) before typing into the pane.
+
+        tmux modes -- copy, clock, choose-tree, customize -- intercept keys, so ``send-keys`` into
+        a pane in one is swallowed entirely. ``paste-buffer`` is NOT, which is what makes this
+        nasty rather than merely broken: a long message pastes into the input box and the Enter
+        after it disappears, leaving the text sitting there unsent rather than failing.
+
+        Users reach copy-mode by accident constantly -- with ``mouse on``, one wheel-up enters it
+        with no obvious indicator. ``copy-mode -q`` clears every mode type in one call and is a
+        silent no-op when the pane is in none, so it needs no ``#{pane_in_mode}`` check. Best
+        effort: if it fails, the send that follows will report the real problem.
+        """
+        self.host.execute_stateful_command(f"tmux copy-mode -q -t {target_arg}")
+
+    def _capture_pane_content(
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+    ) -> str | None:
+        """Capture the agent pane's content, returning None on failure.
+
+        Reads the same pane the sends write to. A window target resolves to whichever pane is
+        ACTIVE, so after a split this would read the wrong pane -- and every decision built on a
+        capture (is a dialog up, did the paste land, is the TUI ready) would be about a shell the
+        agent is not in.
+
+        Accepts an already-resolved target so a polling caller can look the pane up once instead
+        of once per iteration; a readiness wait can capture sixty times, and resolving inside each
+        would triple the round trips it costs.
+        """
         return capture_tmux_pane_content(
             self.host,
-            tmux_target,
+            tmux_target if isinstance(tmux_target, str) else self._send_target_arg(tmux_target),
             timeout_seconds=_CAPTURE_PANE_TIMEOUT_SECONDS,
             include_scrollback=include_scrollback,
         )
@@ -697,7 +758,8 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         it is given.
         """
         with self._message_lock(), log_span("Pressing key chord {} to agent {}", key, self.name):
-            target_arg = self.tmux_target.as_shell_arg()
+            target_arg = self._send_target_arg(self.tmux_target)
+            self._clear_pane_modes(target_arg)
             send_cmd = f"tmux send-keys -t {target_arg} {shlex.quote(key)}"
             result = self.host.execute_stateful_command(send_cmd)
             if not result.success:
@@ -729,15 +791,19 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
         and raise an appropriate error to abort the send.
         """
 
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
         """Send literal text to a tmux pane, choosing the best method by length.
+
+        Returns the resolved tmux target it sent to, so a caller following up with Enter can
+        reuse it rather than paying for a second lookup of the same pane.
 
         For short messages (< 1024 chars), uses ``tmux send-keys -l``.
         For long messages (>= 1024 chars), writes the text to a temp file on
         the host and uses ``tmux load-buffer`` + ``tmux paste-buffer`` to avoid
         the tmux "command too long" error.
         """
-        target_arg = tmux_target.as_shell_arg()
+        target_arg = self._send_target_arg(tmux_target)
+        self._clear_pane_modes(target_arg)
         if len(message) < LONG_MESSAGE_THRESHOLD:
             send_msg_cmd = f"tmux send-keys -t {target_arg} -l -- {shlex.quote(message)}"
             result = self.host.execute_stateful_command(send_msg_cmd)
@@ -765,12 +831,15 @@ class SendKeysAgent(InteractiveAgentMixin, SupportsKeyChordMixin, BaseAgent[Agen
                 self.host.execute_idempotent_command(
                     f"tmux delete-buffer -b {quoted_buffer} 2>/dev/null; rm -f {quoted_path}"
                 )
+        return target_arg
 
     def _send_message_simple(self, tmux_target: TmuxWindowTarget, message: str) -> None:
         """Send a message directly without waiting for paste confirmation."""
-        self._send_tmux_literal_keys(tmux_target, message)
+        target_arg = self._send_tmux_literal_keys(tmux_target, message)
 
-        send_enter_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter"
+        # Reuses that target rather than resolving again: the literal keys immediately above
+        # cleared the modes too, and nothing between them can have put the pane back into one.
+        send_enter_cmd = f"tmux send-keys -t {target_arg} Enter"
         result = self.host.execute_stateful_command(send_enter_cmd)
         if not result.success:
             raise SendMessageError(str(self.name), f"tmux send-keys Enter failed: {result.stderr or result.stdout}")

@@ -55,14 +55,17 @@ class _RecordingTuiAgent(_ProbeTuiAgent):
     def _message_lock(self) -> Generator[None, None, None]:
         yield
 
-    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
+    def _capture_pane_content(
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+    ) -> str | None:
         return self.pane_content
 
     def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         self.steps.append("preflight")
 
-    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> None:
+    def _send_tmux_literal_keys(self, tmux_target: TmuxWindowTarget, message: str) -> str:
         self.steps.append("paste")
+        return tmux_target.as_shell_arg()
 
     def _build_submission_evidence_probes(
         self, message: str, policy: SubmissionConfirmationPolicy
@@ -127,7 +130,7 @@ def test_send_message_waits_for_ready_indicator_before_pasting() -> None:
     agent = _make_recording_agent(pane)
     agent.send_message(_RESUME_MESSAGE)
     assert agent.steps == ["preflight", "paste"]
-    host_commands = cast(ScriptedHost, agent.host).captured
+    host_commands = cast(ScriptedHost, agent.host).sent_commands
     assert host_commands == ["tmux send-keys -t =s:0 Enter"]
 
 

@@ -1059,7 +1059,11 @@ class _StubHost:
         self,
         command_results: list[CommandResult] | None = None,
         is_local: bool = False,
+        pane_id: str | None = None,
     ) -> None:
+        # The agent pane's recorded ID, as `tmux show-options` would answer. None models a
+        # session created before mngr recorded one, where tmux answers `invalid option:`.
+        self.pane_id = pane_id
         default_result = CommandResult(success=True, stdout="", stderr="")
         self._command_results = list(command_results) if command_results else []
         self._default_result = default_result
@@ -1068,11 +1072,31 @@ class _StubHost:
         self.host_dir = Path("/tmp/stub-host")
         self.is_local = is_local
 
+    # Send preflight, not the command under test: resolving the agent's pane and leaving copy-mode
+    # run before every send, and a test scripting results is scripting the SEND. Serving these from
+    # the default keeps the scripted queue lined up with the command each test actually means.
+    _PREFLIGHT_COMMAND_PREFIXES = ("tmux show-options", "tmux copy-mode")
+
     def _execute_command(self, command: str, **kwargs: object) -> CommandResult:
         self.executed_commands.append(command)
+        if command.startswith("tmux show-options"):
+            if self.pane_id is None:
+                return CommandResult(success=False, stdout="", stderr="invalid option: @mngr_agent_pane")
+            return CommandResult(success=True, stdout=f"{self.pane_id}\n", stderr="")
+        if command.startswith(self._PREFLIGHT_COMMAND_PREFIXES):
+            return self._default_result
         if self._command_results:
             return self._command_results.pop(0)
         return self._default_result
+
+    @property
+    def sent_commands(self) -> list[str]:
+        """Executed commands with send preflight filtered out.
+
+        Assertions about "what this send did" mean the send, not the pane resolution and
+        mode-clearing that precede every one of them.
+        """
+        return [c for c in self.executed_commands if not c.startswith(self._PREFLIGHT_COMMAND_PREFIXES)]
 
     def execute_idempotent_command(self, command: str, **kwargs: object) -> CommandResult:
         return self._execute_command(command, **kwargs)
@@ -1135,9 +1159,9 @@ def test_send_tmux_literal_keys_short_message_uses_send_keys(
 
     agent._send_tmux_literal_keys(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
-    assert len(stub.executed_commands) == 1
-    assert "send-keys" in stub.executed_commands[0]
-    assert "-l" in stub.executed_commands[0]
+    assert len(stub.sent_commands) == 1
+    assert "send-keys" in stub.sent_commands[0]
+    assert "-l" in stub.sent_commands[0]
     assert len(stub.written_files) == 0
 
 
@@ -1156,13 +1180,13 @@ def test_send_tmux_literal_keys_long_message_uses_load_buffer(
     assert stub.written_files[0][1] == long_message
 
     # Then execute load-buffer, paste-buffer, and cleanup
-    assert len(stub.executed_commands) == 3
-    assert "load-buffer" in stub.executed_commands[0]
-    assert "-b" in stub.executed_commands[0]
-    assert "paste-buffer" in stub.executed_commands[1]
-    assert "-b" in stub.executed_commands[1]
-    assert "delete-buffer" in stub.executed_commands[2]
-    assert "rm -f" in stub.executed_commands[2]
+    assert len(stub.sent_commands) == 3
+    assert "load-buffer" in stub.sent_commands[0]
+    assert "-b" in stub.sent_commands[0]
+    assert "paste-buffer" in stub.sent_commands[1]
+    assert "-b" in stub.sent_commands[1]
+    assert "delete-buffer" in stub.sent_commands[2]
+    assert "rm -f" in stub.sent_commands[2]
 
 
 def test_send_tmux_literal_keys_long_message_raises_on_load_buffer_failure(
@@ -1227,8 +1251,8 @@ def test_migrate_unnamed_primary_window_renames_lowest_index_window(
     is_migrated = agent._migrate_unnamed_primary_window()
 
     assert is_migrated is True
-    assert len(stub.executed_commands) == 1
-    command = stub.executed_commands[0]
+    assert len(stub.sent_commands) == 1
+    command = stub.sent_commands[0]
     session_target = TmuxSessionTarget(session_name=agent.session_name).as_shell_arg()
     # Guarded by has-session so a missing session is a no-op.
     assert f"tmux has-session -t {session_target}" in command
@@ -1261,9 +1285,9 @@ def test_get_lifecycle_state_migrates_on_name_miss_then_reprobes(
     agent.get_lifecycle_state()
 
     # First probe, then rename, then re-probe (a correctly-named session would skip the latter two).
-    assert "list-panes" in stub.executed_commands[0]
-    assert "rename-window" in stub.executed_commands[1]
-    assert "list-panes" in stub.executed_commands[2]
+    assert "list-panes" in stub.sent_commands[0]
+    assert "rename-window" in stub.sent_commands[1]
+    assert "list-panes" in stub.sent_commands[2]
 
 
 def test_get_lifecycle_state_skips_migration_when_name_probe_hits(
@@ -1280,7 +1304,7 @@ def test_get_lifecycle_state_skips_migration_when_name_probe_hits(
 
     agent.get_lifecycle_state()
 
-    assert not any("rename-window" in command for command in stub.executed_commands)
+    assert not any("rename-window" in command for command in stub.sent_commands)
 
 
 def test_agent_name_rejects_slash() -> None:
@@ -1303,10 +1327,10 @@ def test_send_message_simple_sends_keys_and_enter(
 
     agent._send_message_simple(TmuxWindowTarget(session_name="mngr-test", window=0), "hello")
 
-    assert len(stub.executed_commands) == 2
-    assert "send-keys" in stub.executed_commands[0]
-    assert "-l" in stub.executed_commands[0]
-    assert "Enter" in stub.executed_commands[1]
+    assert len(stub.sent_commands) == 2
+    assert "send-keys" in stub.sent_commands[0]
+    assert "-l" in stub.sent_commands[0]
+    assert "Enter" in stub.sent_commands[1]
 
 
 def test_send_message_simple_raises_on_enter_failure(
@@ -1330,6 +1354,44 @@ def test_send_message_simple_raises_on_enter_failure(
 # =========================================================================
 
 
+def test_send_targets_the_recorded_pane_and_leaves_copy_mode(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A send resolves the agent's own pane and clears any mode before typing.
+
+    Both halves matter and neither is visible in the result. `session:window` resolves to
+    whichever pane is ACTIVE, so one split delivers the message into another shell with no error
+    at all; and a pane sitting in copy-mode swallows send-keys entirely while paste-buffer still
+    lands, which is how a message ends up pasted into the input box with its Enter eaten.
+    """
+    stub = _StubHost(pane_id="%7")
+    agent = _create_named_agent_with_stub_host(temp_mngr_ctx, stub, AgentName("pane-target"))
+    agent.press_key_chord("M-q")
+
+    commands = stub.executed_commands
+    assert any("show-options" in c and "@mngr_agent_pane" in c for c in commands)
+    assert any(c.startswith("tmux copy-mode -q") for c in commands)
+    # The send goes to the pane ID, not to session:window.
+    send_command = next(c for c in commands if "send-keys" in c)
+    assert "%7" in send_command
+
+
+def test_send_falls_back_to_the_window_target_on_an_older_session(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A session created before the pane ID was recorded keeps working.
+
+    tmux answers `invalid option:` and exits non-zero, which is the signal to use the target
+    mngr has always used -- so rolling this out does not strand agents that are already running.
+    """
+    stub = _StubHost(pane_id=None)
+    agent = _create_named_agent_with_stub_host(temp_mngr_ctx, stub, AgentName("pane-fallback"))
+    agent.press_key_chord("M-q")
+
+    send_command = next(c for c in stub.executed_commands if "send-keys" in c)
+    assert ":agent" in send_command
+
+
 def test_press_key_chord_sends_tmux_key(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1340,8 +1402,8 @@ def test_press_key_chord_sends_tmux_key(
 
     agent.press_key_chord("M-q")
 
-    assert len(stub.executed_commands) == 1
-    command = stub.executed_commands[0]
+    assert len(stub.sent_commands) == 1
+    command = stub.sent_commands[0]
     assert "send-keys" in command
     assert "M-q" in command
     assert "-l" not in command
@@ -1371,8 +1433,8 @@ def test_press_key_chord_holds_message_lock(
 
     lock_path = get_agent_state_dir_path(tmp_path, agent.id) / "message.lock"
     assert lock_path.exists()
-    assert len(stub.executed_commands) == 1
-    assert "send-keys" in stub.executed_commands[0]
+    assert len(stub.sent_commands) == 1
+    assert "send-keys" in stub.sent_commands[0]
 
 
 # =========================================================================

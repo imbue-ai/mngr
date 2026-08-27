@@ -29,7 +29,7 @@ When isolation is disabled (shared mode):
 - mngr still writes to the user's Claude config to dismiss the cosmetic startup
   dialogs (trust the work_dir, onboarding, effort callout, cost threshold) so they
   don't intercept automated input -- prompting interactively, or silently when
-  `auto_dismiss_dialogs` is set. It writes these into the file claude actually
+  `auto_dismiss_dialogs_at_startup` is set. It writes these into the file claude actually
   reads (`$CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json` when unset). It
   does **not** accept bypass-permissions mode there (that is governed by
   settings.json), and it does no per-agent settings.json or keychain provisioning.

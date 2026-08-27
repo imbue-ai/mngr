@@ -16,6 +16,7 @@ from imbue.mngr.agents.base_agent import SendKeysAgent
 from imbue.mngr.api.create import CreateAgentOptions
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
+from imbue.mngr.api.message import AgentSendFailure
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import _deliver_text
 from imbue.mngr.api.message import _process_host_for_messaging
@@ -30,6 +31,7 @@ from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import CorruptedAgentDataError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
@@ -72,7 +74,9 @@ def test_message_result_can_add_successful_agent() -> None:
 def test_message_result_can_add_failed_agent() -> None:
     """Test that we can add failed agents to the result."""
     result = MessageResult()
-    result.failed_agents.append(("test-agent", "error message"))
+    result.failures.append(
+        AgentSendFailure(agent_name="test-agent", reason="error message", kind=SendFailureKind.UNKNOWN)
+    )
     assert result.failed_agents == [("test-agent", "error message")]
 
 

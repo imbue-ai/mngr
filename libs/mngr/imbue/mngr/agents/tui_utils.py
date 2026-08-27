@@ -21,6 +21,7 @@ import re
 import shlex
 from enum import auto
 from typing import Any
+from typing import Callable
 from typing import Final
 
 from loguru import logger
@@ -32,6 +33,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.utils.polling import poll_until
@@ -39,7 +41,7 @@ from imbue.mngr.utils.polling import poll_until
 _SEND_MESSAGE_TIMEOUT_SECONDS: Final[float] = 15.0
 # This can take a while, especially on Modal -- the process needs to actually
 # start and render the TUI before the indicator appears.
-_TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
+TUI_READY_TIMEOUT_SECONDS: Final[float] = 30.0
 # Default confirmation window: how long to poll for durable evidence that the
 # agent accepted the message. Needs to be fairly long: a message sent to a busy
 # codex/antigravity agent leaves no evidence until the prompt is dequeued at
@@ -186,46 +188,67 @@ def _check_paste_content(pane_content: str, message: str) -> bool:
     return probe in normalized_pane
 
 
-def _pane_matches(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, indicator: str | re.Pattern[str]) -> bool:
+def _pane_matches(
+    agent: BaseAgent[Any],
+    tmux_target: TmuxWindowTarget | str,
+    indicator: str | re.Pattern[str] | Callable[[str], bool],
+) -> bool:
     content = agent._capture_pane_content(tmux_target)
     if content is None:
         return False
     if isinstance(indicator, re.Pattern):
         return indicator.search(content) is not None
-    return indicator in content
+    if isinstance(indicator, str):
+        return indicator in content
+    return indicator(content)
 
 
 def wait_for_tui_ready(
     agent: BaseAgent[Any],
     tmux_target: TmuxWindowTarget,
-    indicator: str | re.Pattern[str],
-    timeout_seconds: float = _TUI_READY_TIMEOUT_SECONDS,
+    indicator: str | re.Pattern[str] | Callable[[str], bool],
+    timeout_seconds: float = TUI_READY_TIMEOUT_SECONDS,
 ) -> None:
     """Wait until the TUI is ready by polling the pane for ``indicator``.
 
-    ``indicator`` is either a plain ``str`` (matched as an exact substring) or a
-    compiled ``re.Pattern`` (matched with ``re.search``) -- the type chooses the
-    matching mode. Raises ``SendMessageError`` on timeout. Without this check,
+    ``indicator`` is a plain ``str`` (matched as an exact substring), a compiled
+    ``re.Pattern`` (matched with ``re.search``), or a predicate taking the pane
+    content -- the type chooses the matching mode. A predicate is what a harness
+    needs when readiness depends on WHERE something appears rather than whether
+    it appears at all. Raises ``SendMessageError`` on timeout. Without this check,
     input sent before the TUI finishes rendering -- or while a resumed transcript
     is still replaying -- may be lost or appear as raw text. Returns immediately
     when the indicator already matches, so it is a cheap no-op once ready.
     """
-    label = indicator.pattern if isinstance(indicator, re.Pattern) else indicator
+    if isinstance(indicator, re.Pattern):
+        label = indicator.pattern
+    elif isinstance(indicator, str):
+        label = indicator
+    else:
+        # A predicate is described rather than named: `Callable` declares no `__name__`, and
+        # the alternatives (a Protocol carrying one, or getattr) buy a function name that says
+        # no more here than this does.
+        label = "a readiness predicate over the pane"
+    # Resolved once: this polls every half second for up to thirty, and resolving the pane inside
+    # each iteration would spend a tmux round trip per poll to learn the same answer.
+    resolved_target = agent._send_target_arg(tmux_target)
     with log_span("Waiting for TUI to be ready (looking for: {})", label):
         if poll_until(
-            lambda: _pane_matches(agent, tmux_target, indicator),
+            lambda: _pane_matches(agent, resolved_target, indicator),
             timeout=timeout_seconds,
         ):
             return
-        pane_content = agent._capture_pane_content(tmux_target)
+        pane_content = agent._capture_pane_content(resolved_target)
         if pane_content is not None:
             logger.error("TUI ready timeout -- remote pane content:\n{}", pane_content)
         else:
             logger.error("TUI ready timeout -- failed to capture remote pane content")
+        # The pane is logged just above but deliberately kept OUT of the raised message: it is
+        # unbounded and can carry the user's own code or a diff, and this message is surfaced.
         raise SendMessageError(
             str(agent.name),
-            f"Timeout waiting for TUI to be ready (waited {timeout_seconds:.1f}s)"
-            + (f"\nPane content:\n{pane_content}" if pane_content else ""),
+            f"Timeout waiting for TUI to be ready (waited {timeout_seconds:.1f}s)",
+            SendFailureKind.NOT_READY,
         )
 
 
@@ -261,7 +284,9 @@ def send_key_keystroke(agent: BaseAgent[Any], tmux_target: TmuxWindowTarget, key
     ``key`` is a tmux key name, not literal text, so it is spliced into the
     command unquoted (as tmux expects). Raises SendMessageError on failure.
     """
-    send_cmd = f"tmux send-keys -t {tmux_target.as_shell_arg()} {key}"
+    # The agent's pane, not the window's active one: a split would otherwise send this keystroke
+    # into whatever shell the user just opened.
+    send_cmd = f"tmux send-keys -t {agent._send_target_arg(tmux_target)} {key}"
     result = agent.host.execute_stateful_command(send_cmd)
     if not result.success:
         raise SendMessageError(
@@ -306,7 +331,7 @@ def _build_probe_check_lines(probes: tuple[SubmissionEvidenceProbe, ...]) -> lis
 
 @pure
 def _build_enter_retry_lines(
-    tmux_target: TmuxWindowTarget,
+    tmux_target: TmuxWindowTarget | str,
     normalized_pane_probe: str,
     retry_offsets: tuple[int, ...],
 ) -> list[str]:
@@ -321,17 +346,17 @@ def _build_enter_retry_lines(
     input row is a no-op for every TUI we drive. Each slot is consumed whether
     or not Enter was re-sent, bounding the pane captures to one per slot.
     """
+    target_arg = tmux_target if isinstance(tmux_target, str) else tmux_target.as_shell_arg()
     if normalized_pane_probe == "":
         retry_action = (
-            f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter 2>/dev/null; "
-            f"printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\""
+            f"tmux send-keys -t {target_arg} Enter 2>/dev/null; printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\""
         )
     else:
         retry_action = (
-            f'pane="$( tmux capture-pane -p -t {tmux_target.as_shell_arg()} 2>/dev/null '
+            f'pane="$( tmux capture-pane -p -t {target_arg} 2>/dev/null '
             "| tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' )\"; "
             f'case "$pane" in *{shlex.quote(normalized_pane_probe)}*) '
-            f"tmux send-keys -t {tmux_target.as_shell_arg()} Enter 2>/dev/null; "
+            f"tmux send-keys -t {target_arg} Enter 2>/dev/null; "
             f"printf '%s %s\\n' {_RETRY_MARKER} \"$elapsed\" ;; *) : ;; esac"
         )
     return [
@@ -355,7 +380,7 @@ def _build_timeout_diagnostic_lines(probes: tuple[SubmissionEvidenceProbe, ...])
 
 @pure
 def build_confirmation_command(
-    tmux_target: TmuxWindowTarget,
+    tmux_target: TmuxWindowTarget | str,
     probes: tuple[SubmissionEvidenceProbe, ...],
     normalized_pane_probe: str,
     window_seconds: int,
@@ -370,7 +395,10 @@ def build_confirmation_command(
     construction. Evidence is checked immediately after Enter and then every
     ``poll_interval_seconds`` until ``window_seconds`` elapse.
     """
-    target_arg = tmux_target.as_shell_arg()
+    # Accepts a rendered target so the caller can hand in the agent's pane ID. Everything this
+    # script does -- the Enter, the retries, the pane reads gating them -- must address the same
+    # pane the paste went to, or a split turns the retry gate into a reading of another shell.
+    target_arg = tmux_target if isinstance(tmux_target, str) else tmux_target.as_shell_arg()
     lines: list[str] = []
     # Capture every probe's baseline BEFORE Enter so evidence produced by this
     # submission always reads as a change against it.
@@ -473,7 +501,7 @@ def submit_message_and_confirm(
     window_seconds = max(1, int(timeout_seconds))
     normalized_pane_probe = build_normalized_message_probe(message)
     command = build_confirmation_command(
-        tmux_target=tmux_target,
+        tmux_target=agent._send_target_arg(tmux_target),
         probes=probes,
         normalized_pane_probe=normalized_pane_probe,
         window_seconds=window_seconds,

@@ -7,7 +7,8 @@
 #            degenerate client on the shared tmux server can never collapse it), and this script
 #            re-fits the window to the attaching client's geometry, floored at a usable minimum
 #            (_MIN_WIDTH x _MIN_HEIGHT) so a degenerate (e.g. 2x1) client cannot shrink the pane
-#            below what Claude Code's Ink TUI needs. It then signals the panes to repaint.
+#            below what Claude Code's Ink TUI needs, then subtracts the status line (counted in
+#            #{client_height} but unusable by the window). It then signals the panes to repaint.
 #            Usage: sigwinch_panes.sh <session> <primary_window> fit <client_width> <client_height>
 #
 #   nudge -- an explicit window_size policy is in effect; tmux owns resizing. This script only
@@ -56,11 +57,32 @@ _floored() {
     fi
 }
 
+# Echo the number of rows the status line occupies. tmux reports `status` as on/off or as a row
+# count, so this is a mapping rather than arithmetic on the raw value.
+_status_lines() {
+    local status
+    # Read it through display-message rather than show-options: the format resolves the
+    # session's effective value (its own override, or the inherited global) in one call, and
+    # unlike show-options it accepts an exact-match "=" target.
+    status="$(tmux display-message -p -t "=${SESSION}:${PRIMARY_WINDOW}" '#{status}' 2>/dev/null || true)"
+    case "${status}" in
+        off) echo 0 ;;
+        '' | *[!0-9]*) echo 1 ;;
+        *) echo "${status}" ;;
+    esac
+}
+
 # Re-fit the manual-pinned agent window to the attaching client, floored at the usable minimum.
 _fit_window() {
     local width height
     width="$(_floored "${CLIENT_WIDTH}" "${_MIN_WIDTH}")"
     height="$(_floored "${CLIENT_HEIGHT}" "${_MIN_HEIGHT}")"
+    # The status line is counted in #{client_height} but cannot be given to the window. tmux does
+    # not clamp a manual-pinned window, so sizing to the raw client height leaves the window one
+    # row taller than the client can display, and the fullscreen TUI anchors its footer on that
+    # bottom row -- rendering it where nobody can see it. Floor the client height first, then
+    # subtract, so _MIN_HEIGHT keeps its meaning as the minimum acceptable *client*.
+    height=$(( height - $(_status_lines) ))
     tmux resize-window -t "=${SESSION}:${PRIMARY_WINDOW}" -x "${width}" -y "${height}" 2>/dev/null || true
 }
 

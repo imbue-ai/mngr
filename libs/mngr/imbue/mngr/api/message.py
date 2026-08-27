@@ -7,6 +7,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
@@ -21,6 +22,7 @@ from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import SendFailureKind
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import require_interactive_agent
@@ -33,15 +35,40 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
+class AgentSendFailure(FrozenModel):
+    """One agent that did not get the message: why, and what kind of thing went wrong.
+
+    ``reason`` is the why ALONE -- "the agent is in shell mode with an unsubmitted command" --
+    with no "failed to send to X" framing around it. Every consumer has ``agent_name`` right
+    here and adds its own framing: the CLI logs "Failed to send message to {name}: {reason}",
+    and a GUI puts it under a title of its own. Carrying the framing in the string meant each
+    of them printed it twice.
+
+    ``kind`` is the machine-readable half, for a client choosing what to offer: trying again
+    helps a blocked input and cannot help an agent that is gone. Reading that out of prose
+    written for a human, and varying per harness, is not something a client should have to do.
+    """
+
+    agent_name: str
+    reason: str
+    kind: SendFailureKind
+
+
 class MessageResult(MutableModel):
     """Result of sending messages to agents."""
 
     successful_agents: list[str] = Field(
         default_factory=list, description="List of agent names that received messages"
     )
-    failed_agents: list[tuple[str, str]] = Field(
-        default_factory=list, description="List of (agent_name, error_message) tuples"
+    failures: list[AgentSendFailure] = Field(
+        default_factory=list, description="One record per agent that did not receive the message"
     )
+
+    @property
+    def failed_agents(self) -> list[tuple[str, str]]:
+        """``(agent_name, reason)`` pairs -- the shape ``mngr message``'s exit code and output read."""
+        return [(failure.agent_name, failure.reason) for failure in self.failures]
+
     blocked_agents: list[tuple[str, str]] = Field(
         default_factory=list,
         description="List of (agent_name, dialog_description) tuples for messages that were delivered but "
@@ -183,14 +210,16 @@ def _record_agent_failure(
     agent_name: str,
     error_msg: str,
     on_error: Callable[[str, str], None] | None,
+    kind: SendFailureKind = SendFailureKind.UNKNOWN,
 ) -> None:
     """Record one agent as not having received the message.
 
-    ``failed_agents`` is what carries a failure into ``mngr message``'s exit code, and
-    ``on_error`` is what carries it into the streamed ``--format jsonl`` output.
+    ``result.failures`` is what carries a failure into ``mngr message``'s exit code, and
+    ``on_error`` is what carries it into the streamed ``--format jsonl`` output. ``error_msg``
+    is the reason alone -- see :class:`AgentSendFailure` for why it carries no framing.
     """
     with result_lock:
-        result.failed_agents.append((agent_name, error_msg))
+        result.failures.append(AgentSendFailure(agent_name=agent_name, reason=error_msg, kind=kind))
     if on_error:
         on_error(agent_name, error_msg)
 
@@ -336,13 +365,21 @@ def _send_message_to_agent(
                     ensure_agent_started(agent, host, is_start_desired=True)
             except MngrError as e:
                 error_msg = str(e)
-                _record_agent_failure(result, result_lock, agent_name, error_msg, on_error)
+                # The agent was stopped and would not start, so there is nothing to type into.
+                # This is the path a chat send actually takes when an agent has died -- it asks
+                # for a start rather than failing on the stopped state above -- so leaving it
+                # unclassified is what would offer a retry that cannot work.
+                _record_agent_failure(
+                    result, result_lock, agent_name, error_msg, on_error, SendFailureKind.AGENT_UNREACHABLE
+                )
                 if error_behavior == ErrorBehavior.ABORT:
                     raise MngrError(error_msg) from e
                 return
         else:
             error_msg = f"Agent is not running (state: {lifecycle_state.value})"
-            _record_agent_failure(result, result_lock, agent_name, error_msg, on_error)
+            _record_agent_failure(
+                result, result_lock, agent_name, error_msg, on_error, SendFailureKind.AGENT_UNREACHABLE
+            )
             if error_behavior == ErrorBehavior.ABORT:
                 raise MngrError(f"Cannot send message to {agent_name}: {error_msg}")
             return
@@ -367,7 +404,12 @@ def _send_message_to_agent(
             raise
     except MngrError as e:
         error_msg = str(e)
-        _record_agent_failure(result, result_lock, agent_name, error_msg, on_error)
+        # A harness that classified its own failure says so on the exception, and states the
+        # reason without the "failed to send to X" framing str(e) adds for a standalone raise.
+        # Anything else is unclassified prose, which the client treats exactly as it does today.
+        reason = e.reason if isinstance(e, SendMessageError) else error_msg
+        kind = e.kind if isinstance(e, SendMessageError) else SendFailureKind.UNKNOWN
+        _record_agent_failure(result, result_lock, agent_name, reason, on_error, kind)
         if error_behavior == ErrorBehavior.ABORT:
             raise MngrError(error_msg) from e
 

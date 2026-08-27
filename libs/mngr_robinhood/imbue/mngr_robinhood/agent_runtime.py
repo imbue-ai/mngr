@@ -31,7 +31,7 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 # the SDK always run on the local host, so we set them explicitly to avoid hangs on the
 # "bypass permissions mode" and "skip dangerous mode" prompts.
 UNATTENDED_SETTINGS: Final[tuple[str, ...]] = (
-    "agent_types.claude.auto_dismiss_dialogs=true",
+    "agent_types.claude.auto_dismiss_dialogs_at_startup=true",
     "agent_types.claude.auto_allow_permissions=true",
     "agent_types.claude.settings_overrides.skipDangerousModePermissionPrompt=true",
     "agent_types.claude.settings_overrides.bypassPermissionsModeAccepted=true",

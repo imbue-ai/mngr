@@ -39,11 +39,16 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
 
     * ``TUI_READY_INDICATOR`` -- what the pane shows once the TUI is rendered and
       ready to accept input, on BOTH a fresh start and a resume (and ideally
-      stays matching while the TUI is processing). Either a plain ``str``
-      (matched as an exact substring) or a compiled ``re.Pattern`` (matched with
-      ``re.search``) -- the type, not the string contents, chooses the matching
-      mode, so reach for a ``re.Pattern`` when no single substring captures the
-      ready state. Polled by ``send_message`` before pasting, and at startup by
+      stays matching while the TUI is processing). A plain ``str`` (matched as an
+      exact substring), a compiled ``re.Pattern`` (matched with ``re.search``),
+      or a predicate taking the pane content and returning whether it is ready --
+      the type, not the string contents, chooses the matching mode. Reach for a
+      ``re.Pattern`` when no single substring captures the ready state, and for a
+      predicate when readiness is not a match at all (for example when it depends
+      on WHERE in the pane something appears). A harness supplying a predicate
+      should return it from ``get_tui_ready_indicator`` rather than storing it in
+      the ClassVar, since a function stored on a class binds as a method when read
+      through an instance. Polled by ``send_message`` before pasting, and at startup by
       ``wait_for_ready_signal``. A startup-only banner is unsuitable: it does not
       render when resuming a saved session, so prefer the input prompt glyph (or
       the input-box chrome) over a welcome banner.
@@ -60,14 +65,14 @@ class InteractiveTuiAgent(SendKeysAgent[AgentConfigT]):
     Enter (never the text) while the pane still shows the message unconsumed.
     """
 
-    TUI_READY_INDICATOR: ClassVar[str | re.Pattern[str]]
+    TUI_READY_INDICATOR: ClassVar[str | re.Pattern[str] | Callable[[str], bool]]
 
     confirmation_timeout_seconds: float = Field(
         default=DEFAULT_CONFIRMATION_TIMEOUT_SECONDS,
         description="How long to poll for durable submission evidence before a strict send fails",
     )
 
-    def get_tui_ready_indicator(self) -> str | re.Pattern[str]:
+    def get_tui_ready_indicator(self) -> str | re.Pattern[str] | Callable[[str], bool]:
         return self.TUI_READY_INDICATOR
 
     @abstractmethod

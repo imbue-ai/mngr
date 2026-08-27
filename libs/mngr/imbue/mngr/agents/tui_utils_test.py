@@ -224,7 +224,9 @@ class _ProbeAgent(BaseAgent[AgentTypeConfig]):
 
     captured_commands: list[str] = pydantic.Field(default_factory=list)
 
-    def _capture_pane_content(self, tmux_target: TmuxWindowTarget, include_scrollback: bool = False) -> str | None:
+    def _capture_pane_content(
+        self, tmux_target: TmuxWindowTarget | str, include_scrollback: bool = False
+    ) -> str | None:
         return "pane still shows the typed message"
 
 
@@ -242,7 +244,9 @@ def _make_probe_agent(*scripted_results: CommandResult) -> _ProbeAgent:
 def test_send_enter_keystroke_runs_tmux_send_keys() -> None:
     agent = _make_probe_agent()
     send_enter_keystroke(agent, _FAKE_TARGET)
-    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
+    assert [c for c in agent.captured_commands if not c.startswith(("tmux show-options", "tmux copy-mode"))] == [
+        "tmux send-keys -t =probe-target:0 Enter"
+    ]
 
 
 def test_send_enter_keystroke_raises_on_command_failure() -> None:
@@ -259,7 +263,7 @@ def test_submit_and_confirm_returns_confirmed_outcome() -> None:
     assert outcome.is_confirmed is True
     assert outcome.confirming_probe_name == "marker"
     # One host round-trip for the whole confirmation window.
-    assert len(agent.captured_commands) == 1
+    assert len([c for c in agent.captured_commands if not c.startswith(("tmux show-options", "tmux copy-mode"))]) == 1
 
 
 def test_submit_and_confirm_flags_rejection_when_a_rejection_probe_confirms() -> None:
@@ -334,7 +338,9 @@ def test_submit_and_confirm_degrades_to_plain_enter_without_probes() -> None:
         agent=agent, tmux_target=_FAKE_TARGET, message="hello", probes=(), timeout_seconds=5.0
     )
     assert outcome.is_confirmed is False
-    assert agent.captured_commands == ["tmux send-keys -t =probe-target:0 Enter"]
+    assert [c for c in agent.captured_commands if not c.startswith(("tmux show-options", "tmux copy-mode"))] == [
+        "tmux send-keys -t =probe-target:0 Enter"
+    ]
 
 
 @pytest.mark.allow_warnings
