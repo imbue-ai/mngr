@@ -62,6 +62,7 @@ from websockets import ClientConnection
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr_forward.auth import AuthStoreInterface
 from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
@@ -1197,38 +1198,88 @@ def _handle_subdomain_auth_bridge(
     return response
 
 
-class TunnelWarningRateLimiter(MutableModel):
-    """Interval rate limit for the repeated per-agent tunnel-setup-failed warning.
+# Above this many tracked keys, the limiter forgets the ones whose interval has
+# already lapsed. The unresolved-origin key carries the request's own Host
+# label, which nothing validates against a known service, so without this the
+# key space a long-lived forward accumulates is whatever clients ask for.
+_MAX_TRACKED_WARNING_KEYS: Final[int] = 512
 
-    A refused tunnel is retried about once a second while a workspace view is
-    open, so an unreachable workspace floods the log with (usually identical)
-    warnings. One line per interval per agent (carrying the count of suppressed
-    earlier warnings, whatever their message) keeps the signal without the noise.
+
+class ForwardWarningRateLimiter(MutableModel):
+    """Interval rate limit for a per-key repeated warning.
+
+    Both warnings this guards (tunnel setup failed; origin unresolved) recur
+    about once a second while a proxied view is open -- the tunnel is
+    re-dialed per request, and the 503 loading page polls its dead origin --
+    so an unhealthy agent floods the log with (usually identical)
+    warnings. One line per interval per key (carrying the count of suppressed
+    earlier warnings, whatever their message) keeps the signal without the
+    noise.
     """
 
     interval_seconds: float = Field(
-        frozen=True, default=60.0, description="Minimum seconds between logged warnings per agent"
+        frozen=True, default=60.0, description="Minimum seconds between logged warnings per key"
     )
     now_fn: Callable[[], float] = Field(
         frozen=True, default=time.monotonic, description="Monotonic clock, injectable for tests"
     )
-    last_logged_at_by_agent: dict[str, float] = Field(
-        default_factory=dict, description="Monotonic time of the last logged warning per agent"
+    last_logged_at_by_key: dict[str, float] = Field(
+        default_factory=dict, description="Monotonic time of the last logged warning per key"
     )
-    suppressed_count_by_agent: dict[str, int] = Field(
-        default_factory=dict, description="Warnings suppressed since the last logged one per agent"
+    suppressed_count_by_key: dict[str, int] = Field(
+        default_factory=dict, description="Warnings suppressed since the last logged one per key"
     )
 
-    def suppressed_repeats_if_should_log(self, agent_key: str) -> int | None:
+    def suppressed_repeats_if_should_log(self, key: str) -> int | None:
         """Return the count of warnings suppressed since the last logged one when a warning should log now, or None to suppress."""
         now = self.now_fn()
-        last_logged_at = self.last_logged_at_by_agent.get(agent_key)
+        last_logged_at = self.last_logged_at_by_key.get(key)
         if last_logged_at is None or now - last_logged_at >= self.interval_seconds:
-            suppressed_count = self.suppressed_count_by_agent.pop(agent_key, 0)
-            self.last_logged_at_by_agent[agent_key] = now
+            suppressed_count = self.suppressed_count_by_key.pop(key, 0)
+            self.last_logged_at_by_key[key] = now
+            self._forget_lapsed_keys_over_capacity(now)
             return suppressed_count
-        self.suppressed_count_by_agent[agent_key] = self.suppressed_count_by_agent.get(agent_key, 0) + 1
+        self.suppressed_count_by_key[key] = self.suppressed_count_by_key.get(key, 0) + 1
         return None
+
+    def _forget_lapsed_keys_over_capacity(self, now: float) -> None:
+        """Drop keys whose interval has lapsed, once more than ``_MAX_TRACKED_WARNING_KEYS`` are tracked.
+
+        Only lapsed keys may ever be dropped: evicting one still inside its
+        interval would let the flood this limiter exists to damp silence it.
+        """
+        if len(self.last_logged_at_by_key) <= _MAX_TRACKED_WARNING_KEYS:
+            return
+        for key, last_logged_at in tuple(self.last_logged_at_by_key.items()):
+            if now - last_logged_at >= self.interval_seconds:
+                del self.last_logged_at_by_key[key]
+                self.suppressed_count_by_key.pop(key, None)
+
+
+def _log_unresolved_origin_rate_limited(
+    limiter: ForwardWarningRateLimiter,
+    instance_key: AgentInstanceKey,
+    origin_label: str | None,
+) -> None:
+    """Log (rate-limited per agent+label) that a request's origin had no backend route.
+
+    This is the only trace the permanent loading-page state leaves on
+    the desktop: the 503 response itself is silent, and the UNRESOLVED failure
+    envelope is deliberately not enrolled by the health machinery (an agent
+    restart routes *through* the forward, so it cannot refill the forward's own
+    maps). Without this line, a wedged label map is invisible in every log.
+    """
+    origin_description = "the bare host origin" if origin_label is None else f"origin label {origin_label!r}"
+    suppressed_repeats = limiter.suppressed_repeats_if_should_log(f"{instance_key}|{origin_label}")
+    if suppressed_repeats is not None:
+        repeat_suffix = f" ({suppressed_repeats} earlier occurrences suppressed)" if suppressed_repeats > 0 else ""
+        logger.warning(
+            "Resolved no backend for {} on {}; serving the 503 loading page "
+            "(service not registered, or its origin label is not yet mapped){}",
+            origin_description,
+            instance_key,
+            repeat_suffix,
+        )
 
 
 async def _handle_workspace_forward_http(
@@ -1246,7 +1297,8 @@ async def _handle_workspace_forward_http(
     envelope_writer: EnvelopeWriter,
     use_http2: bool,
     stall_notice_seconds: float,
-    tunnel_warning_limiter: TunnelWarningRateLimiter,
+    tunnel_warning_limiter: ForwardWarningRateLimiter,
+    unresolved_warning_limiter: ForwardWarningRateLimiter,
 ) -> Response:
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
         return _handle_subdomain_auth_bridge(request, host_info, auth_store, use_http2)
@@ -1333,6 +1385,7 @@ async def _handle_workspace_forward_http(
     else:
         target = resolver.resolve_by_origin_label(instance_key, host_info.service_name)
     if target is None:
+        _log_unresolved_origin_rate_limited(unresolved_warning_limiter, instance_key, host_info.service_name)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         return _service_unavailable_response(request)
 
@@ -1403,6 +1456,7 @@ async def _handle_workspace_forward_websocket(
     preauth_cookie_value: str | None,
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
+    unresolved_warning_limiter: ForwardWarningRateLimiter,
 ) -> None:
     if not _is_authenticated(
         cookies=websocket.cookies,
@@ -1435,6 +1489,7 @@ async def _handle_workspace_forward_websocket(
         # Mirror the HTTP path: an unresolved backend is a backend failure a
         # consumer must hear about. A loaded SPA whose only live channel is a
         # websocket would otherwise leave minds blind to the dead workspace.
+        _log_unresolved_origin_rate_limited(unresolved_warning_limiter, instance_key, host_info.service_name)
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         await websocket.close(code=1013, reason="Backend not yet available")
         return
@@ -1832,7 +1887,8 @@ def create_forward_app(
     beyond the default 'self' + workspace-family deny-external posture.
     """
     env = _build_jinja_env()
-    tunnel_warning_limiter = TunnelWarningRateLimiter()
+    tunnel_warning_limiter = ForwardWarningRateLimiter()
+    unresolved_warning_limiter = ForwardWarningRateLimiter()
 
     app = FastAPI(
         title="mngr forward",
@@ -1870,6 +1926,7 @@ def create_forward_app(
             use_http2=use_http2,
             stall_notice_seconds=stall_notice_seconds,
             tunnel_warning_limiter=tunnel_warning_limiter,
+            unresolved_warning_limiter=unresolved_warning_limiter,
         )
         # The proxy owns embedding policy for every workspace origin: APPEND a
         # frame-ancestors CSP header (never modify what the service sent --
@@ -1955,6 +2012,7 @@ def create_forward_app(
             preauth_cookie_value=preauth_cookie_value,
             allow_host_loopback=allow_host_loopback,
             envelope_writer=envelope_writer,
+            unresolved_warning_limiter=unresolved_warning_limiter,
         )
 
     return app

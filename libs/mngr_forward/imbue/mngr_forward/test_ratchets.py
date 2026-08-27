@@ -204,7 +204,10 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(29))
+    # Most of these are the inline ``noqa: SLF001`` suppressions on
+    # stream_manager_test.py's private-access test hooks; ruff requires the
+    # suppression on the flagged line, so each hook costs one.
+    rc.check_trailing_comments(_DIR, snapshot(30))
 
 
 def test_prevent_init_docstrings() -> None:

@@ -22,6 +22,15 @@ from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 
+# Process exit code for "the named agent or host does not exist", as opposed to a
+# transient or environmental failure. Distinct from the generic error code so
+# out-of-process callers can tell the two apart from (exit code, stderr) alone --
+# notably mngr_forward, which runs a `mngr event --follow` child per agent and must
+# decide whether respawning it could ever succeed. Defined here, beside the classes
+# that carry it, because cli/exit_codes.py cannot be imported from this module (it
+# imports interfaces.data_types, which imports this module).
+EXIT_CODE_TARGET_NOT_FOUND: Final[int] = 8
+
 
 class MngrError(ClickException):
     """Base exception for all user-facing mngr errors.
@@ -59,6 +68,16 @@ class UserInputError(MngrError):
     """Raised when user input is invalid."""
 
     user_help_text = "Check the command syntax with 'mngr --help' or 'mngr <command> --help'."
+
+
+class NoMatchingHostsError(UserInputError):
+    """Raised when a host identifier matches no host that discovery can see."""
+
+    # Not the inherited "check the command syntax" text: the identifier is
+    # usually well-formed and the host is simply gone or not yet discovered,
+    # which is what `mngr list` answers. Mirrors AgentNotFoundError's help.
+    user_help_text = "Use 'mngr list' to see available hosts and agents."
+    exit_code = EXIT_CODE_TARGET_NOT_FOUND
 
 
 class ParseSpecError(MngrError, ValueError):
@@ -204,6 +223,18 @@ class AgentNotFoundError(AgentError):
     def __init__(self, agent_identifier: str) -> None:
         self.agent_identifier = agent_identifier
         super().__init__(f"Agent not found: {agent_identifier}")
+
+
+class AgentIdNotFoundError(AgentNotFoundError):
+    """No agent matched, and every identifier looked for was an agent *id*.
+
+    The exit code lives here rather than on the base because the base is also
+    raised for user-typed names, where a miss is as likely a typo as a gone
+    agent. An id is machine-generated, so a miss really does mean the target is
+    gone -- which is the only thing an out-of-process caller can act on.
+    """
+
+    exit_code = EXIT_CODE_TARGET_NOT_FOUND
 
 
 class AgentNotFoundOnHostError(AgentError):

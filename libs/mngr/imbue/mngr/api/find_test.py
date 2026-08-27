@@ -10,6 +10,7 @@ from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
+from imbue.mngr.api.find import _post_filter_matches_by_addresses
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import filter_all_hosts
@@ -18,13 +19,17 @@ from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import get_host_from_list_by_id
 from imbue.mngr.api.find import get_unique_host_from_list_by_name
 from imbue.mngr.api.find import group_agents_by_host
+from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -36,6 +41,7 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostNameOrId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import allow_warnings
@@ -159,6 +165,63 @@ def test_filter_one_host_raises_when_not_found() -> None:
             address=HostAddress(host=HostName("nonexistent")),
             all_hosts=[],
         )
+
+
+@pytest.mark.parametrize(
+    ("host", "expected_exit_code"),
+    [
+        (HostName("nonexistent"), EXIT_CODE_ERROR),
+        (HostId("host-fa29307a16734899aa77b0f0563c8c99"), EXIT_CODE_TARGET_NOT_FOUND),
+    ],
+    ids=["host_name", "host_id"],
+)
+def test_filter_one_host_reserves_the_gone_target_code_for_ids(host: HostNameOrId, expected_exit_code: int) -> None:
+    """The host-target lookup makes the same id-vs-name split the agent one does.
+
+    Host-addressed commands (`mngr event @HOST`, mngr file / limit / snapshot / wait) resolve
+    here rather than through find_one_agent, so an exit code carried only by the agent path
+    would mean the answer to "does this host exist" depends on which command was run.
+    """
+    with pytest.raises(MngrError) as exc_info:
+        filter_one_host(address=HostAddress(host=host), all_hosts=[])
+
+    assert exc_info.value.exit_code == expected_exit_code
+
+
+_LIVE_AGENT_ELSEWHERE = AgentMatch(
+    agent_id=AgentId("agent-fa29307a16734899aa77b0f0563c8c99"),
+    agent_name=AgentName("some-machine"),
+    host_id=HostId("host-11111111111111111111111111111111"),
+    host_name=HostName("its-real-host"),
+    provider_name=ProviderInstanceName("local"),
+)
+
+
+@pytest.mark.parametrize(
+    ("host", "expected_exit_code"),
+    [
+        (HostName("some-other-host"), EXIT_CODE_ERROR),
+        (HostId("host-22222222222222222222222222222222"), EXIT_CODE_TARGET_NOT_FOUND),
+    ],
+    ids=["host_name", "host_id"],
+)
+def test_the_host_qualified_bulk_lookup_reserves_the_gone_target_code_for_id_only_addresses(
+    host: HostNameOrId, expected_exit_code: int
+) -> None:
+    """An agent id that is alive elsewhere plus a mistyped host *name* is not a gone target.
+
+    `mngr stop <agent>@<host>` fails here rather than in the miss paths the other
+    tests drive: the agent identifier already matched discovery, and it is the host
+    constraint that rejects it. So the gone-target code has to depend on the host
+    component too -- otherwise a typo'd host name reports an agent that is demonstrably
+    running as permanently gone.
+    """
+    address = AgentAddress(agent=_LIVE_AGENT_ELSEWHERE.agent_id, host=HostAddress(host=host))
+
+    with pytest.raises(MngrError) as exc_info:
+        _post_filter_matches_by_addresses([address], [_LIVE_AGENT_ELSEWHERE])
+
+    assert exc_info.value.exit_code == expected_exit_code
 
 
 def test_filter_one_host_disambiguates_with_host_provider_form() -> None:

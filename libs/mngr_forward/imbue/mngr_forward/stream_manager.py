@@ -26,6 +26,7 @@ line is parsed.
 import json
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
@@ -54,6 +55,7 @@ from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import tail_discovery_events_file
 from imbue.mngr.api.discovery_log_suppression import DiscoveryErrorLogSuppressor
+from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
@@ -74,6 +76,21 @@ _REQUESTS_SOURCE = "requests"
 _EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS: Final[float] = 2.0
 _EVENTS_RESPAWN_MAX_BACKOFF_SECONDS: Final[float] = 60.0
 _EVENTS_STREAM_HEALTHY_AGE_SECONDS: Final[float] = 60.0
+# A child whose stderr says its target agent/host does not exist cannot succeed
+# until discovery changes its mind, so it retries far less often than the
+# crash-loop ladder's cap. Still finite: the child's view can be transiently
+# stale (e.g. an agent listing hiccup during a host restart), so never respawning
+# again would strand a live agent's stream -- the exact wedge this plugin's
+# respawn machinery exists to prevent.
+_EVENTS_GONE_TARGET_RESPAWN_BACKOFF_SECONDS: Final[float] = 900.0
+# How many of a child's most recent stderr lines are kept for its exit log line.
+_EVENTS_STDERR_TAIL_MAX_LINES: Final[int] = 5
+# How many gone-target exits, with no healthy run in between, before the long
+# backoff applies. A stream is only ever started for an agent this forward's own
+# aggregator currently tracks, so a gone-target exit means the child's discovery
+# view and ours disagree -- and one disagreement is not worth 15 minutes of
+# silence for an agent that may well be alive.
+_EVENTS_GONE_TARGET_STRIKES_REQUIRED: Final[int] = 2
 
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
@@ -156,6 +173,12 @@ class ForwardStreamManager(MutableModel):
     _events_respawn_backoff_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
     _events_next_respawn_at_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
     _events_spawned_at_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
+    # The most recent stderr lines per live events child, surfaced in its exit
+    # log line: the child's stderr is otherwise logged at debug only, which made
+    # every returncode=1 exit undiagnosable from a default-level log bundle.
+    _events_stderr_tail_by_instance: dict[str, deque[str]] = PrivateAttr(default_factory=dict)
+    # Consecutive gone-target exits per instance; reset by any other exit reason.
+    _events_gone_target_strikes_by_instance: dict[str, int] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _compiled_includes: list[Any] = PrivateAttr(default_factory=list)
@@ -501,25 +524,59 @@ class ForwardStreamManager(MutableModel):
                 spawned_at = self._events_spawned_at_by_instance.pop(instance_str, None)
                 if spawned_at is not None and now - spawned_at >= _EVENTS_STREAM_HEALTHY_AGE_SECONDS:
                     # The dead stream had lived long enough to count as
-                    # healthy; treat this exit as a fresh incident.
+                    # healthy; treat this exit as a fresh incident. That clears
+                    # the gone-target strikes too: a stream that ran healthily
+                    # for a minute proves its target existed, so an earlier
+                    # strike must not combine with a later one hours apart to
+                    # sideline a live agent for the long backoff.
                     self._events_respawn_backoff_by_instance.pop(instance_str, None)
+                    self._events_gone_target_strikes_by_instance.pop(instance_str, None)
                 if now < self._events_next_respawn_at_by_instance.get(instance_str, 0.0):
                     # Still inside the backoff window: keep the dead entry so a
                     # later snapshot retries once the window has passed.
                     return
-                backoff = self._events_respawn_backoff_by_instance.get(
-                    instance_str, _EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS
-                )
+                stderr_tail = tuple(self._events_stderr_tail_by_instance.pop(instance_str, ()))
+                stderr_summary = " | ".join(stderr_tail) if stderr_tail else "(no stderr captured)"
+                # The child exits with a distinct code when its target does not
+                # exist, so this needs no message matching. See
+                # EXIT_CODE_TARGET_NOT_FOUND in mngr's errors module.
+                if existing.returncode == EXIT_CODE_TARGET_NOT_FOUND:
+                    gone_strikes = self._events_gone_target_strikes_by_instance.get(instance_str, 0) + 1
+                    self._events_gone_target_strikes_by_instance[instance_str] = gone_strikes
+                else:
+                    gone_strikes = 0
+                    self._events_gone_target_strikes_by_instance.pop(instance_str, None)
+                if gone_strikes >= _EVENTS_GONE_TARGET_STRIKES_REQUIRED:
+                    # A flat, much longer interval that neither consumes nor
+                    # escalates the crash-loop ladder, so a later ordinary crash
+                    # resumes the ladder where this interlude left it.
+                    backoff = _EVENTS_GONE_TARGET_RESPAWN_BACKOFF_SECONDS
+                    logger.info(
+                        "Per-agent events stream for {} exited (returncode={}) reporting its target gone "
+                        "{} times running; retrying no sooner than {:.0f}s in case discovery is stale; "
+                        "last stderr: {}",
+                        instance_key,
+                        existing.returncode,
+                        gone_strikes,
+                        backoff,
+                        stderr_summary,
+                    )
+                else:
+                    backoff = self._events_respawn_backoff_by_instance.get(
+                        instance_str, _EVENTS_RESPAWN_INITIAL_BACKOFF_SECONDS
+                    )
+                    self._events_respawn_backoff_by_instance[instance_str] = min(
+                        backoff * 2, _EVENTS_RESPAWN_MAX_BACKOFF_SECONDS
+                    )
+                    logger.info(
+                        "Per-agent events stream for {} exited (returncode={}); respawning "
+                        "(next retry no sooner than {:.0f}s); last stderr: {}",
+                        instance_key,
+                        existing.returncode,
+                        backoff,
+                        stderr_summary,
+                    )
                 self._events_next_respawn_at_by_instance[instance_str] = now + backoff
-                self._events_respawn_backoff_by_instance[instance_str] = min(
-                    backoff * 2, _EVENTS_RESPAWN_MAX_BACKOFF_SECONDS
-                )
-                logger.info(
-                    "Per-agent events stream for {} exited (returncode={}); respawning (next retry no sooner than {:.0f}s)",
-                    instance_key,
-                    existing.returncode,
-                    backoff,
-                )
                 self._events_processes.pop(instance_str, None)
             # Preserve any already-known services across a respawn (the new
             # stream re-emits current registrations on connect); only seed an
@@ -560,6 +617,8 @@ class ForwardStreamManager(MutableModel):
             self._events_respawn_backoff_by_instance.pop(instance_str, None)
             self._events_next_respawn_at_by_instance.pop(instance_str, None)
             self._events_spawned_at_by_instance.pop(instance_str, None)
+            self._events_stderr_tail_by_instance.pop(instance_str, None)
+            self._events_gone_target_strikes_by_instance.pop(instance_str, None)
         if process is None:
             return
         try:
@@ -572,6 +631,11 @@ class ForwardStreamManager(MutableModel):
             stripped = line.strip()
             if stripped:
                 logger.debug("mngr event stderr for {}: {}", instance_key, stripped)
+                with self._lock:
+                    tail = self._events_stderr_tail_by_instance.setdefault(
+                        str(instance_key), deque(maxlen=_EVENTS_STDERR_TAIL_MAX_LINES)
+                    )
+                    tail.append(stripped)
             return
         stripped = line.strip()
         if not stripped:
@@ -620,8 +684,7 @@ class ForwardStreamManager(MutableModel):
             services_snapshot = dict(services)
             # Invert to origin-label -> service-name for the resolver's routing.
             label_to_name_snapshot = {label: name for name, label in labels.items()}
-        self.resolver.update_services(instance_key, services_snapshot)
-        self.resolver.update_service_labels(instance_key, label_to_name_snapshot)
+        self.resolver.update_services(instance_key, services_snapshot, label_to_name_snapshot)
 
     @staticmethod
     def _safely_call(callback: Callable[..., None], *args: Any, name: str) -> None:

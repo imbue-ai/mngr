@@ -298,7 +298,9 @@ When watching an agent, both agent and host states are tracked:
 Exit codes:
   0 - Target reached one of the requested states
   1 - Error
-  2 - Timeout expired""",
+  2 - Timeout expired
+  8 - TARGET is an agent or host ID that does not exist (a name that matches
+      nothing stays 1, since it is as likely a typo as a gone target)""",
     examples=(
         ("Wait for an agent to finish", "mngr wait my-agent DONE"),
         ("Wait for any terminal state", "mngr wait agent-abc123"),

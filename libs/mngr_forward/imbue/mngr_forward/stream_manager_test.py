@@ -22,6 +22,7 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
@@ -31,6 +32,7 @@ from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
+from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentName
@@ -44,6 +46,7 @@ from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.stream_manager import ForwardStreamManager
+from imbue.mngr_forward.stream_manager import _EVENTS_STREAM_HEALTHY_AGE_SECONDS
 from imbue.mngr_forward.testing import TEST_AGENT_ID_1
 from imbue.mngr_forward.testing import TEST_AGENT_ID_2
 
@@ -675,3 +678,174 @@ def test_crash_loop_backoff_is_not_reset_by_time_spent_waiting_in_the_window(
     # The ladder kept escalating (4 -> stored 8): the instantly-dead stream was
     # not misclassified as healthy just because its corpse sat for 61s.
     assert backoff_by_instance[instance_str] == 8.0
+
+
+def _feed_events_stderr(manager: ForwardStreamManager, instance_key: AgentInstanceKey, line: str) -> None:
+    """Deliver one stderr line from the per-agent events child (test hook)."""
+    manager._on_event_output(line, is_stdout=False, instance_key=instance_key)  # noqa: SLF001
+
+
+def test_events_stream_exit_log_carries_the_childs_last_stderr_lines(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """The exit/respawn log line must include the dead child's recent stderr.
+
+    Regression for undiagnosable stream deaths: the child's stderr was logged at
+    debug only, so a default-level log bundle showed hundreds of
+    ``exited (returncode=1)`` lines with no reason. The tail is capped and is
+    cleared per incident so a later child's exit reports its own stderr.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    infos: list[str] = []
+    sink_id = logger.add(infos.append, level="INFO", format="{message}")
+    try:
+        _start_events(manager, _INSTANCE_1)
+        # Seven stderr lines; only the newest five may survive in the tail.
+        for idx in range(7):
+            _feed_events_stderr(manager, _INSTANCE_1, f"stderr-line-{idx}")
+        fake_cg.spawned[0].mark_dead(1)
+        _start_events(manager, _INSTANCE_1)
+
+        exit_logs = [message for message in infos if "exited (returncode=1)" in message]
+        assert len(exit_logs) == 1
+        assert "stderr-line-6" in exit_logs[0]
+        assert "stderr-line-2" in exit_logs[0]
+        assert "stderr-line-0" not in exit_logs[0]
+        assert "stderr-line-1" not in exit_logs[0]
+
+        # The second child dies without writing stderr: its exit line must not
+        # replay the first child's output.
+        fake_cg.spawned[1].mark_dead(1)
+        backoff_by_instance, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
+        next_respawn_at_by_instance[str(_INSTANCE_1)] = time.monotonic() - 1.0
+        _start_events(manager, _INSTANCE_1)
+        exit_logs_after = [message for message in infos if "exited (returncode=1)" in message]
+        assert len(exit_logs_after) == 2
+        assert "stderr-line-6" not in exit_logs_after[1]
+        assert "(no stderr captured)" in exit_logs_after[1]
+    finally:
+        logger.remove(sink_id)
+
+
+def test_gone_target_stream_backs_off_far_longer_without_touching_the_ladder(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A child that repeatedly reports its target gone waits the long flat backoff, not the crash ladder.
+
+    Regression for the futile respawn storm: a stream whose agent no longer
+    exists was respawned at the 60s ladder cap forever -- pure SSH/process
+    churn that can never succeed. The child signals this with a distinct exit
+    code, and two consecutive such exits are required, so a host record read
+    mid-rewrite costs one ordinary ladder step instead of 15 minutes. The long
+    backoff also leaves the ladder alone, so a later ordinary crash resumes it
+    where this interlude left it.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    instance_str = str(_INSTANCE_1)
+
+    _start_events(manager, _INSTANCE_1)
+    fake_cg.spawned[0].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
+    before = time.monotonic()
+    # One gone-target exit is not enough: it takes the ordinary ladder, so a
+    # transiently unreadable host record is retried in seconds.
+    _start_events(manager, _INSTANCE_1)
+    assert len(fake_cg.spawned) == 2
+    backoff_by_instance, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
+    assert next_respawn_at_by_instance[instance_str] - before < 60.0
+    assert backoff_by_instance[instance_str] == 4.0
+
+    # The second consecutive gone-target exit opens the long window, and leaves
+    # the ladder untouched from here on.
+    fake_cg.spawned[1].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
+    next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
+    before = time.monotonic()
+    _start_events(manager, _INSTANCE_1)
+    assert len(fake_cg.spawned) == 3
+    backoff_by_instance, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
+    assert next_respawn_at_by_instance[instance_str] - before > 600.0
+    # Still where strike one left it: the long backoff is flat, so it neither
+    # consumed the ladder step nor doubled 15 minutes into it.
+    assert backoff_by_instance[instance_str] == 4.0
+
+    # Inside the long window, snapshot-cadence retries must not spawn.
+    fake_cg.spawned[2].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
+    _start_events(manager, _INSTANCE_1)
+    _start_events(manager, _INSTANCE_1)
+    assert len(fake_cg.spawned) == 3
+
+    # Once the window passes (discovery may have been stale), it retries again.
+    next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
+    _start_events(manager, _INSTANCE_1)
+    assert len(fake_cg.spawned) == 4
+
+
+def test_an_ordinary_exit_clears_the_gone_target_strikes(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """Only *consecutive* gone-target exits escalate; any other exit resets the count.
+
+    Otherwise a workspace that occasionally races a host-record rewrite would
+    accumulate strikes across unrelated crashes and eventually sit out 15
+    minutes for a target that is alive.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    instance_str = str(_INSTANCE_1)
+
+    _start_events(manager, _INSTANCE_1)
+    fake_cg.spawned[0].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
+    _start_events(manager, _INSTANCE_1)
+
+    # An ordinary crash in between clears the strike.
+    _, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
+    next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
+    fake_cg.spawned[1].mark_dead(1)
+    _start_events(manager, _INSTANCE_1)
+
+    # So this gone-target exit is strike one again, not two: ordinary ladder.
+    _, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
+    next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
+    fake_cg.spawned[2].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
+    before = time.monotonic()
+    _start_events(manager, _INSTANCE_1)
+    _, next_respawn_at_by_instance, _spawned_at = _pacing_state(manager)
+    assert next_respawn_at_by_instance[instance_str] - before < 60.0
+
+
+def test_a_healthy_run_clears_the_gone_target_strikes(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A stream that ran healthily proves its target existed, so it must reset the strikes.
+
+    Without this, "consecutive" spans unlimited wall-clock: one gone-target exit,
+    then hours of healthy streaming, then a single unlucky second exit would put a
+    live agent into the 15-minute backoff -- the very wedge this plugin exists to
+    prevent, made rarer rather than removed.
+    """
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    instance_str = str(_INSTANCE_1)
+
+    _start_events(manager, _INSTANCE_1)
+    fake_cg.spawned[0].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
+    _start_events(manager, _INSTANCE_1)
+
+    # The respawn runs long enough to count as healthy before it dies, again
+    # with the gone-target code.
+    _backoff, next_respawn_at_by_instance, spawned_at_by_instance = _pacing_state(manager)
+    spawned_at_by_instance[instance_str] = time.monotonic() - (_EVENTS_STREAM_HEALTHY_AGE_SECONDS + 1.0)
+    next_respawn_at_by_instance[instance_str] = time.monotonic() - 1.0
+    fake_cg.spawned[1].mark_dead(EXIT_CODE_TARGET_NOT_FOUND)
+    before = time.monotonic()
+    _start_events(manager, _INSTANCE_1)
+
+    # The healthy run reset the count, so this is strike one: ordinary ladder,
+    # not the long window.
+    _backoff, next_respawn_at_by_instance, _spawned = _pacing_state(manager)
+    assert next_respawn_at_by_instance[instance_str] - before < 60.0

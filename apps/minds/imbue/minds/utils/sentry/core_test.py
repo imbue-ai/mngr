@@ -203,13 +203,18 @@ def test_collect_external_attachments_sweeps_latchkey_and_discovery_dirs(tmp_pat
     latchkey_dir = tmp_path / "latchkey" / "mngr_latchkey"
     latchkey_dir.mkdir(parents=True)
     (latchkey_dir / "events.jsonl").write_text("daemon-structured\n")
+    (latchkey_dir / "events.jsonl.20260824172552142020").write_text("daemon-rotated\n")
+    # The daemon rotates its raw capture too; that one is deliberately not swept.
     (latchkey_dir / "latchkey_forward.log").write_text("daemon-raw\n")
+    (latchkey_dir / "latchkey_forward.log.20260824172552142020").write_text("daemon-raw-rotated\n")
     discovery_dir = tmp_path / "mngr" / "events" / "mngr" / "discovery"
     discovery_dir.mkdir(parents=True)
     (discovery_dir / "events.jsonl").write_text("discovery\n")
     mngr_cli_events_dir = tmp_path / "mngr" / "events" / "logs" / "mngr"
     mngr_cli_events_dir.mkdir(parents=True)
     (mngr_cli_events_dir / "events.jsonl").write_text("cli-command\n")
+    (mngr_cli_events_dir / "events.jsonl.20260824172552142020").write_text("cli-rotated-old\n")
+    (mngr_cli_events_dir / "events.jsonl.20260825081231000000").write_text("cli-rotated-new\n")
 
     uploader = ErrorAttachmentsS3Uploader(
         log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
@@ -224,16 +229,26 @@ def test_collect_external_attachments_sweeps_latchkey_and_discovery_dirs(tmp_pat
         "",
         "live_logs",
         "latchkey_live_logs",
+        "latchkey_rotated_logs",
         "latchkey_raw_logs",
         "discovery_events",
         "mngr_cli_events",
+        "mngr_cli_rotated_events",
     }
+    # The live globs must not pick up the rotated siblings, and the raw capture's
+    # own rotation must not be swept at all -- it only ever rotates because it
+    # grew oversized, which is the bulk rotating it exists to stop re-uploading.
     assert len(groups["latchkey_live_logs"]) == 1
+    assert len(groups["latchkey_rotated_logs"]) == 1
     assert len(groups["latchkey_raw_logs"]) == 1
     assert len(groups["discovery_events"]) == 1
     assert len(groups["mngr_cli_events"]) == 1
-    # one callback per upload: traceback + the five log files.
-    assert len(callbacks) == 6
+    # Only the newest rotated CLI events file is swept, not every epoch (two
+    # rotated files exist; max_file_count keeps one). Which one is the newest
+    # is _n_newest_files's mtime contract, pinned where that helper lives.
+    assert len(groups["mngr_cli_rotated_events"]) == 1
+    # one callback per upload: traceback + the seven log files.
+    assert len(callbacks) == 8
 
 
 def test_collect_external_attachments_tolerates_missing_external_dirs(tmp_path: Path) -> None:

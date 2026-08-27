@@ -1,12 +1,16 @@
 """Resolves ``[<service>.]host-<hex>.localhost`` requests to a backend ``ProxyTarget``.
 
-Holds three pieces of state, all updated externally:
+Holds four pieces of state, all updated externally:
 
 - The configured forwarding strategy: either ``ForwardServiceStrategy`` (look
   up a named service URL per agent) or ``ForwardPortStrategy`` (forward to a
   fixed remote port on the agent's host).
 - ``services_by_instance``: per-agent-instance service-name → URL, populated
   from the ``mngr event`` stream's ``services`` source.
+- ``label_to_name_by_instance``: per-agent-instance origin label → service
+  name, from that same ``services`` source and set together with
+  ``services_by_instance``. An app origin routes by its label, so this is what
+  ``resolve_by_origin_label`` reads before resolving by name.
 - ``ssh_by_instance``: per-agent-instance SSH info, populated from the
   ``mngr observe`` stream's ``HOST_SSH_INFO`` events; absent for local agents.
 
@@ -39,8 +43,18 @@ from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.data_types import ForwardStrategy
 from imbue.mngr_forward.data_types import ProxyTarget
+from imbue.mngr_forward.service_map_cache import PersistedServiceMap
 from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+
+
+def _is_valid_instance_key(instance_str: str) -> bool:
+    try:
+        AgentInstanceKey(instance_str)
+    except InvalidAgentInstanceKey:
+        logger.debug("Dropping stale service-map cache entry with non-instance key {!r}", instance_str)
+        return False
+    return True
 
 
 class ForwardResolver(MutableModel):
@@ -54,9 +68,9 @@ class ForwardResolver(MutableModel):
         default=None,
         description=(
             "Optional last-known service-map cache. When set, every mutation of "
-            "the per-instance services map -- ``update_services`` (set/replace) plus "
+            "the per-instance services + label maps -- ``update_services`` (set/replace) plus "
             "the destruction paths (``remove_known_agent`` and ``update_known_agents`` "
-            "when they drop an agent that had services) -- is persisted through it, and "
+            "when they drop an agent that had services or labels) -- is persisted through it, and "
             "``seed_services`` loads from it at startup so a fresh run resolves without "
             "waiting on the slow per-agent event stream. None in tests / paths that don't persist."
         ),
@@ -73,39 +87,45 @@ class ForwardResolver(MutableModel):
     _known_agent_instances: set[str] = PrivateAttr(default_factory=set)
     _initial_discovery_done: bool = PrivateAttr(default=False)
 
-    def _snapshot_services_locked(self) -> dict[str, dict[str, str]]:
-        """Return a deep copy of ``_services_by_instance`` for persistence.
+    def _snapshot_maps_locked(self) -> PersistedServiceMap:
+        """Return a deep copy of the per-instance services + label maps for persistence.
 
         Caller MUST hold ``self._lock``. The copy is taken under the lock so the
-        persisted map is a consistent point-in-time view; the write itself must
+        persisted maps are a consistent point-in-time view; the write itself must
         happen outside the lock to avoid holding it across disk I/O.
         """
-        return {instance: dict(svc) for instance, svc in self._services_by_instance.items()}
+        return PersistedServiceMap(
+            services_by_instance={instance: dict(svc) for instance, svc in self._services_by_instance.items()},
+            label_to_name_by_instance={
+                instance: dict(labels) for instance, labels in self._label_to_name_by_instance.items()
+            },
+        )
 
     def update_known_agents(self, instance_keys: tuple[AgentInstanceKey, ...]) -> None:
-        """Replace the set of known agent instances. Drops services / SSH info for removed ones.
+        """Replace the set of known agent instances. Drops services / labels / SSH info for removed ones.
 
-        Persists the post-mutation map when any instance's services entry was
-        dropped, so the cache does not seed the next run with agents that no
-        longer exist. A bulk destruction persists once for the batch, not once
-        per instance.
+        Persists the post-mutation maps when any instance's services or labels
+        entry was dropped, so the cache does not seed the next run with agents
+        that no longer exist. A bulk destruction persists once for the batch,
+        not once per instance.
         """
-        snapshot: dict[str, dict[str, str]] | None = None
+        snapshot: PersistedServiceMap | None = None
         with self._lock:
             new_set = {str(key) for key in instance_keys}
             removed = self._known_agent_instances - new_set
-            services_changed = False
+            maps_changed = False
             for instance_str in removed:
                 if self._services_by_instance.pop(instance_str, None) is not None:
-                    services_changed = True
+                    maps_changed = True
+                if self._label_to_name_by_instance.pop(instance_str, None) is not None:
+                    maps_changed = True
                 self._ssh_by_instance.pop(instance_str, None)
-                self._label_to_name_by_instance.pop(instance_str, None)
             self._known_agent_instances = new_set
             self._initial_discovery_done = True
-            if services_changed:
-                snapshot = self._snapshot_services_locked()
+            if maps_changed:
+                snapshot = self._snapshot_maps_locked()
         if snapshot is not None:
-            self._persist_services_snapshot(snapshot)
+            self._persist_snapshot(snapshot)
 
     def add_known_agent(self, instance_key: AgentInstanceKey) -> None:
         """Mark a single agent instance as known (incremental discovery)."""
@@ -116,43 +136,45 @@ class ForwardResolver(MutableModel):
     def remove_known_agent(self, instance_key: AgentInstanceKey) -> None:
         """Mark a single agent instance as no longer known (incremental destruction).
 
-        Persists the post-mutation map when the instance had a services entry
-        (i.e. there was something to drop). Every mutation of
-        ``_services_by_instance`` persists, so the cache does not retain stale
-        entries for destroyed agents.
+        Persists the post-mutation maps when the instance had a services or
+        labels entry (i.e. there was something to drop). Every mutation of the
+        per-instance maps persists, so the cache does not retain stale entries
+        for destroyed agents.
         """
-        snapshot: dict[str, dict[str, str]] | None = None
+        snapshot: PersistedServiceMap | None = None
         with self._lock:
             instance_str = str(instance_key)
             self._known_agent_instances.discard(instance_str)
-            services_changed = self._services_by_instance.pop(instance_str, None) is not None
+            maps_changed = False
+            if self._services_by_instance.pop(instance_str, None) is not None:
+                maps_changed = True
+            if self._label_to_name_by_instance.pop(instance_str, None) is not None:
+                maps_changed = True
             self._ssh_by_instance.pop(instance_str, None)
-            self._label_to_name_by_instance.pop(instance_str, None)
-            if services_changed:
-                snapshot = self._snapshot_services_locked()
+            if maps_changed:
+                snapshot = self._snapshot_maps_locked()
         if snapshot is not None:
-            self._persist_services_snapshot(snapshot)
+            self._persist_snapshot(snapshot)
 
-    def update_services(self, instance_key: AgentInstanceKey, services: dict[str, str]) -> None:
-        """Replace the known services for a single agent instance.
+    def update_services(
+        self, instance_key: AgentInstanceKey, services: dict[str, str], label_to_name: dict[str, str]
+    ) -> None:
+        """Replace the known services and origin-label map for a single agent instance.
 
-        Persists the post-mutation map, which carries every instance rather
-        than just this one, so the persisted cache is a complete point-in-time
-        view a later run can seed from in a single read.
+        The two maps update together under one lock acquisition because they
+        come from the same service event stream and routing needs them to
+        agree: an app origin resolves by looking its label up in one and the
+        resulting name up in the other. Persists the post-mutation maps, which
+        carry every instance rather than just this one, so the persisted cache
+        is a complete point-in-time view a later run can seed from in a single
+        read.
         """
         with self._lock:
-            self._services_by_instance[str(instance_key)] = dict(services)
-            snapshot = self._snapshot_services_locked()
-        self._persist_services_snapshot(snapshot)
-
-    def update_service_labels(self, instance_key: AgentInstanceKey, label_to_name: dict[str, str]) -> None:
-        """Replace the known origin-label -> service-name map for a single agent instance.
-
-        Not emitted or persisted -- labels are re-derived live from the same
-        service event stream that feeds ``update_services``.
-        """
-        with self._lock:
-            self._label_to_name_by_instance[str(instance_key)] = dict(label_to_name)
+            instance_str = str(instance_key)
+            self._services_by_instance[instance_str] = dict(services)
+            self._label_to_name_by_instance[instance_str] = dict(label_to_name)
+            snapshot = self._snapshot_maps_locked()
+        self._persist_snapshot(snapshot)
 
     def resolve_by_origin_label(self, instance_key: AgentInstanceKey, origin_label: str) -> ProxyTarget | None:
         """Resolve a ``<label>.host-<hex>`` service origin to its backend.
@@ -210,33 +232,37 @@ class ForwardResolver(MutableModel):
                 assert_never(unreachable)
                 raise SwitchError(f"Unknown forwarding strategy: {unreachable}")
 
-    def seed_services(self, services_by_instance: dict[str, dict[str, str]]) -> None:
-        """Seed the per-instance service map from a last-known cache at startup.
+    def seed_services(self, persisted: PersistedServiceMap) -> None:
+        """Seed the per-instance service + label maps from a last-known cache at startup.
 
-        Fills only the services map; ``resolve()`` still gates on
+        Fills only these two maps; ``resolve()`` still gates on
         discovery-supplied membership, so a seeded entry is served only once
-        this run's discovery confirms the agent is known. Does not emit or
-        re-persist -- it loads what is already on disk. The resolver is empty at
-        startup, so in practice this is a plain fill.
+        this run's discovery confirms the agent is known. Labels are seeded so
+        app origins (which route by their ``<name>-<rand>`` label) resolve from
+        the seed too, not just the shell. Does not emit or re-persist -- it
+        loads what is already on disk. The resolver is empty at startup, so in
+        practice this is a plain fill.
 
         Keys that do not parse as instance keys (e.g. bare agent ids persisted
         by an older cache format) are dropped: they could never match a
         discovery-supplied instance, so seeding them would only pin dead data.
         """
         with self._lock:
-            for instance_str, services in services_by_instance.items():
-                try:
-                    AgentInstanceKey(instance_str)
-                except InvalidAgentInstanceKey:
-                    logger.debug("Dropping stale service-map cache entry with non-instance key {!r}", instance_str)
+            for instance_str, services in persisted.services_by_instance.items():
+                if not _is_valid_instance_key(instance_str):
                     continue
                 self._services_by_instance[instance_str] = dict(services)
+            for instance_str, label_to_name in persisted.label_to_name_by_instance.items():
+                if not _is_valid_instance_key(instance_str):
+                    continue
+                self._label_to_name_by_instance[instance_str] = dict(label_to_name)
 
-    def _persist_services_snapshot(self, snapshot: dict[str, dict[str, str]]) -> None:
+    def _persist_snapshot(self, snapshot: PersistedServiceMap) -> None:
         """Persist the service-map cache.
 
         Called (outside ``self._lock``) at every point that mutates the
-        per-instance services map, so a later run can seed from the full map.
+        per-instance services or label maps, so a later run can seed from the
+        full maps.
         """
         if self.service_map_cache is not None:
             self.service_map_cache.persist(snapshot)

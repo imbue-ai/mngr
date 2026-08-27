@@ -280,6 +280,19 @@ def _external_log_attachment_groups(
             is_immutable=False,
             base_dir=mngr_cli_events_dir,
         ),
+        # The most recent rotated per-command mngr CLI log: rotation is
+        # size-based, so on a busy install the current file can cover only
+        # hours, and this log is where a spawned `mngr forward`'s stream
+        # diagnostics land (immutable: rotated files never change, so the S3
+        # key is reused).
+        LogAttachmentGroup(
+            group_name="mngr_cli_rotated_events",
+            glob="events.jsonl.*",
+            max_file_count=1,
+            is_compressed=True,
+            is_immutable=True,
+            base_dir=mngr_cli_events_dir,
+        ),
         # The daemon's structured loguru log (mutable -- re-upload on every report).
         LogAttachmentGroup(
             group_name="latchkey_live_logs",
@@ -287,6 +300,19 @@ def _external_log_attachment_groups(
             max_file_count=MAX_SENTRY_LIST_SIZE,
             is_compressed=True,
             is_immutable=False,
+            base_dir=latchkey_plugin_data_dir,
+        ),
+        # Its most recent rotation, on the same size-based scheme and for the
+        # same reason as the mngr CLI one above: measured at 5-6 hours per file
+        # on a busy install. Mirrors the group the daemon's own reports already
+        # carry (mngr_latchkey/sentry.py's "rotated_logs"); the raw *.log
+        # rotations are deliberately left behind there, so they are here too.
+        LogAttachmentGroup(
+            group_name="latchkey_rotated_logs",
+            glob="*.jsonl.*",
+            max_file_count=1,
+            is_compressed=True,
+            is_immutable=True,
             base_dir=latchkey_plugin_data_dir,
         ),
         # The daemon's raw stdout/stderr capture (latchkey_forward.log).

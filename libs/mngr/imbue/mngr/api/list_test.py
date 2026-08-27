@@ -40,10 +40,12 @@ from imbue.mngr.api.list import _process_host_with_error_handling
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents
+from imbue.mngr.cli.exit_codes import EXIT_CODE_ERROR
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import EXIT_CODE_TARGET_NOT_FOUND
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
@@ -2872,3 +2874,70 @@ def test_the_single_agent_lookup_blames_the_unreachable_backend_too(temp_mngr_ct
     # With every provider reachable this stays the ordinary bad-input answer.
     with pytest.raises(UserInputError):
         find_one_agent(address, temp_mngr_ctx)
+
+
+# A lookup that matches nothing exits with the gone-target code only when every
+# identifier it was given is machine-generated. mngr_forward reads the exit code
+# alone to decide whether respawning its per-agent `mngr event --follow` child
+# could ever succeed, and it always addresses `<agent_id>@<host_id>`. A name is
+# user-typed, so a miss there is as likely a typo and must keep the ordinary
+# code -- otherwise `mngr stop <typo>` is indistinguishable from a gone target.
+_MISSING_AGENT_NAME = AgentName("some-machine")
+_MISSING_AGENT_ID = AgentId("agent-fa29307a16734899aa77b0f0563c8c99")
+_MISSING_HOST_ID = HostId("host-fa29307a16734899aa77b0f0563c8c99")
+
+
+@pytest.mark.allow_warnings
+@pytest.mark.parametrize(
+    ("address", "expected_exit_code"),
+    [
+        (AgentAddress(agent=_MISSING_AGENT_NAME), EXIT_CODE_ERROR),
+        (AgentAddress(agent=_MISSING_AGENT_ID), EXIT_CODE_TARGET_NOT_FOUND),
+        (
+            AgentAddress(agent=_MISSING_AGENT_NAME, host=HostAddress(host=HostName("some-host"))),
+            EXIT_CODE_ERROR,
+        ),
+        (
+            AgentAddress(agent=_MISSING_AGENT_NAME, host=HostAddress(host=_MISSING_HOST_ID)),
+            EXIT_CODE_TARGET_NOT_FOUND,
+        ),
+    ],
+    ids=["agent_name", "agent_id", "host_name", "host_id"],
+)
+def test_the_single_agent_lookup_reserves_the_gone_target_code_for_ids(
+    address: AgentAddress, expected_exit_code: int, temp_mngr_ctx: MngrContext
+) -> None:
+    """find_one_agent's four miss paths: an id is gone, a name is bad input."""
+    with pytest.raises(MngrError) as exc_info:
+        find_one_agent(address, temp_mngr_ctx)
+
+    assert exc_info.value.exit_code == expected_exit_code
+
+
+@pytest.mark.allow_warnings
+@pytest.mark.parametrize(
+    ("agent", "expected_exit_code"),
+    [(_MISSING_AGENT_NAME, EXIT_CODE_ERROR), (_MISSING_AGENT_ID, EXIT_CODE_TARGET_NOT_FOUND)],
+    ids=["agent_name", "agent_id"],
+)
+def test_the_bulk_agent_lookup_reserves_the_gone_target_code_for_ids(
+    agent: AgentName | AgentId, expected_exit_code: int, temp_mngr_ctx: MngrContext
+) -> None:
+    """The other entry point has to make the same split.
+
+    `mngr stop` / `start` / `destroy` / `message` / `label` / `archive` resolve
+    through :func:`find_all_agents`, which fails in a different place
+    (``_raise_for_unmatched_identifiers``) than :func:`find_one_agent` does. An
+    exit code carried by the shared exception *class* would look correct in the
+    single-agent tests while silently giving every mistyped name here the
+    gone-target code.
+    """
+    with pytest.raises(MngrError) as exc_info:
+        find_all_agents(
+            addresses=[AgentAddress(agent=agent)],
+            filter_all=False,
+            target_state=None,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+    assert exc_info.value.exit_code == expected_exit_code

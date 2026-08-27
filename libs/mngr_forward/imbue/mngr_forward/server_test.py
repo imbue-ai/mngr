@@ -56,7 +56,8 @@ from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
 from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
 from imbue.mngr_forward.resolver import ForwardResolver
-from imbue.mngr_forward.server import TunnelWarningRateLimiter
+from imbue.mngr_forward.server import ForwardWarningRateLimiter
+from imbue.mngr_forward.server import _MAX_TRACKED_WARNING_KEYS
 from imbue.mngr_forward.server import _PROXY_BACKSTOP_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _PROXY_CONNECT_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _PROXY_POOL_LIMITS
@@ -220,7 +221,7 @@ def test_http2_subdomain_unauthenticated_html_redirects_to_https_goto(tmp_path: 
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     listen_port = 18421
@@ -327,8 +328,9 @@ def test_bare_origin_html_navigation_redirects_to_shell_label(tmp_path: Path) ->
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
-    resolver.update_service_labels(instance_key, {"system_interface-shell111": "system_interface"})
+    resolver.update_services(
+        instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
+    )
     tunnel_manager = SSHTunnelManager()
     app = create_forward_app(
         auth_store=auth_store,
@@ -359,8 +361,9 @@ def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
-    resolver.update_service_labels(instance_key, {"system_interface-shell111": "system_interface"})
+    resolver.update_services(
+        instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
+    )
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
@@ -403,6 +406,7 @@ def _make_legacy_workspace_app(tmp_path: Path) -> tuple[FastAPI, FileAuthStore]:
             "terminal": "http://stub-terminal",
             "browser": "http://stub-browser",
         },
+        {},
     )
     app = create_forward_app(
         auth_store=auth_store,
@@ -528,8 +532,9 @@ def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path:
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
-    resolver.update_service_labels(instance_key, {"system_interface-shell111": "system_interface"})
+    resolver.update_services(
+        instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
+    )
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
@@ -717,7 +722,7 @@ def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     listen_port = 18421
@@ -757,7 +762,7 @@ def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     app = create_forward_app(
@@ -794,7 +799,7 @@ def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "opaque-preauth-cookie-value"
@@ -852,7 +857,7 @@ def test_subdomain_forward_strips_session_cookie_when_only_session_cookie_presen
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "opaque-preauth-cookie-value"
@@ -928,7 +933,7 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": loopback_url})
+    resolver.update_services(instance_key, {"system_interface": loopback_url}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_output = io.StringIO()
     envelope_writer = EnvelopeWriter(output=envelope_output)
@@ -979,7 +984,7 @@ def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://127.0.0.1:8000"})
+    resolver.update_services(instance_key, {"system_interface": "http://127.0.0.1:8000"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "opaque-preauth-cookie-value"
@@ -1022,7 +1027,7 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     resolver.add_known_agent(instance_key)
     # Non-loopback URL so we don't trip the loopback-refusal path; the
     # retry-page behaviour is independent of that check.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "opaque-preauth-cookie-value"
@@ -1088,7 +1093,7 @@ def _make_forward_app_with_capture(
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_output = io.StringIO()
     envelope_writer = EnvelopeWriter(output=envelope_output)
@@ -1740,7 +1745,7 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
@@ -1814,7 +1819,7 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(
     resolver.add_known_agent(instance_key)
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path,
     # where the failing tunnel manager raises during tunnel setup.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
@@ -1953,7 +1958,7 @@ def test_websocket_emits_failure_when_backend_closes_during_handshake(
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
@@ -2014,7 +2019,7 @@ def test_http_forward_reports_a_refused_channel_as_the_backend_not_listening(
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
@@ -2140,7 +2145,7 @@ def _make_loopback_backend_app(tmp_path: Path, port: int, preauth: str) -> tuple
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{port}"})
+    resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{port}"}, {})
     envelope_output = io.StringIO()
     app = create_forward_app(
         auth_store=FileAuthStore(data_directory=tmp_path),
@@ -2270,6 +2275,7 @@ def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
     resolver.update_services(
         instance_key,
         {"system_interface": "http://stub-shell", "terminal": "http://stub-terminal"},
+        {},
     )
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
@@ -2312,7 +2318,7 @@ def test_deep_service_origin_routes_to_owning_service(tmp_path: Path) -> None:
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"svc": "http://stub-svc"})
+    resolver.update_services(instance_key, {"svc": "http://stub-svc"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "preauth-deep-origin"
@@ -2354,7 +2360,7 @@ def test_service_origin_unregistered_service_serves_loading_page(tmp_path: Path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-shell"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-shell"}, {})
     tunnel_manager = SSHTunnelManager()
     envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "preauth-unregistered"
@@ -2516,7 +2522,7 @@ def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> Non
         resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
         instance_key = _make_test_instance_key()
         resolver.add_known_agent(instance_key)
-        resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{backend_port}"})
+        resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{backend_port}"}, {})
         preauth = "preauth-cookie-ws-backend-close"
         app = create_forward_app(
             auth_store=auth_store,
@@ -2586,7 +2592,7 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
         resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
         instance_key = _make_test_instance_key()
         resolver.add_known_agent(instance_key)
-        resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{backend_port}"})
+        resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{backend_port}"}, {})
         preauth = "preauth-cookie-ws-owner-header"
         app = create_forward_app(
             auth_store=auth_store,
@@ -2782,20 +2788,20 @@ def test_bare_origin_responses_carry_no_frame_ancestors(
     assert "content-security-policy" not in response.headers
 
 
-# -- TunnelWarningRateLimiter ----------------------------------------------
+# -- ForwardWarningRateLimiter ----------------------------------------------
 
 
-def test_tunnel_warning_rate_limiter_logs_the_first_warning_per_agent() -> None:
+def test_forward_warning_rate_limiter_logs_the_first_warning_per_key() -> None:
     clock = [100.0]
-    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
     assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
     assert limiter.suppressed_repeats_if_should_log("agent-b") == 0
 
 
-def test_tunnel_warning_rate_limiter_suppresses_repeats_inside_the_interval() -> None:
+def test_forward_warning_rate_limiter_suppresses_repeats_inside_the_interval() -> None:
     clock = [100.0]
-    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
     assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
     clock[0] = 130.0
@@ -2804,9 +2810,9 @@ def test_tunnel_warning_rate_limiter_suppresses_repeats_inside_the_interval() ->
     assert limiter.suppressed_repeats_if_should_log("agent-a") is None
 
 
-def test_tunnel_warning_rate_limiter_reports_the_suppressed_count_after_the_interval() -> None:
+def test_forward_warning_rate_limiter_reports_the_suppressed_count_after_the_interval() -> None:
     clock = [100.0]
-    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
     assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
     for tick in (110.0, 120.0, 130.0):
@@ -2819,14 +2825,37 @@ def test_tunnel_warning_rate_limiter_reports_the_suppressed_count_after_the_inte
     assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
 
 
-def test_tunnel_warning_rate_limiter_tracks_agents_independently() -> None:
+def test_forward_warning_rate_limiter_tracks_keys_independently() -> None:
     clock = [100.0]
-    limiter = TunnelWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
     assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
     clock[0] = 110.0
     assert limiter.suppressed_repeats_if_should_log("agent-b") == 0
     assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+
+
+def test_forward_warning_rate_limiter_forgets_lapsed_keys_instead_of_growing_forever() -> None:
+    """The unresolved-origin key carries the request's own Host label, so the key space must stay bounded.
+
+    Nothing validates that label against a known service, and the forward runs
+    for the life of the desktop app -- so a stream of distinct origins must not
+    leave a permanent entry each. Lapsed keys are dropped; a key still inside
+    its interval never is, or the flood the limiter exists to damp could evict
+    the limiter into silence.
+    """
+    clock = [100.0]
+    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+
+    for tick in range(4 * _MAX_TRACKED_WARNING_KEYS):
+        clock[0] = 100.0 + tick
+        assert limiter.suppressed_repeats_if_should_log(f"agent-a|label-{tick}") == 0
+        # Warns on every tick, so this key is never a whole interval stale.
+        limiter.suppressed_repeats_if_should_log("agent-hot|shell")
+
+    assert len(limiter.last_logged_at_by_key) <= _MAX_TRACKED_WARNING_KEYS
+    assert len(limiter.suppressed_count_by_key) <= _MAX_TRACKED_WARNING_KEYS
+    assert limiter.suppressed_repeats_if_should_log("agent-hot|shell") is None
 
 
 # -- Streaming stall/close regression tests --------------------------------
@@ -3348,13 +3377,112 @@ def test_sse_handoff_that_ties_with_the_client_disconnect_releases_the_backend_s
     assert _envelope_lines(envelope_output) == []
 
 
+def test_unresolved_service_origin_logs_a_rate_limited_warning(tmp_path: Path, log_warnings: list[str]) -> None:
+    """An unroutable origin must leave a log line, and the 1 Hz loader poll must not flood it.
+
+    Regression for the invisible "Loading workspace" wedge: the 503 loader was
+    served with no trace in any log, and the UNRESOLVED envelope is deliberately
+    ignored by the health machinery -- so a wedged label map was undiagnosable
+    from a log bundle. One rate-limited warning per agent+label is the trace.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    # The shell is routable; the app's label is not (its registration never arrived).
+    resolver.update_services(instance_key, {"system_interface": "http://stub-shell"}, {})
+    envelope_output = io.StringIO()
+    envelope_writer = EnvelopeWriter(output=envelope_output)
+    preauth = "preauth-unresolved-log"
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+    )
+
+    with TestClient(
+        app, base_url=f"http://myapp-x7k9q2w1.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
+    ) as client:
+        for _ in range(3):
+            response = client.get(
+                "/",
+                headers={
+                    "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                    "accept": "text/html",
+                },
+            )
+            assert response.status_code == 503
+
+    unresolved_warnings = [message for message in log_warnings if "Resolved no backend" in message]
+    # Three polls inside the rate-limit interval produce exactly one line.
+    assert len(unresolved_warnings) == 1
+    assert "myapp-x7k9q2w1" in unresolved_warnings[0]
+    # The failure envelope still flows for every request (consumers, not logs).
+    payloads = [json.loads(line)["payload"] for line in _envelope_lines(envelope_output)]
+    assert [p["reason"] for p in payloads] == ["UNRESOLVED", "UNRESOLVED", "UNRESOLVED"]
+
+
+def test_unresolved_service_origin_on_a_websocket_logs_a_rate_limited_warning(
+    tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """The websocket leg of the same wedge must leave the same trace.
+
+    An already-loaded SPA whose only live channel is a websocket never issues
+    another HTTP request, so the HTTP warning alone would leave that shape of
+    the wedge invisible -- the case the handler's own comment calls out as the
+    one that leaves minds blind. The reconnect loop retries about once a
+    second, so this line is rate-limited exactly like the HTTP one.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    # The shell is routable; the app's label is not (its registration never arrived).
+    resolver.update_services(instance_key, {"system_interface": "http://stub-shell"}, {})
+    envelope_output = io.StringIO()
+    preauth = "preauth-unresolved-ws-log"
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=SSHTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=envelope_output),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+    )
+
+    with TestClient(app) as client:
+        for _ in range(2):
+            # The handler closes before accepting, which the test client
+            # surfaces as a WebSocketDisconnect on connect.
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                with client.websocket_connect(
+                    f"ws://myapp-x7k9q2w1.{_TEST_AGENT_ID}.localhost:18421/api/ws",
+                    headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+                ):
+                    pass
+            # 1013 (try again later) is the retry close code, so the client reconnects.
+            assert exc_info.value.code == 1013
+
+    unresolved_warnings = [message for message in log_warnings if "Resolved no backend" in message]
+    assert len(unresolved_warnings) == 1
+    assert "myapp-x7k9q2w1" in unresolved_warnings[0]
+    # The failure envelope still flows for every attempt (consumers, not logs).
+    payloads = [json.loads(line)["payload"] for line in _envelope_lines(envelope_output)]
+    assert [p["reason"] for p in payloads] == ["UNRESOLVED", "UNRESOLVED"]
+
+
 def test_legacy_host_origin_html_navigation_redirects_to_the_agent_origin(tmp_path: Path) -> None:
     """A persisted pre-agent-keying URL (host-<hex> origin) 301s to the canonical agent origin."""
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
@@ -3393,7 +3521,7 @@ def test_legacy_host_origin_websocket_closes_with_the_origin_moved_code(tmp_path
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"})
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     preauth = "preauth-cookie-legacy-ws"
     app = create_forward_app(
         auth_store=auth_store,

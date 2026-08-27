@@ -1,6 +1,7 @@
 import gzip
 import io
 import logging
+import os
 import sys
 import zipfile
 from collections.abc import Callable
@@ -102,6 +103,33 @@ def test_collect_external_attachments_groups_logs_by_configured_glob(tmp_path: P
     # one callback per upload: traceback + the two log files (the immutable rotated
     # file is cached only after its first upload, so it still produces a callback here).
     assert len(callbacks) == 3
+
+
+def test_collect_external_attachments_keeps_the_newest_file_when_a_group_caps_its_count(tmp_path: Path) -> None:
+    """A capped group sweeps the newest matching file by mtime.
+
+    Rotated-log groups (``max_file_count=1``) exist to carry the one rotation that
+    overlaps the incident. Keeping any other one still produces a well-formed report,
+    just one holding exactly the bytes nobody needs -- so a count assertion alone
+    would not notice. The older file here is named to sort *last*, so passing this
+    requires ordering by mtime rather than by name.
+    """
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    older = logs_folder / "events.jsonl.20250109120000123456"
+    newer = logs_folder / "events.jsonl.20250101120000123456"
+    older.write_text("older\n")
+    newer.write_text("newer\n")
+    # Both were written in the same instant otherwise, so pin the older one's mtime
+    # firmly into the past rather than depending on filesystem timestamp granularity.
+    os.utime(older, (1_000_000_000, 1_000_000_000))
+
+    uploader = ErrorAttachmentsS3Uploader(log_attachment_groups=(_ROTATED_LOG_GROUP,))
+    # No exception, so the only callbacks are the file uploads (no traceback upload).
+    _groups, callbacks = uploader.collect_external_attachments(exception=None, logs_folder=logs_folder)
+
+    swept = [callback.keywords["file_path"] for callback in callbacks if isinstance(callback, partial)]
+    assert swept == [newer]
 
 
 def test_collect_external_attachments_globs_group_base_dir_over_logs_folder(tmp_path: Path) -> None:
