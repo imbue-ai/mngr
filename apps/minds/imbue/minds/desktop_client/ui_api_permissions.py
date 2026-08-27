@@ -27,10 +27,10 @@ empty view carrying ``permissions_unavailable``, which the pane renders as its
 conflated with an empty payload.
 """
 
-import json
 import os
 from collections.abc import Callable
 from typing import Any
+from typing import assert_never
 
 from flask import Blueprint
 from flask import Response
@@ -42,7 +42,12 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
@@ -54,11 +59,7 @@ from imbue.minds.desktop_client.latchkey.permission_toggles import apply_connect
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_self_toggle
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_workspace_permissions_view
 from imbue.minds.desktop_client.latchkey.permission_toggles import connect_service_with_credentials
-from imbue.minds.desktop_client.request_events import LatchkeyAccountsPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
-from imbue.minds.desktop_client.request_events import RequestEvent
+from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.ui_models import UiAvailableConnection
@@ -72,9 +73,6 @@ from imbue.minds.desktop_client.ui_models import UiSelfToggleRequest
 from imbue.minds.desktop_client.ui_models import UiWaitingPermissionRequest
 from imbue.minds.desktop_client.ui_models import UiWorkspacePermissions
 from imbue.mngr.primitives import AgentId
-
-# Headline for a waiting request whose kind carries no better name.
-_GENERIC_REQUEST_TITLE: str = "Permission request"
 
 
 def _is_permissions_request_authenticated() -> bool:
@@ -97,10 +95,6 @@ def _json_response(payload: FrozenModel, status_code: int = 200) -> Response:
     return Response(payload.model_dump_json(), status=status_code, mimetype="application/json")
 
 
-def _json_error(message: str, status_code: int) -> Response:
-    return Response(json.dumps({"error": message}), status=status_code, mimetype="application/json")
-
-
 def _find_permission_grant_handler() -> LatchkeyPermissionGrantHandler | None:
     """The registered predefined-permission handler, which owns the gateway client, catalog, and latchkey.
 
@@ -114,7 +108,7 @@ def _find_permission_grant_handler() -> LatchkeyPermissionGrantHandler | None:
 
 
 def _waiting_request_title_and_service(
-    req: RequestEvent,
+    req: StreamedPermissionRequest,
     handler: LatchkeyPermissionGrantHandler | None,
 ) -> tuple[str, str, str]:
     """``(title, reason, service_name)`` for one pending request row.
@@ -122,18 +116,19 @@ def _waiting_request_title_and_service(
     ``service_name`` is the catalog service whose brand mark leads the row and
     is empty for the kinds that have none (those fall back to a category glyph).
     """
-    if isinstance(req, LatchkeyPredefinedPermissionRequestEvent):
-        info = handler.services_catalog.get_by_scope(req.scope) if handler is not None else None
+    payload = req.payload
+    if isinstance(payload, PredefinedRequestPayload):
+        info = handler.services_catalog.get_by_scope(payload.scope) if handler is not None else None
         if info is None:
-            return req.scope, req.rationale, ""
+            return payload.scope, req.rationale, ""
         return info.display_name, req.rationale, info.name
-    if isinstance(req, LatchkeyFileSharingPermissionRequestEvent):
+    if isinstance(payload, FileSharingRequestPayload):
         return "Local files", req.rationale, ""
-    if isinstance(req, LatchkeyWorkspacePermissionRequestEvent):
+    if isinstance(payload, WorkspaceRequestPayload):
         return "Other machines", req.rationale, ""
-    if isinstance(req, LatchkeyAccountsPermissionRequestEvent):
+    if isinstance(payload, AccountsRequestPayload):
         return "Device accounts", req.rationale, ""
-    return _GENERIC_REQUEST_TITLE, "", ""
+    assert_never(payload)
 
 
 def _build_waiting_requests(agent_id: str) -> tuple[UiWaitingPermissionRequest, ...]:
@@ -156,13 +151,13 @@ def _build_waiting_requests(agent_id: str) -> tuple[UiWaitingPermissionRequest, 
     rows: list[UiWaitingPermissionRequest] = []
     # Pending requests arrive most-recent-first; the strip reads oldest first
     # (the request the agent has been blocked on longest leads).
-    for req in reversed(displayable_pending_requests(state.request_inbox, backend_resolver)):
+    for req in reversed(displayable_pending_requests(state.pending_requests, backend_resolver)):
         if (backend_resolver.get_workspace_name(AgentId(req.agent_id)) or "") != ws_name:
             continue
         title, reason, service_name = _waiting_request_title_and_service(req, handler)
         rows.append(
             UiWaitingPermissionRequest(
-                id=str(req.event_id),
+                id=req.request_id,
                 title=title,
                 reason=reason,
                 service_name=service_name,
@@ -240,17 +235,17 @@ def _write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPe
     ``(body, handler)`` on success.
     """
     if not _is_permissions_request_authenticated():
-        return _json_error("Not authenticated", 401)
+        return make_json_error_response("Not authenticated", 401)
     try:
         AgentId(agent_id)
     except InvalidRandomIdError:
-        return _json_error("Unknown workspace", 404)
+        return make_json_error_response("Unknown workspace", 404)
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
-        return _json_error("Invalid JSON body", 400)
+        return make_json_error_response("Invalid JSON body", 400)
     handler = _find_permission_grant_handler()
     if handler is None:
-        return _json_error("Permission management is unavailable", 503)
+        return make_json_error_response("Permission management is unavailable", 503)
     return body, handler
 
 
@@ -268,21 +263,21 @@ def _apply_and_refresh(agent_id: str, apply_toggle: Callable[[], object]) -> Res
     try:
         apply_toggle()
     except (PermissionToggleError, PermissionOverviewError) as e:
-        return _json_error(str(e), 400)
+        return make_json_error_response(str(e), 400)
     except LatchkeyGatewayClientError as e:
         logger.warning("Could not apply the permission change through the latchkey gateway: {}", e)
-        return _json_error(f"Could not apply the change through the latchkey gateway: {e}", 502)
+        return make_json_error_response(f"Could not apply the change through the latchkey gateway: {e}", 502)
     return _json_response(_build_permissions_payload(agent_id))
 
 
 def _handle_workspace_permissions(agent_id: str) -> Response:
     """GET /ui/api/workspaces/<agent_id>/permissions: the Permissions pane's full payload."""
     if not _is_permissions_request_authenticated():
-        return _json_error("Not authenticated", 401)
+        return make_json_error_response("Not authenticated", 401)
     try:
         AgentId(agent_id)
     except InvalidRandomIdError:
-        return _json_error("Unknown workspace", 404)
+        return make_json_error_response("Unknown workspace", 404)
     return _json_response(_build_permissions_payload(agent_id))
 
 
@@ -296,7 +291,7 @@ def _handle_connector_toggle(agent_id: str) -> Response:
         toggle_request = UiConnectorToggleRequest.model_validate(body)
     except ValidationError as e:
         logger.debug("Rejected a malformed connector-toggle body: {}", e)
-        return _json_error("scope, account, permission and enabled are required.", 400)
+        return make_json_error_response("scope, account, permission and enabled are required.", 400)
     return _apply_and_refresh(
         agent_id,
         lambda: apply_connector_toggle(
@@ -323,7 +318,7 @@ def _handle_self_toggle(agent_id: str) -> Response:
         toggle_request = UiSelfToggleRequest.model_validate(body)
     except ValidationError as e:
         logger.debug("Rejected a malformed self-toggle body: {}", e)
-        return _json_error("permission and enabled are required.", 400)
+        return make_json_error_response("permission and enabled are required.", 400)
     return _apply_and_refresh(
         agent_id,
         lambda: apply_self_toggle(
@@ -355,7 +350,7 @@ def _handle_connect_credentials(agent_id: str) -> Response:
         # The values themselves are the user's credentials, so only the shape
         # of the failure is reportable.
         logger.debug("Rejected a malformed connect-credentials body: {} field(s) invalid", e.error_count())
-        return _json_error("service_name and value_by_parameter_name are required.", 400)
+        return make_json_error_response("service_name and value_by_parameter_name are required.", 400)
     return _apply_and_refresh(
         agent_id,
         lambda: connect_service_with_credentials(
@@ -383,7 +378,7 @@ def _handle_connector_revoke_all(agent_id: str) -> Response:
         revoke_request = UiConnectorRevokeAllRequest.model_validate(body)
     except ValidationError as e:
         logger.debug("Rejected a malformed connector-revoke-all body: {}", e)
-        return _json_error("service_name and account are required.", 400)
+        return make_json_error_response("service_name and account are required.", 400)
     return _apply_and_refresh(
         agent_id,
         lambda: revoke_service_account_for_workspace(
@@ -424,16 +419,16 @@ def _handle_connector_disconnect(agent_id: str) -> Response:
         disconnect_request = UiConnectorDisconnectRequest.model_validate(body)
     except ValidationError as e:
         logger.debug("Rejected a malformed connector-disconnect body: {}", e)
-        return _json_error("service_name and account are required.", 400)
+        return make_json_error_response("service_name and account are required.", 400)
     if not handler.services_catalog.get(disconnect_request.service_name):
-        return _json_error(f"Unknown service '{disconnect_request.service_name}'.", 400)
+        return make_json_error_response(f"Unknown service '{disconnect_request.service_name}'.", 400)
     try:
         disconnect_account(handler.latchkey, disconnect_request.service_name, disconnect_request.account)
     except PermissionOverviewError as e:
         # The account key is a personal identifier, so the service and
         # latchkey's own detail are all that is logged.
         logger.warning("Could not disconnect from {}: {}", disconnect_request.service_name, e)
-        return _json_error(str(e), 502)
+        return make_json_error_response(str(e), 502)
 
     # The host count the strip answers with is discarded, the same way the
     # settings page's Disconnect discards it.

@@ -34,12 +34,12 @@ from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
-from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
@@ -61,8 +61,8 @@ class DesktopClientState(MutableModel):
     """All runtime dependencies the desktop-client request handlers read.
 
     Most fields are configuration set once at construction (``frozen=True``).
-    ``http_client``, ``request_inbox``, and ``permission_requests_consumer``
-    are mutated during the app's lifetime and are intentionally not frozen.
+    ``http_client`` and ``permission_requests_consumer`` are mutated during
+    the app's lifetime and are intentionally not frozen.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -125,8 +125,13 @@ class DesktopClientState(MutableModel):
     sync_scheduler: WorkspaceSyncScheduler | None = Field(
         default=None, frozen=True, description="Background workspace-record sync loop (kicked on auth changes)"
     )
-    request_inbox: RequestInbox | None = Field(
-        default=None, description="Immutable pending-request inbox (reassigned)"
+    pending_requests: PendingRequestsInterface | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The one answer to 'what permission requests are pending?': gateway-backed reads "
+            "plus the append-only verdict index (see latchkey/pending_requests.py)."
+        ),
     )
     is_account_setup_skipped: bool = Field(
         default=False,

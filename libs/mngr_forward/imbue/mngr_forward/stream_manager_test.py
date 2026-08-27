@@ -428,10 +428,7 @@ def test_event_filters_unset_keeps_all_sources() -> None:
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     writer = EnvelopeWriter(output=io.StringIO())
     manager = ForwardStreamManager(resolver=resolver, envelope_writer=writer)
-    assert manager._filtered_event_sources == (  # noqa: SLF001 - asserts internal state
-        "services",
-        "requests",
-    )
+    assert manager._filtered_event_sources == ("services",)  # noqa: SLF001 - asserts internal state
 
 
 def test_multiple_observe_lines_serialize_through_envelope(

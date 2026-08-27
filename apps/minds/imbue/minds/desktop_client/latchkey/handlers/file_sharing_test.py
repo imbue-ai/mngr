@@ -20,14 +20,17 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import RequestType
-from imbue.minds.desktop_client.request_events import create_latchkey_file_sharing_permission_request_event
-from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
+from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
+from imbue.minds.desktop_client.latchkey.response_events import load_response_events
 from imbue.minds.desktop_client.request_handler import UiFileSharingPermissionDetail
+from imbue.minds.desktop_client.testing import StaticPendingRequests
+from imbue.minds.desktop_client.testing import create_file_sharing_permission_request
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
 
@@ -70,6 +73,7 @@ def _make_file_sharing_handler(
         FileSharingGrantHandler(
             data_dir=tmp_path,
             gateway_client=_build_gateway_client(gateway_handler),
+            latchkey=make_full_fake_latchkey(tmp_path),
             mngr_message_sender=sender,
             share_roots=share_roots,
             home_dir=home_dir,
@@ -91,7 +95,7 @@ class _NamedWorkspaceResolver(StaticBackendResolver):
 def _build_authenticated_client(
     tmp_path: Path,
     handler: FileSharingGrantHandler,
-    inbox: RequestInbox,
+    inbox: StaticPendingRequests,
     known_agent: AgentId | None = None,
 ) -> FlaskClient:
     auth_dir = tmp_path / "auth"
@@ -107,7 +111,7 @@ def _build_authenticated_client(
         backend_resolver=backend_resolver,
         http_client=None,
         paths=paths,
-        request_inbox=inbox,
+        pending_requests=inbox,
         request_event_handlers=(handler,),
     )
     client = app.test_client()
@@ -121,13 +125,13 @@ def _build_authenticated_client(
 
 def test_handler_claims_file_sharing_request_type(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    assert handler.handles_request_type() == str(RequestType.FILE_SHARING_PERMISSION)
+    assert handler.handles_request_type() == REQUEST_TYPE_FILE_SHARING
     assert handler.kind_label() == "file sharing"
 
 
 def test_display_name_returns_path(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
         access="READ",
@@ -149,16 +153,16 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     agent_id = AgentId()
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(agent_id),
         path="/home/user/data.txt",
         access="WRITE",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant")
+    response = client.post(f"/requests/{event.request_id}/grant")
     assert response.status_code == 200
     body = response.get_json()
     assert body["outcome"] == "GRANTED"
@@ -169,16 +173,19 @@ def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Pa
 
     # Gateway received the approve request.
     assert captured["method"] == "POST"
-    assert str(captured["path"]).endswith(f"/permission-requests/approve/{event.event_id}")
+    assert str(captured["path"]).endswith(f"/permission-requests/approve/{event.request_id}")
 
     # Response event was appended on disk.
     response_events = load_response_events(tmp_path)
     assert len(response_events) == 1
     assert response_events[0].status == "GRANTED"
-    assert response_events[0].request_event_id == str(event.event_id)
+    assert response_events[0].request_event_id == event.request_id
 
-    # Agent was notified.
-    assert sender.sent_messages == [(str(agent_id), body["message"])]
+    # Agent was notified, with the request id appended so the chat harness can
+    # correlate this notice to the right card regardless of arrival order.
+    assert sender.sent_messages == [
+        (str(agent_id), format_resolution_notice(body["message"], event.request_id, RequestStatus.GRANTED))
+    ]
 
 
 def test_grant_with_edited_path_sends_override_and_uses_it(tmp_path: Path) -> None:
@@ -192,17 +199,17 @@ def test_grant_with_edited_path_sends_override_and_uses_it(tmp_path: Path) -> No
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
     agent_id = AgentId()
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(agent_id),
         path="/home/user/requested.txt",
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
     edited = "/Users/glenn/Documents/Shared"
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": edited})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": edited})
     assert response.status_code == 200
     body = response.get_json()
     assert body["outcome"] == "GRANTED"
@@ -218,9 +225,10 @@ def test_grant_with_edited_path_sends_override_and_uses_it(tmp_path: Path) -> No
     # The persisted response event records the edited path as its scope.
     response_events = load_response_events(tmp_path)
     assert len(response_events) == 1
-    assert response_events[0].scope == edited
     # The agent notification names the edited path.
-    assert sender.sent_messages == [(str(agent_id), body["message"])]
+    assert sender.sent_messages == [
+        (str(agent_id), format_resolution_notice(body["message"], event.request_id, RequestStatus.GRANTED))
+    ]
 
 
 def test_grant_with_unchanged_path_sends_no_override_body(tmp_path: Path) -> None:
@@ -232,16 +240,16 @@ def test_grant_with_unchanged_path_sends_no_override_body(tmp_path: Path) -> Non
         return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/home/user/data.txt"})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": "/home/user/data.txt"})
     assert response.status_code == 200
     assert response.get_json()["outcome"] == "GRANTED"
     assert captured["content"] == b""
@@ -258,16 +266,16 @@ def test_grant_rejects_relative_edited_path(tmp_path: Path) -> None:
         return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "relative/path"})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": "relative/path"})
     assert response.status_code == 400
     assert "absolute" in response.get_json()["error"].lower()
     assert gateway_called is False
@@ -287,16 +295,16 @@ def test_grant_rejects_traversal_in_edited_path(tmp_path: Path) -> None:
         return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/home/user/../../etc/shadow"})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": "/home/user/../../etc/shadow"})
     assert response.status_code == 400
     assert ".." in response.get_json()["error"]
     assert gateway_called is False
@@ -314,16 +322,16 @@ def test_grant_rejects_edited_path_outside_share_roots(tmp_path: Path) -> None:
 
     in_root = str(tmp_path / "ok.txt")
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler, share_roots=(tmp_path,))
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path=in_root,
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "/etc/passwd"})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": "/etc/passwd"})
     assert response.status_code == 400
     error = response.get_json()["error"]
     assert "shared folder" in error
@@ -343,17 +351,17 @@ def test_grant_accepts_edited_path_within_share_roots(tmp_path: Path) -> None:
         return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler, share_roots=(tmp_path,))
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path=str(tmp_path / "orig.txt"),
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
     edited = str(tmp_path / "nested" / "file.txt")
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": edited})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": edited})
     assert response.status_code == 200
     assert response.get_json()["outcome"] == "GRANTED"
 
@@ -369,16 +377,16 @@ def test_grant_with_tilde_edited_path_expands_to_home(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(
         tmp_path, _gateway_handler, share_roots=(tmp_path,), home_dir=tmp_path
     )
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path=str(tmp_path / "requested.txt"),
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~/Documents/Shared"})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": "~/Documents/Shared"})
     assert response.status_code == 200, response.text
     body = response.get_json()
     assert body["outcome"] == "GRANTED"
@@ -391,7 +399,6 @@ def test_grant_with_tilde_edited_path_expands_to_home(tmp_path: Path) -> None:
     assert expanded in body["message"]
     response_events = load_response_events(tmp_path)
     assert len(response_events) == 1
-    assert response_events[0].scope == expanded
 
 
 def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
@@ -405,16 +412,16 @@ def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
         return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
 
     handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/example/data.txt",
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~otheruser/secret.txt"})
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": "~otheruser/secret.txt"})
     assert response.status_code == 400
     assert "~user" in response.get_json()["error"]
     assert gateway_called is False
@@ -426,16 +433,16 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
         return httpx.Response(500, json={"error": "boom"})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/data.txt",
         access="READ",
         rationale="need data",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/grant")
+    response = client.post(f"/requests/{event.request_id}/grant")
     assert response.status_code == 502
     assert "gateway" in response.get_json()["error"].lower()
     # No response event written; the request stays pending.
@@ -455,23 +462,23 @@ def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path
         return httpx.Response(204)
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/secret.txt",
         access="READ",
         rationale="please",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/deny")
+    response = client.post(f"/requests/{event.request_id}/deny")
     assert response.status_code == 200
     body = response.get_json()
     assert body["outcome"] == "DENIED"
 
     # Gateway received DELETE (not POST).
     assert captured["method"] == "DELETE"
-    assert str(captured["path"]).endswith(f"/permission-requests/{event.event_id}")
+    assert str(captured["path"]).endswith(f"/permission-requests/{event.request_id}")
 
     # Response event written.
     response_events = load_response_events(tmp_path)
@@ -497,16 +504,16 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
         return httpx.Response(500, json={"error": "gateway down"})
 
     handler, sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/secret.txt",
         access="WRITE",
         rationale="please",
     )
-    inbox = RequestInbox().add_request(event)
+    inbox = StaticPendingRequests(pending=(event,))
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(f"/requests/{event.event_id}/deny")
+    response = client.post(f"/requests/{event.request_id}/deny")
     assert response.status_code == 200
     assert response.get_json()["outcome"] == "DENIED"
     assert len(load_response_events(tmp_path)) == 1
@@ -518,7 +525,7 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
 
 def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/important.txt",
         access="READ",
@@ -526,13 +533,13 @@ def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path
     )
 
     payload = handler.build_request_detail_payload(
-        req_event=event,
+        permission_request=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
     )
 
     if not isinstance(payload, UiFileSharingPermissionDetail):
         pytest.fail(f"expected a file_sharing detail payload, got {payload!r}")
-    assert payload.request_id == str(event.event_id)
+    assert payload.request_id == event.request_id
     assert payload.file_path == "/home/user/important.txt"
     assert payload.access == "READ"
     assert payload.access_human_label == "read-only"
@@ -543,7 +550,7 @@ def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path
 
 def test_build_request_detail_payload_labels_write_access_distinctly(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
-    event = create_latchkey_file_sharing_permission_request_event(
+    event = create_file_sharing_permission_request(
         agent_id=str(AgentId()),
         path="/home/user/notes",
         access="WRITE",
@@ -551,7 +558,7 @@ def test_build_request_detail_payload_labels_write_access_distinctly(tmp_path: P
     )
 
     payload = handler.build_request_detail_payload(
-        req_event=event,
+        permission_request=event,
         backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
     )
 

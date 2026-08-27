@@ -9,6 +9,7 @@ generator is consumed (the SSE handlers read ``request`` / ``current_app``
 mid-stream).
 """
 
+import json
 from collections.abc import Iterator
 from collections.abc import Mapping
 from pathlib import Path
@@ -32,6 +33,15 @@ def make_response(
         for key, value in headers.items():
             response.headers[key] = value
     return response
+
+
+def make_json_error_response(message: str, status_code: int) -> Response:
+    """Build the ``{"error": ...}`` JSON body the API-style routes share."""
+    return make_response(
+        content=json.dumps({"error": message}),
+        media_type="application/json",
+        status_code=status_code,
+    )
 
 
 def make_html_response(

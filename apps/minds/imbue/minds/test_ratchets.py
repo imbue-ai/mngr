@@ -85,7 +85,7 @@ def test_prevent_broad_exception_catch() -> None:
     # is a best-effort post-create side effect running in the create worker, so an
     # unexpected failure must be logged (with traceback) and survived rather than
     # crashing the worker and skipping the create's remaining steps.
-    rc.check_broad_exception_catch(_DIR, snapshot(11))
+    rc.check_broad_exception_catch(_DIR, snapshot(10))
 
 
 def test_prevent_base_exception_catch() -> None:

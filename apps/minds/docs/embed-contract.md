@@ -63,20 +63,23 @@ see the `*_PATTERN` constants in the module.
 |---|---|---|
 | `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the active dockview tab. |
 | `minds:open-ai-keys-ack` | `{}` | A minds chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
-| `minds:permission-request-resolved` | `{ requestId, resolution }` | The user resolved that permission request in the shell's review popup; `resolution` is `granted` or `denied`. |
+| `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 
 The ack's semantic is "a minds chrome is present" -- NOT "the desktop app is
 present". Plain-browser chrome acks too.
 
-`permission-request-resolved` is a display shortcut, not a decision: it flips
-the workspace's in-chat card to its verdict without waiting for the agent
-transcript's own resolution message to make the round trip. The transcript
-stays authoritative -- the workspace shows the shell-reported verdict only
-until the classified one lands. The chrome sends it exclusively to the frame
-showing the workspace that ASKED (it knows, from the request's agent id): the
-chrome hosts one workspace frame at a time, so no other workspace has a live
-page to update, and posting one workspace's request id into another
-workspace's page would leak it across that boundary for nothing.
+`permission-resolutions` is a display channel, not a decision channel: it
+flips the workspace's in-chat cards to their verdicts without waiting for the
+agent transcript's own resolution message to make the round trip, and the
+transcript's classified resolution takes over once it lands. The single-entry
+send goes exclusively to the frame showing the workspace that ASKED (the
+chrome knows, from the request's agent id); the load-time snapshot is what
+makes missing it harmless: the workspace's verdict cache is page-scoped, so
+whenever the chrome (re)loads a frame it pushes that workspace's newest
+verdicts from the desktop client's response event log
+(`/ui/api/inbox/resolutions`) -- scoped to the mounted workspace's own
+requests, so verdicts never read across workspace boundaries. The workspace
+never has to ask, time, or retry anything.
 
 ## Compatibility policy (tolerant)
 
@@ -119,8 +122,17 @@ payloads -- to the console.
   restoring the instant in-chat card flip that the deleted Electron content
   relay used to carry. Same postMessage path in Electron and plain browser;
   no Electron IPC is involved.
-- **3** -- added `open-share-settings` (workspace -> embedder), replacing the
-  workspace's instructional share popup with a deep link to the shell's Share
-  tab. A well-shaped name for a service the shell does not recognize falls
-  back to the whole-machine share (`ShareModel.selectTarget`'s existing
-  behavior for an unknown target).
+- **3** -- added `permission-resolutions` (embedder -> workspace): the
+  workspace's recent-verdicts snapshot on every frame (re)load, so a rebuilt
+  page never offers Approve/Deny for an already-decided request, plus the
+  live one-entry flip on resolve; see `specs/permission_state.md` in this
+  repo for the failure analysis. It supersedes v2's
+  `permission-request-resolved`: v3 chromes no longer send that type and v3
+  workspaces no longer handle it (mixed versions degrade to the
+  transcript-driven flip), and the string `minds:permission-request-resolved`
+  is retired -- never reuse it with a different meaning. Also added
+  `open-share-settings` (workspace -> embedder), replacing the workspace's
+  instructional share popup with a deep link to the shell's Share tab. A
+  well-shaped name for a service the shell does not recognize falls back to
+  the whole-machine share (`ShareModel.selectTarget`'s existing behavior for
+  an unknown target).

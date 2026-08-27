@@ -21,7 +21,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
-from imbue.minds.desktop_client.request_events import RequestInbox
+from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -180,7 +180,7 @@ def _build_client(
         backend_resolver=resolver,
         http_client=None,
         paths=InstallationPaths(data_dir=tmp_path),
-        request_inbox=RequestInbox(),
+        pending_requests=StaticPendingRequests(),
         request_event_handlers=(handler,),
     )
     client = app.test_client()

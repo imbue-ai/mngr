@@ -58,12 +58,19 @@ export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 export const CLOSE_ACTIVE_TAB = "minds:close-active-tab";
 // embedder -> workspace: ack for OPEN_AI_KEYS_PAGE (see above). Payload: {}.
 export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
-// embedder -> workspace: the user resolved a permission request in the
-// shell's review popup. Payload: { requestId, resolution }, where resolution
-// is "granted" or "denied". Lets the asking workspace show the verdict at
-// once, ahead of the agent transcript's own resolution message; the workspace
-// still treats the transcript as authoritative once that lands.
-export const PERMISSION_REQUEST_RESOLVED = "minds:permission-request-resolved";
+// embedder -> workspace: permission-request verdicts, each entry
+// { requestId, resolution: "granted" | "denied" }. Sent two ways with one
+// meaning: the mounted workspace's recent-verdicts snapshot whenever its
+// frame (re)loads -- so a page rebuilt after a verdict was given while it was
+// not live never offers Approve/Deny for a decided request -- and a single
+// unsolicited entry the moment the user resolves a request in the shell's
+// review popup, flipping the card ahead of the transcript's own notice.
+export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
+
+// Upper bound on entries per message, bounding the work it can demand; the
+// snapshot carries the newest verdicts and older cards fall back to the
+// transcript's own resolution notices.
+export const MAX_PERMISSION_RESOLUTION_ENTRIES = 64;
 
 // -- Payload validation ------------------------------------------------------
 
@@ -106,6 +113,12 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   },
 };
 
+function isResolutionEntryValid(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  if (typeof entry.requestId !== 'string' || !REQUEST_ID_PATTERN.test(entry.requestId)) return false;
+  return entry.resolution === 'granted' || entry.resolution === 'denied';
+}
+
 const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   [CLOSE_ACTIVE_TAB]: function () {
     return true;
@@ -113,9 +126,10 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   [OPEN_AI_KEYS_ACK]: function () {
     return true;
   },
-  [PERMISSION_REQUEST_RESOLVED]: function (data) {
-    if (typeof data.requestId !== 'string' || !REQUEST_ID_PATTERN.test(data.requestId)) return false;
-    return data.resolution === 'granted' || data.resolution === 'denied';
+  [PERMISSION_RESOLUTIONS]: function (data) {
+    if (!Array.isArray(data.resolutions)) return false;
+    if (data.resolutions.length > MAX_PERMISSION_RESOLUTION_ENTRIES) return false;
+    return data.resolutions.every(isResolutionEntryValid);
   },
 };
 

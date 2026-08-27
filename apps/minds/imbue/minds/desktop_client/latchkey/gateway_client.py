@@ -203,16 +203,23 @@ class PermissionEffect(FrozenModel):
     )
 
 
+# The wire ``request_type`` values, mirroring the request-type constants in
+# ``extensions/permission_requests.mjs``. The handlers claim requests by these
+# strings (see ``RequestEventHandler.handles_request_type``).
+REQUEST_TYPE_PREDEFINED: Final[str] = "predefined"
+REQUEST_TYPE_FILE_SHARING: Final[str] = "file-sharing"
+REQUEST_TYPE_WORKSPACE: Final[str] = "workspace"
+REQUEST_TYPE_ACCOUNTS: Final[str] = "accounts"
+
 # Maps the wire ``request_type`` to its payload model, so
 # ``StreamedPermissionRequest`` selects the variant deterministically instead of
 # relying on pydantic shape resolution (the ``workspace`` and ``accounts``
-# payloads are both satisfiable by an empty object). The keys mirror the
-# request-type constants in ``extensions/permission_requests.mjs``.
+# payloads are both satisfiable by an empty object).
 _PAYLOAD_CLASS_BY_REQUEST_TYPE: Final[Mapping[str, type[FrozenModel]]] = {
-    "predefined": PredefinedRequestPayload,
-    "file-sharing": FileSharingRequestPayload,
-    "workspace": WorkspaceRequestPayload,
-    "accounts": AccountsRequestPayload,
+    REQUEST_TYPE_PREDEFINED: PredefinedRequestPayload,
+    REQUEST_TYPE_FILE_SHARING: FileSharingRequestPayload,
+    REQUEST_TYPE_WORKSPACE: WorkspaceRequestPayload,
+    REQUEST_TYPE_ACCOUNTS: AccountsRequestPayload,
 }
 
 
@@ -476,23 +483,9 @@ class LatchkeyGatewayClient(MutableModel):
                 with client.stream("GET", url, params=params, headers=self._build_headers()) as response:
                     response.raise_for_status()
                     for raw_line in response.iter_lines():
-                        line = raw_line.strip()
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except json.JSONDecodeError as e:
-                            logger.warning("Could not parse permission-requests JSONL line {!r}: {}", line, e)
-                            continue
-                        try:
-                            yield StreamedPermissionRequest.model_validate(data)
-                        except ValueError as e:
-                            logger.warning(
-                                "permission-requests JSONL line had unexpected shape {!r}: {}",
-                                line,
-                                e,
-                            )
-                            continue
+                        parsed = _parse_permission_request_line(raw_line)
+                        if parsed is not None:
+                            yield parsed
         except httpx.ReadTimeout:
             # Idle window -- not an error. Return so the caller's
             # reconnect loop can check its stop event and either exit or
@@ -500,6 +493,28 @@ class LatchkeyGatewayClient(MutableModel):
             return
         except httpx.HTTPError as e:
             raise self._wrap_transport_error(e, "GET /permission-requests stream failed") from e
+
+    def list_permission_requests(self) -> tuple[StreamedPermissionRequest, ...]:
+        """The gateway's current pending permission requests, as one point-in-time read.
+
+        ``GET /permission-requests`` without ``follow`` writes every pending
+        request as JSONL and closes; unparsable lines are logged and skipped
+        (same tolerance as the follow stream).
+        """
+        self.ensure_initialized()
+        url = f"{self._require_base_url().rstrip('/')}/permission-requests"
+        requests: list[StreamedPermissionRequest] = []
+        try:
+            with self._stream_client() as client:
+                with client.stream("GET", url, headers=self._build_headers()) as response:
+                    response.raise_for_status()
+                    for raw_line in response.iter_lines():
+                        parsed = _parse_permission_request_line(raw_line)
+                        if parsed is not None:
+                            requests.append(parsed)
+        except httpx.HTTPError as e:
+            raise self._wrap_transport_error(e, "GET /permission-requests failed") from e
+        return tuple(requests)
 
     def delete_permission_request(self, request_id: str) -> None:
         """Remove the named pending request from the gateway's queue.
@@ -701,3 +716,25 @@ class LatchkeyGatewayClient(MutableModel):
             raise LatchkeyGatewayClientError(
                 f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )
+
+
+def _parse_permission_request_line(raw_line: str) -> StreamedPermissionRequest | None:
+    """Parse one permission-requests JSONL line, logging and skipping bad ones.
+
+    A single malformed record must never take down a whole read: the gateway
+    validates request bodies up front, so this is a backstop for
+    malformed/legacy on-disk records.
+    """
+    line = raw_line.strip()
+    if not line:
+        return None
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError as e:
+        logger.warning("Could not parse permission-requests JSONL line {!r}: {}", line, e)
+        return None
+    try:
+        return StreamedPermissionRequest.model_validate(data)
+    except ValueError as e:
+        logger.warning("permission-requests JSONL line had unexpected shape {!r}: {}", line, e)
+        return None

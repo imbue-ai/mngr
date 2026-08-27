@@ -29,12 +29,9 @@ from pathlib import Path
 from typing import Final
 
 import click
-from flask import Flask
 from loguru import logger
-from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import resolve_effective_mngr_host_dir
@@ -73,6 +70,7 @@ from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharin
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.pending_requests import GatewayPendingRequests
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
@@ -83,11 +81,6 @@ from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_c
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
-from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import RequestEvent
-from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -120,17 +113,13 @@ from imbue.minds.utils.sentry.core import setup_sentry
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.api.discovery_events import get_discovery_events_dir
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.logging import get_default_cli_events_log_dir
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
-from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
-from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
@@ -457,6 +446,7 @@ def run(
     file_sharing_handler = FileSharingGrantHandler(
         data_dir=data_directory,
         gateway_client=gateway_client,
+        latchkey=latchkey,
         mngr_message_sender=mngr_message_sender,
     )
     workspace_permission_handler = WorkspacePermissionGrantHandler(
@@ -511,10 +501,9 @@ def run(
         backup_reaper=backup_reaper,
     )
     sync_scheduler.start(root_concurrency_group)
-    response_events = load_response_events(data_directory)
-    request_inbox = RequestInbox()
-    for resp in response_events:
-        request_inbox = request_inbox.add_response(resp)
+    # The one answer to "what permission requests are pending?": gateway-backed
+    # reads plus the verdict index seeded from the response event log.
+    pending_requests = GatewayPendingRequests.load(gateway_client=gateway_client, data_dir=data_directory)
 
     # Spawn the plugin and attach the envelope consumer that feeds the
     # surviving resolver from the plugin's stdout stream. We no longer
@@ -744,7 +733,7 @@ def run(
         session_store=session_store,
         minds_config=minds_config,
         client_env_config=client_env_config,
-        request_inbox=request_inbox,
+        pending_requests=pending_requests,
         request_event_handlers=(
             latchkey_permission_handler,
             file_sharing_handler,
@@ -800,7 +789,10 @@ def run(
     # ``root_concurrency_group``.
     permission_requests_consumer = PermissionRequestsConsumer(
         gateway_client=gateway_client,
-        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver, latchkey=latchkey),
+        # A new request only needs to wake the chrome SSE: every surface
+        # (badge, inbox, notification feed) re-reads pending state from the
+        # gateway-backed view on the way back down.
+        on_new_request=backend_resolver.notify_change,
     )
     permission_requests_consumer.start(root_concurrency_group)
     # Stash on the app state so the shutdown teardown can stop() the consumer
@@ -830,142 +822,6 @@ def run(
     # before the server drains so streams end cleanly with no tracebacks.
     with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
         serve_desktop_client(app, get_state(app), host=host, port=port)
-
-
-class _StreamedPermissionRequestHandler(FrozenModel):
-    """Callable that appends a streamed permission request to the app inbox.
-
-    The handler runs on the permission-requests consumer thread (not a
-    request thread), so it only does thread-safe work: appending to the
-    immutable :class:`RequestInbox` produces a new instance per mutation
-    and Python attribute assignment is atomic for our purposes here. Same
-    trick the legacy JSONL ``_handle_request_event_callback`` already uses.
-    """
-
-    app: Flask = Field(
-        frozen=True,
-        description="Desktop-client Flask instance whose state ``request_inbox`` is mutated on receipt.",
-    )
-    backend_resolver: MngrCliBackendResolver = Field(
-        frozen=True,
-        description="Resolver whose ``notify_change()`` wakes the chrome SSE so the panel updates promptly.",
-    )
-    latchkey: Latchkey = Field(
-        frozen=True,
-        description=(
-            "Latchkey instance used to repair a host whose canonical "
-            "``latchkey_permissions.json`` is missing when a fresh request arrives."
-        ),
-    )
-
-    # ``Flask``, ``MngrCliBackendResolver`` and ``Latchkey`` are not
-    # pydantic natives; tolerate them with ``arbitrary_types_allowed``.
-    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-
-    def __call__(self, event: RequestEvent) -> None:
-        current: RequestInbox | None = get_state(self.app).request_inbox
-        if current is None:
-            return
-        # The gateway re-emits every still-pending request on each
-        # stream reconnect (and the consumer reconnects every couple of
-        # seconds when idle, see ``_FOLLOW_READ_TIMEOUT``). Once we've
-        # ingested a given ``event_id`` the redeliveries carry no new
-        # information, so we no-op rather than append a duplicate to
-        # the requests list (it would grow unbounded), log again, and
-        # wake the SSE for nothing.
-        if current.get_request_by_id(str(event.event_id)) is not None:
-            return
-        # Repair a host whose canonical permissions file was never
-        # materialized *before* surfacing the request, so the user's
-        # eventual approval actually takes effect. Best-effort: failures
-        # are logged and the request is still surfaced.
-        self._maybe_recover_host_permissions(event)
-        get_state(self.app).request_inbox = current.add_request(event)
-        if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
-            logger.info(
-                "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
-                event.agent_id,
-                event.scope,
-                event.event_id,
-            )
-        elif isinstance(event, LatchkeyFileSharingPermissionRequestEvent):
-            logger.info(
-                "Streamed file-sharing permission request for agent {} (path={}, request_id={})",
-                event.agent_id,
-                event.path,
-                event.event_id,
-            )
-        else:
-            logger.info(
-                "Streamed permission request for agent {} (request_type={}, request_id={})",
-                event.agent_id,
-                event.request_type,
-                event.event_id,
-            )
-        self.backend_resolver.notify_change()
-
-    def _maybe_recover_host_permissions(self, event: RequestEvent) -> None:
-        """Recreate a missing per-host permissions file for the request's agent.
-
-        The streamed request carries ``permissions_target_path`` -- the
-        agent's opaque permissions handle (what its gateway JWT resolves
-        to). :func:`maybe_recover_host_permissions_for_agent` swings that
-        handle into the canonical host path when the latter is missing (so grants
-        written by the approval flow are visible to the agent) and
-        idempotently re-registers the agent in the host's allowlist. No-op
-        when the target is absent (non-latchkey request) or the host is
-        not yet known to discovery.
-        """
-        if not isinstance(
-            event,
-            (LatchkeyPredefinedPermissionRequestEvent, LatchkeyFileSharingPermissionRequestEvent),
-        ):
-            return
-        target = event.permissions_target_path
-        if target is None:
-            return
-        agent_id = AgentId(event.agent_id)
-        host_id = self._resolve_host_id(agent_id)
-        if host_id is None:
-            return
-        try:
-            did_recover = maybe_recover_host_permissions_for_agent(
-                latchkey=self.latchkey,
-                host_id=host_id,
-                agent_id=agent_id,
-                opaque_permissions_path=Path(target),
-            )
-        except LatchkeyStoreError as e:
-            logger.opt(exception=e).error(
-                "Could not recover missing latchkey permissions file for host {} (agent {}): {}",
-                host_id,
-                event.agent_id,
-                e,
-            )
-            return
-        if did_recover:
-            logger.info(
-                "Recovered missing latchkey permissions file for host {} (agent {}) from opaque handle {}",
-                host_id,
-                event.agent_id,
-                target,
-            )
-
-    def _resolve_host_id(self, agent_id: AgentId) -> HostId | None:
-        """Resolve the host an agent runs on, or ``None`` when discovery hasn't caught up.
-
-        Mirrors the resolution the permission-grant handler does: the
-        backend resolver maps the agent id to its host id, and the
-        placeholder ``"localhost"`` string (used by static / in-memory
-        resolvers) is treated as "unknown host".
-        """
-        info = self.backend_resolver.get_agent_display_info(agent_id)
-        if info is None:
-            return None
-        try:
-            return HostId(info.host_id)
-        except ValueError:
-            return None
 
 
 def _resolve_backup_quota_evictor(

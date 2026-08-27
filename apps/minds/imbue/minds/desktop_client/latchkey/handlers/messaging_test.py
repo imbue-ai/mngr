@@ -6,10 +6,24 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
 from imbue.minds.desktop_client.latchkey.handlers.messaging import stdout_reports_message_delivered
+from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+
+
+def test_format_resolution_notice_appends_the_verdict_and_request_id() -> None:
+    notice = format_resolution_notice(
+        "Your permission request for Slack was granted.", "evt-abc123", RequestStatus.GRANTED
+    )
+    assert notice == "Your permission request for Slack was granted. (resolution: granted, request_id: evt-abc123)"
+    denied = format_resolution_notice("No.", "evt-d", RequestStatus.DENIED)
+    assert denied == "No. (resolution: denied, request_id: evt-d)"
+    # The original message stays a prefix, unmodified -- callers also return it
+    # verbatim to the human user, where the appended tag would just be clutter.
+    assert notice.startswith("Your permission request for Slack was granted.")
 
 
 def test_stdout_reports_delivered_true_for_message_sent_event() -> None:
@@ -126,3 +140,30 @@ def test_deliver_false_when_exit_zero_but_no_message_sent_event(root_concurrency
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
 
     assert sender.deliver("assistant", "hello") is False
+
+
+def test_send_keeps_retrying_at_the_final_interval_after_the_ramp(
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The backoff ramp does not end in a give-up: its last interval repeats.
+
+    A verdict for a stopped workspace must land whenever that workspace next
+    comes up during this app run, not only within the first two minutes.
+    """
+    caller = _ScriptedMngrCaller(
+        results=(
+            MngrCallResult(returncode=1, stderr="Agent is not running (state: STOPPED)"),
+            MngrCallResult(returncode=0, stdout=""),
+            MngrCallResult(returncode=0, stdout=""),
+            MngrCallResult(returncode=0, stdout=_DELIVERED_STDOUT),
+        ),
+    )
+    # A two-entry ramp; the fourth attempt only happens if the final interval repeats.
+    sender = MngrMessageSender(
+        mngr_caller=caller,
+        concurrency_group=root_concurrency_group,
+        retry_delays_seconds=(0.01, 0.01),
+    )
+
+    assert sender._send_with_retries("some-agent", "denied") is True
+    assert len(caller.calls) == 4

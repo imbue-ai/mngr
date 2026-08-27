@@ -1,4 +1,4 @@
-"""File-sharing permission grant/deny flow (``RequestType.FILE_SHARING_PERMISSION``).
+"""File-sharing permission grant/deny flow (wire ``request_type == "file-sharing"``).
 
 This module is one of the two sibling handlers under
 :mod:`imbue.minds.desktop_client.latchkey.handlers`. It owns the
@@ -40,27 +40,27 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import resolve_workspace_display_name
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import RequestEvent
-from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import RequestResponseEvent
-from imbue.minds.desktop_client.request_events import RequestStatus
-from imbue.minds.desktop_client.request_events import RequestType
-from imbue.minds.desktop_client.request_events import append_response_event
-from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_host_permissions
+from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
+from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import UiFileSharingPermissionDetail
 from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
+from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.webdav import get_file_sharing_roots
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.core import Latchkey
 
 # Label shown on the inbox list card (lower-case, short).
 _KIND_LABEL: Final[str] = "file sharing"
@@ -162,28 +162,8 @@ def _format_denied_message(file_path: str, access: str) -> str:
     return f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' was denied."
 
 
-def _json_error(message: str, status_code: int) -> Response:
-    return make_response(
-        content=json.dumps({"error": message}),
-        media_type="application/json",
-        status_code=status_code,
-    )
-
-
-def _resolve_workspace_name(
-    backend_resolver: BackendResolverInterface,
-    agent_id: AgentId,
-    fallback: str,
-) -> str:
-    ws_name = backend_resolver.get_workspace_name(agent_id) or ""
-    if ws_name:
-        return ws_name
-    info = backend_resolver.get_agent_display_info(agent_id)
-    return info.agent_name if info else fallback
-
-
 class FileSharingGrantHandler(RequestEventHandler):
-    """Per-``RequestType.FILE_SHARING_PERMISSION`` handler.
+    """Handler for file-sharing permission requests.
 
     The bulk of the work lives in the gateway's
     ``permission-requests`` extension (which owns the
@@ -204,6 +184,9 @@ class FileSharingGrantHandler(RequestEventHandler):
     )
     mngr_message_sender: MngrMessageSender = Field(
         description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
+    )
+    latchkey: Latchkey = Field(
+        description="Latchkey wrapper used to repair a host's missing canonical permissions file at grant time.",
     )
     share_roots: tuple[Path, ...] = Field(
         default_factory=get_file_sharing_roots,
@@ -227,33 +210,37 @@ class FileSharingGrantHandler(RequestEventHandler):
     # -- RequestEventHandler interface ---------------------------------------
 
     def handles_request_type(self) -> str:
-        return str(RequestType.FILE_SHARING_PERMISSION)
+        return REQUEST_TYPE_FILE_SHARING
 
     def kind_label(self) -> str:
         return _KIND_LABEL
 
-    def display_name_for_event(self, req_event: RequestEvent) -> str:
-        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
+    def display_name_for_event(self, permission_request: StreamedPermissionRequest) -> str:
+        payload = permission_request.payload
+        if not isinstance(payload, FileSharingRequestPayload):
             return ""
-        return req_event.path
+        return payload.path
 
     def build_request_detail_payload(
         self,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
         backend_resolver: BackendResolverInterface,
     ) -> RequestDetailPayload:
-        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
+        payload = permission_request.payload
+        if not isinstance(payload, FileSharingRequestPayload):
             return UiUnsupportedDetail(message="Unsupported request type")
-        parsed_agent_id = AgentId(req_event.agent_id)
-        ws_name = _resolve_workspace_name(backend_resolver, parsed_agent_id, fallback=req_event.agent_id)
+        parsed_agent_id = AgentId(permission_request.agent_id)
+        ws_name = resolve_workspace_display_name(
+            backend_resolver, parsed_agent_id, fallback=permission_request.agent_id
+        )
         return UiFileSharingPermissionDetail(
-            request_id=str(req_event.event_id),
-            agent_id=req_event.agent_id,
+            request_id=permission_request.request_id,
+            agent_id=permission_request.agent_id,
             ws_name=ws_name,
-            rationale=req_event.rationale,
-            file_path=req_event.path,
-            access=req_event.access,
-            access_human_label=_access_human_label(req_event.access),
+            rationale=permission_request.rationale,
+            file_path=payload.path,
+            access=str(payload.access),
+            access_human_label=_access_human_label(str(payload.access)),
             allowed_roots=tuple(str(root) for root in self.share_roots),
             home_dir=str(self.home_dir),
         )
@@ -261,12 +248,17 @@ class FileSharingGrantHandler(RequestEventHandler):
     def apply_grant_request(
         self,
         request: Request,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
     ) -> Response:
-        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
-            return _json_error("Unsupported request type", status_code=500)
-        request_event_id = str(req_event.event_id)
-        parsed_agent_id = AgentId(req_event.agent_id)
+        payload = permission_request.payload
+        if not isinstance(payload, FileSharingRequestPayload):
+            return make_json_error_response("Unsupported request type", status_code=500)
+        request_event_id = permission_request.request_id
+        parsed_agent_id = AgentId(permission_request.agent_id)
+        # A host whose canonical permissions file was never materialized must
+        # be repaired before the grant, or the approval lands in a file the
+        # agent's gateway JWT does not resolve to.
+        maybe_recover_host_permissions(self.latchkey, get_state().backend_resolver, permission_request)
 
         # The dialog lets the user edit the shared path (paste or native
         # file picker) before approving. Read the submitted value, falling
@@ -279,15 +271,15 @@ class FileSharingGrantHandler(RequestEventHandler):
             effective_path = (
                 _normalize_share_path(str(raw_override), self.share_roots, self.home_dir)
                 if raw_override is not None
-                else req_event.path
+                else payload.path
             )
         except InvalidSharePathError as e:
-            return _json_error(str(e), status_code=400)
+            return make_json_error_response(str(e), status_code=400)
 
         # Only send an override to the gateway when the user actually
         # changed the path; otherwise the gateway applies the precomputed
         # effect verbatim (and we avoid recomputation for the common case).
-        override_path = effective_path if effective_path != req_event.path else None
+        override_path = effective_path if effective_path != payload.path else None
         try:
             self.gateway_client.approve_permission_request(
                 request_event_id,
@@ -299,20 +291,20 @@ class FileSharingGrantHandler(RequestEventHandler):
                 request_event_id,
                 e,
             )
-            return _json_error(
+            return make_json_error_response(
                 f"Could not approve file-sharing request through the latchkey gateway: {e}",
                 status_code=502,
             )
 
-        message = _format_granted_message(effective_path, req_event.access)
-        response_event = self._write_response_and_notify(
+        message = _format_granted_message(effective_path, str(payload.access))
+        resolve_request(
+            self.mngr_message_sender,
+            self.data_dir,
             request_event_id=request_event_id,
             agent_id=parsed_agent_id,
-            file_path=effective_path,
             status=RequestStatus.GRANTED,
             message=message,
         )
-        self._mirror_response_into_inbox(response_event)
         return make_response(
             content=json.dumps({"outcome": "GRANTED", "message": message}),
             media_type="application/json",
@@ -321,12 +313,13 @@ class FileSharingGrantHandler(RequestEventHandler):
     def apply_deny_request(
         self,
         request: Request,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
     ) -> Response:
-        if not isinstance(req_event, LatchkeyFileSharingPermissionRequestEvent):
-            return _json_error("Unsupported request type", status_code=500)
-        request_event_id = str(req_event.event_id)
-        parsed_agent_id = AgentId(req_event.agent_id)
+        payload = permission_request.payload
+        if not isinstance(payload, FileSharingRequestPayload):
+            return make_json_error_response("Unsupported request type", status_code=500)
+        request_event_id = permission_request.request_id
+        parsed_agent_id = AgentId(permission_request.agent_id)
         # DELETE tolerates 404 -- if the request is already gone we still
         # want to write the response event and notify the agent.
         try:
@@ -338,63 +331,18 @@ class FileSharingGrantHandler(RequestEventHandler):
                 e,
             )
 
-        message = _format_denied_message(req_event.path, req_event.access)
-        response_event = self._write_response_and_notify(
+        message = _format_denied_message(payload.path, str(payload.access))
+        resolve_request(
+            self.mngr_message_sender,
+            self.data_dir,
             request_event_id=request_event_id,
             agent_id=parsed_agent_id,
-            file_path=req_event.path,
             status=RequestStatus.DENIED,
             message=message,
         )
-        self._mirror_response_into_inbox(response_event)
         return make_response(
             content=json.dumps({"outcome": "DENIED", "message": message}),
             media_type="application/json",
         )
 
     # -- Internals -----------------------------------------------------------
-
-    def _write_response_and_notify(
-        self,
-        request_event_id: str,
-        agent_id: AgentId,
-        file_path: str,
-        status: RequestStatus,
-        message: str,
-    ) -> RequestResponseEvent:
-        """Persist the response event and ping the agent. Returns the new event."""
-        response_event = create_request_response_event(
-            request_event_id=request_event_id,
-            status=status,
-            agent_id=str(agent_id),
-            request_type=str(RequestType.FILE_SHARING_PERMISSION),
-            # ``scope`` on a response is informational only -- the
-            # inbox joins responses to requests on
-            # ``request_event_id`` (see ``get_pending_requests`` in
-            # ``request_events.py``). We still record the file path
-            # here so the persisted response carries the resolved
-            # path for debugging.
-            scope=file_path,
-        )
-        append_response_event(self.data_dir, response_event)
-        self.mngr_message_sender.send(agent_id, message)
-        return response_event
-
-    def _mirror_response_into_inbox(
-        self,
-        response_event: RequestResponseEvent,
-    ) -> None:
-        """Mirror the on-disk response event into the in-memory inbox.
-
-        Without this the resolved card stays visible in the requests
-        panel until the next desktop-client restart. Also wakes the
-        chrome SSE so the new ``requests`` payload is pushed without
-        waiting for the 30s heartbeat.
-        """
-        inbox: RequestInbox | None = get_state().request_inbox
-        if inbox is None:
-            return
-        get_state().request_inbox = inbox.add_response(response_event)
-        backend_resolver: BackendResolverInterface = get_state().backend_resolver
-        if isinstance(backend_resolver, MngrCliBackendResolver):
-            backend_resolver.notify_change()

@@ -71,6 +71,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
@@ -78,6 +79,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
+from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -86,14 +88,10 @@ from imbue.minds.desktop_client.notification_feed import NotificationDispatchPre
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_report_with_attachments
-from imbue.minds.desktop_client.request_events import RequestEvent
-from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import RequestStatus
-from imbue.minds.desktop_client.request_events import RequestType
-from imbue.minds.desktop_client.request_events import parse_request_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.responses import make_html_response
+from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
@@ -113,6 +111,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
 from imbue.minds.desktop_client.ui_api import serve_spa_index
 from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
+from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
@@ -157,15 +156,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
-
-
-def _json_error(message: str, status_code: int) -> Response:
-    """Return a small ``{"error": ...}`` JSON response."""
-    return make_response(
-        content=json.dumps({"error": message}),
-        media_type="application/json",
-        status_code=status_code,
-    )
 
 
 def _system_interface_status_payload(
@@ -1274,40 +1264,8 @@ def _build_workspace_list(
     return workspaces
 
 
-def _displayable_pending_requests(
-    inbox: RequestInbox | None,
-    backend_resolver: BackendResolverInterface,
-) -> list[RequestEvent]:
-    """Pending requests whose originating agent's host is currently resolvable.
-
-    A permission request filed by an agent on a since-stopped workspace
-    lingers in the inbox after that workspace disappears from discovery
-    (the request file survives on the gateway). With no live agent to
-    resolve, the inbox can only fall back to raw agent ids, which render
-    as meaningless 16-char hex in the UI. Rather than show those, we hide
-    a request whenever ``get_agent_display_info`` can't resolve its agent
-    -- the same signal every other display path uses to map an agent to a
-    host/workspace. The request itself is untouched on the gateway, so it
-    reappears if the workspace comes back (or once a freshly-arrived
-    request's host is discovered).
-    """
-    pending = inbox.get_pending_requests() if inbox else []
-    displayable: list[RequestEvent] = []
-    for req in pending:
-        try:
-            agent_id = AgentId(req.agent_id)
-        except InvalidRandomIdError:
-            # A request with a malformed agent_id (not a valid 'agent-...' id) can't
-            # resolve to a real agent, so it isn't displayable. Skip it rather than let
-            # the AgentId() validation raise and take down the whole request panel.
-            continue
-        if backend_resolver.get_agent_display_info(agent_id) is not None:
-            displayable.append(req)
-    return displayable
-
-
 def _build_requests_payload(
-    inbox: RequestInbox | None,
+    pending_requests: PendingRequestsInterface | None,
     backend_resolver: BackendResolverInterface,
 ) -> dict[str, Any]:
     """Build the content-based requests payload pushed over the chrome SSE.
@@ -1324,11 +1282,11 @@ def _build_requests_payload(
     for the badge.
 
     Requests whose host can't be resolved are excluded (see
-    :func:`_displayable_pending_requests`) so the badge count and the
+    :func:`displayable_pending_requests`) so the badge count and the
     rendered cards stay in agreement.
     """
-    pending = _displayable_pending_requests(inbox, backend_resolver)
-    request_ids = [str(req.event_id) for req in pending]
+    pending = displayable_pending_requests(pending_requests, backend_resolver)
+    request_ids = [req.request_id for req in pending]
     return {"count": len(request_ids), "request_ids": request_ids}
 
 
@@ -1539,7 +1497,7 @@ def _revoke_prelude() -> Response | tuple[Mapping[str, Any], LatchkeyPermissionG
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     handler = _find_predefined_permission_handler()
     if handler is None:
-        return _json_error("Permission management is unavailable", status_code=503)
+        return make_json_error_response("Permission management is unavailable", status_code=503)
     return body, handler
 
 
@@ -1553,10 +1511,10 @@ def _apply_revoke(revoke: Callable[..., object], **kwargs: Any) -> Response:
     try:
         revoke(**kwargs)
     except PermissionOverviewError as e:
-        return _json_error(str(e), status_code=400)
+        return make_json_error_response(str(e), status_code=400)
     except LatchkeyGatewayClientError as e:
         logger.warning("Could not revoke through the latchkey gateway: {}", e)
-        return _json_error(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
+        return make_json_error_response(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
     return make_response(content='{"status": "ok"}', media_type="application/json")
 
 
@@ -1576,7 +1534,7 @@ def _handle_revoke_service_for_workspace() -> Response:
     workspace_agent_id = str(body.get("workspace_agent_id", ""))
     service_name = str(body.get("service_name", ""))
     if not workspace_agent_id or not service_name or "account" not in body:
-        return _json_error("workspace_agent_id, service_name and account are required.", status_code=400)
+        return make_json_error_response("workspace_agent_id, service_name and account are required.", status_code=400)
     return _apply_revoke(
         revoke_service_account_for_workspace,
         backend_resolver=get_state().backend_resolver,
@@ -1600,7 +1558,7 @@ def _handle_revoke_service_for_all_workspaces() -> Response:
     body, handler = prelude
     service_name = str(body.get("service_name", ""))
     if not service_name or "account" not in body:
-        return _json_error("service_name and account are required.", status_code=400)
+        return make_json_error_response("service_name and account are required.", status_code=400)
     return _apply_revoke(
         revoke_service_account_for_all_workspaces,
         backend_resolver=get_state().backend_resolver,
@@ -1625,7 +1583,7 @@ def _handle_revoke_file_sharing_for_workspace() -> Response:
     body, handler = prelude
     workspace_agent_id = str(body.get("workspace_agent_id", ""))
     if not workspace_agent_id:
-        return _json_error("workspace_agent_id is required.", status_code=400)
+        return make_json_error_response("workspace_agent_id is required.", status_code=400)
     return _apply_revoke(
         revoke_file_sharing_for_workspace,
         backend_resolver=get_state().backend_resolver,
@@ -1666,7 +1624,7 @@ def _handle_revoke_workspace_delegation_verb() -> Response:
     workspace_agent_id = str(body.get("workspace_agent_id", ""))
     verb = str(body.get("verb", ""))
     if not workspace_agent_id or not verb:
-        return _json_error("workspace_agent_id and verb are required.", status_code=400)
+        return make_json_error_response("workspace_agent_id and verb are required.", status_code=400)
     return _apply_revoke(
         revoke_workspace_verb_for_workspace,
         backend_resolver=get_state().backend_resolver,
@@ -1692,10 +1650,10 @@ def _handle_add_connector_account() -> Response:
     body, handler = prelude
     service_name = str(body.get("service_name", ""))
     if not service_name:
-        return _json_error("service_name is required.", status_code=400)
+        return make_json_error_response("service_name is required.", status_code=400)
     is_success, detail = handler.latchkey.add_account(service_name)
     if not is_success:
-        return _json_error(detail or "Sign-in did not complete.", status_code=502)
+        return make_json_error_response(detail or "Sign-in did not complete.", status_code=502)
     return make_response(content='{"status": "ok"}', media_type="application/json")
 
 
@@ -1716,11 +1674,11 @@ def _handle_disconnect_connector_account() -> Response:
     service_name = str(body.get("service_name", ""))
     account = str(body.get("account", ""))
     if not service_name:
-        return _json_error("service_name is required.", status_code=400)
+        return make_json_error_response("service_name is required.", status_code=400)
     try:
         disconnect_account(handler.latchkey, service_name, account)
     except PermissionOverviewError as e:
-        return _json_error(str(e), status_code=502)
+        return make_json_error_response(str(e), status_code=502)
     _revoke_service_account_for_all_workspaces_in_background(handler, service_name, account)
     return make_response(content='{"status": "ok"}', media_type="application/json")
 
@@ -1863,69 +1821,32 @@ def _dispatch_request_action(
     and forwards. ``action`` must be ``"grant"`` or ``"deny"``.
     """
     if not _is_request_authenticated():
-        return _json_error("Not authenticated", status_code=403)
-    inbox: RequestInbox | None = get_state().request_inbox
-    if inbox is None:
-        return _json_error("Request inbox not available", status_code=500)
-    req_event = inbox.get_request_by_id(request_id)
-    if req_event is None:
-        return _json_error("Request not found", status_code=404)
+        return make_json_error_response("Not authenticated", status_code=403)
+    pending: PendingRequestsInterface | None = get_state().pending_requests
+    if pending is None:
+        return make_json_error_response("Pending requests unavailable", status_code=500)
     # Reject a second grant/deny on an already-resolved request so a stale
-    # (e.g. cached) form cannot re-apply side effects.
-    if inbox.is_request_resolved(request_id):
-        return _json_error("This request has already been approved or denied.", status_code=409)
+    # (e.g. cached) form cannot re-apply side effects. Checked before the
+    # pending lookup: a resolved request may still be listed by the gateway
+    # when its deny-time DELETE failed.
+    if pending.is_resolved(request_id):
+        return make_json_error_response("This request has already been approved or denied.", status_code=409)
+    permission_request = pending.get_pending(request_id)
+    if permission_request is None:
+        return make_json_error_response("Request not found", status_code=404)
 
     handlers: tuple[RequestEventHandler, ...] = get_state().request_event_handlers
-    handler = find_handler_for_event(handlers, req_event)
+    handler = find_handler_for_event(handlers, permission_request)
     if handler is None:
-        return _json_error(
-            f"No handler registered for request type '{req_event.request_type}'",
+        return make_json_error_response(
+            f"No handler registered for request type '{permission_request.request_type}'",
             status_code=400,
         )
     if action == "grant":
-        return handler.apply_grant_request(request, req_event)
+        return handler.apply_grant_request(request, permission_request)
     if action == "deny":
-        return handler.apply_deny_request(request, req_event)
-    return _json_error(f"Unsupported action '{action}'", status_code=500)
-
-
-_request_event_apps: dict[int, Flask] = {}
-
-
-def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
-    """Process an incoming request event and add it to the app's inbox.
-
-    After mutating the inbox, fires the resolver's change notification so
-    the chrome SSE wakes up and pushes the new ``requests`` payload immediately
-    (otherwise it would lag up to 30s for the next poll tick, breaking the
-    inbox badge UX).
-
-    ``LATCHKEY_PERMISSION`` events from the JSONL stream are ignored
-    here: latchkey 2.9.0 ships a gateway extension that owns the
-    pending-permission queue, and the desktop client consumes it via
-    :class:`PermissionRequestsConsumer` instead. Any latchkey events
-    that still arrive over the legacy JSONL channel are stale (the
-    agents migrating to the extension write directly to the gateway
-    now) and would only double-count.
-    """
-    event = parse_request_event(raw_line)
-    if event is None:
-        return
-    if event.request_type == str(RequestType.LATCHKEY_PERMISSION):
-        logger.debug(
-            "Ignoring legacy JSONL latchkey-permission event from agent {}; the gateway extension owns this flow now",
-            agent_id_str,
-        )
-        return
-    for app in _request_event_apps.values():
-        app_state = get_state(app)
-        current_inbox: RequestInbox | None = app_state.request_inbox
-        if current_inbox is not None:
-            app_state.request_inbox = current_inbox.add_request(event)
-            logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
-            backend_resolver: BackendResolverInterface = app_state.backend_resolver
-            if isinstance(backend_resolver, MngrCliBackendResolver):
-                backend_resolver.notify_change()
+        return handler.apply_deny_request(request, permission_request)
+    return make_json_error_response(f"Unsupported action '{action}'", status_code=500)
 
 
 # -- /ui channel publisher wiring --
@@ -2030,7 +1951,7 @@ def _derive_ui_requests_message(
     backend_resolver: BackendResolverInterface,
 ) -> UiRequestsMessage:
     with app.app_context():
-        payload = _build_requests_payload(get_state().request_inbox, backend_resolver)
+        payload = _build_requests_payload(get_state().pending_requests, backend_resolver)
         return UiRequestsMessage(count=payload["count"], request_ids=tuple(payload["request_ids"]))
 
 
@@ -2058,15 +1979,15 @@ def _derive_ui_notifications_message(
         feed = state.notification_feed
         if feed is None:
             return UiNotificationsMessage(entries=(), unresolved_count=0)
-        inbox = state.request_inbox
-        pending = _displayable_pending_requests(inbox, backend_resolver)
+        pending_view = state.pending_requests
+        pending = displayable_pending_requests(pending_view, backend_resolver)
         primary_agent_id_by_ws_name = primary_agent_ids_by_workspace_name(backend_resolver)
         pending_cards = tuple(
             build_notification_card(req, state.request_event_handlers, backend_resolver, primary_agent_id_by_ws_name)
             for req in pending
         )
         responses_by_request_id: dict[str, NotificationOutcome] = {}
-        for response in inbox.responses if inbox is not None else ():
+        for response in pending_view.responses() if pending_view is not None else ():
             outcome = _RESOLVED_OUTCOME_BY_RESPONSE_STATUS.get(response.status)
             if outcome is not None:
                 responses_by_request_id[response.request_event_id] = outcome
@@ -2236,7 +2157,7 @@ def create_desktop_client(
     client_env_config: ClientEnvConfig | None = None,
     envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    request_inbox: RequestInbox | None = None,
+    pending_requests: PendingRequestsInterface | None = None,
     request_event_handlers: tuple[RequestEventHandler, ...] = (),
     server_port: int = 0,
     mngr_forward_port: int = 0,
@@ -2353,7 +2274,7 @@ def create_desktop_client(
         client_env_config=client_env_config,
         envelope_stream_consumer=envelope_stream_consumer,
         session_store=session_store,
-        request_inbox=request_inbox,
+        pending_requests=pending_requests,
         request_event_handlers=request_event_handlers,
         auth_server_port=server_port,
         mngr_forward_port=mngr_forward_port,
@@ -2443,11 +2364,6 @@ def create_desktop_client(
 
     # Mount the SPA surface (/ui, /ui/ws, /ui/api/*).
     app.register_blueprint(create_ui_blueprint())
-
-    # Register callback to process incoming request events from agents
-    if isinstance(backend_resolver, MngrCliBackendResolver):
-        _request_event_apps[id(backend_resolver)] = app
-        backend_resolver.add_on_request_callback(_handle_request_event_callback)
 
     # Mount the auth routes (proxy to the mngr_imbue_cloud plugin's auth subcommands)
     if session_store is not None and imbue_cloud_cli is not None:

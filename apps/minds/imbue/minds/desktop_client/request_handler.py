@@ -1,11 +1,11 @@
-"""Abstract handler for a single ``RequestEvent`` subtype.
+"""Abstract handler for a single permission-request kind.
 
 The desktop client supports multiple kinds of pending requests (sharing,
 latchkey-permission, ...). Each is rendered, granted, and denied through a
 type-specific ``RequestEventHandler`` so the route layer can stay a thin
-dispatcher: it authenticates, looks up the request event by id, picks the
-handler that claims the event's ``request_type``, and forwards the rest
-of the work.
+dispatcher: it authenticates, looks up the pending request by id, picks the
+handler that claims the request's wire ``request_type``, and forwards the
+rest of the work.
 
 Adding a new request kind is now a matter of writing a new
 ``RequestEventHandler`` subclass and registering it with the desktop
@@ -24,7 +24,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.request_events import RequestEvent
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
 
@@ -168,27 +168,27 @@ RequestDetailPayload = (
 
 
 class RequestEventHandler(MutableModel, ABC):
-    """Per-``RequestType`` handler for the request inbox flow.
+    """Per-request-kind handler for the request inbox flow.
 
     Each implementation owns building the typed request detail payload,
     applying a grant, applying a deny, and providing the human-readable
     labels the inbox list uses to describe pending requests of its
-    kind. The route layer guarantees that ``req_event.request_type``
+    kind. The route layer guarantees that ``permission_request.request_type``
     matches ``handles_request_type()`` before calling any of the
-    methods below, so subclasses may safely narrow ``req_event`` to
-    their concrete type.
+    methods below, so subclasses may safely narrow ``permission_request.payload``
+    to their concrete payload type.
     """
 
     @abstractmethod
     def handles_request_type(self) -> str:
-        """Return the ``RequestType`` string this handler claims (e.g. ``"SHARING"``)."""
+        """Return the wire ``request_type`` this handler claims (e.g. ``"predefined"``)."""
 
     @abstractmethod
     def kind_label(self) -> str:
         """Short, lower-case label shown on inbox list cards (e.g. ``"sharing"``)."""
 
     @abstractmethod
-    def display_name_for_event(self, req_event: RequestEvent) -> str:
+    def display_name_for_event(self, permission_request: StreamedPermissionRequest) -> str:
         """Human-readable secondary label for the inbox list card.
 
         Typically the friendly service name (e.g. ``"Slack"`` rather than
@@ -199,7 +199,7 @@ class RequestEventHandler(MutableModel, ABC):
     @abstractmethod
     def build_request_detail_payload(
         self,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
         backend_resolver: BackendResolverInterface,
     ) -> RequestDetailPayload:
         """Build the typed inbox-detail payload for the SPA's right pane.
@@ -213,7 +213,7 @@ class RequestEventHandler(MutableModel, ABC):
     def apply_grant_request(
         self,
         request: Request,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
     ) -> Response:
         """Apply a grant from ``POST /requests/{id}/grant`` and return the response.
 
@@ -229,7 +229,7 @@ class RequestEventHandler(MutableModel, ABC):
     def apply_deny_request(
         self,
         request: Request,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
     ) -> Response:
         """Apply a deny from ``POST /requests/{id}/deny`` and return the response.
 
@@ -241,15 +241,15 @@ class RequestEventHandler(MutableModel, ABC):
 
 def find_handler_for_event(
     handlers: Sequence[RequestEventHandler],
-    req_event: RequestEvent,
+    permission_request: StreamedPermissionRequest,
 ) -> RequestEventHandler | None:
-    """Return the handler that claims ``req_event.request_type``, or ``None``.
+    """Return the handler that claims ``permission_request.request_type``, or ``None``.
 
     There is at most one handler per request type by construction (the
     desktop client builds the tuple from a fixed set of handlers); if
     two ever claimed the same type, the first registered one wins.
     """
     for handler in handlers:
-        if handler.handles_request_type() == req_event.request_type:
+        if handler.handles_request_type() == permission_request.request_type:
             return handler
     return None

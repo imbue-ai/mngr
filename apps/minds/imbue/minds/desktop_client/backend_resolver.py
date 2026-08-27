@@ -33,7 +33,6 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
-REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
 
 # Every minds workspace runs a constant-named ``main``-type agent whose
 # bootstrap execs supervisord (and thus owns the system interface). This is the
@@ -839,7 +838,6 @@ class MngrCliBackendResolver(BackendResolverInterface):
     )
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
-    _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
     # host_id_str -> a short-lived optimistic state set by a UI lifecycle action, masking discovery
     # in ``get_host_state`` until discovery agrees or the TTL elapses. Guarded by _lock. Only ever
     # holds a real RUNNING/STOPPED-style transition -- never DESTROYED -- so it cannot affect the
@@ -1630,36 +1628,15 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             return self._initial_discovery_done
 
-    def add_on_request_callback(self, callback: Callable[[str, str], None]) -> None:
-        """Register a callback invoked when a request event arrives.
 
-        The callback receives (agent_id_str, raw_json_line).
-        """
-        with self._lock:
-            self._on_request_callbacks.append(callback)
-
-    def remove_on_request_callback(self, callback: Callable[[str, str], None]) -> None:
-        """Unregister a request event callback."""
-        with self._lock:
-            try:
-                self._on_request_callbacks.remove(callback)
-            except ValueError:
-                pass
-
-    def fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
-        """Invoke all registered request event callbacks.
-
-        Public dispatch entry point used by both the legacy in-process
-        ``MngrStreamManager`` and the new ``EnvelopeStreamConsumer``.
-        """
-        with self._lock:
-            callbacks = list(self._on_request_callbacks)
-        for callback in callbacks:
-            try:
-                callback(agent_id_str, raw_line)
-            except (OSError, RuntimeError) as e:
-                logger.warning("Request event callback failed: {}", e)
-
-    def _fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
-        """Internal alias for ``fire_on_request`` retained for backward compatibility."""
-        self.fire_on_request(agent_id_str, raw_line)
+def resolve_workspace_display_name(
+    backend_resolver: BackendResolverInterface,
+    agent_id: AgentId,
+    fallback: str,
+) -> str:
+    """The agent's workspace name, else its display name, else ``fallback``."""
+    ws_name = backend_resolver.get_workspace_name(agent_id) or ""
+    if ws_name:
+        return ws_name
+    info = backend_resolver.get_agent_display_info(agent_id)
+    return info.agent_name if info else fallback

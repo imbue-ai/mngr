@@ -272,9 +272,10 @@ export class ShellState {
    * asked: the chrome mounts a single workspace frame, so no other workspace
    * has a live page in this window, and posting a request id into a workspace
    * that did not ask would hand it to foreign content for nothing. A verdict
-   * given while looking at some other workspace is simply not relayed -- that
-   * page is rebuilt from the transcript when the user returns to it, by which
-   * point the agent's own resolution message has landed.
+   * given while looking at some other workspace is simply not relayed -- the
+   * frame pushes the workspace's verdict snapshot (from the response event
+   * log) whenever it next loads that page, so missing this send never
+   * strands a card.
    *
    * Both sides of the comparison are WORKSPACE agent ids. The request's own
    * ``agent_id`` is not usable here: latchkey requests are filed by the

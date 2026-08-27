@@ -48,7 +48,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
-from imbue.minds.desktop_client.backend_resolver import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
@@ -727,10 +726,6 @@ class EnvelopeStreamConsumer(MutableModel):
     def _handle_event_payload(self, agent_id: AgentId, payload: dict[str, Any]) -> None:
         source = payload.get("source", "")
         aid_str = str(agent_id)
-        if source == REQUESTS_EVENT_SOURCE_NAME:
-            raw_line = json.dumps(payload, separators=(",", ":"))
-            self.resolver.fire_on_request(aid_str, raw_line)
-            return
         if source != SERVICES_EVENT_SOURCE_NAME:
             return
         try:

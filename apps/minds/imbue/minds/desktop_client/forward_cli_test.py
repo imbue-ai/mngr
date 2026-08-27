@@ -952,24 +952,6 @@ def test_event_services_envelope_carries_the_origin_label_to_the_resolver(
     assert consumer.resolver.list_service_labels_for_agent(_AGENT_ID_1) == {}
 
 
-def test_event_requests_envelope_dispatches_to_request_callback(consumer: EnvelopeStreamConsumer) -> None:
-    fired: list[tuple[str, str]] = []
-    consumer.resolver.add_on_request_callback(lambda aid_str, raw: fired.append((aid_str, raw)))
-    request_payload = {
-        "timestamp": _TIMESTAMP,
-        "event_id": "evt-" + "0" * 32,
-        "type": "request",
-        "source": "requests",
-        "request_id": "req-1",
-    }
-    _dispatch(consumer, _event_envelope(_AGENT_ID_1, request_payload))
-    assert len(fired) == 1
-    assert fired[0][0] == str(_AGENT_ID_1)
-
-
-# --- forward stream: reverse_tunnel_established ---------------------------
-
-
 def test_reverse_tunnel_established_is_silently_ignored(
     consumer: EnvelopeStreamConsumer,
 ) -> None:

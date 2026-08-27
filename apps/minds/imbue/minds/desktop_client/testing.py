@@ -7,6 +7,7 @@ import queue
 import re
 import subprocess
 import threading
+import uuid
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -21,6 +22,7 @@ from typing import Any
 from typing import Final
 
 import pytest
+from flask import Flask
 from loguru import logger as loguru_logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -28,7 +30,9 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
@@ -38,8 +42,23 @@ from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.environment_signals import NetworkProber
 from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
+from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_ACCOUNTS
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_PREDEFINED
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_WORKSPACE
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
+from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
+from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
+from imbue.minds.desktop_client.latchkey.response_events import RequestResponseEvent
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
+from imbue.minds.desktop_client.state import DesktopClientState
+from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
@@ -853,3 +872,149 @@ def record_sleep_of(sleep_tracker: SleepTracker, clock: CatchUpClock, seconds: f
     sleep_tracker.record_heartbeat()
     clock.lag_seconds = 0.0
     sleep_tracker.record_heartbeat()
+
+
+def _streamed_request(
+    agent_id: str,
+    rationale: str,
+    request_type: str,
+    payload: PredefinedRequestPayload | FileSharingRequestPayload | WorkspaceRequestPayload | AccountsRequestPayload,
+    target: str,
+) -> StreamedPermissionRequest:
+    """Assemble one gateway permission request with a fresh request id."""
+    return StreamedPermissionRequest(
+        request_id=f"req-{uuid.uuid4().hex}",
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=request_type,
+        payload=payload,
+        target=target,
+        effect=PermissionEffect(),
+    )
+
+
+def create_predefined_permission_request(
+    agent_id: str,
+    scope: str,
+    rationale: str,
+    permissions: tuple[str, ...] = (),
+    account: str | None = None,
+    target: str = "/tmp/permissions.json",
+) -> StreamedPermissionRequest:
+    """Build a predefined permission request as the gateway would stream it."""
+    return _streamed_request(
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=REQUEST_TYPE_PREDEFINED,
+        payload=PredefinedRequestPayload(scope=scope, permissions=permissions, account=account),
+        target=target,
+    )
+
+
+def create_file_sharing_permission_request(
+    agent_id: str,
+    path: str,
+    access: str,
+    rationale: str,
+    target: str = "/tmp/permissions.json",
+) -> StreamedPermissionRequest:
+    """Build a file-sharing permission request as the gateway would stream it."""
+    return _streamed_request(
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=REQUEST_TYPE_FILE_SHARING,
+        payload=FileSharingRequestPayload(path=path, access=FileSharingAccess(access)),
+        target=target,
+    )
+
+
+def create_workspace_permission_request(
+    agent_id: str,
+    rationale: str,
+    permissions: tuple[str, ...] = (),
+    target_workspace_id: str | None = None,
+) -> StreamedPermissionRequest:
+    """Build a workspace permission request as the gateway would stream it."""
+    return _streamed_request(
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=REQUEST_TYPE_WORKSPACE,
+        payload=WorkspaceRequestPayload(permissions=permissions, target_workspace_id=target_workspace_id),
+        target="/tmp/permissions.json",
+    )
+
+
+def create_accounts_permission_request(
+    agent_id: str,
+    rationale: str,
+) -> StreamedPermissionRequest:
+    """Build an accounts permission request as the gateway would stream it."""
+    return _streamed_request(
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=REQUEST_TYPE_ACCOUNTS,
+        payload=AccountsRequestPayload(),
+        target="/tmp/permissions.json",
+    )
+
+
+class StaticPendingRequests(MutableModel, PendingRequestsInterface):
+    """In-memory :class:`PendingRequestsInterface` for tests: fixed pending set, recorded verdicts."""
+
+    pending: tuple[StreamedPermissionRequest, ...] = Field(default=(), description="The fixed pending set")
+    answered: tuple[RequestResponseEvent, ...] = Field(
+        default=(), description="Verdicts already recorded when the view is built"
+    )
+    recorded: list[RequestResponseEvent] = Field(
+        default_factory=list, description="Verdicts recorded through the view, for assertions"
+    )
+
+    _responses_by_request_id: dict[str, RequestResponseEvent] = PrivateAttr(default_factory=dict)
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
+
+    def model_post_init(self, context: object) -> None:
+        for event in self.answered:
+            self._responses_by_request_id[event.request_event_id] = event
+
+    def list_pending(self) -> tuple[StreamedPermissionRequest, ...]:
+        return tuple(req for req in self.pending if req.request_id not in self._responses_by_request_id)
+
+    def get_pending(self, request_id: str) -> StreamedPermissionRequest | None:
+        return next((req for req in self.list_pending() if req.request_id == request_id), None)
+
+    def is_resolved(self, request_id: str) -> bool:
+        return request_id in self._responses_by_request_id
+
+    def record_response(self, event: RequestResponseEvent) -> None:
+        self._responses_by_request_id[event.request_event_id] = event
+        self.recorded.append(event)
+
+    def responses(self) -> tuple[RequestResponseEvent, ...]:
+        return tuple(self._responses_by_request_id.values())
+
+
+@contextmanager
+def desktop_state_app_context(
+    tmp_path: Path,
+    pending_requests: StaticPendingRequests | None = None,
+) -> Iterator[StaticPendingRequests]:
+    """A minimal Flask app context carrying a DesktopClientState, for direct handler calls.
+
+    Handler unit tests invoke grant/deny methods without the full desktop
+    client; the shared resolve epilogue still reads ``get_state()`` for the
+    pending-requests view and the backend resolver. Yields the view so tests
+    can assert on what was recorded.
+    """
+    view = pending_requests if pending_requests is not None else StaticPendingRequests()
+    app = Flask("minds-test-state")
+    set_state(
+        app,
+        DesktopClientState(
+            auth_store=FileAuthStore(data_directory=tmp_path / "auth-state"),
+            backend_resolver=MngrCliBackendResolver(),
+            pending_requests=view,
+        ),
+    )
+    with app.app_context():
+        yield view

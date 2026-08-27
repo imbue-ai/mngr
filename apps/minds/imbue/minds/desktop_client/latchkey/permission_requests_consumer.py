@@ -1,28 +1,22 @@
-"""Background streaming consumer for the ``permission-requests`` extension.
+"""Background change signal for the gateway's ``permission-requests`` stream.
 
 Spawned at desktop-client startup, owns a daemon thread that holds a
 long-lived ``GET /permission-requests?follow=true`` connection open
-against the shared latchkey gateway. Each pending request streamed
-over that connection is translated into a
-:class:`LatchkeyPredefinedPermissionRequestEvent` and appended to the in-memory
-:class:`RequestInbox` exactly the way agent-written JSONL events used
-to be (before latchkey 2.9.0 grew the extension layer).
+against the shared latchkey gateway and fires ``on_new_request`` the
+first time each pending request is seen. That is its whole job: pending
+state itself is read on demand from the gateway (see
+``latchkey/pending_requests.py``), so the signal only wakes the chrome
+SSE -- every surface then re-reads.
 
-The consumer must be resilient: a network blip or a gateway restart
-will tear the stream down, but the on-disk request files survive, so
-the consumer just reconnects with bounded backoff and the next stream
-re-emits everything that is still pending. There is no need to
-deduplicate -- the inbox keys requests by ``event_id``, which we
-populate from the extension-generated ``request_id``, so a redelivered
-request idempotently overwrites the previous entry.
+The stream re-emits every still-pending request on each reconnect (and
+reconnects every couple of seconds when idle), so first-sight dedup by
+``request_id`` keeps the signal quiet when nothing changed. The seen-set
+is thread-local to the consumer and append-only.
 """
 
 import threading
 from collections.abc import Callable
-from datetime import datetime
-from datetime import timezone
 from typing import Final
-from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -30,25 +24,9 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.thread_utils import ObservableThread
-from imbue.imbue_common.event_envelope import EventId
-from imbue.imbue_common.event_envelope import EventSource
-from imbue.imbue_common.event_envelope import EventType
-from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
-from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
-from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
-from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
-from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
-from imbue.minds.desktop_client.request_events import LatchkeyAccountsPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import LatchkeyWorkspacePermissionRequestEvent
-from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
-from imbue.minds.desktop_client.request_events import RequestEvent
-from imbue.minds.desktop_client.request_events import RequestType
 
 # Backoff bounds for the reconnect loop. The lower bound keeps the
 # consumer responsive when the gateway is just slow to start; the upper
@@ -59,117 +37,28 @@ _RECONNECT_MAX_DELAY_SECONDS: Final[float] = 30.0
 _RECONNECT_DELAY_GROWTH: Final[float] = 2.0
 
 
-def _now_iso() -> IsoTimestamp:
-    return IsoTimestamp(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
-
-
-def streamed_request_to_event(streamed: StreamedPermissionRequest) -> RequestEvent:
-    """Translate a streamed permission request into the inbox's event shape.
-
-    ``request_id`` from the extension is reused verbatim as the inbox
-    ``event_id`` so the FastAPI routes (which look events up by
-    ``event_id`` and DELETE the gateway record on grant/deny) can join
-    the two systems on a single identifier.
-
-    Dispatches on the concrete type of ``streamed.payload``:
-    :class:`PredefinedRequestPayload` becomes a
-    :class:`LatchkeyPredefinedPermissionRequestEvent` (the per-account
-    scope/permission grant flow); :class:`FileSharingRequestPayload` becomes a
-    :class:`LatchkeyFileSharingPermissionRequestEvent` (rendered as a single
-    per-path yes/no dialog whose grant path goes through
-    ``POST /permission-requests/approve/<id>``);
-    :class:`WorkspaceRequestPayload` becomes a
-    :class:`LatchkeyWorkspacePermissionRequestEvent` (the cross-workspace
-    ``minds-workspaces`` verb + all-vs-selected target dialog).
-    """
-    payload = streamed.payload
-    if isinstance(payload, PredefinedRequestPayload):
-        return LatchkeyPredefinedPermissionRequestEvent(
-            timestamp=_now_iso(),
-            type=EventType("latchkey_permission_request"),
-            event_id=EventId(streamed.request_id),
-            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
-            agent_id=streamed.agent_id,
-            request_type=str(RequestType.LATCHKEY_PERMISSION),
-            is_user_requested=False,
-            permissions_target_path=streamed.target,
-            scope=payload.scope,
-            permissions=payload.permissions,
-            account=payload.account,
-            rationale=streamed.rationale,
-        )
-    if isinstance(payload, FileSharingRequestPayload):
-        return LatchkeyFileSharingPermissionRequestEvent(
-            timestamp=_now_iso(),
-            type=EventType("file_sharing_permission_request"),
-            event_id=EventId(streamed.request_id),
-            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
-            agent_id=streamed.agent_id,
-            request_type=str(RequestType.FILE_SHARING_PERMISSION),
-            is_user_requested=False,
-            permissions_target_path=streamed.target,
-            path=payload.path,
-            access=str(payload.access),
-            rationale=streamed.rationale,
-        )
-    if isinstance(payload, WorkspaceRequestPayload):
-        return LatchkeyWorkspacePermissionRequestEvent(
-            timestamp=_now_iso(),
-            type=EventType("workspace_permission_request"),
-            event_id=EventId(streamed.request_id),
-            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
-            agent_id=streamed.agent_id,
-            request_type=str(RequestType.WORKSPACE_PERMISSION),
-            is_user_requested=False,
-            permissions_target_path=streamed.target,
-            permissions=payload.permissions,
-            target_workspace_id=payload.target_workspace_id,
-            rationale=streamed.rationale,
-        )
-    if isinstance(payload, AccountsRequestPayload):
-        return LatchkeyAccountsPermissionRequestEvent(
-            timestamp=_now_iso(),
-            type=EventType("accounts_permission_request"),
-            event_id=EventId(streamed.request_id),
-            source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
-            agent_id=streamed.agent_id,
-            request_type=str(RequestType.ACCOUNTS_PERMISSION),
-            is_user_requested=False,
-            permissions_target_path=streamed.target,
-            rationale=streamed.rationale,
-        )
-    assert_never(payload)
-
-
 class PermissionRequestsConsumer(MutableModel):
-    """Long-running thread that pumps gateway-side permission requests into the inbox.
+    """Long-running thread that signals the arrival of fresh permission requests.
 
     The thread is launched via :meth:`start` (which adds it to a
     :class:`ConcurrencyGroup` so process-wide shutdown tears it down)
-    and stops on :meth:`stop` or on group exit. ``on_request`` is
-    invoked from the consumer thread for every fresh request -- the
-    desktop client's callback owns whatever side effects (inbox
-    update, SSE wakeup) belong with each one.
+    and stops on :meth:`stop` or on group exit.
     """
 
     gateway_client: LatchkeyGatewayClient = Field(
         frozen=True,
         description="HTTP client used to talk to the gateway's bundled extension endpoints.",
     )
-    on_request: Callable[[RequestEvent], None] = Field(
+    on_new_request: Callable[[], None] = Field(
         description=(
-            "Callback invoked from the consumer thread for each streamed permission request "
-            "after translation into the inbox event shape. Receives either a "
-            ":class:`LatchkeyPredefinedPermissionRequestEvent` (for ``type=predefined``) or a "
-            ":class:`LatchkeyFileSharingPermissionRequestEvent` (for ``type=file-sharing``)."
+            "Invoked from the consumer thread the first time each pending request is seen; "
+            "wakes whatever re-reads pending state (in production, the chrome SSE)."
         ),
     )
 
-    # Co-ordination state; held as private attributes so pydantic does
-    # not try to serialize a :class:`threading.Event` or a live thread
-    # object.
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _thread: ObservableThread | None = PrivateAttr(default=None)
+    _seen_request_ids: set[str] = PrivateAttr(default_factory=set)
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
         """Spawn the consumer thread under ``concurrency_group``. Idempotent."""
@@ -180,10 +69,8 @@ class PermissionRequestsConsumer(MutableModel):
             target=self._run,
             name="latchkey-permission-requests-consumer",
             daemon=True,
-            # The consumer thread is intentionally fire-and-forget: it
-            # is the request inbox's source of truth and a crash inside
-            # it has already been logged. ``is_checked=False`` keeps
-            # the group's ``__exit__`` from re-raising on this thread.
+            # Fire-and-forget: a crash inside it has already been logged, and
+            # is_checked=False keeps the group's __exit__ from re-raising.
             is_checked=False,
         )
 
@@ -193,11 +80,7 @@ class PermissionRequestsConsumer(MutableModel):
         The follow stream uses a finite read timeout (see
         :data:`~imbue.minds.desktop_client.latchkey.gateway_client._FOLLOW_READ_TIMEOUT`)
         so the consumer thread wakes up at least every couple of seconds
-        and notices the stop event between reconnect attempts. Worst-case
-        shutdown delay is one read-timeout interval.
-
-        Safe to call concurrently with :meth:`start` / ``_run`` /
-        another :meth:`stop`; the event set is idempotent.
+        and notices the stop event between reconnect attempts.
         """
         self._stop_event.set()
 
@@ -209,30 +92,19 @@ class PermissionRequestsConsumer(MutableModel):
                 for streamed in self.gateway_client.iter_permission_requests():
                     if self._stop_event.is_set():
                         return
-                    try:
-                        event = streamed_request_to_event(streamed)
-                        self.on_request(event)
-                    except Exception as e:
-                        # A single request the consumer cannot process must never
-                        # take down this thread: it is the request inbox's source
-                        # of truth, so an uncaught error here silently stops EVERY
-                        # future permission request -- for any agent or service --
-                        # from reaching the UI until restart (and re-crashes on the
-                        # same record on each reconnect). Log the failure with its
-                        # traceback and skip just this request. The gateway
-                        # validates request bodies up front (see
-                        # permission_requests.mjs), so this broad catch is a
-                        # defense-in-depth backstop for malformed/legacy records,
-                        # not the primary guard.
-                        logger.opt(exception=e).error(
-                            "Skipping a permission request the consumer could not process "
-                            "(request_id={}, agent_id={}): {}",
-                            streamed.request_id,
-                            streamed.agent_id,
-                            e,
-                        )
+                    if streamed.request_id in self._seen_request_ids:
                         continue
-                    # Reset backoff after a successful delivery.
+                    self._seen_request_ids.add(streamed.request_id)
+                    logger.info(
+                        "Streamed permission request for agent {} (request_type={}, request_id={})",
+                        streamed.agent_id,
+                        streamed.request_type,
+                        streamed.request_id,
+                    )
+                    try:
+                        self.on_new_request()
+                    except (OSError, RuntimeError) as e:
+                        logger.opt(exception=e).error("permission-request change signal failed: {}", e)
                     delay = _RECONNECT_MIN_DELAY_SECONDS
             except LatchkeyGatewayClientError as e:
                 logger.warning(
@@ -240,20 +112,12 @@ class PermissionRequestsConsumer(MutableModel):
                     e,
                     delay,
                 )
-                # Real error -- escalate the backoff so a dead gateway
-                # doesn't get hammered.
                 if self._stop_event.wait(timeout=delay):
                     return
                 delay = min(delay * _RECONNECT_DELAY_GROWTH, _RECONNECT_MAX_DELAY_SECONDS)
             else:
-                # Clean close from the gateway side OR a read-timeout
-                # idle reconnect (iter_permission_requests treats
-                # httpx.ReadTimeout as a clean close, see its docstring).
-                # Reset the backoff -- the previous attempt succeeded at
-                # the protocol level, no failure to back off from -- but
-                # still pace ourselves with the min delay so a gateway
-                # that immediately closes every connection (instead of
-                # holding the stream open) can't induce a tight
+                # Clean close or idle read-timeout reconnect: pace with the min
+                # delay so an immediately-closing gateway can't induce a tight
                 # reconnect loop.
                 delay = _RECONNECT_MIN_DELAY_SECONDS
                 if self._stop_event.wait(timeout=delay):

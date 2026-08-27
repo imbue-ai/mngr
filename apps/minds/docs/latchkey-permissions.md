@@ -27,15 +27,17 @@ second gateway URL or a different agent skill.
      the user has not yet authenticated to the service.
    * 403 with `Error: Request not permitted by the user.`: the user has
      authenticated but has not allowed this kind of request.
-3. **Agent writes a request event.** On any of the blocked outcomes, the
-   agent appends a `LatchkeyPredefinedPermissionRequestEvent` to
-   `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl` with the latchkey
-   service name and a one-paragraph rationale, then ends its turn and goes
-   idle.
-4. **The user opens the request.** The desktop client consumes the
-   gateway's pending-request stream, but a pending request never opens
-   anything by itself: it waits behind the chat card's "Review & respond"
-   relay and the "Waiting on you" rows in a machine's Permissions tab.
+3. **Agent files a request with the gateway.** On any of the blocked
+   outcomes, the agent POSTs to the gateway's `/permission-requests`
+   extension with the request type, its type-specific payload, and a
+   one-paragraph rationale, then ends its turn and goes idle. The gateway
+   persists the request in its own queue.
+4. **The user opens the request.** The gateway's own persisted queue is
+   the pending set: the desktop client reads it on demand (minus requests
+   with a recorded verdict) and follows the gateway's stream only as a
+   change signal. A pending request never opens anything by itself: it
+   waits behind the chat card's "Review & respond" relay and the "Waiting
+   on you" rows in a machine's Permissions tab.
    Either one opens the permission popup as a **centered dialog** over the
    current window, on a dim backdrop. The popup is the only review
    surface; the other ways in all lead back to it: the titlebar bell's
@@ -122,22 +124,31 @@ second gateway URL or a different agent skill.
       `~/.minds/events/requests/events.jsonl`. (A `FAILED` approval writes
       no response event and leaves the request pending; see step 6.2.)
    6. On a `GRANTED` outcome, sends the agent a plain-English `mngr message`
-      describing the decision; the agent wakes up and decides whether to
-      retry. A `FAILED` or manual-credentials outcome leaves the request
-      pending and notifies only the user (in the dialog), not the agent.
+      describing the decision (with the request's id embedded, so the chat
+      harness can pair the notice with the right card); the agent wakes up
+      and decides whether to retry. Delivery is retried with backoff for as
+      long as the app runs, so a nudge for a stopped workspace lands when
+      that workspace next comes up; the in-chat card does not depend on it
+      (see step 8). A `FAILED` or manual-credentials outcome leaves the
+      request pending and notifies only the user (in the dialog), not the
+      agent.
 7. **User denies.** The desktop client appends a `DENIED` response event
-   and sends the agent a plain-English denial message. `latchkey_permissions.json`
-   is not touched.
+   and sends the agent a plain-English denial message (same id embedding
+   and retrying as the grant nudge). `latchkey_permissions.json` is not
+   touched.
 8. **The asking workspace hears the verdict at once.** Either resolution
-   also sends the workspace a `minds:permission-request-resolved` embed
-   contract message (see `docs/embed-contract.md`), so its in-chat card
-   flips to Approved/Denied without waiting for the agent's own resolution
-   message to travel back through the transcript. It goes only to the
-   workspace that asked, and only when that workspace is the one on screen
-   -- the chrome mounts one workspace frame at a time, so no other
-   workspace has a live page to update. The transcript stays authoritative:
-   the workspace shows the shell-reported verdict only until the classified
-   one lands.
+   also sends the workspace a one-entry `minds:permission-resolutions`
+   embed contract message (see `docs/embed-contract.md`), so its in-chat
+   card flips to Approved/Denied without waiting for the agent's own
+   resolution message to travel back through the transcript. It goes only
+   to the workspace that asked, and only when that workspace is the one on
+   screen -- the chrome mounts one workspace frame at a time, so no other
+   workspace has a live page to update. A workspace page built AFTER the
+   verdict (a reload, or returning to a workspace resolved while another
+   was displayed) is covered by the snapshot: whenever the chrome (re)loads
+   a frame it pushes that workspace's recent verdicts, read from the
+   response event log via `/ui/api/inbox/resolutions`. Once the
+   transcript's own classified resolution lands, it takes over.
 
 ## Manual credential entry
 

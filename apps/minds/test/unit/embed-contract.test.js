@@ -87,26 +87,34 @@ test('workspace endpoint send posts to the parent with the type merged in', () =
   assert.strictEqual(parentWin.posted[0].targetOrigin, '*');
 });
 
-test('workspace endpoint validates the permission-resolution payload', () => {
+test('workspace endpoint validates the permission-resolutions payload', () => {
   const seen = [];
   contract.createWorkspaceEndpoint({
     handlers: {
-      [contract.PERMISSION_REQUEST_RESOLVED]: (msg) => seen.push([msg.requestId, msg.resolution]),
+      [contract.PERMISSION_RESOLUTIONS]: (msg) => seen.push(msg.resolutions.map((r) => [r.requestId, r.resolution])),
     },
   });
-  const from = (data) => win.deliver({ source: parentWin, origin: 'o', data });
+  const from = (resolutions) =>
+    win.deliver({ source: parentWin, origin: 'o', data: { type: contract.PERMISSION_RESOLUTIONS, resolutions } });
   // Only the two verdicts the contract defines, and only ids of the
-  // server-issued shape, reach the card.
-  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-a', resolution: 'maybe' });
-  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-a' });
-  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-1/../admin', resolution: 'granted' });
-  from({ type: contract.PERMISSION_REQUEST_RESOLVED, resolution: 'granted' });
+  // server-issued shape, reach the card; one bad entry rejects the message.
+  from([{ requestId: 'evt-a', resolution: 'maybe' }]);
+  from([{ requestId: 'evt-1/../admin', resolution: 'granted' }]);
+  from([{ resolution: 'granted' }]);
+  from('evt-a');
   assert.deepStrictEqual(seen, []);
-  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-a', resolution: 'granted' });
-  from({ type: contract.PERMISSION_REQUEST_RESOLVED, requestId: 'evt-b', resolution: 'denied' });
+  // An empty answer is valid ("all still pending"), and good entries pass whole.
+  from([]);
+  from([
+    { requestId: 'evt-a', resolution: 'granted' },
+    { requestId: 'evt-b', resolution: 'denied' },
+  ]);
   assert.deepStrictEqual(seen, [
-    ['evt-a', 'granted'],
-    ['evt-b', 'denied'],
+    [],
+    [
+      ['evt-a', 'granted'],
+      ['evt-b', 'denied'],
+    ],
   ]);
 });
 

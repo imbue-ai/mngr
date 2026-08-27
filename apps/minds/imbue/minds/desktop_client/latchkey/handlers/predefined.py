@@ -1,4 +1,4 @@
-"""Predefined-permission grant/deny flow (``RequestType.LATCHKEY_PERMISSION``).
+"""Predefined-permission grant/deny flow (wire ``request_type == "predefined"``).
 
 This module is one of the two sibling handlers under
 :mod:`imbue.minds.desktop_client.latchkey.handlers`. It owns the
@@ -50,22 +50,20 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import resolve_workspace_display_name
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_PREDEFINED
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.account_choices import DEFAULT_ACCOUNT_LABEL
 from imbue.minds.desktop_client.latchkey.handlers.account_choices import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.handlers.account_choices import PermissionAccountChoice
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_host_permissions
+from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
 from imbue.minds.desktop_client.latchkey.permission_toggles import group_permissions_by_area
-from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
-from imbue.minds.desktop_client.request_events import RequestEvent
-from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import RequestResponseEvent
-from imbue.minds.desktop_client.request_events import RequestStatus
-from imbue.minds.desktop_client.request_events import RequestType
-from imbue.minds.desktop_client.request_events import append_response_event
-from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import UiManualCredentialsPrompt
@@ -73,6 +71,7 @@ from imbue.minds.desktop_client.request_handler import UiPermissionAccountChoice
 from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
 from imbue.minds.desktop_client.request_handler import UiUnknownScopeDetail
 from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
+from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
@@ -157,12 +156,6 @@ class GrantResult(FrozenModel):
             "already been delivered to the agent via ``mngr message``; for "
             "``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user "
             "(the request stays pending, so the agent is not notified)."
-        ),
-    )
-    response_event: RequestResponseEvent | None = Field(
-        description=(
-            "The freshly-appended response event when the request was resolved. "
-            "``None`` for ``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
         ),
     )
     manual_credentials: UiManualCredentialsPrompt | None = Field(
@@ -255,7 +248,6 @@ def _manual_credentials_result(message: str, prompt: UiManualCredentialsPrompt) 
     return GrantResult(
         outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
         message=message,
-        response_event=None,
         manual_credentials=prompt.model_copy_update(to_update(prompt.field_ref().message, message)),
     )
 
@@ -446,26 +438,6 @@ def _parse_manual_credentials_form(raw_values: str | None, account_name: str) ->
     )
 
 
-def _json_error(message: str, status_code: int) -> Response:
-    return make_response(
-        content=json.dumps({"error": message}),
-        media_type="application/json",
-        status_code=status_code,
-    )
-
-
-def _resolve_workspace_name(
-    backend_resolver: BackendResolverInterface,
-    agent_id: AgentId,
-    fallback: str,
-) -> str:
-    ws_name = backend_resolver.get_workspace_name(agent_id) or ""
-    if ws_name:
-        return ws_name
-    info = backend_resolver.get_agent_display_info(agent_id)
-    return info.agent_name if info else fallback
-
-
 def _resolve_host_id(
     backend_resolver: BackendResolverInterface,
     agent_id: AgentId,
@@ -503,7 +475,7 @@ def _resolve_host_id(
 
 
 class LatchkeyPermissionGrantHandler(RequestEventHandler):
-    """Top-level orchestrator for ``LatchkeyPredefinedPermissionRequestEvent`` handling.
+    """Top-level orchestrator for predefined (catalog-backed) permission requests.
 
     Owns the latchkey services catalog and exposes both pure-logic methods
     (``grant`` / ``deny``, easy to unit-test) and the HTTP-aware
@@ -593,10 +565,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         form a previous ``NEEDS_MANUAL_CREDENTIALS`` result asked for; it is
         :data:`EMPTY_MANUAL_CREDENTIAL_SUBMISSION` on every other call.
 
-        The HTTP layer mirrors any non-None ``response_event`` into the
-        in-memory inbox so it doesn't have to reload from disk, and
-        surfaces ``message`` to both the agent (via ``mngr message``) and
-        the dialog UI.
+        The resolve epilogue durably records and indexes the verdict;
+        ``message`` is surfaced to both the agent (via ``mngr message``)
+        and the dialog UI.
         """
         if not granted_permissions:
             raise LatchkeyPermissionFlowError(
@@ -629,17 +600,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         )
 
         granted_message = _format_granted_message(service_info.display_name, granted_permissions, resolved)
-        response_event = self._write_response_and_notify(
+        self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
-            scope=service_info.scope,
             status=RequestStatus.GRANTED,
             message=granted_message,
         )
         return GrantResult(
             outcome=GrantOutcome.GRANTED,
             message=granted_message,
-            response_event=response_event,
             manual_credentials=None,
         )
 
@@ -726,7 +695,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             return GrantResult(
                 outcome=GrantOutcome.FAILED,
                 message=_format_auth_failed_message(service_info.display_name, detail),
-                response_event=None,
                 manual_credentials=None,
             )
         return self._account_after_sign_in(service_info, accounts_before, chosen)
@@ -889,7 +857,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 f"Could not tell which {service_info.display_name} account was signed in, so the "
                 "permission was not granted. Try approving again and picking the account explicitly."
             ),
-            response_event=None,
             manual_credentials=None,
         )
 
@@ -897,69 +864,66 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        scope: str,
         display_name: str,
-    ) -> tuple[str, RequestResponseEvent]:
-        """Append a DENIED response and notify the agent. Returns ``(message, response_event)``.
+    ) -> str:
+        """Record a DENIED verdict and notify the agent. Returns the human-facing message.
 
-        ``scope`` is the Detent scope schema the request was filed under;
-        it goes into the response event for informational purposes (the
-        inbox joins responses to requests on ``request_event_id``).
         ``display_name`` is the human-readable service name shown in the
         agent-facing message.
         """
         message = _format_denied_message(display_name)
-        response_event = self._write_response_and_notify(
+        self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
-            scope=scope,
             status=RequestStatus.DENIED,
             message=message,
         )
-        return message, response_event
+        return message
 
     # -- RequestEventHandler interface ---------------------------------------
 
     def handles_request_type(self) -> str:
-        return str(RequestType.LATCHKEY_PERMISSION)
+        return REQUEST_TYPE_PREDEFINED
 
     def kind_label(self) -> str:
         return "permission"
 
-    def display_name_for_event(self, req_event: RequestEvent) -> str:
+    def display_name_for_event(self, permission_request: StreamedPermissionRequest) -> str:
         """Friendly service name for the inbox list card.
 
         Falls back to the raw scope schema when no catalog entry matches
-        (or when the event is somehow not a latchkey permission request,
-        which shouldn't happen given the dispatcher).
+        (or when the request is somehow not a predefined one, which
+        shouldn't happen given the dispatcher).
         """
-        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
+        payload = permission_request.payload
+        if not isinstance(payload, PredefinedRequestPayload):
             return ""
-        info = self.services_catalog.get_by_scope(req_event.scope)
-        return info.display_name if info is not None else req_event.scope
+        info = self.services_catalog.get_by_scope(payload.scope)
+        return info.display_name if info is not None else payload.scope
 
     def build_request_detail_payload(
         self,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
         backend_resolver: BackendResolverInterface,
     ) -> RequestDetailPayload:
-        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
+        payload = permission_request.payload
+        if not isinstance(payload, PredefinedRequestPayload):
             return UiUnsupportedDetail(message="Unsupported request type")
-        service_info = self.services_catalog.get_by_scope(req_event.scope)
+        service_info = self.services_catalog.get_by_scope(payload.scope)
         if service_info is None:
-            return UiUnknownScopeDetail(request_id=str(req_event.event_id), scope=req_event.scope)
+            return UiUnknownScopeDetail(request_id=permission_request.request_id, scope=payload.scope)
 
-        parsed_id = AgentId(req_event.agent_id)
-        ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
+        parsed_id = AgentId(permission_request.agent_id)
+        ws_name = resolve_workspace_display_name(backend_resolver, parsed_id, fallback=permission_request.agent_id)
         host_id = _resolve_host_id(backend_resolver, parsed_id)
 
         latchkey_service_info = _services_info_or_assumed(self.latchkey, service_info.name)
         account_choices, selected_account = _build_account_choices(
             latchkey_service_info.accounts,
-            req_event.account,
+            payload.account,
             is_browser_auth_supported=latchkey_service_info.is_browser_auth_supported,
         )
-        pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions, selected_account)
+        pre_checked = self._initial_checked_permissions(host_id, service_info, payload.permissions, selected_account)
         selected_status_by_account = {
             entry.account: entry.credential_status for entry in latchkey_service_info.accounts
         }
@@ -969,10 +933,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         ) and latchkey_service_info.is_browser_auth_supported
 
         return UiPredefinedPermissionDetail(
-            request_id=str(req_event.event_id),
-            agent_id=req_event.agent_id,
+            request_id=permission_request.request_id,
+            agent_id=permission_request.agent_id,
             ws_name=ws_name,
-            rationale=req_event.rationale,
+            rationale=permission_request.rationale,
             scope=service_info.scope,
             display_name=service_info.display_name,
             service_name=service_info.name,
@@ -1008,22 +972,27 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     def apply_grant_request(
         self,
         request: Request,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
     ) -> Response:
         """Drive the grant flow from the dialog form submission."""
-        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
-            return _json_error("Unsupported request type", status_code=500)
-        service_info = self.services_catalog.get_by_scope(req_event.scope)
+        payload = permission_request.payload
+        if not isinstance(payload, PredefinedRequestPayload):
+            return make_json_error_response("Unsupported request type", status_code=500)
+        # A host whose canonical permissions file was never materialized must
+        # be repaired before the grant, or the approval lands in a file the
+        # agent's gateway JWT does not resolve to.
+        maybe_recover_host_permissions(self.latchkey, get_state().backend_resolver, permission_request)
+        service_info = self.services_catalog.get_by_scope(payload.scope)
         if service_info is None:
-            return _json_error(
-                f"Scope '{req_event.scope}' is not in the gateway catalog",
+            return make_json_error_response(
+                f"Scope '{payload.scope}' is not in the gateway catalog",
                 status_code=400,
             )
 
         form = request.form
         granted_permissions = tuple(str(v) for v in form.getlist("permissions"))
         if not granted_permissions:
-            return _json_error(
+            return make_json_error_response(
                 "At least one permission must be selected to approve the request.",
                 status_code=400,
             )
@@ -1031,7 +1000,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # means the form was not the one we rendered.
         account_choice = form.get("account")
         if account_choice is None:
-            return _json_error(
+            return make_json_error_response(
                 "An account must be selected to approve the request.",
                 status_code=400,
             )
@@ -1041,14 +1010,14 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 account_name=str(form.get("account_name", "")),
             )
         except LatchkeyPermissionFlowError as e:
-            return _json_error(str(e), status_code=400)
+            return make_json_error_response(str(e), status_code=400)
 
-        request_event_id = str(req_event.event_id)
-        parsed_agent_id = AgentId(req_event.agent_id)
+        request_event_id = permission_request.request_id
+        parsed_agent_id = AgentId(permission_request.agent_id)
         backend_resolver: BackendResolverInterface = get_state().backend_resolver
         host_id = _resolve_host_id(backend_resolver, parsed_agent_id)
         if host_id is None:
-            return _json_error(
+            return make_json_error_response(
                 f"Could not resolve host for agent {parsed_agent_id}; cannot apply grant.",
                 status_code=503,
             )
@@ -1063,24 +1032,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 manual_credentials=manual_credentials,
             )
         except LatchkeyPermissionFlowError as e:
-            return _json_error(str(e), status_code=400)
+            return make_json_error_response(str(e), status_code=400)
         except LatchkeyGatewayClientError as e:
             # The grant flow could not reach the gateway's permissions
             # extension; surface that as a 502 so the dialog can show a
             # meaningful error instead of a generic 500.
             logger.warning("Could not apply latchkey permission grant via gateway: {}", e)
-            return _json_error(
+            return make_json_error_response(
                 f"Could not apply grant through the latchkey gateway: {e}",
                 status_code=502,
             )
-
-        # The grant call may have appended a response event to
-        # ~/.minds/events/requests/events.jsonl; mirror it into the
-        # in-memory inbox so the inbox modal reflects the resolution
-        # without needing a desktop-client restart. The manual-credentials
-        # branch leaves the request pending, so there is nothing to mirror.
-        if grant_result.response_event is not None:
-            self._mirror_response_into_inbox(grant_result.response_event)
 
         response_payload: dict[str, JsonValue] = {
             "outcome": str(grant_result.outcome),
@@ -1096,27 +1057,26 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     def apply_deny_request(
         self,
         request: Request,
-        req_event: RequestEvent,
+        permission_request: StreamedPermissionRequest,
     ) -> Response:
         """Drive the deny flow from the dialog form submission."""
-        if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
-            return _json_error("Unsupported request type", status_code=500)
-        service_info = self.services_catalog.get_by_scope(req_event.scope)
+        payload = permission_request.payload
+        if not isinstance(payload, PredefinedRequestPayload):
+            return make_json_error_response("Unsupported request type", status_code=500)
+        service_info = self.services_catalog.get_by_scope(payload.scope)
         if service_info is None:
             # Even invalid permission requests can be denied.
-            display_name = req_event.scope
+            display_name = payload.scope
         else:
             display_name = service_info.display_name
 
-        request_event_id = str(req_event.event_id)
-        parsed_agent_id = AgentId(req_event.agent_id)
-        _, response_event = self.deny(
+        request_event_id = permission_request.request_id
+        parsed_agent_id = AgentId(permission_request.agent_id)
+        self.deny(
             request_event_id=request_event_id,
             agent_id=parsed_agent_id,
-            scope=req_event.scope,
             display_name=display_name,
         )
-        self._mirror_response_into_inbox(response_event)
         return make_response(
             content=json.dumps({"outcome": "DENIED"}),
             media_type="application/json",
@@ -1211,26 +1171,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        scope: str,
         status: RequestStatus,
         message: str,
-    ) -> RequestResponseEvent:
-        """Persist the response event to disk, drop the gateway record, and notify the agent.
+    ) -> None:
+        """Drop the gateway's pending record, then run the shared resolve epilogue.
 
-        Returns the newly-created event so callers can mirror it into the
-        in-memory inbox without re-creating it (and getting a fresh event_id).
-
-        Three things happen in order:
-
-        1. Issue ``DELETE /permission-requests/<request_event_id>`` so
-           the gateway forgets the pending entry (a future reconnect of
-           the follow stream must not redeliver an already-resolved
-           request). Failure is logged but does not abort: the user
-           cares more about the agent getting unblocked than about a
-           stale on-disk file the gateway will clean up next restart.
-        2. Append the response event to the on-disk JSONL so the inbox
-           survives a desktop-client restart.
-        3. Send the agent a ``mngr message`` nudge.
+        The DELETE comes first so a future reconnect of the follow stream
+        cannot redeliver an already-resolved request; failure is logged but
+        does not abort (the recorded verdict outranks the gateway's stale
+        record everywhere pending state is read).
         """
         try:
             self.gateway_client.delete_permission_request(request_event_id)
@@ -1240,35 +1189,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 request_event_id,
                 e,
             )
-        response_event = create_request_response_event(
+        resolve_request(
+            self.mngr_message_sender,
+            self.data_dir,
             request_event_id=request_event_id,
+            agent_id=agent_id,
             status=status,
-            agent_id=str(agent_id),
-            request_type=str(RequestType.LATCHKEY_PERMISSION),
-            scope=scope,
+            message=message,
         )
-        append_response_event(self.data_dir, response_event)
-        self.mngr_message_sender.send(agent_id, message)
-        return response_event
-
-    def _mirror_response_into_inbox(
-        self,
-        response_event: RequestResponseEvent,
-    ) -> None:
-        """Mirror the on-disk response event into the in-memory inbox.
-
-        The on-disk event-sourcing log is the source of truth; this update
-        is just so the inbox modal doesn't show the resolved request as
-        still pending until the next desktop-client restart.
-
-        Also wakes the chrome SSE so the new ``requests`` payload is pushed
-        right away -- otherwise the inbox would keep showing the resolved
-        card for up to 30s while the SSE poll waits for its next tick.
-        """
-        inbox: RequestInbox | None = get_state().request_inbox
-        if inbox is None:
-            return
-        get_state().request_inbox = inbox.add_response(response_event)
-        backend_resolver: BackendResolverInterface = get_state().backend_resolver
-        if isinstance(backend_resolver, MngrCliBackendResolver):
-            backend_resolver.notify_change()

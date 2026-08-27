@@ -60,18 +60,18 @@ from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.dek_store import verify_master_password_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
+from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import RequestStatus
-from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
-from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
+from imbue.minds.desktop_client.testing import create_predefined_permission_request
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
@@ -932,19 +932,17 @@ def test_build_requests_payload_empty_inbox() -> None:
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     expected = {"count": 0, "request_ids": []}
     assert _build_requests_payload(None, resolver) == expected
-    assert _build_requests_payload(RequestInbox(), resolver) == expected
+    assert _build_requests_payload(StaticPendingRequests(), resolver) == expected
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
-    """A pending request surfaces its event_id alongside the count."""
+    """A pending request surfaces its request_id alongside the count."""
     agent_id = str(AgentId())
-    event = create_latchkey_predefined_permission_request_event(
-        agent_id=agent_id, scope="slack-api", rationale="post updates"
-    )
+    event = create_predefined_permission_request(agent_id=agent_id, scope="slack-api", rationale="post updates")
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
+    payload = _build_requests_payload(StaticPendingRequests(pending=(event,)), resolver)
     assert payload["count"] == 1
-    assert payload["request_ids"] == [str(event.event_id)]
+    assert payload["request_ids"] == [event.request_id]
 
 
 def test_build_requests_payload_distinguishes_equal_count_different_contents() -> None:
@@ -954,31 +952,28 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
     would miss this transition (count stays 1), so the payload must differ.
     """
     agent_id = str(AgentId())
-    request_a = create_latchkey_predefined_permission_request_event(
-        agent_id=agent_id, scope="slack-api", rationale="a"
-    )
-    request_b = create_latchkey_predefined_permission_request_event(
-        agent_id=agent_id, scope="github-api", rationale="b"
-    )
+    request_a = create_predefined_permission_request(agent_id=agent_id, scope="slack-api", rationale="a")
+    request_b = create_predefined_permission_request(agent_id=agent_id, scope="github-api", rationale="b")
 
-    inbox_with_a = RequestInbox().add_request(request_a)
+    inbox_with_a = StaticPendingRequests(pending=(request_a,))
     # Resolve A and add B: the pending set becomes {B}, same size as {A}.
-    inbox_with_b = inbox_with_a.add_response(
-        create_request_response_event(
-            request_event_id=str(request_a.event_id),
-            status=RequestStatus.GRANTED,
-            agent_id=agent_id,
-            request_type=request_a.request_type,
-            scope="slack-api",
-        )
-    ).add_request(request_b)
+    inbox_with_b = StaticPendingRequests(
+        pending=(request_b, request_a),
+        answered=(
+            create_request_response_event(
+                request_event_id=request_a.request_id,
+                status=RequestStatus.GRANTED,
+                agent_id=agent_id,
+            ),
+        ),
+    )
 
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     payload_a = _build_requests_payload(inbox_with_a, resolver)
     payload_b = _build_requests_payload(inbox_with_b, resolver)
     assert payload_a["count"] == payload_b["count"] == 1
     assert payload_a != payload_b
-    assert payload_b["request_ids"] == [str(request_b.event_id)]
+    assert payload_b["request_ids"] == [request_b.request_id]
 
 
 # -- Tests for new account management and request routes --
@@ -1012,7 +1007,7 @@ def _create_test_client_with_stores(
     auth_store = FileAuthStore(data_directory=auth_dir)
     session_store = make_session_store_for_test(tmp_path, cli=cli)
     minds_config = MindsConfig(data_dir=tmp_path)
-    request_inbox = RequestInbox()
+    request_inbox = StaticPendingRequests()
 
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     app = create_desktop_client(
@@ -1021,7 +1016,7 @@ def _create_test_client_with_stores(
         http_client=None,
         session_store=session_store,
         minds_config=minds_config,
-        request_inbox=request_inbox,
+        pending_requests=request_inbox,
         paths=InstallationPaths(data_dir=tmp_path),
         mngr_caller=mngr_caller,
         imbue_cloud_cli=imbue_cloud_cli,

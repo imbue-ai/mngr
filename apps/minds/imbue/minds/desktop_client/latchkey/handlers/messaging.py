@@ -16,20 +16,37 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
 
-# Delivery retry schedule for :meth:`MngrMessageSender.send`. A resolution
-# message races the agent's own lifecycle: the user can approve or deny while
-# the agent is stopped or mid-restart (a propagate cycle, a host recovery),
-# and a message that simply vanishes then leaves the chat card stuck on
-# "Review & respond" and the agent never resuming. Retrying with backoff for
-# a couple of minutes covers those windows; an agent that stays down longer
-# genuinely cannot be nudged, and the give-up is logged loudly.
+# Backoff ramp for :meth:`MngrMessageSender.send`; after it, retries continue
+# at the final interval until delivery or app shutdown, so a workspace that
+# comes back hours later still hears its verdict without any bookkeeping
+# surviving the process. The card does not depend on this message (it reads
+# verdicts from the response event log via the shell), so a nudge lost to an
+# app exit costs only the agent's early wake-up.
 _SEND_RETRY_DELAYS_SECONDS: Final[tuple[float, ...]] = (2.0, 5.0, 10.0, 20.0, 30.0, 60.0)
+
+
+@pure
+def format_resolution_notice(message: str, request_event_id: str, status: RequestStatus) -> str:
+    """The agent-facing text for a resolved request: ``message`` plus a machine-readable tag.
+
+    ``request_event_id`` is the gateway request id, reused verbatim as the request/
+    response event id and echoed on the request's own tool-call result, so the chat
+    harness pairs this notice with the right permission card by id instead of
+    guessing from arrival order (which swaps verdicts on out-of-order resolutions).
+    The verdict rides in the same tag so the harness never has to recognise the
+    handler-authored English phrasing (a cross-repo coupling that has broken
+    before; see ``message_display.py`` in the workspace template). Appended rather
+    than folded in because ``message`` is also shown verbatim to the human user.
+    """
+    verdict = "granted" if status is RequestStatus.GRANTED else "denied"
+    return f"{message} (resolution: {verdict}, request_id: {request_event_id})"
 
 
 @pure
@@ -85,7 +102,10 @@ class MngrMessageSender(MutableModel):
     )
     retry_delays_seconds: tuple[float, ...] = Field(
         default=_SEND_RETRY_DELAYS_SECONDS,
-        description="Backoff schedule between delivery attempts; injectable so tests avoid real waits.",
+        description=(
+            "Backoff ramp between delivery attempts; the final entry repeats until delivery or "
+            "shutdown. Injectable so tests avoid real waits."
+        ),
     )
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
@@ -94,12 +114,10 @@ class MngrMessageSender(MutableModel):
         """Dispatch the message without blocking the caller, retrying until it lands.
 
         The send runs on a thread tracked by :attr:`concurrency_group` and
-        never raises -- failures are logged. Delivery is judged from the
-        structured output (see :meth:`deliver`), and undelivered attempts are
-        retried on the :data:`_SEND_RETRY_DELAYS_SECONDS` backoff schedule so
-        a resolution that races the agent's lifecycle (stopped, mid-restart)
-        still reaches it -- the chat's verdict badge and the agent's resume
-        both ride on this one message.
+        never raises -- failures are logged. Undelivered attempts retry on the
+        :attr:`retry_delays_seconds` ramp and then at its final interval for as
+        long as the app runs, so a resolution given while the agent is stopped
+        reaches it whenever the workspace next comes up.
         """
         self.concurrency_group.start_new_thread(
             self._send_with_retries,
@@ -112,27 +130,39 @@ class MngrMessageSender(MutableModel):
         )
 
     def _send_with_retries(self, target: str, text: str) -> bool:
-        """Deliver ``text`` to ``target``, retrying with backoff; return whether it landed.
+        """Deliver ``text`` to ``target``, retrying until delivery or shutdown.
 
         The between-attempt waits ride the concurrency group's shutdown
-        event, so an app shutdown interrupts the backoff immediately instead
-        of the retry thread pinning the graceful-exit window open.
+        event, so an app shutdown interrupts the backoff immediately. A nudge
+        abandoned that way is not re-sent by a later run; the card still
+        learns the verdict from the response event log, and the agent catches
+        up the next time it is spoken to.
         """
-        if self.deliver(target, text):
-            return True
-        for delay_seconds in self.retry_delays_seconds:
-            if self.concurrency_group.shutdown_event.wait(timeout=delay_seconds):
-                logger.info("mngr message retry to target {} abandoned: shutting down", target)
-                return False
+        attempt_index = 0
+        is_shutting_down = False
+        while not is_shutting_down:
             if self.deliver(target, text):
-                logger.info("mngr message to target {} delivered after retry", target)
+                if attempt_index > 0:
+                    logger.info("mngr message to target {} delivered after retry", target)
                 return True
-        logger.error(
-            "mngr message to target {} was never delivered (agent unavailable for the whole retry "
-            "window); the agent will not learn its permission request was resolved until it is next "
-            "spoken to",
-            target,
-        )
+            # An empty schedule means single-attempt (tests use it to keep a
+            # failing send to one call).
+            if not self.retry_delays_seconds:
+                logger.warning("mngr message to target {} was not delivered and retries are disabled", target)
+                return False
+            if attempt_index == len(self.retry_delays_seconds):
+                logger.warning(
+                    "mngr message to target {} is still undelivered after the backoff ramp; retrying "
+                    "every {}s until it lands or the app exits",
+                    target,
+                    self.retry_delays_seconds[-1],
+                )
+            delay_index = min(attempt_index, len(self.retry_delays_seconds) - 1)
+            is_shutting_down = self.concurrency_group.shutdown_event.wait(
+                timeout=self.retry_delays_seconds[delay_index]
+            )
+            attempt_index += 1
+        logger.info("mngr message retry to target {} abandoned: shutting down", target)
         return False
 
     def deliver(self, target: str, text: str) -> bool:

@@ -1,0 +1,15 @@
+# Permission-request state can no longer go stale or show the wrong verdict
+
+One PR landing (and then simplifying) the rework planned in `specs/permission_state.md`, paired with a default-workspace-template PR on the same branch name.
+
+Verdicts pair with the right card. Resolution nudges now carry a machine-readable `(resolution: granted, request_id: ...)` tag, so the chat harness attaches each verdict by id instead of guessing from arrival order -- previously, resolving two pending requests out of creation order silently swapped the two cards' verdicts -- and no longer needs to recognise the handler-authored English phrasing.
+
+Cards are hydrated on every page build. Embed contract v3 replaces the one-shot `minds:permission-request-resolved` push with a single `minds:permission-resolutions` message carrying both the live one-entry flip and a recent-verdicts snapshot the chrome pushes whenever it (re)loads a workspace frame, read via the new `/ui/api/inbox/resolutions` route and scoped to that workspace's own requests. A verdict given while the page was not live now flips the card on the next build instead of leaving Approve/Deny up.
+
+Resolution nudges are never abandoned mid-run. `mngr message` delivery used to give up for good after a ~2 minute backoff; it now keeps retrying at the final interval until it lands or the app exits.
+
+There is no mirrored pending-request inbox to go wrong. The latchkey gateway's own persisted queue is the pending set, read on demand minus recorded verdicts (`latchkey/pending_requests.py`); the verdict index is append-only, so the lost-update race that could silently undo a grant or deny -- and the lock that guarded it -- are gone by construction. The stream consumer is now only a change signal, host-permissions recovery runs at grant time (the moment it matters), the four grant handlers share one resolve epilogue, and the legacy agent-written JSONL request channel (dead since latchkey 2.9.0) is deleted end to end.
+
+The desktop client consumes the gateway's own request shape directly. The parallel `RequestEvent` class hierarchy (four `Latchkey*PermissionRequestEvent` subclasses plus a per-read translation step that fabricated request timestamps) is deleted; routes, handlers, and the inbox UI read `StreamedPermissionRequest` and dispatch on its typed payload, and handlers claim requests by the wire `request_type` strings (`predefined`, `file-sharing`, `workspace`, `accounts`).
+
+Shared route plumbing is deduplicated and the response event is slimmed: one `make_json_error_response` (responses.py) and one `resolve_workspace_display_name` (backend_resolver.py) replace the copies each handler and route module carried, and `RequestResponseEvent` drops the event-envelope ceremony (fabricated `event_id`/`type`/`source` that nothing read) down to timestamp, request id, status, and agent id -- historical log lines still parse, and the writer keeps emitting the retired fields (CLEANUP-marked) so an older desktop client can still read new verdicts. What is left of the old request-inbox module is only the permission-verdict log, so it now lives at `desktop_client/latchkey/response_events.py`.
