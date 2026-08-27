@@ -61,9 +61,6 @@ class UiNotificationPrefs(FrozenModel):
     is_enabled: bool = Field(description="Master notifications toggle (gates every OS nudge the app sends)")
     style: NotificationStyle = Field(description="Delivery style for feed-backed notifications")
     is_os_hint_dismissed: bool = Field(description="Whether the one-time OS-notification hint was dismissed")
-    os_permission_confirmed: bool = Field(
-        description="Whether the desktop app has ever confirmed native OS notification permission is granted"
-    )
     version: str = Field(description="If-Match version for the notification-prefs write")
 
 
@@ -219,14 +216,12 @@ def _current_notification_prefs() -> UiNotificationPrefs:
         is_enabled = True
         style: NotificationStyle = DEFAULT_NOTIFICATION_STYLE
         is_os_hint_dismissed = False
-        os_permission_confirmed = False
     else:
-        is_enabled, style, is_os_hint_dismissed, os_permission_confirmed = minds_config.get_notification_prefs()
+        is_enabled, style, is_os_hint_dismissed = minds_config.get_notification_prefs()
     return UiNotificationPrefs(
         is_enabled=is_enabled,
         style=style,
         is_os_hint_dismissed=is_os_hint_dismissed,
-        os_permission_confirmed=os_permission_confirmed,
         version=compute_notification_prefs_version(is_enabled, style, is_os_hint_dismissed),
     )
 
@@ -397,42 +392,6 @@ def _handle_notification_prefs_write() -> Response:
     )
 
 
-class UiNotificationOsPermissionWrite(FrozenModel):
-    """Body of the OS-notification-permission-confirmed write."""
-
-    os_permission_confirmed: bool = Field(
-        description="Whether native OS notification permission was just confirmed granted"
-    )
-
-
-def _handle_notification_os_permission_write() -> Response:
-    """POST /ui/api/settings/notification-os-permission: records the desktop app's own
-    best-effort observation of whether native OS notification permission is granted.
-
-    Electron exposes no permission-status API on macOS, so this is set from a
-    probe notification's 'show' event actually firing (or not) -- the one
-    signal available. Deliberately unguarded by If-Match: this is
-    system-observed state the app derives for itself, not a user-typed
-    preference, so a lost update under a race just means probing once more
-    than strictly necessary, never a torn record.
-    """
-    if not _is_settings_request_authenticated():
-        return _unauthenticated_response()
-    minds_config = get_state().minds_config
-    if minds_config is None:
-        return _error_response("Settings storage is not configured", 503)
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return _error_response("Invalid JSON body", 400)
-    try:
-        write = UiNotificationOsPermissionWrite.model_validate(body)
-    except ValidationError as e:
-        logger.debug("Rejected a malformed notification-os-permission write body: {}", e)
-        return _error_response("Invalid JSON body", 400)
-    minds_config.set_notification_os_permission_confirmed(write.os_permission_confirmed)
-    return Response(status=204)
-
-
 def _handle_accounts_detail() -> Response:
     """GET /ui/api/accounts: the Accounts page's account list."""
     if not _is_settings_request_authenticated():
@@ -558,11 +517,6 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/settings", view_func=_handle_settings_overview)
     blueprint.add_url_rule("/api/settings/error-reporting", view_func=_handle_error_reporting_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
-    blueprint.add_url_rule(
-        "/api/settings/notification-os-permission",
-        view_func=_handle_notification_os_permission_write,
-        methods=["POST"],
-    )
     blueprint.add_url_rule("/api/accounts", view_func=_handle_accounts_detail)
     blueprint.add_url_rule("/api/accounts/<user_id>/plan", view_func=_handle_account_plan)
     blueprint.add_url_rule("/api/ai-keys", view_func=_handle_ai_keys_context)

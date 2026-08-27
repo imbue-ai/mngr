@@ -1965,9 +1965,9 @@ function handleNotification(event) {
   notification.on('show', () => {
     console.log(`[notification] shown by the OS: ${JSON.stringify(title)}`);
   });
-  // A definitive OS-reported failure (see probeNotificationPermission's own
-  // 'failed' handler) -- distinct from getting neither 'show' nor 'failed'
-  // at all, which the generic hint after .show() below already covers.
+  // A definitive OS-reported failure -- distinct from getting neither 'show'
+  // nor 'failed' at all, which the generic hint after .show() below already
+  // covers.
   notification.on('failed', () => {
     console.warn(`[notification] failed to display (OS-reported): ${JSON.stringify(title)}`);
   });
@@ -2008,68 +2008,10 @@ function handleNotification(event) {
   console.log(`[notification] .show() called for ${JSON.stringify(title)} -- if no banner appeared, check System Settings > Notifications for this app`);
 }
 
-// How long to wait for the OS to confirm a probe notification was actually
-// displayed before concluding permission is not granted, on top of the
-// definitive 'failed' event below. Real headroom, not just enough for the
-// typical case: 'show' firing is intermittently slow under an unsigned dev
-// build (see probeNotificationPermission's own comment), observed timing
-// out under 4s and then firing normally moments later with no permission
-// change in between.
-const NOTIFICATION_PERMISSION_PROBE_TIMEOUT_MS = 10000;
-
-// Ask the OS for native-notification permission the only way Electron allows
-// on macOS: by actually attempting to show one. There is no separate
-// "request permission" call -- posting a notification for the first time IS
-// the request, and the system's own "Would You Like to Allow Notifications"
-// dialog appears before the banner does. Resolves true if the OS confirmed
-// it displayed the probe ('show' fired in time), false on a definitive
-// 'failed' event or on timing out unseen (denied, or simply not decided fast
-// enough -- Electron cannot tell the two apart). The probe self-dismisses as
-// soon as it is resolved either way.
-//
-// On macOS, the underlying UNNotification API requires the app to be
-// code-signed for 'show' to fire reliably at all -- an unsigned build (any
-// local dev run of this app, including via `pnpm start`) instead gets an
-// intermittent mix of a delayed 'show', an explicit 'failed', or neither
-// within the timeout, even though the OS's own notification permission is
-// genuinely granted and a banner may visibly appear. This is a real Electron
-// limitation of unsigned binaries (see electronjs.org/docs/latest/api/notification),
-// not a bug in this probe: a packaged, signed build does not have it.
-function probeNotificationPermission() {
-  if (!Notification.isSupported()) {
-    console.warn('[notification] permission probe skipped: Notification.isSupported() is false');
-    return Promise.resolve(false);
-  }
-  return new Promise((resolve) => {
-    const notification = new Notification({
-      title: 'Notifications enabled',
-      body: 'minds will notify you here when a machine needs your attention.',
-      silent: true,
-    });
-    let settled = false;
-    const settle = (granted, reason) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      notification.close();
-      console.log(`[notification] permission probe ${reason}`);
-      resolve(granted);
-    };
-    const timer = setTimeout(() => settle(false, 'timed out -- treating as declined'), NOTIFICATION_PERMISSION_PROBE_TIMEOUT_MS);
-    notification.on('show', () => settle(true, 'confirmed shown'));
-    // An unsigned build (see this function's own comment) reliably gets this
-    // instead of 'show' -- resolve it immediately rather than waiting out
-    // the full timeout for a verdict the OS already gave.
-    notification.on('failed', () => settle(false, 'failed (likely an unsigned build -- see this function\'s comment)'));
-    notification.show();
-  });
-}
-
-ipcMain.handle('probe-notification-permission', () => probeNotificationPermission());
 
 // Open the OS's own notification-settings pane so the reader can flip the
 // permission back on themselves after declining it -- no app can force a
-// re-prompt once the OS has decided (see probeNotificationPermission).
+// re-prompt once the OS has decided.
 // Deliberately opens the general pane rather than deep-linking to this app's
 // own row: on macOS, every locally-run unpackaged dev build shares one
 // "com.github.Electron" identity in the OS's eyes (Electron.app's own

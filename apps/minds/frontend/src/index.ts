@@ -10,7 +10,6 @@ import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { setPendingHelpLaunch } from "./models/help";
 import {
   NotificationsUiController,
-  maybeProbeDesktopNotificationPermission,
   setReviewGestureContext,
 } from "./models/notificationsUi";
 import { consumeWebLoginParams, webLogin } from "./models/webLogin";
@@ -91,14 +90,8 @@ function main(): void {
   // flashes for it) and tell the dock badge the starting count.
   notificationsUi.seedFromSnapshot(bootContext.stores.notifications);
   // Prefs (enabled + style) gate arrivals; the defaults stand until this
-  // lands or the settings modal pushes fresher ones. Once the real prefs are
-  // in (not the "both" default), a desktop build with unconfirmed OS
-  // permission asks for it once here -- not on every focus-gain below, which
-  // would otherwise re-show the probe's own banner on every alt-tab back in
-  // while the user has left it undecided.
-  void notificationsUi
-    .loadPrefs()
-    .then(() => maybeProbeDesktopNotificationPermission());
+  // lands or the settings modal pushes fresher ones.
+  void notificationsUi.loadPrefs();
   // Cards flash only in the focused window, so refreshing prefs at focus-gain
   // closes the cross-window staleness gap (prefs changed in another window or
   // tab) without a new wire frame. loadPrefs dedupes concurrent loads and

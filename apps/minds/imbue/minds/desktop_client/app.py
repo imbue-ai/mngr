@@ -2517,7 +2517,7 @@ class _NotificationDispatchPreferencesReader(FrozenModel):
         # One atomic read (not two separate locked getters): a concurrent
         # set_notification_prefs() write landing between two separate calls could
         # otherwise produce an (is_enabled, style) pair never actually persisted together.
-        is_enabled, style, _is_os_hint_dismissed, _os_permission_confirmed = self.minds_config.get_notification_prefs()
+        is_enabled, style, _is_os_hint_dismissed = self.minds_config.get_notification_prefs()
         return NotificationDispatchPreferences(is_enabled=is_enabled, style=style)
 
 

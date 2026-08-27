@@ -483,7 +483,6 @@ const NOTIFICATIONS_OVERVIEW: SettingsOverview = {
     is_enabled: true,
     style: "cards",
     is_os_hint_dismissed: false,
-    os_permission_confirmed: false,
     version: "np-1",
   },
   version: "v-one",
@@ -545,7 +544,6 @@ describe("SettingsSections notifications panel", () => {
       is_enabled: false,
       style: "both",
       is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
       version: "np-1",
     };
     const panel = renderSections(model);
@@ -577,7 +575,7 @@ describe("SettingsSections notifications panel", () => {
     expect(requestPermission).toHaveBeenCalledTimes(1);
   });
 
-  it("offers to open OS notification settings in desktop mode when permission isn't confirmed", async () => {
+  it("offers to open OS notification settings in desktop mode whenever system delivery is selected", async () => {
     const openNotificationSettings = vi.fn(async () => true);
     vi.stubGlobal("window", {
       mindsNative: { platform: "darwin", openNotificationSettings },
@@ -587,7 +585,6 @@ describe("SettingsSections notifications panel", () => {
       is_enabled: true,
       style: "both",
       is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
       version: "np-1",
     };
 
@@ -615,7 +612,6 @@ describe("SettingsSections notifications panel", () => {
       is_enabled: true,
       style: "both",
       is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
       version: "np-1",
     };
 
@@ -631,11 +627,8 @@ describe("SettingsSections notifications panel", () => {
   });
 
   it.each([
-    [
-      "permission is already confirmed",
-      { os_permission_confirmed: true, style: "both" as const },
-    ],
-    ["the style is cards-only", { os_permission_confirmed: false, style: "cards" as const }],
+    ["the style is cards-only", { style: "cards" as const }],
+    ["notifications are off", { is_enabled: false, style: "both" as const }],
   ])("does not offer to open OS settings when %s", async (_label, overrides) => {
     vi.stubGlobal("window", {
       mindsNative: { platform: "darwin", openNotificationSettings: vi.fn() },
@@ -660,7 +653,6 @@ describe("SettingsSections notifications panel", () => {
       is_enabled: true,
       style: "both",
       is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
       version: "np-1",
     };
 

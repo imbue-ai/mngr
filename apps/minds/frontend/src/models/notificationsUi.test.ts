@@ -10,7 +10,6 @@ import {
   NotificationsUiController,
   applyNotificationPrefs,
   currentNotificationPrefs,
-  maybeProbeDesktopNotificationPermission,
   maybeRequestOsPermissionForStyle,
   openReviewRoute,
   resetNotificationPrefsForTests,
@@ -485,7 +484,6 @@ describe("notification prefs plumbing", () => {
       is_enabled: true,
       style: "both",
       is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
       version: "v7",
     });
     const writes: { url: string; ifMatch: string | null; body: unknown }[] = [];
@@ -516,7 +514,6 @@ describe("notification prefs plumbing", () => {
       is_enabled: true,
       style: "both",
       is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
       version: "v7",
     });
     let resolveFetch: (response: Response) => void = () => undefined;
@@ -532,7 +529,6 @@ describe("notification prefs plumbing", () => {
     // own change while this write is still on the wire.
     applyNotificationPrefs({
       ...currentNotificationPrefs(),
-      os_permission_confirmed: true,
     });
     resolveFetch(jsonResponse({ version: "v8" }));
     await dismiss;
@@ -541,7 +537,6 @@ describe("notification prefs plumbing", () => {
       is_enabled: true,
       style: "both",
       is_os_hint_dismissed: true,
-      os_permission_confirmed: true,
       version: "v8",
     });
   });
@@ -640,237 +635,6 @@ describe("maybeRequestOsPermissionForStyle", () => {
 
     maybeRequestOsPermissionForStyle("both", false);
     expect(requestPermission).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("maybeProbeDesktopNotificationPermission", () => {
-  it("does nothing outside desktop mode", async () => {
-    applyNotificationPrefs({
-      is_enabled: true,
-      style: "both",
-      is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
-      version: "v1",
-    });
-    const probe = vi.fn(async () => true);
-    const fetchImpl = vi.fn(async () => jsonResponse({}));
-
-    await maybeProbeDesktopNotificationPermission(false, probe, fetchImpl);
-
-    expect(probe).not.toHaveBeenCalled();
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["notifications are off", { is_enabled: false, style: "both" as const }],
-    ["the style is cards-only", { is_enabled: true, style: "cards" as const }],
-  ])("skips the probe when %s", async (_label, overrides) => {
-    applyNotificationPrefs({
-      ...DEFAULT_NOTIFICATION_PREFS,
-      is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
-      version: "v1",
-      ...overrides,
-    });
-    const probe = vi.fn(async () => true);
-    const fetchImpl = vi.fn(async () => jsonResponse({}));
-
-    await maybeProbeDesktopNotificationPermission(true, probe, fetchImpl);
-
-    expect(probe).not.toHaveBeenCalled();
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("on a granted probe, records the confirmation and leaves the style standing", async () => {
-    applyNotificationPrefs({
-      is_enabled: true,
-      style: "both",
-      is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
-      version: "v1",
-    });
-    const probe = vi.fn(async () => true);
-    const writes: { url: string; body: unknown }[] = [];
-    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
-      writes.push({ url, body: JSON.parse(String(init?.body)) });
-      return jsonResponse({});
-    });
-
-    await maybeProbeDesktopNotificationPermission(true, probe, fetchImpl);
-
-    expect(writes).toEqual([
-      {
-        url: "/ui/api/settings/notification-os-permission",
-        body: { os_permission_confirmed: true },
-      },
-    ]);
-    expect(currentNotificationPrefs().os_permission_confirmed).toBe(true);
-    expect(currentNotificationPrefs().style).toBe("both");
-  });
-
-  it("re-probes even when an earlier probe already confirmed permission granted, and catches a later revocation", async () => {
-    // A prior probe's "granted" is only ever as fresh as that probe -- the
-    // reader can revoke it in System Settings at any time with the app none
-    // the wiser, so a stale "yes" must not be trusted forever.
-    applyNotificationPrefs({
-      is_enabled: true,
-      style: "both",
-      is_os_hint_dismissed: false,
-      os_permission_confirmed: true,
-      version: "v1",
-    });
-    const probe = vi.fn(async () => false);
-    const fetchImpl = vi.fn(async (url: string) => {
-      if (url === "/ui/api/settings/notification-os-permission") return jsonResponse({});
-      return jsonResponse({ version: "v2" });
-    });
-
-    await maybeProbeDesktopNotificationPermission(true, probe, fetchImpl);
-
-    expect(probe).toHaveBeenCalledOnce();
-    expect(currentNotificationPrefs().os_permission_confirmed).toBe(false);
-    expect(currentNotificationPrefs().style).toBe("cards");
-  });
-
-  it("on a declined probe, records the denial and falls the style back to cards", async () => {
-    applyNotificationPrefs({
-      is_enabled: true,
-      style: "both",
-      is_os_hint_dismissed: true,
-      os_permission_confirmed: false,
-      version: "v1",
-    });
-    const probe = vi.fn(async () => false);
-    const writes: { url: string; ifMatch: string | null; body: unknown }[] = [];
-    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
-      writes.push({
-        url,
-        ifMatch: new Headers(init?.headers).get("If-Match"),
-        body: JSON.parse(String(init?.body)),
-      });
-      if (url === "/ui/api/settings/notification-os-permission") return jsonResponse({});
-      return jsonResponse({ version: "v2" });
-    });
-
-    await maybeProbeDesktopNotificationPermission(true, probe, fetchImpl);
-
-    expect(writes).toEqual([
-      {
-        url: "/ui/api/settings/notification-os-permission",
-        ifMatch: null,
-        body: { os_permission_confirmed: false },
-      },
-      {
-        url: "/ui/api/settings/notifications",
-        ifMatch: "v1",
-        body: { is_enabled: true, style: "cards", is_os_hint_dismissed: true },
-      },
-    ]);
-    expect(currentNotificationPrefs()).toEqual({
-      is_enabled: true,
-      style: "cards",
-      is_os_hint_dismissed: true,
-      os_permission_confirmed: false,
-      version: "v2",
-    });
-  });
-
-  it("treats a rejected probe as declined rather than throwing", async () => {
-    // probe() is an IPC round-trip to Electron main and can reject; a
-    // rejection should resolve the same way a declined/timed-out probe
-    // does, not surface as an unhandled rejection to the void-fired caller.
-    applyNotificationPrefs({
-      is_enabled: true,
-      style: "both",
-      is_os_hint_dismissed: true,
-      os_permission_confirmed: false,
-      version: "v1",
-    });
-    const probe = vi.fn(async () => {
-      throw new Error("ipc failure");
-    });
-    const fetchImpl = vi.fn(async (url: string) => {
-      if (url === "/ui/api/settings/notification-os-permission") return jsonResponse({});
-      return jsonResponse({ version: "v2" });
-    });
-
-    const granted = await maybeProbeDesktopNotificationPermission(
-      true,
-      probe,
-      fetchImpl,
-    );
-
-    expect(granted).toBe(false);
-    expect(currentNotificationPrefs().os_permission_confirmed).toBe(false);
-    expect(currentNotificationPrefs().style).toBe("cards");
-  });
-
-  it("leaves prefs standing when the downgrade write is refused", async () => {
-    applyNotificationPrefs({
-      is_enabled: true,
-      style: "both",
-      is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
-      version: "v1",
-    });
-    const probe = vi.fn(async () => false);
-    const fetchImpl = vi.fn(async (url: string) => {
-      if (url === "/ui/api/settings/notification-os-permission") return jsonResponse({});
-      return jsonResponse({ error: "gone" }, 412);
-    });
-
-    await maybeProbeDesktopNotificationPermission(true, probe, fetchImpl);
-
-    expect(currentNotificationPrefs().style).toBe("both");
-    expect(currentNotificationPrefs().version).toBe("v1");
-  });
-
-  it("merges the downgrade onto prefs a concurrent writer already updated, not the pre-probe snapshot", async () => {
-    applyNotificationPrefs({
-      is_enabled: true,
-      style: "both",
-      is_os_hint_dismissed: false,
-      os_permission_confirmed: false,
-      version: "v1",
-    });
-    const probe = vi.fn(async () => false);
-    let resolveDowngrade: (response: Response) => void = () => undefined;
-    let downgradeStarted: () => void = () => undefined;
-    const downgradeStartedPromise = new Promise<void>((resolve) => {
-      downgradeStarted = resolve;
-    });
-    const fetchImpl = vi.fn(async (url: string) => {
-      if (url === "/ui/api/settings/notification-os-permission")
-        return jsonResponse({});
-      downgradeStarted();
-      return new Promise<Response>((resolve) => {
-        resolveDowngrade = resolve;
-      });
-    });
-
-    const probeDone = maybeProbeDesktopNotificationPermission(
-      true,
-      probe,
-      fetchImpl,
-    );
-    await downgradeStartedPromise;
-    // A different writer to the shared prefs cell (e.g. a settings-panel
-    // save) lands its own change while the downgrade write is still on the
-    // wire.
-    applyNotificationPrefs({
-      ...currentNotificationPrefs(),
-      is_os_hint_dismissed: true,
-    });
-    resolveDowngrade(jsonResponse({ version: "v2" }));
-    await probeDone;
-
-    expect(currentNotificationPrefs()).toEqual({
-      is_enabled: true,
-      style: "cards",
-      is_os_hint_dismissed: true,
-      os_permission_confirmed: false,
-      version: "v2",
-    });
   });
 });
 

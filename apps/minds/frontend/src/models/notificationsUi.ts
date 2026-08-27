@@ -26,11 +26,6 @@ export interface NotificationPrefs {
   is_enabled: boolean;
   style: NotificationStyle;
   is_os_hint_dismissed: boolean;
-  /** Desktop only: whether native OS notification permission was ever
-   * confirmed granted (see maybeProbeDesktopNotificationPermission). Always
-   * false in plain-browser mode, which has its own Web Notification
-   * permission model instead. */
-  os_permission_confirmed: boolean;
   version: string;
 }
 
@@ -40,7 +35,6 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   is_enabled: true,
   style: "both",
   is_os_hint_dismissed: false,
-  os_permission_confirmed: false,
   version: "",
 };
 
@@ -206,95 +200,6 @@ export function postNotificationPrefsWrite(
     },
     body: JSON.stringify(next),
   });
-}
-
-/** Persist the desktop app's own observation of whether native OS
- * notification permission is granted. Unguarded (no If-Match): this is
- * system-observed state the app derives for itself, not a user-typed
- * preference, so there is nothing for a stale window to clobber. */
-function postNotificationOsPermissionWrite(
-  fetchImpl: FetchLike,
-  confirmed: boolean,
-): Promise<Response> {
-  return fetchImpl("/ui/api/settings/notification-os-permission", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ os_permission_confirmed: confirmed }),
-  });
-}
-
-/** Desktop analog of maybeRequestOsPermissionForStyle: ask the OS for native
- * notification permission by actually attempting to show one (Electron
- * exposes no separate "request" call on macOS -- posting the first
- * notification IS the request, and the system's own permission dialog
- * appears before the banner does). Always re-verifies, even if a prior probe
- * already confirmed it granted: "confirmed" is only ever as fresh as the last
- * probe, and the reader can revoke it in System Settings at any time with the
- * app none the wiser, so a stale "yes" would silently strand the OS delivery
- * style with no way back except this call site. On denial (the probe times
- * out unseen -- Electron cannot tell "declined" from "not decided yet"),
- * falls the delivery style back to "cards" so OS delivery is never silently
- * retried forever with nothing to show for it.
- *
- * Best-effort throughout: any write failure here just means the app asks
- * again next time (the next boot, or the next settings save), never a
- * broken UI state.
- *
- * Returns whether the OS confirmed the probe granted -- false for every
- * skipped case too (not desktop, not enabled, cards-only style), since none
- * of those actually confirm anything either. */
-export async function maybeProbeDesktopNotificationPermission(
-  isDesktop: boolean = electronBridge.isDesktop,
-  probe: () => Promise<boolean> = () =>
-    electronBridge.probeNotificationPermission(),
-  fetchImpl: FetchLike = (url, init) => fetch(url, init),
-): Promise<boolean> {
-  if (!isDesktop) return false;
-  const prefs = currentNotificationPrefs();
-  if (!prefs.is_enabled || prefs.style === "cards") return false;
-  let granted: boolean;
-  try {
-    granted = await probe();
-  } catch {
-    // Best-effort: an IPC failure reads the same as a declined/undecided
-    // probe -- there is nothing else to confirm it granted.
-    granted = false;
-  }
-  try {
-    await postNotificationOsPermissionWrite(fetchImpl, granted);
-  } catch {
-    // Best-effort: a failed write just means this probes again next time.
-  }
-  applyNotificationPrefs({ ...currentNotificationPrefs(), os_permission_confirmed: granted });
-  if (granted) return true;
-  const latest = currentNotificationPrefs();
-  try {
-    const response = await postNotificationPrefsWrite(fetchImpl, latest.version, {
-      is_enabled: latest.is_enabled,
-      style: "cards",
-      is_os_hint_dismissed: latest.is_os_hint_dismissed,
-    });
-    if (!response.ok) return false;
-    const result = (await response.json()) as { version: string };
-    // Merge onto the CURRENT prefs, not the pre-await `latest` snapshot: a
-    // concurrent writer to the shared appliedPrefs cell (a settings-panel
-    // save, the OS hint's dismissal) may have already landed its own field
-    // while this downgrade write was in flight, and spreading the stale
-    // snapshot would clobber it (mirrors the settings.ts merge-onto-fresh
-    // fix for the same shared-state race).
-    applyNotificationPrefs({
-      ...currentNotificationPrefs(),
-      style: "cards",
-      os_permission_confirmed: false,
-      version: result.version,
-    });
-  } catch {
-    // Best-effort: a failed downgrade write just leaves the style standing
-    // until the next probe (this session's next settings save, or a later
-    // boot once permission is actually decided).
-  }
-  return false;
 }
 
 export interface NotificationsUiHooks {

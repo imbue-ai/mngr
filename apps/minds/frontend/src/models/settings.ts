@@ -20,7 +20,6 @@ import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
 import {
   DEFAULT_NOTIFICATION_PREFS,
   applyNotificationPrefs,
-  currentNotificationPrefs,
   postNotificationPrefsWrite,
 } from "./notificationsUi";
 
@@ -417,8 +416,6 @@ export class SettingsModel {
       }
       if (response.ok) {
         const result = (await response.json()) as { version: string };
-        // os_permission_confirmed is system-observed, not part of this
-        // write's payload: carry the prior value forward untouched.
         const applied: NotificationPrefs = {
           ...current,
           ...next,
@@ -451,22 +448,6 @@ export class SettingsModel {
       this.notificationPrefsError =
         "Could not update notifications (network error).";
     }
-    this.redraw();
-  }
-
-  /** Sync the model's notification-prefs copy from the shared applied-prefs
-   * cell (kept current by setNotificationPrefs above and by
-   * maybeProbeDesktopNotificationPermission's own writes). Local only -- no
-   * network request -- so a probe's server-side style downgrade can be
-   * reflected without risking the isLoadFailed error state a full reload
-   * would risk over a background refresh unrelated to what just landed. */
-  syncNotificationPrefsFromApplied(): void {
-    const overview = this.overview;
-    if (overview === null) return;
-    this.overview = {
-      ...overview,
-      notification_prefs: currentNotificationPrefs(),
-    };
     this.redraw();
   }
 

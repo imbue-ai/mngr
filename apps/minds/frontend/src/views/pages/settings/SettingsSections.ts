@@ -23,7 +23,6 @@ import {
 import { formatRelativeAgo } from "../../../models/backups";
 import type { NotificationStyle } from "../../../models/notificationsUi";
 import {
-  maybeProbeDesktopNotificationPermission,
   maybeRequestOsPermissionForStyle,
 } from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
@@ -534,12 +533,12 @@ const NOTIFICATION_STYLE_OPTIONS: {
   },
 ];
 
-/** No app can force a re-prompt once native OS notification permission is
- * declined (see maybeProbeDesktopNotificationPermission): this is the
- * escape hatch, pointing the reader at the OS's own settings pane. Surfaces
- * the open itself failing (e.g. no known settings command on this Linux
- * desktop environment) rather than leaving the button looking like it
- * silently did nothing. */
+/** System banners are the OS's call to make, and it never tells app code
+ * whether it is delivering them -- so this stands whenever OS delivery is
+ * selected, as the one place to go when banners do not appear. Surfaces the
+ * open itself failing (e.g. no known settings command on this Linux desktop
+ * environment) rather than leaving the button looking like it silently did
+ * nothing. */
 function notificationOsPermissionNotice(model: SettingsModel): m.Vnode {
   return m(
     Notice,
@@ -551,8 +550,8 @@ function notificationOsPermissionNotice(model: SettingsModel): m.Vnode {
         m(
           "span",
           {},
-          "This computer's OS notifications for minds may be turned off, " +
-            "so system banners might not appear.",
+          "System banners come from your operating system. If they don't " +
+            "appear, check its notification settings for minds.",
         ),
         m(
           Button,
@@ -595,20 +594,6 @@ function notificationsPanel(model: SettingsModel): m.Children {
         ...next,
         is_os_hint_dismissed: prefs.is_os_hint_dismissed,
       });
-      if (!next.is_enabled) return;
-      // Desktop: (re-)ask the OS, regardless of whether an earlier probe
-      // already confirmed it granted -- covers the first time this style is
-      // picked and a retry after the reader flipped it in System Settings
-      // (in either direction) since that probe. No gesture constraint here
-      // (Electron's native API has none), so this can safely wait for the
-      // write to land first. A denial downgrades the style server-side;
-      // sync the model's local copy from the applied-prefs cell the probe
-      // itself just updated, rather than reloading the whole settings
-      // payload -- a transient failure in an unrelated background refresh
-      // must never blank the entire modal over a write that already
-      // succeeded (see SettingsPage.ts's isLoadFailed handling).
-      await maybeProbeDesktopNotificationPermission();
-      model.syncNotificationPrefsFromApplied();
     })();
   };
   return m("section", [
@@ -701,10 +686,7 @@ function notificationsPanel(model: SettingsModel): m.Children {
           }),
         )
       : null,
-    electronBridge.isDesktop &&
-    prefs.is_enabled &&
-    prefs.style !== "cards" &&
-    !prefs.os_permission_confirmed
+    electronBridge.isDesktop && prefs.is_enabled && prefs.style !== "cards"
       ? notificationOsPermissionNotice(model)
       : null,
     model.notificationPrefsError !== ""

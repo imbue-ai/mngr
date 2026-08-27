@@ -33,11 +33,6 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // Native file/directory picker (the file-sharing permission dialog).
   showFilePicker: (options) => ipcRenderer.invoke('show-file-picker', options),
 
-  // Ask the OS for native-notification permission by actually attempting to
-  // show one (main.js's probeNotificationPermission -- Electron exposes no
-  // separate "request" or "check status" call on macOS). Resolves to
-  // whether the OS confirmed it displayed the probe.
-  probeNotificationPermission: () => ipcRenderer.invoke('probe-notification-permission'),
   // Open the OS's own notification-settings pane (no app can force a
   // re-prompt once declined -- the reader has to flip it back on there).
   openNotificationSettings: () => ipcRenderer.invoke('open-notification-settings'),

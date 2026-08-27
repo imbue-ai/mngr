@@ -118,7 +118,7 @@ def test_multiple_settings_coexist(tmp_path: Path) -> None:
 def test_notification_prefs_defaults(tmp_path: Path) -> None:
     """On a fresh install: nudges on, style 'both', hint not dismissed."""
     config = _make_config(tmp_path)
-    is_enabled, style, is_os_hint_dismissed, _os_permission_confirmed = config.get_notification_prefs()
+    is_enabled, style, is_os_hint_dismissed = config.get_notification_prefs()
     assert is_enabled is True
     assert style == "both"
     assert is_os_hint_dismissed is False
@@ -127,10 +127,10 @@ def test_notification_prefs_defaults(tmp_path: Path) -> None:
 def test_notification_prefs_round_trip(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     config.set_notification_prefs(is_enabled=False, style=NotificationStyle.OS, is_os_hint_dismissed=True)
-    assert config.get_notification_prefs()[:3] == (False, NotificationStyle.OS, True)
+    assert config.get_notification_prefs() == (False, NotificationStyle.OS, True)
     # A new instance reads the same persisted values.
     reloaded = _make_config(tmp_path)
-    assert reloaded.get_notification_prefs()[:3] == (False, NotificationStyle.OS, True)
+    assert reloaded.get_notification_prefs() == (False, NotificationStyle.OS, True)
 
 
 def test_set_notification_prefs_persists_all_three_keys_in_one_write(tmp_path: Path) -> None:
@@ -142,7 +142,7 @@ def test_set_notification_prefs_persists_all_three_keys_in_one_write(tmp_path: P
 
     assert config.write_count == 1
     reloaded = _make_config(tmp_path)
-    assert reloaded.get_notification_prefs()[:3] == (False, NotificationStyle.OS, True)
+    assert reloaded.get_notification_prefs() == (False, NotificationStyle.OS, True)
 
 
 def test_set_notification_prefs_replaces_a_full_prior_record_wholesale(tmp_path: Path) -> None:
@@ -152,11 +152,11 @@ def test_set_notification_prefs_replaces_a_full_prior_record_wholesale(tmp_path:
 
     config.set_notification_prefs(is_enabled=True, style=NotificationStyle.CARDS, is_os_hint_dismissed=True)
 
-    assert config.get_notification_prefs()[:3] == (True, NotificationStyle.CARDS, True)
+    assert config.get_notification_prefs() == (True, NotificationStyle.CARDS, True)
 
 
 def test_get_notification_prefs_reads_all_fields_under_one_lock_acquisition(tmp_path: Path) -> None:
-    """One _read_raw() call, not four: separate locked reads could observe a concurrent
+    """One _read_raw() call, not three: separate locked reads could observe a concurrent
     set_notification_prefs() writer's update to only some of the fields -- a combination that
     write never actually persisted together."""
     config = ReadCountingMindsConfig(data_dir=tmp_path)
@@ -170,25 +170,11 @@ def test_get_notification_prefs_reads_all_fields_under_one_lock_acquisition(tmp_
 
 def test_get_notification_prefs_round_trips_with_set_notification_prefs(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
-    assert config.get_notification_prefs() == (True, NotificationStyle.BOTH, False, False)
+    assert config.get_notification_prefs() == (True, NotificationStyle.BOTH, False)
 
     config.set_notification_prefs(is_enabled=False, style=NotificationStyle.CARDS, is_os_hint_dismissed=True)
 
-    assert config.get_notification_prefs() == (False, NotificationStyle.CARDS, True, False)
-
-
-def test_get_notification_prefs_reflects_os_permission_confirmed_independently(tmp_path: Path) -> None:
-    """os_permission_confirmed is read alongside the other three (for the shared lock
-    acquisition) but is written independently of set_notification_prefs."""
-    config = _make_config(tmp_path)
-
-    config.set_notification_os_permission_confirmed(True)
-
-    assert config.get_notification_prefs() == (True, NotificationStyle.BOTH, False, True)
-    # A later set_notification_prefs write (the user-driven one) does not
-    # touch this system-observed flag.
-    config.set_notification_prefs(is_enabled=False, style=NotificationStyle.CARDS, is_os_hint_dismissed=True)
-    assert config.get_notification_prefs() == (False, NotificationStyle.CARDS, True, True)
+    assert config.get_notification_prefs() == (False, NotificationStyle.CARDS, True)
 
 
 def test_malformed_notification_style_falls_back_to_the_default(tmp_path: Path) -> None:
@@ -221,7 +207,7 @@ def test_set_notification_prefs_if_version_matches_applies_on_a_matching_version
 
     assert new_version == _notification_prefs_test_version(False, NotificationStyle.OS, True)
     assert config.write_count == 1
-    assert config.get_notification_prefs() == (False, NotificationStyle.OS, True, False)
+    assert config.get_notification_prefs() == (False, NotificationStyle.OS, True)
 
 
 def test_set_notification_prefs_if_version_matches_rejects_a_stale_version_without_writing(tmp_path: Path) -> None:
@@ -243,7 +229,7 @@ def test_set_notification_prefs_if_version_matches_rejects_a_stale_version_witho
     assert result is None
     # Only the first writer's write landed.
     assert config.write_count == 1
-    assert config.get_notification_prefs() == (False, NotificationStyle.OS, True, False)
+    assert config.get_notification_prefs() == (False, NotificationStyle.OS, True)
 
 
 def test_set_notification_prefs_if_version_matches_closes_the_check_then_act_race(tmp_path: Path) -> None:
@@ -273,7 +259,7 @@ def test_set_notification_prefs_if_version_matches_closes_the_check_then_act_rac
     assert first is not None
     assert second is None
     assert config.write_count == 1
-    assert config.get_notification_prefs() == (False, NotificationStyle.OS, False, False)
+    assert config.get_notification_prefs() == (False, NotificationStyle.OS, False)
 
 
 def test_set_report_unexpected_errors_if_version_matches_applies_on_a_matching_version(tmp_path: Path) -> None:

@@ -238,18 +238,14 @@ class MindsConfig(MutableModel):
         """
         return self._get_bool("notifications_enabled", default=True)
 
-    def get_notification_prefs(self) -> tuple[bool, NotificationStyle, bool, bool]:
-        """Return ``(is_enabled, style, is_os_hint_dismissed, os_permission_confirmed)`` from one atomic read.
+    def get_notification_prefs(self) -> tuple[bool, NotificationStyle, bool]:
+        """Return ``(is_enabled, style, is_os_hint_dismissed)`` from one atomic read.
 
         Reading the fields via separate locked calls (as each getter does on
         its own) could observe a concurrent writer's update to only some of
         them -- a combination that :meth:`set_notification_prefs` never
         actually persisted together. One lock acquisition here mirrors that
-        write's atomicity on the read side. ``os_permission_confirmed`` is
-        read alongside the other three purely to share this one lock
-        acquisition; it is written independently (see
-        :meth:`set_notification_os_permission_confirmed`), not by
-        :meth:`set_notification_prefs`.
+        write's atomicity on the read side.
         """
         with self._lock:
             data = self._read_raw()
@@ -257,7 +253,6 @@ class MindsConfig(MutableModel):
                 _bool_from_raw(data, "notifications_enabled", True),
                 _style_from_raw(data),
                 _bool_from_raw(data, "notification_os_hint_dismissed", False),
-                _bool_from_raw(data, "notification_os_permission_confirmed", False),
             )
 
     def set_notification_prefs(
@@ -312,24 +307,3 @@ class MindsConfig(MutableModel):
             data["notification_os_hint_dismissed"] = is_os_hint_dismissed
             self._write_raw(data)
             return compute_version(is_enabled, style, is_os_hint_dismissed)
-
-    def get_notification_os_permission_confirmed(self) -> bool:
-        """Return whether the desktop app has ever confirmed native OS notification
-        permission is granted. Default: False.
-
-        Desktop-only (Electron's native Notification module exposes no
-        permission-status API; this is our own best-effort memory of the one
-        signal it does give -- a probe notification's 'show' event actually
-        firing). This is a status snapshot only, not a gate: the app always
-        re-verifies against current OS truth on every launch and settings
-        save regardless of this stored value (see
-        maybeProbeDesktopNotificationPermission in notificationsUi.ts),
-        since the reader can revoke permission in System Settings at any
-        time with no other way for the app to notice. The stored value
-        exists so the settings UI has something to render between probes.
-        """
-        return self._get_bool("notification_os_permission_confirmed", default=False)
-
-    def set_notification_os_permission_confirmed(self, confirmed: bool) -> None:
-        """Record whether native OS notification permission was last confirmed granted."""
-        self._set_bool("notification_os_permission_confirmed", confirmed)
