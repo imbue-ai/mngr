@@ -12,6 +12,8 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 
+import pytest
+
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.testing import ManualClock
@@ -346,6 +348,10 @@ def test_backoff_holds_at_cap_without_overflow_after_many_restarts() -> None:
     assert watchdog._current_backoff_seconds() == _MAX_BACKOFF_SECONDS
 
 
+@pytest.mark.witnesses(
+    "no-verdict-on-unobserved-time",
+    partial="witnesses the producer-stall verdict only",
+)
 def test_a_long_sleep_is_not_read_as_a_stalled_producer() -> None:
     """The first tick after the lid opens must not SIGHUP a producer that never stalled.
 

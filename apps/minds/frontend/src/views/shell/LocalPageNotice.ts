@@ -17,7 +17,7 @@ export function LocalPageNotice(): m.Component {
   return {
     view() {
       const health = getAppContext().stores.health;
-      const payload = localPageNoticeFor(health.discoveryHealth, electronBridge.isDesktop, health.appEnvironmentBlock());
+      const payload = localPageNoticeFor(health.discoveryHealth, electronBridge.isDesktop, health.appEnvironmentCondition());
       if (payload === null) return null;
       // Aligned to the page container rather than the full scroll width, so
       // it reads as part of the page's own column alongside the notices the

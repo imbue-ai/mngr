@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import { HealthStore } from "../../models/health";
-import type { EnvironmentBlock } from "../../models/health";
+import type { EnvironmentCondition } from "../../models/health";
 import { LocalPageNotice } from "./LocalPageNotice";
 import { allText, renderRoot } from "../../testing";
 
@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 /** Register a context carrying nothing but the health store this notice reads. */
-function noticeFor(environment: EnvironmentBlock): string {
+function noticeFor(environment: EnvironmentCondition): string {
   const health = new HealthStore();
   health.applyEnvironmentMessage({ type: "environment", state: environment });
   registerAppContext({ stores: { health }, shell: {} } as unknown as AppContext);
@@ -32,7 +32,8 @@ describe("LocalPageNotice", () => {
     expect(noticeFor("SSH_BLOCKED")).toContain("This network blocks the connection to your machines.");
   });
 
-  it("says nothing about a device with no trouble to report", () => {
+  it("says nothing about a device with no trouble to report, or none measured yet", () => {
     expect(noticeFor("NONE")).toBe("");
+    expect(noticeFor("UNKNOWN")).toBe("");
   });
 });

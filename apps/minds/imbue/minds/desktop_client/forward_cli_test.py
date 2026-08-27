@@ -31,6 +31,8 @@ from imbue.minds.desktop_client.forward_cli import _build_forward_command
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import make_sleep_tracker
+from imbue.minds.desktop_client.testing import record_sleep_of
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -567,6 +569,104 @@ def test_alternating_pre_start_errors_are_tallied_separately() -> None:
     assert "5x docker daemon unreachable" in lines[1]
     assert "1x token expired" in lines[2]
     assert all("Dropped pre-start provider errors for local" in line for line in lines)
+
+
+def _consumer_that_slept(seconds: float) -> tuple[EnvelopeStreamConsumer, datetime]:
+    """A live consumer whose process just slept for ``seconds``; returns it and the wake's wall-clock moment."""
+    sleep_tracker, clock = make_sleep_tracker()
+    record_sleep_of(sleep_tracker, clock, seconds)
+    wake_at = sleep_tracker.get_last_wake_at()
+    assert wake_at is not None
+    consumer = EnvelopeStreamConsumer(
+        resolver=MngrCliBackendResolver(),
+        started_at=wake_at - timedelta(hours=1),
+        sleep_tracker=sleep_tracker,
+    )
+    return consumer, wake_at
+
+
+def _dispatch_snapshot_spanning(
+    consumer: EnvelopeStreamConsumer,
+    started_at: datetime,
+    finished_at: datetime,
+    error: DiscoveryError | None,
+) -> None:
+    _dispatch(
+        consumer,
+        _observe_envelope(
+            make_provider_discovery_snapshot_event(
+                provider_name=ProviderInstanceName("local"),
+                agents=(_make_agent(_AGENT_ID_1),),
+                hosts=(),
+                discovery_started_at=started_at,
+                discovery_finished_at=finished_at,
+                error=error,
+            )
+        ),
+    )
+
+
+@pytest.mark.witnesses(
+    "no-verdict-on-unobserved-time",
+    partial="witnesses the provider-unreachable verdict at its ingress only",
+)
+def test_an_errored_poll_that_straddled_a_sleep_is_not_the_providers_last_word() -> None:
+    """The error is dropped and the snapshot advances no freshness, like the pre-start replay.
+
+    The poll opened its socket before the lid closed and read the timeout after
+    it opened: what it reports is that this laptop went away, not that the
+    provider did. Recording it would let the recovery verdict name the provider
+    -- "Can't connect to Imbue Cloud" -- on the strength of a poll that never
+    reached it. Its topology still merges, exactly as the pre-start drop's does.
+    """
+    consumer, wake_at = _consumer_that_slept(900.0)
+    provider_name = ProviderInstanceName("local")
+    with capture_loguru(level="INFO") as log_output:
+        _dispatch_snapshot_spanning(
+            consumer,
+            started_at=wake_at - timedelta(seconds=901),
+            finished_at=wake_at + timedelta(seconds=1),
+            error=_stale_error("The read operation timed out"),
+        )
+    assert consumer.resolver.get_provider_errors() == {}
+    assert consumer.resolver.get_last_snapshot_at_for_provider(provider_name) is None
+    assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
+    assert "straddled a sleep" in log_output.getvalue()
+
+
+def test_a_clean_poll_that_straddled_a_sleep_is_kept() -> None:
+    """A poll that succeeded completed after the wake, so its answer is real and its freshness counts."""
+    consumer, wake_at = _consumer_that_slept(900.0)
+    finished_at = wake_at + timedelta(seconds=1)
+    _dispatch_snapshot_spanning(
+        consumer, started_at=wake_at - timedelta(seconds=901), finished_at=finished_at, error=None
+    )
+    assert consumer.resolver.get_last_snapshot_at_for_provider(ProviderInstanceName("local")) == finished_at
+
+
+def test_an_errored_poll_that_finished_before_the_sleep_still_registers() -> None:
+    """Only a poll whose own window slept is fenced; one consumed late is evidence all the same."""
+    consumer, wake_at = _consumer_that_slept(900.0)
+    finished_at = wake_at - timedelta(seconds=905)
+    _dispatch_snapshot_spanning(
+        consumer,
+        started_at=finished_at - timedelta(seconds=2),
+        finished_at=finished_at,
+        error=_stale_error("provider really was down"),
+    )
+    assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
+    assert consumer.resolver.get_last_snapshot_at_for_provider(ProviderInstanceName("local")) == finished_at
+
+
+def test_a_consumer_with_no_sleep_tracker_fences_nothing() -> None:
+    consumer = EnvelopeStreamConsumer(resolver=MngrCliBackendResolver(), started_at=_CONSUMER_STARTED_AT)
+    _dispatch_snapshot_spanning(
+        consumer,
+        started_at=_DISCOVERY_STARTED_AT,
+        finished_at=_DISCOVERY_FINISHED_AT,
+        error=_stale_error("provider really was down"),
+    )
+    assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
 
 
 def test_live_errored_snapshot_ends_the_replay_and_registers_its_error() -> None:

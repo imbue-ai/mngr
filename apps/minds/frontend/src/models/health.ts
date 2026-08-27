@@ -22,15 +22,21 @@ export type DiscoveryHealth = "healthy" | "reconnecting" | "blocked";
  * really is unreachable -- what this adds is that the machine is not the thing
  * that is wrong, so the surfaces must not narrate a restart, and there is no
  * restart to offer while it holds.
+ *
+ * "UNKNOWN" is the reading before anything has been measured -- at startup,
+ * and after a wake until the next probe lands. It is not "NONE": a surface
+ * told the device is fine goes on to blame the next thing in line, which after
+ * a wake is the provider, on the strength of no measurement at all. A surface
+ * reading "UNKNOWN" blames nothing.
  */
-export type EnvironmentBlock = "NONE" | "OFFLINE" | "SSH_BLOCKED";
+export type EnvironmentCondition = "NONE" | "OFFLINE" | "SSH_BLOCKED" | "UNKNOWN";
 
 export class HealthStore {
   discoveryHealth: DiscoveryHealth = "healthy";
 
   private statusByAgentId = new Map<string, WorkspaceHealth>();
   private errorByAgentId = new Map<string, string>();
-  private deviceEnvironment: EnvironmentBlock = "NONE";
+  private deviceEnvironment: EnvironmentCondition = "UNKNOWN";
   private isRestartANoOpByAgentId = new Set<string>();
   // A map rather than a set, because the absent case is a third answer: the
   // frame reports the shape of a restart only while one is running, and "no
@@ -96,7 +102,7 @@ export class HealthStore {
    * convicted, because nothing has been asked to load, and that is exactly when
    * the user most needs telling.
    */
-  appEnvironmentBlock(): EnvironmentBlock {
+  appEnvironmentCondition(): EnvironmentCondition {
     return this.deviceEnvironment;
   }
 

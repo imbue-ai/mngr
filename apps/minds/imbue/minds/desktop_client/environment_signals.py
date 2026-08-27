@@ -15,10 +15,11 @@ workspace's: which wall-clock windows this process spent not running
 all (:class:`ConnectivityDetector`). Neither ever asserts health. A signal here
 may suppress a negative verdict or withhold an action; nothing here can make a
 workspace read as healthy, and an *unknown* reading -- the state right after a
-wake, before any probe has landed -- suppresses nothing at all. Workspaces on
-local backends are exempt from the connectivity signals entirely (a rule that
-lives with the recovery paths that apply it); the sleep signal still applies to
-them, because the probe loop was frozen regardless of where the machine lives.
+wake, before any probe has landed -- suppresses nothing at all. Workspaces
+dialled on this device are exempt from the connectivity signals entirely (which
+machines those are is decided from the address minds connects to, by the
+recovery paths that apply the rule); the sleep signal still applies to them,
+because the probe loop was frozen regardless of where the machine lives.
 
 Sleep is detected by heartbeat rather than by a platform sleep/wake
 notification. ``SleepTracker`` ticks about once a second and compares
@@ -269,6 +270,26 @@ class SleepTracker(MutableModel):
             interval = self._last_interval
         return interval is not None and interval.ended_at > start
 
+    def was_asleep_during(self, start: datetime, end: datetime) -> bool:
+        """Whether this process stopped running at any point in the closed window ``[start, end]``.
+
+        For an observation that is already over when it is read -- a discovery
+        poll that reports when it began and when it finished. Such a result is
+        only evidence if the whole window was watched, and :meth:`was_asleep_since`
+        cannot say: it would also disqualify a window that closed before the
+        sleep and was merely consumed after the wake.
+
+        Answered from the latest interval alone, which is exact for every window
+        that reaches to now or into the latest sleep, and answers "no" for a
+        window that ended before an earlier sleep began. That earlier window is
+        one no consumer holds: the observations this is asked about are consumed
+        as they arrive, so a reading old enough to predate two sleeps has long
+        since been superseded.
+        """
+        with self._lock:
+            interval = self._last_interval
+        return interval is not None and interval.ended_at > start and interval.started_at < end
+
     def get_last_wake_at(self) -> datetime | None:
         """Wall-clock (UTC) end of the most recent sleep interval, or None if none is recorded.
 
@@ -289,10 +310,10 @@ class SleepTracker(MutableModel):
 # three answer for both ports, which is what makes the SSH verdict possible at
 # all: whichever one answered on 443 is among the ones asked on 22, so passing
 # HTTPS while every one of them refuses SSH is the network blocking a port
-# rather than the hosts being unreachable. The internet facet stops at the first
-# host that answers -- the question it asks is whether this device can reach
-# *anything*. The SSH facet asks all three together instead, for the reason
-# :meth:`ConnectivityDetector._does_any_ssh_endpoint_answer` gives.
+# rather than the hosts being unreachable. Both facets ask all three together,
+# for the reason :meth:`ConnectivityDetector._does_any_ssh_endpoint_answer`
+# gives: the answer that costs the most is the one that has to hear from every
+# host.
 _PROBE_HOSTS: Final[tuple[str, ...]] = ("github.com", "gitlab.com", "bitbucket.org")
 _HTTPS_PORT: Final[int] = 443
 _PUBLIC_SSH_PORT: Final[int] = 22
@@ -302,10 +323,11 @@ _PUBLIC_SSH_PORT: Final[int] = 22
 # answers when it succeeds; the cap bounds the case where none of them do.
 _MAX_SAMPLED_WORKSPACE_SSH_ENDPOINTS: Final[int] = 3
 
-# Per-connection budget. Short because the whole probe is on the critical path
-# of a recovery decision, and because a network that needs longer than this to
-# answer three well-connected hosts is not one a workspace is reachable over
-# either.
+# Budget for reaching one endpoint, shared across every address that endpoint
+# resolves to (:meth:`SocketNetworkProber._connect_within_budget`). Short because
+# the whole probe is on the critical path of a recovery decision, and because a
+# network that needs longer than this to answer three well-connected hosts is not
+# one a workspace is reachable over either.
 _DEFAULT_PROBE_TIMEOUT_SECONDS: Final[float] = 1.5
 
 # How often a *bad* reading is re-checked, so an owed action fires soon after
@@ -341,6 +363,24 @@ class EnvironmentBlock(UpperCaseStrEnum):
     NONE = auto()
     OFFLINE = auto()
     SSH_BLOCKED = auto()
+
+
+class EnvironmentCondition(UpperCaseStrEnum):
+    """This device's condition as the surfaces should describe it: a block, none, or not yet known.
+
+    :class:`EnvironmentBlock` is the answer for *acting*, where an unmeasured
+    device must count as fine so that nothing is ever withheld on no evidence.
+    The surfaces ask a different question -- whose fault is it -- and there "no
+    measurement" is not "the device is fine": a surface handed ``NONE`` for a
+    reading nobody has taken goes on to blame the next thing down, which after a
+    wake is the provider. ``UNKNOWN`` is that third answer, and a surface
+    reading it declines to blame anyone until a probe lands.
+    """
+
+    NONE = auto()
+    OFFLINE = auto()
+    SSH_BLOCKED = auto()
+    UNKNOWN = auto()
 
 
 class SshEndpoint(FrozenModel):
@@ -388,6 +428,20 @@ class ConnectivityReading(FrozenModel):
             return EnvironmentBlock.SSH_BLOCKED
         return EnvironmentBlock.NONE
 
+    @property
+    def environment_condition(self) -> EnvironmentCondition:
+        """The device-level condition as a surface should describe it.
+
+        The same answer as :attr:`environment_block` for a reading that has
+        been taken, and ``UNKNOWN`` for one that has not -- none yet, or one a
+        wake invalidated. The internet facet alone decides that: the SSH facet
+        is left ``UNKNOWN`` by design whenever the internet is down, and that is
+        a measured reading, not a missing one.
+        """
+        if self.internet is ConnectivityFacet.UNKNOWN:
+            return EnvironmentCondition.UNKNOWN
+        return EnvironmentCondition(self.environment_block.value)
+
 
 _UNKNOWN_READING: Final[ConnectivityReading] = ConnectivityReading(
     internet=ConnectivityFacet.UNKNOWN, ssh=ConnectivityFacet.UNKNOWN, observed_at=None
@@ -411,6 +465,32 @@ class NetworkProber(MutableModel, ABC):
         """Whether ``host:port`` answers with an SSH protocol banner."""
 
 
+def _address_attempt_seconds(remaining_seconds: float, remaining_address_count: int) -> float:
+    """How long one address may take: an equal share of what is left of its endpoint's budget.
+
+    An address that drops the SYN rather than refusing it takes every second it
+    is given, and a routable IPv6 address on a network that blackholes IPv6
+    egress is exactly that -- the case the walk over an endpoint's addresses
+    exists for. Handed more than its share, it would report an endpoint that
+    answers on a later address as unreachable, which for a dual-stack quorum
+    host reads as this device being offline while its IPv4 works.
+
+    An equal share rather than a fixed reservation, because what has to be held
+    back is every attempt still to come, not one of them: ``bitbucket.org``
+    publishes three AAAA and three A records, so a rule that reserved for one
+    successor would let the second silent address spend what the other four
+    needed. Dividing by the addresses left instead leaves each of them something
+    to dial on, and the last -- which is the whole of what remains, since its
+    count is one -- is reached whatever the ones before it did.
+
+    What that costs is a narrower window per address on a many-addressed
+    endpoint. It is the same trade ``_DEFAULT_PROBE_TIMEOUT_SECONDS`` already
+    makes: a network that cannot answer a well-connected host inside a share of
+    that budget is not one a workspace is reachable over either.
+    """
+    return remaining_seconds / remaining_address_count
+
+
 class SocketNetworkProber(NetworkProber):
     """A :class:`NetworkProber` backed by blocking stdlib sockets.
 
@@ -421,10 +501,69 @@ class SocketNetworkProber(NetworkProber):
 
     timeout_seconds: float = Field(
         default=_DEFAULT_PROBE_TIMEOUT_SECONDS,
-        description="Budget for each connection attempt, and for the SSH banner read.",
+        description="Budget for connecting to one endpoint, however many addresses it resolves to, and for the banner read.",
     )
 
-    # UnicodeError alongside OSError in both methods: the endpoints come from
+    def _connect_within_budget(self, host: str, port: int) -> socket.socket | None:
+        """Connect to ``host:port``, spending one budget on the endpoint rather than one per address.
+
+        ``socket.create_connection`` cannot be asked for that: it walks the
+        resolved addresses itself and re-applies its ``timeout`` to each one, so
+        a single multi-homed host spends the budget once per address --
+        ``bitbucket.org`` answers on three A records, measured at 3.0s against a
+        1.5s budget where this loop takes 1.5s. That multiplication is what put
+        the whole probe's worst case above the concurrency group's exit budget,
+        and it is what a quit landing mid-round has to wait out.
+
+        The addresses are still tried in turn, because that is what makes a host
+        reachable at all when its first address family is not routable from
+        here. What changes is that they share one deadline, and that each takes
+        an equal share of what is left of it (:func:`_address_attempt_seconds`)
+        -- otherwise one that blackholes spends the lot and the walk is a walk
+        in name only.
+
+        Returns the connected socket, which the caller owns, or None when no
+        address answered -- refused, unreachable, unopenable, or still silent
+        when its share of the budget ran out. Raises what resolution raises; the
+        callers report that as the endpoint not answering.
+
+        The budget starts once the addresses are in hand. Charging resolution to
+        it would bound nothing -- ``getaddrinfo`` blocks for as long as it blocks
+        either way -- while a lookup slower than the budget would leave nothing
+        to connect with, reporting a reachable endpoint as unreachable. An
+        uncached lookup right after a reassociation is exactly when this runs.
+        """
+        address_infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        deadline = time.monotonic() + self.timeout_seconds
+        for index, (family, socket_type, protocol, _canonical_name, address) in enumerate(address_infos):
+            attempt_seconds = _address_attempt_seconds(
+                remaining_seconds=deadline - time.monotonic(),
+                remaining_address_count=len(address_infos) - index,
+            )
+            # Zero would put the socket in non-blocking mode rather than time
+            # out, so the budget is spent as soon as it is not positive.
+            if attempt_seconds <= 0.0:
+                logger.debug("Probe of {}:{} spent its budget before reaching {}", host, port, address[0])
+                break
+            try:
+                connection = socket.socket(family, socket_type, protocol)
+            # A family the kernel does not support is one more address that
+            # cannot be reached from here, so it falls through to the next one
+            # rather than ending the walk.
+            except OSError as e:
+                logger.debug("Probe of {}:{} could not open a socket for {}: {}", host, port, address[0], e)
+                continue
+            try:
+                connection.settimeout(attempt_seconds)
+                connection.connect(address)
+            except OSError as e:
+                logger.debug("Probe of {}:{} did not connect to {}: {}", host, port, address[0], e)
+                connection.close()
+                continue
+            return connection
+        return None
+
+    # UnicodeError alongside OSError in both of these: the endpoints come from
     # discovery, and a hostname getaddrinfo's idna codec refuses to encode -- a
     # label past 63 characters -- raises a ValueError rather than an OSError. A
     # non-ASCII label is not one of these: it punycodes and comes back as an
@@ -433,15 +572,25 @@ class SocketNetworkProber(NetworkProber):
     # latched on with nothing left to lift it.
     def is_reachable(self, host: str, port: int) -> bool:
         try:
-            with socket.create_connection((host, port), timeout=self.timeout_seconds):
-                return True
+            connection = self._connect_within_budget(host, port)
         except (OSError, UnicodeError) as e:
             logger.debug("Connectivity probe of {}:{} did not connect: {}", host, port, e)
             return False
+        if connection is None:
+            return False
+        with connection:
+            return True
 
     def is_ssh_server(self, host: str, port: int) -> bool:
         try:
-            with socket.create_connection((host, port), timeout=self.timeout_seconds) as connection:
+            connection = self._connect_within_budget(host, port)
+        except (OSError, UnicodeError) as e:
+            logger.debug("SSH probe of {}:{} did not connect: {}", host, port, e)
+            return False
+        if connection is None:
+            return False
+        try:
+            with connection:
                 # Read until the prefix is in hand or the peer stops sending. A
                 # single recv may return fewer bytes than asked for, and taking
                 # that short read as "not an SSH server" would report a working
@@ -467,7 +616,7 @@ class SocketNetworkProber(NetworkProber):
                     if not chunk:
                         break
                     banner += chunk
-        except (OSError, UnicodeError) as e:
+        except OSError as e:
             logger.debug("SSH probe of {}:{} did not answer: {}", host, port, e)
             return False
         return banner.startswith(_SSH_BANNER_PREFIX)
@@ -557,7 +706,7 @@ class ConnectivityDetector(MutableModel):
         ),
     )
     concurrency_group: SkipValidation[ConcurrencyGroup] = Field(
-        description="Parent group for the SSH facet's concurrent round."
+        description="Parent group both of the probe's concurrent rounds fan out under."
     )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -675,6 +824,12 @@ class ConnectivityDetector(MutableModel):
             # during the measurement disqualifies the whole of it.
             with self._lock:
                 generation = self._reading_generation
+            # Checked before the round as well as after it, the way
+            # :meth:`_read_ssh_facet` checks before each of its own: the round
+            # starts threads on the parent group, which refuses outright once
+            # that group is shutting down rather than answering short.
+            if self._is_shutting_down():
+                return self._abandon_probe()
             is_internet_up = self._does_any_probe_host_answer(_HTTPS_PORT)
             if self._is_shutting_down():
                 return self._abandon_probe()
@@ -719,18 +874,40 @@ class ConnectivityDetector(MutableModel):
         logger.debug("Abandoning a connectivity probe: the app is shutting down")
         return self.get_reading()
 
+    def _ask_probe_host(self, host: str, port: int) -> bool:
+        """Whether one quorum host answers on ``port``, opening no connection once shut down."""
+        if self._is_shutting_down():
+            return False
+        return self.prober.is_reachable(host, port)
+
     def _does_any_probe_host_answer(self, port: int) -> bool:
-        """Whether any public quorum host answers on ``port``, opening no connection once shut down.
+        """Whether any public quorum host answers on ``port``, asking them all at once.
+
+        Concurrent for the same reason the SSH round is (see
+        :meth:`_does_any_ssh_endpoint_answer`) and with the same trade: "one of
+        them answered" could stop at the first, but "none of them did" -- the
+        reading that declares this device offline -- has to hear from every
+        host, and asking them one at a time makes that the sum of every budget
+        rather than the slowest one. It was the largest single term in the
+        probe's worst case, which has to fit inside the concurrency group's exit
+        budget.
+
+        What it costs is connections on the path where the answer is good and
+        nothing is waiting on it: three rather than one, per probe.
 
         A short round on shutdown reads as "nothing answered", which is why
         every caller re-checks :meth:`_is_shutting_down` before believing it.
         """
-        for host in self.probe_hosts:
-            if self._is_shutting_down():
-                return False
-            if self.prober.is_reachable(host, port):
-                return True
-        return False
+        if not self.probe_hosts:
+            return False
+        with ConcurrencyGroupExecutor(
+            parent_cg=self.concurrency_group,
+            name="connectivity-internet-probe",
+            max_workers=len(self.probe_hosts),
+        ) as executor:
+            futures = [executor.submit(self._ask_probe_host, host, port) for host in self.probe_hosts]
+            # Resolved into a list first, for the reason the SSH round gives.
+            return any([future.result() for future in futures])
 
     def _ask_ssh_endpoint(self, endpoint: SshEndpoint) -> bool:
         """Whether one endpoint serves an SSH banner, opening no connection once shut down.
@@ -751,8 +928,9 @@ class ConnectivityDetector(MutableModel):
         withholds a dispatch -- has to hear from every endpoint, and asking them
         one at a time makes that the sum of every budget. A round of one
         workspace endpoint and the three public hosts was measured at 9.25s
-        against a 1.5s per-connection budget, because one multi-homed public host
-        spends that budget once per resolved address.
+        against a 1.5s budget that was then per *connection*, so one multi-homed
+        public host spent it once per resolved address; the budget is the
+        endpoint's now (:meth:`SocketNetworkProber._connect_within_budget`).
 
         The trade is that every endpoint is now asked even when the first would
         have settled it. The wall clock is the slowest single endpoint either
@@ -871,7 +1049,7 @@ class ConnectivityDetector(MutableModel):
         restart stranded, every held refresh unpublished, and the surfaces
         latched on the last bad reading. The families are the widest the probe
         can reach here with: ``workspace_ssh_endpoints_fn`` is a walk over
-        discovery, and the SSH round starts threads on the parent group, which
+        discovery, and each round starts threads on the parent group, which
         refuses once that group is shutting down or has a failed strand.
         """
         while not concurrency_group.is_shutting_down():

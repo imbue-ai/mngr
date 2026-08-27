@@ -32,7 +32,7 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
-from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
+from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 
 # Bumped on ANY breaking change to the models in this module. The server
@@ -42,7 +42,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 6
+UI_SCHEMA_VERSION: int = 7
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -281,7 +281,13 @@ class UiEnvironmentMessage(FrozenModel):
     """
 
     type: Literal["environment"] = "environment"
-    state: EnvironmentBlock = Field(description="Device-level condition (offline / SSH-blocked network), or NONE")
+    state: EnvironmentCondition = Field(
+        description=(
+            "Device-level condition (offline / SSH-blocked network), NONE for a device measured "
+            "fine, or UNKNOWN while nothing has been measured -- before the first probe, and "
+            "after a wake until the next one. A surface reading UNKNOWN blames nothing."
+        )
+    )
 
 
 class UiWorkspaceStoppedMessage(FrozenModel):

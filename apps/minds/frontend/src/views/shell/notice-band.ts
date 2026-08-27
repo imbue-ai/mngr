@@ -9,7 +9,7 @@
 // the loss of every machine, so it names itself rather than the stuck machine
 // it produces -- restarting that machine would not help.
 
-import type { DiscoveryHealth, EnvironmentBlock, WorkspaceHealth } from "../../models/health";
+import type { DiscoveryHealth, EnvironmentCondition, WorkspaceHealth } from "../../models/health";
 
 /** What an action asks the shell to do. The views bind these; the decision
  * itself stays free of routing and IPC. */
@@ -32,6 +32,13 @@ export interface NoticePayload {
 const DISCOVERY_BLOCKED_MESSAGE =
   "Minds lost contact with your machines and can't reconnect on its own. Your work is safe.";
 
+/** The conditions with a line to say: a measured, confirmed block. */
+type EnvironmentBlock = Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">;
+
+function isEnvironmentBlock(condition: EnvironmentCondition): condition is EnvironmentBlock {
+  return condition !== "NONE" && condition !== "UNKNOWN";
+}
+
 /**
  * What this device's own condition means, in one line.
  *
@@ -46,7 +53,7 @@ const DISCOVERY_BLOCKED_MESSAGE =
  * stopped being able to look at exactly the moment it went offline, so a
  * machine that died a second earlier would be described as fine.
  */
-const ENVIRONMENT_BLOCKED_MESSAGE: Record<Exclude<EnvironmentBlock, "NONE">, string> = {
+const ENVIRONMENT_BLOCKED_MESSAGE: Record<EnvironmentBlock, string> = {
   OFFLINE: "No network connection.",
   SSH_BLOCKED: "This network blocks the connection to your machines.",
 };
@@ -71,8 +78,14 @@ export interface NoticeBandContext {
   isRestartAppAvailable?: boolean;
   /** The provider hosting this machine, when discovery cannot reach it. */
   unreachableProviderLabel?: string | null;
-  /** True of this device as a whole, before any machine has been convicted. */
-  deviceEnvironmentBlock?: EnvironmentBlock;
+  /** True of this device as a whole, before any machine has been convicted.
+   * "UNKNOWN" while nothing has been measured, which withholds every blame
+   * below it rather than clearing the device. */
+  deviceEnvironment?: EnvironmentCondition;
+  /** The shape of the restart in flight, from the health frame: false is the
+   * user's own stop+start bounce, true the app's start-only dispatch, null no
+   * restart to describe. */
+  isRestartStartOnly?: boolean | null;
   /** False for a machine on this device, which the network cannot explain. */
   isWorkspaceNetworkDependent?: boolean;
   /** This one connection failed on this device, on a network that works. */
@@ -108,7 +121,8 @@ export function noticeBandFor(
   const {
     isRestartAppAvailable = true,
     unreachableProviderLabel = null,
-    deviceEnvironmentBlock = "NONE",
+    deviceEnvironment = "NONE",
+    isRestartStartOnly = null,
     isWorkspaceNetworkDependent = true,
     isDeviceCannotConnect = false,
   } = context;
@@ -120,18 +134,22 @@ export function noticeBandFor(
   // provider there would blame a backend that is fine for a condition the user
   // can fix. It keeps the recovering key, since the condition is still "we have
   // lost contact", only correctly attributed. It speaks over a healthy machine
-  // too, offering nothing: there is no recovery card to open. A restart that is
-  // actually running is the one exception, narrating itself -- there is a
-  // restart to report, so the waiting state would be false.
+  // too, offering nothing: there is no recovery card to open. The one exception
+  // is a restart the user asked for -- their own stop+start bounce narrates
+  // itself, since there is a restart to report and the waiting state would be
+  // false. The app's own start-only dispatch is not that: it is entered
+  // unasked, within seconds of any network flap, and lasts as long as the
+  // network is down, which is precisely when the device's condition is the
+  // explanation the user needs.
   //
   // And it is silent over a machine that runs on this device: a docker
   // container answers over loopback with the wifi off, so a dead network
   // explains nothing about its outage. Displacing its recovery notice would
   // blame the network for a machine the network cannot touch, and send the
   // user to a card for a restart that would have worked.
-  const isRestartRunning = workspaceHealth === "restarting";
-  const block: EnvironmentBlock =
-    isRestartRunning || !isWorkspaceNetworkDependent ? "NONE" : deviceEnvironmentBlock;
+  const isUserBounceRunning = workspaceHealth === "restarting" && isRestartStartOnly === false;
+  const condition: EnvironmentCondition =
+    isUserBounceRunning || !isWorkspaceNetworkDependent ? "NONE" : deviceEnvironment;
   // The three explanations in rank order, each one line. They differ only in
   // what they say, so the ranking is the whole of the logic and is kept where
   // it can be read as a list -- the payload they share is built once below.
@@ -141,16 +159,22 @@ export function noticeBandFor(
   // or what minds is doing about it. The device-side line likewise says whose
   // fault it is and nothing else -- its remedy is an app restart, a real
   // interruption, offered from the card next to the error that justifies it.
-  const explanation =
-    block !== "NONE"
-      ? ENVIRONMENT_BLOCKED_MESSAGE[block]
-      : workspaceHealth === "healthy"
-        ? null
-        : unreachableProviderLabel !== null
-          ? `Can't connect to ${unreachableProviderLabel}`
-          : isDeviceCannotConnect
-            ? "Can't connect to this machine from this device"
-            : null;
+  //
+  // An unmeasured device names nobody. Both lines below it blame something on
+  // the far side of this device's network, and until a probe has looked at
+  // that network there is no ground to say the provider is what failed --
+  // after a wake, the provider's own poll errored because the laptop was
+  // asleep, and naming it would be the wrong headline. The generic recovering
+  // line below still speaks, so the user is not left with nothing.
+  const explanation = isEnvironmentBlock(condition)
+    ? ENVIRONMENT_BLOCKED_MESSAGE[condition]
+    : workspaceHealth === "healthy" || condition === "UNKNOWN"
+      ? null
+      : unreachableProviderLabel !== null
+        ? `Can't connect to ${unreachableProviderLabel}`
+        : isDeviceCannotConnect
+          ? "Can't connect to this machine from this device"
+          : null;
   if (explanation !== null) {
     return {
       key: "workspace-recovering",
@@ -199,14 +223,14 @@ export function noticeBandFor(
 export function localPageNoticeFor(
   discoveryHealth: DiscoveryHealth,
   isRestartAppAvailable = true,
-  environmentBlock: EnvironmentBlock = "NONE",
+  environment: EnvironmentCondition = "NONE",
 ): NoticePayload | null {
   if (discoveryHealth === "blocked") return discoveryBlockedNotice(isRestartAppAvailable);
-  if (environmentBlock === "NONE") return null;
+  if (!isEnvironmentBlock(environment)) return null;
   return {
     key: "environment-blocked",
     variant: "warn",
-    message: ENVIRONMENT_BLOCKED_MESSAGE[environmentBlock],
+    message: ENVIRONMENT_BLOCKED_MESSAGE[environment],
     action: null,
   };
 }

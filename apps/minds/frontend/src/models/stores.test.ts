@@ -209,13 +209,15 @@ describe("HealthStore device environment", () => {
   it("reports the device condition the server sends, with nothing convicted", () => {
     // The cold-start case: minds opened on a dead network. No machine has been
     // asked to load, so none is stuck -- and the hub page still has to be able
-    // to say what is wrong.
+    // to say what is wrong. Until the server has said anything, nothing has
+    // been measured, and a store that read "fine" here would let the surfaces
+    // blame the provider before the first frame lands.
     const store = new HealthStore();
-    expect(store.appEnvironmentBlock()).toBe("NONE");
+    expect(store.appEnvironmentCondition()).toBe("UNKNOWN");
 
     store.applyEnvironmentMessage({ type: "environment", state: "OFFLINE" });
 
-    expect(store.appEnvironmentBlock()).toBe("OFFLINE");
+    expect(store.appEnvironmentCondition()).toBe("OFFLINE");
     expect(store.statusFor("agent-aa11")).toBe("healthy");
   });
 
@@ -225,11 +227,11 @@ describe("HealthStore device environment", () => {
       type: "environment",
       state: "SSH_BLOCKED",
     });
-    expect(store.appEnvironmentBlock()).toBe("SSH_BLOCKED");
+    expect(store.appEnvironmentCondition()).toBe("SSH_BLOCKED");
 
     store.applyEnvironmentMessage({ type: "environment", state: "NONE" });
 
-    expect(store.appEnvironmentBlock()).toBe("NONE");
+    expect(store.appEnvironmentCondition()).toBe("NONE");
   });
 
   it("keeps the device condition across a reconnect resync", () => {
@@ -241,7 +243,7 @@ describe("HealthStore device environment", () => {
 
     store.reset();
 
-    expect(store.appEnvironmentBlock()).toBe("OFFLINE");
+    expect(store.appEnvironmentCondition()).toBe("OFFLINE");
   });
 });
 
@@ -305,7 +307,7 @@ describe("boot seeding", () => {
       "evt-9",
     ]);
     expect(boot.stores.health.statusFor("agent-aa11")).toBe("restarting");
-    expect(boot.stores.health.appEnvironmentBlock()).toBe("OFFLINE");
+    expect(boot.stores.health.appEnvironmentCondition()).toBe("OFFLINE");
   });
 
   it("applySnapshotToStores lands the connect-time snapshot in every store", () => {
@@ -336,6 +338,6 @@ describe("boot seeding", () => {
     expect(stores.notifications.unresolvedCount).toBe(1);
     expect(stores.accounts.hasAccounts).toBe(true);
     expect(stores.accounts.accountEmail).toBe("a@b.c");
-    expect(stores.health.appEnvironmentBlock()).toBe("OFFLINE");
+    expect(stores.health.appEnvironmentCondition()).toBe("OFFLINE");
   });
 });

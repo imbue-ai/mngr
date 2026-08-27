@@ -32,6 +32,7 @@ from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.environment_signals import SocketNetworkProber
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
 from imbue.minds.desktop_client.environment_signals import _MAX_SAMPLED_WORKSPACE_SSH_ENDPOINTS
+from imbue.minds.desktop_client.environment_signals import _address_attempt_seconds
 from imbue.minds.desktop_client.testing import PUBLIC_SSH_ENDPOINTS
 from imbue.minds.desktop_client.testing import STUB_CONNECTIVITY_HOSTS
 from imbue.minds.desktop_client.testing import SideEffectingStubNetworkProber
@@ -200,6 +201,39 @@ def test_a_stretch_reaching_back_into_a_sleep_is_disqualified() -> None:
     assert not tracker.was_asleep_since(interval_end + timedelta(seconds=1))
 
 
+def test_a_window_is_disqualified_only_if_the_sleep_fell_inside_it() -> None:
+    """An observation that is already over is judged by its own window, not by everything since.
+
+    A discovery poll reports when it began and when it finished. One that
+    finished before the lid closed and was merely consumed after the wake is
+    evidence; ``was_asleep_since`` would throw it out, which is why the window
+    form exists.
+    """
+    clocks = _Clocks(_T0)
+    tracker, _wakes = _make_tracker(clocks)
+
+    # One interval spanning [T0 + 10s, T0 + 310s].
+    clocks.advance(10.0)
+    tracker.record_heartbeat()
+    clocks.advance(300.0, monotonic_seconds=0.0)
+    tracker.record_heartbeat()
+    sleep_start = _T0 + timedelta(seconds=10)
+    sleep_end = _T0 + timedelta(seconds=310)
+
+    # Closed before the sleep began: every second of it was watched.
+    assert not tracker.was_asleep_during(_T0, sleep_start - timedelta(seconds=1))
+    assert tracker.was_asleep_since(_T0), "the 'since' form cannot tell this window apart"
+    # Straddling it, wholly inside it, or opened inside it: not evidence.
+    assert tracker.was_asleep_during(_T0, sleep_end + timedelta(seconds=5))
+    assert tracker.was_asleep_during(sleep_start + timedelta(seconds=1), sleep_end - timedelta(seconds=1))
+    assert tracker.was_asleep_during(sleep_end - timedelta(seconds=1), sleep_end + timedelta(seconds=5))
+    # Opened at the wake: every second of it was watched.
+    assert not tracker.was_asleep_during(sleep_end, sleep_end + timedelta(seconds=5))
+    # No sleep recorded at all answers no for any window.
+    fresh_tracker, _ = _make_tracker(_Clocks(_T0))
+    assert not fresh_tracker.was_asleep_during(_T0, sleep_end)
+
+
 def test_a_backwards_clock_step_records_nothing_and_rebaselines() -> None:
     """An NTP correction is not evidence the process stopped running."""
     clocks = _Clocks(_T0)
@@ -283,12 +317,17 @@ def test_a_working_network_reads_online_and_blocks_nothing(root_concurrency_grou
     assert reading.internet is ConnectivityFacet.ONLINE
     assert reading.ssh is ConnectivityFacet.ONLINE
     assert reading.environment_block is EnvironmentBlock.NONE
-    # The internet facet asks one at a time, so the first host answering ends it.
-    # The SSH round asks its whole quorum at once, which is what buys the verdict
-    # that has to hear from every endpoint -- so a good network costs three
-    # connections there rather than one.
-    assert prober.probed_endpoints[0] == "alpha.example:443"
-    assert sorted(prober.probed_endpoints[1:]) == sorted(f"ssh://{host}:22" for host in STUB_CONNECTIVITY_HOSTS)
+    # Both rounds ask their whole quorum at once, which is what buys the verdicts
+    # that have to hear from every host -- so a good network costs three
+    # connections in each rather than one. Sorted because the rounds ask on
+    # threads of their own, so which host records itself first is a scheduling
+    # accident rather than anything promised.
+    assert sorted(call for call in prober.probed_endpoints if not call.startswith("ssh://")) == sorted(
+        f"{host}:443" for host in STUB_CONNECTIVITY_HOSTS
+    )
+    assert sorted(call for call in prober.probed_endpoints if call.startswith("ssh://")) == sorted(
+        f"ssh://{host}:22" for host in STUB_CONNECTIVITY_HOSTS
+    )
 
 
 def test_no_host_answering_reads_offline_and_leaves_ssh_untested(root_concurrency_group: ConcurrencyGroup) -> None:
@@ -514,19 +553,27 @@ def test_a_probe_opens_no_connections_once_the_app_is_going_down(root_concurrenc
     assert reading == reading_before, "and the reading in force must survive the round that measured nothing"
 
 
-class _ProberThatRendezvousesOnEverySshQuestion(StubNetworkProber):
-    """Holds every SSH question at a barrier until the whole round has arrived.
+class _ProberThatRendezvouses(StubNetworkProber):
+    """Holds every question of one round at a barrier until the whole round has arrived.
 
     A round asked one endpoint at a time can never fill the barrier, so it trips
     instead of releasing -- which makes "these ran together" an outcome rather
-    than a stopwatch reading.
+    than a stopwatch reading. The subclass says which round is held.
     """
 
     rendezvous: Callable[[], None] = Field(description="Waits for the rest of the round to arrive")
 
+
+class _ProberThatRendezvousesOnEverySshQuestion(_ProberThatRendezvouses):
     def is_ssh_server(self, host: str, port: int) -> bool:
         self.rendezvous()
         return super().is_ssh_server(host, port)
+
+
+class _ProberThatRendezvousesOnEveryInternetQuestion(_ProberThatRendezvouses):
+    def is_reachable(self, host: str, port: int) -> bool:
+        self.rendezvous()
+        return super().is_reachable(host, port)
 
 
 # Ceiling on "the whole round has arrived": a concurrent round fills the barrier
@@ -537,12 +584,24 @@ class _ProberThatRendezvousesOnEverySshQuestion(StubNetworkProber):
 _RENDEZVOUS_WAIT_SECONDS: Final[float] = 2.0
 
 
-def test_the_ssh_round_asks_every_endpoint_at_once() -> None:
-    """The endpoints of one round are dialled concurrently, not one after another.
+@pytest.mark.parametrize(
+    ("prober_type", "is_ssh_round"),
+    [(_ProberThatRendezvousesOnEverySshQuestion, True), (_ProberThatRendezvousesOnEveryInternetQuestion, False)],
+    ids=["ssh", "internet"],
+)
+def test_a_round_asks_every_one_of_its_endpoints_at_once(
+    prober_type: type[_ProberThatRendezvouses], is_ssh_round: bool
+) -> None:
+    """A round's endpoints are dialled concurrently, not one after another.
 
-    This is the round a stuck machine's dispatch waits on, and its worst case --
-    nothing answered -- has to hear from every endpoint. Serially that is the sum
-    of every connection budget; one such round was measured at 9.25s.
+    Both rounds' expensive answer is the negative one, and it has to hear from
+    every endpoint: serially that is the sum of every connection budget. The SSH
+    round is the one a stuck machine's dispatch waits on, and one such round was
+    measured at 9.25s; the internet round is the term that declares this device
+    offline, and was the largest single term in the probe's worst case, which
+    has to fit inside the concurrency group's exit budget when a quit lands
+    mid-round. A first answer still settles the facet either way; what changed
+    is that the rest were already being asked.
     """
     endpoint_count = len(STUB_CONNECTIVITY_HOSTS)
     barrier = threading.Barrier(endpoint_count, timeout=_RENDEZVOUS_WAIT_SECONDS)
@@ -557,20 +616,21 @@ def test_the_ssh_round_asks_every_endpoint_at_once() -> None:
         except threading.BrokenBarrierError:
             pass
 
-    prober = _ProberThatRendezvousesOnEverySshQuestion(
+    prober = prober_type(
         reachable_hosts=set(STUB_CONNECTIVITY_HOSTS),
         ssh_endpoints=set(PUBLIC_SSH_ENDPOINTS),
         rendezvous=rendezvous,
     )
 
-    with ConcurrencyGroup(name="test-ssh-round") as cg:
+    with ConcurrencyGroup(name="test-concurrent-round") as cg:
         detector = build_connectivity_detector_over(prober, cg)
         reading = detector.probe_now()
 
     assert not barrier.broken, "the round did not run its endpoints together"
+    assert reading.internet is ConnectivityFacet.ONLINE
     assert reading.ssh is ConnectivityFacet.ONLINE
-    ssh_questions = [call for call in prober.probed_endpoints if call.startswith("ssh://")]
-    assert len(ssh_questions) == endpoint_count
+    questions = [call for call in prober.probed_endpoints if call.startswith("ssh://") is is_ssh_round]
+    assert len(questions) == endpoint_count
 
 
 class _ProberThatQuitsPartWayThroughTheSshFacet(StubNetworkProber):
@@ -691,8 +751,10 @@ def test_a_reachable_workspace_endpoint_settles_the_ssh_facet_without_the_public
 
     assert reading.ssh is ConnectivityFacet.ONLINE
     assert reading.environment_block is EnvironmentBlock.NONE
-    # Settled by minds' own endpoint; the public hosts were never asked.
-    assert prober.probed_endpoints == ["alpha.example:443", f"ssh://{_WORKSPACE_ENDPOINT.host}:22131"]
+    # Settled by minds' own endpoint; the public hosts were never asked on SSH.
+    assert [call for call in prober.probed_endpoints if call.startswith("ssh://")] == [
+        f"ssh://{_WORKSPACE_ENDPOINT.host}:22131"
+    ]
 
 
 def test_the_public_quorum_keeps_dead_machines_from_being_blamed_on_the_network(
@@ -783,6 +845,10 @@ def _build_waking_detector(
     return detector, prober
 
 
+@pytest.mark.witnesses(
+    "no-verdict-on-unobserved-time",
+    partial="witnesses the device's own connectivity reading only",
+)
 def test_a_reading_measured_across_a_wake_is_dropped_rather_than_stored(
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
@@ -903,15 +969,21 @@ _PROBE_BUDGET_SECONDS: Final[float] = 0.5
 
 
 @contextmanager
-def _loopback_listener(chunks: tuple[bytes, ...], chunk_delay_seconds: float = 0.0) -> Iterator[int]:
+def _loopback_listener(
+    chunks: tuple[bytes, ...], chunk_delay_seconds: float = 0.0, bind_host: str = "127.0.0.1"
+) -> Iterator[int]:
     """Serve ``chunks`` to every connection on a loopback port, yielding the port.
 
     Each connection is handled on its own thread and then held open until
     teardown: a peer that hangs up is a different answer from one that goes
     quiet, and the quiet one is what the banner read's deadline exists for.
+
+    ``bind_host`` is the loopback address to listen on, for the one test that
+    needs the listener on a particular one of ``localhost``'s addresses.
     """
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind(("127.0.0.1", 0))
+    family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
+    listener = socket.socket(family, socket.SOCK_STREAM)
+    listener.bind((bind_host, 0))
     listener.listen(8)
     port = int(listener.getsockname()[1])
     is_stopping = threading.Event()
@@ -1043,3 +1115,54 @@ def test_a_port_nothing_is_listening_on_answers_neither_question() -> None:
 
     assert not prober.is_reachable("127.0.0.1", port)
     assert not prober.is_ssh_server("127.0.0.1", port)
+
+
+def test_a_host_is_reached_on_whichever_of_its_addresses_answers() -> None:
+    """The budget is spent per endpoint, so the walk over its addresses is ours to get right.
+
+    ``socket.create_connection`` does that walk itself, and giving it up is what
+    stops one multi-homed host from spending the budget once per address. What
+    it would take with it, done wrong, is the fallback that makes a host
+    reachable at all when the address its resolver hands back first is not the
+    one answering -- an ordinary shape for minds' own endpoints on any machine
+    with both address families configured.
+
+    The listener is bound to the address ``localhost`` resolves to *last*, so
+    reaching it means the walk got past the one that comes first.
+    """
+    loopback_addresses = tuple(str(info[4][0]) for info in socket.getaddrinfo("localhost", 0, 0, socket.SOCK_STREAM))
+    if len(set(loopback_addresses)) < 2:
+        pytest.skip("localhost resolves to one address here, so there is no fallback to exercise")
+    prober = SocketNetworkProber(timeout_seconds=_PROBE_BUDGET_SECONDS)
+
+    with _loopback_listener((_SSH_BANNER,), bind_host=loopback_addresses[-1]) as port:
+        assert prober.is_reachable("localhost", port)
+        assert prober.is_ssh_server("localhost", port)
+
+
+@pytest.mark.parametrize("address_count", [1, 2, 3, 6])
+def test_no_address_can_spend_the_budget_the_ones_behind_it_need(address_count: int) -> None:
+    """The fallback the walk exists for is the address that goes silent, not the one that refuses.
+
+    A refused address costs nothing, so the walk reaches the next one whatever
+    the budget rule is -- which is all a local listener can stage. What no
+    listener can stage is an address that drops the SYN, and that is the case
+    the walk is for: a routable IPv6 address on a network that blackholes IPv6
+    takes every second it is given. So the schedule is walked here with every
+    address silent, which is the worst the rule has to hold under.
+
+    Six addresses because that is ``bitbucket.org``, one of the quorum hosts
+    this dials: three AAAA records ahead of three A records, which on a network
+    that carries no IPv6 is five silent addresses in front of the one that
+    answers.
+    """
+    budget_seconds = 1.5
+    remaining_seconds = budget_seconds
+
+    for index in range(address_count):
+        attempt_seconds = _address_attempt_seconds(remaining_seconds, address_count - index)
+        assert attempt_seconds > 0.0, "every address must be left something to dial on, or the walk stops short"
+        # The silent case: this address spends the whole of what it was given.
+        remaining_seconds -= attempt_seconds
+
+    assert remaining_seconds >= 0.0, "and the whole walk must stay inside the endpoint's budget"

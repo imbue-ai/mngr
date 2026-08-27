@@ -77,7 +77,8 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
       health: {
         statusFor: () => "healthy",
         discoveryHealth: "healthy",
-        appEnvironmentBlock: () => "NONE",
+        appEnvironmentCondition: () => "NONE",
+        isRestartStartOnlyFor: () => null,
       },
       notifications: {
         entries: [],
@@ -387,7 +388,8 @@ describe("Shell notifications overlay", () => {
         health: {
           statusFor: () => "healthy",
           discoveryHealth: "healthy",
-          appEnvironmentBlock: () => "NONE",
+          appEnvironmentCondition: () => "NONE",
+          isRestartStartOnlyFor: () => null,
         },
         notifications: {
         entries: [],
@@ -708,7 +710,8 @@ describe("Shell notice band wiring", () => {
         health: {
           statusFor: () => "stuck",
           discoveryHealth: "healthy",
-          appEnvironmentBlock: () => "SSH_BLOCKED",
+          appEnvironmentCondition: () => "SSH_BLOCKED",
+          isRestartStartOnlyFor: () => null,
         },
       },
     } as unknown as Partial<ShellState>);
@@ -742,7 +745,8 @@ describe("Shell notice band wiring", () => {
         health: {
           statusFor: () => "healthy",
           discoveryHealth: "healthy",
-          appEnvironmentBlock: () => "OFFLINE",
+          appEnvironmentCondition: () => "OFFLINE",
+          isRestartStartOnlyFor: () => null,
         },
       },
     } as unknown as Partial<ShellState>);
@@ -777,7 +781,8 @@ describe("Shell notice band wiring", () => {
         health: {
           statusFor: () => "stuck",
           discoveryHealth: "healthy",
-          appEnvironmentBlock: () => "OFFLINE",
+          appEnvironmentCondition: () => "OFFLINE",
+          isRestartStartOnlyFor: () => null,
         },
       },
     } as unknown as Partial<ShellState>);
@@ -818,7 +823,8 @@ describe("Shell toast layer", () => {
         health: {
           statusFor: () => "healthy",
           discoveryHealth: "healthy",
-          appEnvironmentBlock: () => "NONE",
+          appEnvironmentCondition: () => "NONE",
+          isRestartStartOnlyFor: () => null,
         },
         notifications: { entries: [liveEntry] },
       } as unknown as ShellState["stores"],
@@ -858,7 +864,8 @@ describe("Shell toast layer", () => {
         health: {
           statusFor: () => "healthy",
           discoveryHealth: "healthy",
-          appEnvironmentBlock: () => "NONE",
+          appEnvironmentCondition: () => "NONE",
+          isRestartStartOnlyFor: () => null,
         },
         notifications: { entries: [notificationEntry("n1")] },
       } as unknown as ShellState["stores"],

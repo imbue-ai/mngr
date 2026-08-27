@@ -779,6 +779,10 @@ def test_end_create_attempt_grace_is_idempotent_for_unknown_agent() -> None:
     tracker.end_create_attempt_grace(AgentId.generate())
 
 
+@pytest.mark.witnesses(
+    "no-verdict-on-unobserved-time",
+    partial="witnesses the stuck conviction only; the same rule binds every other verdict",
+)
 def test_failure_run_that_straddles_a_sleep_re_accumulates_from_the_wake() -> None:
     """The stuck threshold must be reached entirely while the process was running.
 

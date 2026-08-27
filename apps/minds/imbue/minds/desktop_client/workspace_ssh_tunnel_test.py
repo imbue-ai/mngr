@@ -35,12 +35,31 @@ def _ssh(host: str, port: int) -> RemoteSSHInfo:
     return RemoteSSHInfo(user="root", host=host, port=port, key_path=Path("/keys/k"))
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "LOCALHOST", "  127.0.0.1  "])
+# Beyond the canonical three: mngr hands this whatever `urlparse().hostname` gave
+# it for a docker daemon URL, and a machine's own coordinate is whatever its
+# provider reported -- so 127.0.0.0/8 at large, an expanded v6 loopback and a
+# fully-qualified `localhost.` all reach here.
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "LOCALHOST",
+        "  127.0.0.1  ",
+        "127.0.1.1",
+        "127.0.0.53",
+        "localhost.",
+        "0:0:0:0:0:0:0:1",
+    ],
+)
 def test_is_loopback_host_true_for_loopback_addresses(host: str) -> None:
     assert is_loopback_host(host) is True
 
 
-@pytest.mark.parametrize("host", ["remote.example.com", "10.0.0.5", "1.2.3.4", "modal-x.modal.host", ""])
+@pytest.mark.parametrize(
+    "host", ["remote.example.com", "10.0.0.5", "1.2.3.4", "modal-x.modal.host", "", "::", "0.0.0.0"]
+)
 def test_is_loopback_host_false_for_routable_hosts(host: str) -> None:
     assert is_loopback_host(host) is False
 

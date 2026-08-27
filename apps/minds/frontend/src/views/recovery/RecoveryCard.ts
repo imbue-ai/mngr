@@ -24,7 +24,7 @@ import { DialogCloseButton } from "../components/Modal";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
 import type { RecoveryModel } from "../../models/backups";
-import type { EnvironmentBlock } from "../../models/health";
+import type { EnvironmentCondition } from "../../models/health";
 import { electronBridge } from "../../electron-bridge";
 
 /**
@@ -131,7 +131,7 @@ const BACKEND_UNREACHABLE_EXPLANATION =
  * works, because otherwise it reads as the app being wrong about a connection
  * the user can see is fine.
  */
-const ENVIRONMENT_BLOCKED_EXPLANATION: Record<Exclude<EnvironmentBlock, "NONE">, string> = {
+const ENVIRONMENT_BLOCKED_EXPLANATION: Record<Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">, string> = {
   OFFLINE: "This device has no network connection. Minds will reconnect to your machine as soon as it does.",
   SSH_BLOCKED:
     "This network blocks the connection Minds uses to reach your machines (SSH). " +
@@ -223,11 +223,25 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // on the next poll, so reading health alone would drop a running
       // restart's spinner and log lines for a poll interval.
       const isBusy = model.isRestartRunning || isSettling || info.health === "restarting";
-      // The device's condition, and never over a running restart: there is a
-      // restart to narrate, and rendering the block would swap its spinner for
-      // a wait that does not hold it. The route answers NONE for a machine on
-      // this device, whose outage a dead network cannot explain.
-      const environment = isBusy ? "NONE" : info.device_environment;
+      // A restart dispatched from here knows its own shape from the click,
+      // before the tracker has caught up and can answer -- and that window is
+      // exactly when the user is looking at the card they just clicked. A
+      // restart merely attached to (the unattended one, another window's) does
+      // not, and has to take the tracker's word: ``isRestartRunning`` covers
+      // both, so it cannot stand in for the distinction.
+      const isRestartStartOnly = model.dispatchedRestartIsStartOnly ?? info.is_restart_start_only;
+      // The device's condition, and never over a restart the user asked for:
+      // their own stop+start bounce is a restart to narrate, and rendering the
+      // block would swap its spinner for a wait that does not hold it. The
+      // same holds while a finished restart waits for the confirmation that
+      // dismisses the card. The app's start-only dispatch is neither -- it is
+      // entered unasked within seconds of a network flap and lasts as long as
+      // the network is down, which is when the device's condition is the
+      // explanation the user needs, so it does not hide it. The route answers
+      // NONE for a machine on this device, whose outage a dead network cannot
+      // explain, and UNKNOWN while nothing has been measured.
+      const isNarratingUserBounce = (isBusy && isRestartStartOnly === false) || isSettling;
+      const environment: EnvironmentCondition = isNarratingUserBounce ? "NONE" : info.device_environment;
       // This device having no usable network outranks everything below,
       // including the backend verdict, because it explains those too: a laptop
       // that cannot reach the network cannot reach the provider either, so the
@@ -239,7 +253,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // its own: the machine answering clears it, and so does connectivity
       // coming back -- which also runs the start that was withheld. On a dead
       // network only the second of those can happen.
-      if (environment !== "NONE" && info.health !== "healthy") {
+      if (environment !== "NONE" && environment !== "UNKNOWN" && info.health !== "healthy") {
         return m("div", { class: "flex flex-col gap-3" }, [
           m("div", { class: "type-heading pr-10" }, deviceScopedHeading(info.workspace_name)),
           m("p", { class: "type-helper text-tertiary" }, ENVIRONMENT_BLOCKED_EXPLANATION[environment]),
@@ -260,7 +274,13 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // minds is in contact with is not unreachable whatever that poll did --
       // so the band withholds this same verdict on a healthy machine, and the
       // card owes the user the ending it stayed up to deliver instead.
-      if (info.is_backend_unreachable && info.health !== "healthy") {
+      //
+      // And withheld while this device's own network is unmeasured. The
+      // verdict blames something on the far side of that network; after a
+      // wake the provider's poll errored because the laptop was asleep, and
+      // naming the provider on the strength of no measurement is the wrong
+      // headline. The card's ordinary states below still describe the wait.
+      if (info.is_backend_unreachable && info.health !== "healthy" && environment !== "UNKNOWN") {
         return m("div", { class: "flex flex-col gap-3" }, [
           // Both halves of the verdict: which machine is affected, and why. The
           // card can be opened from a list or a stale tab, so the machine it
@@ -287,8 +307,12 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // All three outrank the machine's own health, and for the same reason --
       // the machine reads unhealthy *because* of them, and its restart episode
       // is an effect rather than a cause. As above, withheld over a machine
-      // that is answering: whatever failed earlier, it is not failing now.
-      if (info.is_device_cannot_connect && info.health !== "healthy") {
+      // that is answering: whatever failed earlier, it is not failing now. And
+      // withheld, like the verdict above, while this device's network is
+      // unmeasured: the copy's claim is a failure on a network that works, and
+      // nothing has measured that yet -- the band withholds its line for the
+      // same state.
+      if (info.is_device_cannot_connect && info.health !== "healthy" && environment !== "UNKNOWN") {
         const isRestartAppAvailable = electronBridge.isDesktop;
         return m("div", { class: "flex flex-col gap-3" }, [
           m("div", { class: "type-heading pr-10" }, deviceScopedHeading(info.workspace_name)),
@@ -325,13 +349,6 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
         ]);
       }
       const health = isBusy ? "restarting" : info.health;
-      // A restart dispatched from here knows its own shape from the click,
-      // before the tracker has caught up and can answer -- and that window is
-      // exactly when the user is looking at the card they just clicked. A
-      // restart merely attached to (the unattended one, another window's) does
-      // not, and has to take the tracker's word: ``isRestartRunning`` covers
-      // both, so it cannot stand in for the distinction.
-      const isRestartStartOnly = model.dispatchedRestartIsStartOnly ?? info.is_restart_start_only;
       return m("div", { class: "flex flex-col gap-4" }, [
         m("div", { class: "flex flex-col gap-2" }, [
           m("div", { class: "flex items-center gap-2 type-heading pr-10" }, [

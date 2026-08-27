@@ -15,17 +15,19 @@ machinery the latchkey gateway forwarding uses -- so the only minds-specific
 logic here is deciding when to broker and wrapping the manager's errors.
 """
 
+import ipaddress
+from typing import Final
+
 import paramiko
 
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 
-# SSH hosts reachable only from the hub itself: a local Docker/Lima target
-# publishes its sshd on one of these, so a peer (or remote) workspace cannot
-# reach it directly and the hub must broker a tunnel. Any other host is a
-# routable address the caller connects to directly.
-_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+# The one hostname that means loopback by definition rather than by resolution
+# (RFC 6761 reserves it), so it can be read without the DNS lookup that
+# :func:`is_loopback_host` must not make.
+_LOOPBACK_HOST_NAME: Final[str] = "localhost"
 
 
 class WorkspaceSshTunnelError(Exception):
@@ -33,8 +35,29 @@ class WorkspaceSshTunnelError(Exception):
 
 
 def is_loopback_host(host: str) -> bool:
-    """Whether an SSH host is a hub-only loopback address (not reachable by a peer workspace)."""
-    return host.strip().lower() in _LOOPBACK_HOSTS
+    """Whether an SSH host is served by this device itself rather than reached over the network.
+
+    Asked of the ``host`` of the :class:`RemoteSSHInfo` discovery reports for a
+    machine, and true has two readings that any change here has to keep
+    together: the address is reachable only from this device, so a peer
+    workspace needs a tunnel brokered to it, *and* it answers with the network
+    unplugged, so no connectivity reading has anything to say about that
+    machine. A local Docker or Lima target publishes its sshd on loopback and
+    satisfies both; a box's public name, a LAN address, or the host a remote
+    Docker daemon lives on satisfies neither.
+
+    Only literal addresses are read. Resolving a name would put a DNS lookup on
+    the recovery gate's path and on every endpoint sample, and would answer from
+    the very network being measured; ``localhost`` is exempt from that because
+    it is reserved for loopback by definition, so no lookup is needed to know it.
+    """
+    normalized_host = host.strip().rstrip(".").lower()
+    if normalized_host == _LOOPBACK_HOST_NAME:
+        return True
+    try:
+        return ipaddress.ip_address(normalized_host).is_loopback
+    except ValueError:
+        return False
 
 
 def broker_reverse_tunnel_into_caller(

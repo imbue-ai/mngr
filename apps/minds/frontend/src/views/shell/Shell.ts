@@ -351,7 +351,10 @@ export function Shell(): m.Component<ShellAttrs> {
         {
           isRestartAppAvailable: electronBridge.isDesktop,
           unreachableProviderLabel,
-          deviceEnvironmentBlock: shell.stores.health.appEnvironmentBlock(),
+          deviceEnvironment: shell.stores.health.appEnvironmentCondition(),
+          // So the band can tell the user's own bounce, which narrates itself,
+          // from the app's start-only dispatch, which must not hide the device.
+          isRestartStartOnly: agentScoped === null ? null : shell.stores.health.isRestartStartOnlyFor(agentScoped),
           // Which scopes that app-global condition to the machines it can
           // explain: one on an on-device backend answers over loopback with the
           // wifi off. A row we have no entry for keeps the conservative default.

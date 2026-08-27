@@ -52,6 +52,7 @@ from imbue.minds.desktop_client.backend_resolver import REQUESTS_EVENT_SOURCE_NA
 from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
+from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_aggregator import AggregatorDelta
@@ -228,6 +229,15 @@ class EnvelopeStreamConsumer(MutableModel):
             "are events-file replay (the pre-start backlog), whose provider "
             "errors describe the gap while minds was closed rather than the "
             "present, and are dropped by the observe handler."
+        ),
+    )
+    sleep_tracker: SleepTracker | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Records the windows in which this process was not running, so an errored snapshot "
+            "whose poll straddled one is treated like the pre-start replay: the error is dropped and "
+            "the snapshot advances no freshness. None (tests, embedded factories) fences nothing."
         ),
     )
 
@@ -474,6 +484,12 @@ class EnvelopeStreamConsumer(MutableModel):
         else:
             logger.trace("Unknown envelope stream {!r}", stream)
 
+    def _did_poll_straddle_a_sleep(self, event: ProviderDiscoverySnapshotEvent) -> bool:
+        """Whether this process stopped running somewhere inside the poll's own window."""
+        if self.sleep_tracker is None:
+            return False
+        return self.sleep_tracker.was_asleep_during(event.discovery_started_at, event.discovery_finished_at)
+
     def _handle_observe_payload(self, payload: dict[str, Any]) -> None:
         # Re-serialize to a single-line JSON so we can reuse mngr's parser.
         try:
@@ -537,6 +553,26 @@ class EnvelopeStreamConsumer(MutableModel):
                     is_snapshot_state_current = False
             else:
                 self._pre_start_drop_logger.flush_provider(event.provider_name)
+                # A poll that straddled a sleep is the same case inside one
+                # lifetime: its error describes a window in which this process
+                # -- and the network in front of it -- was not there, not the
+                # provider. The socket it timed out on was opened before the lid
+                # closed and read after it opened, so what it reports is that
+                # the laptop went away, and consuming that as the provider's
+                # last word blames a backend that was never asked. Every reader
+                # of provider freshness is fenced here, at the ingress, rather
+                # than each remembering to ask the tracker. A clean poll that
+                # spanned the same sleep completed after the wake and is kept.
+                if error is not None and self._did_poll_straddle_a_sleep(event):
+                    logger.info(
+                        "Dropping provider error for {} from a discovery poll that straddled a sleep ({} to {}): {}",
+                        event.provider_name,
+                        event.discovery_started_at.isoformat(),
+                        event.discovery_finished_at.isoformat(),
+                        error.message,
+                    )
+                    error = None
+                    is_snapshot_state_current = False
             # A per-provider snapshot is also a discovery event, so update_providers
             # bumps last_event_at; merge just this provider's state + freshness.
             # A clean snapshot additionally carries its full host-id set (with the
@@ -788,6 +824,7 @@ class EnvelopeStreamConsumer(MutableModel):
 def start_mngr_forward(
     config: ForwardSubprocessConfig,
     resolver: MngrCliBackendResolver,
+    sleep_tracker: SleepTracker | None = None,
 ) -> tuple[EnvelopeStreamConsumer, str, str]:
     """Spawn the ``mngr forward`` subprocess and attach an envelope consumer.
 
@@ -825,7 +862,7 @@ def start_mngr_forward(
         env=env,
         cwd=str(Path.home()),
     )
-    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    consumer = EnvelopeStreamConsumer(resolver=resolver, sleep_tracker=sleep_tracker)
     consumer.attach(process)
     return consumer, preauth_cookie, browser_bridge_token
 

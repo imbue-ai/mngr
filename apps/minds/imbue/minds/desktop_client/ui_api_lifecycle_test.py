@@ -326,6 +326,31 @@ def test_recovery_info_reports_a_dead_network_for_a_machine_it_can_explain(
     assert payload["device_environment"] == "OFFLINE"
 
 
+@pytest.mark.witnesses(
+    "no-blame-past-an-unmeasured-device",
+    partial="witnesses the recovery card's input only; the card's own withholding is witnessed by the SPA's suite",
+)
+def test_recovery_info_reports_an_unmeasured_device_as_unknown_not_fine(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Before a probe lands (and after a wake blanks the reading) the card is told nothing was measured.
+
+    The card withholds its backend verdict on this value: after a wake the
+    provider's poll errored because the laptop was asleep, and NONE here would
+    have the card name the provider on no measurement at all.
+    """
+    agent_id = AgentId(_DESTROYED_AGENT_ID)
+    resolver = build_resolver_with_provider_backend(
+        agent_id, provider_name="imbue_cloud_someone", backend="imbue_cloud"
+    )
+    detector, _ = build_stub_connectivity_detector(root_concurrency_group, is_internet_up=False)
+    client, _ = _build_lifecycle_client(tmp_path, backend_resolver=resolver, connectivity_detector=detector)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{_DESTROYED_AGENT_ID}/recovery-info").data)
+
+    assert payload["device_environment"] == "UNKNOWN"
+
+
 @pytest.mark.parametrize("backend", ["local", "docker", "lima"])
 def test_recovery_info_withholds_the_device_condition_from_a_machine_on_this_device(
     tmp_path: Path,

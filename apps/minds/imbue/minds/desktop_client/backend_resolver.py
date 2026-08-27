@@ -828,11 +828,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # snapshot this session. Positive evidence for ``is_host_positively_absent``:
     # only a clean snapshot enumerates everything its provider manages, so only
     # absence from one proves a host is gone rather than unreachable or simply
-    # not yet discovered. Errored snapshots never land here, and neither does
-    # the errored pre-start replay whose error (and state-current claim)
-    # ``forward_cli`` drops; a CLEAN pre-start replay does land here -- it is a
-    # real poll from while minds was closed, so it postdates every host this
-    # client could hold a destroy marker for.
+    # not yet discovered. Errored snapshots never land here, and neither do the
+    # errored pre-start replay and the errored sleep-straddling poll, whose
+    # errors (and state-current claims) ``forward_cli`` drops; a CLEAN pre-start
+    # replay does land here -- it is a real poll from while minds was closed, so
+    # it postdates every host this client could hold a destroy marker for -- and
+    # so does a clean sleep-straddling poll, which completed after the wake.
     _clean_snapshot_host_ids_by_provider: dict[ProviderInstanceName, frozenset[str]] = PrivateAttr(
         default_factory=dict
     )
@@ -1069,8 +1070,9 @@ class MngrCliBackendResolver(BackendResolverInterface):
         last_snapshot_at: datetime,
         clean_snapshot_host_ids: tuple[str, ...] | None = None,
         # False when this snapshot tells us nothing current about the provider, so its
-        # time must not advance the provider's freshness. Only the pre-start replay
-        # passes False -- see the caller in ``forward_cli`` for why.
+        # time must not advance the provider's freshness. Only the errored pre-start
+        # replay and the errored poll that straddled a sleep pass False -- see the
+        # caller in ``forward_cli`` for why.
         is_snapshot_state_current: bool = True,
     ) -> None:
         """Merge one provider's discovery snapshot into provider state. Thread-safe.
@@ -1117,10 +1119,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
             # Record positive-evidence host sets only from clean, state-current
             # snapshots: an errored snapshot's hosts are unreachable (not
             # absent), and a snapshot whose state-current claim the caller
-            # dropped (the errored pre-start replay -- see ``forward_cli``)
-            # carries no usable state -- either would let absence be mistaken
-            # for gone-ness. A clean pre-start replay stays eligible: it is a
-            # real enumeration from while minds was closed.
+            # dropped (the errored pre-start replay or the errored
+            # sleep-straddling poll -- see ``forward_cli``) carries no usable
+            # state -- either would let absence be mistaken for gone-ness. A
+            # clean pre-start replay stays eligible: it is a real enumeration
+            # from while minds was closed.
             if error is None and clean_snapshot_host_ids is not None and is_snapshot_state_current:
                 self._clean_snapshot_host_ids_by_provider[provider_name] = frozenset(clean_snapshot_host_ids)
             if self._last_event_at is None or last_snapshot_at > self._last_event_at:

@@ -407,8 +407,9 @@ def run(
         # holding the group's drain for a round of timeouts -- which on a dead
         # network, where a round was measured at 9.25s, is most of the time.
         shutdown_event=root_concurrency_group.shutdown_event,
-        # And so the SSH facet asks its endpoints at once rather than one after
-        # another, which is what made that round the sum of every budget.
+        # And so each of the probe's rounds asks its endpoints at once rather
+        # than one after another, which is what made a round the sum of every
+        # budget instead of the slowest single endpoint.
         concurrency_group=root_concurrency_group,
     )
     sleep_tracker.add_on_wake_callback(connectivity_detector.invalidate_after_wake)
@@ -539,6 +540,10 @@ def run(
     consumer, preauth_cookie, browser_bridge_token = start_mngr_forward(
         config=forward_config,
         resolver=backend_resolver,
+        # So a provider poll that straddled a sleep is not consumed as the
+        # provider's last word: its error says the laptop went away, not the
+        # backend.
+        sleep_tracker=sleep_tracker,
     )
 
     # App-global discovery-pipeline health watchdog. Detects a stalled pipeline

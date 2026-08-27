@@ -288,10 +288,10 @@ describe("UiChannelClient", () => {
     sockets[0].receive({ type: "hello", schema_version: 1 });
 
     sockets[0].receive({ type: "environment", state: "OFFLINE" });
-    expect(stores.health.appEnvironmentBlock()).toBe("OFFLINE");
+    expect(stores.health.appEnvironmentCondition()).toBe("OFFLINE");
 
     sockets[0].receive({ type: "environment", state: "NONE" });
-    expect(stores.health.appEnvironmentBlock()).toBe("NONE");
+    expect(stores.health.appEnvironmentCondition()).toBe("NONE");
   });
 
   it("clears per-workspace health on the reconnect hello (reconnect is resync)", () => {

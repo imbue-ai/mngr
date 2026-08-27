@@ -28,8 +28,11 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     browser sign-in to a service that has none; for 4, by expecting a field the
     server no longer sends; for 5, by reading a field that is gone and so never
     naming the backend its band is about; for 6, by reading the state off a
-    snapshot field the older server does not send at all."""
-    assert UI_SCHEMA_VERSION == 6
+    snapshot field the older server does not send at all; and to 7 when the
+    environment frame's state gained ``UNKNOWN`` (an unmeasured device is no
+    longer reported as a fine one), which an older client would fail to parse
+    and read as no condition at all."""
+    assert UI_SCHEMA_VERSION == 7
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -38,7 +41,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 6}
+    assert parsed == {"type": "hello", "schema_version": 7}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -91,7 +94,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
         [
             "AgentHealth",
             "DiscoveryHealth",
-            "EnvironmentBlock",
+            "EnvironmentCondition",
             "NotificationOutcome",
             "ProviderPanelStatus",
             "UiAccountsMessage",

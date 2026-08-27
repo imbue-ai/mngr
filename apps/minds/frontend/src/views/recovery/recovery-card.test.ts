@@ -272,13 +272,70 @@ describe("RecoveryCardBody", () => {
     expect(text).not.toContain("Restart Machine");
   });
 
-  it("keeps narrating a restart that is actually running", () => {
-    // The device may well be offline, but the restart is in flight and its
-    // progress is what the user asked to see.
-    const text = renderCard({ ...UNRESPONSIVE, health: "restarting", device_environment: "OFFLINE" });
+  it("keeps narrating the restart the user asked for", () => {
+    // The device may well be offline, but the user's own stop+start bounce is
+    // in flight and its progress is what they asked to see.
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      health: "restarting",
+      is_restart_start_only: false,
+      device_environment: "OFFLINE",
+    });
 
+    expect(text).toContain("Restarting my-machine...");
     expect(text).not.toContain("This device has no network connection.");
     expect(text).not.toContain("Waiting for network");
+  });
+
+  it("explains the device over the app's own start-only dispatch", () => {
+    // The app enters "restarting" unasked within seconds of a network flap and
+    // stays there for as long as the network is down, which is the whole of
+    // the episode this explanation exists for. The tracker's word (true) and
+    // no word at all (null) both decline the exception the user's click earns.
+    for (const is_restart_start_only of [true, null]) {
+      const text = renderCard({
+        ...UNRESPONSIVE,
+        health: "restarting",
+        is_restart_start_only,
+        device_environment: "OFFLINE",
+      });
+      expect(text).toContain("This device has no network connection.");
+      expect(text).toContain("Waiting for network");
+      expect(text).not.toContain("Reconnecting to my-machine...");
+    }
+  });
+
+  it("withholds the backend verdict while this device's network is unmeasured", () => {
+    // After a wake the reading is blank until a probe lands, and the provider's
+    // poll errored because the laptop was asleep -- so the verdict that names
+    // the provider is built on no measurement, and the card declines to state
+    // it. The machine's ordinary state describes the wait instead.
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      health: "stuck",
+      device_environment: "UNKNOWN",
+      is_backend_unreachable: true,
+      provider_label: "Imbue Cloud",
+      unreachable_reason: "The read operation timed out",
+    });
+    expect(text).not.toContain("Can't connect to Imbue Cloud");
+    expect(text).not.toContain("Waiting for network");
+    expect(text).toContain("my-machine isn't responding yet.");
+  });
+
+  it("withholds the device-side connection verdict while the network is unmeasured", () => {
+    // Same withholding as the backend verdict above, and as the band's line
+    // for this state: the copy claims the connection failed on a network that
+    // works, and before a probe lands nothing has measured that network.
+    const text = renderCard({
+      ...UNRESPONSIVE,
+      health: "stuck",
+      device_environment: "UNKNOWN",
+      is_device_cannot_connect: true,
+      device_error_detail: "pool timeout",
+    });
+    expect(text).not.toContain("from this device");
+    expect(text).toContain("my-machine isn't responding yet.");
   });
 
   it("keeps narrating a restart this card just started, before the poll catches up", () => {
