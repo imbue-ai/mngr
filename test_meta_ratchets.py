@@ -837,6 +837,11 @@ def _get_coverage_omit(pyproject: dict) -> list[str]:
     return [str(x) for x in pyproject.get("tool", {}).get("coverage", {}).get("run", {}).get("omit", [])]
 
 
+# Walks every subproject's pyproject + package tree; fast locally but observed
+# exceeding the default 10s pytest-timeout under CI load. See
+# test_no_import_layer_violations for the flaky/timeout rationale.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_top_level_cov_flags_are_union_of_subproject_cov_flags() -> None:
     """Ensure the top-level pyproject.toml `--cov=` flags are exactly the union of the
     subprojects' `--cov=` flags, except for packages whose source is fully omitted in the

@@ -125,7 +125,9 @@ test-minds-evals args="":
 # apps/share_relay/README.md. RELAY_ID comes from `just register-share-relay`
 # (or `minds-admin relays list`); CONTENT_DOMAIN is the env's content
 # apex (imbueminds.com / minds-staging.com / minds-dev.com); PLUGIN_AUTH_URL is
-# the connector's /frps/auth endpoint for that env.
+# the connector's /frps/auth endpoint for that env, WITHOUT any secret. The
+# plugin secret is read from FRPS_AUTH_SECRET in the environment
+# (Vault: secrets/minds/<tier>/sharing/FRPS_AUTH_SECRET).
 [group("share-relay ops")]
 render-share-relay relay_id region content_domain plugin_auth_url out_dir:
   uv run share-relay render --relay-id {{relay_id}} --region {{region}} \
@@ -156,9 +158,10 @@ deregister-share-relay connector_url relay_id:
 # Install/refresh a relay host's software + config (pinned frps, nftables,
 # :80 redirector, healthcheck) and restart its services. relay_id comes from
 # `just register-share-relay` (or `minds-admin relays list`);
-# plugin_auth_url must include the shared-secret path segment:
-# https://<connector>/frps/auth/<secret>
-# (the secret lives in Vault under secrets/minds/<tier>/sharing/FRPS_AUTH_SECRET).
+# plugin_auth_url is the secret-free connector endpoint
+# (https://<connector>/frps/auth); the plugin secret is read from
+# FRPS_AUTH_SECRET in the environment
+# (Vault: secrets/minds/<tier>/sharing/FRPS_AUTH_SECRET).
 [group("share-relay ops")]
 deploy-share-relay host relay_id region content_domain plugin_auth_url:
   uv run share-relay deploy --host {{host}} --relay-id {{relay_id}} --region {{region}} \
