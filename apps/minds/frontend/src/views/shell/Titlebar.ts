@@ -87,17 +87,6 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
           m(
             TitlebarButton,
             {
-              id: "back-btn",
-              "aria-label": "Back",
-              "data-tooltip": "Back",
-              hidden: !context.isBackShown,
-              onclick: () => history.back(),
-            },
-            m(Icon16, { name: "chevron-left" }),
-          ),
-          m(
-            TitlebarButton,
-            {
               id: "home-btn",
               "aria-label": "Home",
               "data-tooltip": "Home",

@@ -11,7 +11,6 @@ export interface TitlebarContext {
   workspaceAnyId: string | null;
   activeTab: OptionsTab | null;
   pageLabel: string;
-  isBackShown: boolean;
 }
 
 const HOME_CONTEXT: TitlebarContext = {
@@ -19,7 +18,6 @@ const HOME_CONTEXT: TitlebarContext = {
   workspaceAnyId: null,
   activeTab: null,
   pageLabel: "",
-  isBackShown: false,
 };
 
 function workspaceContext(
@@ -31,17 +29,15 @@ function workspaceContext(
     workspaceAnyId: anyId,
     activeTab,
     pageLabel: "",
-    isBackShown: false,
   };
 }
 
-function pageContext(label: string, isBackShown: boolean): TitlebarContext {
+function pageContext(label: string): TitlebarContext {
   return {
     kind: "page",
     workspaceAnyId: null,
     activeTab: null,
     pageLabel: label,
-    isBackShown,
   };
 }
 
@@ -156,29 +152,28 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
     const behind = overlayBehindWorkspaceId(path, search);
     return behind !== null
       ? workspaceContext(behind, null)
-      : pageContext("New machine", false);
+      : pageContext("New machine");
   }
   if (path === "/create" || path.startsWith("/creating/")) {
-    return pageContext("New machine", path === "/create");
+    return pageContext("New machine");
   }
   if (isAppOverlayPath(path)) {
     // Minds settings / Accounts / Get help / the request popup / the AI-keys
     // mint dialog float as a centered modal over the surface they were opened
     // from; the titlebar keeps that surface's context (the workspace behind Get
-    // help / the popup / AI-keys, else Home) rather than a back-button page.
+    // help / the popup / AI-keys, else Home) rather than a standalone page.
     const behind = overlayBehindWorkspaceId(path, search);
     return behind !== null ? workspaceContext(behind, null) : HOME_CONTEXT;
   }
   if (path === "/workspaces/destroyed")
-    return pageContext("Recently destroyed", true);
-  if (path === "/consent") return pageContext("Consent", false);
+    return pageContext("Recently destroyed");
+  if (path === "/consent") return pageContext("Consent");
   if (path === "/welcome") {
     return {
       kind: "welcome",
       workspaceAnyId: null,
       activeTab: null,
       pageLabel: "",
-      isBackShown: false,
     };
   }
   return HOME_CONTEXT;

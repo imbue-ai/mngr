@@ -328,3 +328,19 @@ describe("Titlebar workspace tab strip", () => {
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
   });
 });
+
+describe("Titlebar breadcrumb", () => {
+  it("renders no back button, on any route", () => {
+    for (const routePath of [
+      "/create",
+      "/workspaces/destroyed",
+      `/workspace/${WORKSPACE_ID}`,
+      "/",
+    ]) {
+      const ids = collectVnodes(renderTitlebar("", { routePath })).map(
+        (vnode) => attrsOf(vnode).id,
+      );
+      expect(ids, routePath).not.toContain("back-btn");
+    }
+  });
+});
