@@ -387,9 +387,9 @@ def test_raw_transcript_captures_every_message(tmp_path: Path) -> None:
 def test_common_transcript_event_ids_stay_unique_across_restart(tmp_path: Path) -> None:
     """A second process (resume) must not reuse event_ids written by the first.
 
-    event_id is seeded from the existing line count, so ids keep climbing across
-    a stop/start even though the resumed session reuses its id and only new
-    messages fire message_end.
+    event_id hashes the message's own timestamp and content, so ids stay
+    unique across a stop/start even though the resumed session reuses its id
+    and only new messages fire message_end.
     """
     events = [{"event": "message_end", "payload": {"message": {"role": "user", "content": "hi", "timestamp": 1}}}]
     # First run writes one record.

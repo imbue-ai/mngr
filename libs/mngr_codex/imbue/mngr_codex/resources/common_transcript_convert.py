@@ -32,10 +32,10 @@ assistant's reasoning text (a distinct ``message`` item), so the call is emitted
 as a standalone assistant_message carrying the tool_call -- matching the other
 ports, whose native formats nest tool_calls in the assistant message.
 
-Event ids are synthesized from the line's 1-based index in the append-only raw
-input (stable across restarts) plus the item kind, so re-processing the same
-input never produces duplicates; the converter also dedupes against the set of
-event_ids already in the output file.
+Event ids are synthesized by hashing the line's timestamp and content (plus the
+item kind), so re-processing the same input never produces duplicates and ids
+never repeat across agents or hosts; the converter also dedupes against the set
+of event_ids already in the output file.
 
 Invoked as ``python3 common_transcript_convert.py`` with the input/output paths
 passed via the ``_INPUT_FILE`` / ``_OUTPUT_FILE`` environment variables that
@@ -50,6 +50,7 @@ subprocess.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any
@@ -137,6 +138,23 @@ def _load_existing_ids(output_file: str) -> set[str]:
     return ids
 
 
+def _make_event_id(timestamp: str, content: str, kind: str) -> str:
+    """A stable, globally unique event id from the record's own timestamp and content.
+
+    Line-index ids repeat identically for every agent on every host (analytics
+    dedupes transcripts fleet-wide by event id); hashing the line's timestamp
+    plus content keeps re-processing idempotent while making ids unique.
+    """
+    digest = hashlib.sha256(f"{timestamp}:{content[:1024]}".encode("utf-8", "replace")).hexdigest()[:32]
+    return f"evt-{digest}-{kind}"
+
+
+def _is_already_converted(existing_ids: set[str], event_id: str, line_index: int, kind: str) -> bool:
+    # CLEANUP: drop the legacy line-index id check once transcripts converted
+    # before the content-hash ids existed have aged out of live agent hosts.
+    return event_id in existing_ids or f"line-{line_index}-{kind}" in existing_ids
+
+
 def convert(input_file: str, output_file: str) -> int:
     """Append new common-transcript events from ``input_file`` to ``output_file``; return the count."""
     existing_ids = _load_existing_ids(output_file)
@@ -171,9 +189,6 @@ def convert(input_file: str, output_file: str) -> int:
             payload_type = payload.get("type")
 
             if payload_type == "message" and payload.get("role") == "user":
-                event_id = f"line-{line_index}-user"
-                if event_id in existing_ids:
-                    continue
                 text = _join_content_text(payload.get("content"), "input_text")
                 # An empty user message carries no signal -> drop it.
                 if not text:
@@ -182,6 +197,10 @@ def convert(input_file: str, output_file: str) -> int:
                 # not user turns -> drop them (export-side filtering only).
                 if _is_injected_instructions(text):
                     continue
+                event_id = _make_event_id(timestamp, text, "user")
+                if _is_already_converted(existing_ids, event_id, line_index, "user"):
+                    continue
+                existing_ids.add(event_id)
                 new_events.append(
                     (
                         timestamp,
@@ -198,10 +217,11 @@ def convert(input_file: str, output_file: str) -> int:
                 )
 
             elif payload_type == "message" and payload.get("role") == "assistant":
-                event_id = f"line-{line_index}-assistant"
-                if event_id in existing_ids:
-                    continue
                 text = _join_content_text(payload.get("content"), "output_text")
+                event_id = _make_event_id(timestamp, text, "assistant")
+                if _is_already_converted(existing_ids, event_id, line_index, "assistant"):
+                    continue
+                existing_ids.add(event_id)
                 # codex assistant messages are text-only (tool calls are separate
                 # response_items surfaced as tool_results), so parts is just the text and
                 # its order is trivially faithful.
@@ -255,9 +275,10 @@ def convert(input_file: str, output_file: str) -> int:
                 # tool_call. The tool_call_id matches the paired tool_result below. Each
                 # call is its own rollout item, so the single tool_call part is trivially
                 # ordered -> parts_ordered=True.
-                event_id = f"line-{line_index}-assistant"
-                if event_id in existing_ids:
+                event_id = _make_event_id(timestamp, arguments, "assistant")
+                if _is_already_converted(existing_ids, event_id, line_index, "assistant"):
                     continue
+                existing_ids.add(event_id)
                 new_events.append(
                     (
                         timestamp,
@@ -286,10 +307,11 @@ def convert(input_file: str, output_file: str) -> int:
                 # nothing to pair with -> drop it.
                 if pending is None:
                     continue
-                event_id = f"line-{line_index}-tool_result"
-                if event_id in existing_ids:
-                    continue
                 output = _truncate(_stringify_output(payload.get("output", "")), _MAX_OUTPUT_LENGTH)
+                event_id = _make_event_id(timestamp, output, "tool_result")
+                if _is_already_converted(existing_ids, event_id, line_index, "tool_result"):
+                    continue
+                existing_ids.add(event_id)
                 new_events.append(
                     (
                         timestamp,

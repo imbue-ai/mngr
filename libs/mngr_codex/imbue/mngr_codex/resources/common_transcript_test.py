@@ -372,15 +372,19 @@ def test_dropped_lines_emit_nothing_to_pane(state_dir: Path) -> None:
     assert [e["content"] for e in events] == ["kept"]
 
 
-def test_event_ids_are_stable_per_line(state_dir: Path) -> None:
-    """Event ids derive from the line index, so they're stable across restarts."""
+def test_event_ids_are_stable_across_reruns(state_dir: Path) -> None:
+    """Event ids hash the line's timestamp and content, so re-running the
+    converter yields the same ids and appends nothing."""
     _write_raw_stream(state_dir, [_user("a-message"), _assistant("b-message")])
 
     _run_converter(state_dir)
+    first_ids = [e["event_id"] for e in _read_common_events(state_dir)]
+    _run_converter(state_dir)
+    second_ids = [e["event_id"] for e in _read_common_events(state_dir)]
 
-    events = _read_common_events(state_dir)
-    ids = [e["event_id"] for e in events]
-    assert ids == ["line-1-user", "line-2-assistant"]
+    assert len(set(first_ids)) == 2
+    assert all(event_id.startswith("evt-") for event_id in first_ids)
+    assert second_ids == first_ids
 
 
 def _lock_dir(state_dir: Path) -> Path:

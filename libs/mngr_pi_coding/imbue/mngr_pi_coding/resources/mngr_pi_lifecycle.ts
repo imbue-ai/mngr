@@ -53,6 +53,7 @@
 //     itself is installed (npm, brew, bundled binary). Event/message shapes are
 //     declared locally as the minimal structural types we read.
 
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
@@ -461,14 +462,19 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   // USAGE_SOURCE_NAME.
   const emitUsage = existsSync(join(stateDir, "pi_emit_usage"));
   const usagePath = join(stateDir, "events", "pi-coding", "usage", "events.jsonl");
-  let usageSeq = emitUsage ? countLines(usagePath) : 0;
 
-  // event_id must be unique within commonPath so `mngr transcript`'s dedupe set
-  // never drops a real record. Seed the counter from the existing line count so
-  // ids keep climbing across stop/start (a `--continue` restart reuses the same
-  // session id but only fires message_end for *new* messages, so a per-session
-  // reset would collide with ids written before the restart).
-  let commonSeq = emitCommon ? countLines(commonPath) : 0;
+  // Event ids hash the message's own timestamp and content: unique per event
+  // globally (analytics dedupes transcripts fleet-wide by event id), and
+  // stable for the single moment each message is appended.
+  const makeEventId = (prefix: string, message: AgentMessage): string => {
+    const rawContent = (message as { content?: unknown }).content ?? "";
+    const contentText = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent);
+    const digest = createHash("sha256")
+      .update(`${isoTimestamp(message)}:${contentText.slice(0, 1024)}`)
+      .digest("hex")
+      .slice(0, 32);
+    return `${prefix}-${digest}`;
+  };
 
   // Record this (main) agent's session file so the plugin can resume it
   // explicitly with `pi --session <file>` -- more robust than `--continue`,
@@ -912,7 +918,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
             return "";
           }
         })();
-        const usageRecord = toUsageRecord(message, sessionFile, () => `evt-pi-usage-${usageSeq++}`);
+        const usageRecord = toUsageRecord(message, sessionFile, () => makeEventId("evt-pi-usage", message));
         if (usageRecord !== null) {
           appendLine(usagePath, JSON.stringify(usageRecord));
         }
@@ -920,7 +926,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       if (!emitCommon) {
         return;
       }
-      const record = toCommonRecord(message, commonSource, () => `pi-${commonSeq++}`);
+      const record = toCommonRecord(message, commonSource, () => makeEventId("pi", message));
       if (record !== null) {
         appendLine(commonPath, JSON.stringify(record));
       }
@@ -982,7 +988,7 @@ export function toUsageRecord(
 // Convert a pi AgentMessage into an mngr common-transcript record, or null for
 // message roles the common schema does not represent (bashExecution, custom,
 // branchSummary, compactionSummary). `nextId` is called at most once and only
-// for emitted records, so the id counter stays dense.
+// for emitted records.
 export function toCommonRecord(
   message: AgentMessage,
   source: string,

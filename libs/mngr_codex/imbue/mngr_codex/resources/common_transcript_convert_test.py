@@ -65,7 +65,7 @@ def test_converts_user_and_assistant_messages(tmp_path: Path) -> None:
     assert events[0] == {
         "timestamp": "2026-06-09T07:00:00.000Z",
         "type": "user_message",
-        "event_id": "line-1-user",
+        "event_id": common_transcript_convert._make_event_id("2026-06-09T07:00:00.000Z", "hello", "user"),
         "source": "codex/common_transcript",
         "role": "user",
         "content": "hello",
@@ -77,6 +77,16 @@ def test_converts_user_and_assistant_messages(tmp_path: Path) -> None:
     assert events[1]["parts_ordered"] is True
     for event in events:
         assert validate_common_transcript_record(event) is None
+
+
+def test_legacy_line_index_ids_still_dedupe_reprocessing(tmp_path: Path) -> None:
+    input_file, output_file = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    _write(input_file, [_user("hello")])
+    # An output written by the old converter carries line-index ids; re-running
+    # with content-hash ids must not re-append the already-converted line.
+    output_file.write_text(json.dumps({"event_id": "line-1-user"}) + "\n")
+    assert common_transcript_convert.convert(str(input_file), str(output_file)) == 0
+    assert _events(output_file) == [{"event_id": "line-1-user"}]
 
 
 def test_function_call_and_output_pair_into_tool_result(tmp_path: Path) -> None:
