@@ -2096,13 +2096,20 @@ body {
 /* Overlays that paint ABOVE the titlebar -- the workspace-switcher popover
  * (z-200) and the full-window modal / docked-options backdrops (z-110) -- must
  * subtract the titlebar strip's drag region, or a click in that top strip (the
- * empty backdrop above an app modal, or the docked options panel's own tab
- * strip standing in for the titlebar tabs) would drag the window instead of
- * dismissing / switching tabs. macOS unions drag regions across the whole
- * window, so being on top in z-order is not enough; the overlapping element
- * must itself declare no-drag. */
+ * empty backdrop above an app modal, or the raised icon strip standing in for
+ * the titlebar's own icons) would drag the window instead of dismissing /
+ * switching surfaces. macOS unions drag regions across the whole window, so
+ * being on top in z-order is not enough; the overlapping element must itself
+ * declare no-drag.
+ *
+ * EVERY backdrop that can host the raised icon strip belongs here. The strip
+ * is the only way to reach the other four surfaces while one is open, so a
+ * backdrop left off this list makes those icons dead on macOS -- they paint,
+ * they hover, and the click drags the window instead. */
 #sidebar-backdrop,
 #app-overlay-backdrop,
-#ws-options-backdrop {
+#ws-options-backdrop,
+#notifications-backdrop,
+#help-backdrop {
   -webkit-app-region: no-drag;
 }

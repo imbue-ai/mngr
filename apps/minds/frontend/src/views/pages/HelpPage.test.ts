@@ -7,7 +7,7 @@ import {
   memoryStorage,
 } from "../../testing";
 import type { AnyVnode } from "../../testing";
-import { formPhase, sentPhase } from "./HelpPage";
+import { formPhase, sentPhase, titleRow } from "./HelpPage";
 
 /** Render the report form for a help surface opened over `workspaceAgentId`. */
 function renderForm(workspaceAgentId: string): AnyVnode[] {
@@ -24,6 +24,28 @@ function checkboxIds(nodes: AnyVnode[]): unknown[] {
 function findById(nodes: AnyVnode[], id: string): AnyVnode | undefined {
   return nodes.find((node) => node.attrs?.id === id);
 }
+
+describe("HelpPage title row", () => {
+  it("mirrors the feed's header: 56px row, bug icon left of the label, hairline below", () => {
+    // The help form and the notification feed are one anchored window shown
+    // two ways, so a switch between them must keep one header line.
+    const nodes = collectVnodes(titleRow());
+    const row = nodes[0];
+
+    const rowClasses = classTokensOf(row);
+    expect(rowClasses).toContain("h-[56px]");
+    expect(rowClasses).toContain("border-b");
+
+    const heading = nodes.find((node) => node.tag === "h1");
+    expect(heading).toBeDefined();
+    expect(classTokensOf(heading as AnyVnode)).toContain("type-label");
+    const icon = collectVnodes((heading as AnyVnode).children).find(
+      (node) => node.attrs?.name !== undefined,
+    );
+    expect(icon?.attrs?.name).toBe("bug");
+    expect(allText(titleRow())).toContain("Ran into a bug?");
+  });
+});
 
 describe("HelpPage report form", () => {
   it("offers the workspace diagnostics checkboxes above remote access, both checked", () => {

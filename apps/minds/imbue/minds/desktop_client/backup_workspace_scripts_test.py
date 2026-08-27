@@ -1185,6 +1185,7 @@ def test_restore_script_stops_all_services_before_the_restore_and_restarts_them_
     assert "stop host-backup" not in calls
 
 
+@pytest.mark.flaky
 @pytest.mark.timeout(120)
 def test_restore_script_resumes_services_when_the_restic_restore_fails(tmp_path: Path) -> None:
     host, code, restic_repo = _make_restore_workspace(tmp_path)

@@ -93,6 +93,15 @@ export function isAppOverlayPath(path: string): boolean {
   return APP_OVERLAY_PATHS.has(path);
 }
 
+/** Whether `path` is one of the raised titlebar strip's own routed surfaces:
+ * the docked options panel, the request popup, or Get help. (The bell's feed
+ * is the strip's fourth surface but is local state, not a route.) A strip
+ * switch REPLACES these routes' history entry rather than stacking on it, so
+ * the surface being left is never one Back away under the new one. */
+export function isTitlebarPopupRoutePath(path: string): boolean {
+  return isWorkspaceOverlayPath(path) || path === "/inbox" || path === "/help";
+}
+
 /** The workspace kept mounted behind an app-overlay modal: the ?workspace= that
  * Get help, the request-review popup, the New machine
  * template flow, and the AI-keys mint dialog forward, so those overlays float

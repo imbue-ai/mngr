@@ -16,13 +16,30 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** The app-modal layer, if the Shell floated one: the only vnode carrying a
- * `cardClass` (its own view, and the backdrop inside it, are not expanded by a
- * direct view() call). */
-function appOverlay(root: AnyVnode): AnyVnode | undefined {
-  return collectVnodes(root).find(
-    (vnode) => attrsOf(vnode).cardClass !== undefined,
+/** Every OverlayShell vnode the Shell floated. The Shell renders at most one
+ * (its single overlay slot; the options panel's own layer renders its
+ * OverlayShell only once the routed page inside it is itself rendered). */
+function overlayShells(root: AnyVnode): AnyVnode[] {
+  return collectVnodes(root).filter(
+    (vnode) =>
+      typeof vnode.tag === "function" &&
+      (vnode.tag as { name?: string }).name === "OverlayShell",
   );
+}
+
+/** The overlay layer, if the Shell floated one. */
+function appOverlay(root: AnyVnode): AnyVnode | undefined {
+  return overlayShells(root)[0];
+}
+
+/** Render an overlay down to its own DOM tree (the Shell hands back the
+ * OverlayShell component vnode unrendered). */
+function renderOverlay(vnode: AnyVnode): AnyVnode {
+  const name =
+    typeof vnode.tag === "function"
+      ? ((vnode.tag as { name?: string }).name ?? "")
+      : "";
+  return name === "OverlayShell" ? renderComponent(vnode) : vnode;
 }
 
 /** Render a component vnode's own tree (the Shell's view returns it unrendered). */
@@ -51,6 +68,7 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     notificationsUi: null,
     currentRouteSearch: () => `workspace=${WORKSPACE_ID}`,
     closeAppOverlay: () => true,
+    displayedWorkspaceAgentId: () => WORKSPACE_ID,
     stores: {
       workspaces: {
         toAgentScopedId: (anyId: string) => anyId,
@@ -61,11 +79,88 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
         discoveryHealth: "healthy",
         appEnvironmentBlock: () => "NONE",
       },
+      notifications: {
+        entries: [],
+        unresolvedCount: 0,
+        hasUnresolvedForWorkspace: () => false,
+      },
     },
     isRecoveryModalOpenFor: () => false,
     ...overrides,
   } as unknown as ShellState;
   return { state };
+}
+
+/** The titlebar's measurable boxes in a 1000px window, laid out as the real
+ * one lays them out: the machine tab strip after the breadcrumb, the bell and
+ * the bug-report button at the right edge. */
+const TITLEBAR_RECTS: Record<
+  string,
+  { left: number; top: number; width: number; height: number }
+> = {
+  "ws-tab-strip": { left: 331, top: 5, width: 92, height: 28 },
+  "ws-tab-permissions": { left: 331, top: 5, width: 28, height: 28 },
+  "ws-tab-settings": { left: 363, top: 5, width: 28, height: 28 },
+  "ws-tab-share": { left: 395, top: 5, width: 28, height: 28 },
+  "notifications-toggle": { left: 900, top: 5, width: 28, height: 28 },
+  "help-toggle": { left: 940, top: 5, width: 28, height: 28 },
+};
+
+/** Put a measurable titlebar on screen. `ids` names which boxes are there; the
+ * rest read as absent, the way a hub page's machine tabs do. Call it AFTER
+ * `renderShell` (whose own window stub carries no innerWidth) and before the
+ * overlay component is instantiated, which is when it measures. */
+function stubTitlebar(
+  ids: readonly string[] = Object.keys(TITLEBAR_RECTS),
+): void {
+  vi.stubGlobal("document", {
+    getElementById: (id: string) => {
+      const rect = TITLEBAR_RECTS[id];
+      if (rect === undefined || !ids.includes(id)) return null;
+      return { getBoundingClientRect: () => rect };
+    },
+  });
+  vi.stubGlobal("window", { location: { search: "" }, innerWidth: 1000 });
+}
+
+/** The raised icon strip an open surface mounted, rendered: it is a component
+ * vnode, so a single-level view() call leaves its buttons unexpanded. */
+function raisedStrip(rendered: AnyVnode): AnyVnode {
+  const strip = collectVnodes(rendered).find(
+    (vnode) =>
+      typeof vnode.tag === "function" &&
+      (vnode.tag as { name?: string }).name === "RaisedTitlebarIcons",
+  );
+  expect(strip, "no raised titlebar icons").toBeDefined();
+  return renderComponent(strip as AnyVnode);
+}
+
+/** The raised copy of one titlebar popup icon, drawn by whichever surface is
+ * open over the dimmed real one. */
+function raisedIcon(rendered: AnyVnode, popupId: string): AnyVnode | undefined {
+  return collectVnodes(raisedStrip(rendered)).find(
+    (vnode) => attrsOf(vnode)["data-titlebar-popup"] === popupId,
+  );
+}
+
+/** Every popup icon the open surface raised, in strip order. */
+function raisedIconIds(rendered: AnyVnode): unknown[] {
+  return collectVnodes(raisedStrip(rendered))
+    .map((vnode) => attrsOf(vnode)["data-titlebar-popup"])
+    .filter((popupId) => popupId !== undefined);
+}
+
+/** The anchored OverlayShell the Shell mounted for `id` (the bell's feed or
+ * Get help): both take the same placement, so they are told apart by which
+ * icon each has lit. */
+function popoverLayer(root: AnyVnode, id: string): AnyVnode | undefined {
+  return collectVnodes(root).find(
+    (vnode) =>
+      typeof vnode.tag === "function" &&
+      (vnode.tag as { name?: string }).name === "OverlayShell" &&
+      attrsOf(vnode).placement === "anchored" &&
+      attrsOf(vnode).selected === id,
+  );
 }
 
 interface RenderOptions {
@@ -159,36 +254,24 @@ describe("Shell request popup layer", () => {
     );
   });
 
-  it("draws all three option tabs, not just the one the popup is", () => {
-    // The popup covers the titlebar's icon-tabs, so drawing only its own key
-    // took Share and Machine settings off screen for as long as it was open.
+  it("draws all five titlebar icons, not just the one the popup is", () => {
+    // The popup covers the titlebar's icons, so drawing only its own key took
+    // the other four off screen for as long as it was open.
     const { state } = makeShell();
-    vi.stubGlobal("document", {
-      getElementById: (id: string) =>
-        id === "ws-tab-strip"
-          ? {
-              getBoundingClientRect: () => ({
-                left: 331,
-                top: 5,
-                width: 92,
-                height: 28,
-              }),
-            }
-          : null,
-    });
+    stubTitlebar();
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
       workspaceParam: null,
     });
 
-    const rendered = renderComponent(appOverlay(root) as AnyVnode);
-    const strip = collectVnodes(rendered).find(
-      (vnode) => attrsOf(vnode).id === "app-overlay-key-tab",
-    );
-    const tabs = collectVnodes(strip as AnyVnode)
-      .map((vnode) => attrsOf(vnode)["data-wsopt-tab"])
-      .filter((tab) => tab !== undefined);
+    const rendered = renderOverlay(appOverlay(root) as AnyVnode);
 
-    expect(tabs).toEqual(["permissions", "settings", "share"]);
+    expect(raisedIconIds(rendered)).toEqual([
+      "permissions",
+      "settings",
+      "share",
+      "notifications",
+      "help",
+    ]);
   });
 
   it("closes the popup from the key it hangs off, which covers the titlebar's own", () => {
@@ -206,35 +289,16 @@ describe("Shell request popup layer", () => {
     };
     // The popup hangs off the titlebar key, so it only draws its own key when
     // there is one on screen to measure and cover.
-    vi.stubGlobal("document", {
-      getElementById: (id: string) =>
-        id === "ws-tab-strip"
-          ? {
-              getBoundingClientRect: () => ({
-                left: 331,
-                top: 5,
-                width: 92,
-                height: 28,
-              }),
-            }
-          : null,
-    });
+    stubTitlebar();
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
       workspaceParam: null,
     });
 
     // The Shell hands the popup off to its own component, so render that to
     // reach the chrome it draws around the card.
-    const overlay = appOverlay(root) as AnyVnode;
-    const rendered = renderComponent(overlay);
-    const strip = collectVnodes(rendered).find(
-      (vnode) => attrsOf(vnode).id === "app-overlay-key-tab",
-    );
-    const keyTab = collectVnodes(strip as AnyVnode).find(
-      (vnode) => attrsOf(vnode)["data-wsopt-tab"] === "permissions",
-    );
+    const rendered = renderOverlay(appOverlay(root) as AnyVnode);
+    const keyTab = raisedIcon(rendered, "permissions");
 
-    expect(strip).toBeDefined();
     expect(keyTab).toBeDefined();
     (attrsOf(keyTab as AnyVnode).onclick as () => void)();
 
@@ -243,10 +307,14 @@ describe("Shell request popup layer", () => {
 
   it("gives the popup its own card width, not the settings modal's", () => {
     const { state } = makeShell();
+    stubTitlebar();
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
       workspaceParam: null,
     });
-    expect(String(attrsOf(appOverlay(root) as AnyVnode).cardClass)).toContain(
+    const panel = collectVnodes(renderOverlay(appOverlay(root) as AnyVnode)).find(
+      (vnode) => attrsOf(vnode).id === "app-overlay-panel",
+    );
+    expect(String(attrsOf(panel as AnyVnode).className)).toContain(
       "w-[600px]",
     );
   });
@@ -277,7 +345,7 @@ describe("Shell app-overlay backdrop", () => {
       behindContent: recoveryPage,
     });
 
-    expect(appOverlay(root)).toBeDefined();
+    expect(popoverLayer(root, "help")).toBeDefined();
     expect(collectVnodes(root)).toContain(recoveryPage);
     expect(
       collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame),
@@ -303,15 +371,8 @@ describe("Shell app-overlay backdrop", () => {
 });
 
 describe("Shell notifications overlay", () => {
-  /** The popover's component vnode: keyed on shell state, not the route, so
-   * it is found by the panel component it mounts rather than by cardClass
-   * (the unanchored fallback reuses AppOverlay, the anchored form does not). */
   function notificationsLayer(root: AnyVnode): AnyVnode | undefined {
-    return collectVnodes(root).find(
-      (vnode) =>
-        typeof vnode.tag === "function" &&
-        (vnode.tag as { name?: string }).name === "NotificationsOverlay",
-    );
+    return popoverLayer(root, "notifications");
   }
 
   function shellWithFeedOpen(): FakeShell {
@@ -319,13 +380,20 @@ describe("Shell notifications overlay", () => {
       isNotificationsOpen: true,
       closeNotifications: () => undefined,
       stores: {
-        workspaces: { toAgentScopedId: (anyId: string) => anyId },
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
         health: {
           statusFor: () => "healthy",
           discoveryHealth: "healthy",
           appEnvironmentBlock: () => "NONE",
         },
-        notifications: { entries: [], unresolvedCount: 0 },
+        notifications: {
+        entries: [],
+        unresolvedCount: 0,
+        hasUnresolvedForWorkspace: () => false,
+      },
       },
     } as unknown as Partial<ShellState>);
   }
@@ -353,43 +421,64 @@ describe("Shell notifications overlay", () => {
     expect(notificationsLayer(root)).toBeUndefined();
   });
 
-  it("anchors the panel under the measured bell, right edge to right edge", () => {
+  it("holds the one overlay slot alone while a popup route is still leaving", () => {
+    // A strip switch opens the feed and THEN navigates the popup away, so for
+    // a beat the feed is open while the route is still /help. The slot must
+    // show exactly one surface -- the feed, the one being switched to. Two
+    // OverlayShells here is the flash: a doubled backdrop and strip for the
+    // frames until the navigation lands.
+    const { state } = shellWithFeedOpen();
+    const root = renderShell(state, "/help", m("div#help-form"));
+
+    const shells = overlayShells(root);
+    expect(shells).toHaveLength(1);
+    expect(attrsOf(shells[0]).selected).toBe("notifications");
+    // The leaving popup's content is not rendered at all, not even hidden.
+    expect(
+      collectVnodes(root).some((vnode) => attrsOf(vnode).id === "help-form"),
+    ).toBe(false);
+  });
+
+  it("suppresses the live options panel underneath for the same switch beat", () => {
+    // Same beat, other left-hand surface: feed opened from the docked panel,
+    // dismissal navigation not yet landed. The panel (which draws its own
+    // OverlayShell when rendered) must sit this beat out, or its backdrop
+    // doubles the feed's.
+    const { state } = shellWithFeedOpen();
+    const content = m("div#options-panel-content");
+    const root = renderShell(state, OPTIONS_PATH, content);
+
+    expect(notificationsLayer(root)).toBeDefined();
+    expect(collectVnodes(root)).not.toContain(content);
+  });
+
+  it("hangs the panel from the right-hand pair, aligned to the bug button", () => {
     const { state } = shellWithFeedOpen();
     const root = renderShell(state, "/create", m("div#create-form"), {
       workspaceParam: null,
     });
-    // The bell rect is measured when the overlay component instantiates.
-    vi.stubGlobal("document", {
-      getElementById: (id: string) =>
-        id === "notifications-toggle"
-          ? {
-              getBoundingClientRect: () => ({
-                left: 900,
-                top: 5,
-                width: 28,
-                height: 28,
-              }),
-            }
-          : null,
-    });
-    vi.stubGlobal("window", { location: { search: "" }, innerWidth: 1000 });
-    const rendered = renderComponent(notificationsLayer(root) as AnyVnode);
+    // The rects are measured when the overlay component instantiates.
+    stubTitlebar();
+    const rendered = renderOverlay(notificationsLayer(root) as AnyVnode);
     const panel = collectVnodes(rendered).find(
       (vnode) => attrsOf(vnode).id === "notifications-panel",
     );
     expect(panel).toBeDefined();
     const style = String(attrsOf(panel as AnyVnode).style);
-    // top = bell bottom (5 + 28), flush; right = 1000 - (900 + 28).
+    // top = icon bottom (5 + 28), flush; right = 1000 - (940 + 28), the BUG
+    // button's edge rather than the bell's -- so switching between the two
+    // does not slide the box out from under the cursor.
     expect(style).toContain("top: 33px");
-    expect(style).toContain("right: 72px");
-    // A narrow dropdown, not a centered modal's width.
+    expect(style).toContain("right: 32px");
     const panelClass = String(attrsOf(panel as AnyVnode).className);
-    expect(panelClass).toContain("w-[360px]");
-    // Square only the top-right corner (it is right-aligned under the raised
-    // bell, and touches its own squared bottom edge); top-left has nothing
-    // above it to join and stays rounded.
+    // A narrow dropdown, not a centered modal's width, and the same width
+    // Get help gets.
+    expect(panelClass).toContain("w-[400px]");
+    // The bell is not the icon standing at the panel's right corner, so that
+    // corner has an unselected button above it and nothing to join: rounded,
+    // like the rest of the card.
     expect(panelClass).toContain("rounded-xl");
-    expect(panelClass).toContain("rounded-tr-none");
+    expect(panelClass).not.toContain("rounded-tr-none");
   });
 
   it("draws its own raised bell over the dimmed real one, at its measured rect", () => {
@@ -397,24 +486,9 @@ describe("Shell notifications overlay", () => {
     const root = renderShell(state, "/create", m("div#create-form"), {
       workspaceParam: null,
     });
-    vi.stubGlobal("document", {
-      getElementById: (id: string) =>
-        id === "notifications-toggle"
-          ? {
-              getBoundingClientRect: () => ({
-                left: 900,
-                top: 5,
-                width: 28,
-                height: 28,
-              }),
-            }
-          : null,
-    });
-    vi.stubGlobal("window", { location: { search: "" }, innerWidth: 1000 });
-    const rendered = renderComponent(notificationsLayer(root) as AnyVnode);
-    const raisedBell = collectVnodes(rendered).find(
-      (vnode) => attrsOf(vnode).id === "notifications-toggle-raised",
-    );
+    stubTitlebar();
+    const rendered = renderOverlay(notificationsLayer(root) as AnyVnode);
+    const raisedBell = raisedIcon(rendered, "notifications");
     expect(raisedBell).toBeDefined();
     const style = String(attrsOf(raisedBell as AnyVnode).style);
     expect(style).toContain("left: 900px");
@@ -430,66 +504,71 @@ describe("Shell notifications overlay", () => {
     expect(raisedClass).toContain("rounded-b-none");
   });
 
-  it("falls back to the centered card when no bell is mounted to hang from", () => {
+  it("raises the bug button alongside the bell, so one is a click from the other", () => {
+    // On a hub page the three machine tabs are not on screen, so the strip is
+    // the right-hand pair alone -- and Get help is still reachable without
+    // clicking out of the feed first.
+    const { state } = shellWithFeedOpen();
+    const root = renderShell(state, "/create", m("div#create-form"), {
+      workspaceParam: null,
+    });
+    stubTitlebar(["notifications-toggle", "help-toggle"]);
+    const rendered = renderOverlay(notificationsLayer(root) as AnyVnode);
+
+    expect(raisedIconIds(rendered)).toEqual(["notifications", "help"]);
+    const bug = raisedIcon(rendered, "help") as AnyVnode;
+    expect(attrsOf(bug)["aria-selected"]).toBe("false");
+    expect(typeof attrsOf(bug).onclick).toBe("function");
+  });
+
+  it("falls back to the centered card when no titlebar is mounted to hang from", () => {
     const { state } = shellWithFeedOpen();
     const root = renderShell(state, "/create", m("div#create-form"), {
       workspaceParam: null,
     });
     vi.stubGlobal("document", { getElementById: () => null });
-    const rendered = renderComponent(notificationsLayer(root) as AnyVnode);
-    // The centered AppOverlay is itself a component vnode carrying cardClass,
-    // dismissing to the popover's own closer rather than a navigation.
-    expect(attrsOf(rendered).cardClass).toContain("w-[360px]");
-    expect(typeof attrsOf(rendered).onDismiss).toBe("function");
+    const rendered = renderOverlay(notificationsLayer(root) as AnyVnode);
+    // Centered rather than hung at a guessed rect, and with no titlebar there
+    // is no strip to raise.
+    const region = collectVnodes(rendered).find((vnode) =>
+      String(attrsOf(vnode).className ?? "").includes("items-center"),
+    );
+    expect(region, "no centered region").toBeDefined();
+    expect(raisedIconIds(rendered)).toEqual([]);
+    const panel = collectVnodes(rendered).find(
+      (vnode) => attrsOf(vnode).id === "notifications-panel",
+    );
+    expect(String(attrsOf(panel as AnyVnode).className)).toContain("w-[400px]");
   });
 });
 
 describe("Shell help overlay", () => {
-  /** HelpOverlay's own component vnode, found the same way notificationsLayer
-   * finds NotificationsOverlay's -- by the component it mounts, since the
-   * unanchored fallback reuses AppOverlay and would not carry cardClass at
-   * this level. */
   function helpLayer(root: AnyVnode): AnyVnode | undefined {
-    return collectVnodes(root).find(
-      (vnode) =>
-        typeof vnode.tag === "function" &&
-        (vnode.tag as { name?: string }).name === "HelpOverlay",
-    );
+    return popoverLayer(root, "help");
   }
 
-  it("anchors the panel under the measured bug-report button, right edge to right edge", () => {
+  it("takes the same box the bell's feed takes, so a switch does not move it", () => {
     const { state } = makeShell();
     const root = renderShell(state, "/help", m("div#help-content"), {
       workspaceParam: null,
     });
-    // The button rect is measured when the overlay component instantiates.
-    vi.stubGlobal("document", {
-      getElementById: (id: string) =>
-        id === "help-toggle"
-          ? {
-              getBoundingClientRect: () => ({
-                left: 940,
-                top: 5,
-                width: 28,
-                height: 28,
-              }),
-            }
-          : null,
-    });
-    vi.stubGlobal("window", { location: { search: "" }, innerWidth: 1000 });
-    const rendered = renderComponent(helpLayer(root) as AnyVnode);
+    // The rects are measured when the overlay component instantiates.
+    stubTitlebar();
+    const rendered = renderOverlay(helpLayer(root) as AnyVnode);
     const panel = collectVnodes(rendered).find(
       (vnode) => attrsOf(vnode).id === "help-panel",
     );
     expect(panel).toBeDefined();
     const style = String(attrsOf(panel as AnyVnode).style);
-    // top = button bottom (5 + 28), flush; right = 1000 - (940 + 28).
+    // Identical top and right to the feed's: top = icon bottom (5 + 28),
+    // flush; right = 1000 - (940 + 28).
     expect(style).toContain("top: 33px");
     expect(style).toContain("right: 32px");
     const panelClass = String(attrsOf(panel as AnyVnode).className);
-    // Square only the top-right corner (it is right-aligned under the raised
-    // button, and touches its own squared bottom edge); top-left has
-    // nothing above it to join and stays rounded.
+    expect(panelClass).toContain("w-[400px]");
+    // The bug button IS the icon standing at the panel's right corner, so
+    // that corner squares off and the two join into one shape with a tab;
+    // top-left has nothing above it and stays rounded.
     expect(panelClass).toContain("rounded-xl");
     expect(panelClass).toContain("rounded-tr-none");
   });
@@ -499,24 +578,9 @@ describe("Shell help overlay", () => {
     const root = renderShell(state, "/help", m("div#help-content"), {
       workspaceParam: null,
     });
-    vi.stubGlobal("document", {
-      getElementById: (id: string) =>
-        id === "help-toggle"
-          ? {
-              getBoundingClientRect: () => ({
-                left: 940,
-                top: 5,
-                width: 28,
-                height: 28,
-              }),
-            }
-          : null,
-    });
-    vi.stubGlobal("window", { location: { search: "" }, innerWidth: 1000 });
-    const rendered = renderComponent(helpLayer(root) as AnyVnode);
-    const raisedButton = collectVnodes(rendered).find(
-      (vnode) => attrsOf(vnode).id === "help-toggle-raised",
-    );
+    stubTitlebar();
+    const rendered = renderOverlay(helpLayer(root) as AnyVnode);
+    const raisedButton = raisedIcon(rendered, "help");
     expect(raisedButton).toBeDefined();
     const style = String(attrsOf(raisedButton as AnyVnode).style);
     expect(style).toContain("left: 940px");
@@ -529,16 +593,55 @@ describe("Shell help overlay", () => {
     expect(raisedClass).toContain("rounded-b-none");
   });
 
-  it("falls back to the centered card when no bug-report button is mounted to hang from", () => {
+  it("raises the machine tabs too, so the panel is a click away from a machine", () => {
+    const { state } = makeShell();
+    const root = renderShell(state, "/help", m("div#help-content"), {
+      workspaceParam: null,
+    });
+    stubTitlebar();
+    const rendered = renderOverlay(helpLayer(root) as AnyVnode);
+
+    expect(raisedIconIds(rendered)).toEqual([
+      "permissions",
+      "settings",
+      "share",
+      "notifications",
+      "help",
+    ]);
+    expect(attrsOf(raisedIcon(rendered, "help") as AnyVnode)["aria-selected"]).toBe(
+      "true",
+    );
+  });
+
+  it("takes the same body shape the feed takes, so the two headers sit on one line", () => {
+    // Both pages draw their own edge-to-edge title row and scroll below it
+    // (HelpPage's suite pins its row); the card body is the same bare column
+    // for both, so a switch swaps content under one unchanged header line.
+    const { state } = makeShell();
+    const root = renderShell(state, "/help", m("div#help-content"), {
+      workspaceParam: null,
+    });
+    const help = helpLayer(root);
+    expect(String(attrsOf(help as AnyVnode).bodyClass)).toBe(
+      "flex-1 min-h-0 flex flex-col",
+    );
+  });
+
+  it("falls back to the centered card when no titlebar is mounted to hang from", () => {
     const { state } = makeShell();
     const root = renderShell(state, "/help", m("div#help-content"), {
       workspaceParam: null,
     });
     vi.stubGlobal("document", { getElementById: () => null });
-    const rendered = renderComponent(helpLayer(root) as AnyVnode);
-    const inner = appOverlay(rendered);
-    expect(inner).toBeDefined();
-    expect(typeof attrsOf(inner as AnyVnode).onDismiss).toBe("function");
+    const rendered = renderOverlay(helpLayer(root) as AnyVnode);
+    const region = collectVnodes(rendered).find((vnode) =>
+      String(attrsOf(vnode).className ?? "").includes("items-center"),
+    );
+    expect(region, "no centered region").toBeDefined();
+    const panel = collectVnodes(rendered).find(
+      (vnode) => attrsOf(vnode).id === "help-panel",
+    );
+    expect(String(attrsOf(panel as AnyVnode).className)).toContain("w-[400px]");
   });
 });
 
@@ -573,11 +676,12 @@ describe("Shell app-overlay card chrome", () => {
   });
 
   it("leaves every other overlay scrolling its card as a whole", () => {
-    // Accounts, Get help, the request popup, the AI-keys dialog and the
-    // template stepper are single columns that depend on the card scrolling.
+    // Accounts, the request popup, the AI-keys dialog and the template stepper
+    // are single columns that depend on the card scrolling. (Get help does not
+    // come through here -- it takes the right-hand popover's own box, and its
+    // own suite pins the scrolling body it gets there.)
     for (const routePath of [
       "/accounts",
-      "/help",
       "/inbox",
       "/settings/ai-keys",
       "/create/template",

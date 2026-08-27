@@ -25,16 +25,9 @@ import {
 } from "./classify";
 import { noticeBandFor } from "./notice-band";
 import { NoticeBand } from "./NoticeBand";
-import { OverlayBackdrop } from "./OverlayBackdrop";
-import type { CardBox } from "./card-resize";
-import {
-  animateCardResize,
-  holdSize,
-  isContentPending,
-  measureCardBox,
-  releaseSize,
-} from "./card-resize";
 import { NotificationsPage } from "../pages/NotificationsPage";
+import type { OverlayShellAttrs } from "./OverlayShell";
+import { ANCHORED_CARD_CLASS, OverlayShell } from "./OverlayShell";
 import { openReviewRoute } from "../../models/notificationsUi";
 import { SidebarMenu } from "./SidebarMenu";
 import { Titlebar } from "./Titlebar";
@@ -49,590 +42,84 @@ import {
 import { UpdateReadyCard } from "./UpdateReadyCard";
 import { RecoveryModal } from "../recovery/RecoveryModal";
 import { WebLoginModal } from "../components/WebLoginModal";
-import { DialogCloseButton } from "../components/Modal";
-import type { OptionsTab } from "../../models/workspaceOptions";
-import { DOCKED_TABS } from "../pages/workspace/WorkspaceOptionsOverlay";
-import { Icon16 } from "../components/Icon";
-import { Badge } from "../components/Badge";
 import { electronBridge } from "../../electron-bridge";
 
-interface AppOverlayAttrs {
-  shell: ShellState;
-  cardClass: string;
-  bodyClass: string;
-  /** How Esc / backdrop / the X dismiss the card. Route-based app modals
-   * take the default (dismissAppOverlay, a navigation); a local-state
-   * overlay reusing this chrome passes its own closer. */
-  onDismiss?: () => void;
-}
-
-/** The floating card for an app-level modal (the request popup, Minds settings,
- * Accounts, Get help) in the shared OverlayBackdrop: a centered card with a
- * close X. Esc and backdrop clicks dismiss back to the surface it was opened
- * over. The card clips to its rounded corners and keeps its body inside itself
- * -- scrolling it, or handing it a bounded column to scroll within -- so the X
- * stays pinned. */
-function AppOverlay(): m.Component<AppOverlayAttrs> {
+/** The request popup's overlay attrs: the docked options panel's own window,
+ * showing a request -- same rect, same raised strip, same key tab filled and
+ * joined to the card. `animatesBox` is what sets it apart: the card grows out
+ * of the panel it was opened over and resizes as the request loads (the
+ * lifecycle lives in OverlayShell). */
+function requestOverlayAttrs(
+  shell: ShellState,
+  bodyClass: string,
+): OverlayShellAttrs {
   return {
-    view(vnode) {
-      const { shell, cardClass, bodyClass } = vnode.attrs;
-      const dismiss =
-        vnode.attrs.onDismiss ?? (() => shell.dismissAppOverlay());
-      return m(
-        OverlayBackdrop,
-        {
-          backdropId: "app-overlay-backdrop",
-          fullWindow: true,
-          onDismiss: dismiss,
-        },
-        m(
-          "div#app-overlay-panel",
-          {
-            class:
-              "relative " +
-              cardClass +
-              " max-w-full max-h-[calc(100%-64px)] flex flex-col " +
-              "rounded-xl border border-subtle bg-surface-primary shadow-overlay overflow-hidden",
-          },
-          [
-            m(DialogCloseButton, { onClose: dismiss }),
-            m("div", { class: bodyClass }, vnode.children),
-          ],
-        ),
-      );
-    },
+    shell,
+    placement: "docked",
+    // Reviewing a permission request is a Permissions surface, so the popup
+    // hangs from the same key the docked Permissions pane does.
+    selected: "permissions",
+    animatesBox: true,
+    panelId: "app-overlay-panel",
+    backdropId: "app-overlay-backdrop",
+    cardClass: "w-[600px] min-h-0 max-w-full",
+    // Laid out at the width the card settles at, not at the card's animating
+    // width: left to fill, every frame of the resize would re-wrap the
+    // request's text and re-flow its rows, which is what a smooth box change
+    // must not do. The card clips, so the wider frame simply shows more
+    // surface around it. Width only -- the card is a COLUMN flex container,
+    // so `shrink-0` here would refuse to shrink in HEIGHT, and the body's own
+    // overflow scroller would never engage.
+    bodyClass: bodyClass + " w-[600px] max-w-full",
+    onDismiss: () => shell.dismissAppOverlay(),
   };
 }
 
-/** The #ws-tab-strip (titlebar icon-tabs) window rect, or null when no
- * workspace titlebar is mounted (a hub-context or cold-start open). The strip
- * keeps its box while hidden by visibility, so the rect stays true even while
- * the titlebar's own tabs are hidden under a panel or this popup. The strip's
- * left edge is the key's, which is what the card hangs from. */
-function readKeyAnchor(): { x: number; y: number; height: number } | null {
-  const strip = document.getElementById("ws-tab-strip");
-  if (strip === null) return null;
-  const rect = strip.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0) return null;
-  return { x: rect.left, y: rect.top, height: rect.height };
-}
-
-/** Gutter kept clear beside the anchored request card at small window sizes. */
-const REQUEST_MIN_GUTTER_PX = 24;
-
-/** How far left of the key tab the request card's edge sits, so the card reads
- * as hanging from the key rather than floating loose beside it. */
-const REQUEST_KEY_OVERHANG_PX = 20;
-
-const REQUEST_CARD_WIDTH_PX = 600;
-
-/** The request popup, hung from the titlebar's key tab. Reviewing a permission
- * request is a Permissions surface, so the popup attaches to the same key icon
- * the docked Permissions panel hangs from: a raised key tab filled with the
- * card's surface, square-bottomed and joined to the card below it, wherever the
- * popup was opened from (the in-chat card or a Waiting-on-you row). Keeps the
- * centered AppOverlay's ids and dismissal chrome -- it IS the app overlay for
- * /inbox -- and falls back to the centered card when no key tab is mounted to
- * hang from (a hub-context or cold-start open). */
-function RequestOverlay(): m.Component<AppOverlayAttrs> {
-  let anchor = readKeyAnchor();
-  // The card's last settled size, so a change (the request landing after its
-  // spinner, the Adjust editor opening) grows out of what was on screen.
-  let lastBox: CardBox | null = null;
-  // The resize in flight, if any. Held so an interrupting change animates from
-  // where the card visually IS rather than from where it was headed.
-  let resize: Animation | null = null;
-  // The size the window is being held at while the request loads, or null when
-  // the card is sizing itself.
-  let held: CardBox | null = null;
-
-  function remeasure(): void {
-    const next = readKeyAnchor();
-    if (next === null) return;
-    if (
-      anchor === null ||
-      anchor.x !== next.x ||
-      anchor.y !== next.y ||
-      anchor.height !== next.height
-    ) {
-      anchor = next;
-      m.redraw();
-    }
-  }
-
-  /** The card's box as drawn and as its content wants it -- the same box unless
-   * a resize is mid-flight, which is cancelled here so the content size can be
-   * measured (an animated element measures at its interpolated size).
-   * `wasResizing` says whether that happened, since the drawn box is then the
-   * only record of where the card visually was. */
-  function boxesOf(
-    card: HTMLElement,
-  ): { drawn: CardBox; content: CardBox; wasResizing: boolean } | null {
-    const drawn = measureCardBox(card);
-    if (drawn === null) return null;
-    if (resize === null) return { drawn, content: drawn, wasResizing: false };
-    resize.cancel();
-    resize = null;
-    const content = measureCardBox(card);
-    return content === null ? null : { drawn, content, wasResizing: true };
-  }
-
-  /** Take the card to whatever size its content now asks for, animating from
-   * `from` (the previous size, or the surface the popup was opened over). */
-  function resizeInto(from: CardBox | null): void {
-    // By id rather than through the vnode: this component's own dom is the
-    // backdrop, and the card is the panel nested inside it.
-    const card = document.getElementById("app-overlay-panel");
-    if (card === null) return;
-    const boxes = boxesOf(card);
-    if (boxes === null) return;
-    // A running resize was just cancelled to measure, and cancelling hands the
-    // card straight to its content size -- so the trip has to be picked up from
-    // where the card visually WAS, not from where the last one started. Without
-    // this, any redraw landing inside the 200ms (the list load resolving, a
-    // channel frame) ends the animation early and snaps the card to size:
-    // `from` would be the size the cancelled run was already headed for, which
-    // is no distance at all.
-    const previous = boxes.wasResizing ? boxes.drawn : from;
-    lastBox = boxes.content;
-    if (previous === null) return;
-    resize = animateCardResize(card, previous, boxes.content);
-    if (resize !== null)
-      resize.addEventListener("finish", () => (resize = null));
-  }
-
+/** The two surfaces hung from the titlebar's right-hand pair: the bell's feed
+ * and the bug button's Get help form. One box, one placement, one dismissal
+ * shape -- they differ only in which icon is lit, which panel id they carry,
+ * and how they are put away (the feed is local state, Get help is a route).
+ * Sharing this is what keeps the window from moving when you click from one
+ * icon to the other. */
+function anchoredOverlayAttrs(
+  shell: ShellState,
+  id: "notifications" | "help",
+): OverlayShellAttrs {
+  const isFeed = id === "notifications";
   return {
-    oncreate() {
-      remeasure();
-      const card = document.getElementById("app-overlay-panel");
-      if (card === null) return;
-      // Opened over the options panel (a "Waiting on you" row), the popup takes
-      // that window over, so it starts at the panel's box and shrinks into its
-      // own -- the panel is still mounted behind, so it is there to measure.
-      // Opened from anywhere else there is no window to take over, and the
-      // popup simply appears at its size.
-      const panel = document.getElementById("ws-options-panel");
-      const openedFrom = panel === null ? null : measureCardBox(panel);
-      // Nothing to shrink INTO yet while the request is still loading: sizing
-      // to the spinner would shrink past the answer and grow back into it. The
-      // window holds the size it was opened at until the request lands, and
-      // then makes that trip once.
-      if (openedFrom !== null && isContentPending(card)) {
-        holdSize(card, openedFrom);
-        held = openedFrom;
-        return;
-      }
-      resizeInto(openedFrom);
-    },
-    onupdate() {
-      remeasure();
-      const card = document.getElementById("app-overlay-panel");
-      if (card === null) return;
-      if (held !== null) {
-        if (isContentPending(card)) return;
-        const openedFrom = held;
-        held = null;
-        releaseSize(card);
-        resizeInto(openedFrom);
-        return;
-      }
-      resizeInto(lastBox);
-    },
-    onremove() {
-      if (resize !== null) resize.cancel();
-      resize = null;
-      held = null;
-    },
-    view(vnode) {
-      const { shell, cardClass, bodyClass } = vnode.attrs;
-      if (anchor === null) return m(AppOverlay, vnode.attrs, vnode.children);
-      // Left edge just left of the key, clamped so the card never leaves the
-      // window's gutters (a narrow window slides it left rather than clipping).
-      const leftLimit = Math.max(
-        REQUEST_MIN_GUTTER_PX,
-        window.innerWidth - REQUEST_MIN_GUTTER_PX - REQUEST_CARD_WIDTH_PX,
-      );
-      const gutterPx = Math.min(
-        Math.max(
-          REQUEST_MIN_GUTTER_PX,
-          Math.round(anchor.x - REQUEST_KEY_OVERHANG_PX),
-        ),
-        leftLimit,
-      );
-      return m(
-        OverlayBackdrop,
-        {
-          backdropId: "app-overlay-backdrop",
-          fullWindow: true,
-          onDismiss: () => shell.dismissAppOverlay(),
-        },
-        m(
-          "div",
-          {
-            class:
-              "fixed left-0 right-0 bottom-3 flex items-start justify-start pointer-events-none",
-            style: `top: ${anchor.y + anchor.height}px; padding-left: ${gutterPx}px; padding-right: ${REQUEST_MIN_GUTTER_PX}px`,
-          },
-          [
-            // The raised key: the popup's own copy of the titlebar tab it hangs
-            // from, drawn over the dimmed real one at its measured rect.
-            // The whole icon-tab strip, not just the key: the popup covers the
-            // titlebar's own tabs, and a window that shows one of three tabs
-            // while it is open has quietly taken the other two away. Same
-            // shape the docked panel draws, so the strip reads as one strip
-            // wherever you are.
-            m(
-              "div",
-              {
-                id: "app-overlay-key-tab",
-                role: "tablist",
-                "aria-label": "Machine options",
-                class:
-                  "pointer-events-auto absolute z-10 flex items-center gap-1",
-                style: `left: ${anchor.x}px; top: -${anchor.height}px; height: ${anchor.height}px`,
-              },
-              DOCKED_TABS.map((entry) => {
-                const isSelected = entry.id === "permissions";
-                return m(
-                  "button",
-                  {
-                    type: "button",
-                    role: "tab",
-                    "data-wsopt-tab": entry.id,
-                    "aria-selected": isSelected ? "true" : "false",
-                    "aria-label": isSelected
-                      ? "Close permission request"
-                      : entry.label,
-                    "data-tooltip": isSelected ? "Close" : entry.label,
-                    class:
-                      "inline-flex items-center justify-center p-1.5 rounded-md cursor-pointer " +
-                      "focus-visible:outline-2 focus-visible:outline-accent " +
-                      (isSelected
-                        ? "bg-surface-primary rounded-b-none text-primary"
-                        : "titlebar-surface text-secondary hover:bg-fill-hover active:bg-fill-active hover:text-primary"),
-                    // The key is the tab this window IS, so it puts the window
-                    // away, like the titlebar tab it stands in for. The other
-                    // two are different surfaces, so they go there -- leaving
-                    // the request behind, exactly as they would from the panel.
-                    onclick: () =>
-                      isSelected
-                        ? shell.dismissAppOverlay()
-                        : openOptionsTab(shell, entry.id),
-                  },
-                  m(Icon16, { name: entry.icon }),
-                );
-              }),
-            ),
-            m(
-              "div#app-overlay-panel",
-              {
-                class:
-                  "pointer-events-auto relative " +
-                  cardClass +
-                  " max-w-full max-h-full flex flex-col " +
-                  "rounded-xl bg-surface-primary shadow-overlay overflow-hidden",
-              },
-              [
-                m(DialogCloseButton, {
-                  onClose: () => shell.dismissAppOverlay(),
-                }),
-                // Laid out at the width the card settles at, not at the card's
-                // animating width: left to fill, every frame of the resize
-                // would re-wrap the request's text and re-flow its rows, which
-                // is what a smooth box change must not do. The card clips, so
-                // the wider frame simply shows more surface around it.
-                // The width is written out rather than built from
-                // REQUEST_CARD_WIDTH_PX: Tailwind generates classes by reading
-                // complete literals out of the source.
-                // Width only. The card is a COLUMN flex container, so a
-                // `shrink-0` here would refuse to shrink in HEIGHT -- the body
-                // would grow to its content instead of to the card, and its own
-                // overflow scroller would never engage (which is what stopped
-                // the Adjust editor's toggle list scrolling).
-                m(
-                  "div",
-                  { class: bodyClass + " w-[600px] max-w-full" },
-                  vnode.children,
-                ),
-              ],
-            ),
-          ],
-        ),
-      );
-    },
+    shell,
+    placement: "anchored",
+    selected: id,
+    panelId: isFeed ? "notifications-panel" : "help-panel",
+    backdropId: isFeed ? "notifications-backdrop" : "help-backdrop",
+    // One width, so the box does not change when you click the other icon.
+    // The height is the one dimension the two genuinely differ on: a viewport
+    // fraction for the feed's row list, a fixed window offset for the help
+    // form, whose card must not outgrow the window it hangs in.
+    cardClass:
+      ANCHORED_CARD_CLASS +
+      (isFeed ? " max-h-[70vh]" : " max-h-[calc(100%-64px)]"),
+    // One body shape too: both pages draw their own edge-to-edge title row
+    // (icon + label over a hairline) and scroll their content below it, so the
+    // window keeps one header line across a switch.
+    bodyClass: "flex-1 min-h-0 flex flex-col",
+    onDismiss: isFeed
+      ? () => shell.closeNotifications()
+      : () => shell.dismissAppOverlay(),
   };
 }
 
-/** A titlebar button's window rect by id, or null when none is mounted to
- * hang from (or there is no DOM, as under vitest's node environment). */
-function readButtonAnchor(elementId: string): {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-} | null {
-  if (typeof document === "undefined") return null;
-  const button = document.getElementById(elementId);
-  if (button === null) return null;
-  const rect = button.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0) return null;
-  return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
-}
-
-/** Air between an anchored button (the bell, the bug-report button) and its
- * popped-over panel: flush, so the panel reads as hanging directly off the
- * raised button's own square bottom corners rather than floating as a
- * separate card. Shared by every anchored popover (see anchoredPopoverPanel). */
-const ANCHORED_POPOVER_GAP_PX = 0;
-
-/** Gutter an anchored popover panel keeps from the window's right edge. */
-const ANCHORED_POPOVER_MIN_GUTTER_PX = 8;
-
-/** Measures and tracks one titlebar button's rect for an anchored popover,
- * re-running on create/update (mithril's redraw hooks) and only triggering a
- * redraw when the rect actually changed. Kept as per-instance closure state
- * (rather than a plain function call) since NotificationsOverlay/HelpOverlay
- * are themselves closure components -- this factors out their identical
- * measure-and-track logic without losing the fresh-on-remount state each
- * gets from mithril re-invoking its own closure factory on every mount. */
-function anchorTracker(elementId: string): {
-  get(): { x: number; y: number; width: number; height: number } | null;
-  remeasure(): void;
-} {
-  let anchor = readButtonAnchor(elementId);
-  return {
-    get: () => anchor,
-    remeasure() {
-      const next = readButtonAnchor(elementId);
-      if (next === null) return;
-      if (
-        anchor === null ||
-        anchor.x !== next.x ||
-        anchor.y !== next.y ||
-        anchor.width !== next.width ||
-        anchor.height !== next.height
-      ) {
-        anchor = next;
-        m.redraw();
-      }
-    },
-  };
-}
-
-interface AnchoredPopoverAttrs {
-  anchor: { x: number; y: number; width: number; height: number } | null;
-  shell: ShellState;
-  cardClass: string;
-  bodyClass: string;
-  onDismiss: () => void;
-  children: m.Children;
-  /** DOM id for the anchored panel (e.g. "notifications-panel"). */
-  panelId: string;
-  backdropId: string;
-  /** DOM id for the popover's own raised copy of the anchor button. */
-  raisedButtonId: string;
-  ariaLabel: string;
-  iconName: string;
-  /** The panel's own max-height class -- the one dimension callers actually
-   * differ on (a viewport fraction for the bell's feed, a fixed window
-   * offset for the help modal). */
-  panelMaxHeightClass: string;
-  /** The raised button's badge (the bell's unresolved count); null draws none. */
-  badge: { id: string; count: number } | null;
-}
-
-/** A popover hung under one of the titlebar's own buttons rather than
- * centered in the window: the bell's notification feed (NotificationsOverlay)
- * and the bug button's Get Help modal (HelpOverlay) both use this shape,
- * differing only in which button they hang from, their icon, and (for the
- * bell) the badge. Falls back to the centered AppOverlay when the button
- * isn't mounted (a hub-context or cold-start open, or under vitest's node
- * environment). The backdrop dismisses it, as does Escape and any
- * navigation -- both wired by the caller's own onDismiss.
- *
- * Draws its own raised copy of the anchor button over the dimmed real one
- * (which the titlebar hides by visibility while open, matching the
- * workspace options tabs) -- so the highlight is a real button on its own
- * surface rather than a re-colored titlebar button, with no titlebar
- * hover/active classes to fight for the background and no rebased
- * .titlebar-surface text color to go invisible against it. A plain function
- * (not a mithril component) so it returns vnodes directly into the caller's
- * own view() -- the caller (a closure component) owns the anchor-tracking
- * state via anchorTracker, since that state needs to be fresh per mount. */
-function anchoredPopoverPanel(config: AnchoredPopoverAttrs): m.Children {
-  const { anchor, shell, cardClass, bodyClass, onDismiss, children } = config;
-  if (anchor === null) {
-    return m(AppOverlay, { shell, cardClass, bodyClass, onDismiss }, children);
-  }
-  // Right-align the panel's edge to the button's, clamped into the gutter.
-  const rightPx = Math.max(
-    ANCHORED_POPOVER_MIN_GUTTER_PX,
-    Math.round(window.innerWidth - (anchor.x + anchor.width)),
-  );
-  return m(
-    OverlayBackdrop,
-    { backdropId: config.backdropId, fullWindow: true, onDismiss },
-    [
-      m(
-        `div#${config.panelId}`,
-        {
-          class:
-            "pointer-events-auto fixed " +
-            cardClass +
-            ` ${config.panelMaxHeightClass} max-w-[calc(100%-16px)] flex flex-col ` +
-            // Square only the top-right corner (joins the raised button's
-            // own squared-off bottom directly above it, right-aligned to the
-            // panel); the top-left corner has nothing above it to join and
-            // stays rounded like the rest of the card. No border: the
-            // raised button has none either, so together they read as one
-            // shape with a tab, not two seamed-together cards.
-            "rounded-xl rounded-tr-none bg-surface-primary shadow-overlay overflow-hidden",
-          style: `top: ${anchor.y + anchor.height + ANCHORED_POPOVER_GAP_PX}px; right: ${rightPx}px`,
-        },
-        [
-          m(DialogCloseButton, { onClose: onDismiss }),
-          m("div", { class: bodyClass }, children),
-        ],
-      ),
-      // The raised button: the popover's own copy of the titlebar button it
-      // hangs from, drawn over the dimmed real one (hidden by the titlebar)
-      // at its measured rect. Painted after (so: on top of) the panel,
-      // whose shadow-overlay halo would otherwise bleed a few px onto the
-      // bottom of this opaque white button and read as a slightly darker
-      // shade right at the seam.
-      m(
-        "button",
-        {
-          type: "button",
-          id: config.raisedButtonId,
-          "aria-label": config.ariaLabel,
-          class:
-            "pointer-events-auto fixed inline-flex items-center justify-center p-1.5 rounded-md rounded-b-none " +
-            "bg-surface-primary text-primary cursor-pointer focus-visible:outline-2 focus-visible:outline-accent",
-          style: `left: ${anchor.x}px; top: ${anchor.y}px; width: ${anchor.width}px; height: ${anchor.height}px`,
-          onclick: onDismiss,
-        },
-        [
-          m(Icon16, { name: config.iconName }),
-          config.badge !== null
-            ? m(
-                "span",
-                { class: "pointer-events-none absolute -top-1 -right-1 flex" },
-                m(Badge, { id: config.badge.id, count: config.badge.count }),
-              )
-            : null,
-        ],
-      ),
-    ],
-  );
-}
-
-/** The bell's notification feed: a popover hung under the titlebar bell,
- * keyed on ``shell.isNotificationsOpen`` rather than a route so it floats over
- * whatever surface is on screen (a hub page, the create form, a machine) and
- * never navigates away from it. Anchors to the bell by the same measure-by-id
- * the request popup uses on the key tab; when no bell is mounted to hang from
- * it falls back to a centered card. The backdrop dismisses it, as does
- * Escape (shell.handleEscape) and any navigation (handleRouteChanged). See
- * anchoredPopoverPanel for the shared anchored-popover shape (also used by
- * HelpOverlay). */
-function NotificationsOverlay(): m.Component<{ shell: ShellState }> {
-  const anchor = anchorTracker("notifications-toggle");
-
-  return {
-    oncreate() {
-      anchor.remeasure();
-    },
-    onupdate() {
-      anchor.remeasure();
-    },
-    view(vnode) {
-      const { shell } = vnode.attrs;
-      const unresolvedCount = shell.stores.notifications.unresolvedCount;
-      return anchoredPopoverPanel({
-        anchor: anchor.get(),
-        shell,
-        cardClass: "w-[360px] min-h-0",
-        bodyClass: "flex-1 min-h-0 flex flex-col",
-        onDismiss: () => shell.closeNotifications(),
-        children: m(NotificationsPage),
-        panelId: "notifications-panel",
-        backdropId: "notifications-backdrop",
-        raisedButtonId: "notifications-toggle-raised",
-        ariaLabel: "Notifications",
-        iconName: "bell",
-        panelMaxHeightClass: "max-h-[70vh]",
-        badge:
-          unresolvedCount > 0
-            ? { id: "notifications-badge-raised", count: unresolvedCount }
-            : null,
-      });
-    },
-  };
-}
-
-/** Get help / report a bug: hung under the titlebar's bug-report button
- * rather than centered in the window, mirroring the bell's own feed panel
- * (see NotificationsOverlay and anchoredPopoverPanel) -- attached to the
- * button that opened it, and drawing the same raised copy of the button
- * over the dimmed real one. Falls back to the centered AppOverlay when the
- * button isn't mounted (a hub-context or cold-start open, or under
- * vitest's node environment). */
-function HelpOverlay(): m.Component<{
-  shell: ShellState;
-  cardClass: string;
-  bodyClass: string;
-}> {
-  const anchor = anchorTracker("help-toggle");
-
-  return {
-    oncreate() {
-      anchor.remeasure();
-    },
-    onupdate() {
-      anchor.remeasure();
-    },
-    view(vnode) {
-      const { shell, cardClass, bodyClass } = vnode.attrs;
-      const dismiss = () => shell.dismissAppOverlay();
-      return anchoredPopoverPanel({
-        anchor: anchor.get(),
-        shell,
-        cardClass,
-        bodyClass,
-        onDismiss: dismiss,
-        children: vnode.children,
-        panelId: "help-panel",
-        backdropId: "help-backdrop",
-        raisedButtonId: "help-toggle-raised",
-        ariaLabel: "Report a bug",
-        iconName: "bug",
-        panelMaxHeightClass: "max-h-[calc(100%-64px)]",
-        badge: null,
-      });
-    },
-  };
-}
-
-/** Leave the request popup for one of the machine's other option panes. */
-function openOptionsTab(shell: ShellState, tab: OptionsTab): void {
-  const behind = overlayBehindWorkspaceId("/inbox", shell.currentRouteSearch());
-  if (behind === null) return;
-  m.route.set(`/workspace/${behind}/options`, { tab });
-}
-
-/** Per-route sizing for the app modal card. Minds settings takes a definite
+/** Per-route sizing for a CENTERED app modal. Minds settings takes a definite
  * height -- its two columns scroll within it, and a card that resized itself
  * per section would move the section list out from under the cursor -- capped
  * to the window by the same min() the others' max uses. Accounts is a short
- * list; the request popup is a grant dialog; Get help and the AI-keys mint
- * dialog are compact forms, so those grow to their content. */
+ * list and the AI-keys mint dialog a compact form, so those grow to their
+ * content. The placed surfaces (the request popup, the feed, Get help) name
+ * their own box where they are rendered. */
 function appOverlayCardClass(path: string): string {
   if (path === "/settings") return "w-[880px] h-[min(660px,calc(100%-64px))]";
-  if (path === "/inbox") return "w-[600px] min-h-0";
   if (path === "/accounts") return "w-[520px] min-h-0";
-  if (path === "/settings/ai-keys") return "w-[460px] min-h-0";
-  return "w-[460px] min-h-0"; // /help
+  return "w-[460px] min-h-0";
 }
 
 /** How the card holds its body. Minds settings is a two-column pane that
@@ -643,8 +130,6 @@ function appOverlayCardClass(path: string): string {
  * route falls through to. */
 function appOverlayBodyClass(path: string): string {
   if (path === "/settings") return "flex-1 min-h-0 flex flex-col px-6 py-5";
-  // The notification feed draws its own edge-to-edge header and row list, so
-  // it gets an unpadded bounded column and scrolls its rows itself.
   return "min-h-0 overflow-y-auto px-6 py-5";
 }
 
@@ -747,10 +232,15 @@ export function Shell(): m.Component<ShellAttrs> {
       // The options panel is its own docked overlay layer (backdrop + tab strip
       // + card): the Shell just floats it over the mounted surface, from the
       // route while it IS the route and from the router's remembered copy while
-      // a modal floats over it.
-      const optionsLayer = isWorkspaceOverlayPath(routePath)
-        ? content
-        : optionsContent;
+      // a modal floats over it. Not while the feed is open, though: the feed
+      // only ever opens over the LIVE panel route in the beat between a strip
+      // switch and its dismissal navigation landing, and rendering the panel
+      // under it for that beat would double the backdrop -- the flash the one
+      // overlay slot below exists to prevent.
+      const optionsLayer =
+        isWorkspaceOverlayPath(routePath) && !shell.isNotificationsOpen
+          ? content
+          : optionsContent;
       // The request popup does not float OVER the options panel, it takes that
       // window over: it hangs from the same key and resizes out of the panel's
       // box. So the panel is hidden while it is up -- left visible, the two
@@ -762,34 +252,67 @@ export function Shell(): m.Component<ShellAttrs> {
       // it is resizing out of.
       const isPanelTakenOver = routePath === "/inbox" && optionsLayer !== null;
 
-      let overlay: m.Children = null;
-      if (isAppOverlay) {
-        const cardClass = appOverlayCardClass(routePath);
-        // The request popup hangs from the titlebar's key tab, and Get help
-        // hangs from the bug-report button (mirroring the bell's own feed
-        // panel); every other app modal is a centered card. (The bell's feed
-        // is not a route: it is its own state-keyed layer below.)
-        const component =
+      // THE ONE OVERLAY SLOT: whichever of the Shell's floating surfaces is up
+      // -- the bell's feed, the request popup, Get help, a centered app modal,
+      // the template stepper -- renders as ONE OverlayShell at this one vtree
+      // position. One position means one component instance across a strip
+      // switch, so the backdrop, the raised strip, and the card are the SAME
+      // DOM nodes on both sides of it: switching from Get help to the feed
+      // swaps the card's contents in place instead of tearing one overlay
+      // down and mounting another, which flashed a doubled (or missing)
+      // backdrop for the frames in between.
+      //
+      // The feed leads. It is local state, not a route, and it is OPEN during
+      // the beat between a strip switch and the dismissal navigation landing
+      // (switchToNotifications arms it across exactly that arrival) -- so
+      // while both the feed and a popup route are up, the feed is the surface
+      // being switched TO, and the one the slot must show. (The options panel
+      // is the one floating surface with a slot of its own, above: it must
+      // stay mounted -- models, scroll, edits -- behind a request popup that
+      // takes its window over, which means panel and popup genuinely coexist.)
+      let overlayAttrs: OverlayShellAttrs | null = null;
+      let overlayContent: m.Children = null;
+      if (shell.isNotificationsOpen) {
+        overlayAttrs = anchoredOverlayAttrs(shell, "notifications");
+        overlayContent = m(NotificationsPage);
+      } else if (isAppOverlay) {
+        const bodyClass = appOverlayBodyClass(routePath);
+        // The request popup hangs from the titlebar's key tab, Get help hangs
+        // from the right-hand icon pair; every other app modal is a centered
+        // card.
+        overlayAttrs =
           routePath === "/inbox"
-            ? RequestOverlay
+            ? requestOverlayAttrs(shell, bodyClass)
             : routePath === "/help"
-              ? HelpOverlay
-              : AppOverlay;
-        overlay = m(
-          component,
-          { shell, cardClass, bodyClass: appOverlayBodyClass(routePath) },
-          content,
-        );
+              ? anchoredOverlayAttrs(shell, "help")
+              : {
+                  shell,
+                  placement: "centered",
+                  selected: null,
+                  panelId: "app-overlay-panel",
+                  backdropId: "app-overlay-backdrop",
+                  cardClass: appOverlayCardClass(routePath),
+                  bodyClass,
+                  onDismiss: () => shell.dismissAppOverlay(),
+                };
+        overlayContent = content;
       } else if (isTemplateModal) {
         // The New machine template stepper over a live machine: a centered
         // card, dismissed back to that machine (closeAppOverlay handles it).
-        const bodyClass = appOverlayBodyClass(routePath);
-        overlay = m(
-          AppOverlay,
-          { shell, cardClass: "w-[600px] min-h-0", bodyClass },
-          content,
-        );
+        overlayAttrs = {
+          shell,
+          placement: "centered",
+          selected: null,
+          panelId: "app-overlay-panel",
+          backdropId: "app-overlay-backdrop",
+          cardClass: "w-[600px] min-h-0 max-w-full",
+          bodyClass: appOverlayBodyClass(routePath),
+          onDismiss: () => shell.dismissAppOverlay(),
+        };
+        overlayContent = content;
       }
+      const overlay =
+        overlayAttrs === null ? null : m(OverlayShell, overlayAttrs, overlayContent);
 
       // The band speaks for whichever machine is painted, so it is keyed to the
       // surface rather than the route: the workspace route's own frame, and
@@ -870,12 +393,6 @@ export function Shell(): m.Component<ShellAttrs> {
               onClose: () => shell.closeRecoveryModal(),
             })
           : null,
-        // The bell's feed: a popover over whatever surface is on screen.
-        // Emitted after RecoveryModal (both share z-[110]; later DOM siblings
-        // paint on top) so it visually wins when both are open at once,
-        // matching handleEscape's coded precedence (notifications closes
-        // ahead of the recovery card -- see shell-state.ts).
-        shell.isNotificationsOpen ? m(NotificationsOverlay, { shell }) : null,
         // The browser sign-in waiting modal: any page (welcome, accounts,
         // create) can trigger it through the shared webLogin model.
         m(WebLoginModal),
@@ -935,6 +452,11 @@ export function Shell(): m.Component<ShellAttrs> {
             },
             optionsLayer,
           ),
+          // The one overlay slot (see above). Emitted after RecoveryModal
+          // (both share z-[110]; later DOM siblings paint on top) so the feed
+          // visually wins when both are open at once, matching handleEscape's
+          // coded precedence (notifications closes ahead of the recovery
+          // card -- see shell-state.ts).
           overlay,
         ]),
       ]);

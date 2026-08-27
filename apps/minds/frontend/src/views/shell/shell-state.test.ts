@@ -469,23 +469,19 @@ describe("ShellState notifications popover", () => {
     expect(cleared).toBe(1);
   });
 
-  it("toggles from the bell, and Escape closes it first without touching history", () => {
+  it("closes on Escape first, without touching history", () => {
     const shell = makeShell();
     const back = vi.fn();
     vi.stubGlobal("window", { history: { length: 5, back } });
     land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
 
-    shell.toggleNotifications();
+    shell.openNotifications();
     expect(shell.isNotificationsOpen).toBe(true);
     // The popover sits on top, so Escape takes it -- not the app overlay it
     // was opened over, which would have fired history.back().
     expect(shell.handleEscape()).toBe(true);
     expect(shell.isNotificationsOpen).toBe(false);
     expect(back).not.toHaveBeenCalled();
-
-    shell.toggleNotifications();
-    shell.toggleNotifications();
-    expect(shell.isNotificationsOpen).toBe(false);
   });
 
   it("closes on any navigation, like a dropdown would", () => {
@@ -500,6 +496,204 @@ describe("ShellState notifications popover", () => {
     // Leaving the surface (a feed row's jump to a machine) closes it.
     land(shell, `/workspace/${WORKSPACE_ID}`);
     expect(shell.isNotificationsOpen).toBe(false);
+  });
+});
+
+describe("ShellState.switchToNotifications", () => {
+  it("puts an open app modal away and raises the feed in its place", () => {
+    // Clicking the bell from Get help is a switch between two titlebar
+    // popups, not a navigation away from a surface -- so the arrival at the
+    // route the modal is dismissed to must not close the feed it opened.
+    const shell = makeShell();
+    // Real history depth, since Get help is a click away from the docked
+    // options panel: history.back() would land back ON that panel, which would
+    // then be standing under the feed this switch is opening.
+    let backCount = 0;
+    vi.stubGlobal("window", {
+      history: { length: 5, back: () => (backCount += 1) },
+    });
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.switchToNotifications();
+
+    // Straight to the machine Get help named, replacing its entry rather than
+    // walking back through whatever opened it.
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+    expect(backCount).toBe(0);
+    expect(shell.isNotificationsOpen).toBe(true);
+    // The dismissal navigation lands: the feed rides across it.
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isNotificationsOpen).toBe(true);
+    // And an ORDINARY navigation after that still closes it.
+    land(shell, "/create");
+    expect(shell.isNotificationsOpen).toBe(false);
+  });
+
+  it("falls back to history for a Get help that names no machine", () => {
+    // Opened from a hub page there is no machine to route to, and no titlebar
+    // popup can be waiting back there to come up under the feed either.
+    const shell = makeShell();
+    let backCount = 0;
+    vi.stubGlobal("window", {
+      history: { length: 5, back: () => (backCount += 1) },
+    });
+    land(shell, "/help");
+
+    shell.switchToNotifications();
+
+    expect(backCount).toBe(1);
+    expect(shell.isNotificationsOpen).toBe(true);
+  });
+
+  it("closes the docked options panel on its way to the feed, replacing its entry", () => {
+    // Replaced like every other strip switch: pushed, the panel would sit one
+    // Back away under the feed.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.switchToNotifications();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+    expect(shell.isNotificationsOpen).toBe(true);
+  });
+
+  it("puts a centered app modal away first, so the feed never raises beneath its backdrop", () => {
+    // The titlebar's real bell stays painted under Minds settings / Accounts
+    // (no raised strip covers it there), and the feed's backdrop draws under
+    // a later-DOM modal's at the same z -- so the bell's click must put the
+    // modal away, not float the feed beneath it.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, "/settings");
+
+    shell.switchToNotifications();
+
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(shell.isNotificationsOpen).toBe(true);
+    // The dismissal navigation lands: the feed rides across it.
+    land(shell, "/");
+    expect(shell.isNotificationsOpen).toBe(true);
+  });
+
+  it("just opens the feed when there is no popup to put away", () => {
+    // Nothing was navigated, so nothing is armed: the next navigation closes
+    // the feed exactly as it would have before.
+    const shell = makeShell();
+    land(shell, "/create");
+
+    shell.switchToNotifications();
+    expect(shell.isNotificationsOpen).toBe(true);
+
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    expect(shell.isNotificationsOpen).toBe(false);
+  });
+});
+
+describe("ShellState.openHelp", () => {
+  it("floats over the displayed machine as an ordinary push", () => {
+    // No titlebar popup is up (the titlebar's own bug button), so dismissing
+    // Get help must be able to go back to this machine entry.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelp();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      { workspace: WORKSPACE_ID, assist: "1" },
+      undefined,
+    );
+  });
+
+  it("replaces another titlebar popup's entry when switched to from its strip", () => {
+    // Options panel -> bug icon is a switch between two of the five surfaces:
+    // pushed, the panel would be left one Back away under Get help, and
+    // dismissing the form would re-raise the panel that was just left.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelp();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      { workspace: WORKSPACE_ID, assist: "1" },
+      { replace: true },
+    );
+  });
+
+  it("lets go of the panel the request popup was remembering", () => {
+    // Switching the popup for Get help leaves the panel like it leaves the
+    // popup. Kept, the panel stayed painted under Get help with its own
+    // backdrop and its own raised strip -- two of the five surfaces at once.
+    const shell = makeShell();
+    const optionsRoute = `/workspace/${WORKSPACE_ID}/options?tab=permissions&section=waiting`;
+    land(shell, optionsRoute);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    shell.openInbox({ selected: "evt-a" });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+    expect(shell.panelRouteBehindOverlay).toBe(optionsRoute);
+
+    shell.openHelp();
+
+    expect(routeSet).toHaveBeenLastCalledWith(
+      "/help",
+      { workspace: WORKSPACE_ID, assist: "1" },
+      { replace: true },
+    );
+    // The panel lives exactly as long as /inbox is the route: it is let go
+    // the moment the /help route lands -- however /help was reached, the
+    // strip or an Electron open-overlay ask alike.
+    land(shell, `/help?workspace=${WORKSPACE_ID}&assist=1`);
+    expect(shell.panelRouteBehindOverlay).toBeNull();
+  });
+});
+
+describe("ShellState.dismissAppOverlay", () => {
+  it("leaves the popup's window for the machine, replacing the popup's entry", () => {
+    // The popup took the panel's window over, so dismissing it leaves the
+    // window rather than uncovering the panel -- and replaces, so Back from
+    // the machine does not re-raise the popup that was just dismissed.
+    const shell = makeShell();
+    const back = vi.fn();
+    vi.stubGlobal("window", { history: { length: 5, back } });
+    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=permissions`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+    shell.openInbox({ selected: "evt-a" });
+    land(shell, `/inbox?workspace=${WORKSPACE_ID}`);
+
+    expect(shell.dismissAppOverlay()).toBe(true);
+
+    expect(back).not.toHaveBeenCalled();
+    expect(routeSet).toHaveBeenLastCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
   });
 });
 

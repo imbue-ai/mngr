@@ -384,13 +384,33 @@ function HelpPageComponent(): m.Component {
       else if (activeModel.phase === "sent") body = sentPhase(activeModel);
       else body = formPhase(activeModel);
       // Rendered inside the AppOverlay card (Shell), which supplies the card
-      // chrome, padding, scroll, and close X.
+      // chrome and close X. The title row and the scroller below it are this
+      // page's own.
       return [
-        m("h1", { class: "type-section text-primary mb-4" }, "Ran into a bug?"),
-        body,
+        titleRow(),
+        m("div", { class: "min-h-0 flex-1 overflow-y-auto px-6 py-5" }, body),
       ];
     },
   };
+}
+
+/** The page's title row, mirroring the notification feed's header exactly
+ * (same 56px row, icon left, hairline below): the two anchored surfaces are
+ * one window shown two ways, so their headers sit on one line. 56px centers
+ * the row on the same line the panel's close X sits on (see
+ * NotificationsPage's title row for the arithmetic). */
+export function titleRow(): m.Children {
+  return m(
+    "div",
+    {
+      class: "flex h-[56px] shrink-0 items-center border-b border-subtle px-3",
+    },
+    m(
+      "h1",
+      { class: "flex items-center gap-1.5 type-label text-primary" },
+      [m(Icon16, { name: "bug", size: "sm" }), "Ran into a bug?"],
+    ),
+  );
 }
 
 export const HelpPage: m.ComponentTypes = HelpPageComponent;

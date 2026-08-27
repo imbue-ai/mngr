@@ -1,5 +1,6 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { NotificationsStore } from "../../models/notifications";
 import type { ShellState } from "./shell-state";
 import { Titlebar } from "./Titlebar";
 import type { AnyVnode } from "../../testing";
@@ -12,6 +13,7 @@ import {
 import type { UiNotificationEntry } from "../../channel/messages";
 
 const WORKSPACE_ID = "agent-ab12";
+const OPTIONS_PATH = `/workspace/${WORKSPACE_ID}/options`;
 
 /** Expands one level of an unrendered component vnode by calling its own
  * view() -- TitlebarButton computes its final class string there, so an
@@ -35,8 +37,8 @@ interface RenderTitlebarOptions {
   routePath?: string;
   unresolvedNotificationCount?: number;
   isNotificationsOpen?: boolean;
-  /** Records the shell's toggleNotifications calls. */
-  toggleNotifications?: () => void;
+  /** Records the shell's switchToNotifications calls. */
+  switchToNotifications?: () => void;
   notificationEntries?: UiNotificationEntry[];
 }
 
@@ -60,16 +62,22 @@ function renderTitlebar(
         toAgentScopedId: (anyId: string) => anyId,
       },
       requests: { count: 0 },
-      notifications: {
-        unresolvedCount: options.unresolvedNotificationCount ?? 0,
-        entries: options.notificationEntries ?? [],
-      },
+      // A real store, so the key-tab dot tests exercise the store's own
+      // waiting-request derivation rather than a fake's copy of it.
+      notifications: (() => {
+        const store = new NotificationsStore();
+        store.applyNotificationsMessage({
+          entries: options.notificationEntries ?? [],
+          unresolved_count: options.unresolvedNotificationCount ?? 0,
+        });
+        return store;
+      })(),
       health: { isContentAssumedReady: () => true },
     },
     openSidebar: () => undefined,
     displayedWorkspaceAnyId: WORKSPACE_ID,
     isNotificationsOpen: options.isNotificationsOpen ?? false,
-    toggleNotifications: options.toggleNotifications ?? (() => undefined),
+    switchToNotifications: options.switchToNotifications ?? (() => undefined),
   } as unknown as ShellState;
   const instance = Titlebar() as unknown as m.Component;
   const routePath =
@@ -142,19 +150,21 @@ describe("Titlebar right cluster", () => {
     expect(ids).not.toContain("notifications-badge");
   });
 
-  it("toggles the feed popover in place (no navigation), and reads expanded while open", () => {
+  it("opens the feed through the shell's switch (no navigation of its own), and reads expanded while open", () => {
+    // The switch, not a bare open: it puts a centered app modal away first,
+    // so the feed never raises beneath that modal's backdrop.
     const routeSet = vi
       .spyOn(m.route, "set")
       .mockImplementation(() => undefined);
-    let toggles = 0;
+    let switches = 0;
     const closed = renderTitlebar("", {
-      toggleNotifications: () => (toggles += 1),
+      switchToNotifications: () => (switches += 1),
     });
     const bell = collectVnodes(closed).find(
       (vnode) => attrsOf(vnode).id === "notifications-toggle",
     );
     (attrsOf(bell as AnyVnode).onclick as () => void)();
-    expect(toggles).toBe(1);
+    expect(switches).toBe(1);
     // The feed is a popover over the current surface, never a route.
     expect(routeSet).not.toHaveBeenCalled();
     expect(attrsOf(bell as AnyVnode)["aria-expanded"]).toBe("false");
@@ -166,47 +176,85 @@ describe("Titlebar right cluster", () => {
     expect(attrsOf(openBell as AnyVnode)["aria-expanded"]).toBe("true");
   });
 
-  it("hides the bell by visibility while its feed is open", () => {
-    // NotificationsOverlay draws its own raised copy of the bell over the
-    // dimmed titlebar (see Shell.test.ts), so the real one just gets out of
-    // the way -- keeping its box and rect true for NotificationsOverlay to
-    // measure -- rather than the two ghosting through each other.
-    const closed = renderTitlebar("");
-    const closedBell = collectVnodes(closed).find(
-      (vnode) => attrsOf(vnode).id === "notifications-toggle",
-    );
-    const closedTokens = classTokensOf(
-      renderComponentVnode(closedBell as AnyVnode),
-    );
-    expect(closedTokens).not.toContain("invisible");
+  it("hides all five popup icons together, whichever of their surfaces is open", () => {
+    // Every one of these surfaces raises a copy of ALL FIVE icons over the
+    // dimmed titlebar, so the real five have to get out of the way together:
+    // hiding only the one whose surface is up would leave four real buttons
+    // ghosting through four raised ones.
+    // The two route-backed popups forward ?workspace=, which is what keeps the
+    // machine tabs on screen behind them.
+    const OVER_MACHINE = `workspace=${WORKSPACE_ID}`;
+    const POPUP_STATES: {
+      label: string;
+      search: string;
+      options: RenderTitlebarOptions;
+    }[] = [
+      {
+        label: "the docked options panel",
+        search: "",
+        options: { routePath: OPTIONS_PATH },
+      },
+      {
+        label: "the request popup",
+        search: OVER_MACHINE,
+        options: { routePath: "/inbox" },
+      },
+      {
+        label: "a modal over the frozen panel",
+        search: "",
+        options: { panelRouteBehindOverlay: `${OPTIONS_PATH}?tab=permissions` },
+      },
+      {
+        label: "Get help",
+        search: OVER_MACHINE,
+        options: { routePath: "/help" },
+      },
+      {
+        label: "the bell's feed",
+        search: "",
+        options: { isNotificationsOpen: true },
+      },
+    ];
+    const POPUP_BUTTON_IDS = [
+      "ws-tab-permissions",
+      "ws-tab-settings",
+      "ws-tab-share",
+      "notifications-toggle",
+      "help-toggle",
+    ];
 
-    const open = renderTitlebar("", { isNotificationsOpen: true });
-    const openBell = collectVnodes(open).find(
-      (vnode) => attrsOf(vnode).id === "notifications-toggle",
-    );
-    const openTokens = classTokensOf(
-      renderComponentVnode(openBell as AnyVnode),
-    );
-    expect(openTokens).toContain("invisible");
+    for (const state of POPUP_STATES) {
+      const root = renderTitlebar(state.search, state.options);
+      for (const id of POPUP_BUTTON_IDS) {
+        expect(
+          classTokensOf(renderComponentVnode(tabButton(root, id))),
+          `${id} stayed painted under ${state.label}`,
+        ).toContain("invisible");
+      }
+    }
+
+    // With nothing open they are all on screen, of course.
+    const closed = renderTitlebar("");
+    for (const id of POPUP_BUTTON_IDS) {
+      expect(
+        classTokensOf(renderComponentVnode(tabButton(closed, id))),
+      ).not.toContain("invisible");
+    }
   });
 
-  it("hides the bug-report button the same way while its modal is open", () => {
-    const closed = renderTitlebar("");
-    const closedBug = collectVnodes(closed).find(
-      (vnode) => attrsOf(vnode).id === "help-toggle",
-    );
-    expect(
-      classTokensOf(renderComponentVnode(closedBug as AnyVnode)),
-    ).not.toContain("invisible");
+  it("keeps the right-hand pair painted under a request popup that raises nothing", () => {
+    // Opened from an in-chat card with no machine on screen, /inbox forwards no
+    // ?workspace=: the titlebar draws no #ws-tab-strip, so the popup has nothing
+    // to hang from and falls back to a centered card with no raised icons.
+    // Hiding the bell and the bug button then takes them away for nothing.
+    const root = renderTitlebar("", { routePath: "/inbox" });
 
-    const open = renderTitlebar("", { routePath: "/help" });
-    const openBug = collectVnodes(open).find(
-      (vnode) => attrsOf(vnode).id === "help-toggle",
-    );
-    const openTokens = classTokensOf(
-      renderComponentVnode(openBug as AnyVnode),
-    );
-    expect(openTokens).toContain("invisible");
+    for (const id of ["notifications-toggle", "help-toggle"]) {
+      expect(
+        classTokensOf(renderComponentVnode(tabButton(root, id))),
+        `${id} went missing under the centered request popup`,
+      ).not.toContain("invisible");
+    }
   });
 });
 

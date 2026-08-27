@@ -157,6 +157,7 @@ export const WorkspaceOptionsPage: m.ClosureComponent = () => {
       if (currentPermissions.status === "ready")
         void currentPermissions.refreshIfPendingChanged(getAppContext().stores.requests.requestIds);
       return m(WorkspaceOptionsOverlay, {
+        shell: getAppContext().shell,
         agentId: requestedAgentId(),
         model: currentModel,
         permissions: currentPermissions,

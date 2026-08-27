@@ -70,6 +70,8 @@ from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
+from imbue.minds.desktop_client.ui_models import UiNotificationEntry
+from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
@@ -295,6 +297,24 @@ def _build_spa_fixture_bootstrap() -> UiBootstrap:
                 "req-00000000000000000000000000000001",
                 "req-00000000000000000000000000000002",
             ),
+        ),
+        notifications=UiNotificationsMessage(
+            entries=(
+                UiNotificationEntry(
+                    id="req-00000000000000000000000000000001",
+                    created_at="2026-01-01T00:00:00+00:00",
+                    is_resolved=False,
+                    outcome=None,
+                    title="Sign in to Slack",
+                    body="alpha wants to connect your Slack account.",
+                    request_id="req-00000000000000000000000000000001",
+                    workspace_agent_id="agent-00000000000000000000000000000001",
+                    workspace_name="alpha",
+                    workspace_accent="#7c9885",
+                    service_name="slack",
+                ),
+            ),
+            unresolved_count=1,
         ),
         health=(UiHealthMessage(agent_id="agent-00000000000000000000000000000002", status=AgentHealth.STUCK),),
         discovery_health=UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),

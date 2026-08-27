@@ -14,7 +14,7 @@ import { PermissionsModel } from "../../../models/workspacePermissions";
 import { classifyRoute } from "../../shell/classify";
 import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
-import { DOCKED_TABS } from "./WorkspaceOptionsOverlay";
+import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
 import type { AnyVnode } from "../../../testing";
 import { allText, attrsOf, classesOf, collectVnodes, withAttr } from "../../../testing";
@@ -828,9 +828,20 @@ describe("PermissionsTab service marks", () => {
 });
 
 describe("permissions tab registration", () => {
-  it("keeps the docked tab strip, the ?tab parse, and the titlebar in agreement", () => {
-    expect(DOCKED_TABS.map((tab) => tab.id)).toEqual([...OPTIONS_TABS]);
-    expect(DOCKED_TABS[0]).toEqual({ id: "permissions", icon: "key", label: "Permissions" });
+  it("keeps the raised icon strip, the ?tab parse, and the titlebar in agreement", () => {
+    // The machine tabs lead the strip, in the ?tab order, with the two
+    // window-wide icons after them.
+    expect(TITLEBAR_POPUP_ICONS.map((icon) => icon.id)).toEqual([
+      ...OPTIONS_TABS,
+      "notifications",
+      "help",
+    ]);
+    expect(TITLEBAR_POPUP_ICONS[0]).toEqual({
+      id: "permissions",
+      buttonId: "ws-tab-permissions",
+      icon: "key",
+      label: "Permissions",
+    });
     for (const tab of OPTIONS_TABS) {
       expect(toOptionsTab(tab)).toBe(tab);
       expect(classifyRoute("/workspace/agent-ab12/options", `tab=${tab}`).activeTab).toBe(tab);

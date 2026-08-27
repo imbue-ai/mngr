@@ -12,6 +12,7 @@ import type { NotificationsUiController } from "../../models/notificationsUi";
 import {
   accentSourceForRoute,
   isAppOverlayPath,
+  isTitlebarPopupRoutePath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
   recoveryWorkspaceIdFromPath,
@@ -105,6 +106,11 @@ export class ShellState {
    * idempotent, and a repeated Escape can reach it again before the first
    * back() has landed. Cleared on the next route change. */
   private isAppOverlayClosing = false;
+  /** Raised by `switchToNotifications`: the feed is being opened as PART of a
+   * navigation (the one putting the popup it is replacing away), so the
+   * arrival must not close it the way an ordinary navigation does. Consumed
+   * by the first route change that lands. */
+  private isNotificationsArmed = false;
   /** The path the last `handleRouteChanged` saw, so a redraw on the route the
    * window is already on is not mistaken for a navigation to it. */
   private lastHandledRoutePath: string | null = null;
@@ -291,13 +297,17 @@ export class ShellState {
     sender(resolved.requestId, resolved.verdict);
   }
 
-  /** Close the options overlay if one is open, returning whether it was. */
-  closeWorkspaceOverlay(): boolean {
+  /** Close the options overlay if one is open, returning whether it was.
+   * `routeOptions` is forwarded to the route set: a strip switch passes
+   * `{replace: true}` so the panel being left is not one Back away under the
+   * surface replacing it; a plain dismissal (Escape, the X) pushes, leaving
+   * the panel in history like any left page. */
+  closeWorkspaceOverlay(routeOptions?: { replace: boolean }): boolean {
     const path = this.currentRoutePath();
     if (!isWorkspaceOverlayPath(path)) return false;
     const surfaceId = workspaceSurfaceIdFromPath(path);
     if (surfaceId === null) return false;
-    m.route.set(`/workspace/${surfaceId}`);
+    m.route.set(`/workspace/${surfaceId}`, undefined, routeOptions);
     return true;
   }
 
@@ -408,8 +418,10 @@ export class ShellState {
         this.isAppOverlayClosing = true;
         // Straight to the machine rather than back through history: the panel
         // is the history entry, and going back to it is the thing this avoids.
-        // handleRouteChanged forgets the remembered panel on the way.
-        m.route.set(`/workspace/${behind}`);
+        // Replace, so Back from the machine does not re-raise the popup being
+        // dismissed. handleRouteChanged forgets the remembered panel on the
+        // way.
+        m.route.set(`/workspace/${behind}`, undefined, { replace: true });
         return true;
       }
     }
@@ -497,20 +509,30 @@ export class ShellState {
     if (!isSameRoute) this.isAppOverlayClosing = false;
     // The feed is a popover over the surface it was opened on; leaving that
     // surface (a feed row's jump to a machine, the sidebar, anything) closes
-    // it, like a dropdown would.
-    if (!isSameRoute) this.isNotificationsOpen = false;
+    // it, like a dropdown would. A switch INTO it from another titlebar popup
+    // is the exception: that navigation is how the popup being replaced goes
+    // away, so the feed rides across it once.
+    if (!isSameRoute) {
+      if (this.isNotificationsArmed) this.isNotificationsArmed = false;
+      else this.isNotificationsOpen = false;
+    }
     // The dedup guard (see lastOpenedInboxSelectedId) only needs to survive
     // the race right at open time; once a real navigation lands away from
     // /inbox, the popup is confirmed gone and a later re-open of the SAME
     // request is a fresh, legitimate ask, not a duplicate.
     if (!isSameRoute && path !== "/inbox")
       this.lastOpenedInboxSelectedId = null;
-    // The panel (or page) underneath belongs to the modal that was opened over
-    // it; once the route is no longer a modal's, it is (or is not) the route.
-    if (!isSameRoute && !isAppOverlayPath(path)) {
-      this.panelRouteBehindOverlay = null;
+    // The panel underneath belongs to the request popup that took its window
+    // over, so it lives exactly as long as /inbox is the route: navigating to
+    // ANY other route -- including another app modal's, like a Get help the
+    // strip or an Electron open-overlay ask raised -- leaves the panel
+    // behind. A modal route that kept it would paint the panel underneath
+    // itself, backdrop and raised strip and all.
+    if (!isSameRoute && path !== "/inbox") this.panelRouteBehindOverlay = null;
+    // The page underneath belongs to the modal that was opened over it; once
+    // the route is no longer a modal's, it is (or is not) the route.
+    if (!isSameRoute && !isAppOverlayPath(path))
       this.pageRouteBehindOverlay = null;
-    }
     // Pass the query so an app modal opened over a workspace (/help?workspace=)
     // keeps that workspace's accent painting behind it.
     const accentSource = accentSourceForRoute(path, search);
@@ -778,6 +800,14 @@ export class ShellState {
     this.isSidebarOpen = false;
   }
 
+  /** The displayed workspace's stable agent id, or null on a hub page. */
+  displayedWorkspaceAgentId(): string | null {
+    const displayed = this.displayedWorkspaceAnyId;
+    return displayed === null
+      ? null
+      : this.stores.workspaces.toAgentScopedId(displayed);
+  }
+
   /** Open the bell's feed over the current surface. Opening acknowledges the
    * floating toasts (the feed is their durable home), so they retire. */
   openNotifications(): void {
@@ -789,8 +819,82 @@ export class ShellState {
     this.isNotificationsOpen = false;
   }
 
-  toggleNotifications(): void {
-    if (this.isNotificationsOpen) this.closeNotifications();
-    else this.openNotifications();
+  /**
+   * Open the bell's feed, putting away whatever floats on screen first: the
+   * raised strip's "go to another surface" for the bell, and equally the
+   * titlebar bell's own click (which is only reachable with no titlebar popup
+   * up, but IS reachable under a centered app modal -- which must leave, or
+   * the feed would raise beneath that modal's backdrop, dimmed and
+   * unclickable).
+   *
+   * Putting a route-backed surface away is a navigation, and an arriving
+   * navigation ordinarily closes the feed, so the feed is armed across that
+   * one arrival. Opened from a surface with nothing floating, there is
+   * nothing to put away and nothing to arm. The options panel's entry is
+   * REPLACED, like the other strip switches, so the panel is not one Back
+   * away under the feed.
+   */
+  switchToNotifications(): void {
+    this.isNotificationsArmed =
+      this.dismissHelpToItsMachine() ||
+      this.dismissAppOverlay() ||
+      this.closeWorkspaceOverlay({ replace: true });
+    this.openNotifications();
+  }
+
+  /**
+   * Put Get help away by routing straight to the machine it names, rather than
+   * back through history, reporting whether that applied.
+   *
+   * Get help is one click from the docked options panel, so the entry
+   * `history.back()` returns to is often that panel -- which the armed feed
+   * would then be sitting on top of, two of the five surfaces up at once, each
+   * drawing its own raised strip and its own backdrop. Same reasoning
+   * `dismissAppOverlay` applies to the request popup, and `replace` for the
+   * same reason: the surface landed on is not left one Back away from the modal
+   * again.
+   *
+   * Only with a machine named and no remembered page: the recovery page's Get
+   * help forwards the very machine nobody could load (see
+   * `pageRouteBehindOverlay`), and with no `?workspace=` at all history is the
+   * only thing that knows where this came from -- and no popup can be waiting
+   * there to come back up.
+   */
+  private dismissHelpToItsMachine(): boolean {
+    const path = this.currentRoutePath();
+    if (path !== "/help" || this.pageRouteBehindOverlay !== null) return false;
+    const behind = overlayBehindWorkspaceId(path, this.currentRouteSearch());
+    if (behind === null) return false;
+    m.route.set(`/workspace/${behind}`, undefined, { replace: true });
+    return true;
+  }
+
+  /**
+   * Open Get help / report a bug, carrying the displayed workspace so the page
+   * can offer the in-workspace /assist flow -- only when that workspace's
+   * interface is healthy, mirroring the legacy titlebar's assist gating. The
+   * one place the bug button's route is built, so the titlebar's own button
+   * and its raised copy open the identical page.
+   *
+   * Arrived at from another titlebar popup's route (the options panel or the
+   * request popup, via the raised strip), this is a switch, not a stack: that
+   * popup's history entry is replaced rather than built on. (The panel a
+   * request popup was remembering is let go by handleRouteChanged when the
+   * /help route lands -- the panel lives exactly as long as /inbox does.)
+   */
+  openHelp(): void {
+    const isSwitching = isTitlebarPopupRoutePath(this.currentRoutePath());
+    const routeOptions = isSwitching ? { replace: true } : undefined;
+    const agentScoped = this.displayedWorkspaceAgentId();
+    if (agentScoped === null) {
+      m.route.set("/help", undefined, routeOptions);
+      return;
+    }
+    const isHealthy = this.stores.health.isContentAssumedReady(agentScoped);
+    m.route.set(
+      "/help",
+      { workspace: agentScoped, assist: isHealthy ? "1" : "0" },
+      routeOptions,
+    );
   }
 }

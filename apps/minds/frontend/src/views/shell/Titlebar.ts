@@ -48,29 +48,32 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         ? workspaces.toAgentScopedId(context.workspaceAnyId ?? "")
         : null;
       const hasCurrentWorkspaceRequest =
-        currentWorkspaceAgentId !== null &&
-        shell.stores.notifications.entries.some(
-          (entry) =>
-            !entry.is_resolved &&
-            entry.workspace_agent_id === currentWorkspaceAgentId,
+        shell.stores.notifications.hasUnresolvedForWorkspace(
+          currentWorkspaceAgentId,
         );
       const isDesktop = electronBridge.isDesktop;
       const isHomeSelected = context.kind === "home";
-      const isHelpOpen = routePath === "/help";
-      // While the docked options panel is up it draws its own tab strip at this
-      // strip's measured rect, so hide ours (by visibility, keeping the crumb's
-      // box and the rect true) or the two would ghost through each other --
-      // matching the legacy body.ws-options-open rule. The panel is still up,
-      // frozen, while an app modal (a request popup) floats over it.
-      // Also while the request popup is up: it draws the same strip at this
-      // strip's measured rect, so leaving ours painted would ghost two strips
-      // through each other -- the reason the panel hides them in the first
-      // place. `/inbox` covers the popup opened from the in-chat card too,
-      // which names no panel.
-      const isOptionsOverlayOpen =
+      // Every one of these five icons' surfaces (the docked options panel, the
+      // request popup, the bell's feed, Get help) draws a raised copy of ALL
+      // FIVE at their measured rects, so hide all five here (by visibility,
+      // which keeps their boxes and so those rects true) or the two strips
+      // would ghost through each other -- matching the legacy
+      // body.ws-options-open rule. The panel is still up, frozen, while an app
+      // modal (a request popup) floats over it, hence panelRouteBehindOverlay;
+      // `/inbox` covers the popup opened from the in-chat card too, which
+      // names no panel.
+      //
+      // The request popup hangs from #ws-tab-strip, and with no machine on
+      // screen there is no strip: it falls back to a centered card that raises
+      // nothing, so the real five stay painted (as they do under every other
+      // centered app modal).
+      const isTitlebarPopupOpen =
         isWorkspaceOverlayPath(routePath) ||
-        routePath === "/inbox" ||
-        shell.panelRouteBehindOverlay !== null;
+        (routePath === "/inbox" && isWorkspace) ||
+        routePath === "/help" ||
+        shell.panelRouteBehindOverlay !== null ||
+        shell.isNotificationsOpen;
+      const popupHiddenClass = isTitlebarPopupOpen ? "invisible" : "";
 
       return m(
         "div#minds-titlebar",
@@ -169,7 +172,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                               ? "default"
                               : "muted",
                           extra:
-                            (isOptionsOverlayOpen
+                            (isTitlebarPopupOpen
                               ? "invisible"
                               : context.activeTab === "permissions"
                                 ? "bg-fill-active"
@@ -224,7 +227,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                             context.activeTab === "settings"
                               ? "default"
                               : "muted",
-                          extra: isOptionsOverlayOpen
+                          extra: isTitlebarPopupOpen
                             ? "invisible"
                             : context.activeTab === "settings"
                               ? "bg-fill-active"
@@ -247,7 +250,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                           "data-tooltip": "Share machine",
                           tone:
                             context.activeTab === "share" ? "default" : "muted",
-                          extra: isOptionsOverlayOpen
+                          extra: isTitlebarPopupOpen
                             ? "invisible"
                             : context.activeTab === "share"
                               ? "bg-fill-active"
@@ -299,7 +302,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
           "div",
           { class: "flex items-center justify-end shrink-0 gap-1 pr-1" },
           [
-            notificationsBell(shell),
+            notificationsBell(shell, popupHiddenClass),
             m(
               TitlebarButton,
               {
@@ -307,30 +310,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                 "aria-label": "Report a bug",
                 "data-tooltip": "Report a bug",
                 tone: "muted",
-                // HelpOverlay draws its own raised copy of this button over
-                // the dimmed titlebar while its modal is open (matching the
-                // workspace options tabs), so hide this one by visibility --
-                // keeping its box and rect true for HelpOverlay to measure --
-                // rather than the two ghosting through each other.
-                extra: isHelpOpen ? "invisible" : "",
-                // Carry the displayed workspace so the help page can offer the
-                // in-workspace /assist flow (only when its interface is healthy,
-                // mirroring the legacy titlebar's assist gating).
-                onclick: () => {
-                  const displayed = shell.displayedWorkspaceAnyId;
-                  if (displayed === null) {
-                    m.route.set("/help");
-                    return;
-                  }
-                  const agentScoped =
-                    shell.stores.workspaces.toAgentScopedId(displayed);
-                  const isHealthy =
-                    shell.stores.health.isContentAssumedReady(agentScoped);
-                  m.route.set("/help", {
-                    workspace: agentScoped,
-                    assist: isHealthy ? "1" : "0",
-                  });
-                },
+                extra: popupHiddenClass,
+                onclick: () => shell.openHelp(),
               },
               m(Icon16, { name: "bug" }),
             ),
@@ -382,9 +363,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
 
 /** The notification bell + its unresolved-count badge, and the one-time
  * "enable system notifications" hint below it (browser mode only). Clicking
- * toggles the feed overlay, forwarding the displayed workspace so the feed
- * floats over it (kept mounted), exactly as Get help forwards ?workspace. */
-function notificationsBell(shell: ShellState): m.Children {
+ * opens the feed overlay (putting away whatever modal is up), forwarding the
+ * displayed workspace so the feed floats over it (kept mounted), exactly as
+ * Get help forwards ?workspace. */
+function notificationsBell(
+  shell: ShellState,
+  popupHiddenClass: string,
+): m.Children {
   const unresolvedCount = shell.stores.notifications.unresolvedCount;
   const isOpen = shell.isNotificationsOpen;
   // `?? null` guards the fake shells tests cast in without the controller.
@@ -400,16 +385,14 @@ function notificationsBell(shell: ShellState): m.Children {
         "data-tooltip": "Notifications",
         "aria-expanded": isOpen ? "true" : "false",
         tone: "muted",
-        // relative for the badge's own absolute positioning. NotificationsOverlay
-        // draws its own raised copy of this button over the dimmed titlebar
-        // while the feed is open (matching the workspace options tabs), so
-        // hide this one by visibility -- keeping its box and rect true for
-        // NotificationsOverlay to measure -- rather than the two ghosting
-        // through each other.
-        extra: "relative" + (isOpen ? " invisible" : ""),
-        // A popover, not a route: it opens over whatever surface is on
-        // screen and never navigates, so the page underneath stays put.
-        onclick: () => shell.toggleNotifications(),
+        // relative for the badge's own absolute positioning.
+        extra: "relative " + popupHiddenClass,
+        // The switch, not a bare open: a CENTERED app modal (Minds settings,
+        // Accounts) leaves this button reachable, and the feed's backdrop
+        // draws under a later-DOM modal's at the same z -- so the modal must
+        // be put away first or the feed raises beneath it, dimmed and
+        // unclickable.
+        onclick: () => shell.switchToNotifications(),
       },
       [
         m(Icon16, { name: "bell" }),
