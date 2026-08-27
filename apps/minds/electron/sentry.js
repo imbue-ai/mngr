@@ -68,7 +68,7 @@ const ANONYMOUS_USER_ID_PATTERN = /^[0-9a-f]{32}$/;
 /**
  * Read (or create-and-persist) this install's stable anonymous user id, or return null on failure.
  *
- * The id is a random, opaque value (no PII) attached to every event via `Sentry.setUser` so Sentry
+ * The id is a random, opaque value (no PII) attached to every event via `initialScope` so Sentry
  * can count the distinct installs affected by each issue. It is shared with the Python backend (which
  * writes/reads the same `<dataDir>/anonymous_user_id` file) so an install is counted once regardless
  * of which surface reported the event. The file is created atomically with the `wx` (O_EXCL) flag so
@@ -154,10 +154,12 @@ function initSentry(options = {}) {
   const environment = resolveEnvironment();
   const dsn = dsnForEnvironment(environment);
   const { releaseId, gitSha } = getBuildMetadata();
+  const anonymousUserId = getOrCreateAnonymousUserId();
   Sentry.init({
     dsn,
     environment,
     release: fixupReleaseId(releaseId),
+    initialScope: anonymousUserId ? { user: { id: anonymousUserId } } : {},
     // Label renderer-death events by which window view died (chrome/content/modal).
     // The caller (main.js) supplies the mapping since it owns the window registry;
     // undefined is fine (the childProcess integration falls back to "renderer").
@@ -216,12 +218,6 @@ function initSentry(options = {}) {
     },
   });
   Sentry.setTag('git_sha', gitSha);
-  // Attach the install's stable anonymous id (no PII) so Sentry counts distinct installs per issue,
-  // matching the Python backend's sentry_sdk.set_user (see imbue/minds/utils/sentry/core.py).
-  const anonymousUserId = getOrCreateAnonymousUserId();
-  if (anonymousUserId) {
-    Sentry.setUser({ id: anonymousUserId });
-  }
   console.log(
     `[sentry] Initialized (environment=${environment}, release=${fixupReleaseId(releaseId)}); ` +
       'automatic reporting gated live by the report_unexpected_errors user setting.'
