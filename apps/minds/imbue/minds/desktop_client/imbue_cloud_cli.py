@@ -74,6 +74,12 @@ _EMAIL_NOT_VERIFIED_ERROR_CLASS_SIGNAL = "ImbueCloudEmailNotVerifiedError"
 # matched like the quota signal.
 _CLIENT_TOO_OLD_ERROR_CLASS_SIGNAL = "ImbueCloudClientTooOldError"
 
+# The connector's structured code for refusing to hard-delete the record of a
+# workspace that still holds its pool lease (a 409 relayed by the plugin's
+# ``sync records delete``). Substring-matched like the quota signal: the code
+# rides inside the relayed connector body.
+_LEASE_ACTIVE_CODE_SIGNAL = "lease_active"
+
 # The plugin's error_class marker for a structured auth rejection, written by
 # ``_persist_auth_response`` in the plugin's auth CLI whenever the connector
 # answers an auth call with a non-OK status. Matched on the parsed body's
@@ -145,6 +151,15 @@ class ImbueCloudAuthFailedCliError(ImbueCloudCliError):
 
     auth_status: str = "ERROR"
     auth_message: str = ""
+
+
+class ImbueCloudLeaseActiveCliError(ImbueCloudCliError):
+    """The connector refused to hard-delete a record because its workspace still holds a pool lease.
+
+    Tombstone-first: destroying the workspace is what releases the lease (and
+    retires the record), so the remedy is destroy, not remove-from-list.
+    Deterministic -- retrying cannot succeed while the lease exists.
+    """
 
 
 class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
@@ -425,6 +440,14 @@ class ImbueCloudCli(MutableModel):
             quota_exc.stdout = result.stdout
             quota_exc.stderr = result.stderr
             raise quota_exc
+        if _LEASE_ACTIVE_CODE_SIGNAL in result.stderr:
+            lease_active_exc = ImbueCloudLeaseActiveCliError(
+                f"{command_repr}: the workspace still holds its cloud lease; destroy it instead"
+            )
+            lease_active_exc.exit_code = exit_code
+            lease_active_exc.stdout = result.stdout
+            lease_active_exc.stderr = result.stderr
+            raise lease_active_exc
         if _EMAIL_NOT_VERIFIED_ERROR_CLASS_SIGNAL in result.stderr:
             verification_body = _parse_stderr_error_body(result.stderr) or {}
             verification_message = _parse_stderr_error_message(result.stderr)
@@ -908,7 +931,11 @@ class ImbueCloudCli(MutableModel):
         return body if isinstance(body, dict) else {}
 
     def sync_record_delete(self, account: str, record_id: str) -> None:
-        """Delete one record by workspace id (``agent-<hex>``, preferred) or host id."""
+        """Delete one record by workspace id (``agent-<hex>``, preferred) or host id.
+
+        Raises ``ImbueCloudLeaseActiveCliError`` when the connector refuses
+        because the workspace still holds its pool lease.
+        """
         result = self._run(
             ["sync", "records", "delete", record_id, "--account", account],
             cg_name="imbue-cloud-sync-record-delete",

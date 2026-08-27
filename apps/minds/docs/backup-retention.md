@@ -28,6 +28,8 @@ Both reapers are idempotent, so they never conflict; whoever runs first wins.
 
 Any record tombstoned for longer than the window is reapable regardless of how it was tombstoned (explicit destroy or absence detection) -- the window itself is the safety margin for local workspaces, and a workspace that reappears in discovery is resurrected (clearing the clock) before it can ever be reaped.
 
+The one exception is an imbue_cloud workspace whose pool lease still exists: its record is never removed (and cannot be hard-deleted from the list) until the lease is released, because that tombstone is what the connector's lease-vs-record sweep acts on to finish a destroy whose release failed. The connector's reaper skips such a tombstone entirely; the client-side reaper has no view of the lease, so it may still reap the backup bucket at the window, but the connector refuses the record's removal (`lease_active`) and the reaper retries it on later passes. Releasing the lease -- through destroy, or the operator's `minds-admin workspaces release` -- is what frees the record for the reaper.
+
 ## Quota-pressure eviction
 
 Backup provisioning for a new workspace can hit the account's bucket-count or storage quota. Instead of failing, the client **evicts**: it force-destroys the oldest destroyed workspace's backup (something the reapers would delete anyway -- past-window first, then within-window early if needed) and retries, looping until provisioning succeeds or nothing is left to evict. Eviction is silent (the Recently destroyed page reflects it); live workspaces' data is never touched automatically. A destroy failure aborts the attempt with the usual "Backup setup failed" notification.

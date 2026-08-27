@@ -112,6 +112,10 @@ def delete_record(record_id: str, account: str | None, connector_url: str | None
     RECORD_ID is the workspace id (``agent-<hex>``, preferred -- the record's
     durable key) or, for compatibility, the workspace's current host id
     (``host-<hex>``).
+
+    Refused (connector 409 ``lease_active``) while the workspace still holds
+    its cloud lease: destroy the workspace instead, which releases the lease
+    and retires the record.
     """
     client = make_connector_client(connector_url)
     store = make_session_store()

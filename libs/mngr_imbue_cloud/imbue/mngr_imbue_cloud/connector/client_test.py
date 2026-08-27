@@ -1750,6 +1750,42 @@ def test_admin_abandon_workspace_posts_reason_with_admin_key(monkeypatch: pytest
     assert seen["body"] == {"reason": "box died"}
 
 
+def test_admin_release_workspace_posts_with_admin_key_and_returns_the_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"status": "released"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    status = client.admin_release_workspace(SecretStr("adminkey"), "00000000-0000-0000-0000-000000000043")
+
+    assert status == "released"
+    assert seen["path"] == "/admin/workspaces/00000000-0000-0000-0000-000000000043/release"
+    assert seen["auth"] == "Bearer adminkey"
+
+
+def test_admin_run_lease_record_sweep_passes_dry_run_and_grace_as_query_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["query"] = dict(request.url.params)
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"status": "completed", "result": {"dry_run": True}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    result = client.admin_run_lease_record_sweep(SecretStr("adminkey"), dry_run=True, grace_seconds=0.0)
+
+    assert result["result"] == {"dry_run": True}
+    assert seen["path"] == "/admin/sweep/lease-records"
+    assert seen["query"] == {"dry_run": "1", "grace_seconds": "0.0"}
+    assert seen["auth"] == "Bearer adminkey"
+
+
 def test_every_request_carries_the_client_identification_headers(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_headers: list[httpx.Headers] = []
 

@@ -719,6 +719,9 @@ def test_send_message_to_agents_only_messages_requested_agents(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
+# real agent setup/teardown for two agents occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,

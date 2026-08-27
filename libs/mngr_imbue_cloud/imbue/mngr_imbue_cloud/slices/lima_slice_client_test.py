@@ -107,6 +107,13 @@ def test_destroy_instance_raises_on_genuine_delete_failure() -> None:
         client.destroy_instance(VpsInstanceId("mngr-slice-abc"))
 
 
+def test_destroy_instance_raises_when_limactl_itself_is_missing() -> None:
+    """The shell's "command not found" is not the instance being absent: the VM was never touched."""
+    client = _recording_client({"limactl delete": (127, "", "bash: limactl: command not found")})
+    with pytest.raises(LimaCommandError):
+        client.destroy_instance(VpsInstanceId("mngr-slice-abc"))
+
+
 def test_list_disk_names_parses_jsonl_names() -> None:
     disk_json = '{"name": "mngr-slice-aaa-data"}\n{"name": "mngr-slice-bbb-data"}\n'
     client = _recording_client({"limactl disk list --json": (0, disk_json, "")})

@@ -10,6 +10,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliEr
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import _ACCOUNTS_URL_SUBPROCESS_ENV
@@ -119,6 +120,28 @@ def test_parse_stderr_error_message_survives_surrounding_log_lines() -> None:
     stderr = "2026-07-12 10:00:00 | WARNING | noisy {braced} log line\n" + body + "\ntrailing\n"
     assert _parse_stderr_error_message(stderr) == "the message"
     assert _parse_stderr_error_message("no json here\n") is None
+
+
+def test_sync_record_delete_raises_the_typed_lease_active_error_on_the_connectors_refusal() -> None:
+    """The connector's tombstone-first 409 (``code: lease_active``) surfaces as its own error type."""
+    body = json.dumps(
+        {
+            "error": (
+                'Connector error 409: {"detail":{"code":"lease_active","message":"workspace record agent-1 '
+                'still holds a cloud lease; destroy the workspace instead of removing its record"}}'
+            ),
+            "error_class": "ImbueCloudConnectorError",
+        },
+        indent=2,
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout="", stderr="a log line\n" + body + "\n"))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    with pytest.raises(ImbueCloudLeaseActiveCliError) as exc_info:
+        cli.sync_record_delete("owner@example.com", "agent-1")
+
+    assert "destroy it instead" in str(exc_info.value)
+    assert "lease_active" in exc_info.value.stderr
 
 
 def test_run_routes_through_mngr_caller_with_home_cwd_and_connector_env() -> None:

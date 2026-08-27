@@ -137,6 +137,7 @@ from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachab
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
 from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
 from imbue.minds.errors import SyncCryptoError
+from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.enablement import list_disabled_provider_names
@@ -545,6 +546,21 @@ def _handle_remove_workspace_record() -> Response:
             continue
         try:
             record_store.remove_record_or_raise(str(account.user_id), str(account.email), matching.agent_id)
+        except WorkspaceRecordLeaseActiveError:
+            # Tombstone-first: the row is not stale, it is a live machine, and
+            # destroying it is the way out.
+            return make_response(
+                status_code=409,
+                content=json.dumps(
+                    {
+                        "error": (
+                            "This machine still holds its cloud lease, so its record cannot be removed; "
+                            "destroy the workspace instead."
+                        )
+                    }
+                ),
+                media_type="application/json",
+            )
         except WorkspaceSyncError as exc:
             return make_response(
                 status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json"

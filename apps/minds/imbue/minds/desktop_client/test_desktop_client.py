@@ -1841,6 +1841,32 @@ def test_remove_workspace_record_deletes_the_row(tmp_path: Path) -> None:
     assert session_store.record_store.list_records("user-1") == []
 
 
+def test_remove_workspace_record_of_a_leased_cloud_workspace_is_refused_with_a_hint(tmp_path: Path) -> None:
+    """The connector's tombstone-first refusal surfaces as a 409 that points at destroy, not a sync error."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    session_store = get_state(client.application).session_store
+    assert session_store is not None
+    workspace_id = str(AgentId.generate())
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=workspace_id,
+        host_id="host-still-leased",
+        display_name="live",
+        color=None,
+        is_cloud_row=True,
+    )
+    cli.lease_holding_workspace_ids.add(workspace_id)
+
+    response = client.post("/_chrome/workspaces/remove-record", json={"workspace_id": workspace_id})
+
+    assert response.status_code == 409
+    assert "destroy the workspace" in response.get_json()["error"]
+    assert workspace_id in cli.sync_records_by_email["a@b.com"]
+
+
 def test_remove_workspace_record_unknown_host_is_404(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")

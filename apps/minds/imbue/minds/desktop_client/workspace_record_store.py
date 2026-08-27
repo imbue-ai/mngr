@@ -56,8 +56,10 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.destroying import has_destroying_marker
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
 from imbue.minds.errors import BackupProvisioningError
+from imbue.minds.errors import WorkspaceRecordLeaseActiveError
 from imbue.minds.errors import WorkspaceRecordTooNewError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
@@ -823,6 +825,8 @@ class WorkspaceRecordStore(MutableModel):
             raise WorkspaceSyncError("machine sync is not configured (no imbue_cloud CLI)")
         try:
             self.cli.sync_record_delete(account_email, workspace_id)
+        except ImbueCloudLeaseActiveCliError as e:
+            raise WorkspaceRecordLeaseActiveError(str(e)) from e
         except ImbueCloudCliError as e:
             raise WorkspaceSyncError(f"could not remove the record from the connector: {e}") from e
         with self._lock:

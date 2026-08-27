@@ -389,7 +389,13 @@ class SyncWorkspaceRecord(WireModel):
     agent_id: str = Field(description="Logical workspace id (one ACTIVE record per agent_id)")
     display_name: str = Field(default="", description="Workspace display name")
     color: str | None = Field(default=None, description="Workspace accent color (#rrggbb)")
-    provider_kind: str = Field(description="mngr provider backend kind (e.g. 'lima', 'imbue_cloud')")
+    provider_kind: str = Field(
+        description=(
+            "The mngr provider *instance* name the workspace is discovered under on its hosting device "
+            "(e.g. 'docker', 'lima', or 'imbue_cloud_<account-slug>' for cloud rows -- the server's "
+            "lease-time stub derives the same name from the account email)"
+        )
+    )
     hosting_device_id: str | None = Field(
         default=None, description="Install that hosts a local workspace (None for cloud rows)"
     )

@@ -75,6 +75,10 @@ def _is_already_absent_error(stderr: str) -> bool:
     disk deletes must tolerate the target already being absent.
     """
     stderr_lower = stderr.lower()
+    # The shell's "limactl: command not found" also says "not found" but means
+    # the target was never touched.
+    if "command not found" in stderr_lower:
+        return False
     return "not found" in stderr_lower or "does not exist" in stderr_lower
 
 

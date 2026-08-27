@@ -166,6 +166,17 @@ class WorkspaceSyncError(MindError):
     ...
 
 
+class WorkspaceRecordLeaseActiveError(WorkspaceSyncError):
+    """Raised when a record cannot be removed because its cloud workspace still holds a pool lease.
+
+    The connector is tombstone-first: destroying the workspace is what releases
+    the lease and retires the record, so remove-from-list is refused while the
+    machine is live.
+    """
+
+    ...
+
+
 class WorkspaceRecordTooNewError(WorkspaceSyncError):
     """Raised when a state-changing operation targets a record whose record_format postdates this app.
 
