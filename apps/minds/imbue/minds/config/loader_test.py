@@ -122,8 +122,11 @@ def test_bundled_client_config_path_or_none_default_is_none() -> None:
     assert bundled_client_config_path_or_none() is None
 
 
-@pytest.mark.parametrize("tier", ["dev", "staging", "production", "ci"])
-def test_every_committed_deploy_toml_ships_analytics_disabled(tier: str) -> None:
-    """Analytics stays off until a tier's bringup runbook has run; flipping it on is a deliberate edit."""
+@pytest.mark.parametrize(
+    ("tier", "is_deployed"),
+    [("dev", False), ("staging", True), ("production", True), ("ci", False)],
+)
+def test_every_committed_deploy_toml_analytics_enablement_matches_bringup_state(tier: str, is_deployed: bool) -> None:
+    """Analytics is on only for tiers whose bringup runbook has run (staging + production: 2026-08-26); flipping a tier is a deliberate edit."""
     config = load_deploy_config(tier)
-    assert config.analytics.is_deployed is False
+    assert config.analytics.is_deployed is is_deployed

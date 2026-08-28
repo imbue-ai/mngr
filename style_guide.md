@@ -1452,6 +1452,12 @@ Every JSONL line must include these envelope fields:
 - `event_id`: unique identifier for this specific event
 - `source`: must match the folder name under `logs/` where this event is stored
 
+`event_id` must be unique per event -- globally, not just within one file or
+one machine (analytics aggregates event streams fleet-wide and deduplicates
+by event id). Mint a random id, or hash in the event's full-precision
+timestamp; never derive an id from only static values like a service name or
+URL, which repeat on every machine that runs the same code.
+
 ## Self-describing events
 
 Include enough context in each line to be self-describing. Every event should have a timestamp, an event type, and enough identifiers (conversation ID, agent name, source, etc.) that you could split the data in different ways later if you want. This is the most important principle: if each line is self-contained, your file organization becomes a performance/convenience choice rather than a correctness one. You should never need to know the name of the file that an event came from.

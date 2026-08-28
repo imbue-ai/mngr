@@ -103,9 +103,9 @@ chrome_origin = "https://minds.imbue.com"
 cookie_domain = "imbue.com"
 
 # Whether this tier deploys the analytics app (analytics-<tier>): the
-# gold-table aggregation + lake maintenance crons. Off until the tier's
-# analytics bringup (apps/analytics/docs/bringup.md) has provisioned the
-# Neon project, R2 buckets, and Vault entry. Dev envs can opt in per-env
-# with the sticky `minds env deploy --with-analytics` flag.
+# gold-table aggregation + lake maintenance crons. Production's bringup
+# (apps/analytics/docs/bringup.md) ran 2026-08-26: the analytics-production
+# Neon project, R2 buckets/tokens, reader role, and Vault entry all exist,
+# and the app is deployed -- so unified deploys must keep maintaining it.
 [analytics]
-is_deployed = false
+is_deployed = true
