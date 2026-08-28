@@ -890,7 +890,7 @@ _PREBAKED_IMAGE_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 #
 # Every wait for a cold-booted workspace's interface is sized from this one
 # number -- the create attempt's readiness wait (``workspace_ready_timeout_seconds``
-# below) and the restart worker's post-``mngr start`` wait in
+# below) and the recovery worker's post-``mngr start`` wait in
 # :mod:`workspace_recovery` -- so the two can never drift into disagreeing about
 # how long a cold boot takes.
 WORKSPACE_READY_TIMEOUT_SECONDS: Final[float] = 300.0

@@ -419,7 +419,7 @@ describe("RecoveryModel", () => {
     workspace_name: "my-machine",
     health: "stuck",
     health_error: "",
-    is_restart_start_only: null,
+    recovery_kind: null,
     ssh_command: "ssh -p 22 user@host",
     is_host_offline: false,
     device_environment: "NONE",
@@ -439,16 +439,16 @@ describe("RecoveryModel", () => {
     expect(model.agentId).toBe("agent-33");
 
     deps.postResponses.push({ status: 202, json: { operation_id: "agent-33", kind: "restart" } });
-    await model.dispatchRestart();
-    expect(model.isRestartRunning).toBe(true);
+    await model.dispatchRecovery();
+    expect(model.isRecoveryRunning).toBe(true);
     expect(deps.postCalls[0].url).toContain("/api/v1/workspaces/agent-33/restart");
     expect(deps.postCalls[0].body).toEqual({ scope: "host", start_only: false });
 
     deps.getResponses.push({ status: "DONE", is_done: true });
     deps.runScheduled();
     await settle();
-    expect(model.isRestartRunning).toBe(false);
-    expect(model.isRestartSucceeded).toBe(true);
+    expect(model.isRecoveryRunning).toBe(false);
+    expect(model.isRecoverySucceeded).toBe(true);
   });
 
   it("surfaces a rejected restart dispatch and a failed restart operation", async () => {
@@ -458,16 +458,16 @@ describe("RecoveryModel", () => {
     await model.load();
 
     deps.postResponses.push({ status: 409, json: { error: "another operation is running" } });
-    await model.dispatchRestart();
-    expect(model.isRestartRunning).toBe(false);
-    expect(model.restartError).toBe("another operation is running");
+    await model.dispatchRecovery();
+    expect(model.isRecoveryRunning).toBe(false);
+    expect(model.recoveryError).toBe("another operation is running");
 
     deps.postResponses.push({ status: 202, json: null });
-    await model.dispatchRestart();
+    await model.dispatchRecovery();
     deps.getResponses.push({ status: "FAILED", is_done: false, error: "host did not come back" });
     deps.runScheduled();
     await settle();
-    expect(model.restartError).toBe("host did not come back");
+    expect(model.recoveryError).toBe("host did not come back");
   });
 
   it("bounds consecutive failed restart-status polls like the sibling pollers", async () => {
@@ -476,19 +476,19 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     await model.load();
     deps.postResponses.push({ status: 202, json: null });
-    await model.dispatchRestart();
+    await model.dispatchRecovery();
 
     // Every status poll answers null (no queued responses): the model keeps
     // polling until the bound, then surfaces a lost-contact error instead of
     // pinning "Restarting..." forever.
     for (let attempt = 0; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
-      expect(model.isRestartRunning).toBe(true);
+      expect(model.isRecoveryRunning).toBe(true);
       deps.runScheduled();
       await settle();
     }
 
-    expect(model.isRestartRunning).toBe(false);
-    expect(model.restartError).toContain("Lost contact with the restart");
+    expect(model.isRecoveryRunning).toBe(false);
+    expect(model.recoveryError).toContain("Lost contact with the recovery");
 
     // The restart poll is what has to stop -- a lost restart must not keep
     // asking about itself forever. The card's own state poll is a separate
@@ -507,22 +507,22 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     await model.load();
     deps.postResponses.push({ status: 202, json: null });
-    await model.dispatchRestart();
+    await model.dispatchRecovery();
     for (let attempt = 0; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
       deps.runScheduled();
       await settle();
     }
-    expect(model.restartError).toContain("Lost contact with the restart");
+    expect(model.recoveryError).toContain("Lost contact with the recovery");
     const streamCount = deps.sources.length;
 
     // The tracker goes on calling that same restart running -- it is the state
     // whose status could not be read. Attaching to it would clear the report
     // the bound exists to make and start the whole run over, every poll.
-    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.recoveryInfoResponses.push({ ...info, health: "recovering" });
     deps.runScheduled();
     await settle();
-    expect(model.restartError).toContain("Lost contact with the restart");
-    expect(model.isRestartRunning).toBe(false);
+    expect(model.recoveryError).toContain("Lost contact with the recovery");
+    expect(model.isRecoveryRunning).toBe(false);
     expect(deps.sources).toHaveLength(streamCount);
 
     // A restart that starts after the tracker has left this one is a different
@@ -530,20 +530,20 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     deps.runScheduled();
     await settle();
-    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.recoveryInfoResponses.push({ ...info, health: "recovering" });
     deps.runScheduled();
     await settle();
-    expect(model.isRestartRunning).toBe(true);
-    expect(model.restartError).toBeNull();
+    expect(model.isRecoveryRunning).toBe(true);
+    expect(model.recoveryError).toBeNull();
     expect(deps.sources).toHaveLength(streamCount + 1);
   });
 
   it("reattaches to an in-flight restart when the page loads mid-restart", async () => {
     const deps = new FakeDeps();
     const model = new RecoveryModel("agent-33", deps);
-    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.recoveryInfoResponses.push({ ...info, health: "recovering" });
     await model.load();
-    expect(model.isRestartRunning).toBe(true);
+    expect(model.isRecoveryRunning).toBe(true);
     expect(deps.sources).toHaveLength(1);
   });
 
@@ -608,18 +608,18 @@ describe("RecoveryModel", () => {
     const model = new RecoveryModel("agent-33", deps);
     deps.recoveryInfoResponses.push(info);
     await model.load();
-    expect(model.isRestartRunning).toBe(false);
+    expect(model.isRecoveryRunning).toBe(false);
 
     // Something else -- the same machine's card in another window -- restarts
     // it. The card shows that restart rather than an idle machine.
-    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.recoveryInfoResponses.push({ ...info, health: "recovering" });
     deps.runScheduled();
     await settle();
-    expect(model.isRestartRunning).toBe(true);
+    expect(model.isRecoveryRunning).toBe(true);
     expect(deps.sources).toHaveLength(1);
 
     // The next poll must not open a second stream for the same restart.
-    deps.recoveryInfoResponses.push({ ...info, health: "restarting" });
+    deps.recoveryInfoResponses.push({ ...info, health: "recovering" });
     deps.runScheduled();
     await settle();
     expect(deps.sources).toHaveLength(1);
@@ -631,11 +631,11 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     await model.load();
     deps.postResponses.push({ status: 202, json: null });
-    await model.dispatchRestart();
+    await model.dispatchRecovery();
 
-    // The server moves the tracker out of "restarting" before the operation
+    // The server moves the tracker out of "recovering" before the operation
     // reports done, so a read whose answer was decided just before that
-    // transition still says "restarting" -- and can land after the status poll
+    // transition still says "recovering" -- and can land after the status poll
     // has already reported success. Adopting it would re-report a restart that
     // is over: the success would vanish, the log would clear, and a second log
     // stream would open for a finished operation.
@@ -643,14 +643,14 @@ describe("RecoveryModel", () => {
     deps.getResponses.push({ status: "DONE", is_done: true });
     deps.runScheduled();
     await settle();
-    expect(model.isRestartSucceeded).toBe(true);
+    expect(model.isRecoverySucceeded).toBe(true);
     const streamCount = deps.sources.length;
 
-    deps.resolveRecoveryInfo({ ...info, health: "restarting" });
+    deps.resolveRecoveryInfo({ ...info, health: "recovering" });
     await settle();
 
-    expect(model.isRestartSucceeded).toBe(true);
-    expect(model.isRestartRunning).toBe(false);
+    expect(model.isRecoverySucceeded).toBe(true);
+    expect(model.isRecoveryRunning).toBe(false);
     expect(model.info?.health).toBe("stuck");
     expect(deps.sources).toHaveLength(streamCount);
     // Dropping a reading is not a reason to stop reading.
@@ -682,7 +682,7 @@ describe("RecoveryModel", () => {
     // already out -- the server may restart the machine -- but a stopped model
     // must not open a log stream nothing will ever close, or arm a poller.
     deps.postResponses.push({ status: 202, json: null });
-    const dispatching = model.dispatchRestart();
+    const dispatching = model.dispatchRecovery();
     model.stop();
     await dispatching;
 
@@ -717,7 +717,7 @@ describe("RecoveryModel", () => {
     await model.load();
 
     deps.postResponses.push({ status: 202, json: null });
-    await model.dispatchRestart();
+    await model.dispatchRecovery();
 
     expect(deps.getUrls.some((url) => url.includes("/health"))).toBe(false);
   });
@@ -732,12 +732,12 @@ describe("RecoveryModel", () => {
     await model.load();
 
     deps.postResponses.push({ status: 202, json: null });
-    await model.dispatchRestart(true);
+    await model.dispatchRecovery("start");
     expect(deps.postCalls.at(-1)?.body).toEqual({ scope: "host", start_only: true });
 
-    model.isRestartRunning = false;
+    model.isRecoveryRunning = false;
     deps.postResponses.push({ status: 202, json: null });
-    await model.dispatchRestart();
+    await model.dispatchRecovery();
     expect(deps.postCalls.at(-1)?.body).toEqual({ scope: "host", start_only: false });
   });
 });

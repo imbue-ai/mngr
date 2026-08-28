@@ -8,6 +8,7 @@ import {
 } from "./RecoveryCard";
 import { RecoveryModel, type LifecycleDeps, type RecoveryInfo } from "../../models/backups";
 import { healthBadgeLabelFor } from "../pages/landing-controls";
+import type { RecoveryKind } from "../../models/health";
 import { allText, attrsOf, collectVnodes, renderRoot, renderedText } from "../../testing";
 
 /** Deps that answer nothing and schedule nothing: these tests render a state,
@@ -24,9 +25,9 @@ const IDLE_DEPS: LifecycleDeps = {
 const UNRESPONSIVE: RecoveryInfo = {
   agent_id: "agent-33",
   workspace_name: "my-machine",
-  health: "restart_failed",
+  health: "recovery_failed",
   health_error: "",
-  is_restart_start_only: null,
+  recovery_kind: null,
   ssh_command: "",
   is_host_offline: false,
   device_environment: "NONE",
@@ -54,15 +55,15 @@ async function modelAttachedTo(info: RecoveryInfo): Promise<RecoveryModel> {
   return model;
 }
 
-/** A model that dispatched its own restart, of the given shape, and is still
+/** A model that dispatched its own recovery, of the given kind, and is still
  * following it. */
-async function modelRestartingOwn(info: RecoveryInfo, isStartOnly: boolean): Promise<RecoveryModel> {
+async function modelRecoveringOwn(info: RecoveryInfo, kind: RecoveryKind): Promise<RecoveryModel> {
   const model = new RecoveryModel("agent-33", {
     ...IDLE_DEPS,
     postJson: async () => ({ status: 202, json: null }),
   });
   model.info = info;
-  await model.dispatchRestart(isStartOnly);
+  await model.dispatchRecovery(kind);
   return model;
 }
 
@@ -104,55 +105,53 @@ describe("recoveryHeading", () => {
     // stuck is "we don't know yet": the app is still checking, and the machine
     // may come back on its own. Calling that unresponsive would be claiming a
     // verdict the classifier declined to give.
-    expect(recoveryHeading("my-machine", "restart_failed", false)).toBe("my-machine unresponsive");
+    expect(recoveryHeading("my-machine", "recovery_failed", false)).toBe("my-machine unresponsive");
     expect(recoveryHeading("my-machine", "stuck", false)).toBe("my-machine isn't responding yet.");
     expect(recoveryHeading("my-machine", "healthy", true)).toBe("my-machine is stopped.");
     expect(recoveryHeading("my-machine", "healthy", false)).toBe("my-machine is responding again.");
   });
 
-  it("claims a restart only where something is known to be restarting", () => {
-    // The three restarting readings, and why they differ. A stopped host is
-    // genuinely being booted. A full stop+start bounce is only ever the user's
-    // own click, so their action makes the claim honest. Everything else is the
-    // start-only dispatch the app fires at any machine that stops answering --
-    // it no-ops against a host that is already up, so "Restarting" would tell
-    // the user their work was interrupted when nothing happened to the machine.
-    expect(recoveryHeading("my-machine", "restarting", true, null)).toBe("Bringing my-machine back online...");
-    expect(recoveryHeading("my-machine", "restarting", false, false)).toBe("Restarting my-machine...");
-    expect(recoveryHeading("my-machine", "restarting", false, true)).toBe("Reconnecting to my-machine...");
+  it("claims a restart only where something is known to be recovering", () => {
+    // The three in-flight readings, and why they differ. A stopped host is
+    // genuinely being booted. A RESTART is only ever the user's own click, so
+    // their action makes the claim honest. A START is what the app fires at any
+    // machine that stops answering -- it no-ops against a host that is already
+    // up, so "Restarting" would tell the user their work was interrupted when
+    // nothing happened to the machine.
+    expect(recoveryHeading("my-machine", "recovering", true, null)).toBe("Bringing my-machine back online...");
+    expect(recoveryHeading("my-machine", "recovering", false, "restart")).toBe("Restarting my-machine...");
+    expect(recoveryHeading("my-machine", "recovering", false, "start")).toBe("Reconnecting to my-machine...");
     // No reading at all is not evidence of a restart either.
-    expect(recoveryHeading("my-machine", "restarting", false, null)).toBe("Reconnecting to my-machine...");
+    expect(recoveryHeading("my-machine", "recovering", false, null)).toBe("Reconnecting to my-machine...");
   });
 
-  it("agrees with the machines-list badge about the same restart", () => {
+  it("agrees with the machines-list badge about the same recovery", () => {
     // The card and the row are two views of one episode, and a user looking at
     // the list and then opening the card must not be told two different things
-    // about it. Both read the tracker's start-only reading off their own frame,
+    // about it. Both read the tracker's recovery kind off their own frame,
     // so the pairing is what keeps them in step -- the badge silently reporting
     // the weaker word for a bounce the user themselves clicked is exactly the
     // divergence this pins.
-    for (const isStartOnly of [true, false, null]) {
-      const isRestartClaimedOnCard = recoveryHeading("my-machine", "restarting", false, isStartOnly).startsWith(
-        "Restarting",
-      );
-      const isRestartClaimedOnBadge = healthBadgeLabelFor("restarting", false, isStartOnly, false) === "Restarting...";
+    for (const kind of ["start", "restart", null] as const) {
+      const isRestartClaimedOnCard = recoveryHeading("my-machine", "recovering", false, kind).startsWith("Restarting");
+      const isRestartClaimedOnBadge = healthBadgeLabelFor("recovering", false, kind, false) === "Restarting...";
       expect(isRestartClaimedOnBadge).toBe(isRestartClaimedOnCard);
     }
   });
 
-  it("agrees with its own action button about the same restart", () => {
+  it("agrees with its own action button about the same recovery", () => {
     // The shortest range at which one episode can be described two ways: the
     // button sits directly under the heading, so a fixed "Restarting..." there
     // contradicts a heading that has just declined to claim a restart.
     for (const isHostOffline of [true, false]) {
-      for (const isStartOnly of [true, false, null]) {
+      for (const kind of ["start", "restart", null] as const) {
         const isRestartClaimedInHeading = recoveryHeading(
           "my-machine",
-          "restarting",
+          "recovering",
           isHostOffline,
-          isStartOnly,
+          kind,
         ).startsWith("Restarting");
-        const isRestartClaimedOnButton = recoveryBusyActionLabel(isHostOffline, isStartOnly) === "Restarting...";
+        const isRestartClaimedOnButton = recoveryBusyActionLabel(isHostOffline, kind) === "Restarting...";
         expect(isRestartClaimedOnButton).toBe(isRestartClaimedInHeading);
       }
     }
@@ -277,8 +276,8 @@ describe("RecoveryCardBody", () => {
     // in flight and its progress is what they asked to see.
     const text = renderCard({
       ...UNRESPONSIVE,
-      health: "restarting",
-      is_restart_start_only: false,
+      health: "recovering",
+      recovery_kind: "restart",
       device_environment: "OFFLINE",
     });
 
@@ -287,16 +286,17 @@ describe("RecoveryCardBody", () => {
     expect(text).not.toContain("Waiting for network");
   });
 
-  it("explains the device over the app's own start-only dispatch", () => {
-    // The app enters "restarting" unasked within seconds of a network flap and
+  it("explains the device over the app's own unattended start", () => {
+    // The app enters "recovering" unasked within seconds of a network flap and
     // stays there for as long as the network is down, which is the whole of
-    // the episode this explanation exists for. The tracker's word (true) and
-    // no word at all (null) both decline the exception the user's click earns.
-    for (const is_restart_start_only of [true, null]) {
+    // the episode this explanation exists for. The tracker's word ("start")
+    // and no word at all (null) both decline the exception the user's click
+    // earns.
+    for (const recovery_kind of ["start", null] as const) {
       const text = renderCard({
         ...UNRESPONSIVE,
-        health: "restarting",
-        is_restart_start_only,
+        health: "recovering",
+        recovery_kind,
         device_environment: "OFFLINE",
       });
       expect(text).toContain("This device has no network connection.");
@@ -345,10 +345,10 @@ describe("RecoveryCardBody", () => {
     // lines for "Waiting for network..." over a restart that is running.
     const info: RecoveryInfo = { ...UNRESPONSIVE, health: "stuck", device_environment: "OFFLINE" };
     const model = modelShowing(info);
-    model.isRestartRunning = true;
+    model.isRecoveryRunning = true;
     // A click from this card is a full stop+start bounce, which is what
     // licenses the card to call it a restart at all.
-    model.dispatchedRestartIsStartOnly = false;
+    model.dispatchedRecoveryKind = "restart";
 
     const text = renderCard(info, model);
 
@@ -365,20 +365,20 @@ describe("RecoveryCardBody", () => {
     expect(text).not.toContain("Waiting for network");
   });
 
-  it("reads a restart nobody started here as busy, not as an idle machine", async () => {
-    // The unattended dispatcher restarts a wedged machine on its own, so the
-    // card must not sit there offering to start a second one. It is start-only,
+  it("reads a recovery nobody started here as busy, not as an idle machine", async () => {
+    // The unattended dispatcher starts a wedged machine on its own, so the card
+    // must not sit there offering to start a second one. It is a plain start,
     // so the heading says reconnecting rather than claiming a restart.
     //
-    // Loaded rather than assigned on purpose: adopting a "restarting" reading is
-    // what attaches the model to that restart, and a card that read its own
+    // Loaded rather than assigned on purpose: adopting a "recovering" reading is
+    // what attaches the model to that episode, and a card that read its own
     // busy flag as evidence of its own click would claim a restart here.
-    const info = { ...UNRESPONSIVE, health: "restarting", is_restart_start_only: true };
+    const info = { ...UNRESPONSIVE, health: "recovering", recovery_kind: "start" as const };
     const model = await modelAttachedTo(info);
     // The precondition that makes this a regression test: attaching sets the
     // same busy flag the card's own click sets, so the flag cannot stand in for
     // "this card dispatched it".
-    expect(model.isRestartRunning).toBe(true);
+    expect(model.isRecoveryRunning).toBe(true);
     const text = renderCard(info, model);
     expect(text).toContain("Reconnecting to my-machine...");
     // Busy, and busy in the same words the heading chose: the button under a
@@ -394,7 +394,7 @@ describe("RecoveryCardBody", () => {
     // tracker answers is exactly when the user is looking at the card they
     // just clicked.
     const info = { ...UNRESPONSIVE, health: "stuck" };
-    const text = renderCard(info, await modelRestartingOwn(info, false));
+    const text = renderCard(info, await modelRecoveringOwn(info, "restart"));
     expect(text).toContain("Restarting my-machine...");
   });
 
@@ -403,7 +403,7 @@ describe("RecoveryCardBody", () => {
     // idempotent start through this same model. It may well no-op, so the
     // claim the full bounce earns is not available to it.
     const info = { ...UNRESPONSIVE, health: "stuck" };
-    const text = renderCard(info, await modelRestartingOwn(info, true));
+    const text = renderCard(info, await modelRecoveringOwn(info, "start"));
     expect(text).toContain("Reconnecting to my-machine...");
   });
 
@@ -447,13 +447,13 @@ describe("RecoveryCardBody", () => {
   });
 
   it("outranks the restart episode's own account of the machine", () => {
-    // A machine this device cannot reach goes STUCK and gets restarted whether
-    // or not anything is wrong with it, so RESTART_FAILED here is an effect of
-    // the device-side fault. Reporting it would blame the machine for the
-    // app's own broken connection.
+    // A machine this device cannot reach goes STUCK and gets a start dispatched
+    // at it whether or not anything is wrong with it, so RECOVERY_FAILED here is
+    // an effect of the device-side fault. Reporting it would blame the machine
+    // for the app's own broken connection.
     const text = renderCardOnDesktop({
       ...UNRESPONSIVE,
-      health: "restart_failed",
+      health: "recovery_failed",
       health_error: "The system interface did not respond within 300s of the host restart.",
       is_device_cannot_connect: true,
     });
@@ -483,7 +483,7 @@ describe("RecoveryCardBody", () => {
     // used to fall through to the still-checking copy and render that over the
     // success -- one card saying both things at once.
     const model = modelShowing({ ...UNRESPONSIVE, health: "healthy" });
-    model.isRestartSucceeded = true;
+    model.isRecoverySucceeded = true;
     const text = renderedText(renderRoot(RecoveryCardBody, { model }));
     expect(text).toContain("my-machine is responding again.");
     expect(text).toContain("This machine is answering again.");
@@ -496,7 +496,7 @@ describe("RecoveryCardBody", () => {
     // Until then, an idle-reading card would offer a Restart button for the
     // restart that just ran.
     const model = modelShowing(UNRESPONSIVE);
-    model.isRestartSucceeded = true;
+    model.isRecoverySucceeded = true;
     const text = renderedText(renderRoot(RecoveryCardBody, { model, isSelfDismissing: true }));
     expect(text).toContain("Reconnecting...");
     expect(text).not.toContain("Restart Machine");
@@ -508,10 +508,10 @@ describe("RecoveryCardBody", () => {
     // from leaving. Rendering the wait here would replace a restart that just
     // succeeded with an indefinite "Waiting for network".
     const model = modelShowing({ ...UNRESPONSIVE, health: "stuck", device_environment: "OFFLINE" });
-    model.isRestartSucceeded = true;
+    model.isRecoverySucceeded = true;
     const text = renderedText(renderRoot(RecoveryCardBody, { model, isSelfDismissing: true }));
-    // No evidence of the restart's shape here, so the busy label is the
-    // weakest honest one -- what matters is that it narrates the restart.
+    // No evidence of which recovery this is here, so the busy label is the
+    // weakest honest one -- what matters is that it narrates the recovery.
     expect(text).toContain("Reconnecting...");
     expect(text).not.toContain("Waiting for network");
     expect(text).not.toContain("This device has no network connection.");
@@ -540,9 +540,9 @@ describe("RecoveryCardBody", () => {
 });
 
 /** What the troubleshooting block puts on screen for a given reading. */
-function renderTroubleshooting(info: RecoveryInfo, restartError: string | null = null): string {
+function renderTroubleshooting(info: RecoveryInfo, recoveryError: string | null = null): string {
   const model = modelShowing(info);
-  model.restartError = restartError;
+  model.recoveryError = recoveryError;
   return renderedText(renderRoot(RecoveryTroubleshooting, { model }));
 }
 

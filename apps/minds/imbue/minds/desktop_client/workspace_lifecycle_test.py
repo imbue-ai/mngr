@@ -184,7 +184,7 @@ def test_a_probe_that_caught_the_machine_still_up_does_not_unmark_the_stop(tmp_p
 
     The mark goes on before ``mngr stop`` runs, so it is live while the
     interface is still answering -- and a machine being stopped is often a
-    probe target already (suspect-enrolled, STUCK, or RESTART_FAILED). Were a
+    probe target already (suspect-enrolled, STUCK, or RECOVERY_FAILED). Were a
     probe to clear the mark there, the dying interface would re-enroll the agent
     through its window's failure envelopes, it would reach STUCK, and the
     dispatch would start the machine back up under a stop that is still running.

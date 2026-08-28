@@ -21,7 +21,7 @@
 //
 // NEVER auto-navigated to, and never linked to by the shell's band, which
 // raises the modal instead. Unattended recovery is dispatched by the server's
-// health tracker on the STUCK edge, so this page reports a restart already
+// health tracker on the STUCK edge, so this page reports a recovery already
 // under way rather than racing to start one. The way in, and the only thing
 // that dispatches from here, is a machines-list click-through:
 // ?intent=start ("open this stopped machine" -- a plain, idempotent start) and
@@ -34,15 +34,16 @@ import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
 import { RecoveryPanel } from "../recovery/RecoveryCard";
 import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
+import type { RecoveryKind } from "../../models/health";
 
 interface RecoveryState {
   model: RecoveryModel;
   /** Validated same-app ?return_to destination, honored once the machine answers. */
   returnTo: string | null;
   hasReturned: boolean;
-  /** Whether the click-through's own restart has been asked for (immediately
+  /** Whether the click-through's own recovery has been asked for (immediately
    * true when it carried no ?intent). Until it has, the machine's health is a
-   * reading of the state that restart was meant to change, so returning on it
+   * reading of the state that recovery was meant to change, so returning on it
    * would leave without doing the thing the click-through came to do. */
   isDispatchSettled: boolean;
 }
@@ -50,16 +51,16 @@ interface RecoveryState {
 /**
  * Whether the machine is answering again, and this page is therefore done.
  *
- * Deliberately NOT "the restart succeeded". A restart can fail while the
- * machine comes back anyway -- the failure and the recovery have separate
- * causes, and this page's own state poll is what reports the second one. Read
- * the other way, a page whose restart errored parked the reader on a card
- * saying "nothing further is needed here" with no way into the machine it was
- * saying it about.
+ * Deliberately NOT "the recovery succeeded". A recovery can fail while the
+ * machine comes back anyway -- the failure and the machine answering have
+ * separate causes, and this page's own state poll is what reports the second
+ * one. Read the other way, a page whose recovery errored parked the reader on
+ * a card saying "nothing further is needed here" with no way into the machine
+ * it was saying it about.
  */
 function isMachineAnswering(model: RecoveryModel): boolean {
-  if (model.isRestartRunning) return false;
-  if (model.isRestartSucceeded) return true;
+  if (model.isRecoveryRunning) return false;
+  if (model.isRecoverySucceeded) return true;
   const info = model.info;
   // A stopped machine reads healthy (there is nothing wrong with it); it is
   // simply not somewhere anyone can be sent.
@@ -103,15 +104,15 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     // crafted deeplink cannot turn the return into an open redirect.
     vnode.state.returnTo = rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//") ? rawReturnTo : null;
     vnode.state.hasReturned = false;
-    const isDispatchingIntent = intent === "start" || intent === "restart";
-    vnode.state.isDispatchSettled = !isDispatchingIntent;
+    const dispatchKind: RecoveryKind | null = intent === "start" || intent === "restart" ? intent : null;
+    vnode.state.isDispatchSettled = dispatchKind === null;
     const model = new RecoveryModel(workspaceAnyId, browserLifecycleDeps(() => m.redraw()));
     vnode.state.model = model;
     void model.load().then(async () => {
-      // load() already re-attached if a restart is in flight, and
-      // dispatchRestart is a no-op while one is running.
-      if (isDispatchingIntent && model.loadError === null) {
-        await model.dispatchRestart(intent === "start");
+      // load() already re-attached if a recovery is in flight, and
+      // dispatchRecovery is a no-op while one is running.
+      if (dispatchKind !== null && model.loadError === null) {
+        await model.dispatchRecovery(dispatchKind);
       }
       vnode.state.isDispatchSettled = true;
     });

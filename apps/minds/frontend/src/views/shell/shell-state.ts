@@ -742,13 +742,14 @@ export class ShellState {
   }
 
   /**
-   * Raise the card on the edge into restart_failed for the displayed machine,
+   * Raise the card on the edge into recovery_failed for the displayed machine,
    * and drop an auto-raised one on the edge back into healthy.
    *
-   * restart_failed means the app restarted the machine and it is still
-   * unresponsive. That is the end of the unattended path, and a one-line band
-   * is too quiet for it; every other condition leaves the band as the sole
-   * surface and waits to be asked.
+   * recovery_failed means the app tried to bring the machine back -- unattended,
+   * that is a plain start, not a bounce -- and it is still unresponsive. That is
+   * the end of the unattended path, and a one-line band is too quiet for it;
+   * every other condition leaves the band as the sole surface and waits to be
+   * asked.
    *
    * Only an edge raises it -- ``isSnapshotFrame`` marks the connect-time replay
    * of current state -- so a window that opens onto a machine already in this
@@ -775,7 +776,7 @@ export class ShellState {
         this.finishRecovery();
       return;
     }
-    if (isSnapshotFrame || health !== "restart_failed") return;
+    if (isSnapshotFrame || health !== "recovery_failed") return;
     if (this.openRecovery !== null) return;
     if (this.stores.health.discoveryHealth === "blocked") return;
     const displayed = this.displayedWorkspaceAnyId;

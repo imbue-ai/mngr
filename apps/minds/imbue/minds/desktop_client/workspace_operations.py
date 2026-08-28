@@ -1,15 +1,18 @@
 """In-memory registry for short-lived in-process workspace operations.
 
-A workspace restart runs as an in-process worker (``mngr stop`` + ``mngr
-start``), so -- unlike a destroy, which is a detached subprocess that must
-outlive the desktop app for crash-survival (see :mod:`destroying`) -- it has no
-durability requirement and its operation record lives purely in memory,
-consistent with how create is tracked (in :class:`AgentCreator`). Killing the
-app mid-restart simply abandons the restart; nothing is leaked.
+A host recovery runs as an in-process worker (``mngr start``, preceded by an
+``mngr stop`` when the user asked for a restart), so -- unlike a destroy, which
+is a detached subprocess that must outlive the desktop app for crash-survival
+(see :mod:`destroying`) -- it has no durability requirement and its operation
+record lives purely in memory, consistent with how create is tracked (in
+:class:`AgentCreator`). Killing the app mid-recovery simply abandons it; nothing
+is leaked.
 
-The ``/api/v1/workspaces/operations/restart/<id>`` resource reads restart status
-and a status-log stream from here, keyed by the workspace's agent id (which is the
-operation id; the type-segmented route means it is never confused with a destroy).
+The ``/api/v1/workspaces/operations/restart/<id>`` resource reads that status and
+a status-log stream from here, keyed by the workspace's agent id (which is the
+operation id; the type-segmented route means it is never confused with a
+destroy). The route says "restart" because agents inside workspaces poll it; the
+operation it names covers a plain start too.
 
 Operation logs are stored on the record (size-capped) rather than in a
 consume-once queue: any number of readers can attach at any time and each
@@ -43,7 +46,9 @@ MAX_OPERATION_LOG_LINES: Final[int] = 4000
 class WorkspaceOperationKind(UpperCaseStrEnum):
     """Which kind of in-process workspace operation a record tracks."""
 
-    RESTART = auto()
+    # A host recovery: ``mngr start``, with an ``mngr stop --stop-host`` ahead of
+    # it when the user asked for a restart (see ``HostRecoveryKind``).
+    RECOVERY = auto()
     BACKUP_UPDATE = auto()
     BACKUP_CONFIGURE = auto()
     BACKUP_RESTORE = auto()
@@ -98,7 +103,7 @@ class OperationLogChunk(FrozenModel):
 
 
 class WorkspaceOperationRegistryInterface(MutableModel, ABC):
-    """Tracks short-lived in-process workspace operations (restart) and their log streams."""
+    """Tracks short-lived in-process workspace operations (host recovery, backups) and their log streams."""
 
     @abstractmethod
     def start(self, agent_id: AgentId, kind: WorkspaceOperationKind, now: datetime) -> None:

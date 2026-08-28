@@ -18,12 +18,12 @@ def test_start_registers_a_running_record_with_a_readable_log() -> None:
     registry = InMemoryWorkspaceOperationRegistry()
     agent_id = AgentId()
 
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, now=_now())
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, now=_now())
 
     record = registry.get(agent_id)
     assert record is not None
     assert record.status == WorkspaceOperationStatus.RUNNING
-    assert record.kind == WorkspaceOperationKind.RESTART
+    assert record.kind == WorkspaceOperationKind.RECOVERY
     assert record.error is None
     chunk = registry.read_log_chunk(agent_id, 0, timeout_seconds=0.01)
     assert chunk is not None
@@ -40,7 +40,7 @@ def test_get_returns_none_for_an_unknown_operation() -> None:
 def test_complete_marks_done_and_ends_the_log_stream() -> None:
     registry = InMemoryWorkspaceOperationRegistry()
     agent_id = AgentId()
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, now=_now())
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, now=_now())
 
     registry.append_log(agent_id, "stopping services")
     registry.complete(agent_id)
@@ -58,7 +58,7 @@ def test_complete_marks_done_and_ends_the_log_stream() -> None:
 def test_fail_marks_failed_with_error_and_ends_the_log_stream() -> None:
     registry = InMemoryWorkspaceOperationRegistry()
     agent_id = AgentId()
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, now=_now())
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, now=_now())
 
     registry.fail(agent_id, "mngr start exited 1")
 
@@ -176,10 +176,10 @@ def test_log_cap_drops_oldest_lines_but_keeps_indices_logical() -> None:
 def test_start_again_replaces_the_prior_record() -> None:
     registry = InMemoryWorkspaceOperationRegistry()
     agent_id = AgentId()
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, now=_now())
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, now=_now())
     registry.fail(agent_id, "first attempt failed")
 
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, now=_now())
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, now=_now())
 
     record = registry.get(agent_id)
     assert record is not None

@@ -356,8 +356,8 @@ def tamper_session_cookie_signed_content(cookie_value: str) -> str:
 def capture_error_logs() -> Iterator[list[str]]:
     """Capture loguru ERROR-level records (a loguru sink; caplog can't hook loguru).
 
-    Every RESTART_FAILED transition must reach error reporting (Principle 3:
-    the recovery surface is quiet), so the restart-failure tests assert exactly
+    Every RECOVERY_FAILED transition must reach error reporting (Principle 3:
+    the recovery surface is quiet), so the recovery-failure tests assert exactly
     one error record per attempt through this capture.
     """
     records: list[str] = []
@@ -757,7 +757,7 @@ def scripted_workspace_probe_server(
     Answers 503 for the first ``not_ready_count`` probes and 200 thereafter, so a
     readiness wait sees a workspace that becomes reachable partway through
     (``10**6`` stands in for "never ready"). Shared by every test that drives a
-    readiness poll -- the create attempt's wait and the restart worker's -- so
+    readiness poll -- the create attempt's wait and the recovery worker's -- so
     both exercise the same stand-in.
 
     Speaks TLS with the proxy's own CA-backed cert helpers: minds always runs

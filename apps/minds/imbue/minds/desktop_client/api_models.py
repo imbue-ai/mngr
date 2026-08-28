@@ -64,10 +64,12 @@ class ApiValidationErrorResponse(FrozenModel):
 
 
 class OperationHandleResponse(FrozenModel):
-    """A handle for a long-running create/destroy/restart operation, to poll."""
+    """A handle for a long-running create/destroy/recovery operation, to poll."""
 
     operation_id: str = Field(description="Poll at /api/v1/workspaces/operations/<kind>/<operation_id>")
-    kind: str = Field(description="Operation kind: create, destroy, or restart")
+    kind: str = Field(
+        description="Operation kind: create, destroy, or restart (the host recovery, whichever kind it runs)"
+    )
 
 
 class CreateOperationStatusResponse(FrozenModel):
@@ -110,13 +112,17 @@ class CreateAttemptDiscardStatusResponse(FrozenModel):
 
 
 class RestartOperationStatusResponse(FrozenModel):
-    """Status of a restart operation (polled at /operations/restart/<id>)."""
+    """Status of a host-recovery operation (polled at /operations/restart/<id>).
 
-    operation_id: str = Field(description="The workspace agent id being restarted")
+    Named for the route, which agents inside workspaces call. The operation it
+    reports on covers both recoveries: a ``start_only`` start, and a restart.
+    """
+
+    operation_id: str = Field(description="The workspace agent id being recovered")
     kind: str = Field(description="Always 'restart'")
-    status: str = Field(description="Raw restart status")
-    is_done: bool = Field(description="Whether the restart has finished")
-    error: str | None = Field(default=None, description="Failure message, when the restart failed")
+    status: str = Field(description="Raw operation status")
+    is_done: bool = Field(description="Whether the operation has finished")
+    error: str | None = Field(default=None, description="Failure message, when the operation failed")
 
 
 class BackupOperationStatusResponse(FrozenModel):
@@ -303,19 +309,24 @@ class PatchWorkspaceRequest(ApiRequestModel):
 
 
 class RestartWorkspaceRequest(ApiRequestModel):
-    """Body for restarting a workspace's host."""
+    """Body for recovering a workspace's host.
+
+    Named for the route. Without ``start_only`` this really does restart the
+    host (stop, then start); with it, only the start runs.
+    """
 
     # ``scope`` is structurally a required string; the route validates that its
     # value is 'host' (a value-semantic check kept in the handler, since the
     # lowercase wire value can't be a standard UpperCaseStrEnum). The former
     # 'services' scope (in-place system-services restart) was removed; it is
     # rejected with a 400.
-    scope: str = Field(description="Must be 'host' (bounce the whole host); no other scope is supported")
+    scope: str = Field(description="Must be 'host' (act on the whole host); no other scope is supported")
     start_only: bool | None = Field(
         default=None,
         description=(
             "Skip the stop step and run only the idempotent ``mngr start`` -- safe to dispatch "
-            "with no knowledge of the host's state (a live host makes it a no-op)"
+            "with no knowledge of the host's state (a live host makes it a no-op). Omitted or "
+            "false restarts the host instead, which is the only recovery that stops it"
         ),
     )
 

@@ -353,8 +353,8 @@ export function Shell(): m.Component<ShellAttrs> {
           unreachableProviderLabel,
           deviceEnvironment: shell.stores.health.appEnvironmentCondition(),
           // So the band can tell the user's own bounce, which narrates itself,
-          // from the app's start-only dispatch, which must not hide the device.
-          isRestartStartOnly: agentScoped === null ? null : shell.stores.health.isRestartStartOnlyFor(agentScoped),
+          // from the app's unattended start, which must not hide the device.
+          recoveryKind: agentScoped === null ? null : shell.stores.health.recoveryKindFor(agentScoped),
           // Which scopes that app-global condition to the machines it can
           // explain: one on an on-device backend answers over loopback with the
           // wifi off. A row we have no entry for keeps the conservative default.

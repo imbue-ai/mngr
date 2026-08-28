@@ -156,6 +156,7 @@ from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_share_probe_host
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
@@ -172,8 +173,8 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRe
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MESSAGE
 from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
-from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
-from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
+from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
+from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
@@ -1389,26 +1390,32 @@ def _handle_workspace_rename(agent_id: str) -> Response:
     return _apply_workspace_display_label(parsed_id, raw_name, str(new_slug), parent_cg)
 
 
-# -- Workspace recovery routes (restart) --
+# -- Workspace recovery routes --
 
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=RestartWorkspaceRequest, resp=json_response_model(OperationHandleResponse, status_code=202))
 def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
-    """Dispatch a workspace host restart; return an operation handle to poll.
+    """Dispatch a workspace host recovery; return an operation handle to poll.
 
-    Body: ``{"scope": "host", "start_only"?: bool}``. The restart
-    bounces the whole host; ``start_only`` skips the stop step and runs only
-    the idempotent ``mngr start``, for callers dispatching with no knowledge of
-    the host's state. The former ``services`` scope (an in-place
-    system-services restart) was removed and is rejected with a 400. Returns
-    ``202`` with ``{operation_id, kind: "restart"}`` (the op id is the workspace
-    agent id), followed via ``/api/v1/workspaces/operations/restart/<id>``
-    (+``/logs``) exactly like create / destroy. A restart already in flight is
-    deduped: the same handle is returned without stacking a second worker. A
-    RUNNING operation of another kind (a backup update/configure) is a 409:
-    workspace operations are serialized, and a restart must not bounce the
-    host under an in-flight backup mutation.
+    Body: ``{"scope": "host", "start_only"?: bool}``. By default this restarts
+    the host -- ``mngr stop --stop-host`` and then ``mngr start`` -- which is
+    what the recovery card's "Restart machine" click asks for. ``start_only``
+    runs the idempotent ``mngr start`` alone, for callers dispatching with no
+    knowledge of the host's state; it never bounces a live container. The former
+    ``services`` scope (an in-place system-services restart) was removed and is
+    rejected with a 400. Returns ``202`` with ``{operation_id, kind: "restart"}``
+    (the op id is the workspace agent id), followed via
+    ``/api/v1/workspaces/operations/restart/<id>`` (+``/logs``) exactly like
+    create / destroy. A recovery already in flight is deduped: the same handle is
+    returned without stacking a second worker. A RUNNING operation of another
+    kind (a backup update/configure) is a 409: workspace operations are
+    serialized, and a recovery must not act on the host under an in-flight backup
+    mutation.
+
+    The route, the handle's ``kind`` and the ``start_only`` field keep saying
+    "restart" because agents inside workspaces call them; only the internals were
+    renamed to distinguish the two actions.
     """
     parsed_id = AgentId(agent_id)
     # The spectree model enforces ``scope`` is a required string; its value
@@ -1425,7 +1432,7 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     tracker: SystemInterfaceHealthTracker | None = state.system_interface_health_tracker
     parent_cg = state.root_concurrency_group
     if tracker is None or parent_cg is None:
-        return _json_error("Machine restart is unavailable in this configuration", 503)
+        return _json_error("Machine recovery is unavailable in this configuration", 503)
 
     handle = OperationHandleResponse(operation_id=str(parsed_id), kind="restart")
     # A ``start_only`` caller can race the workspace's own self-recovery, and
@@ -1438,9 +1445,9 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
     registry = state.workspace_operation_registry
     # A manual restart keeps the stop step, since it may target a running but
     # wedged container that only a bounce fixes.
-    skip_stop = bool(body.get("start_only", False))
+    kind = HostRecoveryKind.START if bool(body.get("start_only", False)) else HostRecoveryKind.RESTART
 
-    outcome = dispatch_host_restart(
+    outcome = dispatch_host_recovery(
         workspace_agent_id=parsed_id,
         tracker=tracker,
         backend_resolver=backend_resolver,
@@ -1450,24 +1457,24 @@ def _handle_workspace_restart(agent_id: str) -> tuple[OperationHandleResponse, i
         mngr_host_dir=state.mngr_host_dir,
         mngr_forward_port=state.mngr_forward_port or 0,
         mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
-        skip_stop=skip_stop,
+        kind=kind,
         connectivity_detector=state.connectivity_detector,
     )
     match outcome:
         # A refused dispatch leaves the record untouched, so it still names the
         # operation that blocked this one.
-        case RestartDispatchOutcome.OPERATION_CONFLICT:
+        case RecoveryDispatchOutcome.OPERATION_CONFLICT:
             return _operation_conflict_error(registry.get(parsed_id))
         # The outcome cannot carry the cause, but the dispatch recorded it on
         # the operation record before failing it -- and no worker ever ran, so
         # there are no logs to look at either.
-        case RestartDispatchOutcome.SPAWN_FAILED:
+        case RecoveryDispatchOutcome.SPAWN_FAILED:
             failed_operation = registry.get(parsed_id)
             reason = None if failed_operation is None else failed_operation.error
-            return _json_error(reason if reason is not None else "Could not start the restart worker", 503)
-        # A restart already in flight is deduped onto the same handle rather
+            return _json_error(reason if reason is not None else "Could not start the recovery worker", 503)
+        # A recovery already in flight is deduped onto the same handle rather
         # than stacking a second worker, so both read as accepted.
-        case RestartDispatchOutcome.DISPATCHED | RestartDispatchOutcome.ALREADY_RUNNING:
+        case RecoveryDispatchOutcome.DISPATCHED | RecoveryDispatchOutcome.ALREADY_RUNNING:
             return handle, 202
         case _ as unreachable:
             assert_never(unreachable)
@@ -1544,20 +1551,20 @@ def _handle_destroy_operation_status(operation_id: str) -> DestroyOperationStatu
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(RestartOperationStatusResponse))
 def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatusResponse | Response:
-    """Report the status of a restart operation (the id is the workspace agent id)."""
+    """Report the status of a host-recovery operation (the id is the workspace agent id)."""
     parsed_id = AgentId(operation_id)
-    restart_record = get_state().workspace_operation_registry.get(parsed_id)
+    recovery_record = get_state().workspace_operation_registry.get(parsed_id)
     # Operation polling is type-segmented: a backup update/configure record for
     # the same workspace must not read as a restart through this endpoint (the
     # backup status handler filters in the same way for the other direction).
-    if restart_record is None or restart_record.kind != WorkspaceOperationKind.RESTART:
+    if recovery_record is None or recovery_record.kind != WorkspaceOperationKind.RECOVERY:
         return _json_error(f"Unknown operation {operation_id}", 404)
     return RestartOperationStatusResponse(
         operation_id=operation_id,
         kind="restart",
-        status=str(restart_record.status),
-        is_done=restart_record.status == WorkspaceOperationStatus.DONE,
-        error=restart_record.error,
+        status=str(recovery_record.status),
+        is_done=recovery_record.status == WorkspaceOperationStatus.DONE,
+        error=recovery_record.error,
     )
 
 
@@ -1566,7 +1573,7 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
 
 # Plain-language names for the running operation in conflict (409) messages.
 _OPERATION_CONFLICT_PHRASES: Final[dict[WorkspaceOperationKind, str]] = {
-    WorkspaceOperationKind.RESTART: "A restart",
+    WorkspaceOperationKind.RECOVERY: "A machine recovery",
     WorkspaceOperationKind.BACKUP_UPDATE: "A backup software update",
     WorkspaceOperationKind.BACKUP_CONFIGURE: "A backup settings change",
     WorkspaceOperationKind.BACKUP_RESTORE: "A restore",
@@ -1613,7 +1620,7 @@ def _dispatch_backup_worker(
 
     Shared by the update and restore routes, whose dispatch differs only in the
     worker and its extra kwargs. The claim is atomic (``start_if_idle``, the
-    same primitive ``dispatch_host_restart`` claims with): two concurrent
+    same primitive ``dispatch_host_recovery`` claims with): two concurrent
     requests must not both spawn workers mutating the same workspace, and a
     request that loses to a running operation of any kind is rejected rather
     than stacked.
@@ -2100,7 +2107,7 @@ def _handle_destroy_operation_logs(operation_id: str) -> Response:
 
 @require_api_or_cookie_auth
 def _handle_restart_operation_logs(operation_id: str) -> Response:
-    """Stream a restart operation's stored registry log (full history + live tail) as server-sent events."""
+    """Stream a host-recovery operation's stored registry log (full history + live tail) as server-sent events."""
     parsed_id = AgentId(operation_id)
     registry = get_state().workspace_operation_registry
     if registry.get(parsed_id) is None:
@@ -3199,7 +3206,7 @@ def create_api_v1_blueprint() -> Blueprint:
         endpoint="workspace_stop",
         methods=["POST"],
     )
-    # Workspace recovery (restart). Gated by ``minds-workspaces-recover``
+    # Workspace recovery (start / restart). Gated by ``minds-workspaces-recover``
     # at the gateway.
     blueprint.add_url_rule("/workspaces/<agent_id>/restart", view_func=_handle_workspace_restart, methods=["POST"])
 

@@ -1794,7 +1794,7 @@ def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
     assert any(error["field"] == "description" for error in response.get_json()["errors"])
 
 
-# -- system-interface restart + recovery tests --
+# -- system-interface health + recovery tests --
 
 
 def _await_workspaces_frame(client_queue: "queue.Queue[str | None]", timeout_seconds: float = 3.0) -> dict[str, Any]:
@@ -1826,7 +1826,7 @@ def _await_health_frame(
     """Block for the next ``health`` frame reporting ``status``, skipping other frames.
 
     Health edges are broadcast directly rather than diffed, so this is how a test
-    waits on a transition a background strand makes (the unattended restart's)
+    waits on a transition a background strand makes (the unattended start's)
     instead of guessing at a sleep.
     """
     deadline = time.monotonic() + timeout_seconds
@@ -1855,7 +1855,7 @@ def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
     some unrelated producer happened to fire, which during an outage of the
     machine's own provider can be a full poll interval away.
 
-    Wired the way the app wires it, unattended restart included: that dispatch
+    Wired the way the app wires it, unattended recovery included: that dispatch
     rides the same stuck edge and clears the probe-failure run, so a verdict
     gated on the *run* would let the withheld error speak again a beat later --
     and for the rest of the episode, since a new run only starts from HEALTHY.
@@ -1875,10 +1875,10 @@ def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         system_interface_health_tracker=tracker,
         root_concurrency_group=root_concurrency_group,
-        # Fails the restart's ``mngr start`` outright, so the dispatch reaches a
+        # Fails the recovery's ``mngr start`` outright, so the dispatch reaches a
         # terminal state within the test instead of parking on the cold-boot
-        # readiness wait. RESTART_FAILED clears the failure run just as
-        # RESTARTING does, so it exercises the same thing.
+        # readiness wait. RECOVERY_FAILED clears the failure run just as
+        # RECOVERING does, so it exercises the same thing.
         mngr_binary=write_stub_mngr(tmp_path, "mngr", "exit 1"),
     )
     publisher = get_state(app).ui_publisher
@@ -1902,10 +1902,10 @@ def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
         frame = _await_workspaces_frame(client_queue)
         assert frame["workspaces"][0]["is_backend_unreachable"] is False
 
-        # The unattended restart has by now run and cleared the failure run. The
+        # The unattended start has by now run and cleared the failure run. The
         # backend is still not something this episode has observed, so it still
         # may not be named.
-        _await_health_frame(client_queue, AgentHealth.RESTART_FAILED)
+        _await_health_frame(client_queue, AgentHealth.RECOVERY_FAILED)
         publisher.publish_now()
         after_restart = [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "workspaces"]
         latest = after_restart[-1] if after_restart else frame

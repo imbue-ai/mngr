@@ -421,7 +421,7 @@ def run(
         # fences its own probe, because unchecked is not the same as harmless
         # here -- this thread is the only thing that can observe the network
         # coming back, so losing it while a bad reading is outstanding would
-        # strand every owed restart rather than fall back to dispatching.
+        # strand every owed start rather than fall back to dispatching.
         is_checked=False,
     )
 
@@ -767,8 +767,8 @@ def run(
         sleep_tracker=sleep_tracker,
     )
 
-    # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY
-    # once the plugin probe sees a 200. Started here (not inside
+    # Background probe loop: flips STUCK / RECOVERY_FAILED agents back to
+    # HEALTHY once the plugin probe sees a 200. Started here (not inside
     # ``create_desktop_client``) so test factories that build the app can
     # skip the probe thread by simply not calling this function.
     start_system_interface_health_probe_loop(

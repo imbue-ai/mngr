@@ -42,7 +42,7 @@ from imbue.mngr.primitives import HostState
 # connector for up to 20 minutes), so START now shares the generous cap --
 # mngr reports genuine failures well before it.
 #
-# Public: the recovery flow's restart worker runs the same host stop/start
+# Public: the recovery worker runs the same host stop and start commands
 # through its own mngr subprocesses and must share these budgets, or a click
 # on a stopped cloud machine manufactures a spurious timeout failure while
 # the underlying start keeps running.

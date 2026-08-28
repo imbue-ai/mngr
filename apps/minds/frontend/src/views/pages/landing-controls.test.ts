@@ -98,27 +98,27 @@ describe("healthBadgeLabelFor", () => {
     // The start the app dispatches on its own is start-only and idempotent, so
     // against a machine whose host is up it does nothing. Calling that a
     // restart tells the user their work was interrupted when it was not.
-    expect(healthBadgeLabelFor("restarting", false, true, false)).toBe("Reconnecting...");
+    expect(healthBadgeLabelFor("recovering", false, "start", false)).toBe("Reconnecting...");
   });
 
   it("calls the user's own full bounce a restart", () => {
     // A stop+start is only ever dispatched by a click, and it really does
     // interrupt the machine -- so here the stronger word is the honest one.
-    expect(healthBadgeLabelFor("restarting", false, false, false)).toBe("Restarting...");
+    expect(healthBadgeLabelFor("recovering", false, "restart", false)).toBe("Restarting...");
   });
 
-  it("takes the weaker reading for a restart the tracker cannot describe", () => {
-    // No shape reported yet (or the episode ended under the frame): there is no
+  it("takes the weaker reading for a recovery the tracker cannot describe", () => {
+    // No kind reported yet (or the episode ended under the frame): there is no
     // evidence for the claim that work was interrupted, so it is not made.
-    expect(healthBadgeLabelFor("restarting", false, null, false)).toBe("Reconnecting...");
+    expect(healthBadgeLabelFor("recovering", false, null, false)).toBe("Reconnecting...");
   });
 
   it("does not blame a restart that never ran", () => {
     // Same start, one step later: it reported that it booted nothing, so the
     // machine is unresponsive and no restart failed. Only a start that really
     // booted the host keeps the restart framing.
-    expect(healthBadgeLabelFor("restart_failed", true, null, false)).toBe("Not responding");
-    expect(healthBadgeLabelFor("restart_failed", false, null, false)).toBe("Restart failed");
+    expect(healthBadgeLabelFor("recovery_failed", true, null, false)).toBe("Not responding");
+    expect(healthBadgeLabelFor("recovery_failed", false, null, false)).toBe("Restart failed");
   });
 
   it("keeps the still-checking state distinct from both", () => {
@@ -130,10 +130,10 @@ describe("healthBadgeLabelFor", () => {
     // and the device verdict contradicts all of them at once: nothing was ever
     // sent to the machine, so a failed restart, an unresponsive server and a
     // reconnect in progress are all describing the wrong end of the connection.
-    expect(healthBadgeLabelFor("restart_failed", false, null, true)).toBe("Can't connect from this device");
-    expect(healthBadgeLabelFor("restart_failed", true, null, true)).toBe("Can't connect from this device");
+    expect(healthBadgeLabelFor("recovery_failed", false, null, true)).toBe("Can't connect from this device");
+    expect(healthBadgeLabelFor("recovery_failed", true, null, true)).toBe("Can't connect from this device");
     expect(healthBadgeLabelFor("stuck", false, null, true)).toBe("Can't connect from this device");
-    expect(healthBadgeLabelFor("restarting", false, false, true)).toBe("Can't connect from this device");
+    expect(healthBadgeLabelFor("recovering", false, "restart", true)).toBe("Can't connect from this device");
   });
 
   it("says nothing about a machine that is answering, whatever failed earlier", () => {

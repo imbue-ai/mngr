@@ -9,7 +9,14 @@
 
 import type { UiDiscoveryHealthMessage, UiEnvironmentMessage, UiHealthMessage } from "../channel/messages";
 
-export type WorkspaceHealth = "healthy" | "stuck" | "restarting" | "restart_failed";
+// Neither recovery state says the machine was stopped -- the unattended path
+// only starts it. Which one ran is `RecoveryKind` below; read that, never the
+// state name.
+export type WorkspaceHealth = "healthy" | "stuck" | "recovering" | "recovery_failed";
+
+/** Which of the two host recoveries is running. Only "restart" stops the
+ * machine, and only the user's own click asks for one. */
+export type RecoveryKind = "start" | "restart";
 
 export type DiscoveryHealth = "healthy" | "reconnecting" | "blocked";
 
@@ -20,8 +27,8 @@ export type DiscoveryHealth = "healthy" | "reconnecting" | "blocked";
  *
  * Carried alongside the health state rather than replacing it. The machine
  * really is unreachable -- what this adds is that the machine is not the thing
- * that is wrong, so the surfaces must not narrate a restart, and there is no
- * restart to offer while it holds.
+ * that is wrong, so the surfaces must not narrate a recovery, and there is no
+ * recovery to offer while it holds.
  *
  * "UNKNOWN" is the reading before anything has been measured -- at startup,
  * and after a wake until the next probe lands. It is not "NONE": a surface
@@ -37,11 +44,11 @@ export class HealthStore {
   private statusByAgentId = new Map<string, WorkspaceHealth>();
   private errorByAgentId = new Map<string, string>();
   private deviceEnvironment: EnvironmentCondition = "UNKNOWN";
-  private isRestartANoOpByAgentId = new Set<string>();
+  private isRecoveryANoOpByAgentId = new Set<string>();
   // A map rather than a set, because the absent case is a third answer: the
-  // frame reports the shape of a restart only while one is running, and "no
-  // restart to describe" is not the same as "a restart that skips the stop".
-  private isRestartStartOnlyByAgentId = new Map<string, boolean>();
+  // frame reports which recovery is running only while one is, and "no recovery
+  // to describe" is not the same as "a recovery that skips the stop".
+  private recoveryKindByAgentId = new Map<string, RecoveryKind>();
 
   /** Reconnect is resync: the snapshot only carries non-HEALTHY agents, so
    * the per-workspace state must be cleared before it is reapplied or an
@@ -53,27 +60,27 @@ export class HealthStore {
     this.errorByAgentId.clear();
     // deviceEnvironment is left alone, like discoveryHealth: the snapshot
     // always carries an environment frame, which overwrites it.
-    this.isRestartANoOpByAgentId.clear();
-    this.isRestartStartOnlyByAgentId.clear();
+    this.isRecoveryANoOpByAgentId.clear();
+    this.recoveryKindByAgentId.clear();
   }
 
   applyHealthMessage(message: UiHealthMessage): void {
     if (message.status === "healthy") {
       this.statusByAgentId.delete(message.agent_id);
       this.errorByAgentId.delete(message.agent_id);
-      this.isRestartANoOpByAgentId.delete(message.agent_id);
-      this.isRestartStartOnlyByAgentId.delete(message.agent_id);
+      this.isRecoveryANoOpByAgentId.delete(message.agent_id);
+      this.recoveryKindByAgentId.delete(message.agent_id);
       return;
     }
     this.statusByAgentId.set(message.agent_id, message.status);
     if (message.error) this.errorByAgentId.set(message.agent_id, message.error);
     else this.errorByAgentId.delete(message.agent_id);
-    if (message.is_restart_a_no_op) this.isRestartANoOpByAgentId.add(message.agent_id);
-    else this.isRestartANoOpByAgentId.delete(message.agent_id);
-    if (message.is_restart_start_only === null || message.is_restart_start_only === undefined) {
-      this.isRestartStartOnlyByAgentId.delete(message.agent_id);
+    if (message.is_recovery_a_no_op) this.isRecoveryANoOpByAgentId.add(message.agent_id);
+    else this.isRecoveryANoOpByAgentId.delete(message.agent_id);
+    if (message.recovery_kind === null || message.recovery_kind === undefined) {
+      this.recoveryKindByAgentId.delete(message.agent_id);
     } else {
-      this.isRestartStartOnlyByAgentId.set(message.agent_id, message.is_restart_start_only);
+      this.recoveryKindByAgentId.set(message.agent_id, message.recovery_kind);
     }
   }
 
@@ -108,16 +115,15 @@ export class HealthStore {
 
   /** Whether this workspace's dispatched start reported it booted nothing, so
    * there is no failed restart to name -- only a machine that never answered. */
-  isRestartANoOpFor(agentId: string): boolean {
-    return this.isRestartANoOpByAgentId.has(agentId);
+  isRecoveryANoOpFor(agentId: string): boolean {
+    return this.isRecoveryANoOpByAgentId.has(agentId);
   }
 
-  /** Whether the restart this workspace is running skips the stop step, or null
-   * when there is no restart in flight to describe. Only `false` -- a full
-   * stop+start bounce, which only the user's own click dispatches -- licenses
-   * calling it a restart. */
-  isRestartStartOnlyFor(agentId: string): boolean | null {
-    return this.isRestartStartOnlyByAgentId.get(agentId) ?? null;
+  /** Which recovery this workspace is running, or null when there is none in
+   * flight to describe. Only "restart" -- a full stop+start bounce, which only
+   * the user's own click dispatches -- licenses calling it a restart. */
+  recoveryKindFor(agentId: string): RecoveryKind | null {
+    return this.recoveryKindByAgentId.get(agentId) ?? null;
   }
 
   isContentAssumedReady(agentId: string): boolean {

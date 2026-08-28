@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
@@ -89,9 +90,9 @@ class RecoveryInfoResponse(FrozenModel):
     agent_id: str = Field(description="The workspace's resolved agent id (input may be host-keyed)")
     workspace_name: str = Field(description="Display name, falling back to the agent id")
     health: AgentHealth = Field(description="Current tracker health state")
-    health_error: str = Field(description="Last restart error, empty when none")
-    is_restart_start_only: bool | None = Field(
-        description="Whether an in-flight restart skips the stop step; None outside a restart"
+    health_error: str = Field(description="Last recovery error, empty when none")
+    recovery_kind: HostRecoveryKind | None = Field(
+        description="Which recovery is in flight (only RESTART stops the machine); None outside one"
     )
     ssh_command: str = Field(description="Copy-pasteable SSH command for the host, empty when unknown")
     is_host_offline: bool = Field(description="Whether discovery currently reads the host as stopped/stopping/crashed")
@@ -100,13 +101,13 @@ class RecoveryInfoResponse(FrozenModel):
             "Device-level condition blocking this machine (offline / SSH-blocked network), NONE for a "
             "device measured fine, or UNKNOWN while nothing has been measured (before the first probe, "
             "and after a wake until the next). A block outranks the machine's own health in the card: "
-            "while it holds there is no restart to narrate and none that could run. UNKNOWN blames "
+            "while it holds there is no recovery to narrate and none that could run. UNKNOWN blames "
             "nothing, the card included -- it withholds the backend verdict rather than name a "
             "provider on the strength of no measurement. The device's cached reading, not a "
             "per-machine record, so it answers for a machine that was already stuck when the network "
-            "died and for one whose restart already failed. Still NONE for a machine that runs on this "
+            "died and for one whose recovery already failed. Still NONE for a machine that runs on this "
             "device: a docker container is reachable with the wifi off, so a dead network neither "
-            "explains its failure nor is a reason to withhold the restart that fixes it."
+            "explains its failure nor is a reason to withhold the recovery that fixes it."
         )
     )
     is_backend_unreachable: bool = Field(
@@ -302,7 +303,7 @@ def _is_host_offline(backend_resolver: BackendResolverInterface, agent_id: Agent
     if display_info is None:
         return False
     # STOPPING counts: a mid-stop host is expectedly unreachable, and the
-    # recovery restart (which waits for stopped before starting) is its remedy.
+    # recovery start (which waits for stopped before starting) is its remedy.
     return read_host_state(backend_resolver, display_info) in (
         HostState.STOPPED,
         HostState.STOPPING,
@@ -385,7 +386,7 @@ def _handle_recovery_info(workspace_id: str) -> Response:
         workspace_name = display_info.agent_name if display_info is not None else str(resolved_id)
     # Read every poll, not just the first: a provider error can land (or clear)
     # while the card is open, and it outranks whatever the machine's own health
-    # says -- no restart routed through an unreachable backend can help.
+    # says -- no recovery routed through an unreachable backend can help.
     backend_verdict = read_backend_unreachable_verdict(resolved_id, backend_resolver=backend_resolver, tracker=tracker)
     # Read on the same poll and for the same reason: a device-side failure can
     # start or clear while the card is open, and it outranks the machine's own
@@ -396,8 +397,8 @@ def _handle_recovery_info(workspace_id: str) -> Response:
         agent_id=str(resolved_id),
         workspace_name=workspace_name or str(resolved_id),
         health=tracker.get_health(resolved_id) if tracker is not None else AgentHealth.HEALTHY,
-        health_error=(tracker.get_last_restart_error(resolved_id) or "") if tracker is not None else "",
-        is_restart_start_only=tracker.get_restart_is_start_only(resolved_id) if tracker is not None else None,
+        health_error=(tracker.get_last_recovery_error(resolved_id) or "") if tracker is not None else "",
+        recovery_kind=tracker.get_recovery_kind(resolved_id) if tracker is not None else None,
         ssh_command=_build_ssh_command(backend_resolver, resolved_id),
         is_host_offline=_is_host_offline(backend_resolver, resolved_id),
         device_environment=read_environment_condition(state.connectivity_detector, backend_resolver, resolved_id),

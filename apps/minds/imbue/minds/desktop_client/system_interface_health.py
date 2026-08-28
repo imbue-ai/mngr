@@ -1,4 +1,4 @@
-"""Tracks per-agent system-interface health for restart-recovery UX.
+"""Tracks per-agent system-interface health for the machine-recovery UX.
 
 The plugin (``mngr_forward``) emits a ``system_interface_backend_failure``
 envelope each time it observes a backend failure (connection failure, mid-SSE
@@ -23,16 +23,20 @@ The state machine:
   lasting at least ``stuck_threshold_seconds``. Every second of that run is
   backed by a real HTTP probe against the live workspace, so STUCK is never
   shown for an ephemeral signal. The SPA shows a notice band over the
-  still-rendered machine, and unattended recovery dispatches a start-only
-  restart without waiting to be asked.
-- STUCK -> RESTARTING: the restart dispatch marks the tracker so the recovery
+  still-rendered machine, and unattended recovery *starts* the machine without
+  waiting to be asked (an idempotent ``mngr start``, never a bounce).
+- STUCK -> RECOVERING: the recovery dispatch marks the tracker so the recovery
   card can render a different label. The background loop stands off a
-  RESTARTING agent (see ``snapshot_probe_targets``); the restart worker's own
+  RECOVERING agent (see ``snapshot_probe_targets``); the recovery worker's own
   readiness probe is what decides whether the machine came back.
-- RESTARTING -> RESTART_FAILED: a restart failed to recover the workspace
+- RECOVERING -> RECOVERY_FAILED: a recovery failed to bring the workspace back
   within its window, or its ``mngr`` commands errored. The recovery card
   renders the failure reason and the restart affordance.
-- {STUCK, RESTARTING, RESTART_FAILED} -> HEALTHY: a successful probe.
+- {STUCK, RECOVERING, RECOVERY_FAILED} -> HEALTHY: a successful probe.
+
+Which of the two recoveries ran is :class:`HostRecoveryKind`, and the surfaces
+turn on it: only the user's own click stops the machine, so only that one may be
+narrated as a restart.
 
 State changes fire registered on-change callbacks. Callbacks are invoked
 outside the internal lock so they may take the FastAPI app's own locks
@@ -63,6 +67,7 @@ from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from enum import Enum
+from enum import auto
 from typing import Final
 
 from loguru import logger
@@ -70,6 +75,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.environment_signals import SleepTracker
@@ -117,12 +123,12 @@ def should_enroll_suspect_for_backend_failure(
     because a HEALTHY non-suspect agent is never probed.
 
     ``UNRESOLVED`` is ignored outright: it means the forward has no route for the
-    agent at all. A restart routes *through* the forward, so it cannot help a
+    agent at all. A recovery routes *through* the forward, so it cannot help a
     routeless agent regardless. In practice ``UNRESOLVED`` is either a cold-start
     / fresh-forward warm-up (the forward has not caught up to discovery yet --
     this self-resolves the moment it does, so enrolling would only mark a healthy
-    workspace STUCK and needlessly restart it) or a genuinely-gone agent (which a
-    restart cannot revive). A workspace that is present but unreachable does NOT
+    workspace STUCK and needlessly start it) or a genuinely-gone agent (which a
+    start cannot revive). A workspace that is present but unreachable does NOT
     land here: discovery retains its (stale) route, so the dial failure surfaces
     as ``CONNECT_ERROR`` / a 5xx, which still enrolls and still drives recovery.
     """
@@ -157,11 +163,12 @@ _CONNECTION_CLASS_REASONS: Final[frozenset[SystemInterfaceBackendFailureReason]]
 #
 # It is a rule about the next envelope, not a timer: nothing ages the recorded
 # cause out on its own. So it does not fire across a stretch where nothing goes
-# through the forward at all -- notably while a restart worker is running its
-# ``mngr stop`` / ``mngr start``, since the probe loop excludes RESTARTING
-# agents and the readiness probes only begin once the start returns. A cause
-# recorded just before a restart therefore keeps speaking for the length of
-# those commands, and is displaced by the first readiness probe after them.
+# through the forward at all -- notably while a recovery worker is running its
+# ``mngr start`` (preceded by an ``mngr stop`` when the user asked for a
+# restart), since the probe loop excludes RECOVERING agents and the readiness
+# probes only begin once the start returns. A cause recorded just before a
+# recovery therefore keeps speaking for the length of those commands, and is
+# displaced by the first readiness probe after them.
 _DEFAULT_ESTABLISHED_CAUSE_DEFERENCE_SECONDS: Final[float] = 15.0
 
 # How long one cause may go unlogged for an agent while it keeps being reported
@@ -179,12 +186,43 @@ _DEFAULT_CONNECTION_FAILURE_LOG_INTERVAL_SECONDS: Final[float] = 300.0
 
 
 class AgentHealth(str, Enum):
-    """Per-agent health classification used by the tracker + the /ui/ws channel."""
+    """Per-agent health classification used by the tracker + the /ui/ws channel.
+
+    Neither recovery value says the machine was stopped, because the unattended
+    path only starts it. Which of the two ran is ``HostRecoveryKind``; the state
+    name deliberately does not answer that.
+
+    These values reach no agent-facing surface -- they are absent from every
+    ``/api/v1`` model and from the OpenAPI document -- so all three consumers
+    ship from this repo: the SPA's ``WorkspaceHealth``, the
+    ``/ui/api/.../recovery-info`` payload, and ``electron/main.js``, which
+    compares against the bare string in plain JS no type checker covers. Any
+    further change to them is a ``UI_SCHEMA_VERSION`` bump.
+    """
 
     HEALTHY = "healthy"
     STUCK = "stuck"
-    RESTARTING = "restarting"
-    RESTART_FAILED = "restart_failed"
+    RECOVERING = "recovering"
+    RECOVERY_FAILED = "recovery_failed"
+
+
+class HostRecoveryKind(LowerCaseStrEnum):
+    """Which of the two host-recovery actions an episode is running.
+
+    The distinction is the stop step, and it is the whole reason the surfaces
+    cannot describe the two the same way: only RESTART takes the machine down.
+    """
+
+    # ``mngr start`` alone: idempotent, no-ops against a host that is already
+    # running, never bounces a live container. What unattended recovery
+    # dispatches on the STUCK edge, and what the stopped-machine click-through
+    # asks for.
+    START = auto()
+    # ``mngr stop --stop-host`` then ``mngr start``: a real bounce, and the only
+    # recovery that takes the machine down. Reached solely from the user's own
+    # "Restart machine" click, since a running-but-wedged container is the one
+    # case a start cannot fix.
+    RESTART = auto()
 
 
 OnChangeCallback = Callable[[AgentId, AgentHealth], None]
@@ -262,22 +300,22 @@ class _AgentRecord(MutableModel):
         description=(
             "Wall-clock (UTC) start of this whole unhealthy episode, captured with the first "
             "probe failure that opened it. Unlike ``failure_run_started_wall_at`` it survives "
-            "the restart attempts made during the episode -- those clear the failure *run* "
+            "the recovery attempts made during the episode -- those clear the failure *run* "
             "because the machine is already known-bad, but the outage they are responding to "
             "began when the machine stopped answering, and evidence gathered before that "
             "moment describes the world before it. Cleared with the record when a probe "
             "observes the machine answering again."
         ),
     )
-    last_restart_error: str | None = Field(
+    last_recovery_error: str | None = Field(
         default=None,
-        description="Failure reason carried while health is RESTART_FAILED, for the recovery page to render.",
+        description="Failure reason carried while health is RECOVERY_FAILED, for the recovery page to render.",
     )
     backend_outage: BackendOutageObservation | None = Field(
         default=None,
         description=(
             "The machine's backend reported unavailable by a command mngr rejected at the "
-            "provider during this episode. Unlike ``last_restart_error`` a fresh restart attempt "
+            "provider during this episode. Unlike ``last_recovery_error`` a fresh recovery attempt "
             "does not supersede it: it describes the backend rather than the attempt, and the "
             "next attempt is routed through that same backend. Cleared with the record when a "
             "probe observes the machine answering again."
@@ -293,24 +331,24 @@ class _AgentRecord(MutableModel):
             "observes the machine answering again."
         ),
     )
-    is_restart_a_no_op: bool = Field(
+    is_recovery_a_no_op: bool = Field(
         default=False,
         description=(
-            "Whether the start this episode's restart dispatched reported it booted no host "
+            "Whether the start this episode's recovery dispatched reported it booted no host "
             "(``mngr start``'s was_host_started). The machine was up throughout, so it never went "
             "down and came back -- which is why the terminal state reads as the machine not "
-            "responding rather than as a restart that failed. Reset by the next restart attempt "
+            "responding rather than as a restart that failed. Reset by the next recovery attempt "
             "and cleared with the record on recovery."
         ),
     )
-    restart_is_start_only: bool | None = Field(
+    recovery_kind: HostRecoveryKind | None = Field(
         default=None,
         description=(
-            "Whether the in-flight RESTARTING restart is start-only (an idempotent ``mngr start`` "
-            "that may be a no-op) rather than a full stop+start bounce. Set when a restart wins the "
-            "RESTARTING transition and read only while RESTARTING -- the recovery page picks its "
-            "restarting-state copy from it (a full manual bounce reads as 'Restarting your machine', "
-            "a start-only entry dispatch as the neutral 'Loading machine'). None outside a restart."
+            "Which recovery the in-flight RECOVERING episode is running. Set when a recovery wins "
+            "the RECOVERING transition and read only while RECOVERING -- the recovery card picks "
+            "its heading from it (a RESTART reads as 'Restarting <machine>...', a START as the "
+            "weaker 'Reconnecting to <machine>...', since a start may well be a no-op). None "
+            "outside one."
         ),
     )
 
@@ -322,8 +360,8 @@ class SystemInterfaceHealthTracker(MutableModel):
 
     Construct one per minds process; share with the envelope-consumer callback
     (which calls ``record_failure``), the background probe loop (which calls
-    ``record_probe_success`` / ``record_probe_failure``), the restart worker
-    (``mark_restarting`` / ``mark_restart_failed`` / ``record_probe_success``),
+    ``record_probe_success`` / ``record_probe_failure``), the recovery worker
+    (``mark_recovering`` / ``mark_recovery_failed`` / ``record_probe_success``),
     and the callback subscribers wired in ``app.py``.
     """
 
@@ -390,7 +428,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         """Register a callback fired whenever any agent's health changes.
 
         Callbacks receive ``(agent_id, new_health)`` and run on whichever
-        thread caused the transition (probe loop or restart worker).
+        thread caused the transition (probe loop or recovery worker).
         Callbacks must be fast and non-blocking; do real work on a queue or
         worker thread.
         """
@@ -413,7 +451,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         Narrower than :meth:`add_on_change_callback` on purpose: only this edge
         means "an outage just started, nothing has been tried yet", and it fires
         exactly once per outage episode, so a consumer that dispatches work (the
-        unattended restart) needs no latch of its own.
+        unattended start) needs no latch of its own.
 
         Not the same as filtering on-change for a STUCK result. :meth:`mark_stuck`
         forces the state from anywhere, with no probe run behind it and no
@@ -512,15 +550,15 @@ class SystemInterfaceHealthTracker(MutableModel):
         Cleared by the in-app start, or by any probe that finds the machine
         answering again. That probe clear is what makes the mark self-limiting:
         a stopped machine can also be started by a route that never touches the
-        start endpoint (the machines-list click-through dispatches a start-only
-        restart), and those machines would otherwise stay suppressed for the
-        life of the process.
+        start endpoint (the machines-list click-through dispatches a start), and
+        those machines would otherwise stay suppressed for the life of the
+        process.
 
         ``is_stop_in_flight`` covers the one window in which that probe clear
         would be wrong: a stop's own command, which blocks for tens of seconds
         (a cloud host, minutes) while the interface goes on answering for the
         first of them. A machine being stopped is often a probe target already
-        (suspect-enrolled, STUCK, or RESTART_FAILED), so that 200 gets taken,
+        (suspect-enrolled, STUCK, or RECOVERY_FAILED), so that 200 gets taken,
         and dropping the mark on it would hand the machine to the dispatch
         mid-stop. While a stop is in flight a probe success leaves the mark
         alone; the stop closes the window when its command returns, either by
@@ -616,7 +654,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         that would not bind binds on the next try. Deferring to such a cause
         indefinitely would pin a momentary fault on this device over an outage
         that has since become the machine's, telling the user their machine is
-        probably fine and withholding the restart that would fix it. That is the
+        probably fine and withholding the start that would fix it. That is the
         misdiagnosis this whole decomposition exists to end, only inverted, so
         the residual reason takes over once the specific one falls silent.
 
@@ -694,8 +732,8 @@ class SystemInterfaceHealthTracker(MutableModel):
         Starts the agent's probe-failure run on the first failure, then
         transitions HEALTHY -> STUCK once the run has lasted at least
         ``stuck_threshold_seconds``. Probe failures for an agent that is not
-        HEALTHY (already STUCK, or RESTARTING / RESTART_FAILED -- states owned
-        by the restart flow) or that has no record (de-enrolled concurrently)
+        HEALTHY (already STUCK, or RECOVERING / RECOVERY_FAILED -- states owned
+        by the recovery flow) or that has no record (de-enrolled concurrently)
         are ignored.
 
         A run whose onset predates a recorded sleep interval is restarted from
@@ -765,11 +803,11 @@ class SystemInterfaceHealthTracker(MutableModel):
         """Record that a probe observed ``agent_id`` responding (HTTP 200).
 
         Clears the agent's probe-failure run and suspect flag. If the agent was
-        STUCK, RESTARTING, or RESTART_FAILED, transitions it back to HEALTHY and
+        STUCK, RECOVERING, or RECOVERY_FAILED, transitions it back to HEALTHY and
         fires on-change. The now-clean record is dropped so ``_records`` stays
         scoped to agents that still need attention.
 
-        Called by the background probe loop on a 200, and by the restart worker
+        Called by the background probe loop on a 200, and by the recovery worker
         and the create-attempt-time readiness wait, whose own probes are equally
         authoritative.
         """
@@ -818,20 +856,20 @@ class SystemInterfaceHealthTracker(MutableModel):
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
 
-    def mark_restarting(self, agent_id: AgentId, start_only: bool) -> bool:
-        """Mark ``agent_id`` as RESTARTING (called from the restart endpoint).
+    def mark_recovering(self, agent_id: AgentId, kind: HostRecoveryKind) -> bool:
+        """Mark ``agent_id`` as RECOVERING (called from the recovery dispatch).
 
         Clears any in-progress probe-failure run (the agent is already
         known-bad) and fires on-change so the recovery page can re-label.
-        ``start_only`` records the restart's flavor (an idempotent ``mngr start``
-        vs a full stop+start bounce) so the recovery page can name the wait; it
-        is recorded only when this call wins the transition, so a deduped later
-        request never rewrites the flavor of the restart already in flight.
+        ``kind`` records which recovery is running so the recovery page can name
+        the wait; it is recorded only when this call wins the transition, so a
+        deduped later request never rewrites the kind of the episode already in
+        flight.
 
-        Returns whether this call transitioned the agent into RESTARTING (it
-        was not already RESTARTING). That reports the transition; it does not
-        decide who owns the restart. Ownership is the workspace's single
-        operation slot, which ``dispatch_host_restart`` wins before it gets
+        Returns whether this call transitioned the agent into RECOVERING (it
+        was not already RECOVERING). That reports the transition; it does not
+        decide who owns the recovery. Ownership is the workspace's single
+        operation slot, which ``dispatch_host_recovery`` wins before it gets
         here -- a tracker-side compare-and-set could not serialize against the
         backup operations, which never touch the tracker.
         """
@@ -841,36 +879,36 @@ class SystemInterfaceHealthTracker(MutableModel):
             record = self._records.setdefault(aid_str, _AgentRecord())
             record.failure_run_started_at = None
             record.failure_run_started_wall_at = None
-            # A fresh restart attempt supersedes any prior failure reason, and
+            # A fresh recovery attempt supersedes any prior failure reason, and
             # any prior attempt's account of whether it booted anything.
-            record.last_restart_error = None
-            record.is_restart_a_no_op = False
-            if record.health != AgentHealth.RESTARTING:
-                record.health = AgentHealth.RESTARTING
-                record.restart_is_start_only = start_only
-                fire_health = AgentHealth.RESTARTING
+            record.last_recovery_error = None
+            record.is_recovery_a_no_op = False
+            if record.health != AgentHealth.RECOVERING:
+                record.health = AgentHealth.RECOVERING
+                record.recovery_kind = kind
+                fire_health = AgentHealth.RECOVERING
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)
         return fire_health is not None
 
-    def mark_restart_failed(self, agent_id: AgentId, error: str) -> None:
-        """Mark ``agent_id`` as RESTART_FAILED, carrying ``error`` as the reason.
+    def mark_recovery_failed(self, agent_id: AgentId, error: str) -> None:
+        """Mark ``agent_id`` as RECOVERY_FAILED, carrying ``error`` as the reason.
 
-        Called when a restart tier fails to recover the workspace within its
+        Called when a recovery fails to bring the workspace back within its
         window, or its ``mngr`` commands error out. The reason is surfaced to
         the recovery page so it can render an escalate / try-again affordance
-        instead of an indefinite "Restarting...".
+        instead of an indefinite wait.
         """
         aid_str = str(agent_id)
         with self._lock:
             record = self._records.setdefault(aid_str, _AgentRecord())
             record.failure_run_started_at = None
             record.failure_run_started_wall_at = None
-            record.last_restart_error = error
+            record.last_recovery_error = error
             # Always re-fire: a second failure with a new reason must reach
-            # the recovery page even if the state is already RESTART_FAILED.
-            record.health = AgentHealth.RESTART_FAILED
-        self._fire_on_change(agent_id, AgentHealth.RESTART_FAILED)
+            # the recovery page even if the state is already RECOVERY_FAILED.
+            record.health = AgentHealth.RECOVERY_FAILED
+        self._fire_on_change(agent_id, AgentHealth.RECOVERY_FAILED)
 
     def get_health(self, agent_id: AgentId) -> AgentHealth:
         """Return the current health for ``agent_id`` (HEALTHY by default)."""
@@ -880,15 +918,15 @@ class SystemInterfaceHealthTracker(MutableModel):
                 return AgentHealth.HEALTHY
             return record.health
 
-    def get_last_restart_error(self, agent_id: AgentId) -> str | None:
-        """Return the failure reason for ``agent_id`` if it is RESTART_FAILED."""
+    def get_last_recovery_error(self, agent_id: AgentId) -> str | None:
+        """Return the failure reason for ``agent_id`` if it is RECOVERY_FAILED."""
         with self._lock:
             record = self._records.get(str(agent_id))
             if record is None:
                 return None
-            return record.last_restart_error
+            return record.last_recovery_error
 
-    def record_restart_started_nothing(self, agent_id: AgentId) -> None:
+    def record_recovery_started_nothing(self, agent_id: AgentId) -> None:
         """Record that this episode's dispatched ``mngr start`` reported it booted no host.
 
         ``mngr start`` is idempotent, so a start against a host that was already
@@ -903,9 +941,9 @@ class SystemInterfaceHealthTracker(MutableModel):
         here, which is the half the copy turns on.
         """
         with self._lock:
-            self._records.setdefault(str(agent_id), _AgentRecord()).is_restart_a_no_op = True
+            self._records.setdefault(str(agent_id), _AgentRecord()).is_recovery_a_no_op = True
 
-    def is_restart_a_no_op(self, agent_id: AgentId) -> bool:
+    def is_recovery_a_no_op(self, agent_id: AgentId) -> bool:
         """Whether this episode's dispatched start reported it booted nothing.
 
         False when no start has reported yet, which is also the honest default:
@@ -914,12 +952,12 @@ class SystemInterfaceHealthTracker(MutableModel):
         """
         with self._lock:
             record = self._records.get(str(agent_id))
-            return record is not None and record.is_restart_a_no_op
+            return record is not None and record.is_recovery_a_no_op
 
     def record_backend_outage(self, agent_id: AgentId, provider_name: str, reason: str) -> None:
         """Record that ``provider_name`` rejected a command for ``agent_id`` as unavailable.
 
-        Called from the restart worker, which is where minds first runs a command
+        Called from the recovery worker, which is where minds first runs a command
         against a machine whose backend has gone down. Recording it is what lets
         the recovery surfaces name the backend on the same edge that raises them,
         rather than a provider poll later.
@@ -945,25 +983,24 @@ class SystemInterfaceHealthTracker(MutableModel):
                 return None
             return record.backend_outage
 
-    def get_restart_is_start_only(self, agent_id: AgentId) -> bool | None:
-        """Return whether the in-flight restart is start-only, or None if not RESTARTING.
+    def get_recovery_kind(self, agent_id: AgentId) -> HostRecoveryKind | None:
+        """Return which recovery is in flight, or None if not RECOVERING.
 
-        Only meaningful while the agent is RESTARTING; returns None otherwise so a
-        stale value from a prior restart is never read. The recovery page uses it
-        to pick the restarting-state copy -- a full manual bounce reads as
-        "Restarting your machine", a start-only entry dispatch (which may be a
-        no-op) as the neutral "Loading machine".
+        Only meaningful while the agent is RECOVERING; returns None otherwise so
+        a stale value from a prior episode is never read. The recovery card picks
+        its heading from it: a RESTART reads as "Restarting <machine>...", a
+        START (which may be a no-op) as the weaker "Reconnecting to <machine>...".
         """
         with self._lock:
             record = self._records.get(str(agent_id))
-            if record is None or record.health != AgentHealth.RESTARTING:
+            if record is None or record.health != AgentHealth.RECOVERING:
                 return None
-            return record.restart_is_start_only
+            return record.recovery_kind
 
     def get_failure_run_started_wall_at(self, agent_id: AgentId) -> datetime | None:
         """Return the wall-clock (UTC) start of the current probe-failure run, or None.
 
-        The run begins on the first failed probe and ends at the next restart
+        The run begins on the first failed probe and ends at the next recovery
         attempt, which clears it: the machine is already known-bad, so the run
         has nothing left to decide. A caller asking when the *outage* began wants
         :meth:`get_outage_started_wall_at`, which spans those attempts.
@@ -981,7 +1018,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         episode, held until a probe observes the machine answering again. Recovery
         compares discovery snapshots against it to decide whether what the
         resolver reports describes *this* outage or the world before it, so it
-        must span the episode -- a restart attempt part-way through does not make
+        must span the episode -- a recovery attempt part-way through does not make
         pre-outage evidence current, and the failure *run* is cleared by exactly
         that. None when the machine is healthy, or was force-marked STUCK with no
         probe-failure run behind it.
@@ -1012,26 +1049,30 @@ class SystemInterfaceHealthTracker(MutableModel):
 
         An agent is a probe target when it is suspect (a failure envelope
         enrolled it and no probe has since cleared it), STUCK, or
-        RESTART_FAILED -- the loop polls those for recovery. HEALTHY
+        RECOVERY_FAILED -- the loop polls those for recovery. HEALTHY
         non-suspect agents are omitted; probing every workspace unconditionally
         would scale probe traffic with workspace count for no benefit.
 
-        RESTARTING agents are deliberately excluded: while the restart worker
-        is in flight, the *old* system interface is still answering 200 in the
-        window between ``mark_restarting`` and the worker's ``mngr stop``
-        actually tearing down the backend. A background probe in that window
-        would prematurely flip the agent back to HEALTHY (via
-        ``record_probe_success``), causing the recovery page to 302 the user
-        back into a workspace that is about to disappear. The restart worker
-        owns the recovery decision via its own ``_await_system_interface_ready``
-        probe, which only runs *after* the stop step completes.
+        RECOVERING agents are deliberately excluded, whichever recovery is
+        running: the worker owns that decision via its own
+        ``_await_system_interface_ready`` probe, which runs once the commands
+        return, so a background probe alongside it is a second opinion on a
+        question already being answered.
+
+        A RESTART is where answering it early does real damage. Its ``mngr
+        stop`` takes tens of seconds to tear the backend down, and the *old*
+        system interface goes on answering 200 for the first of them -- so a
+        probe in the window between ``mark_recovering`` and that teardown would
+        flip the agent back to HEALTHY (via ``record_probe_success``), causing
+        the recovery page to 302 the user back into a workspace that is about
+        to disappear.
         """
         with self._lock:
             return frozenset(
                 AgentId(aid)
                 for aid, record in self._records.items()
                 if (record.is_suspect and record.health == AgentHealth.HEALTHY)
-                or record.health in (AgentHealth.STUCK, AgentHealth.RESTART_FAILED)
+                or record.health in (AgentHealth.STUCK, AgentHealth.RECOVERY_FAILED)
             )
 
     # -- Internals --------------------------------------------------------

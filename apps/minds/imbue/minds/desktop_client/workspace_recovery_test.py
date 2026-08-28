@@ -1,8 +1,8 @@
-"""Unit coverage for the workspace-recovery engine (passive verdicts + restart worker).
+"""Unit coverage for the workspace-recovery engine (passive verdicts + recovery worker).
 
 These exercise the building blocks behind ``POST /api/v1/workspaces/<id>/restart``
 and the recovery card's polled verdicts directly, complementing the end-to-end
-route tests in ``api_v1_test.py`` with the granular restart-sequence failure
+route tests in ``api_v1_test.py`` with the granular recovery-sequence failure
 modes (unresolved system-services agent, stop/start command failures, the
 host-already-stopped fast path).
 """
@@ -35,6 +35,7 @@ from imbue.minds.desktop_client.mngr_command import OUTPUT_TAIL_MAX_CHARS
 from imbue.minds.desktop_client.mngr_command import run_mngr_capturing
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import ManualClock
 from imbue.minds.desktop_client.testing import PUBLIC_SSH_ENDPOINTS
@@ -58,27 +59,27 @@ from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKi
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_recovery import HOST_ACCESS_REJECTED_REASON
 from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectivityTrigger
-from imbue.minds.desktop_client.workspace_recovery import RestartDispatchOutcome
-from imbue.minds.desktop_client.workspace_recovery import RestartReadinessOutcome
+from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
+from imbue.minds.desktop_client.workspace_recovery import RecoveryReadinessOutcome
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.desktop_client.workspace_recovery import WorkspaceSshEndpointSource
-from imbue.minds.desktop_client.workspace_recovery import _HOST_RESTART_STARTUP_WAIT_SECONDS
+from imbue.minds.desktop_client.workspace_recovery import _HOST_RECOVERY_STARTUP_WAIT_SECONDS
 from imbue.minds.desktop_client.workspace_recovery import _await_system_interface_ready
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
-from imbue.minds.desktop_client.workspace_recovery import _build_restart_agent_address
+from imbue.minds.desktop_client.workspace_recovery import _build_recovery_agent_address
 from imbue.minds.desktop_client.workspace_recovery import _did_start_boot_a_host
 from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outage_reason
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
 from imbue.minds.desktop_client.workspace_recovery import _provider_error_message_for_workspace
-from imbue.minds.desktop_client.workspace_recovery import _report_restart_step_failure
-from imbue.minds.desktop_client.workspace_recovery import dispatch_host_restart
+from imbue.minds.desktop_client.workspace_recovery import _report_recovery_step_failure
+from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_provider
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
 from imbue.minds.desktop_client.workspace_recovery import is_recovery_classification_trustworthy
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
-from imbue.minds.desktop_client.workspace_recovery import run_restart_sequence
+from imbue.minds.desktop_client.workspace_recovery import run_host_recovery_sequence
 from imbue.minds.errors import MindError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
@@ -154,7 +155,7 @@ def _read_fake_mngr_invocations(mngr_binary: str) -> list[str]:
 
 
 def _wait_for_mngr_invocation(mngr_binary: str, prefix: str) -> bool:
-    """Wait for a dispatched restart worker to actually reach ``mngr <prefix>``.
+    """Wait for a dispatched recovery worker to actually reach ``mngr <prefix>``.
 
     Must be called while the concurrency group is still open: the worker runs
     its mngr commands *through* that group, and the ``with`` exit flips it out
@@ -169,9 +170,9 @@ def _wait_for_mngr_invocation(mngr_binary: str, prefix: str) -> bool:
 
 
 def _started_registry(workspace_agent: AgentId) -> InMemoryWorkspaceOperationRegistry:
-    """A fresh operation registry with a RESTART operation already started for the agent."""
+    """A fresh operation registry with a RECOVERY operation already started for the agent."""
     registry = InMemoryWorkspaceOperationRegistry()
-    registry.start(workspace_agent, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(workspace_agent, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
     return registry
 
 
@@ -232,17 +233,17 @@ def test_an_unreadable_start_result_is_reported_rather_than_passed_over() -> Non
     assert "Could not read" in log_output.getvalue()
 
 
-def test_restart_agent_address_restricts_discovery_to_one_provider() -> None:
+def test_recovery_agent_address_restricts_discovery_to_one_provider() -> None:
     """The pinned address must be one ``mngr`` reads as naming a single provider.
 
     Asserted through mngr's own parser rather than against a literal, because the
     property that matters is the one ``find_all_agents`` acts on: a provider
-    filter of exactly this agent's provider, so a restart never pays for -- or
+    filter of exactly this agent's provider, so a recovery never pays for -- or
     fails on -- a provider that could not have hosted it.
     """
     services_agent = AgentId.generate()
     host_id = HostId.generate()
-    address = _build_restart_agent_address(
+    address = _build_recovery_agent_address(
         services_agent,
         AgentDisplayInfo(agent_name="workspace", host_id=str(host_id), provider_name="imbue_cloud_gabriel-imbue-com"),
     )
@@ -262,13 +263,13 @@ def test_restart_agent_address_restricts_discovery_to_one_provider() -> None:
         ),
     ],
 )
-def test_restart_agent_address_falls_back_to_the_bare_id(display_info: AgentDisplayInfo | None) -> None:
-    """A coordinate discovery cannot supply costs the scoping, never the restart."""
+def test_recovery_agent_address_falls_back_to_the_bare_id(display_info: AgentDisplayInfo | None) -> None:
+    """A coordinate discovery cannot supply costs the scoping, never the recovery."""
     services_agent = AgentId.generate()
-    assert _build_restart_agent_address(services_agent, display_info) == str(services_agent)
+    assert _build_recovery_agent_address(services_agent, display_info) == str(services_agent)
 
 
-def test_run_restart_sequence_pins_the_provider_on_both_steps(tmp_path: Path) -> None:
+def test_run_host_recovery_sequence_pins_the_provider_on_both_steps(tmp_path: Path) -> None:
     """Both subprocesses address the machine by provider, not by bare agent id.
 
     The stop matters as much as the start: it runs the same unpinned discovery
@@ -278,12 +279,12 @@ def test_run_restart_sequence_pins_the_provider_on_both_steps(tmp_path: Path) ->
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     host_id = HostId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_id=host_id)
     mngr_binary = _write_fake_mngr(tmp_path)
 
     with ConcurrencyGroup(name="test-restart") as cg:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -293,6 +294,7 @@ def test_run_restart_sequence_pins_the_provider_on_both_steps(tmp_path: Path) ->
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
         )
 
     expected = f"{services_agent}@{host_id}.{SYSTEM_SERVICES_PROVIDER_NAME}"
@@ -326,7 +328,7 @@ def test_run_mngr_capturing_timeout_carries_the_output_tail(tmp_path: Path) -> N
     assert "step-one-done" not in str(caught)
 
 
-def test_restart_step_failure_logs_the_timeout_output_tail_without_widening_the_user_message() -> None:
+def test_recovery_step_failure_logs_the_timeout_output_tail_without_widening_the_user_message() -> None:
     """The timeout's output tail reaches the (single) error record but not the user-facing message."""
     workspace_agent = AgentId.generate()
     tracker = SystemInterfaceHealthTracker()
@@ -336,7 +338,7 @@ def test_restart_step_failure_logs_the_timeout_output_tail_without_widening_the_
     )
 
     with capture_error_logs() as error_records:
-        _report_restart_step_failure(
+        _report_recovery_step_failure(
             "Start",
             exc,
             workspace_agent_id=workspace_agent,
@@ -348,7 +350,7 @@ def test_restart_step_failure_logs_the_timeout_output_tail_without_widening_the_
 
     assert len(error_records) == 1, error_records
     assert "acquiring host lock" in error_records[0]
-    message = tracker.get_last_restart_error(workspace_agent) or ""
+    message = tracker.get_last_recovery_error(workspace_agent) or ""
     assert "acquiring host lock" not in message
 
 
@@ -497,18 +499,18 @@ def test_provider_error_message_for_workspace_reduces_the_generic_shape_to_its_r
     assert _provider_error_message_for_workspace(errors, "docker", True) == reason
 
 
-# -- restart worker --
+# -- recovery worker --
 
 
-def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp_path: Path) -> None:
-    """With no system-services agent discovered, the sequence ends in RESTART_FAILED."""
+def test_run_host_recovery_sequence_fails_when_system_services_agent_is_unresolved(tmp_path: Path) -> None:
+    """With no system-services agent discovered, the sequence ends in RECOVERY_FAILED."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     registry = _started_registry(workspace_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=MngrCliBackendResolver(),
@@ -518,25 +520,26 @@ def test_run_restart_sequence_fails_when_system_services_agent_is_unresolved(tmp
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=registry,
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "system-services" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    assert "system-services" in (tracker.get_last_recovery_error(workspace_agent) or "")
     record = registry.get(workspace_agent)
     assert record is not None and record.status == WorkspaceOperationStatus.FAILED
     assert len(error_records) == 1, error_records
 
 
-def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> None:
-    """A non-zero ``mngr stop`` ends the sequence in RESTART_FAILED naming the stop step."""
+def test_run_host_recovery_sequence_fails_when_stop_command_errors(tmp_path: Path) -> None:
+    """A non-zero ``mngr stop`` ends the sequence in RECOVERY_FAILED naming the stop step."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -546,23 +549,24 @@ def test_run_restart_sequence_fails_when_stop_command_errors(tmp_path: Path) -> 
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    assert "Stop step" in (tracker.get_last_recovery_error(workspace_agent) or "")
     assert len(error_records) == 1, error_records
 
 
-def test_run_restart_sequence_fails_when_start_command_errors(tmp_path: Path) -> None:
-    """A non-zero ``mngr start`` ends the sequence in RESTART_FAILED naming the start step."""
+def test_run_host_recovery_sequence_fails_when_start_command_errors(tmp_path: Path) -> None:
+    """A non-zero ``mngr start`` ends the sequence in RECOVERY_FAILED naming the start step."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -572,15 +576,16 @@ def test_run_restart_sequence_fails_when_start_command_errors(tmp_path: Path) ->
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "Start step" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    assert "Start step" in (tracker.get_last_recovery_error(workspace_agent) or "")
     assert len(error_records) == 1, error_records
 
 
-def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp_path: Path) -> None:
-    """A clean stop+start whose interface never answers ends in RESTART_FAILED with one error log.
+def test_run_host_recovery_sequence_fails_and_reports_when_interface_never_answers(tmp_path: Path) -> None:
+    """A clean stop+start whose interface never answers ends in RECOVERY_FAILED with one error log.
 
     With a plugin route configured (nonzero forward port + cookie) but nothing
     answering on it, the readiness wait times out; this failure branch was
@@ -589,11 +594,11 @@ def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -605,15 +610,16 @@ def test_run_restart_sequence_fails_and_reports_when_interface_never_answers(tmp
             mngr_forward_preauth_cookie="cookie",
             registry=_started_registry(workspace_agent),
             startup_wait_seconds=0.1,
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "did not respond" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    assert "did not respond" in (tracker.get_last_recovery_error(workspace_agent) or "")
     assert len(error_records) == 1, error_records
 
 
-def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
-    """A launch failure (missing ``mngr`` binary) surfaces as RESTART_FAILED naming the stop step.
+def test_run_host_recovery_sequence_fails_when_stop_command_cannot_launch(tmp_path: Path) -> None:
+    """A launch failure (missing ``mngr`` binary) surfaces as RECOVERY_FAILED naming the stop step.
 
     Exercises the path where ``run_mngr_to_completion`` wraps the ``OSError`` from the failed
     fork/exec into a ``MngrCommandError`` and the restart sequence catches that
@@ -622,12 +628,12 @@ def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Pa
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     missing_binary = str(tmp_path / "definitely_not_a_real_mngr")
 
     with ConcurrencyGroup(name="test-restart") as cg:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -637,23 +643,24 @@ def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Pa
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    assert "Stop step" in (tracker.get_last_recovery_error(workspace_agent) or "")
 
 
-def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path: Path) -> None:
+def test_run_host_recovery_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path: Path) -> None:
     """Clean stop+start with no plugin route to probe through recovers the agent to HEALTHY."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -663,6 +670,7 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=registry,
+            kind=HostRecoveryKind.RESTART,
         )
 
     assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
@@ -670,14 +678,14 @@ def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path
     assert record is not None and record.status == WorkspaceOperationStatus.DONE
 
 
-def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path) -> None:
+def test_run_host_recovery_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path) -> None:
     """A host-restart on a provider that cannot stop a host in place (Modal: ``mngr stop
     --stop-host`` raises HostShutdownNotSupportedError) must NOT fail the restart -- the stop
     step is skipped and the sequence proceeds to ``mngr start``, which restarts it on its own."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
     # A fake mngr whose ``stop`` fails with the host-shutdown-not-supported message (as Modal
@@ -695,7 +703,7 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     script.chmod(0o755)
 
     with ConcurrencyGroup(name="test-restart") as cg:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -705,6 +713,7 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=registry,
+            kind=HostRecoveryKind.RESTART,
         )
 
     # The unsupported stop is treated as "skip and proceed", so the restart recovers (not FAILED).
@@ -713,17 +722,17 @@ def test_run_restart_sequence_skips_unsupported_stop_and_proceeds(tmp_path: Path
     assert record is not None and record.status == WorkspaceOperationStatus.DONE
 
 
-def test_run_restart_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path) -> None:
-    """``skip_stop=True`` (the API's ``start_only``) goes straight to ``mngr start`` (no stop subprocess)."""
+def test_run_host_recovery_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path) -> None:
+    """``HostRecoveryKind.START`` (the API's ``start_only``) goes straight to ``mngr start`` (no stop subprocess)."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=True)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 
     with ConcurrencyGroup(name="test-restart") as cg:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -733,7 +742,7 @@ def test_run_restart_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path)
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
         )
 
     assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
@@ -742,17 +751,17 @@ def test_run_restart_sequence_skips_stop_for_start_only_dispatch(tmp_path: Path)
     assert not any(line.startswith("stop ") for line in invocations)
 
 
-def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> None:
-    """Without ``skip_stop``, a host restart stops the host before starting it."""
+def test_run_host_recovery_sequence_stops_before_start_for_a_restart(tmp_path: Path) -> None:
+    """``HostRecoveryKind.RESTART`` stops the host before starting it."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_fake_mngr(tmp_path)
 
     with ConcurrencyGroup(name="test-restart") as cg:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -762,6 +771,7 @@ def test_run_restart_sequence_stops_before_start_by_default(tmp_path: Path) -> N
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
         )
 
     assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
@@ -939,10 +949,10 @@ def _dispatcher(
 
 
 def test_unattended_recovery_starts_a_wedged_machine_without_bouncing_it(tmp_path: Path) -> None:
-    """The STUCK edge dispatches a start-only restart: ``mngr start`` runs, ``mngr stop`` does not.
+    """The STUCK edge dispatches a plain start: ``mngr start`` runs, ``mngr stop`` does not.
 
-    start_only is what makes it safe to fire unprompted -- it can cold-boot a
-    stopped host but can never bounce a live one.
+    Running the start alone is what makes it safe to fire unprompted -- it can
+    cold-boot a stopped host but can never bounce a live one.
     """
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
@@ -980,7 +990,7 @@ def test_unattended_recovery_leaves_a_machine_the_user_stopped_alone(tmp_path: P
         dispatch(workspace_agent)
 
     assert _read_fake_mngr_invocations(mngr_binary) == []
-    assert tracker.get_health(workspace_agent) != AgentHealth.RESTARTING
+    assert tracker.get_health(workspace_agent) != AgentHealth.RECOVERING
 
 
 def test_unattended_recovery_resumes_after_the_user_starts_the_machine_again(tmp_path: Path) -> None:
@@ -1029,20 +1039,20 @@ def test_a_forced_stuck_does_not_re_dispatch(tmp_path: Path) -> None:
     assert len(_read_fake_mngr_invocations(mngr_binary)) == started_count
 
 
-def test_dispatch_host_restart_does_not_stack_a_second_worker(tmp_path: Path) -> None:
-    """A restart already in flight reports ALREADY_RUNNING instead of racing the first."""
+def test_dispatch_host_recovery_does_not_stack_a_second_worker(tmp_path: Path) -> None:
+    """A recovery already in flight reports ALREADY_RUNNING instead of racing the first."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = InMemoryWorkspaceOperationRegistry()
     # The claim the first caller already won: the workspace's operation slot,
-    # which is what owning a restart means.
-    registry.start(workspace_agent, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
-    tracker.mark_restarting(workspace_agent, start_only=True)
+    # which is what owning a recovery means.
+    registry.start(workspace_agent, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
 
     with ConcurrencyGroup(name="test-unattended") as cg:
-        outcome = dispatch_host_restart(
+        outcome = dispatch_host_recovery(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -1052,10 +1062,10 @@ def test_dispatch_host_restart_does_not_stack_a_second_worker(tmp_path: Path) ->
             mngr_host_dir=tmp_path,
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
         )
 
-    assert outcome == RestartDispatchOutcome.ALREADY_RUNNING
+    assert outcome == RecoveryDispatchOutcome.ALREADY_RUNNING
 
 
 def test_probe_failures_alone_drive_a_wedged_machine_back_up(tmp_path: Path) -> None:
@@ -1084,10 +1094,10 @@ def test_probe_failures_alone_drive_a_wedged_machine_back_up(tmp_path: Path) -> 
 def test_unattended_recovery_never_takes_a_backup_operation_s_slot(tmp_path: Path) -> None:
     """A restore stops the machine's services, so the wedge it produces must not evict it.
 
-    ``registry.start`` replaces the workspace's record, so a restart that
+    ``registry.start`` replaces the workspace's record, so a recovery that
     claimed the slot mid-restore would strand the restore's poller and let the
-    restore worker's terminal complete/fail land on the restart's record --
-    reporting a restart that never ran as done.
+    restore worker's terminal complete/fail land on the recovery's record --
+    reporting a recovery that never ran as done.
     """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     workspace_agent = AgentId.generate()
@@ -1106,10 +1116,10 @@ def test_unattended_recovery_never_takes_a_backup_operation_s_slot(tmp_path: Pat
     record = registry.get(workspace_agent)
     assert record is not None and record.kind == WorkspaceOperationKind.BACKUP_RESTORE
     assert record.status == WorkspaceOperationStatus.RUNNING
-    assert tracker.get_health(workspace_agent) != AgentHealth.RESTARTING
+    assert tracker.get_health(workspace_agent) != AgentHealth.RECOVERING
 
 
-def test_dispatch_host_restart_reports_a_conflicting_operation(tmp_path: Path) -> None:
+def test_dispatch_host_recovery_reports_a_conflicting_operation(tmp_path: Path) -> None:
     """The route turns this outcome into its 409, so the enum has to name the case."""
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
@@ -1119,7 +1129,7 @@ def test_dispatch_host_restart_reports_a_conflicting_operation(tmp_path: Path) -
     registry.start(workspace_agent, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc))
 
     with ConcurrencyGroup(name="test-unattended") as cg:
-        outcome = dispatch_host_restart(
+        outcome = dispatch_host_recovery(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -1129,10 +1139,10 @@ def test_dispatch_host_restart_reports_a_conflicting_operation(tmp_path: Path) -
             mngr_host_dir=tmp_path,
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
-            skip_stop=False,
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert outcome == RestartDispatchOutcome.OPERATION_CONFLICT
+    assert outcome == RecoveryDispatchOutcome.OPERATION_CONFLICT
 
 
 class _RegistryWithSlotStolenMidClaim(InMemoryWorkspaceOperationRegistry):
@@ -1157,13 +1167,13 @@ class _RegistryWithSlotStolenMidClaim(InMemoryWorkspaceOperationRegistry):
         return super().start_if_idle(agent_id, kind, now, target)
 
 
-def test_a_backup_that_claims_the_slot_first_is_not_evicted_by_the_restart(tmp_path: Path) -> None:
-    """The restart must lose the slot it did not win, not overwrite the winner's record.
+def test_a_backup_that_claims_the_slot_first_is_not_evicted_by_the_recovery(tmp_path: Path) -> None:
+    """The recovery must lose the slot it did not win, not overwrite the winner's record.
 
-    ``registry.start`` *replaces* the record, so a restart that read an idle
+    ``registry.start`` *replaces* the record, so a recovery that read an idle
     slot and then filled it unconditionally would strand the restore's poller
-    and let the restore worker's terminal complete/fail land on the restart's
-    record -- reporting a restart that never ran as done. One atomic claim is
+    and let the restore worker's terminal complete/fail land on the recovery's
+    record -- reporting a recovery that never ran as done. One atomic claim is
     what closes that window, so this drives a backup into the middle of it.
     """
     tracker = SystemInterfaceHealthTracker()
@@ -1175,7 +1185,7 @@ def test_a_backup_that_claims_the_slot_first_is_not_evicted_by_the_restart(tmp_p
     registry.steal_slot_on_next_claim(workspace_agent)
 
     with ConcurrencyGroup(name="test-unattended") as cg:
-        outcome = dispatch_host_restart(
+        outcome = dispatch_host_recovery(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -1185,20 +1195,20 @@ def test_a_backup_that_claims_the_slot_first_is_not_evicted_by_the_restart(tmp_p
             mngr_host_dir=tmp_path,
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
         )
 
-    assert outcome == RestartDispatchOutcome.OPERATION_CONFLICT
+    assert outcome == RecoveryDispatchOutcome.OPERATION_CONFLICT
     record = registry.get(workspace_agent)
     assert record is not None and record.kind == WorkspaceOperationKind.BACKUP_RESTORE
     assert record.status == WorkspaceOperationStatus.RUNNING
-    # Nothing of the restart may survive its lost claim: no worker, and no
-    # RESTARTING the recovery surfaces would render over the restore.
+    # Nothing of the recovery may survive its lost claim: no worker, and no
+    # RECOVERING the recovery surfaces would render over the restore.
     assert _read_fake_mngr_invocations(mngr_binary) == []
-    assert tracker.get_health(workspace_agent) != AgentHealth.RESTARTING
+    assert tracker.get_health(workspace_agent) != AgentHealth.RECOVERING
 
 
-def test_a_machine_that_answers_is_never_restarted(tmp_path: Path) -> None:
+def test_a_machine_that_answers_is_never_started(tmp_path: Path) -> None:
     """The other half of the edge: a reachable machine stays untouched."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     workspace_agent = AgentId.generate()
@@ -1263,8 +1273,8 @@ def test_in_band_provider_outage_answers_only_for_a_known_matching_provider() ->
     assert _in_band_provider_outage_reason(exc, None) is None
 
 
-def test_restart_step_failure_names_the_step_when_the_machines_provider_is_unknown() -> None:
-    """A restart step that failed at an unidentifiable provider stays a failed step.
+def test_recovery_step_failure_names_the_step_when_the_machines_provider_is_unknown() -> None:
+    """A recovery step that failed at an unidentifiable provider stays a failed step.
 
     The stop step can drop the host out of discovery, so the start step's failure
     is read with no display info to resolve a provider from. Reporting the foreign
@@ -1279,7 +1289,7 @@ def test_restart_step_failure_names_the_step_when_the_machines_provider_is_unkno
     tracker = SystemInterfaceHealthTracker()
 
     with capture_error_logs():
-        _report_restart_step_failure(
+        _report_recovery_step_failure(
             "Start",
             exc,
             workspace_agent_id=workspace_agent,
@@ -1289,8 +1299,8 @@ def test_restart_step_failure_names_the_step_when_the_machines_provider_is_unkno
             connectivity_detector=None,
         )
 
-    message = tracker.get_last_restart_error(workspace_agent) or ""
-    assert message.startswith("Start step of host restart failed:")
+    message = tracker.get_last_recovery_error(workspace_agent) or ""
+    assert message.startswith("Start step of host recovery failed:")
     assert "This machine's backend is unreachable" not in message
     assert tracker.get_backend_outage(workspace_agent) is None
 
@@ -1398,7 +1408,7 @@ def test_backend_unreachable_verdict_withholds_an_untrusted_rejected_host() -> N
     assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
 
 
-def test_run_restart_sequence_reports_the_backend_when_the_start_is_rejected_there(tmp_path: Path) -> None:
+def test_run_host_recovery_sequence_reports_the_backend_when_the_start_is_rejected_there(tmp_path: Path) -> None:
     """A start that mngr rejected at the provider is reported as a backend outage.
 
     The command never reached the host, so naming the start step would blame the
@@ -1408,12 +1418,12 @@ def test_run_restart_sequence_reports_the_backend_when_the_start_is_rejected_the
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=False)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary, reason = _write_fake_mngr_with_provider_outage(tmp_path, "start")
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -1423,19 +1433,20 @@ def test_run_restart_sequence_reports_the_backend_when_the_start_is_rejected_the
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    message = tracker.get_last_restart_error(workspace_agent) or ""
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    message = tracker.get_last_recovery_error(workspace_agent) or ""
     assert reason in message
     assert "Start step" not in message
     assert len(error_records) == 1, error_records
 
 
-def _run_restart_rejected_at_the_backend(
+def _run_recovery_rejected_at_the_backend(
     tmp_path: Path, workspace_agent: AgentId, tracker: SystemInterfaceHealthTracker, resolver: MngrCliBackendResolver
 ) -> str:
-    """Run the restart the tracker's stuck edge dispatches, against a backend that refuses it.
+    """Run the start the tracker's stuck edge dispatches, against a backend that refuses it.
 
     Returns the provider's own reason. This is the sequence the app runs
     unattended the moment a machine wedges, so it is what has happened by the
@@ -1443,7 +1454,7 @@ def _run_restart_rejected_at_the_backend(
     """
     mngr_binary, reason = _write_fake_mngr_with_provider_outage(tmp_path, "start")
     with ConcurrencyGroup(name="test-restart-rejected") as cg, capture_error_logs():
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -1453,21 +1464,21 @@ def _run_restart_rejected_at_the_backend(
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=_started_registry(workspace_agent),
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
         )
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     return reason
 
 
-def test_a_restart_rejected_at_the_backend_is_the_verdict_without_waiting_for_a_poll(tmp_path: Path) -> None:
+def test_a_start_rejected_at_the_backend_is_the_verdict_without_waiting_for_a_poll(tmp_path: Path) -> None:
     """The rejection names the backend on the edge that raises the card, not a poll later.
 
     Discovery has surfaced nothing about this provider -- the outage is seconds
-    old, and its next poll can be half a minute away. The rejected restart is the
+    old, and its next poll can be half a minute away. The rejected start is the
     only observation there is, and it is the same observation discovery will
     eventually make, so the card opens on "Can't connect to Docker" instead of
     opening on "unresponsive" with a Restart button routed through the backend
-    that just refused one, and correcting itself while the user reads it.
+    that just refused a command, and correcting itself while the user reads it.
     """
     workspace_agent = AgentId.generate()
     resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate(), host_state=HostState.RUNNING)
@@ -1476,7 +1487,7 @@ def test_a_restart_rejected_at_the_backend_is_the_verdict_without_waiting_for_a_
 
     assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
 
-    reason = _run_restart_rejected_at_the_backend(tmp_path, workspace_agent, tracker, resolver)
+    reason = _run_recovery_rejected_at_the_backend(tmp_path, workspace_agent, tracker, resolver)
 
     verdict = read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker)
     assert verdict is not None
@@ -1484,7 +1495,7 @@ def test_a_restart_rejected_at_the_backend_is_the_verdict_without_waiting_for_a_
     assert verdict.reason == reason
 
 
-def test_a_rejected_restarts_verdict_lasts_until_the_backend_is_next_polled(tmp_path: Path) -> None:
+def test_a_rejected_starts_verdict_lasts_until_the_backend_is_next_polled(tmp_path: Path) -> None:
     """The next poll of that provider settles it, whichever way it reads.
 
     A rejection is only the freshest word on the backend until discovery gets
@@ -1499,7 +1510,7 @@ def test_a_rejected_restarts_verdict_lasts_until_the_backend_is_next_polled(tmp_
     resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate(), host_state=HostState.RUNNING)
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     _drive_to_stuck_with_onset(tracker, workspace_agent)
-    reason = _run_restart_rejected_at_the_backend(tmp_path, workspace_agent, tracker, resolver)
+    reason = _run_recovery_rejected_at_the_backend(tmp_path, workspace_agent, tracker, resolver)
 
     # Still down when discovery next looks: the same verdict, now off the poll.
     record_provider_discovery_error(resolver, "docker", reason)
@@ -1567,11 +1578,11 @@ def test_device_verdict_is_withheld_for_a_failure_that_reached_the_network(
     assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is None
 
 
-def test_device_verdict_outranks_the_restart_episodes_own_conclusion(tmp_path: Path) -> None:
-    """A restart that ran and failed does not displace the verdict that explains it.
+def test_device_verdict_outranks_the_recovery_episodes_own_conclusion(tmp_path: Path) -> None:
+    """A recovery that ran and failed does not displace the verdict that explains it.
 
-    The app restarts a machine that stops answering without being asked, so a
-    device-side fault produces RESTARTING and then RESTART_FAILED all by itself.
+    The app starts a machine that stops answering without being asked, so a
+    device-side fault produces RECOVERING and then RECOVERY_FAILED all by itself.
     Reporting those would blame the machine for the app's own broken connection,
     which is the whole misdiagnosis this verdict exists to stop.
     """
@@ -1582,11 +1593,11 @@ def test_device_verdict_outranks_the_restart_episodes_own_conclusion(tmp_path: P
     )
 
     tracker.mark_stuck(workspace_agent)
-    tracker.mark_restarting(workspace_agent, start_only=True)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is not None
 
-    tracker.mark_restart_failed(workspace_agent, "The system interface did not respond.")
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    tracker.mark_recovery_failed(workspace_agent, "The system interface did not respond.")
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert read_device_cannot_connect_verdict(workspace_agent, tracker=tracker) is not None
 
 
@@ -1616,7 +1627,7 @@ def test_a_start_that_booted_nothing_is_recorded_against_the_episode(tmp_path: P
 
     The unattended dispatch fires ``mngr start`` at any machine that stops
     answering, and that start is idempotent: against a host that is already up
-    it does nothing at all. The tracker still reaches RESTART_FAILED -- the
+    it does nothing at all. The tracker still reaches RECOVERY_FAILED -- the
     machine really did not come back -- but the surfaces read the recorded
     no-op and report the machine as unresponsive instead of blaming a restart
     that never ran.
@@ -1624,11 +1635,11 @@ def test_a_start_that_booted_nothing_is_recorded_against_the_episode(tmp_path: P
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
     tracker = SystemInterfaceHealthTracker()
-    tracker.mark_restarting(workspace_agent, start_only=True)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -1640,23 +1651,23 @@ def test_a_start_that_booted_nothing_is_recorded_against_the_episode(tmp_path: P
             mngr_forward_port=1,
             mngr_forward_preauth_cookie="cookie",
             registry=_started_registry(workspace_agent),
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
             startup_wait_seconds=0.1,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert tracker.is_restart_a_no_op(workspace_agent) is True
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    assert tracker.is_recovery_a_no_op(workspace_agent) is True
 
 
 def test_a_start_that_really_booted_the_host_keeps_the_restart_framing(tmp_path: Path) -> None:
     """A cold boot that did not converge *is* a failed restart, and still reads as one."""
     workspace_agent = AgentId.generate()
     tracker = SystemInterfaceHealthTracker()
-    tracker.mark_restarting(workspace_agent, start_only=True)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate())
 
     with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs():
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -1666,31 +1677,31 @@ def test_a_start_that_really_booted_the_host_keeps_the_restart_framing(tmp_path:
             mngr_forward_port=1,
             mngr_forward_preauth_cookie="cookie",
             registry=_started_registry(workspace_agent),
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
             startup_wait_seconds=0.1,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
-    assert tracker.is_restart_a_no_op(workspace_agent) is False
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
+    assert tracker.is_recovery_a_no_op(workspace_agent) is False
 
 
-# -- post-restart readiness wait --
+# -- post-recovery readiness wait --
 
 
-def test_restart_readiness_budget_covers_a_cold_boot() -> None:
-    """The restart's readiness budget is the calibrated cold-boot budget, not its own guess.
+def test_recovery_readiness_budget_covers_a_cold_boot() -> None:
+    """The recovery's readiness budget is the calibrated cold-boot budget, not its own guess.
 
-    ``mngr start`` cold-boots the container, so the restart worker waits for
+    ``mngr start`` cold-boots the container, so the recovery worker waits for
     exactly the event the create flow already measures. Sizing both from one
-    constant is what keeps an ordinary slow restart from tripping the failure
+    constant is what keeps an ordinary slow recovery from tripping the failure
     branch: the budget was independently set to 30s against a cold boot that
     regularly runs 90-180s, so a workspace that was merely slow got reported --
-    at error level, to error reporting -- as a failed restart.
+    at error level, to error reporting -- as a failed recovery.
     """
-    assert _HOST_RESTART_STARTUP_WAIT_SECONDS == WORKSPACE_READY_TIMEOUT_SECONDS
+    assert _HOST_RECOVERY_STARTUP_WAIT_SECONDS == WORKSPACE_READY_TIMEOUT_SECONDS
 
 
-def test_run_restart_sequence_recovers_a_workspace_that_boots_slowly(tmp_path: Path) -> None:
+def test_run_host_recovery_sequence_recovers_a_workspace_that_boots_slowly(tmp_path: Path) -> None:
     """A workspace that only answers after several polls recovers rather than failing.
 
     The interface stays 503 for the first two polls and answers on the third, so
@@ -1700,13 +1711,13 @@ def test_run_restart_sequence_recovers_a_workspace_that_boots_slowly(tmp_path: P
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=True)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
     with scripted_workspace_probe_server(not_ready_count=2) as port:
         with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
-            run_restart_sequence(
+            run_host_recovery_sequence(
                 workspace_agent_id=workspace_agent,
                 tracker=tracker,
                 backend_resolver=resolver,
@@ -1716,7 +1727,7 @@ def test_run_restart_sequence_recovers_a_workspace_that_boots_slowly(tmp_path: P
                 mngr_forward_port=port,
                 mngr_forward_preauth_cookie="cookie",
                 registry=registry,
-                skip_stop=True,
+                kind=HostRecoveryKind.START,
                 # Comfortably past the ~2s the scripted boot takes, so the
                 # budget is not what ends the wait.
                 startup_wait_seconds=30.0,
@@ -1735,7 +1746,7 @@ def test_await_system_interface_ready_reports_a_slow_boot_that_answers() -> None
             outcome = _await_system_interface_ready(
                 str(AgentId.generate()), port, "cookie", 30.0, concurrency_group=cg
             )
-    assert outcome is RestartReadinessOutcome.READY
+    assert outcome is RecoveryReadinessOutcome.READY
 
 
 def test_await_system_interface_ready_times_out_when_nothing_ever_answers() -> None:
@@ -1743,7 +1754,7 @@ def test_await_system_interface_ready_times_out_when_nothing_ever_answers() -> N
     with ConcurrencyGroup(name="test-wait") as cg:
         # Port 1 refuses connections, so every poll fails fast.
         outcome = _await_system_interface_ready(str(AgentId.generate()), 1, "cookie", 0.1, concurrency_group=cg)
-    assert outcome is RestartReadinessOutcome.TIMED_OUT
+    assert outcome is RecoveryReadinessOutcome.TIMED_OUT
 
 
 def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
@@ -1759,27 +1770,27 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
         started = time.monotonic()
         # Port 1 refuses connections, so only the shutdown check can end this.
         outcome = _await_system_interface_ready(
-            str(AgentId.generate()), 1, "cookie", _HOST_RESTART_STARTUP_WAIT_SECONDS, concurrency_group=cg
+            str(AgentId.generate()), 1, "cookie", _HOST_RECOVERY_STARTUP_WAIT_SECONDS, concurrency_group=cg
         )
         elapsed = time.monotonic() - started
 
-    assert outcome is RestartReadinessOutcome.ABANDONED
+    assert outcome is RecoveryReadinessOutcome.ABANDONED
     assert elapsed < 5.0, f"the wait ran {elapsed:.1f}s past a shutdown"
 
 
-def test_run_restart_sequence_does_not_report_a_failure_when_shutdown_cuts_it_short(tmp_path: Path) -> None:
-    """A restart truncated by app shutdown is not reported as a failed restart.
+def test_run_host_recovery_sequence_does_not_report_a_failure_when_shutdown_cuts_it_short(tmp_path: Path) -> None:
+    """A recovery truncated by app shutdown is not reported as a failed recovery.
 
     Shutdown says nothing about whether the workspace recovered, and the tracker
     and operation registry are per-process, so there is nothing left to render a
-    verdict to. Claiming RESTART_FAILED here would report a failure that was
+    verdict to. Claiming RECOVERY_FAILED here would report a failure that was
     never observed -- and would reach error reporting on every quit that lands
-    mid-restart.
+    mid-recovery.
     """
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()
-    tracker.mark_restarting(workspace_agent, start_only=True)
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
@@ -1789,7 +1800,7 @@ def test_run_restart_sequence_does_not_report_a_failure_when_shutdown_cuts_it_sh
         # rather than before the sequence's subprocess steps.
         with scripted_workspace_probe_server(not_ready_count=10**6, on_first_request=cg.shutdown) as port:
             with capture_error_logs() as error_records:
-                run_restart_sequence(
+                run_host_recovery_sequence(
                     workspace_agent_id=workspace_agent,
                     tracker=tracker,
                     backend_resolver=resolver,
@@ -1799,11 +1810,11 @@ def test_run_restart_sequence_does_not_report_a_failure_when_shutdown_cuts_it_sh
                     mngr_forward_port=port,
                     mngr_forward_preauth_cookie="cookie",
                     registry=registry,
-                    skip_stop=True,
-                    startup_wait_seconds=_HOST_RESTART_STARTUP_WAIT_SECONDS,
+                    kind=HostRecoveryKind.START,
+                    startup_wait_seconds=_HOST_RECOVERY_STARTUP_WAIT_SECONDS,
                 )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTARTING
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERING
     assert error_records == []
     record = registry.get(workspace_agent)
     assert record is not None and record.status == WorkspaceOperationStatus.RUNNING
@@ -2191,7 +2202,7 @@ def test_an_unknown_reading_dispatches_exactly_as_before(
     assert reading.internet is ConnectivityFacet.UNKNOWN
 
 
-def test_a_restart_that_fails_while_offline_is_still_restart_failed_but_not_error_logged(
+def test_a_start_that_fails_while_offline_is_still_recovery_failed_but_not_error_logged(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
     """The state is truthful and the user can retry it; the error report would be noise.
@@ -2206,8 +2217,8 @@ def test_a_restart_that_fails_while_offline_is_still_restart_failed_but_not_erro
     resolver = _resolver_for_a_remote_machine(workspace_agent, services_agent)
     registry = _started_registry(workspace_agent)
 
-    with ConcurrencyGroup(name="test-restart-offline") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+    with ConcurrencyGroup(name="test-start-offline") as cg, capture_error_logs() as error_records:
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -2217,11 +2228,11 @@ def test_a_restart_that_fails_while_offline_is_still_restart_failed_but_not_erro
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=registry,
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
             connectivity_detector=_offline_detector(root_concurrency_group)[0],
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert error_records == []
 
 
@@ -2241,7 +2252,7 @@ def test_a_stop_that_fails_while_offline_is_downgraded_the_same_way_the_start_is
     registry = _started_registry(workspace_agent)
 
     with ConcurrencyGroup(name="test-restart-offline-stop") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -2252,9 +2263,10 @@ def test_a_stop_that_fails_while_offline_is_downgraded_the_same_way_the_start_is
             mngr_forward_preauth_cookie=None,
             registry=registry,
             connectivity_detector=_offline_detector(root_concurrency_group)[0],
+            kind=HostRecoveryKind.RESTART,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert error_records == []
 
 
@@ -2277,7 +2289,7 @@ def test_a_readiness_wait_that_times_out_while_offline_is_downgraded_too(
     registry = _started_registry(workspace_agent)
 
     with ConcurrencyGroup(name="test-restart-offline-wait") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -2289,12 +2301,12 @@ def test_a_readiness_wait_that_times_out_while_offline_is_downgraded_too(
             mngr_forward_port=1,
             mngr_forward_preauth_cookie="cookie",
             registry=registry,
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
             startup_wait_seconds=0.1,
             connectivity_detector=_offline_detector(root_concurrency_group)[0],
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert error_records == []
 
 
@@ -2311,7 +2323,7 @@ def test_a_readiness_wait_that_times_out_on_a_working_network_still_error_logs(
     assert detector.probe_now().environment_block is EnvironmentBlock.NONE
 
     with ConcurrencyGroup(name="test-restart-online-wait") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -2321,16 +2333,16 @@ def test_a_readiness_wait_that_times_out_on_a_working_network_still_error_logs(
             mngr_forward_port=1,
             mngr_forward_preauth_cookie="cookie",
             registry=registry,
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
             startup_wait_seconds=0.1,
             connectivity_detector=detector,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert len(error_records) == 1
 
 
-def test_a_restart_that_fails_on_a_working_network_still_error_logs(
+def test_a_start_that_fails_on_a_working_network_still_error_logs(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
     """The downgrade is scoped to the one cause that explains the failure away."""
@@ -2343,7 +2355,7 @@ def test_a_restart_that_fails_on_a_working_network_still_error_logs(
     assert detector.probe_now().environment_block is EnvironmentBlock.NONE
 
     with ConcurrencyGroup(name="test-restart-online") as cg, capture_error_logs() as error_records:
-        run_restart_sequence(
+        run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
@@ -2353,11 +2365,11 @@ def test_a_restart_that_fails_on_a_working_network_still_error_logs(
             mngr_forward_port=0,
             mngr_forward_preauth_cookie=None,
             registry=registry,
-            skip_stop=True,
+            kind=HostRecoveryKind.START,
             connectivity_detector=detector,
         )
 
-    assert tracker.get_health(workspace_agent) == AgentHealth.RESTART_FAILED
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert len(error_records) == 1
 
 
@@ -2602,7 +2614,7 @@ def test_a_gate_whose_probe_lost_the_group_drops_the_start(tmp_path: Path) -> No
     gate leaves it. The sibling below is the other family the same call is
     fenced for, and it is answered the opposite way; collapsing the two fences
     into one would dispatch a restart that then loses its own spawn and reports
-    RESTART_FAILED, at error level, on the way out.
+    RECOVERY_FAILED, at error level, on the way out.
     """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     workspace_agent = AgentId.generate()
@@ -2707,14 +2719,14 @@ def test_a_machine_stopped_while_the_gate_probes_is_not_started_anyway(
     assert _read_fake_mngr_invocations(mngr_binary) == [], "a machine stopped from inside the app is not started"
 
 
-def test_a_restart_that_wins_the_machine_mid_probe_is_not_overwritten(
+def test_a_recovery_that_wins_the_machine_mid_probe_is_not_overwritten(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """A restart the user asked for owns the machine, and the gate must not owe it another start.
+    """A recovery already running owns the machine, and the gate must not owe it another start.
 
     An owed start released at the network's return would land on top of the
-    restart that is already running -- and the withheld-start log would say a
-    start was withheld from a machine that is in fact being restarted.
+    recovery that is already running -- and the withheld-start log would say a
+    start was withheld from a machine that is in fact being recovered.
     """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     workspace_agent = AgentId.generate()
@@ -2724,13 +2736,13 @@ def test_a_restart_that_wins_the_machine_mid_probe_is_not_overwritten(
     registry = InMemoryWorkspaceOperationRegistry()
 
     # A dead network, so the gate has a condition to record.
-    def _start_a_restart_mid_probe() -> None:
-        tracker.mark_restarting(workspace_agent, start_only=True)
+    def _start_a_recovery_mid_probe() -> None:
+        tracker.mark_recovering(workspace_agent, HostRecoveryKind.START)
 
-    prober = SideEffectingStubNetworkProber(on_first_question=_start_a_restart_mid_probe)
+    prober = SideEffectingStubNetworkProber(on_first_question=_start_a_recovery_mid_probe)
     detector = build_connectivity_detector_over(prober, root_concurrency_group)
 
-    with ConcurrencyGroup(name="test-unattended-restarting-mid-probe") as cg:
+    with ConcurrencyGroup(name="test-unattended-recovering-mid-probe") as cg:
         dispatcher = _dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path, detector)
         tracker.add_on_stuck_edge_callback(dispatcher)
         tracker.record_failure(workspace_agent)
@@ -2739,11 +2751,11 @@ def test_a_restart_that_wins_the_machine_mid_probe_is_not_overwritten(
             "the gate must have measured the network"
         )
 
-    assert tracker.get_health(workspace_agent) is AgentHealth.RESTARTING
+    assert tracker.get_health(workspace_agent) is AgentHealth.RECOVERING
     # The gate's own share of the race: without its re-read of the health after
     # the probe, the machine joins the owed set and logs a withheld start over a
-    # restart that is genuinely running.
-    assert dispatcher._owed_agent_ids == set(), "a machine a restart already claimed is not owed one"
+    # recovery that is genuinely running.
+    assert dispatcher._owed_agent_ids == set(), "a machine a recovery already claimed is not owed one"
 
 
 def _record_errored_provider(resolver: MngrCliBackendResolver, provider_name: str, backend: str) -> None:
@@ -2994,7 +3006,7 @@ def test_the_endpoint_sample_asks_running_hosts_first() -> None:
     The detector samples only the first few endpoints and one answering settles
     the facet, so spending the sample on hosts that cannot answer is what sends
     it to the public quorum -- where a network blocking port 22 in particular
-    then reads as blocking SSH outright, and withholds a restart the machine may
+    then reads as blocking SSH outright, and withholds a start the machine may
     genuinely need.
     """
     stopped_agent = AgentId.generate()

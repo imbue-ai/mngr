@@ -8,26 +8,26 @@ describe("noticeBandFor", () => {
 
   it("bands a machine that stops answering, and keeps one payload across the recovery states", () => {
     const stuck = noticeBandFor("stuck", "healthy", true);
-    const restarting = noticeBandFor("restarting", "healthy", true);
+    const recovering = noticeBandFor("recovering", "healthy", true);
     expect(stuck?.key).toBe("workspace-recovering");
-    // Recovery steps between stuck and restarting on its own; sharing the
+    // Recovery steps between stuck and recovering on its own; sharing the
     // payload is what keeps the strip from rewriting itself mid-read.
-    expect(restarting).toEqual(stuck);
+    expect(recovering).toEqual(stuck);
     expect(stuck?.action?.kind).toBe("open-recovery");
   });
 
   it("separates a spent restart from one still in progress", () => {
-    const failed = noticeBandFor("restart_failed", "healthy", true);
+    const failed = noticeBandFor("recovery_failed", "healthy", true);
     expect(failed?.key).toBe("workspace-restart-failed");
     expect(failed?.variant).toBe("error");
     expect(failed?.message).not.toBe(noticeBandFor("stuck", "healthy", true)?.message);
   });
 
   it("states the condition without recounting a restart the user never made", () => {
-    // The app restarts a wedged machine unasked, so an account of a failed
-    // restart usually describes an event the user never caused and never saw.
+    // The app starts a wedged machine unasked, so an account of a failed
+    // recovery usually describes an event the user never caused and never saw.
     // The remedy and its cost live on the card behind the action.
-    expect(noticeBandFor("restart_failed", "healthy", true)?.message).toBe("This machine stopped responding.");
+    expect(noticeBandFor("recovery_failed", "healthy", true)?.message).toBe("This machine stopped responding.");
   });
 
   it("names the backend it cannot reach instead of the machine that reads stuck because of it", () => {
@@ -43,7 +43,7 @@ describe("noticeBandFor", () => {
     expect(band?.message).toBe("Can't connect to Imbue Cloud");
     expect(band?.action?.kind).toBe("open-recovery");
     // The card behind it carries the provider's own error verbatim.
-    expect(noticeBandFor("restart_failed", "healthy", true, { unreachableProviderLabel: "Imbue Cloud" })?.message).toBe(
+    expect(noticeBandFor("recovery_failed", "healthy", true, { unreachableProviderLabel: "Imbue Cloud" })?.message).toBe(
       band?.message,
     );
   });
@@ -64,7 +64,7 @@ describe("noticeBandFor", () => {
     expect(band?.key).toBe("workspace-recovering");
     expect(band?.action?.kind).toBe("open-recovery");
     // The terminal state is the same condition better explained, so it reads alike.
-    expect(noticeBandFor("restart_failed", "healthy", true, { isDeviceCannotConnect: true })?.message).toBe(
+    expect(noticeBandFor("recovery_failed", "healthy", true, { isDeviceCannotConnect: true })?.message).toBe(
       band?.message,
     );
     // A machine that is answering is not one this device cannot reach.
@@ -94,7 +94,7 @@ describe("noticeBandFor", () => {
 
   it("withholds the band from hub pages, which have no machine behind it", () => {
     expect(noticeBandFor("stuck", "healthy", false)).toBeNull();
-    expect(noticeBandFor("restart_failed", "blocked", false)).toBeNull();
+    expect(noticeBandFor("recovery_failed", "blocked", false)).toBeNull();
   });
 
   it("names this device's dead network rather than the machine that reads stuck because of it", () => {
@@ -139,9 +139,9 @@ describe("noticeBandFor", () => {
   it("keeps naming the device over a machine whose restart already failed", () => {
     // The terminal state is the one most likely to be read as the machine's own
     // fault, and it is where a restart the network doomed ends up. Left to the
-    // restart_failed branch, the band would say "This machine stopped
+    // recovery_failed branch, the band would say "This machine stopped
     // responding." about a machine nothing here ever reached.
-    const failed = noticeBandFor("restart_failed", "healthy", true, { deviceEnvironment: "SSH_BLOCKED" });
+    const failed = noticeBandFor("recovery_failed", "healthy", true, { deviceEnvironment: "SSH_BLOCKED" });
     expect(failed?.message).toBe("This network blocks the connection to your machines.");
   });
 
@@ -168,24 +168,25 @@ describe("noticeBandFor", () => {
     // The band reports the restart rather than waiting for a network: the
     // user's own stop+start bounce is in flight either way, and its progress
     // is what they asked to see.
-    const band = noticeBandFor("restarting", "healthy", true, {
+    const band = noticeBandFor("recovering", "healthy", true, {
       deviceEnvironment: "OFFLINE",
-      isRestartStartOnly: false,
+      recoveryKind: "restart",
     });
     expect(band?.message).toBe("Lost connection to this machine. Reconnecting…");
   });
 
-  it("keeps naming the device over the app's own start-only dispatch", () => {
-    // The app enters "restarting" on its own within seconds of any network
+  it("keeps naming the device over the app's own unattended start", () => {
+    // The app enters "recovering" on its own within seconds of any network
     // flap, and stays there for as long as the network is down -- the whole of
     // the episode the device's condition exists to explain. Hiding it behind
     // the dispatch left a user with a dead wifi reading "Lost connection" for
-    // the length of a lid-closed sleep. The tracker's word (true) and no word
-    // at all (null) both decline the exception; only the user's click earns it.
-    for (const isRestartStartOnly of [true, null]) {
-      const band = noticeBandFor("restarting", "healthy", true, {
+    // the length of a lid-closed sleep. The tracker's word ("start") and no
+    // word at all (null) both decline the exception; only the user's click
+    // earns it.
+    for (const recoveryKind of ["start", null] as const) {
+      const band = noticeBandFor("recovering", "healthy", true, {
         deviceEnvironment: "OFFLINE",
-        isRestartStartOnly,
+        recoveryKind,
       });
       expect(band?.message).toBe("No network connection.");
     }

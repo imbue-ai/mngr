@@ -13,7 +13,7 @@
 // Everything network- or timer-shaped is injected so vitest drives the state
 // machines synchronously; pages construct with the browser defaults.
 
-import type { EnvironmentCondition } from "./health";
+import type { EnvironmentCondition, RecoveryKind } from "./health";
 
 export const BACKUP_HISTORY_PAGE_SIZE = 15;
 
@@ -705,10 +705,10 @@ export interface RecoveryInfo {
   workspace_name: string;
   health: string;
   health_error: string;
-  /** Whether an in-flight restart skips the stop step. A full stop+start bounce
-   * is only ever dispatched by the user's own click, so `false` is what makes
-   * "Restarting" an honest claim rather than a guess. Null outside a restart. */
-  is_restart_start_only: boolean | null;
+  /** Which recovery is in flight. A full stop+start bounce is only ever
+   * dispatched by the user's own click, so "restart" is what makes "Restarting"
+   * an honest claim rather than a guess. Null outside a recovery. */
+  recovery_kind: RecoveryKind | null;
   ssh_command: string;
   is_host_offline: boolean;
   device_environment: EnvironmentCondition;
@@ -719,7 +719,7 @@ export interface RecoveryInfo {
   device_error_detail: string;
 }
 
-interface RestartStatusPayload {
+interface RecoveryStatusPayload {
   status?: string;
   is_done?: boolean;
   error?: string | null;
@@ -727,8 +727,8 @@ interface RestartStatusPayload {
 
 /**
  * The recovery card's driver: follow the machine's recovery state, dispatch a
- * manual restart, and follow that restart (status + log stream) to a terminal
- * state. Never navigates on its own -- the surfaces offer links.
+ * recovery, and follow it (status + log stream) to a terminal state. Never
+ * navigates on its own -- the surfaces offer links.
  *
  * The state is re-read for as long as a card is mounted, not sampled once when
  * it opened. A recovery episode is exactly when the app's picture of a machine
@@ -741,15 +741,15 @@ export class RecoveryModel {
   readonly workspaceAnyId: string;
   info: RecoveryInfo | null = null;
   loadError: string | null = null;
-  isRestartRunning = false;
-  /** The shape of a restart *this model dispatched*, or null when the restart
-   * it is following was dispatched elsewhere and only attached to. A surface
-   * describing a restart in flight needs the difference: its own click is known
+  isRecoveryRunning = false;
+  /** Which recovery *this model dispatched*, or null when the one it is
+   * following was dispatched elsewhere and only attached to. A surface
+   * describing a recovery in flight needs the difference: its own click is known
    * from the click, while an unattended or other-window dispatch is only ever
    * as good as what the tracker publishes about it. */
-  dispatchedRestartIsStartOnly: boolean | null = null;
-  restartError: string | null = null;
-  isRestartSucceeded = false;
+  dispatchedRecoveryKind: RecoveryKind | null = null;
+  recoveryError: string | null = null;
+  isRecoverySucceeded = false;
   logLines: string[] = [];
 
   private readonly deps: LifecycleDeps;
@@ -770,7 +770,7 @@ export class RecoveryModel {
     // A card removed while its first read was in flight adopts nothing and arms
     // nothing. Leaving `info` null is also what keeps the surfaces' own
     // post-load work off a dead model -- the recovery page's ?intent=restart
-    // dispatches on this promise, and dispatchRestart no-ops without an agent id.
+    // dispatches on this promise, and dispatchRecovery no-ops without an agent id.
     if (this.isStopped) return;
     // The poll is armed either way. A first read that fails is no more final
     // than any later one -- it is the local app's own endpoint, mid-episode --
@@ -800,42 +800,43 @@ export class RecoveryModel {
   /**
    * Adopt a reading of the machine's state.
    *
-   * Only ``info`` is written: the restart fields belong to a restart this model
-   * is running and are owned by ``dispatchRestart`` / ``pollRestartOnce``, which
-   * follow the operation itself rather than the tracker's summary of it.
+   * Only ``info`` is written: the recovery fields belong to a recovery this
+   * model is running and are owned by ``dispatchRecovery`` /
+   * ``pollRecoveryOnce``, which follow the operation itself rather than the
+   * tracker's summary of it.
    *
-   * A restart this model is not already running is attached to, so a restart
-   * dispatched elsewhere -- the unattended one, or the same machine's card in
+   * A recovery this model is not already running is attached to, so one
+   * dispatched elsewhere -- the unattended start, or the same machine's card in
    * another window -- shows its progress and its logs here too. Attaching
-   * clears the previous restart's outcome, which describes a different run.
-   * Readings taken before a restart this model was following reported its
+   * clears the previous recovery's outcome, which describes a different run.
+   * Readings taken before a recovery this model was following reported its
    * outcome never get here (``pollInfoOnce`` drops them), so an outcome is
-   * only ever cleared by a restart that started after it.
+   * only ever cleared by a recovery that started after it.
    *
-   * The one restart never attached to is the one this model has already given
-   * up following (``pollRestartOnce``'s bound). The tracker goes on reporting
+   * The one recovery never attached to is the one this model has already given
+   * up following (``pollRecoveryOnce``'s bound). The tracker goes on reporting
    * it as running -- that is the state whose status could not be read -- so
    * attaching would clear the lost-contact report and start the bound over,
    * every poll, for as long as the tracker says so. The tracker leaving
-   * "restarting" ends that run, and the next one is a different restart.
+   * "recovering" ends that run, and the next one is a different recovery.
    */
   private applyInfo(payload: RecoveryInfo): void {
     this.info = payload;
-    if (payload.health !== "restarting") {
-      this.isRestartFollowAbandoned = false;
+    if (payload.health !== "recovering") {
+      this.isRecoveryFollowAbandoned = false;
       return;
     }
-    if (this.isRestartRunning || this.isRestartFollowAbandoned || this.isStopped) return;
-    this.isRestartRunning = true;
+    if (this.isRecoveryRunning || this.isRecoveryFollowAbandoned || this.isStopped) return;
+    this.isRecoveryRunning = true;
     // Attached, not dispatched: this model has no first-hand account of what
-    // was run, so a surface must take the tracker's word for its shape.
-    this.dispatchedRestartIsStartOnly = null;
-    this.isRestartSucceeded = false;
-    this.restartError = null;
+    // was run, so a surface must take the tracker's word for which it was.
+    this.dispatchedRecoveryKind = null;
+    this.isRecoverySucceeded = false;
+    this.recoveryError = null;
     this.logLines = [];
-    this.consecutiveRestartPollFailures = 0;
-    this.streamRestartLogs(payload.agent_id);
-    this.pollRestartSoon(payload.agent_id);
+    this.consecutiveRecoveryPollFailures = 0;
+    this.streamRecoveryLogs(payload.agent_id);
+    this.pollRecoverySoon(payload.agent_id);
   }
 
   private pollInfoSoon(): void {
@@ -844,7 +845,7 @@ export class RecoveryModel {
 
   async pollInfoOnce(): Promise<void> {
     if (this.isStopped) return;
-    const outcomeCount = this.restartOutcomeCount;
+    const outcomeCount = this.recoveryOutcomeCount;
     const payload = await this.fetchInfo();
     if (this.isStopped) return;
     // A failed read is not news about the machine. The last good reading stays
@@ -853,11 +854,11 @@ export class RecoveryModel {
     // unbounded on purpose: this loop lives only as long as the card is open,
     // and the endpoint it reads is the local app's own.
     //
-    // A reading that was in flight while the restart being followed reported
+    // A reading that was in flight while the recovery being followed reported
     // its outcome is dropped whole: the server moves the tracker out of
-    // "restarting" before the operation reports done, so such a reading still
-    // says "restarting" and would re-report a restart that has finished.
-    if (payload !== null && outcomeCount === this.restartOutcomeCount) {
+    // "recovering" before the operation reports done, so such a reading still
+    // says "recovering" and would re-report a recovery that has finished.
+    if (payload !== null && outcomeCount === this.recoveryOutcomeCount) {
       this.loadError = null;
       this.applyInfo(payload);
       this.deps.redraw();
@@ -865,102 +866,103 @@ export class RecoveryModel {
     this.pollInfoSoon();
   }
 
-  private consecutiveRestartPollFailures = 0;
-  /** How many restarts this model was following have reported an outcome.
+  private consecutiveRecoveryPollFailures = 0;
+  /** How many recoveries this model was following have reported an outcome.
    * Stamped on each recovery-info read so a late one can be told apart from a
    * current one. */
-  private restartOutcomeCount = 0;
-  /** Whether the restart the tracker is still reporting is one this model has
-   * stopped following. Cleared by the tracker leaving "restarting", and by a
-   * restart dispatched from here. */
-  private isRestartFollowAbandoned = false;
+  private recoveryOutcomeCount = 0;
+  /** Whether the recovery the tracker is still reporting is one this model has
+   * stopped following. Cleared by the tracker leaving "recovering", and by a
+   * recovery dispatched from here. */
+  private isRecoveryFollowAbandoned = false;
 
   /**
-   * Dispatch a host restart for this machine and follow it.
+   * Dispatch a host recovery for this machine and follow it.
    *
-   * ``isStartOnly`` skips the stop step, running only the idempotent ``mngr
+   * ``kind`` of "start" skips the stop step, running only the idempotent ``mngr
    * start``: the "open this stopped machine" click-through, which has nothing
-   * to bounce. The card's own Restart Machine button keeps the stop, since it
-   * may be aimed at a running-but-wedged container that only a bounce fixes.
+   * to bounce. The card's own Restart Machine button asks for "restart", since
+   * it may be aimed at a running-but-wedged container that only a bounce fixes.
    */
-  async dispatchRestart(isStartOnly = false): Promise<void> {
+  async dispatchRecovery(kind: RecoveryKind = "restart"): Promise<void> {
     const agentId = this.agentId;
-    if (agentId === null || this.isRestartRunning) return;
-    this.isRestartRunning = true;
-    this.dispatchedRestartIsStartOnly = isStartOnly;
-    this.restartError = null;
-    this.isRestartSucceeded = false;
-    this.consecutiveRestartPollFailures = 0;
-    this.isRestartFollowAbandoned = false;
+    if (agentId === null || this.isRecoveryRunning) return;
+    this.isRecoveryRunning = true;
+    this.dispatchedRecoveryKind = kind;
+    this.recoveryError = null;
+    this.isRecoverySucceeded = false;
+    this.consecutiveRecoveryPollFailures = 0;
+    this.isRecoveryFollowAbandoned = false;
     this.logLines = [];
     this.deps.redraw();
     const result = await this.deps.postJson(`/api/v1/workspaces/${encodeURIComponent(agentId)}/restart`, {
       scope: "host",
-      start_only: isStartOnly,
+      // The body field keeps its wire name: agents inside workspaces post it.
+      start_only: kind === "start",
     });
     // The card may have gone away while the POST was in flight; a stopped model
     // must not open a log stream nothing will ever close.
     if (this.isStopped) return;
     if (result.status >= 400) {
-      this.isRestartRunning = false;
+      this.isRecoveryRunning = false;
       const detail = result.json as { error?: string } | null;
-      this.restartError = detail?.error ?? `Could not start the restart (HTTP ${result.status}).`;
+      this.recoveryError = detail?.error ?? `Could not start the recovery (HTTP ${result.status}).`;
       this.deps.redraw();
       return;
     }
-    this.streamRestartLogs(agentId);
-    this.pollRestartSoon(agentId);
+    this.streamRecoveryLogs(agentId);
+    this.pollRecoverySoon(agentId);
   }
 
-  private pollRestartSoon(agentId: string): void {
-    this.deps.schedule(() => void this.pollRestartOnce(agentId), OPERATION_POLL_INTERVAL_MS);
+  private pollRecoverySoon(agentId: string): void {
+    this.deps.schedule(() => void this.pollRecoveryOnce(agentId), OPERATION_POLL_INTERVAL_MS);
   }
 
-  async pollRestartOnce(agentId: string): Promise<void> {
+  async pollRecoveryOnce(agentId: string): Promise<void> {
     if (this.isStopped) return;
     const payload = (await this.deps.getJson(
       `/api/v1/workspaces/operations/restart/${encodeURIComponent(agentId)}`,
-    )) as RestartStatusPayload | null;
+    )) as RecoveryStatusPayload | null;
     if (this.isStopped) return;
     if (payload === null) {
       // Transient fetch failure: keep polling for a bounded run, exactly like
-      // the backup/lifecycle pollers -- a permanent failure must not pin
-      // "Restarting..." forever.
-      this.consecutiveRestartPollFailures += 1;
-      if (this.consecutiveRestartPollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-        this.isRestartRunning = false;
-        // The tracker still calls this restart running, and will until it ends.
-        // Marking it abandoned is what keeps the recovery-info poll from
+      // the backup/lifecycle pollers -- a permanent failure must not pin the
+      // card on its in-flight state forever.
+      this.consecutiveRecoveryPollFailures += 1;
+      if (this.consecutiveRecoveryPollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+        this.isRecoveryRunning = false;
+        // The tracker still calls this recovery running, and will until it
+        // ends. Marking it abandoned is what keeps the recovery-info poll from
         // re-attaching to it and starting this same bounded run over.
-        this.isRestartFollowAbandoned = true;
+        this.isRecoveryFollowAbandoned = true;
         // No longer "reload to find out": the card's own state poll is a
         // separate loop, still running against the same origin, and it is what
         // reports where the machine ended up.
-        this.restartError =
-          "Lost contact with the restart; its status could not be read for several minutes. " +
+        this.recoveryError =
+          "Lost contact with the recovery; its status could not be read for several minutes. " +
           "The machine's state above is still being checked.";
         this.deps.redraw();
         return;
       }
-      this.pollRestartSoon(agentId);
+      this.pollRecoverySoon(agentId);
       return;
     }
-    this.consecutiveRestartPollFailures = 0;
+    this.consecutiveRecoveryPollFailures = 0;
     if (payload.status === "RUNNING") {
-      this.pollRestartSoon(agentId);
+      this.pollRecoverySoon(agentId);
       return;
     }
-    this.isRestartRunning = false;
-    this.restartOutcomeCount += 1;
+    this.isRecoveryRunning = false;
+    this.recoveryOutcomeCount += 1;
     if (payload.is_done === true) {
-      this.isRestartSucceeded = true;
+      this.isRecoverySucceeded = true;
     } else {
-      this.restartError = payload.error ?? "The restart failed.";
+      this.recoveryError = payload.error ?? "The recovery failed.";
     }
     this.deps.redraw();
   }
 
-  private streamRestartLogs(agentId: string): void {
+  private streamRecoveryLogs(agentId: string): void {
     this.logSource?.close();
     const source = this.deps.openEventSource(
       `/api/v1/workspaces/operations/restart/${encodeURIComponent(agentId)}/logs`,

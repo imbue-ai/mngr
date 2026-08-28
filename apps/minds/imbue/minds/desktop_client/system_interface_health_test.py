@@ -9,6 +9,7 @@ import pytest
 
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
+from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.desktop_client.testing import make_sleep_tracker
@@ -152,7 +153,7 @@ def test_failure_run_wall_onset_is_recorded_then_cleared() -> None:
     assert before <= onset <= after
 
     # A restart supersedes the run, clearing the onset.
-    tracker.mark_restarting(aid, start_only=False)
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
     assert tracker.get_failure_run_started_wall_at(aid) is None
 
 
@@ -161,7 +162,7 @@ def test_outage_onset_spans_the_episode_rather_than_the_failure_run() -> None:
 
     Recovery compares discovery snapshots against this to decide whether what
     the resolver reports describes the current outage or the world before it.
-    The unattended restart fires on the stuck edge, within a second of the
+    The unattended start fires on the stuck edge, within a second of the
     machine wedging, and clears the failure *run* -- so a gate reading the run
     would go unguarded for the rest of the episode, since a new run only ever
     starts from HEALTHY. Only the machine answering again ends it.
@@ -177,9 +178,9 @@ def test_outage_onset_spans_the_episode_rather_than_the_failure_run() -> None:
     assert onset == tracker.get_failure_run_started_wall_at(aid)
 
     # Neither restart outcome ends the outage: the machine still is not answering.
-    tracker.mark_restarting(aid, start_only=True)
+    tracker.mark_recovering(aid, HostRecoveryKind.START)
     assert tracker.get_outage_started_wall_at(aid) == onset
-    tracker.mark_restart_failed(aid, "the start step failed")
+    tracker.mark_recovery_failed(aid, "the start step failed")
     assert tracker.get_outage_started_wall_at(aid) == onset
 
     # The machine answering does.
@@ -276,23 +277,23 @@ def test_repeated_failure_envelopes_enroll_once() -> None:
     assert seen == []
 
 
-def test_probe_failure_does_not_disturb_restarting_agent() -> None:
+def test_probe_failure_does_not_disturb_recovering_agent() -> None:
     """A failed probe while a restart is in flight must not flip the agent to STUCK."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_restarting(aid, start_only=False)
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
     tracker.record_probe_failure(aid)
     _sleep(_FAST_THRESHOLD + 0.02)
     tracker.record_probe_failure(aid)
 
-    assert tracker.get_health(aid) == AgentHealth.RESTARTING
-    assert seen == [AgentHealth.RESTARTING]
+    assert tracker.get_health(aid) == AgentHealth.RECOVERING
+    assert seen == [AgentHealth.RECOVERING]
 
 
-def test_mark_restarting_clears_pending_failure_run() -> None:
+def test_mark_recovering_clears_pending_failure_run() -> None:
     """Starting a restart abandons any in-progress probe-failure run.
 
     After the restart the agent recovers; no leftover run may then re-stick it.
@@ -302,7 +303,7 @@ def test_mark_restarting_clears_pending_failure_run() -> None:
 
     tracker.record_failure(aid)
     tracker.record_probe_failure(aid)
-    tracker.mark_restarting(aid, start_only=False)
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
     tracker.record_probe_success(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
 
@@ -312,26 +313,26 @@ def test_mark_restarting_clears_pending_failure_run() -> None:
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
 
 
-def test_success_clears_restarting() -> None:
+def test_success_clears_recovering() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
-    tracker.mark_restarting(aid, start_only=False)
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
     tracker.record_probe_success(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
 
 
-def test_mark_stuck_rolls_back_restarting_and_fires_callback() -> None:
-    """mark_stuck transitions RESTARTING -> STUCK and fires the change callback."""
+def test_mark_stuck_rolls_back_recovering_and_fires_callback() -> None:
+    """mark_stuck transitions RECOVERING -> STUCK and fires the change callback."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_restarting(aid, start_only=False)
-    assert tracker.get_health(aid) == AgentHealth.RESTARTING
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+    assert tracker.get_health(aid) == AgentHealth.RECOVERING
     tracker.mark_stuck(aid)
     assert tracker.get_health(aid) == AgentHealth.STUCK
-    assert seen == [AgentHealth.RESTARTING, AgentHealth.STUCK]
+    assert seen == [AgentHealth.RECOVERING, AgentHealth.STUCK]
 
 
 def test_mark_stuck_is_idempotent() -> None:
@@ -346,62 +347,62 @@ def test_mark_stuck_is_idempotent() -> None:
     assert seen == [AgentHealth.STUCK]
 
 
-def test_mark_restart_failed_sets_state_and_carries_error() -> None:
-    """mark_restart_failed transitions to RESTART_FAILED and stores the reason."""
+def test_mark_recovery_failed_sets_state_and_carries_error() -> None:
+    """mark_recovery_failed transitions to RECOVERY_FAILED and stores the reason."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_restarting(aid, start_only=False)
-    tracker.mark_restart_failed(aid, "mngr start exited 1")
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+    tracker.mark_recovery_failed(aid, "mngr start exited 1")
 
-    assert tracker.get_health(aid) == AgentHealth.RESTART_FAILED
-    assert tracker.get_last_restart_error(aid) == "mngr start exited 1"
-    assert seen == [AgentHealth.RESTARTING, AgentHealth.RESTART_FAILED]
+    assert tracker.get_health(aid) == AgentHealth.RECOVERY_FAILED
+    assert tracker.get_last_recovery_error(aid) == "mngr start exited 1"
+    assert seen == [AgentHealth.RECOVERING, AgentHealth.RECOVERY_FAILED]
 
 
-def test_mark_restart_failed_refires_with_updated_reason() -> None:
+def test_mark_recovery_failed_refires_with_updated_reason() -> None:
     """A second failure re-fires the callback even though the state is unchanged."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    tracker.mark_restart_failed(aid, "first reason")
-    tracker.mark_restart_failed(aid, "second reason")
+    tracker.mark_recovery_failed(aid, "first reason")
+    tracker.mark_recovery_failed(aid, "second reason")
 
-    assert tracker.get_last_restart_error(aid) == "second reason"
-    assert seen == [AgentHealth.RESTART_FAILED, AgentHealth.RESTART_FAILED]
+    assert tracker.get_last_recovery_error(aid) == "second reason"
+    assert seen == [AgentHealth.RECOVERY_FAILED, AgentHealth.RECOVERY_FAILED]
 
 
-def test_success_clears_restart_failed_and_error() -> None:
-    """A successful probe recovers a RESTART_FAILED agent and drops its error."""
+def test_success_clears_recovery_failed_and_error() -> None:
+    """A successful probe recovers a RECOVERY_FAILED agent and drops its error."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
 
-    tracker.mark_restart_failed(aid, "boom")
+    tracker.mark_recovery_failed(aid, "boom")
     tracker.record_probe_success(aid)
 
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
-    assert tracker.get_last_restart_error(aid) is None
+    assert tracker.get_last_recovery_error(aid) is None
 
 
-def test_mark_restarting_clears_prior_restart_error() -> None:
+def test_mark_recovering_clears_prior_recovery_error() -> None:
     """Starting a fresh restart attempt drops the previous failure reason."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
 
-    tracker.mark_restart_failed(aid, "old failure")
-    tracker.mark_restarting(aid, start_only=False)
+    tracker.mark_recovery_failed(aid, "old failure")
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
 
-    assert tracker.get_health(aid) == AgentHealth.RESTARTING
-    assert tracker.get_last_restart_error(aid) is None
+    assert tracker.get_health(aid) == AgentHealth.RECOVERING
+    assert tracker.get_last_recovery_error(aid) is None
 
 
-def test_get_last_restart_error_is_none_for_untracked_agent() -> None:
+def test_get_last_recovery_error_is_none_for_untracked_agent() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
-    assert tracker.get_last_restart_error(AgentId.generate()) is None
+    assert tracker.get_last_recovery_error(AgentId.generate()) is None
 
 
 def test_a_recorded_backend_outage_outlives_the_attempt_but_not_the_episode() -> None:
@@ -419,7 +420,7 @@ def test_a_recorded_backend_outage_outlives_the_attempt_but_not_the_episode() ->
     before = datetime.now(timezone.utc)
 
     tracker.record_backend_outage(aid, "docker", "Docker Desktop is manually paused.")
-    tracker.mark_restart_failed(aid, "This machine's backend is unreachable, so the restart could not run: paused")
+    tracker.mark_recovery_failed(aid, "This machine's backend is unreachable, so the restart could not run: paused")
 
     outage = tracker.get_backend_outage(aid)
     assert outage is not None
@@ -431,8 +432,8 @@ def test_a_recorded_backend_outage_outlives_the_attempt_but_not_the_episode() ->
     assert outage.observed_at >= before
 
     # The user retries: the attempt's own reason is superseded, the backend's is not.
-    tracker.mark_restarting(aid, start_only=False)
-    assert tracker.get_last_restart_error(aid) is None
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+    assert tracker.get_last_recovery_error(aid) is None
     assert tracker.get_backend_outage(aid) == outage
 
     # Dropped with the record itself, which is also the untracked-agent read.
@@ -440,37 +441,37 @@ def test_a_recorded_backend_outage_outlives_the_attempt_but_not_the_episode() ->
     assert tracker.get_backend_outage(aid) is None
 
 
-def test_get_restart_is_start_only_reflects_flavor_and_is_scoped_to_restarting() -> None:
-    """The restart flavor is readable only while RESTARTING and survives a deduped claim.
+def test_get_recovery_kind_reports_the_kind_and_is_scoped_to_recovering() -> None:
+    """The recovery kind is readable only while RECOVERING and survives a deduped claim.
 
-    The recovery page renders "Restarting your machine" vs "Loading machine"
-    off this flavor. A full manual bounce (``start_only=False``) must not be
-    rewritten by a deduped later start-only request, and the flavor must not leak
-    out of the restart (a subsequent HEALTHY reads None again).
+    The recovery card renders "Restarting <machine>..." vs "Reconnecting to
+    <machine>..." off it. A RESTART must not be rewritten by a deduped later
+    START, and the kind must not leak out of the episode (a subsequent HEALTHY
+    reads None again).
     """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
 
-    # Untracked / non-restarting agents report no flavor.
-    assert tracker.get_restart_is_start_only(aid) is None
+    # Untracked / non-recovering agents report no kind.
+    assert tracker.get_recovery_kind(aid) is None
 
-    # A full manual bounce wins the claim and records its flavor.
-    assert tracker.mark_restarting(aid, start_only=False) is True
-    assert tracker.get_restart_is_start_only(aid) is False
+    # A full manual bounce wins the claim and records itself as a RESTART.
+    assert tracker.mark_recovering(aid, HostRecoveryKind.RESTART) is True
+    assert tracker.get_recovery_kind(aid) is HostRecoveryKind.RESTART
 
-    # A deduped later request (returns False) must not rewrite the flavor of the
-    # restart already in flight -- the first winner's worker is the one running.
-    assert tracker.mark_restarting(aid, start_only=True) is False
-    assert tracker.get_restart_is_start_only(aid) is False
+    # A deduped later request (returns False) must not rewrite the kind of the
+    # episode already in flight -- the first winner's worker is the one running.
+    assert tracker.mark_recovering(aid, HostRecoveryKind.START) is False
+    assert tracker.get_recovery_kind(aid) is HostRecoveryKind.RESTART
 
-    # Scoped to RESTARTING: once recovered the flavor reads None again.
+    # Scoped to RECOVERING: once recovered the kind reads None again.
     tracker.record_probe_success(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
-    assert tracker.get_restart_is_start_only(aid) is None
+    assert tracker.get_recovery_kind(aid) is None
 
-    # A start-only entry dispatch records True.
-    assert tracker.mark_restarting(aid, start_only=True) is True
-    assert tracker.get_restart_is_start_only(aid) is True
+    # The unattended entry dispatch records a START.
+    assert tracker.mark_recovering(aid, HostRecoveryKind.START) is True
+    assert tracker.get_recovery_kind(aid) is HostRecoveryKind.START
 
 
 def test_remove_on_change_callback() -> None:
@@ -485,7 +486,7 @@ def test_remove_on_change_callback() -> None:
     tracker.remove_on_change_callback(cb)
     tracker.remove_on_change_callback(cb)
 
-    tracker.mark_restarting(aid, start_only=False)
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
     assert seen == []
 
 
@@ -494,43 +495,44 @@ def test_snapshot_all_omits_healthy_and_suspect_agents() -> None:
     a1 = AgentId.generate()
     a2 = AgentId.generate()
 
-    tracker.mark_restarting(a1, start_only=False)
+    tracker.mark_recovering(a1, HostRecoveryKind.RESTART)
     # a2 is suspect (enrolled by an envelope) but still HEALTHY.
     tracker.record_failure(a2)
 
-    assert tracker.snapshot_all() == {a1: AgentHealth.RESTARTING}
+    assert tracker.snapshot_all() == {a1: AgentHealth.RECOVERING}
 
 
-def test_snapshot_probe_targets_includes_suspect_stuck_and_restart_failed() -> None:
+def test_snapshot_probe_targets_includes_suspect_stuck_and_recovery_failed() -> None:
     """Probe targets are the agents the bg loop is responsible for recovering.
 
-    RESTARTING agents are deliberately excluded -- the restart worker owns the
-    recovery decision for those, since a bg probe during the gap between
-    ``mark_restarting`` and the worker's ``mngr stop`` would observe the
-    pre-restart system interface as still healthy and prematurely flip the
-    agent back to HEALTHY.
+    RECOVERING agents are deliberately excluded -- the recovery worker owns the
+    decision for those, via the readiness probe it runs once its commands
+    return. A RESTART is where a second opinion does damage: a bg probe during
+    the gap between ``mark_recovering`` and the worker's ``mngr stop`` would
+    observe the pre-stop system interface as still healthy and prematurely flip
+    the agent back to HEALTHY.
     """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     suspect = AgentId.generate()
     stuck = AgentId.generate()
-    restart_failed = AgentId.generate()
-    restarting = AgentId.generate()
+    recovery_failed = AgentId.generate()
+    recovering = AgentId.generate()
     recovered = AgentId.generate()
 
     tracker.record_failure(suspect)
     tracker.mark_stuck(stuck)
-    tracker.mark_restart_failed(restart_failed, "boom")
-    tracker.mark_restarting(restarting, start_only=False)
+    tracker.mark_recovery_failed(recovery_failed, "boom")
+    tracker.mark_recovering(recovering, HostRecoveryKind.RESTART)
     tracker.record_failure(recovered)
     tracker.record_probe_success(recovered)
 
-    assert tracker.snapshot_probe_targets() == frozenset({suspect, stuck, restart_failed})
+    assert tracker.snapshot_probe_targets() == frozenset({suspect, stuck, recovery_failed})
 
 
-def test_snapshot_probe_targets_excludes_restarting_agents() -> None:
-    """RESTARTING agents are never probed by the background loop.
+def test_snapshot_probe_targets_excludes_recovering_agents() -> None:
+    """RECOVERING agents are never probed by the background loop.
 
-    Regression for the race where a bg probe between ``mark_restarting`` and
+    Regression for the race where a bg probe between ``mark_recovering`` and
     the restart worker's ``mngr stop`` actually tearing down the backend would
     see the old system interface as healthy and call ``record_probe_success``,
     flipping the agent prematurely to HEALTHY -- which the recovery page then
@@ -539,7 +541,7 @@ def test_snapshot_probe_targets_excludes_restarting_agents() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
     aid = AgentId.generate()
 
-    tracker.mark_restarting(aid, start_only=False)
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
 
     assert aid not in tracker.snapshot_probe_targets()
     # ...and even a prior failure envelope (which would normally enroll the
@@ -634,8 +636,8 @@ def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
     tracker.add_on_change_callback(bad_cb)
     tracker.add_on_change_callback(good_cb)
 
-    tracker.mark_restarting(aid, start_only=False)
-    assert seen == [AgentHealth.RESTARTING]
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+    assert seen == [AgentHealth.RECOVERING]
 
 
 # ---------------------------------------------------------------------------
@@ -693,8 +695,8 @@ def test_end_create_attempt_grace_restores_normal_probe_accounting() -> None:
 def test_a_machine_that_answers_again_is_no_longer_a_deliberate_stop() -> None:
     """A probe success drops the intentional-stop marker.
 
-    Entering a stopped machine from its row dispatches a start-only restart,
-    which never goes through the in-app start that clears the marker. Without
+    Entering a stopped machine from its row dispatches a start, which never
+    goes through the in-app start that clears the marker. Without
     this, such a machine would run for the rest of the process's life with
     unattended recovery silently switched off.
     """
@@ -951,7 +953,7 @@ def test_the_residual_cause_takes_over_from_a_cause_that_has_fallen_silent() -> 
     Both device-side causes are momentary: a pool refills, a socket that would
     not bind binds on the next try. If such a cause deferred forever, one blip
     during a machine outage would leave the card telling the user their machine
-    is probably fine and withholding the restart that would fix it -- the same
+    is probably fine and withholding the start that would fix it -- the same
     misdiagnosis this decomposition exists to end, only pointed the other way.
     The forward keeps reporting a cause that is still happening, so silence for
     the deference window is what says it has stopped.
@@ -1053,13 +1055,13 @@ def test_a_no_op_start_is_recorded_and_superseded_by_the_next_attempt() -> None:
     """
     tracker = SystemInterfaceHealthTracker()
     aid = AgentId()
-    assert tracker.is_restart_a_no_op(aid) is False
+    assert tracker.is_recovery_a_no_op(aid) is False
 
-    tracker.record_restart_started_nothing(aid)
-    assert tracker.is_restart_a_no_op(aid) is True
+    tracker.record_recovery_started_nothing(aid)
+    assert tracker.is_recovery_a_no_op(aid) is True
 
-    tracker.mark_restarting(aid, start_only=False)
-    assert tracker.is_restart_a_no_op(aid) is False
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+    assert tracker.is_recovery_a_no_op(aid) is False
 
 
 # -- the envelope-to-tracker policy --

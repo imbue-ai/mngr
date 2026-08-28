@@ -9,7 +9,7 @@
 // the loss of every machine, so it names itself rather than the stuck machine
 // it produces -- restarting that machine would not help.
 
-import type { DiscoveryHealth, EnvironmentCondition, WorkspaceHealth } from "../../models/health";
+import type { DiscoveryHealth, EnvironmentCondition, RecoveryKind, WorkspaceHealth } from "../../models/health";
 
 /** What an action asks the shell to do. The views bind these; the decision
  * itself stays free of routing and IPC. */
@@ -82,10 +82,10 @@ export interface NoticeBandContext {
    * "UNKNOWN" while nothing has been measured, which withholds every blame
    * below it rather than clearing the device. */
   deviceEnvironment?: EnvironmentCondition;
-  /** The shape of the restart in flight, from the health frame: false is the
-   * user's own stop+start bounce, true the app's start-only dispatch, null no
-   * restart to describe. */
-  isRestartStartOnly?: boolean | null;
+  /** Which recovery is in flight, from the health frame: "restart" is the
+   * user's own stop+start bounce, "start" the app's unattended dispatch, null
+   * no recovery to describe. */
+  recoveryKind?: RecoveryKind | null;
   /** False for a machine on this device, which the network cannot explain. */
   isWorkspaceNetworkDependent?: boolean;
   /** This one connection failed on this device, on a network that works. */
@@ -122,7 +122,7 @@ export function noticeBandFor(
     isRestartAppAvailable = true,
     unreachableProviderLabel = null,
     deviceEnvironment = "NONE",
-    isRestartStartOnly = null,
+    recoveryKind = null,
     isWorkspaceNetworkDependent = true,
     isDeviceCannotConnect = false,
   } = context;
@@ -136,18 +136,18 @@ export function noticeBandFor(
   // lost contact", only correctly attributed. It speaks over a healthy machine
   // too, offering nothing: there is no recovery card to open. The one exception
   // is a restart the user asked for -- their own stop+start bounce narrates
-  // itself, since there is a restart to report and the waiting state would be
-  // false. The app's own start-only dispatch is not that: it is entered
-  // unasked, within seconds of any network flap, and lasts as long as the
-  // network is down, which is precisely when the device's condition is the
-  // explanation the user needs.
+  // itself, since there is a recovery to report and the waiting state would be
+  // false. The app's own unattended start is not that: it is entered unasked,
+  // within seconds of any network flap, and lasts as long as the network is
+  // down, which is precisely when the device's condition is the explanation
+  // the user needs.
   //
   // And it is silent over a machine that runs on this device: a docker
   // container answers over loopback with the wifi off, so a dead network
   // explains nothing about its outage. Displacing its recovery notice would
   // blame the network for a machine the network cannot touch, and send the
-  // user to a card for a restart that would have worked.
-  const isUserBounceRunning = workspaceHealth === "restarting" && isRestartStartOnly === false;
+  // user to a card for a recovery that would have worked.
+  const isUserBounceRunning = workspaceHealth === "recovering" && recoveryKind === "restart";
   const condition: EnvironmentCondition =
     isUserBounceRunning || !isWorkspaceNetworkDependent ? "NONE" : deviceEnvironment;
   // The three explanations in rank order, each one line. They differ only in
@@ -185,7 +185,7 @@ export function noticeBandFor(
       action: workspaceHealth !== "healthy" ? { label: "Open recovery", kind: "open-recovery" } : null,
     };
   }
-  if (workspaceHealth === "restart_failed") {
+  if (workspaceHealth === "recovery_failed") {
     return {
       key: "workspace-restart-failed",
       variant: "error",
@@ -196,7 +196,7 @@ export function noticeBandFor(
       action: { label: "Open recovery", kind: "open-recovery" },
     };
   }
-  if (workspaceHealth === "stuck" || workspaceHealth === "restarting") {
+  if (workspaceHealth === "stuck" || workspaceHealth === "recovering") {
     return {
       key: "workspace-recovering",
       variant: "warn",

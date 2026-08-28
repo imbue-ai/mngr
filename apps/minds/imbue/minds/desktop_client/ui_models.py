@@ -34,6 +34,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 
 # Bumped on ANY breaking change to the models in this module. The server
 # inlines it into the page bootstrap and sends it again in every connection's
@@ -42,7 +43,7 @@ from imbue.minds.desktop_client.system_interface_health import AgentHealth
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 7
+UI_SCHEMA_VERSION: int = 8
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -251,21 +252,21 @@ class UiHealthMessage(FrozenModel):
     type: Literal["health"] = "health"
     agent_id: str = Field(description="Workspace agent id")
     status: AgentHealth = Field(description="Current health classification")
-    error: str | None = Field(default=None, description="Last restart error, present for RESTART_FAILED")
-    is_restart_a_no_op: bool = Field(
+    error: str | None = Field(default=None, description="Last recovery error, present for RECOVERY_FAILED")
+    is_recovery_a_no_op: bool = Field(
         default=False,
         description=(
             "Whether this episode's dispatched start reported it booted nothing. A row that reads "
-            "RESTART_FAILED with this set has no failed restart behind it -- the machine simply never "
+            "RECOVERY_FAILED with this set has no failed restart behind it -- the machine simply never "
             "answered -- so the badge says so rather than blaming a restart that never ran."
         ),
     )
-    is_restart_start_only: bool | None = Field(
+    recovery_kind: HostRecoveryKind | None = Field(
         default=None,
         description=(
-            "Whether an in-flight restart skips the stop step, or None outside one. A full stop+start "
-            "bounce only ever comes from the user's own click, so False is what makes 'Restarting' an "
-            "honest claim; anything else may no-op against a machine that is already up. Carried here "
+            "Which recovery is in flight, or None outside one. Only RESTART stops the machine, and it "
+            "only ever comes from the user's own click, so it is the one that makes 'Restarting' an "
+            "honest claim; a START may no-op against a machine that is already up. Carried here "
             "because the machines list has to make the same call the recovery card does, off the same "
             "evidence -- the recovery-info route already reports it, and two surfaces reading one "
             "episode must not describe it differently."

@@ -355,9 +355,9 @@ class EnvironmentBlock(UpperCaseStrEnum):
     """Why this *device* -- not the machine -- is why nothing can be reached.
 
     Carried on a workspace's health state while it applies, so the recovery
-    surfaces can name the real condition instead of narrating a restart that was
+    surfaces can name the real condition instead of narrating a recovery that was
     never dispatched. ``NONE`` is the normal state and the only one that permits
-    an unattended restart.
+    an unattended start.
     """
 
     NONE = auto()

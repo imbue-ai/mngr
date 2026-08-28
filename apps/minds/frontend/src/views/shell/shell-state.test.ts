@@ -948,15 +948,15 @@ describe("recovery card openness", () => {
 
   it("stays shut for every state but the one that means a restart is worth offering", () => {
     displaying(shell, AGENT);
-    for (const health of ["stuck", "restarting", "healthy"] as const) {
+    for (const health of ["stuck", "recovering", "healthy"] as const) {
       shell.handleHealthChanged(AGENT, health, false);
       expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
     }
   });
 
-  it("raises itself on the edge into restart_failed for the displayed machine", () => {
+  it("raises itself on the edge into recovery_failed for the displayed machine", () => {
     displaying(shell, AGENT);
-    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
     expect(shell.isRecoveryModalAutoRaised(AGENT)).toBe(true);
   });
@@ -966,7 +966,7 @@ describe("recovery card openness", () => {
     // is not a transition, so the band reports it and "Open recovery" is one
     // click away -- a card taking over a window the user just opened is not.
     displaying(shell, AGENT);
-    shell.handleHealthChanged(AGENT, "restart_failed", true);
+    shell.handleHealthChanged(AGENT, "recovery_failed", true);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 
@@ -975,7 +975,7 @@ describe("recovery card openness", () => {
     // that came back on its own would otherwise leave a window reading
     // "unresponsive" over a working machine.
     displaying(shell, AGENT);
-    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
     shell.handleHealthChanged(AGENT, "healthy", false);
 
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
@@ -985,7 +985,7 @@ describe("recovery card openness", () => {
     // A machine that recovered while the socket was down replays no frame at
     // all, so nothing else would ever drop the card.
     displaying(shell, AGENT);
-    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
 
     shell.handleSnapshotStart();
@@ -1012,7 +1012,7 @@ describe("recovery card openness", () => {
 
   it("does not raise itself for a machine the window is not showing", () => {
     displaying(shell, "agent-cd34");
-    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 
@@ -1025,7 +1025,7 @@ describe("recovery card openness", () => {
       type: "discovery_health",
       state: "blocked",
     });
-    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 
@@ -1039,12 +1039,12 @@ describe("recovery card openness", () => {
   });
 
   it("does not re-raise itself over a card the user is already looking at", () => {
-    // A second restart_failed frame -- a fresh failure reason on the same
+    // A second recovery_failed frame -- a fresh failure reason on the same
     // machine -- must not convert a deliberately opened card into one that
     // will dismiss itself under the user.
     displaying(shell, AGENT);
     shell.openRecoveryModal(AGENT);
-    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
     expect(shell.isRecoveryModalAutoRaised(AGENT)).toBe(false);
   });
 
@@ -1112,7 +1112,7 @@ describe("recovery card openness", () => {
       reload: () => (reloadCount += 1),
     };
 
-    shell.handleHealthChanged(AGENT, "restart_failed", false);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
     shell.handleHealthChanged(AGENT, "healthy", false);
 
     expect(reloadCount).toBe(0);

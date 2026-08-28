@@ -1152,8 +1152,8 @@ function handleShellEvent(evt, senderBundle) {
     }
   } else if (evt.type === 'workspace_stopped') {
     // The page navigates its own window home; main closes any EXTRA windows
-    // still open to the stopped workspace. Skip while mid-restart.
-    if (evt.agent_id && systemInterfaceStatusByAgent.get(String(evt.agent_id)) !== 'restarting') {
+    // still open to the stopped workspace. Skip while mid-recovery.
+    if (evt.agent_id && systemInterfaceStatusByAgent.get(String(evt.agent_id)) !== 'recovering') {
       detachWindowsForWorkspace(String(evt.agent_id));
     }
   } else if (evt.type === 'notifications_count') {

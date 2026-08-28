@@ -107,6 +107,7 @@ from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugi
 from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publisher
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api import create_ui_blueprint
 from imbue.minds.desktop_client.ui_api import serve_spa_index
@@ -163,10 +164,10 @@ def _system_interface_status_payload(
     agent_id: str,
     status: AgentHealth,
 ) -> dict[str, str]:
-    """Build a ``system_interface_status`` SSE payload, including the failure reason for RESTART_FAILED."""
+    """Build a ``system_interface_status`` SSE payload, including the failure reason for RECOVERY_FAILED."""
     payload: dict[str, str] = {"type": "system_interface_status", "agent_id": agent_id, "status": status.value}
-    if status == AgentHealth.RESTART_FAILED and tracker is not None:
-        error = tracker.get_last_restart_error(AgentId(agent_id))
+    if status == AgentHealth.RECOVERY_FAILED and tracker is not None:
+        error = tracker.get_last_recovery_error(AgentId(agent_id))
         if error is not None:
             payload["error"] = error
     return payload
@@ -1294,7 +1295,7 @@ def _build_requests_payload(
 #
 # The probe loop's own timeout is all that lives here. The recovery page's route
 # is registered with the rest of the SPA routes further down, and its data calls
-# are served elsewhere: the restart tiers by the versioned surface (POST
+# are served elsewhere: the recovery actions by the versioned surface (POST
 # /api/v1/workspaces/<id>/restart with a ``scope``), and the polled verdicts the
 # card renders by ``ui_api_lifecycle``'s recovery-info read. Both run off
 # ``workspace_recovery.py`` and the health tracker, with no command of their own.
@@ -2119,26 +2120,26 @@ def _create_ui_state_publisher(
 def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, status: AgentHealth) -> UiHealthMessage:
     """The channel twin of ``_system_interface_status_payload``."""
     error: str | None = None
-    is_restart_a_no_op = False
-    is_restart_start_only: bool | None = None
-    if status == AgentHealth.RESTART_FAILED:
-        error = tracker.get_last_restart_error(AgentId(agent_id))
+    is_recovery_a_no_op = False
+    recovery_kind: HostRecoveryKind | None = None
+    if status == AgentHealth.RECOVERY_FAILED:
+        error = tracker.get_last_recovery_error(AgentId(agent_id))
         # Only read on the terminal state, which is the only one whose copy
         # turns on it -- everywhere else the episode is still in progress and
         # the start may yet report.
-        is_restart_a_no_op = tracker.is_restart_a_no_op(AgentId(agent_id))
-    if status == AgentHealth.RESTARTING:
-        # The shape of a restart is news only while one is running, which is the
+        is_recovery_a_no_op = tracker.is_recovery_a_no_op(AgentId(agent_id))
+    if status == AgentHealth.RECOVERING:
+        # Which recovery it is is news only while one is running, which is the
         # only state whose copy turns on it. The tracker gates it the same way,
         # so a frame that raced the episode's end reads None and the surfaces
         # fall back to the weaker claim rather than to a stale one.
-        is_restart_start_only = tracker.get_restart_is_start_only(AgentId(agent_id))
+        recovery_kind = tracker.get_recovery_kind(AgentId(agent_id))
     return UiHealthMessage(
         agent_id=agent_id,
         status=status,
         error=error,
-        is_restart_a_no_op=is_restart_a_no_op,
-        is_restart_start_only=is_restart_start_only,
+        is_recovery_a_no_op=is_recovery_a_no_op,
+        recovery_kind=recovery_kind,
     )
 
 
@@ -2568,13 +2569,15 @@ def start_system_interface_health_probe_loop(
     """Start a background thread that probes suspect / non-HEALTHY agents.
 
     For each agent the tracker reports as a probe target (suspect agents
-    enrolled by a failure envelope, plus STUCK / RESTARTING / RESTART_FAILED
-    agents), the thread polls the plugin's per-agent subdomain every
-    ``_HEALTH_PROBE_INTERVAL_SECONDS``. A 200 response flips the tracker back
-    to HEALTHY; any other result is reported as a probe failure, and a run of
-    probe failures lasting ``stuck_threshold_seconds`` transitions a suspect
-    agent to STUCK. Either way the on-change callback feeding the SSE stream
-    fires. The thread silently no-ops when there are no probe targets.
+    enrolled by a failure envelope, plus STUCK / RECOVERY_FAILED agents -- a
+    RECOVERING one belongs to its own recovery worker, see
+    ``snapshot_probe_targets``), the thread polls the plugin's per-agent
+    subdomain every ``_HEALTH_PROBE_INTERVAL_SECONDS``. A 200 response flips
+    the tracker back to HEALTHY; any other result is reported as a probe
+    failure, and a run of probe failures lasting ``stuck_threshold_seconds``
+    transitions a suspect agent to STUCK. Either way the on-change callback
+    feeding the SSE stream fires. The thread silently no-ops when there are no
+    probe targets.
 
     This loop is the single authority on STUCK: a ``system_interface_backend_failure``
     envelope only enrolls an agent as suspect, and STUCK is reached solely

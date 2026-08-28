@@ -9,7 +9,7 @@
 // is worse than no action offered.
 
 import type { UiWorkspaceEntry } from "../../channel/messages";
-import type { DiscoveryHealth, WorkspaceHealth } from "../../models/health";
+import type { DiscoveryHealth, RecoveryKind, WorkspaceHealth } from "../../models/health";
 import type { MindLiveness } from "../../models/create";
 
 export interface MindControls {
@@ -71,36 +71,36 @@ export function rowClickActionFor(
  * the misdiagnosis the whole decomposition exists to end, surviving in the one
  * surface that never read the verdict.
  *
- * "restarting" covers two different things: the user's own full bounce, and the
- * start-only dispatch the app fires at a machine that stopped answering. Only
+ * The "recovering" wire state covers two different things: the user's own full
+ * bounce, and the start the app fires at a machine that stopped answering. Only
  * the first is a restart. The second is idempotent and no-ops against a host
  * that is already up, so calling it one tells the user their work was
  * interrupted when nothing happened to the machine -- it is reported as the
- * connection being re-established instead. `isRestartStartOnly` is the same
- * evidence the recovery card picks its heading from, read here so the two
- * surfaces cannot describe one episode differently; its null (no restart the
- * tracker can describe) takes the weaker reading, as the card does. (The caller
+ * connection being re-established instead. `recoveryKind` is the same evidence
+ * the recovery card picks its heading from, read here so the two surfaces
+ * cannot describe one episode differently; its null (no recovery the tracker
+ * can describe) takes the weaker reading, as the card does. (The caller
  * suppresses the badge for a machine whose liveness reads STOPPED or
  * transitional, which is where the card says "Bringing ... back online"
  * instead.)
  *
- * "restart_failed" is an overstatement one step later: when the dispatched
- * start reported it booted no host, the machine was up throughout -- it was
- * never taken down and brought back, so calling that a failed restart describes
- * something the user did not experience. It reads as a machine that never
- * answered instead.
+ * The last reading, "recovery_failed", is where the badge would overstate one
+ * step later: when the dispatched start reported it booted no host, the machine
+ * was up throughout -- it was never taken down and brought back, so a "Restart
+ * failed" badge describes something the user did not experience. It reads as a
+ * machine that never answered instead.
  */
 export function healthBadgeLabelFor(
   health: WorkspaceHealth,
-  isRestartANoOp: boolean,
-  isRestartStartOnly: boolean | null,
+  isRecoveryANoOp: boolean,
+  recoveryKind: RecoveryKind | null,
   isDeviceCannotConnect: boolean,
 ): string | null {
   if (health === "healthy") return null;
   if (isDeviceCannotConnect) return "Can't connect from this device";
   if (health === "stuck") return "Server not responding";
-  if (health === "restarting") return isRestartStartOnly === false ? "Restarting..." : "Reconnecting...";
-  return isRestartANoOp ? "Not responding" : "Restart failed";
+  if (health === "recovering") return recoveryKind === "restart" ? "Restarting..." : "Reconnecting...";
+  return isRecoveryANoOp ? "Not responding" : "Restart failed";
 }
 
 /** The location badge of a remote row: a cloud workspace is named by its

@@ -1246,7 +1246,7 @@ def test_a_machine_coming_back_tells_every_window_to_rebuild_its_view(
     While the machine was down every window went on painting whatever it served
     -- an error page, or a half-loaded one -- and nothing about the recovery
     changes the content frame's URL, so that dead page would sit there until the
-    user navigated away and back. The unattended restart usually succeeds
+    user navigated away and back. The unattended start usually succeeds
     without ever raising a recovery card, so the card cannot be what covers this.
     """
     agent_id = AgentId()
@@ -1260,7 +1260,7 @@ def test_a_machine_coming_back_tells_every_window_to_rebuild_its_view(
     window_queue = get_state(client.application).ui_channel_broadcaster.register()
 
     # The app this client is (one with a concurrency group) also runs the
-    # unattended dispatch off the same stuck edge, and its restart would race
+    # unattended dispatch off the same stuck edge, and its start would race
     # this test to the machine's health. Marked as deliberately stopped, which
     # is what production uses to keep that dispatch off a machine; the probe
     # success below clears the mark as it fires the recovery.
@@ -2505,8 +2505,8 @@ def test_workspace_restart_spawn_failure_returns_503_and_logs_error(tmp_path: Pa
     """A restart whose worker thread cannot be spawned fails closed with one error log.
 
     The spawn raises when the concurrency group is shutting down (simulated here
-    with an already-exited group). The route has already claimed RESTARTING, so
-    it must roll that into RESTART_FAILED, fail the registry operation (so the
+    with an already-exited group). The route has already claimed RECOVERING, so
+    it must roll that into RECOVERY_FAILED, fail the registry operation (so the
     operation poller doesn't hang), return 503 -- and log at error level: this is
     the fifth restart-failure branch that must reach error reporting (Principle
     3: the recovery surface is quiet).
@@ -2530,7 +2530,7 @@ def test_workspace_restart_spawn_failure_returns_503_and_logs_error(tmp_path: Pa
         )
 
     assert response.status_code == 503
-    assert tracker.get_health(agent_id) == AgentHealth.RESTART_FAILED
+    assert tracker.get_health(agent_id) == AgentHealth.RECOVERY_FAILED
     record = get_state(client.application).workspace_operation_registry.get(agent_id)
     assert record is not None and record.status == WorkspaceOperationStatus.FAILED
     assert len(error_records) == 1, error_records
@@ -2637,7 +2637,7 @@ def test_restart_operation_status_reports_registry_record(tmp_path: Path) -> Non
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
 
     running = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
     assert running["kind"] == "restart"
@@ -2671,7 +2671,7 @@ def test_typed_operation_routes_report_independently_for_one_agent_id(tmp_path: 
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
     registry.complete(agent_id)
 
     # Write an on-disk destroy record (a live pid -> RUNNING) for the same id,
@@ -2698,7 +2698,7 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
     agent_id = AgentId()
     client = _client_with_workspace(tmp_path, agent_id)
     registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
     registry.append_log(agent_id, "restarting now")
     registry.complete(agent_id)
 
@@ -2788,22 +2788,22 @@ def test_backup_service_update_unavailable_without_concurrency_group_returns_503
 def test_backup_service_update_conflicts_with_a_running_operation(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    # Any RUNNING operation for the workspace (here a restart) makes a second
-    # dispatch a 409 instead of stacking a second worker.
+    # Any RUNNING operation for the workspace (here a host recovery) makes a
+    # second dispatch a 409 instead of stacking a second worker.
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
     registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
 
     assert response.status_code == 409
-    assert "restart is already in progress" in json.loads(response.data)["error"]
+    assert "A machine recovery is already in progress" in json.loads(response.data)["error"]
     # The dispatch did not replace the running record.
     record = registry.get(agent_id)
     assert record is not None
-    assert record.kind == WorkspaceOperationKind.RESTART
+    assert record.kind == WorkspaceOperationKind.RECOVERY
 
 
 def test_workspace_restart_conflicts_with_a_running_backup_operation(
@@ -2845,7 +2845,7 @@ def test_backup_service_update_cancel_without_an_update_returns_404(tmp_path: Pa
     # A non-backup-update record (a restart) must not be cancellable through
     # the backup route either.
     registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
     assert client.post(cancel_url, headers=_auth_header()).status_code == 404
 
 
@@ -3125,7 +3125,7 @@ def test_backup_service_disable_conflicts_with_a_running_operation(
     resolver = make_resolver_with_data(make_agents_json(agent_id))
     client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group)
     registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
 
     response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/disable", headers=_auth_header())
 
@@ -3143,7 +3143,7 @@ def test_backup_operation_status_unknown_or_wrong_kind_returns_404(tmp_path: Pat
     # Kind segregation: a restart record is not visible through the backup
     # operations endpoint.
     registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RESTART, datetime.now(timezone.utc))
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
     assert client.get(status_url, headers=_auth_header()).status_code == 404
 
 

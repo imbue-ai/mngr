@@ -43,7 +43,7 @@ export function RecoveryModal(): m.Component<RecoveryModalAttrs> {
       bindModel(vnode.attrs.workspaceAnyId);
     },
     // The shell renders this at a fixed position in an unkeyed list, so moving
-    // between two machines that are both restart_failed keeps this instance --
+    // between two machines that are both recovery_failed keeps this instance --
     // and without a rebind it would keep showing, and restarting, the machine
     // the user just left.
     onbeforeupdate(vnode) {

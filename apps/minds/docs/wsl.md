@@ -84,7 +84,7 @@ its sshd, while the agent processes (tmux, supervisord, the system
 interface) exist only in tmux sessions that mngr recreates. A raw
 `docker start` leaves the workspace half-up -- reachable at the container
 level but serving nothing -- until minds' health tracker marks it STUCK and
-its recovery flow performs the proper restart a few minutes later.
+its recovery flow runs that `mngr start` for you a few minutes later.
 
 ## Gotchas (mostly for headless / remote setups)
 

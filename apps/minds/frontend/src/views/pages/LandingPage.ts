@@ -246,8 +246,8 @@ export const LandingPage: m.ClosureComponent = () => {
     const healthStore = getAppContext().stores.health;
     const label = healthBadgeLabelFor(
       healthStore.statusFor(entry.id),
-      healthStore.isRestartANoOpFor(entry.id),
-      healthStore.isRestartStartOnlyFor(entry.id),
+      healthStore.isRecoveryANoOpFor(entry.id),
+      healthStore.recoveryKindFor(entry.id),
       entry.is_device_cannot_connect ?? false,
     );
     if (label === null) return null;

@@ -26,7 +26,7 @@ const ANSWERING: RecoveryInfo = {
   workspace_name: "alpha",
   health: "healthy",
   health_error: "",
-  is_restart_start_only: null,
+  recovery_kind: null,
   ssh_command: "",
   is_host_offline: false,
   device_environment: "NONE",
@@ -96,7 +96,7 @@ describe("recovery page return", () => {
     // is needed here" on a surface with no way into the machine it is talking
     // about, and the reader has to go Home and back in by hand.
     const { routeSets } = withShell();
-    const vnode = pageShowing(ANSWERING, { model: { restartError: "Start step of host restart failed" } });
+    const vnode = pageShowing(ANSWERING, { model: { recoveryError: "Start step of host restart failed" } });
 
     runUpdate(vnode);
 
@@ -106,8 +106,8 @@ describe("recovery page return", () => {
 
   it("stays put while the restart is still running", () => {
     const { routeSets } = withShell();
-    // The tracker reports restarting; the last good reading is still healthy.
-    runUpdate(pageShowing(ANSWERING, { model: { isRestartRunning: true } }));
+    // The tracker reports recovering; the last good reading is still healthy.
+    runUpdate(pageShowing(ANSWERING, { model: { isRecoveryRunning: true } }));
     expect(routeSets).toEqual([]);
   });
 
@@ -203,6 +203,6 @@ describe("recovery page exit button", () => {
     withShell();
     expect(panelAttrs(pageShowing({ ...ANSWERING, health: "stuck" })).onEnterMachine).toBeNull();
     expect(panelAttrs(pageShowing({ ...ANSWERING, is_host_offline: true })).onEnterMachine).toBeNull();
-    expect(panelAttrs(pageShowing(ANSWERING, { model: { isRestartRunning: true } })).onEnterMachine).toBeNull();
+    expect(panelAttrs(pageShowing(ANSWERING, { model: { isRecoveryRunning: true } })).onEnterMachine).toBeNull();
   });
 });

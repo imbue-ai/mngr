@@ -70,9 +70,9 @@ _DEFAULT_REFRESH_SETTLE_SECONDS: Final[float] = 5.0
 class WorkspaceViewRefresher(MutableModel):
     """Recovery callback that tells every window to rebuild a recovered machine's view.
 
-    Hung on the recovery rather than on the restart that usually causes it, so
-    it also covers a machine that came back some other way: a cold boot that
-    finished on its own, or the user starting a machine they had stopped.
+    Hung on the recovery rather than on the unattended start that usually causes
+    it, so it also covers a machine that came back some other way: a cold boot
+    that finished on its own, or the user starting a machine they had stopped.
 
     Constructed without a detector, it publishes every refresh immediately --
     the behaviour without any environment signals at all, and the same

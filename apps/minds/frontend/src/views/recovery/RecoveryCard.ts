@@ -1,6 +1,7 @@
 // The machine-recovery card: what is wrong with the machine, the restart that
 // fixes it, a way to report it, and the troubleshooting nobody needs until
-// they do.
+// they do. The restart is the card's own -- the app never bounces a machine on
+// its own, it only starts one.
 //
 // One card, one state machine, two shells. It renders as a modal over a
 // machine that is still on screen -- there is something worth keeping behind
@@ -12,8 +13,8 @@
 // titlebar above the page is the way out.
 //
 // The card describes the machine's condition, not the history of what has
-// already been tried. The app restarts a wedged machine on its own, so an
-// account of a failed restart would usually be describing an event the user
+// already been tried. The app starts a wedged machine on its own, so an
+// account of a failed recovery would usually be describing an event the user
 // never caused and never saw.
 
 import m from "mithril";
@@ -24,14 +25,14 @@ import { DialogCloseButton } from "../components/Modal";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
 import type { RecoveryModel } from "../../models/backups";
-import type { EnvironmentCondition } from "../../models/health";
+import type { EnvironmentCondition, RecoveryKind } from "../../models/health";
 import { electronBridge } from "../../electron-bridge";
 
 /**
  * The card's heading, which is also its verdict.
  *
  * The unresponsive wording is reserved for the machine the app has actually
- * tried and failed to bring back (restart_failed). Everything else is still
+ * tried and failed to bring back (recovery_failed). Everything else is still
  * being worked out, and says so -- claiming a machine is broken while we are
  * still checking would be putting words in the classifier's mouth.
  *
@@ -44,28 +45,28 @@ export function recoveryHeading(
   machineName: string,
   health: string,
   isHostOffline: boolean,
-  isRestartStartOnly: boolean | null = null,
+  recoveryKind: RecoveryKind | null = null,
 ): string {
-  if (health === "restarting") {
-    // What "restarting" is allowed to claim depends on what is known to be
-    // happening. A machine whose host reads stopped is genuinely being brought
-    // back up, and a full stop+start bounce only ever comes from the user's own
-    // click -- their action makes the claim honest. Everything else is a
-    // start-only dispatch against a machine the app cannot reach, which may
-    // well no-op: it is reconnecting, not restarting, and saying otherwise
-    // tells the user their work was interrupted when it was not.
+  if (health === "recovering") {
+    // What the in-flight state is allowed to claim depends on which recovery is
+    // running. A machine whose host reads stopped is genuinely being brought
+    // back up, and a "restart" only ever comes from the user's own click --
+    // their action makes the claim honest. Everything else is a start against a
+    // machine the app cannot reach, which may well no-op: it is reconnecting,
+    // not restarting, and saying otherwise tells the user their work was
+    // interrupted when it was not.
     if (isHostOffline) return `Bringing ${machineName} back online...`;
-    if (isRestartStartOnly === false) return `Restarting ${machineName}...`;
+    if (recoveryKind === "restart") return `Restarting ${machineName}...`;
     return `Reconnecting to ${machineName}...`;
   }
-  if (health === "restart_failed") return `${machineName} unresponsive`;
+  if (health === "recovery_failed") return `${machineName} unresponsive`;
   if (isHostOffline) return `${machineName} is stopped.`;
   if (health === "healthy") return `${machineName} is responding again.`;
   return `${machineName} isn't responding yet.`;
 }
 
 /**
- * What the disabled action button says while a restart is in flight.
+ * What the disabled action button says while a recovery is in flight.
  *
  * Reads the same evidence as :func:`recoveryHeading` and for the same reason.
  * The button sits directly under the heading, so a fixed "Restarting..." there
@@ -73,15 +74,15 @@ export function recoveryHeading(
  * describing one episode two ways, which is the disagreement this whole
  * decomposition exists to end, at the shortest range it can happen.
  */
-export function recoveryBusyActionLabel(isHostOffline: boolean, isRestartStartOnly: boolean | null): string {
+export function recoveryBusyActionLabel(isHostOffline: boolean, recoveryKind: RecoveryKind | null): string {
   if (isHostOffline) return "Starting...";
-  if (isRestartStartOnly === false) return "Restarting...";
+  if (recoveryKind === "restart") return "Restarting...";
   return "Reconnecting...";
 }
 
 /** What the heading's state means, and what the button below it costs. */
 export function recoverySubheading(health: string, isHostOffline: boolean): string {
-  if (health === "restart_failed") {
+  if (health === "recovery_failed") {
     return (
       "This machine stopped responding and needs to be restarted. " +
       "In progress work will be interrupted, but saved data will not be lost."
@@ -211,36 +212,36 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       const { model, isSelfDismissing = false, onEnterMachine = null } = vnode.attrs;
       const info = model.info;
       if (info === null) return null;
-      // On a surface that dismisses itself, a finished restart is still waiting
-      // on the confirmation that dismisses it. Reading as idle in that window
-      // would offer a Restart button for the restart that just ran.
-      const isSettling = isSelfDismissing && model.isRestartSucceeded;
-      // A restart nobody started from this card counts too: the unattended one,
-      // or the same machine's card in another window. Its progress is what is
-      // actually happening to the machine, so the card must not offer a Restart
-      // button beside it -- nor replace one with a waiting-for-network line.
-      // The click flips isRestartRunning at once while info.health only moves
-      // on the next poll, so reading health alone would drop a running
-      // restart's spinner and log lines for a poll interval.
-      const isBusy = model.isRestartRunning || isSettling || info.health === "restarting";
-      // A restart dispatched from here knows its own shape from the click,
+      // On a surface that dismisses itself, a finished recovery is still
+      // waiting on the confirmation that dismisses it. Reading as idle in that
+      // window would offer a Restart button for the recovery that just ran.
+      const isSettling = isSelfDismissing && model.isRecoverySucceeded;
+      // A recovery nobody started from this card counts too: the unattended
+      // start, or the same machine's card in another window. Its progress is
+      // what is actually happening to the machine, so the card must not offer a
+      // Restart button beside it -- nor replace one with a waiting-for-network
+      // line. The click flips isRecoveryRunning at once while info.health only
+      // moves on the next poll, so reading health alone would drop a running
+      // recovery's spinner and log lines for a poll interval.
+      const isBusy = model.isRecoveryRunning || isSettling || info.health === "recovering";
+      // A recovery dispatched from here knows which it is from the click,
       // before the tracker has caught up and can answer -- and that window is
-      // exactly when the user is looking at the card they just clicked. A
-      // restart merely attached to (the unattended one, another window's) does
-      // not, and has to take the tracker's word: ``isRestartRunning`` covers
-      // both, so it cannot stand in for the distinction.
-      const isRestartStartOnly = model.dispatchedRestartIsStartOnly ?? info.is_restart_start_only;
+      // exactly when the user is looking at the card they just clicked. One
+      // merely attached to (the unattended start, another window's) does not,
+      // and has to take the tracker's word: ``isRecoveryRunning`` covers both,
+      // so it cannot stand in for the distinction.
+      const recoveryKind = model.dispatchedRecoveryKind ?? info.recovery_kind;
       // The device's condition, and never over a restart the user asked for:
-      // their own stop+start bounce is a restart to narrate, and rendering the
+      // their own stop+start bounce is a recovery to narrate, and rendering the
       // block would swap its spinner for a wait that does not hold it. The
-      // same holds while a finished restart waits for the confirmation that
-      // dismisses the card. The app's start-only dispatch is neither -- it is
+      // same holds while a finished recovery waits for the confirmation that
+      // dismisses the card. The app's unattended start is neither -- it is
       // entered unasked within seconds of a network flap and lasts as long as
       // the network is down, which is when the device's condition is the
       // explanation the user needs, so it does not hide it. The route answers
       // NONE for a machine on this device, whose outage a dead network cannot
       // explain, and UNKNOWN while nothing has been measured.
-      const isNarratingUserBounce = (isBusy && isRestartStartOnly === false) || isSettling;
+      const isNarratingUserBounce = (isBusy && recoveryKind === "restart") || isSettling;
       const environment: EnvironmentCondition = isNarratingUserBounce ? "NONE" : info.device_environment;
       // This device having no usable network outranks everything below,
       // including the backend verdict, because it explains those too: a laptop
@@ -248,7 +249,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // provider's poll errors and the machine reads unreachable -- and naming
       // the backend there blames something that is working for a condition the
       // user can actually fix. No restart button, and not a disabled one: the
-      // restart would route over the same dead network, and there is nothing
+      // recovery would route over the same dead network, and there is nothing
       // here for the user to decide. The card returns to its normal states on
       // its own: the machine answering clears it, and so does connectivity
       // coming back -- which also runs the start that was withheld. On a dead
@@ -267,7 +268,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // health reads, because it explains it: a machine minds cannot reach
       // through its provider reads stuck either way, and only one of the two
       // conditions can be acted on. Rendered without a restart button at all --
-      // the restart routes through the same backend.
+      // the recovery routes through the same backend.
       //
       // Except over a machine that is answering. A provider's poll can error
       // while its machines keep answering through the forward, and a machine
@@ -305,7 +306,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // hold at the same time: a dead network takes this machine down along
       // with every other, and an unreachable provider takes down all of its.
       // All three outrank the machine's own health, and for the same reason --
-      // the machine reads unhealthy *because* of them, and its restart episode
+      // the machine reads unhealthy *because* of them, and its recovery episode
       // is an effect rather than a cause. As above, withheld over a machine
       // that is answering: whatever failed earlier, it is not failing now. And
       // withheld, like the verdict above, while this device's network is
@@ -348,12 +349,12 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
             : null,
         ]);
       }
-      const health = isBusy ? "restarting" : info.health;
+      const health = isBusy ? "recovering" : info.health;
       return m("div", { class: "flex flex-col gap-4" }, [
         m("div", { class: "flex flex-col gap-2" }, [
           m("div", { class: "flex items-center gap-2 type-heading pr-10" }, [
             isBusy ? m(Spinner, { size: "sm" }) : null,
-            m("span", recoveryHeading(info.workspace_name, health, info.is_host_offline, isRestartStartOnly)),
+            m("span", recoveryHeading(info.workspace_name, health, info.is_host_offline, recoveryKind)),
           ]),
           isBusy
             ? null
@@ -370,9 +371,9 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
             {
               variant: onEnterMachine === null ? "primary" : "secondary",
               disabled: isBusy,
-              onclick: () => void model.dispatchRestart(),
+              onclick: () => void model.dispatchRecovery(),
             },
-            isBusy ? recoveryBusyActionLabel(info.is_host_offline, isRestartStartOnly) : "Restart Machine",
+            isBusy ? recoveryBusyActionLabel(info.is_host_offline, recoveryKind) : "Restart Machine",
           ),
           m(Button, { variant: "secondary", onclick: () => reportProblem(info.agent_id) }, "Report a problem"),
         ]),
@@ -439,18 +440,18 @@ function Disclosure(): m.Component<DisclosureAttrs> {
  * The bordered Troubleshooting block: the errors this episode produced, and a
  * shell into the machine's host.
  *
- * Error details carries the restart error the tracker is holding and whatever
+ * Error details carries the recovery error the tracker is holding and whatever
  * this card's own dispatch reported, and nothing else. There is no diagnostics
  * probe behind it anymore: the probe and the route that reached it are both
  * gone, and what the background health tracker observes goes to the log rather
  * than to a list of questions nobody could act on.
  *
  * The two sources are deduped on the string itself, because usually they carry
- * one: every server-side restart failure hands the same message to the tracker
+ * one: every server-side recovery failure hands the same message to the tracker
  * and to the operation record, and printing it twice reads as two faults. They
  * are still both consulted, since either can be the only one there -- a
  * dispatch this card never got to start reports client-side only, and an
- * unattended restart that failed before this card opened is the tracker's
+ * unattended start that failed before this card opened is the tracker's
  * alone.
  */
 export function RecoveryTroubleshooting(): m.Component<{ model: RecoveryModel }> {
@@ -461,7 +462,7 @@ export function RecoveryTroubleshooting(): m.Component<{ model: RecoveryModel }>
       const info = model.info;
       if (info === null) return null;
       const errors = [
-        ...new Set([model.restartError, info.health_error].filter((error): error is string => Boolean(error))),
+        ...new Set([model.recoveryError, info.health_error].filter((error): error is string => Boolean(error))),
       ];
       const isSshOffered = Boolean(info.ssh_command);
       if (errors.length === 0 && !isSshOffered) return null;
