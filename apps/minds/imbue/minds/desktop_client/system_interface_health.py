@@ -28,7 +28,9 @@ The state machine:
 - STUCK -> RESTARTING: the restart dispatch marks the tracker so the recovery
   card can render a different label. The background loop stands off a
   RESTARTING agent (see ``snapshot_probe_targets``); the restart worker's own
-  readiness probe is what decides whether the machine came back.
+  readiness probe is what decides whether the machine came back, unless a
+  sleep lands mid-restart on a start-only restart (see
+  ``invalidate_restart_progress_after_wake``).
 - RESTARTING -> RESTART_FAILED: a restart failed to recover the workspace
   within its window, or its ``mngr`` commands errored. The recovery card
   renders the failure reason and the restart affordance.
@@ -54,13 +56,15 @@ that sleeps mid-run stops the probe loop along with everything else, so the
 seconds it slept were backed by no probe at all; a run that straddles a sleep
 is restarted from the first failure observed after it (see ``sleep_tracker``),
 and the threshold is reached only once it has accumulated entirely while the
-process was running.
+process was running. A run that opens just after a wake is timing this device's
+own tunnel rebuild, and is held to ``post_wake_grace_seconds`` instead.
 """
 
 import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from enum import Enum
 from typing import Final
@@ -77,6 +81,12 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
+
+# How long after a wake a probe-failure run is treated as measuring this device's
+# own tunnel rebuild rather than the workspace: a sleep kills the forward's SSH
+# transports, and the rebuild takes a couple of probe intervals. Outside this
+# window the normal threshold applies unchanged.
+_DEFAULT_POST_WAKE_GRACE_SECONDS: Final[float] = 20.0
 
 # HTTP statuses that suggest the backend itself is unreachable / not serving,
 # as opposed to an application-layer error. The plugin reports every non-2xx
@@ -303,6 +313,14 @@ class _AgentRecord(MutableModel):
             "and cleared with the record on recovery."
         ),
     )
+    is_restart_progress_unverified: bool = Field(
+        default=False,
+        description=(
+            "Whether a wake has landed while this agent's restart was in flight, leaving the "
+            "restart's own progress unestablished. Cleared with the record on recovery, and by "
+            "the next restart attempt."
+        ),
+    )
     restart_is_start_only: bool | None = Field(
         default=None,
         description=(
@@ -330,6 +348,14 @@ class SystemInterfaceHealthTracker(MutableModel):
     stuck_threshold_seconds: float = Field(
         default=_DEFAULT_STUCK_THRESHOLD_SECONDS,
         description="Seconds of continuous probe failures before HEALTHY -> STUCK fires.",
+    )
+    post_wake_grace_seconds: float = Field(
+        default=_DEFAULT_POST_WAKE_GRACE_SECONDS,
+        description=(
+            "Seconds after a wake during which a probe-failure run must outlast this same span, "
+            "rather than stuck_threshold_seconds, to convict. Inert without a sleep_tracker, "
+            "which is what knows a wake happened."
+        ),
     )
     sleep_tracker: SleepTracker | None = Field(
         default=None,
@@ -374,6 +400,10 @@ class SystemInterfaceHealthTracker(MutableModel):
     # is still answering, so a probe success is the stop in progress rather than
     # the machine back, and must not drop the mark above.
     _in_flight_intentional_stop_agents: set[str] = PrivateAttr(default_factory=set)
+    # Agents a probe found answering while their restart was still in flight, so
+    # the restart's later failure is declined (see mark_restart_failed). Outside
+    # ``_records`` because the probe success that adds an agent drops its record.
+    _probe_recovered_during_restart_agents: set[str] = PrivateAttr(default_factory=set)
     # agent_id_str -> the connection-failure cause last logged for it, and when.
     # Deliberately outside ``_records``: it has to survive the probe success that
     # drops the episode, which is the only thing standing between a repeating
@@ -488,6 +518,22 @@ class SystemInterfaceHealthTracker(MutableModel):
         if self.sleep_tracker is None or record.failure_run_started_wall_at is None:
             return False
         return self.sleep_tracker.was_asleep_since(record.failure_run_started_wall_at)
+
+    def _is_run_inside_post_wake_window_locked(self, record: _AgentRecord) -> bool:
+        """Whether this agent's failure run opened within the post-wake grace window.
+
+        Complements :meth:`_is_run_interrupted_by_sleep_locked`: the run the
+        rebuild produces opens *after* the wake, since the forward notices a dead
+        transport only when traffic next hits it. Wall-clock, because that is the
+        only clock the wake is recorded on.
+        """
+        if self.sleep_tracker is None or record.failure_run_started_wall_at is None:
+            return False
+        last_wake_at = self.sleep_tracker.get_last_wake_at()
+        if last_wake_at is None:
+            return False
+        grace = timedelta(seconds=self.post_wake_grace_seconds)
+        return last_wake_at <= record.failure_run_started_wall_at < last_wake_at + grace
 
     # -- Intentional stops ------------------------------------------------
 
@@ -705,6 +751,9 @@ class SystemInterfaceHealthTracker(MutableModel):
         (``outage_started_wall_at``) is left alone, since the machine really did
         stop answering when it did, and the discovery-freshness gate that reads
         it is only made stricter by an older mark.
+
+        A run that opened just after a wake is held to ``post_wake_grace_seconds``
+        instead: every probe fails until the forward has rebuilt its transport.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
@@ -738,7 +787,9 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.outage_started_wall_at is None:
                 record.outage_started_wall_at = now_wall
             elapsed = now - record.failure_run_started_at
-            if elapsed + 1e-6 >= self.stuck_threshold_seconds:
+            is_run_in_wake_shadow = self._is_run_inside_post_wake_window_locked(record)
+            required_seconds = self.post_wake_grace_seconds if is_run_in_wake_shadow else self.stuck_threshold_seconds
+            if elapsed + 1e-6 >= required_seconds:
                 record.health = AgentHealth.STUCK
                 fire_health = AgentHealth.STUCK
                 stuck_after_seconds = elapsed
@@ -792,6 +843,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.health != AgentHealth.HEALTHY:
                 prior_health = record.health
                 fire_health = AgentHealth.HEALTHY
+            if prior_health == AgentHealth.RESTARTING:
+                self._probe_recovered_during_restart_agents.add(aid_str)
         if fire_health is not None:
             logger.info(
                 "System-interface health for {}: {} -> HEALTHY (probe succeeded)",
@@ -845,6 +898,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             # any prior attempt's account of whether it booted anything.
             record.last_restart_error = None
             record.is_restart_a_no_op = False
+            record.is_restart_progress_unverified = False
+            self._probe_recovered_during_restart_agents.discard(aid_str)
             if record.health != AgentHealth.RESTARTING:
                 record.health = AgentHealth.RESTARTING
                 record.restart_is_start_only = start_only
@@ -853,24 +908,40 @@ class SystemInterfaceHealthTracker(MutableModel):
             self._fire_on_change(agent_id, fire_health)
         return fire_health is not None
 
-    def mark_restart_failed(self, agent_id: AgentId, error: str) -> None:
+    def mark_restart_failed(self, agent_id: AgentId, error: str) -> bool:
         """Mark ``agent_id`` as RESTART_FAILED, carrying ``error`` as the reason.
 
         Called when a restart tier fails to recover the workspace within its
         window, or its ``mngr`` commands error out. The reason is surfaced to
         the recovery page so it can render an escalate / try-again affordance
         instead of an indefinite "Restarting...".
+
+        Declined (returning False) for an agent a probe found answering while
+        this restart was still running: a ``mngr start`` blocked across a sleep
+        can return its error long after the machine came back (see
+        :meth:`invalidate_restart_progress_after_wake`), and the probe's 200 is
+        the newer and more direct claim about the machine.
         """
         aid_str = str(agent_id)
         with self._lock:
-            record = self._records.setdefault(aid_str, _AgentRecord())
-            record.failure_run_started_at = None
-            record.failure_run_started_wall_at = None
-            record.last_restart_error = error
-            # Always re-fire: a second failure with a new reason must reach
-            # the recovery page even if the state is already RESTART_FAILED.
-            record.health = AgentHealth.RESTART_FAILED
+            is_outranked_by_a_probe = aid_str in self._probe_recovered_during_restart_agents
+            if not is_outranked_by_a_probe:
+                record = self._records.setdefault(aid_str, _AgentRecord())
+                record.failure_run_started_at = None
+                record.failure_run_started_wall_at = None
+                record.last_restart_error = error
+                # Always re-fire: a second failure with a new reason must reach
+                # the recovery page even if the state is already RESTART_FAILED.
+                record.health = AgentHealth.RESTART_FAILED
+        if is_outranked_by_a_probe:
+            logger.info(
+                "Restart failure for {} not shown ({}): a probe found the machine answering while it was still running",
+                agent_id,
+                error,
+            )
+            return False
         self._fire_on_change(agent_id, AgentHealth.RESTART_FAILED)
+        return True
 
     def get_health(self, agent_id: AgentId) -> AgentHealth:
         """Return the current health for ``agent_id`` (HEALTHY by default)."""
@@ -1025,6 +1096,11 @@ class SystemInterfaceHealthTracker(MutableModel):
         back into a workspace that is about to disappear. The restart worker
         owns the recovery decision via its own ``_await_system_interface_ready``
         probe, which only runs *after* the stop step completes.
+
+        The exception is a *start-only* restart that a wake landed in the middle
+        of: there is no ``mngr stop`` for a doomed 200 to come from, and the
+        worker's own probe runs only after a ``mngr start`` the sleep may have
+        left blocked indefinitely.
         """
         with self._lock:
             return frozenset(
@@ -1032,6 +1108,28 @@ class SystemInterfaceHealthTracker(MutableModel):
                 for aid, record in self._records.items()
                 if (record.is_suspect and record.health == AgentHealth.HEALTHY)
                 or record.health in (AgentHealth.STUCK, AgentHealth.RESTART_FAILED)
+                or (record.health == AgentHealth.RESTARTING and record.is_restart_progress_unverified)
+            )
+
+    def invalidate_restart_progress_after_wake(self, wake_at: datetime) -> None:
+        """Hand an in-flight start-only restart back to the probe loop. Fires on every wake.
+
+        Every bound on the restart is measured on a clock a sleep does not
+        advance, so a ``mngr start`` blocked across the sleep can hold the agent
+        RESTARTING indefinitely. Only start-only restarts are marked, for the
+        reason :meth:`snapshot_probe_targets` gives. ``wake_at`` matches the
+        callback signature and is not read.
+        """
+        marked: list[str] = []
+        with self._lock:
+            for aid_str, record in self._records.items():
+                if record.health == AgentHealth.RESTARTING and record.restart_is_start_only:
+                    record.is_restart_progress_unverified = True
+                    marked.append(aid_str)
+        for aid_str in marked:
+            logger.info(
+                "Restart of {} was in flight across a sleep; probing it again rather than waiting on the restart",
+                aid_str,
             )
 
     # -- Internals --------------------------------------------------------

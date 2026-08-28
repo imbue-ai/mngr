@@ -41,6 +41,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.mngr.utils.suspension_watchdog import SuspensionWatchdog
 from imbue.overlay.markers import ScalarTuple
 
 USER_ID_FILENAME: Final[str] = "user_id"
@@ -654,6 +655,10 @@ class MngrContext(FrozenModel):
     is_full_discovery: bool = Field(
         default=False,
         description="When True, always query all providers during discovery (skip event-stream optimization)",
+    )
+    suspension_watchdog: SuspensionWatchdog = Field(
+        default_factory=SuspensionWatchdog,
+        description="Closes SSH transports a machine suspension left half-open; every OuterHost connection registers with it.",
     )
     project_root: Path | None = Field(
         default=None,

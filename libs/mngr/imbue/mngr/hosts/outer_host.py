@@ -546,6 +546,8 @@ class OuterHost(OuterHostInterface):
         transport = _get_ssh_transport(self.connector.host)
         if transport is not None:
             transport.set_keepalive(SSH_KEEPALIVE_INTERVAL_SECONDS)
+        # Keepalives cannot detect a peer that vanished during a suspension.
+        self.mngr_ctx.suspension_watchdog.register(transport)
         # We just (re)built the connection. If a cooperative lock was held, the dropped
         # connection orphaned its lock channel and released the flock, so re-acquire and
         # verify that no other actor acquired in the gap before any operation proceeds.

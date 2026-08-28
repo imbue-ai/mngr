@@ -133,6 +133,11 @@ class SleepTracker(MutableModel):
     (:meth:`get_last_wake_at`), which is the baseline for anything that ages a
     timestamp against now.
 
+    A sleep is not always one interval: on battery, macOS takes short dark wakes
+    partway through, each of which ends the interval, fires the wake callbacks,
+    and moves the last-wake baseline. A "wake" here is not evidence the user
+    opened the lid.
+
     Every reading is negative-only by construction. No interval recorded -- a
     process that just started, or one whose heartbeat loop is not running --
     answers "no sleep recorded", which leaves every consumer exactly as it

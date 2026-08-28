@@ -20,9 +20,17 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.suspension import ClockReading
+from imbue.imbue_common.suspension import read_clocks
+from imbue.imbue_common.suspension import was_suspended_since
 from imbue.mngr_forward.relay import relay_data
 
 _SHUTDOWN_POLL_SECONDS: Final[float] = 0.2
+
+# How long to wait for a retired tunnel's accept loop to exit before refusing to
+# reclaim its socket path. The loop polls its stop event once per
+# ``_SHUTDOWN_POLL_SECONDS``, so this is many times what it can need.
+_TUNNEL_RETIREMENT_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Pending-connection backlog on each tunnel's Unix socket. Connections beyond
 # this are refused, which a caller reads as an unreachable backend, so it needs
@@ -264,14 +272,23 @@ class SSHTunnelManager(MutableModel):
     _tmpdir: tempfile.TemporaryDirectory[str] | None = PrivateAttr(default=None)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _connections: dict[str, paramiko.SSHClient] = PrivateAttr(default_factory=dict)
+    # When each cached connection was established, so one that outlived a machine
+    # suspension can be retired. Guarded by ``_lock``, dropped with ``_connections``.
+    _connection_established_at: dict[str, ClockReading] = PrivateAttr(default_factory=dict)
     _tunnel_socket_paths: dict[str, Path] = PrivateAttr(default_factory=dict)
     _tunnel_threads: dict[str, threading.Thread] = PrivateAttr(default_factory=dict)
+    # Per-forward-tunnel stop flags, so a tunnel can be retired by key.
+    _tunnel_stop_events: dict[str, threading.Event] = PrivateAttr(default_factory=dict)
     _shutdown_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     # Reverse tunnels are keyed by ``(conn_key, local_port)`` so that a single
     # SSH host can host multiple concurrent tunnels for different purposes --
     # e.g. one for a host application's API (``local_port == server_port``) and
     # one per agent for the Latchkey gateway (``local_port == per_agent_gateway_port``).
     _reverse_tunnels: dict[tuple[str, int], ReverseTunnelInfo] = PrivateAttr(default_factory=dict)
+    # The client each reverse tunnel's port forward was registered on: a forward
+    # is bound to one transport, so a replacement client under the same conn_key
+    # means the tunnel is gone. Guarded by ``_lock``, dropped with ``_reverse_tunnels``.
+    _reverse_tunnel_clients: dict[tuple[str, int], paramiko.SSHClient] = PrivateAttr(default_factory=dict)
     _reverse_tunnel_setup_locks: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
     _health_check_thread: threading.Thread | None = PrivateAttr(default=None)
     _on_tunnel_repaired_callbacks: list[Callable[["ReverseTunnelInfo"], None]] = PrivateAttr(default_factory=list)
@@ -307,11 +324,16 @@ class SSHTunnelManager(MutableModel):
         """Get or create an SSH connection to the given host.
 
         Reuses existing active connections. Creates a new connection if none
-        exists or the existing one has become inactive.
+        exists, the existing one has become inactive, or it was established
+        before a machine suspension (see :meth:`_has_connection_outlived_a_suspension`).
         """
         conn_key = f"{ssh_info.host}:{ssh_info.port}"
         existing = self._connections.get(conn_key)
-        if existing is not None and _ssh_connection_is_active(existing):
+        if (
+            existing is not None
+            and _ssh_connection_is_active(existing)
+            and not self._has_connection_outlived_a_suspension(conn_key)
+        ):
             return existing
 
         if existing is not None:
@@ -323,7 +345,51 @@ class SSHTunnelManager(MutableModel):
         logger.debug("Establishing SSH connection to {}:{}", ssh_info.host, ssh_info.port)
         client = _create_ssh_client(ssh_info)
         self._connections[conn_key] = client
+        self._connection_established_at[conn_key] = read_clocks()
         return client
+
+    def _has_connection_outlived_a_suspension(self, conn_key: str) -> bool:
+        """Whether the cached connection for ``conn_key`` predates a machine suspension.
+
+        Must hold ``self._lock``.
+
+        ``transport.is_active()`` cannot answer it: a suspension leaves the
+        transport half-open, and where the peer's reset never arrives it goes on
+        reporting active until an open runs out ``_CHANNEL_OPEN_TIMEOUT_SECONDS``
+        -- paid by the first requests after the wake, and long enough for a
+        consumer to conclude the host is gone.
+        """
+        established_at = self._connection_established_at.get(conn_key)
+        return established_at is not None and was_suspended_since(established_at)
+
+    def _retire_tunnel_locked(self, tunnel_key: str) -> None:
+        """Stop ``tunnel_key``'s accept loop and wait for it, so the caller can rebuild it.
+
+        Must hold ``self._lock``.
+
+        Joined rather than merely signalled, and under the lock: the socket path
+        is a hash of the tunnel key, so the replacement binds the very path this
+        loop unlinks in its ``finally``. A loop still running when the new
+        listener binds would delete the new socket for the rest of the session,
+        and dropping the lock to wait would let a second request build its own
+        tunnel for the key. If the loop outlasts the wait, the tunnel is left
+        recorded (so the next request retries the retirement) and this raises.
+        """
+        stop_event = self._tunnel_stop_events.get(tunnel_key)
+        if stop_event is not None:
+            stop_event.set()
+        thread = self._tunnel_threads.get(tunnel_key)
+        if thread is not None:
+            thread.join(timeout=_TUNNEL_RETIREMENT_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                raise SSHTunnelError(
+                    f"The previous tunnel for {tunnel_key} did not stop within "
+                    f"{_TUNNEL_RETIREMENT_TIMEOUT_SECONDS:.0f}s, so its socket cannot be reclaimed",
+                    SSHTunnelPhase.LOCAL_SETUP,
+                )
+        self._tunnel_stop_events.pop(tunnel_key, None)
+        self._tunnel_socket_paths.pop(tunnel_key, None)
+        self._tunnel_threads.pop(tunnel_key, None)
 
     def _invalidate_connection(self, conn_key: str, client: paramiko.SSHClient) -> None:
         """Drop ``client`` from the connection cache so the next request reconnects.
@@ -337,6 +403,7 @@ class SSHTunnelManager(MutableModel):
             if self._connections.get(conn_key) is not client:
                 return
             del self._connections[conn_key]
+            self._connection_established_at.pop(conn_key, None)
         # Closed outside the lock: closing a wedged transport can itself block,
         # and every other tunnel operation takes this lock.
         try:
@@ -382,6 +449,10 @@ class SSHTunnelManager(MutableModel):
         Returns the path to a Unix domain socket. Connecting to this socket
         will forward traffic through an SSH tunnel to (remote_host, remote_port)
         on the remote host identified by ssh_info.
+
+        An existing tunnel is reused when its accept loop is still running and
+        its SSH connection has not outlived a machine suspension; otherwise both
+        are rebuilt before the path is handed back.
         """
         conn_key = f"{ssh_info.host}:{ssh_info.port}"
         tunnel_key = _forward_tunnel_key(ssh_info, remote_host, remote_port)
@@ -390,7 +461,17 @@ class SSHTunnelManager(MutableModel):
             existing_path = self._tunnel_socket_paths.get(tunnel_key)
             existing_thread = self._tunnel_threads.get(tunnel_key)
             if existing_path is not None and existing_thread is not None and existing_thread.is_alive():
-                return existing_path
+                # The loop captured its transport, so the connection alone cannot be retired.
+                if not self._has_connection_outlived_a_suspension(conn_key):
+                    return existing_path
+                logger.info(
+                    "Rebuilding the tunnel to {}:{} through {}: it was established before this machine "
+                    "suspended, so its SSH connection is half-open whatever the transport reports",
+                    remote_host,
+                    remote_port,
+                    conn_key,
+                )
+                self._retire_tunnel_locked(tunnel_key)
 
             client = self._get_or_create_connection(ssh_info)
             transport = _ssh_connection_transport(client)
@@ -447,7 +528,28 @@ class SSHTunnelManager(MutableModel):
 
             self._tunnel_socket_paths[tunnel_key] = socket_path
             self._tunnel_threads[tunnel_key] = thread
+            self._tunnel_stop_events[tunnel_key] = stop_event
             return socket_path
+
+    def _is_reverse_tunnel_transport_alive_locked(self, tunnel_key: tuple[str, int]) -> bool:
+        """Whether ``tunnel_key``'s port forward is still on a live transport.
+
+        Must hold ``self._lock``.
+
+        Asked of the client the forward was registered on, not whatever is cached
+        under the host key now: a connection rebuilt under a live reverse tunnel
+        carries none of the old forwards. A suspension is checked separately
+        because it leaves the same client in place, still reporting active;
+        without it a reverse tunnel on a host nobody is browsing would never be
+        repaired after a sleep.
+        """
+        conn_key, _local_port = tunnel_key
+        client = self._connections.get(conn_key)
+        if client is None or client is not self._reverse_tunnel_clients.get(tunnel_key):
+            return False
+        if self._has_connection_outlived_a_suspension(conn_key):
+            return False
+        return _ssh_connection_is_active(client)
 
     def _get_reverse_tunnel_setup_lock(self, conn_key: str) -> threading.Lock:
         """Get or create a per-host setup lock for reverse tunnels."""
@@ -493,11 +595,8 @@ class SSHTunnelManager(MutableModel):
             with self._lock:
                 # Check if a reverse tunnel already exists for this (host, local_port)
                 existing = self._reverse_tunnels.get(tunnel_key)
-                if existing is not None:
-                    # Verify the transport is still alive
-                    client = self._connections.get(conn_key)
-                    if client is not None and _ssh_connection_is_active(client):
-                        return existing.remote_port
+                if existing is not None and self._is_reverse_tunnel_transport_alive_locked(tunnel_key):
+                    return existing.remote_port
 
                 client = self._get_or_create_connection(ssh_info)
                 transport = _ssh_connection_transport(client)
@@ -527,6 +626,7 @@ class SSHTunnelManager(MutableModel):
             )
             with self._lock:
                 self._reverse_tunnels[tunnel_key] = tunnel_info
+                self._reverse_tunnel_clients[tunnel_key] = client
                 # Successful setup clears any prior failure bookkeeping so the
                 # next health-check tick treats the tunnel as healthy.
                 self._failure_state.pop(tunnel_key, None)
@@ -570,21 +670,15 @@ class SSHTunnelManager(MutableModel):
         for tunnel_key, tunnel_info in tunnels.items():
             conn_key, _local_port = tunnel_key
             with self._lock:
-                client = self._connections.get(conn_key)
+                is_alive = self._is_reverse_tunnel_transport_alive_locked(tunnel_key)
                 failure_state = self._failure_state.get(tunnel_key)
 
-            is_alive = client is not None and _ssh_connection_is_active(client)
             if is_alive:
-                # Underlying SSH connection is alive again. The most likely
-                # path here is that a *sibling* tunnel sharing the same
-                # conn_key got repaired in this very loop (or earlier),
-                # which recreated the SSH client. ``setup_reverse_tunnel``
-                # clears failure_state only for the specific tunnel_key it
-                # just set up, so siblings observing is_alive=True would
-                # otherwise carry stale failure_state into the next break
-                # and back off from the cap instead of from zero. Drop any
-                # lingering bookkeeping so this tunnel's next failure
-                # starts a fresh schedule.
+                # This tunnel's own transport is still up, so a broken sibling
+                # that failed and backed off earlier can start its next
+                # schedule from zero: ``setup_reverse_tunnel`` clears
+                # failure_state only for the tunnel_key it set up, so lingering
+                # bookkeeping here would back off from the cap instead.
                 if failure_state is not None:
                     with self._lock:
                         self._failure_state.pop(tunnel_key, None)
@@ -725,6 +819,7 @@ class SSHTunnelManager(MutableModel):
             removed_infos: list[tuple[tuple[str, int], ReverseTunnelInfo]] = []
             for tunnel_key in tunnel_keys:
                 info = self._reverse_tunnels.pop(tunnel_key, None)
+                self._reverse_tunnel_clients.pop(tunnel_key, None)
                 self._failure_state.pop(tunnel_key, None)
                 if info is not None:
                     removed_infos.append((tunnel_key, info))
@@ -744,6 +839,7 @@ class SSHTunnelManager(MutableModel):
             orphaned_clients: dict[str, paramiko.SSHClient] = {}
             for conn_key in orphaned_conn_keys:
                 client = self._connections.pop(conn_key, None)
+                self._connection_established_at.pop(conn_key, None)
                 if client is not None:
                     orphaned_clients[conn_key] = client
             # Snapshot remaining clients for shared-host tunnel cancellation
@@ -821,6 +917,7 @@ class SSHTunnelManager(MutableModel):
             except (paramiko.SSHException, OSError) as e:
                 logger.trace("Error cancelling reverse port forward: {}", e)
         self._reverse_tunnels.clear()
+        self._reverse_tunnel_clients.clear()
         self._failure_state.clear()
         # Safe to drop only here, where every tunnel is being retired: a probe
         # armed against a live tunnel compares two readings of its own, and
@@ -835,6 +932,7 @@ class SSHTunnelManager(MutableModel):
         with self._lock:
             clients = tuple(self._connections.values())
             self._connections.clear()
+            self._connection_established_at.clear()
         for client in clients:
             try:
                 client.close()
@@ -843,6 +941,7 @@ class SSHTunnelManager(MutableModel):
 
         self._tunnel_socket_paths.clear()
         self._tunnel_threads.clear()
+        self._tunnel_stop_events.clear()
 
         if self._tmpdir is not None:
             try:
