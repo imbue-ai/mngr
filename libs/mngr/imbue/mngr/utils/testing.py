@@ -605,6 +605,9 @@ def run_mngr_subprocess(
     )
 
 
+_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS: float = 5.0
+
+
 def _get_descendant_pids(pid: str) -> list[str]:
     """Recursively get all descendant PIDs of a given process.
 
@@ -612,22 +615,39 @@ def _get_descendant_pids(pid: str) -> list[str]:
     directly instead of host.execute_command, since this is used for test cleanup
     outside of Host (e.g., in fixtures and context managers). The Host version goes
     through pyinfra which supports both local and SSH execution.
+
+    The whole walk shares one deadline, for the reason given on
+    :func:`_run_with_timeout`: this runs inside the caller's ``pytest-timeout``
+    window, so an unbounded ``pgrep`` here stalls the test itself. A per-call
+    timeout would not be enough, because the walk recurses once per descendant
+    and each call would get a fresh budget. Running out returns the PIDs found
+    so far, which is what cleanup wants: signalling most of the tree beats
+    signalling none of it.
     """
+    return _get_descendant_pids_before(pid, time.monotonic() + _TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS)
+
+
+def _get_descendant_pids_before(pid: str, deadline: float) -> list[str]:
+    """Collect ``pid``'s descendants, giving up on whatever is left at ``deadline``."""
+    remaining_seconds = deadline - time.monotonic()
+    if remaining_seconds <= 0:
+        return []
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", pid],
+            capture_output=True,
+            text=True,
+            timeout=remaining_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return []
     descendants: list[str] = []
-    result = subprocess.run(
-        ["pgrep", "-P", pid],
-        capture_output=True,
-        text=True,
-    )
     if result.returncode == 0 and result.stdout.strip():
         for child_pid in result.stdout.strip().split("\n"):
             if child_pid:
                 descendants.append(child_pid)
-                descendants.extend(_get_descendant_pids(child_pid))
+                descendants.extend(_get_descendant_pids_before(child_pid, deadline))
     return descendants
-
-
-_TMUX_CLEANUP_SUBPROCESS_TIMEOUT_SECONDS: float = 5.0
 
 
 def _run_with_timeout(*args: str) -> "subprocess.CompletedProcess[bytes]":

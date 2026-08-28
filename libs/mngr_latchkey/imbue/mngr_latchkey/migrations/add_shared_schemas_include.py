@@ -10,6 +10,15 @@ baseline; this migration stamps it into per-host files that predate the change,
 so a custom-service grant on an existing host resolves its schema instead of
 failing.
 
+The include is no longer how those schemas reach a permissions file: the agent
+baseline now carries them inline, and ``LatchkeyPermissionsConfig`` does not
+model ``include`` at all. A file this migration stamped is repaired the next
+time an agent is registered on that host --
+:func:`imbue.mngr_latchkey.agent_setup.reconcile_baseline_permissions` inlines
+the schemas, and the ``include`` key is dropped on the following save because
+nothing reads it into the model any more. This step survives only so a store
+old enough to need migrations 1 and 2 still reaches the recorded version.
+
 ``apply_up`` appends the shared-schemas filename to each host file's ``include``
 list (idempotently); ``apply_down`` removes it. The include is a *bare relative*
 name on purpose -- detent resolves it relative to the directory of the file that

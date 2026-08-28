@@ -550,21 +550,27 @@ may start on another host. A service registered with only a `baseApiUrl` can
 be authenticated by hand with `latchkey auth set` instead.
 
 Because a custom scope is not a detent builtin, its schemas have to reach the
-gateway's permission check. Rather than inlining them into every host file,
-`core.Latchkey.initialize()` materializes them **once** into a shared
-`minds_shared_schemas.json` (a schemas-only detent config, see
-`SHARED_SCHEMAS_FILENAME`), and every per-host permissions file references it
-via detent's `include` directive (added by the agent baseline and, for
-pre-existing files, a data-format migration). The include is a *bare relative*
-name so it resolves next to the referencing file on both the desktop (the
-opaque-handle directory) and a VPS (`~/.latchkey`, where `remote_gateway`
-ships the shared file alongside the permissions file). Granting a custom scope
-is then a plain rule write -- no per-host schema inlining.
+gateway's permission check. They are **inlined into every permissions file minds
+writes**: the agent baseline (`baseline_permissions.ADDITIONAL_SERVICE_SCHEMAS`)
+carries them, and `agent_setup.reconcile_baseline_permissions` refreshes them on
+files that already exist, so the bundled definition always wins over a stale
+copy. Granting a custom scope is then a plain rule write against a file that
+already defines the scope.
+
+Inlining rather than sharing one file via detent's `include` is deliberate.
+Detent resolves an `include` relative to the directory of the file that
+references it, and a host's permissions file is reachable through several
+directories -- its canonical `hosts/<host_id>/` path, the opaque handle in
+`permissions/` that a desktop workspace's JWT names, and
+`~/.latchkey/permissions.json` on a VPS. A shared file would have to be copied
+next to each of them, and an include that fails to resolve fails the *whole*
+permission check for that host, not just the rule that needed it. A
+self-contained file has nothing to resolve.
 
 `imbue.mngr_latchkey.additional_services` is the single Python chokepoint for
-the file. It exposes the registration entries, the merged schemas used to
-materialize the shared file, and the catalog projection the generator folds
-into `services.json`. No gateway extension reads it -- they only read
+the file. It exposes the registration entries, the merged detent schemas the
+baseline inlines, and the catalog projection the generator folds into
+`services.json`. No gateway extension reads it -- they only read
 `services.json`.
 
 The registration entries are minds' half of latchkey's own `config.json`:

@@ -33,10 +33,9 @@ things the catalog does not carry:
   :mod:`imbue.mngr_latchkey.core` to write the ``registeredServices`` block of
   every gateway's ``config.json`` (the desktop's and, via
   :mod:`imbue.mngr_latchkey.remote_gateway`, each VPS's).
-* the inline detent schemas -- :func:`additional_service_shared_schemas` /
-  :func:`shared_schemas_file_content`, materialized into the single shared file
-  that every host ``permissions.json`` references via detent's ``include``, so a
-  granted additional-service scope resolves without inlining schemas per host.
+* the inline detent schemas -- :func:`additional_service_schemas`, which the
+  agent baseline folds into every host ``permissions.json`` so a granted
+  additional-service scope resolves from the file itself.
 
 :func:`additional_services_catalog_payload` exists for the generator, which is
 what performs the fold into ``services.json``.
@@ -46,7 +45,6 @@ or malformed file is a packaging bug; it surfaces as
 :class:`AdditionalServicesCatalogError` rather than being silently tolerated.
 """
 
-import json
 from collections.abc import Mapping
 from functools import cache
 from importlib import resources
@@ -188,15 +186,15 @@ def additional_service_registration_entries() -> dict[str, JsonValue]:
     return {name: dict(entry.registration) for name, entry in entries.items()}
 
 
-def additional_service_shared_schemas() -> dict[str, JsonValue]:
+def additional_service_schemas() -> dict[str, JsonValue]:
     """Return the merged Detent schemas (every scope schema + permission schema) of all additional services.
 
-    This is the ``schemas`` map minds materializes into the single shared file
-    that every host ``permissions.json`` references via detent's ``include``, so
-    a granted additional-service scope resolves without inlining the schemas into
-    each host file. A schema name defined by two services with *different* bodies
-    is a packaging bug (the merged file is a flat namespace) and raises; an
-    identical redefinition is harmless and kept.
+    This is the ``schemas`` map every host ``permissions.json`` carries inline
+    (see :data:`imbue.mngr_latchkey.baseline_permissions.AGENT_BASELINE_PERMISSIONS`),
+    so a granted additional-service scope resolves from the file the gateway is
+    already reading. A schema name defined by two services with *different*
+    bodies is a packaging bug (a permissions file's ``schemas`` is a flat
+    namespace) and raises; an identical redefinition is harmless and kept.
     """
     entries = _load_additional_service_entries()
     schemas: dict[str, JsonValue] = {}
@@ -209,16 +207,7 @@ def additional_service_shared_schemas() -> dict[str, JsonValue]:
             if schema_name in schemas and schemas[schema_name] != new_body:
                 raise AdditionalServicesCatalogError(
                     f"Schema name {schema_name!r} is defined by more than one additional service "
-                    f"with conflicting bodies; the shared schemas file is a flat namespace."
+                    f"with conflicting bodies; a permissions file's ``schemas`` is a flat namespace."
                 )
             schemas[schema_name] = new_body
     return schemas
-
-
-def shared_schemas_file_content() -> str:
-    """Serialize the additional-service schemas as a detent config file (``{\"schemas\": {...}}``).
-
-    The shared file carries only ``schemas`` (no rules): the grants stay in each
-    per-host file, which references this file via ``include``.
-    """
-    return json.dumps({"schemas": additional_service_shared_schemas()}, indent=2) + "\n"

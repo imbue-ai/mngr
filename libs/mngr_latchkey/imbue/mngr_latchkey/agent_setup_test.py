@@ -33,6 +33,7 @@ from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_a
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
 from imbue.mngr_latchkey.agent_setup import reconcile_baseline_permissions
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
+from imbue.mngr_latchkey.baseline_permissions import ADDITIONAL_SERVICE_SCHEMAS
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.baseline_permissions import VIA_DESKTOP_PATH_PATTERN
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
@@ -139,10 +140,10 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
             ],
         },
     ]
-    # The baseline references the shared additional-services schemas file, so a
-    # granted custom scope resolves without inlining its schema per host.
-    assert on_disk["include"] == ["minds_shared_schemas.json"]
     schemas = on_disk["schemas"]
+    # The additional (custom) services' schemas are inlined, so granting one of
+    # their scopes later is a plain rule write against a file that defines it.
+    assert schemas["claude-ai"] == ADDITIONAL_SERVICE_SCHEMAS["claude-ai"]
     # The report scope + permission both pin to a POST on the per-agent
     # ``/report`` path, so any agent's bug-report escalation is let through
     # without registration while every other agent-scoped path still falls
@@ -586,72 +587,93 @@ def test_register_agent_for_host_preserves_other_grants(tmp_path: Path) -> None:
     assert rule_keys == ["minds-api-proxy-report", "minds-api-proxy-per-agent-unauthorized", "latchkey-self"]
 
 
-def test_register_agent_for_host_preserves_the_shared_schemas_include(tmp_path: Path) -> None:
-    """Registering an agent must not drop the host file's ``include``.
+def test_register_agent_for_host_keeps_a_granted_custom_scope_resolvable(tmp_path: Path) -> None:
+    """Registering an agent must not drop the additional-service schemas.
 
-    Regression test: rebuilding the config from ``rules``/``schemas`` alone
-    silently dropped ``include``, which points at the shared additional-services
-    schemas file. Losing it leaves any granted custom scope (e.g. ``claude-ai``)
-    referencing a schema detent can no longer resolve.
+    A granted custom scope (e.g. ``claude-ai``) names a schema that is not in
+    detent's builtin catalog, so it only resolves while the host file itself
+    defines it -- and an unresolvable rule key fails the whole permission check
+    for that host, not just that rule.
     """
     host_id = HostId.generate()
     path = permissions_path_for_host(tmp_path, host_id)
-    # A host that already carries the include plus a granted custom scope.
     save_permissions(
         path,
         LatchkeyPermissionsConfig(
             rules=AGENT_BASELINE_PERMISSIONS.rules + ({"claude-ai": ["everything"]},),
             schemas=AGENT_BASELINE_PERMISSIONS.schemas,
-            include=("minds_shared_schemas.json",),
         ),
     )
 
     register_agent_for_host(tmp_path, host_id, AgentId.generate())
 
     config = json.loads(path.read_text())
-    assert config["include"] == ["minds_shared_schemas.json"]
+    assert config["schemas"]["claude-ai"] == ADDITIONAL_SERVICE_SCHEMAS["claude-ai"]
     # The custom-scope grant survives too.
     assert {"claude-ai": ["everything"]} in config["rules"]
 
 
-def test_register_agent_for_host_restores_a_missing_shared_schemas_include(tmp_path: Path) -> None:
-    """A host file that lost its include gets it back on the next registration.
+def test_register_agent_for_host_restores_missing_additional_service_schemas(tmp_path: Path) -> None:
+    """A host file written before a custom service existed picks its schemas up on registration.
 
-    The data-format migration only runs when the recorded version changes, so it
-    cannot repair a file stripped afterwards; registration is the self-heal point.
+    The data-format migration only runs when the recorded version changes, so a
+    service added afterwards never gets one; registration is the self-heal point.
     """
     host_id = HostId.generate()
     path = permissions_path_for_host(tmp_path, host_id)
-    # A host file in the damaged state: baseline rules/schemas but no include.
+    schemas_without_custom_services = {
+        name: body
+        for name, body in AGENT_BASELINE_PERMISSIONS.schemas.items()
+        if name not in ADDITIONAL_SERVICE_SCHEMAS
+    }
     save_permissions(
         path,
         LatchkeyPermissionsConfig(
             rules=AGENT_BASELINE_PERMISSIONS.rules,
-            schemas=AGENT_BASELINE_PERMISSIONS.schemas,
+            schemas=schemas_without_custom_services,
         ),
     )
 
     register_agent_for_host(tmp_path, host_id, AgentId.generate())
 
-    assert json.loads(path.read_text())["include"] == ["minds_shared_schemas.json"]
+    assert json.loads(path.read_text())["schemas"]["claude-ai"] == ADDITIONAL_SERVICE_SCHEMAS["claude-ai"]
 
 
-def test_register_agent_for_host_preserves_unrelated_includes(tmp_path: Path) -> None:
-    """Ensuring the baseline include does not clobber includes someone else added."""
+def test_register_agent_for_host_refreshes_a_stale_additional_service_schema(tmp_path: Path) -> None:
+    """The bundled definition wins over the copy an older build inlined."""
     host_id = HostId.generate()
     path = permissions_path_for_host(tmp_path, host_id)
     save_permissions(
         path,
         LatchkeyPermissionsConfig(
             rules=AGENT_BASELINE_PERMISSIONS.rules,
-            schemas=AGENT_BASELINE_PERMISSIONS.schemas,
-            include=("some_other_config.json",),
+            schemas={
+                **AGENT_BASELINE_PERMISSIONS.schemas,
+                "claude-ai": {"properties": {"domain": {"const": "stale"}}},
+            },
         ),
     )
 
     register_agent_for_host(tmp_path, host_id, AgentId.generate())
 
-    assert json.loads(path.read_text())["include"] == ["some_other_config.json", "minds_shared_schemas.json"]
+    assert json.loads(path.read_text())["schemas"]["claude-ai"] == ADDITIONAL_SERVICE_SCHEMAS["claude-ai"]
+
+
+def test_register_agent_for_host_preserves_unrelated_schemas(tmp_path: Path) -> None:
+    """Refreshing the custom-service schemas does not clobber schemas someone else added."""
+    host_id = HostId.generate()
+    path = permissions_path_for_host(tmp_path, host_id)
+    save_permissions(
+        path,
+        LatchkeyPermissionsConfig(
+            rules=AGENT_BASELINE_PERMISSIONS.rules,
+            schemas={**AGENT_BASELINE_PERMISSIONS.schemas, "minds-file-server-read-/tmp/x": {"properties": {}}},
+        ),
+    )
+
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+
+    assert json.loads(path.read_text())["schemas"]["minds-file-server-read-/tmp/x"] == {"properties": {}}
 
 
 def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Path) -> None:
@@ -728,19 +750,18 @@ def test_reconcile_is_a_noop_on_an_already_current_file() -> None:
     assert reconcile_baseline_permissions(current) == current
 
 
-def test_reconcile_does_not_invent_a_gateway_self_rule_but_still_heals_the_include() -> None:
-    """A file with no gateway-self rule gets its include healed and nothing else.
+def test_reconcile_does_not_invent_a_gateway_self_rule_but_still_heals_the_schemas() -> None:
+    """A file with no gateway-self rule gets its custom-service schemas healed and nothing else.
 
     Inventing the rule would grant far more than reconciliation is about. The
-    include is a different matter: it is not a grant, and a missing one makes
-    detent fail the whole permission check for the host, so it is healed on every
-    path.
+    custom-service schemas are a different matter: they are not a grant, and a
+    missing one makes detent fail the whole permission check for the host, so
+    they are healed on every path.
     """
     config = LatchkeyPermissionsConfig(rules=({"slack-api": ["slack-read-all"]},), schemas={})
     reconciled = reconcile_baseline_permissions(config)
     assert reconciled.rules == config.rules
-    assert reconciled.schemas == config.schemas
-    assert reconciled.include == AGENT_BASELINE_PERMISSIONS.include
+    assert reconciled.schemas == ADDITIONAL_SERVICE_SCHEMAS
 
 
 def test_register_backfills_the_baseline_for_an_already_registered_agent(tmp_path: Path) -> None:
@@ -765,22 +786,21 @@ def test_register_backfills_the_baseline_for_an_already_registered_agent(tmp_pat
     assert len(written["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]) == 1
 
 
-def test_register_heals_a_missing_include_for_an_already_registered_agent(tmp_path: Path) -> None:
-    """An old host file lacking the shared-schemas include is healed on the early-return path too.
+def test_register_heals_missing_custom_service_schemas_for_an_already_registered_agent(tmp_path: Path) -> None:
+    """An old host file lacking the custom-service schemas is healed on the early-return path too.
 
-    Without it a granted custom scope references an unresolvable schema, and
+    Without them a granted custom scope references an unresolvable schema, and
     detent fails the whole permission check for that host rather than just that
     rule.
     """
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     stale = _stale_host_config(str(agent_id))
-    assert stale.include == (), "fixture must start without the include for this to test anything"
+    assert "claude-ai" not in stale.schemas, "fixture must start without the schemas for this to test anything"
     path = permissions_path_for_host(tmp_path, host_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(stale.model_dump_json())
 
     register_agent_for_host(tmp_path, host_id, agent_id)
 
-    written = json.loads(path.read_text())
-    assert written["include"] == list(AGENT_BASELINE_PERMISSIONS.include)
+    assert json.loads(path.read_text())["schemas"]["claude-ai"] == ADDITIONAL_SERVICE_SCHEMAS["claude-ai"]

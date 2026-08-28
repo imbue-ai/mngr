@@ -46,6 +46,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.baseline_permissions import ADDITIONAL_SERVICE_SCHEMAS
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.baseline_permissions import MINDS_API_PROXY_PER_AGENT_PATH_PREFIX
 from imbue.mngr_latchkey.baseline_permissions import SCOPE_LATCHKEY_SELF
@@ -163,7 +164,7 @@ def _extract_agent_id_from_anyof_entry(entry: JsonValue) -> str:
 
 
 def reconcile_baseline_permissions(config: LatchkeyPermissionsConfig) -> LatchkeyPermissionsConfig:
-    """Bring ``config``'s ``latchkey-self`` grants and its ``include`` up to the current baseline.
+    """Bring ``config``'s ``latchkey-self`` grants and additional-service schemas up to the current baseline.
 
     The agent baseline is only written when a host's permissions file is first
     created, so a file written by an older build keeps whatever set of
@@ -177,9 +178,12 @@ def reconcile_baseline_permissions(config: LatchkeyPermissionsConfig) -> Latchke
     ``latchkey-self`` are left exactly as found -- notably the ``not.anyOf``
     allowlist, which is per-host state rather than baseline.
 
-    The baseline's ``include`` is healed on *every* path, including the one with
-    no grant to add, so this function owns the include for both of
-    :func:`register_agent_for_host`'s write paths.
+    The additional-service schemas are refreshed on *every* path, including the
+    one with no grant to add, so this function owns them for both of
+    :func:`register_agent_for_host`'s write paths. They are overwritten rather
+    than merely filled in: the bundled definitions are the source of truth, so a
+    package update to a custom service's schema wins over the stale copy an
+    older build inlined.
     """
     baseline_permissions = tuple(
         permission for rule in AGENT_BASELINE_PERMISSIONS.rules for permission in rule.get(SCOPE_LATCHKEY_SELF, [])
@@ -189,8 +193,11 @@ def reconcile_baseline_permissions(config: LatchkeyPermissionsConfig) -> Latchke
     if not missing or not any(SCOPE_LATCHKEY_SELF in rule for rule in config.rules):
         # No gateway-self rule at all means a file predating the baseline entirely
         # (or a hand-written one), where inventing the rule would grant far more
-        # than reconciliation is about. The include still needs healing either way.
-        return config.model_copy_update(to_update(config.field_ref().include, _merged_include(config)))
+        # than reconciliation is about. The custom-service schemas still need
+        # refreshing either way.
+        return config.model_copy_update(
+            to_update(config.field_ref().schemas, _with_additional_service_schemas(config.schemas))
+        )
 
     rebuilt_rules = tuple(
         {**rule, SCOPE_LATCHKEY_SELF: [*rule[SCOPE_LATCHKEY_SELF], *missing]}
@@ -201,20 +208,15 @@ def reconcile_baseline_permissions(config: LatchkeyPermissionsConfig) -> Latchke
     rebuilt_schemas: dict[str, JsonValue] = dict(config.schemas)
     for permission in missing:
         rebuilt_schemas[permission] = AGENT_BASELINE_PERMISSIONS.schemas[permission]
-    # Copy-with-update, never a fresh construction: rebuilding from rules+schemas
-    # alone silently drops ``include``, which would leave a granted custom scope
-    # pointing at an unresolvable schema -- and detent then fails the *whole*
-    # permission check for that host, not just the one rule.
     return config.model_copy_update(
         to_update(config.field_ref().rules, rebuilt_rules),
-        to_update(config.field_ref().schemas, rebuilt_schemas),
-        to_update(config.field_ref().include, _merged_include(config)),
+        to_update(config.field_ref().schemas, _with_additional_service_schemas(rebuilt_schemas)),
     )
 
 
-def _merged_include(config: LatchkeyPermissionsConfig) -> tuple[str, ...]:
-    """Return ``config``'s includes plus any the baseline has and it lacks."""
-    return config.include + tuple(name for name in AGENT_BASELINE_PERMISSIONS.include if name not in config.include)
+def _with_additional_service_schemas(schemas: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Return ``schemas`` with the current additional-service schemas overlaid by name."""
+    return {**schemas, **ADDITIONAL_SERVICE_SCHEMAS}
 
 
 def register_agent_for_host(

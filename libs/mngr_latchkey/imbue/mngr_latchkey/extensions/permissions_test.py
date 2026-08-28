@@ -261,13 +261,13 @@ def test_available_includes_additional_claude_ai_service(node_extension: str) ->
 
 
 def test_post_rule_for_additional_service_writes_rule_only(tmp_path: Path) -> None:
-    """Granting a custom-service scope writes only the rule; its schema comes from the include.
+    """Granting a custom-service scope writes only the rule; its schema is already in the file.
 
-    A custom (additional) service's scope schema lives in the shared
-    ``minds_shared_schemas.json`` file that every host permissions file
-    references via detent's ``include``, so the write path no longer inlines
-    schemas into the host file -- the grant is a plain rule, exactly like a
-    builtin scope.
+    Every permissions file minds writes carries the additional (custom)
+    services' scope schemas inline from the agent baseline, so the write path
+    does not inline anything of its own -- the grant is a plain rule, exactly
+    like a builtin scope. (This target file is written from scratch by the
+    extension, so it has no schemas at all.)
     """
     target = tmp_path / "hosts" / "host-deadbeefdeadbeefdeadbeefdeadbeef" / "latchkey_permissions.json"
     env = {"PATH": "/usr/bin:/bin", "LATCHKEY_EXTENSION_PERMISSIONS_ROOT": str(tmp_path)}

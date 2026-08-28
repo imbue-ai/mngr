@@ -65,7 +65,6 @@ from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
-from imbue.mngr_latchkey.store import shared_schemas_path
 from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _POLL_INTERVAL_SECONDS = 0.05
@@ -250,21 +249,6 @@ def test_initialize_preserves_a_users_own_latchkey_config(tmp_path: Path) -> Non
     assert config["browser"] == {"executablePath": "/usr/bin/chrome"}
     assert config["registeredServices"]["my-gitlab"] == {"baseApiUrl": "https://gitlab.example.com/api/v4/"}
     assert "claude-ai" in config["registeredServices"]
-
-
-def test_initialize_materializes_shared_schemas_file(tmp_path: Path) -> None:
-    """``initialize`` writes the shared additional-services schemas file the host baselines include."""
-    fake_binary = _make_fake_latchkey_binary(tmp_path)
-    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
-
-    manager.initialize()
-
-    shared_path = shared_schemas_path(manager.plugin_data_dir)
-    assert shared_path.is_file()
-    parsed = json.loads(shared_path.read_text())
-    # It is a schemas-only detent config carrying the additional-service schemas.
-    assert set(parsed.keys()) == {"schemas"}
-    assert "claude-ai" in parsed["schemas"]
 
 
 def _make_fake_latchkey_binary(tmp_path: Path) -> Path:

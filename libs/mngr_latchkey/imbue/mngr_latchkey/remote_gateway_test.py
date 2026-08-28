@@ -509,18 +509,14 @@ def test_sync_permissions_copies_per_host_file_to_remote_permissions_json(tmp_pa
     sync_permissions(outer, latchkey_directory, host_id)
 
     written = _stub(outer).written
-    # Two files ship: the shared additional-services schemas file and the permissions file.
-    assert len(written) == 2
-    written_by_path = {w.path: w for w in written}
-    permissions = written_by_path["/root/.latchkey/permissions.json"]
+    # The permissions file is self-contained, so it is the only file that ships.
+    assert len(written) == 1
+    permissions = written[0]
+    assert permissions.path == "/root/.latchkey/permissions.json"
     assert b"slack-read-all" in permissions.content
     assert permissions.mode == "0600"
     # Written atomically (tmp + rename) so the remote gateway never reads a partial file.
     assert permissions.is_atomic is True
-    # The shared schemas file (which the permissions file's ``include`` resolves to) ships too.
-    shared = written_by_path["/root/.latchkey/minds_shared_schemas.json"]
-    assert b"claude-ai" in shared.content
-    assert shared.is_atomic is True
 
 
 def test_sync_permissions_links_legacy_override_target_at_the_vps_permissions_file(tmp_path: Path) -> None:
@@ -528,8 +524,8 @@ def test_sync_permissions_links_legacy_override_target_at_the_vps_permissions_fi
 
     Its target is a desktop-side opaque handle path that does not exist on the
     VPS, and upstream latchkey answers 400 for a missing override target before
-    it dispatches anything -- so provisioning links that exact path (and the
-    shared schemas file beside it) at the VPS permissions file.
+    it dispatches anything -- so provisioning links that exact path at the VPS
+    permissions file.
     """
     latchkey_directory = tmp_path / "latchkey"
     data_dir = plugin_data_dir(latchkey_directory)
@@ -544,10 +540,6 @@ def test_sync_permissions_links_legacy_override_target_at_the_vps_permissions_fi
     link_commands = [record.command for record in _stub(outer).recorded if "ln -sfn" in record.command]
     assert len(link_commands) == 1
     assert f"ln -sfn /root/.latchkey/permissions.json {opaque_path}" in link_commands[0]
-    assert (
-        f"ln -sfn /root/.latchkey/minds_shared_schemas.json {opaque_path.parent / 'minds_shared_schemas.json'}"
-        in link_commands[0]
-    )
     assert f"mkdir -p {opaque_path.parent}" in link_commands[0]
 
 
@@ -573,11 +565,9 @@ def test_sync_permissions_falls_back_to_restrictive_default_when_local_missing(t
     sync_permissions(outer, latchkey_directory, host_id)
 
     written = _stub(outer).written
-    assert len(written) == 2
-    written_by_path = {w.path: w for w in written}
-    # The deny-all default carries an empty rules list and no schemas/include block.
-    assert written_by_path["/root/.latchkey/permissions.json"].content == b'{\n  "rules": []\n}'
-    assert b"claude-ai" in written_by_path["/root/.latchkey/minds_shared_schemas.json"].content
+    assert len(written) == 1
+    # The deny-all default carries an empty rules list and no schemas block.
+    assert written[0].content == b'{\n  "rules": []\n}'
 
 
 def test_sync_permissions_resolves_remote_home_for_the_destination(tmp_path: Path) -> None:
@@ -588,8 +578,7 @@ def test_sync_permissions_resolves_remote_home_for_the_destination(tmp_path: Pat
     sync_permissions(outer, latchkey_directory, host_id)
 
     written_paths = {w.path for w in _stub(outer).written}
-    assert "/home/agent/.latchkey/permissions.json" in written_paths
-    assert "/home/agent/.latchkey/minds_shared_schemas.json" in written_paths
+    assert written_paths == {"/home/agent/.latchkey/permissions.json"}
 
 
 def test_sync_permissions_raises_when_home_resolution_fails(tmp_path: Path) -> None:

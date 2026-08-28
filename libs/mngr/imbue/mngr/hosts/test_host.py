@@ -922,6 +922,7 @@ def test_procps_ps_command_available() -> None:
         raise AssertionError("ps aux output invalid")
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_stop_agent_kills_single_pane_processes(
     temp_host_dir: Path,

@@ -5,9 +5,8 @@ from pydantic import ValidationError
 
 from imbue.mngr_latchkey.additional_services import _ADDITIONAL_SERVICES_ADAPTER
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
-from imbue.mngr_latchkey.additional_services import additional_service_shared_schemas
+from imbue.mngr_latchkey.additional_services import additional_service_schemas
 from imbue.mngr_latchkey.additional_services import additional_services_catalog_payload
-from imbue.mngr_latchkey.additional_services import shared_schemas_file_content
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 
@@ -78,20 +77,12 @@ def test_catalog_payload_projects_claude_ai_into_services_json_shape() -> None:
     assert "everything" in json.dumps(entry["permissions"])
 
 
-def test_shared_schemas_include_scope_and_permission_schemas() -> None:
-    """The merged shared schemas carry each service's scope schema and permission schema(s)."""
-    schemas = additional_service_shared_schemas()
+def test_schemas_include_scope_and_permission_schemas() -> None:
+    """The merged schemas carry each service's scope schema and permission schema(s)."""
+    schemas = additional_service_schemas()
     # The claude-ai scope schema pins the domain; the ``everything`` permission matches all.
     assert schemas["claude-ai"] == {"properties": {"domain": {"const": "claude.ai"}}, "required": ["domain"]}
     assert schemas["everything"] == {}
-
-
-def test_shared_schemas_file_content_is_a_schemas_only_detent_config() -> None:
-    """The serialized shared file is a detent config with only a ``schemas`` block (no rules)."""
-    parsed = json.loads(shared_schemas_file_content())
-    assert set(parsed.keys()) == {"schemas"}
-    assert "claude-ai" in parsed["schemas"]
-    assert "everything" in parsed["schemas"]
 
 
 def test_every_additional_service_is_folded_into_the_bundled_services_json() -> None:

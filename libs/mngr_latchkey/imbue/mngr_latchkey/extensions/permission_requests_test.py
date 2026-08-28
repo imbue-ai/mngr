@@ -305,8 +305,8 @@ def test_post_creates_predefined_request_for_additional_service(
     }
     # A custom scope composes with per-account scoping exactly like a builtin one:
     # the rule key carries the account and the effect ships the generated
-    # account-gating schema. The custom scope's *own* schema is not inlined here --
-    # it resolves from the shared ``minds_shared_schemas.json`` include.
+    # account-gating schema. The custom scope's *own* schema is not in the effect --
+    # the target permissions file already carries it from the agent baseline.
     rule_key = account_scope_key("claude-ai", "me@example.com")
     assert parsed["effect"] == {
         "schemas": {rule_key: build_account_scope_schema("claude-ai", "me@example.com")},

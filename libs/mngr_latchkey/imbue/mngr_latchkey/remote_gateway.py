@@ -37,7 +37,6 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.additional_services import shared_schemas_file_content
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
@@ -56,7 +55,6 @@ from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
-from imbue.mngr_latchkey.store import SHARED_SCHEMAS_FILENAME
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import opaque_handles_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -463,13 +461,11 @@ def _resolve_remote_latchkey_directory(host: OuterHostInterface) -> Path:
 def _default_permissions_json() -> str:
     """Serialize the deny-all default permissions config (matches ``save_permissions`` output)."""
     config = LatchkeyPermissionsConfig()
-    # ``save_permissions`` omits an empty ``schemas``/``include`` block; mirror it
-    # so the remote file is byte-for-byte the same shape minds writes locally.
+    # ``save_permissions`` omits an empty ``schemas`` block; mirror it so the
+    # remote file is byte-for-byte the same shape the plugin writes locally.
     exclude: set[str] = set()
     if not config.schemas:
         exclude.add("schemas")
-    if not config.include:
-        exclude.add("include")
     return config.model_dump_json(indent=2, exclude=exclude)
 
 
@@ -681,21 +677,6 @@ def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id
         content = _default_permissions_json()
 
     remote_dir = _resolve_remote_latchkey_directory(host)
-    # Ship the shared additional-services schemas file *first*, next to the
-    # permissions file, so the bare ``include`` in the permissions file below
-    # always resolves on the VPS (detent resolves it relative to the permissions
-    # file's directory, ``~/.latchkey``). Writing it before the permissions file
-    # avoids a window where a permissions file referencing a custom scope is live
-    # but its schemas are missing.
-    shared_schemas_remote_path = remote_dir / SHARED_SCHEMAS_FILENAME
-    with log_span("Syncing shared latchkey schemas for host {} to VPS {}", host_id, host.get_name()):
-        host.write_file(
-            shared_schemas_remote_path,
-            shared_schemas_file_content().encode("utf-8"),
-            mode=_REMOTE_FILE_MODE,
-            is_atomic=True,
-        )
-
     content_bytes = content.encode("utf-8")
     remote_path = remote_dir / _REMOTE_PERMISSIONS_FILENAME
     with log_span("Syncing latchkey permissions for host {} to VPS {} ({})", host_id, host.get_name(), remote_path):
@@ -730,9 +711,7 @@ def _materialize_legacy_override_targets(
 
     Symlinking each of those paths at ``~/.latchkey/permissions.json`` makes the
     legacy override resolve to exactly the policy the VPS gateway would have
-    applied anyway. The shared schemas file is linked beside it too, since detent
-    resolves the permissions file's bare ``include`` relative to the referencing
-    file's own directory.
+    applied anyway.
 
     Workspaces created after the rollout send no override header at all, so this
     is dead weight for them: delete this function, its call site, and
@@ -744,7 +723,6 @@ def _materialize_legacy_override_targets(
         return
 
     permissions_target_q = shlex.quote(str(remote_dir / _REMOTE_PERMISSIONS_FILENAME))
-    schemas_target_q = shlex.quote(str(remote_dir / SHARED_SCHEMAS_FILENAME))
     script_lines = ["set -e"]
     for opaque_path in opaque_paths:
         if not opaque_path.is_absolute():
@@ -755,7 +733,6 @@ def _materialize_legacy_override_targets(
                 # ``-sfn`` keeps this idempotent and never dereferences an
                 # existing link into its target directory.
                 f"ln -sfn {permissions_target_q} {shlex.quote(str(opaque_path))}",
-                f"ln -sfn {schemas_target_q} {shlex.quote(str(opaque_path.parent / SHARED_SCHEMAS_FILENAME))}",
             )
         )
 

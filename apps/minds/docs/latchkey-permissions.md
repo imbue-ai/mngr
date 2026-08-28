@@ -470,20 +470,22 @@ three latchkey features:
   then runs for it. `claude.ai` uses the `cookie-capture` flow: latchkey
   opens the claude.ai login page and stores the `sessionKey` session cookie
   as the credentials.
-* **Self-shipped detent schemas, referenced via `include`.** A custom scope
-  is not one of detent's builtin schemas, so each additional service ships
-  its own scope schema (matching the service domain) plus a permission
-  schema. Rather than inlining those schemas into every host's
-  `latchkey_permissions.json`, minds materializes them **once** into a
-  shared `minds_shared_schemas.json` file and has every per-host file
-  reference it through detent's [`include`](https://github.com/imbue-ai/detent)
-  directive. Granting an additional-service scope is then a plain rule
-  write (no schema injection); detent resolves the scope's schema from the
-  shared include. The include is a bare relative name, which detent resolves
-  relative to the referencing file's directory -- so the same host file
-  works both on the desktop (where the shared file lives in the gateway's
-  opaque-handle directory) and on a VPS (where it is shipped next to the
-  host's `~/.latchkey/permissions.json`).
+* **Self-shipped detent schemas, inlined into every permissions file.** A
+  custom scope is not one of detent's builtin schemas, so each additional
+  service ships its own scope schema (matching the service domain) plus a
+  permission schema. Those schemas are written into every host's
+  `latchkey_permissions.json` -- new files get them from the agent baseline,
+  and existing files pick up changes the next time an agent is registered on
+  the host. Granting an additional-service scope is then a plain rule write
+  against a file that already defines the scope. Keeping them in one shared
+  file that host files pull in through detent's
+  [`include`](https://github.com/imbue-ai/detent) directive does not work here:
+  detent resolves a bare include relative to the referencing file's own
+  directory, and a host's permissions file is read through several of them
+  (its canonical `hosts/<host_id>/` path, the opaque handle a desktop
+  workspace's JWT names, and `~/.latchkey/permissions.json` on a VPS), so the
+  shared file would have to be copied next to each -- and an include that fails
+  to resolve fails the whole permission check for that host.
 
 Additional services are merged into the same catalog the dialog reads, so
 they appear and are granted exactly like builtin ones. The seed entry is

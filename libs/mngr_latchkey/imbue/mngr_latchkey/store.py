@@ -78,17 +78,6 @@ _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 _HOSTS_DIR_NAME: Final[str] = "hosts"
 _OPAQUE_PERMISSIONS_DIR_NAME: Final[str] = "permissions"
 
-# Filename of the shared detent config that holds the additional (custom)
-# services' scope/permission schemas. Every per-host permissions file
-# ``include``s it *by this bare name*, and detent resolves that include relative
-# to the directory of the file that references it. On the desktop the gateway
-# evaluates a host file through its opaque handle in ``opaque_permissions_dir``,
-# so the shared file must live there; on a VPS the gateway's single
-# ``permissions.json`` lives in ``~/.latchkey``, so the shared file is shipped
-# alongside it there. The bare relative name therefore resolves correctly on
-# both sides without rewriting the include.
-SHARED_SCHEMAS_FILENAME: Final[str] = "minds_shared_schemas.json"
-
 
 def plugin_data_dir(latchkey_directory: Path) -> Path:
     """Return ``<latchkey_directory>/mngr_latchkey/``.
@@ -249,10 +238,10 @@ class LatchkeyPermissionsConfig(FrozenModel):
     produces: the top-level ``rules`` and ``schemas`` sections, with
     every rule in the plain ``{scope: [permission, ...]}`` shape (the
     ``{"schemas": [...], "hooks": [...]}`` rule-value form is not used
-    by minds and is not modeled). Detent's ``include`` directive is
-    not modeled either; ``extra="ignore"`` makes Pydantic silently drop
-    any such hand-edited keys on load, so they disappear on the next
-    minds-driven save.
+    by minds and is not modeled). Detent's ``include`` directive is not
+    modeled either: every schema a file written here needs is inlined in
+    its own ``schemas``, so no file written here depends on another file
+    resolving next to it.
     """
 
     # Override FrozenModel's ``extra="forbid"`` so hand-edited fields
@@ -271,14 +260,6 @@ class LatchkeyPermissionsConfig(FrozenModel):
             "Optional inline detent request-schema definitions, keyed by schema name. "
             "Used by the per-agent baseline to grant access to specific gateway-self endpoints "
             "without depending on names from detent's built-in schema catalog."
-        ),
-    )
-    include: tuple[str, ...] = Field(
-        default_factory=tuple,
-        description=(
-            "Optional relative paths to other detent config files whose schemas/rules are merged "
-            "in (detent's ``include`` directive). Used to reference the shared additional-services "
-            "schemas file so a custom scope resolves without inlining its schema into every host file."
         ),
     )
 
@@ -382,30 +363,6 @@ def opaque_handles_for_host(data_dir: Path, host_id: HostId) -> list[Path]:
         return []
     canonical_path = permissions_path_for_host(data_dir, host_id).resolve()
     return sorted(path for path in root.glob("*.json") if path.is_symlink() and path.resolve() == canonical_path)
-
-
-def shared_schemas_path(data_dir: Path) -> Path:
-    """Return the desktop path of the shared additional-services schemas file.
-
-    It lives inside :func:`opaque_permissions_dir` because the gateway evaluates
-    a host permissions file through its opaque handle there, and detent resolves
-    the bare ``include`` name relative to that handle's directory.
-    """
-    return opaque_permissions_dir(data_dir) / SHARED_SCHEMAS_FILENAME
-
-
-def write_shared_schemas_file(data_dir: Path, content: str) -> Path:
-    """Atomically (over)write the shared additional-services schemas file (mode 0o600).
-
-    Idempotently rewritten on every gateway bring-up so a package update to the
-    additional-services schemas always wins over a stale on-disk copy. Returns
-    the written path. A newly-created file gets ``atomic_write``'s default 0o600
-    mode; a rewrite preserves the existing mode.
-    """
-    path = shared_schemas_path(data_dir)
-    atomic_write(path, content)
-    logger.debug("Wrote shared additional-services schemas file to {}", path)
-    return path
 
 
 _OPAQUE_PERMISSIONS_PATH_MAX_ATTEMPTS: Final[int] = 16
@@ -516,19 +473,15 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     User-driven per-service grants still go through the gateway's
     ``permissions`` extension instead.
 
-    An empty ``schemas`` dict (and an empty ``include`` list) is omitted
-    from the output (detent accepts both shapes); ``rules`` is always
-    emitted, even when empty.
+    An empty ``schemas`` dict is omitted from the output (detent accepts
+    both shapes); ``rules`` is always emitted, even when empty.
     """
-    # Pydantic's ``exclude=`` drops the field entirely; we drop
-    # ``schemas``/``include`` when empty so existing on-disk files (and the
-    # gateway's own writers) keep emitting the same ``{"rules": ...}``
-    # shape they always have.
+    # Pydantic's ``exclude=`` drops the field entirely; we drop ``schemas``
+    # when empty so existing on-disk files (and the gateway's own writers)
+    # keep emitting the same ``{"rules": ...}`` shape they always have.
     exclude: set[str] = set()
     if not config.schemas:
         exclude.add("schemas")
-    if not config.include:
-        exclude.add("include")
     # ``atomic_write`` uses a uniquely-named temp file, so concurrent writers
     # (e.g. the minds auto-register callback firing from two threads) cannot
     # steal each other's temp file the way a fixed ``.tmp`` name allowed.
@@ -544,8 +497,8 @@ def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
     parses the JSON file via Pydantic, which enforces the documented
     shape (``rules`` is a list of ``{scope: [perm, ...]}`` objects,
     ``schemas`` is an object of JSON values) and silently drops any
-    other top-level keys (e.g. detent's ``include``) per the model's
-    ``extra="ignore"`` config.
+    other top-level keys (e.g. detent's ``include``, which older builds
+    wrote) per the model's ``extra="ignore"`` config.
 
     Raises:
         LatchkeyStoreError: if the file is missing, unreadable, not
