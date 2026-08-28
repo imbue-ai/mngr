@@ -27,6 +27,15 @@ function getUvBinDir() {
   return path.dirname(getUvPath());
 }
 
+/** macOS-only shim that shadows /usr/bin/install_name_tool for uv's spawns. */
+function getInstallNameToolShimPath() {
+  return path.join(getResourcesDir(), 'uv-shims', 'install_name_tool');
+}
+
+function getUvShimBinDir() {
+  return path.dirname(getInstallNameToolShimPath());
+}
+
 function getGitPath() {
   return path.join(getResourcesDir(), 'git', 'bin', 'git');
 }
@@ -260,6 +269,7 @@ module.exports = {
   getResourcesDir,
   getUvPath,
   getUvBinDir,
+  getUvShimBinDir,
   getGitPath,
   getGitBinDir,
   getGitRootDir,

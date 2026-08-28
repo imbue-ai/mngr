@@ -339,7 +339,12 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         const gitBinDir = paths.getGitBinDir();
         const limaBinDir = paths.getLimaBinDir();
         const desyncBinDir = paths.getDesyncBinDir();
-        const bundledBinDirs = [uvBinDir, gitBinDir, limaBinDir, desyncBinDir];
+        // The shim is first so it shadows /usr/bin/install_name_tool if this
+        // `uv run` is the one that has to fetch the managed CPython.
+        const bundledBinDirs = [
+          ...(process.platform === 'darwin' ? [paths.getUvShimBinDir()] : []),
+          uvBinDir, gitBinDir, limaBinDir, desyncBinDir,
+        ];
         const uvCacheDir = paths.getUvCacheDir();
         const uvPythonDir = paths.getUvPythonDir();
         const pyprojectDir = paths.getPyprojectDir();

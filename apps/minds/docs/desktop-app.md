@@ -129,12 +129,13 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 - **lima**: Required for the Lima launch mode (running agents in Linux VMs). SHA256-verified download, pinned to the version in `download-binaries.js`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still run the VM itself via host QEMU.
 - **restic**: Per-workspace backup repositories. Downloaded from GitHub releases.
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image. Downloaded from GitHub releases. macOS/Linux only.
+- **uv-shims**: macOS only, and the one payload that is generated rather than downloaded. It holds a single `install_name_tool` shim, which runs Apple's real tool from the toolchain under `DEVELOPER_DIR` (the standard Xcode location when that is unset) or from `/Library/Developer/CommandLineTools`, and exits nonzero when neither is present. uv unconditionally execs a bare `install_name_tool` after downloading a managed CPython, to rewrite libpython's Mach-O install name ([astral-sh/uv#14893](https://github.com/astral-sh/uv/issues/14893)); on a Mac with no Xcode Command Line Tools, `/usr/bin/install_name_tool` is the xcselect stub, which asks macOS to offer the developer-tools install and so raises a system modal on first launch. uv reports the shim's nonzero exit as a non-fatal warning and libpython keeps its as-shipped install name, which is inert here: Minds runs `bin/python3.12`, which links libpython statically, and none of the bundled packages link it either.
 
-Each is placed in the `resources/` directory (outside the asar archive). The packaged app prepends the `uv`, `git`, `lima`, and `desync` directories to the backend child process's `PATH`. `restic` and `desync` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`.
+Each is placed in the `resources/` directory (outside the asar archive). The packaged app prepends the `uv-shims`, `uv`, `git`, `lima`, and `desync` directories to the backend child process's `PATH`, and prepends `uv-shims` to the `uv sync` environment setup's `PATH` as well -- it is the only payload on both, because either spawn can be the one that fetches the managed CPython. `restic` and `desync` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`.
 
 Dev mode reaches the same pinned binaries: it prepends the `git` and `lima` directories to `PATH` and names `restic`, `desync`, and the latchkey curl by absolute path. `lima` matters because `mngr_lima` resolves `limactl` from `PATH` and enforces only a *minimum* version, so a developer's newer system lima would pass the check and then hang agent creation on the 2.1.x forwarder regression the pin exists to avoid.
 
-`uv` is the deliberate exception. Dev runs the monorepo workspace through `uv run --package minds`, against the same `.venv` and `uv.lock` the developer's shell drives, so it uses *their* uv rather than risking lockfile-format skew against shared state from a second pinned one. It is therefore the one bundled binary dev neither downloads nor resolves (`BINARIES[].usedInDev`).
+`uv` is the deliberate exception. Dev runs the monorepo workspace through `uv run --package minds`, against the same `.venv` and `uv.lock` the developer's shell drives, so it uses *their* uv rather than risking lockfile-format skew against shared state from a second pinned one. It is therefore a bundled binary dev neither downloads nor resolves (`BINARIES[].usedInDev`), and `uv-shims` follows it: dev skips environment setup entirely and shadows nothing for the developer's own uv.
 
 There is deliberately no bundled `qemu-img`. The pre-baked image is published, downloaded, and consumed as a **raw** image end to end, so nothing converts it. See [lima-image.md](./deploy/lima-image.md) for the whole pipeline, and "Why the image is raw" below.
 
@@ -341,7 +342,7 @@ apps/minds/
       uv.lock               # Pinned lockfile for reproducible installs
   scripts/
     build.js                # Build orchestrator: downloads binaries, builds wheels, stages resources/
-    download-binaries.js    # BINARIES table + pinned, hash-verified downloads (uv, git, restic, desync, lima, curl)
+    download-binaries.js    # BINARIES table: pinned, hash-verified downloads (uv, git, restic, desync, lima, curl) + the generated uv-shims
     ensure-binaries.js      # Dev: provisions BINARIES into the shared cache, symlinks resources/ at it
     git-manifest.json       # Pinned dugite-native git payload: tag, version, per-target hashes
   resources/                # (gitignored) Built artifacts for packaging

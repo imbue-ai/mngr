@@ -647,6 +647,42 @@ def test_ensure_binaries_derives_its_required_set_from_the_binaries_table() -> N
     )
 
 
+def test_both_uv_spawn_sites_shadow_install_name_tool() -> None:
+    """Guard: every uv spawn must put the shim dir ahead of /usr/bin on PATH.
+
+    uv execs a bare ``install_name_tool`` after fetching a managed CPython
+    (astral-sh/uv#14893). Resolved from /usr/bin on a Mac without Xcode Command
+    Line Tools, that is the xcselect stub, which raises the developer-tools
+    installer.
+
+    Both sites fetch: ``env-setup.js`` on first launch, and ``backend.js``
+    whenever no matching interpreter is installed. Covering only one leaves the
+    dialog reachable.
+
+    backend.js is read one branch at a time: only its packaged branch ships to
+    users, and a shim reaching the dev branch instead is the regression, not the
+    fix.
+    """
+    backend_text = (APP_ROOT / "electron" / "backend.js").read_text()
+    packaged_branch = re.search(r"\n      \} else \{\n(.*?)\n      \}\n", backend_text, re.DOTALL)
+    assert packaged_branch is not None, "Could not locate the packaged-mode branch in backend.js"
+    spawn_sites = {
+        "electron/env-setup.js": (APP_ROOT / "electron" / "env-setup.js").read_text(),
+        "electron/backend.js's packaged-mode branch": packaged_branch.group(1),
+    }
+
+    for label, text in spawn_sites.items():
+        assert "getUvShimBinDir()" in text, (
+            f"{label} spawns uv but does not put paths.getUvShimBinDir() on its "
+            "PATH, so uv resolves install_name_tool from /usr/bin and a Mac without Xcode "
+            "Command Line Tools gets the developer-tools installer dialog."
+        )
+        assert "process.platform === 'darwin'" in text, (
+            f"{label} must gate the shim on darwin; the shim is provisioned only "
+            "on macOS, so adding its directory elsewhere puts a nonexistent path on PATH."
+        )
+
+
 def test_dev_mode_puts_bundled_lima_on_path() -> None:
     """Guard: dev must resolve the pinned limactl, not the developer's own.
 
@@ -934,6 +970,71 @@ def test_convert_git_payload_symlinks_rejects_links_escaping_the_payload(tmp_pat
     )
     assert result.returncode != 0, "conversion must fail on a payload-escaping symlink"
     assert "escapes the payload" in result.stderr
+
+
+def test_install_name_tool_shim_delegates_rather_than_faking_success(tmp_path: Path) -> None:
+    """The generated shim must exec the real tool, and fail when there is none.
+
+    uv execs a bare ``install_name_tool`` after fetching a managed CPython
+    (astral-sh/uv#14893), and backend.js hands the shim's directory to the minds
+    Python process and everything it spawns -- so the shim stands in for the tool
+    for every descendant, not just uv. This runs the real table entry and then
+    the shim it writes, because the properties that matter are all invisible to
+    reading the generator: the executable bit, valid ``sh``, argv forwarded
+    verbatim, and the real tool's exit status propagated rather than swallowed by
+    a faked success.
+    """
+    written = _run_download_binaries_function(
+        "db.BINARIES['uv-shims'].download(process.argv[2], {platform: 'darwin'});", str(tmp_path)
+    )
+    assert written.returncode == 0, f"writing the shim failed:\nstderr:\n{written.stderr}"
+
+    shim = tmp_path / "uv-shims" / "install_name_tool"
+    assert os.access(shim, os.X_OK), "the shim must be executable; uv reaches it by a PATH lookup"
+    syntax = subprocess.run(["sh", "-n", str(shim)], capture_output=True, text=True, timeout=30)
+    assert syntax.returncode == 0, f"the shim is not valid sh: {syntax.stderr}"
+
+    developer_dir = tmp_path / "developer"
+    toolchain_bin = developer_dir / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "bin"
+    toolchain_bin.mkdir(parents=True)
+    real_tool = toolchain_bin / "install_name_tool"
+    real_tool.write_text('#!/bin/sh\necho "real $@"\nexit 42\n')
+    real_tool.chmod(0o755)
+
+    arguments = ["-id", "@rpath/libpython3.12.dylib", str(tmp_path / "absent.dylib")]
+    delegated = subprocess.run(
+        [str(shim), *arguments],
+        env={**os.environ, "DEVELOPER_DIR": str(developer_dir)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert delegated.stdout.strip() == f"real {' '.join(arguments)}", (
+        "the shim must exec the toolchain's install_name_tool with argv unchanged, or uv's "
+        f"libpython patching silently stops happening on machines that can do it; got {delegated.stdout!r}"
+    )
+    assert delegated.returncode == 42, (
+        f"the shim must exec the real tool, so the real tool's exit status is the shim's; got {delegated.returncode}"
+    )
+
+    absent_developer_dir = tmp_path / "no-developer"
+    absent_developer_dir.mkdir()
+    unresolved = subprocess.run(
+        [str(shim), *arguments],
+        env={**os.environ, "DEVELOPER_DIR": str(absent_developer_dir)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    # Only discriminating where no Command Line Tools are installed, which the
+    # shim probes at a fixed absolute path: a Mac that has them delegates here,
+    # and the real tool rejects a nonexistent target nonzero too. Asserting on
+    # the shim's own stderr message instead would fail on exactly those Macs.
+    assert unresolved.returncode != 0, (
+        "the shim must not fake success. uv reports a nonzero exit as a non-fatal warning, "
+        "where a faked one would leave any descendant that truly needed the tool with a "
+        "silently wrong artifact."
+    )
 
 
 def test_measure_tree_as_archived_prices_symlinks_at_target_size(tmp_path: Path) -> None:
