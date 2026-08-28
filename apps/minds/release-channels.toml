@@ -20,18 +20,26 @@
 # promotion. See scripts/release_channel/publish.py for the gates each entry has
 # to pass, and the Release channels section of apps/minds/docs/deploy/release.md
 # for withdrawing a build.
+#
+# `rollout_percentage` is how much of the channel is offered the build. It is
+# published as electron-updater's `stagingPercentage` key.
+#
+# Required on every entry: a manifest that declares none is rolled out to 100%.
 
 [channels.stable]
 build_id = "260825un55i8ix7"
 version = "0.4.2"
 fallback_branch = "minds-v0.4.2"
+rollout_percentage = 100
 
 [channels.beta]
 build_id = "260825un55i8ix7"
 version = "0.4.2"
 fallback_branch = "minds-v0.4.2"
+rollout_percentage = 100
 
 [channels.alpha]
 build_id = "260825un55i8ix7"
 version = "0.4.2"
 fallback_branch = "minds-v0.4.2"
+rollout_percentage = 100
