@@ -37,8 +37,6 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
-from imbue.imbue_common.suspension import ClockReading
-from imbue.imbue_common.suspension import read_clocks
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -189,19 +187,6 @@ def _make_manager_with_fake_connection(
     with manager._lock:
         manager._connections[conn_key] = fake_client
     return manager
-
-
-def _register_reverse_tunnel(
-    manager: SSHTunnelManager,
-    tunnel_key: tuple[str, int],
-    tunnel_info: ReverseTunnelInfo,
-    client: FakeSSHClient,
-) -> None:
-    """Seed a reverse tunnel as ``setup_reverse_tunnel`` leaves one: cached, and registered on ``client``."""
-    with manager._lock:
-        manager._connections[tunnel_key[0]] = client
-        manager._reverse_tunnels[tunnel_key] = tunnel_info
-        manager._reverse_tunnel_clients[tunnel_key] = client
 
 
 # -- parse_url_host_port ---------------------------------------------------
@@ -624,27 +609,14 @@ def test_check_and_repair_tunnels_skips_alive_tunnel(tmp_path: Path) -> None:
         local_port=8420,
         remote_port=5000,
     )
-    _register_reverse_tunnel(manager, (conn_key, 8420), tunnel_info, FakeSSHClient.create(active=True))
+    fake_client = FakeSSHClient.create(active=True)
+    with manager._lock:
+        manager._reverse_tunnels[(conn_key, 8420)] = tunnel_info
+        manager._connections[conn_key] = fake_client
 
     manager._check_and_repair_tunnels()
 
     assert manager._setup_calls == []
-    manager.cleanup()
-
-
-def test_check_and_repair_tunnels_repairs_a_tunnel_whose_connection_was_replaced(tmp_path: Path) -> None:
-    """A forward is bound to the transport it was registered on; a healthy replacement client carries none of it."""
-    manager = _make_fake_reverse_tunnel_manager(remote_port=9999)
-    ssh_info = _sample_ssh_info(tmp_path)
-    conn_key = "192.0.2.1:22"
-    tunnel_info = ReverseTunnelInfo(ssh_info=ssh_info, local_port=8420, remote_port=5000)
-    _register_reverse_tunnel(manager, (conn_key, 8420), tunnel_info, FakeSSHClient.create(active=True))
-
-    with manager._lock:
-        manager._connections[conn_key] = FakeSSHClient.create(active=True)
-    manager._check_and_repair_tunnels()
-
-    assert len(manager._setup_calls) == 1
     manager.cleanup()
 
 
@@ -766,7 +738,7 @@ def test_successful_setup_clears_failure_state(tmp_path: Path) -> None:
     manager.cleanup()
 
 
-def test_a_tunnel_on_a_live_transport_clears_stale_failure_state(tmp_path: Path) -> None:
+def test_alive_sibling_clears_stale_failure_state(tmp_path: Path) -> None:
     """When the repair loop observes an alive connection on a tunnel that
     previously failed, it clears the stale backoff so the next failure
     starts a fresh schedule (rather than skipping for 5 minutes)."""
@@ -775,7 +747,9 @@ def test_a_tunnel_on_a_live_transport_clears_stale_failure_state(tmp_path: Path)
     conn_key = f"{ssh_info.host}:{ssh_info.port}"
     tunnel_key = (conn_key, 8420)
     tunnel_info = ReverseTunnelInfo(ssh_info=ssh_info, local_port=8420, remote_port=5000)
-    _register_reverse_tunnel(manager, tunnel_key, tunnel_info, FakeSSHClient.create(active=True))
+    with manager._lock:
+        manager._reverse_tunnels[tunnel_key] = tunnel_info
+        manager._connections[conn_key] = FakeSSHClient.create(active=True)
 
     # Stale backoff entry from a previous failure cycle.
     manager._record_repair_failure(tunnel_key, conn_key, tunnel_info, SSHTunnelError("x", SSHTunnelPhase.HOST_CONNECT))
@@ -839,7 +813,6 @@ def test_remove_reverse_tunnels_for_agent_closes_orphan_connection(tmp_path: Pat
     manager = _make_manager_with_fake_connection(ssh_info, fake_client)
     conn_key = f"{ssh_info.host}:{ssh_info.port}"
     with manager._lock:
-        manager._connection_established_at[conn_key] = read_clocks()
         manager._reverse_tunnels[(conn_key, 8420)] = ReverseTunnelInfo(
             ssh_info=ssh_info,
             local_port=8420,
@@ -853,8 +826,6 @@ def test_remove_reverse_tunnels_for_agent_closes_orphan_connection(tmp_path: Pat
     with manager._lock:
         assert (conn_key, 8420) not in manager._reverse_tunnels
         assert conn_key not in manager._connections
-        # The stamp the suspension check reads goes with the connection it describes.
-        assert conn_key not in manager._connection_established_at
     manager.cleanup()
 
 
@@ -978,7 +949,8 @@ def test_setup_reverse_tunnel_reuses_existing_active_tunnel(tmp_path: Path) -> N
         local_port=8420,
         remote_port=11111,
     )
-    _register_reverse_tunnel(manager, (conn_key, 8420), existing_tunnel, fake_client)
+    with manager._lock:
+        manager._reverse_tunnels[(conn_key, 8420)] = existing_tunnel
 
     port = manager.setup_reverse_tunnel(ssh_info=ssh_info, local_port=8420)
 
@@ -1654,129 +1626,6 @@ def test_a_tunnel_over_a_dead_transport_is_rebuilt_on_the_next_request(tmp_path:
         assert manager._connections[conn_key] is replacement_client
     finally:
         manager.cleanup()
-
-
-class _StubDialTunnelManager(SSHTunnelManager):
-    """Hands out a fresh fake connection instead of dialing the unroutable sample host."""
-
-    _clients_handed_out: list[FakeSSHClient] = PrivateAttr(default_factory=list)
-
-    def _get_or_create_connection(self, ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
-        conn_key = f"{ssh_info.host}:{ssh_info.port}"
-        existing = self._connections.get(conn_key)
-        if existing is not None and not self._has_connection_outlived_a_suspension(conn_key):
-            return existing
-        client = FakeSSHClient.create(active=True)
-        self._connections[conn_key] = client
-        self._connection_established_at[conn_key] = read_clocks()
-        self._clients_handed_out.append(client)
-        return client
-
-
-def _pose_a_suspension_since_the_connection(manager: SSHTunnelManager, conn_key: str, seconds: float) -> None:
-    """Rewrite the connection's stamp so ``seconds`` of wall clock passed that the process did not see."""
-    with manager._lock:
-        current = read_clocks()
-        manager._connection_established_at[conn_key] = ClockReading(
-            wall_seconds=current.wall_seconds - seconds,
-            monotonic_seconds=current.monotonic_seconds - 1.0,
-        )
-
-
-def test_a_tunnel_whose_connection_outlived_a_suspension_is_rebuilt_before_it_is_handed_out(
-    tmp_path: Path,
-) -> None:
-    """A live accept loop is not evidence its transport still works; it captured the dead one."""
-    ssh_info = _sample_ssh_info(tmp_path)
-    conn_key = f"{ssh_info.host}:{ssh_info.port}"
-    tunnel_key = f"{conn_key}->127.0.0.1:8000"
-    manager = _StubDialTunnelManager()
-
-    try:
-        socket_path = manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
-        original_thread = manager._tunnel_threads[tunnel_key]
-        assert len(manager._clients_handed_out) == 1
-
-        # A second request while nothing has happened reuses both.
-        assert manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000) == socket_path
-        assert manager._tunnel_threads[tunnel_key] is original_thread
-        assert len(manager._clients_handed_out) == 1
-
-        _pose_a_suspension_since_the_connection(manager, conn_key, seconds=730.0)
-        rebuilt_path = manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
-
-        assert manager._tunnel_threads[tunnel_key] is not original_thread
-        assert len(manager._clients_handed_out) == 2
-        # Same path (a hash of the key), so the old loop must be gone before the
-        # replacement binds, or its ``finally`` unlinks the new socket.
-        assert rebuilt_path == socket_path
-        assert not original_thread.is_alive()
-        assert rebuilt_path.exists()
-    finally:
-        manager.cleanup()
-
-
-class _UnstoppableThread(threading.Thread):
-    """An accept loop that outlasts the join, without waiting out ``_TUNNEL_RETIREMENT_TIMEOUT_SECONDS``."""
-
-    def join(self, timeout: float | None = None) -> None:
-        return
-
-    def is_alive(self) -> bool:
-        return True
-
-
-def test_a_tunnel_that_outlasts_its_retirement_stays_recorded(tmp_path: Path) -> None:
-    """Forgetting it would let the next request bind a second listener under the loop that still owns the path."""
-    ssh_info = _sample_ssh_info(tmp_path)
-    conn_key = f"{ssh_info.host}:{ssh_info.port}"
-    tunnel_key = f"{conn_key}->127.0.0.1:8000"
-    manager = _StubDialTunnelManager()
-
-    try:
-        socket_path = manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
-        stuck_thread = _UnstoppableThread(daemon=True)
-        with manager._lock:
-            manager._tunnel_threads[tunnel_key] = stuck_thread
-
-        _pose_a_suspension_since_the_connection(manager, conn_key, seconds=730.0)
-
-        with pytest.raises(SSHTunnelError):
-            manager.get_tunnel_socket_path(ssh_info, "127.0.0.1", 8000)
-
-        assert manager._tunnel_threads[tunnel_key] is stuck_thread
-        assert manager._tunnel_socket_paths[tunnel_key] == socket_path
-        assert manager._tunnel_stop_events[tunnel_key].is_set()
-    finally:
-        manager.cleanup()
-
-
-def test_a_reverse_tunnel_whose_connection_outlived_a_suspension_reads_as_broken(tmp_path: Path) -> None:
-    """A suspension leaves the same, still-active-looking client in place, so the repair loop must ask about it itself."""
-    ssh_info = _sample_ssh_info(tmp_path)
-    conn_key = f"{ssh_info.host}:{ssh_info.port}"
-    tunnel_key = (conn_key, 8420)
-    client = FakeSSHClient.create(active=True)
-    manager = _make_manager_with_fake_connection(ssh_info, client)
-    with manager._lock:
-        manager._reverse_tunnel_clients[tunnel_key] = client
-        manager._connection_established_at[conn_key] = read_clocks()
-        assert manager._is_reverse_tunnel_transport_alive_locked(tunnel_key)
-
-    _pose_a_suspension_since_the_connection(manager, conn_key, seconds=730.0)
-
-    with manager._lock:
-        assert not manager._is_reverse_tunnel_transport_alive_locked(tunnel_key)
-
-
-def test_a_connection_with_no_recorded_stamp_is_never_called_suspension_stale(tmp_path: Path) -> None:
-    """No stamp is no evidence, which is what leaves an externally seeded connection alone."""
-    ssh_info = _sample_ssh_info(tmp_path)
-    conn_key = f"{ssh_info.host}:{ssh_info.port}"
-    manager = _make_manager_with_fake_connection(ssh_info, FakeSSHClient.create(active=True))
-
-    with manager._lock:
-        assert not manager._has_connection_outlived_a_suspension(conn_key)
 
 
 def test_reading_the_refusal_count_does_not_wait_on_a_tunnel_being_established(tmp_path: Path) -> None:

@@ -572,25 +572,6 @@ def _in_band_provider_outage_reason(exc: MngrCommandError, provider_name: str | 
     return parse_provider_unavailable_reason(str(exc), provider_name)
 
 
-def _record_restart_failure(
-    tracker: SystemInterfaceHealthTracker,
-    registry: WorkspaceOperationRegistryInterface,
-    workspace_agent_id: AgentId,
-    message: str,
-) -> None:
-    """Fail the restart in both the tracker and the operation registry, or in neither.
-
-    The recovery card reads the tracker and the operations endpoint reads the
-    registry, so a failure the tracker declines (a probe found the machine
-    answering mid-restart) ends the operation as a success with ``message`` as
-    its caveat rather than standing as a failure in one store only.
-    """
-    if tracker.mark_restart_failed(workspace_agent_id, message):
-        registry.fail(workspace_agent_id, message)
-        return
-    registry.complete_with_warning(workspace_agent_id, message)
-
-
 def _report_restart_step_failure(
     step_label: str,
     exc: MngrCommandError,
@@ -658,7 +639,8 @@ def _report_restart_step_failure(
         exc,
         "" if exc.output_tail is None else f"\nsubprocess output:\n{exc.output_tail}",
     )
-    _record_restart_failure(tracker, registry, workspace_agent_id, message)
+    tracker.mark_restart_failed(workspace_agent_id, message)
+    registry.fail(workspace_agent_id, message)
 
 
 def read_environment_block(
@@ -867,7 +849,8 @@ class RestartWorkerFailureHandler(MutableModel):
 
     def __call__(self, exc: BaseException) -> None:
         message = f"The restart worker failed unexpectedly: {exc}"
-        _record_restart_failure(self.tracker, self.registry, self.workspace_agent_id, message)
+        self.tracker.mark_restart_failed(self.workspace_agent_id, message)
+        self.registry.fail(self.workspace_agent_id, message)
 
 
 class RestartDispatchOutcome(UpperCaseStrEnum):
@@ -969,7 +952,8 @@ def dispatch_host_restart(
         # quiet, so a restart that never even spawned must report itself.
         logger.opt(exception=exc).error("Failed to spawn restart worker for {}: {}", workspace_agent_id, exc)
         message = f"Could not start the restart worker: {exc}"
-        _record_restart_failure(tracker, registry, workspace_agent_id, message)
+        tracker.mark_restart_failed(workspace_agent_id, message)
+        registry.fail(workspace_agent_id, message)
         return RestartDispatchOutcome.SPAWN_FAILED
     return RestartDispatchOutcome.DISPATCHED
 
@@ -1257,7 +1241,8 @@ def run_restart_sequence(
     if services_agent_id is None:
         message = "Could not locate the system-services agent for this machine."
         logger.error("Host restart of {} failed: {}", workspace_agent_id, message)
-        _record_restart_failure(tracker, registry, workspace_agent_id, message)
+        tracker.mark_restart_failed(workspace_agent_id, message)
+        registry.fail(workspace_agent_id, message)
         return
 
     # Read before the stop step, so both commands address the same machine. The
@@ -1360,7 +1345,8 @@ def run_restart_sequence(
     if display_info is None:
         message = "The workspace is unknown to discovery after the restart, so its recovery cannot be confirmed."
         logger.error("Host restart of {} failed: {}", workspace_agent_id, message)
-        _record_restart_failure(tracker, registry, workspace_agent_id, message)
+        tracker.mark_restart_failed(workspace_agent_id, message)
+        registry.fail(workspace_agent_id, message)
         return
 
     registry.append_log(workspace_agent_id, "Waiting for the system interface to respond.")
@@ -1401,7 +1387,8 @@ def run_restart_sequence(
             workspace_agent_id,
             message,
         )
-        _record_restart_failure(tracker, registry, workspace_agent_id, message)
+        tracker.mark_restart_failed(workspace_agent_id, message)
+        registry.fail(workspace_agent_id, message)
 
 
 def _provider_error_message_for_workspace(

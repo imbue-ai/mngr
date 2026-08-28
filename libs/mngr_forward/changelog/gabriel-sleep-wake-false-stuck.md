@@ -1,3 +1,0 @@
-An SSH tunnel that a laptop sleep left half-open is now rebuilt before it is handed any traffic.
-
-A sleep kills the TCP connection under a tunnel, but paramiko goes on reporting the transport active and the forward went on handing back the cached tunnel while its accept loop was running. The first requests after the wake each waited out the thirty-second channel-open bound, long enough for a consumer watching those failures to conclude the host was gone. Each SSH connection is now stamped with both clocks when it is built; one that predates a suspension is retired along with its accept loop, and the next request builds a fresh one.

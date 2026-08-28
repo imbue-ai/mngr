@@ -557,7 +557,6 @@ def run(
     # laptop sleep restarts from the wake instead of convicting a workspace of
     # seconds during which no probe ran at all.
     system_interface_health_tracker = SystemInterfaceHealthTracker(sleep_tracker=sleep_tracker)
-    sleep_tracker.add_on_wake_callback(system_interface_health_tracker.invalidate_restart_progress_after_wake)
 
     # The plugin reports every backend failure it observes; minds decides which
     # ones count. Only envelopes carrying no status code, or an infrastructure

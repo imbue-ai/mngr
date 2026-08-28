@@ -1,5 +1,0 @@
-Minds no longer reports that it lost the connection to a machine that is up in the minutes after a laptop wakes.
-
-A sleep kills the SSH tunnels Minds reaches a workspace through, and until the tunnel is rebuilt on the next request every health probe fails no matter how healthy the machine is. Five seconds of those failures was enough to call the machine stuck and restart it unasked; one laptop did this seven times in an overnight session. Probe failures that begin within twenty seconds of a wake now have to keep failing for that whole span before a machine is called stuck. Outside that window nothing changes.
-
-A restart caught by a sleep no longer pins the machine in "Reconnecting...". The `mngr start` it runs can block on a connection the sleep killed, and every deadline on it is measured on a clock that stops during the sleep, so the machine sat in "Lost connection to this machine. Reconnecting..." for fourteen minutes while answering normally. On wake, Minds now goes back to probing a machine whose automatic restart was still running and clears the notice as soon as it answers; a restart you asked for is still narrated by the restart itself.
