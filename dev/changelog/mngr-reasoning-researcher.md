@@ -1,0 +1,1 @@
+Added a gitignored `research/` folder (excluded via `.gitignore`) for downloaded paper datasets used by reasoning-researcher work. The folder holds scripts that pull NeurIPS/ICLR/ICML papers (titles, abstracts, reviewer scores, accept tiers) from the OpenReview API and enrich them with Semantic Scholar citation counts; the data itself is not checked in.

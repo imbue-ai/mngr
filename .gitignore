@@ -373,3 +373,6 @@ apps/minds/package-lock.json
 
 # tmr (task-runner) orchestration scratch report
 **/tmr-report/
+
+# Research data (downloaded datasets, not checked in)
+/research/
