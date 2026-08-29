@@ -10,7 +10,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-import imbue.mngr.main
 from imbue.mngr import hookimpl
 from imbue.mngr.cli.help import load_help_topics_from_plugins
 from imbue.mngr.cli.help_topics import _topic_alias_to_canonical
@@ -20,8 +19,7 @@ from imbue.mngr.interfaces.help_topic import DocFile
 from imbue.mngr.interfaces.help_topic import InlineContent
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 from imbue.mngr.main import cli
-from imbue.mngr.main import reset_plugin_manager
-from imbue.mngr.plugins import hookspecs
+from imbue.mngr.plugins.testing import plugin_manager_installed
 
 
 @contextmanager
@@ -116,20 +114,10 @@ class _PluginWithDocBackedTopic:
 @contextmanager
 def _registered_plugin_topics(plugin: Any) -> Generator[pluggy.PluginManager, None, None]:
     """Register a plugin's help topics, restoring the global registry on exit."""
-    reset_plugin_manager()
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    pm.register(plugin)
-
-    old_pm = imbue.mngr.main._plugin_manager_container["pm"]
-    imbue.mngr.main._plugin_manager_container["pm"] = pm
-
-    try:
+    with plugin_manager_installed([plugin]) as pm:
         with preserve_topic_registry():
             load_help_topics_from_plugins(pm)
             yield pm
-    finally:
-        imbue.mngr.main._plugin_manager_container["pm"] = old_pm
 
 
 def test_plugin_topic_is_registered() -> None:
@@ -165,8 +153,12 @@ def test_plugin_topic_page_is_viewable() -> None:
 
 
 def test_plugin_returning_no_topics_is_harmless() -> None:
-    """A plugin returning None contributes no topics and does not error."""
+    """A plugin returning None contributes no topics: the registry is unchanged and help still works."""
+    topics_before = set(_topic_registry)
     with _registered_plugin_topics(_PluginWithNoTopics()) as pm:
+        # The None-returning plugin must not add, remove, or alter any topic keys.
+        assert set(_topic_registry) == topics_before
+
         result = CliRunner().invoke(cli, ["help"], obj=pm, catch_exceptions=False)
         assert result.exit_code == 0
 

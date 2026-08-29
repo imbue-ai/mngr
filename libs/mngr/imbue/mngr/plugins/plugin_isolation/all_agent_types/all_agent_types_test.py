@@ -14,6 +14,11 @@ def test_all_specified_agent_types_registered(plugin_manager: pluggy.PluginManag
 
 
 def test_non_agent_extras_still_blocked(plugin_manager: pluggy.PluginManager) -> None:
-    """Plugins not in the enabled set should remain blocked."""
+    """Plugins not in the enabled set should remain blocked.
+
+    ttyd and kanpan are not agent types, so they have no `list_registered_agent_types`
+    effect to assert on; this re-asserts the fixture's blocking decision directly as a
+    cheap tripwire for the non-agent plugins.
+    """
     assert plugin_manager.is_blocked("ttyd")
     assert plugin_manager.is_blocked("kanpan")
