@@ -76,6 +76,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.environment_signals import SleepTracker
@@ -83,6 +84,20 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
+
+
+class ProbeGracePurpose(UpperCaseStrEnum):
+    """Why a workspace's probe failures are being ignored for a bounded window.
+
+    A workspace can hold several at once; failure accounting resumes only once
+    every one is gone.
+    """
+
+    CREATE_ATTEMPT = auto()
+    """A create is provisioning (a cold Lima create serves 503s for minutes)."""
+    UPDATE_APPLY = auto()
+    """An update's reveal is landing; it takes the services down past the stuck threshold."""
+
 
 # HTTP statuses that suggest the backend itself is unreachable / not serving,
 # as opposed to an application-layer error. The plugin reports every non-2xx
@@ -398,12 +413,8 @@ class SystemInterfaceHealthTracker(MutableModel):
     _on_change_callbacks: list[OnChangeCallback] = PrivateAttr(default_factory=list)
     _on_recovery_callbacks: list[OnRecoveryCallback] = PrivateAttr(default_factory=list)
     _on_stuck_edge_callbacks: list[OnStuckEdgeCallback] = PrivateAttr(default_factory=list)
-    # agent_id_str -> time.monotonic() deadline of an initial-create-attempt grace window.
-    # While a create attempt is in flight (and until its readiness window expires), probe
-    # failures must not drive the agent to STUCK: a cold build-in-VM Lima create
-    # legitimately serves 503s for many minutes, and bouncing the user to the
-    # recovery page mid-provisioning is exactly the takeover this suppresses.
-    _create_attempt_grace_deadline_by_agent: dict[str, float] = PrivateAttr(default_factory=dict)
+    # agent_id_str -> purpose -> time.monotonic() deadline of a probe-grace window.
+    _probe_grace_deadlines_by_agent: dict[str, dict[ProbeGracePurpose, float]] = PrivateAttr(default_factory=dict)
     # Agents stopped from inside the app. Their interface is legitimately
     # unreachable, so the unattended dispatch must not read STUCK as a failure
     # and start the host back up (see suppress_unattended_recovery).
@@ -472,42 +483,44 @@ class SystemInterfaceHealthTracker(MutableModel):
             except ValueError:
                 pass
 
-    # -- CreateAttempt grace ----------------------------------------------------
+    # -- Probe grace ------------------------------------------------------
 
-    def begin_create_attempt_grace(self, agent_id: AgentId, deadline_monotonic: float) -> None:
-        """Suppress probe-failure STUCK transitions for ``agent_id`` until ``deadline_monotonic``.
+    def begin_probe_grace(self, agent_id: AgentId, purpose: ProbeGracePurpose, deadline_monotonic: float) -> None:
+        """Ignore ``agent_id``'s probe failures for ``purpose`` until ``deadline_monotonic``.
 
-        Called by the create attempt flow right before its readiness wait, once the
-        canonical agent id is known. While the grace is active, probe failures
-        are ignored outright (no failure run accumulates), so a workspace still
-        provisioning is never driven to STUCK. The grace ends at the deadline
-        (the create attempt's readiness window expiring), on :meth:`end_create_attempt_grace`
-        (the create attempt reaching a terminal status), or on a successful probe --
-        whichever comes first. Applies to initial create attempt only; the start /
-        restart paths never register a grace.
+        Ends at the deadline, on :meth:`end_probe_grace`, or on a successful
+        probe. Re-arming the same purpose replaces its deadline.
         """
         with self._lock:
-            self._create_attempt_grace_deadline_by_agent[str(agent_id)] = deadline_monotonic
-        logger.debug("Began create attempt grace for {} (until monotonic {:.0f})", agent_id, deadline_monotonic)
+            self._probe_grace_deadlines_by_agent.setdefault(str(agent_id), {})[purpose] = deadline_monotonic
+        logger.debug(
+            "Began {} probe grace for {} (until monotonic {:.0f})", purpose.value, agent_id, deadline_monotonic
+        )
 
-    def end_create_attempt_grace(self, agent_id: AgentId) -> None:
-        """Drop any create attempt grace for ``agent_id``. Idempotent."""
+    def end_probe_grace(self, agent_id: AgentId, purpose: ProbeGracePurpose) -> None:
+        """Drop ``agent_id``'s grace for ``purpose``, leaving any other purpose's. Idempotent."""
+        aid_str = str(agent_id)
         with self._lock:
-            existed = self._create_attempt_grace_deadline_by_agent.pop(str(agent_id), None) is not None
+            deadlines = self._probe_grace_deadlines_by_agent.get(aid_str)
+            existed = deadlines is not None and deadlines.pop(purpose, None) is not None
+            if deadlines is not None and not deadlines:
+                del self._probe_grace_deadlines_by_agent[aid_str]
         if existed:
-            logger.debug("Ended create attempt grace for {}", agent_id)
+            logger.debug("Ended {} probe grace for {}", purpose.value, agent_id)
 
-    def _is_create_attempt_grace_active_locked(self, aid_str: str) -> bool:
-        """Whether an unexpired create attempt grace exists for the agent. Must hold ``self._lock``.
+    def _is_any_probe_grace_active_locked(self, aid_str: str) -> bool:
+        """Whether any unexpired grace exists for the agent. Must hold ``self._lock``.
 
-        An expired grace is dropped on observation so the map stays bounded even
-        if the create attempt thread died before calling :meth:`end_create_attempt_grace`.
+        Expired entries are dropped on observation so the map stays bounded.
         """
-        deadline = self._create_attempt_grace_deadline_by_agent.get(aid_str)
-        if deadline is None:
+        deadlines = self._probe_grace_deadlines_by_agent.get(aid_str)
+        if deadlines is None:
             return False
-        if time.monotonic() >= deadline:
-            del self._create_attempt_grace_deadline_by_agent[aid_str]
+        now = time.monotonic()
+        for purpose in [purpose for purpose, deadline in deadlines.items() if now >= deadline]:
+            del deadlines[purpose]
+        if not deadlines:
+            del self._probe_grace_deadlines_by_agent[aid_str]
             return False
         return True
 
@@ -749,12 +762,9 @@ class SystemInterfaceHealthTracker(MutableModel):
         stuck_after_seconds: float | None = None
         is_run_restarted_at_wake = False
         with self._lock:
-            # An in-flight create attempt's readiness window suppresses failure
-            # accounting entirely: 503s while the workspace is still
-            # provisioning are expected, not evidence of a wedge. After the
-            # grace expires, the normal stuck-threshold run applies from
-            # scratch, so a genuinely wedged workspace still reaches STUCK.
-            if self._is_create_attempt_grace_active_locked(aid_str):
+            # An expected outage suppresses failure accounting entirely; once
+            # every grace expires the normal stuck-threshold run applies from scratch.
+            if self._is_any_probe_grace_active_locked(aid_str):
                 return
             record = self._records.get(aid_str)
             if record is None or record.health != AgentHealth.HEALTHY:
@@ -815,8 +825,8 @@ class SystemInterfaceHealthTracker(MutableModel):
         fire_health: AgentHealth | None = None
         prior_health: AgentHealth | None = None
         with self._lock:
-            # A reachable workspace no longer needs its create attempt grace.
-            self._create_attempt_grace_deadline_by_agent.pop(aid_str, None)
+            # A reachable workspace no longer needs any of its graces.
+            self._probe_grace_deadlines_by_agent.pop(aid_str, None)
             # Nor is it still the stopped machine the marker was set for, no
             # matter which route started it back up. A machine whose stop
             # command has not returned yet is the exception: its interface

@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiSnapshot
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
+from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
@@ -77,6 +78,9 @@ class UiStatePublisher(MutableModel):
     )
     derive_health_states: Callable[[], tuple[UiHealthMessage, ...]] = Field(
         frozen=True, description="Per-workspace health snapshot for connect-time state"
+    )
+    derive_workspace_updates: Callable[[], UiWorkspaceUpdatesMessage] = Field(
+        frozen=True, description="Current per-workspace update state"
     )
 
     _wake_event: threading.Event = PrivateAttr(default_factory=threading.Event)
@@ -126,6 +130,7 @@ class UiStatePublisher(MutableModel):
             notifications=self.derive_notifications(),
             health=self.derive_health_states(),
             discovery_health=self.derive_discovery_health(),
+            workspace_updates=self.derive_workspace_updates(),
             environment=self.derive_environment(),
         )
 
@@ -148,6 +153,7 @@ class UiStatePublisher(MutableModel):
             to_update(snapshot.notifications.field_ref().is_snapshot, True)
         )
         frames.append(marked_notifications.model_dump_json())
+        frames.append(snapshot.workspace_updates.model_dump_json())
         frames.append(snapshot.environment.model_dump_json())
         return frames
 
@@ -162,6 +168,7 @@ class UiStatePublisher(MutableModel):
                 | UiRequestsMessage
                 | UiNotificationsMessage
                 | UiDiscoveryHealthMessage
+                | UiWorkspaceUpdatesMessage
                 | UiEnvironmentMessage,
             ],
             ...,
@@ -172,6 +179,7 @@ class UiStatePublisher(MutableModel):
             self.derive_requests,
             self.derive_notifications,
             self.derive_discovery_health,
+            self.derive_workspace_updates,
             self.derive_environment,
         )
         for derive in derives:

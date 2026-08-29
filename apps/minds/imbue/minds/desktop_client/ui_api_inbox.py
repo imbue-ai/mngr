@@ -9,7 +9,6 @@ importing it from ``app.py`` would be a circular import (``app`` imports
 ``ui_api`` imports this module).
 """
 
-import os
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -25,8 +24,6 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
@@ -38,6 +35,7 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.mngr.primitives import AgentId
 
@@ -111,22 +109,6 @@ class UiInboxDetailResponse(FrozenModel):
     """Envelope for the right-pane detail payload (discriminated by ``detail.kind``)."""
 
     detail: RequestDetailPayload | UiInboxUnavailableDetail = Field(description="The per-kind detail payload")
-
-
-def _is_inbox_request_authenticated() -> bool:
-    """Session-cookie check; mirrors ``ui_api.is_ui_request_authenticated``.
-
-    Duplicated (5 lines) because ``ui_api`` imports this module at load time,
-    so importing back would be circular; a shared guard hoisted onto the /ui
-    blueprint would remove the duplication.
-    """
-    if os.getenv("SKIP_AUTH", "0") == "1":
-        return True
-    signing_key = get_state().auth_store.get_signing_key()
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(cookie_value=cookie_value, signing_key=signing_key)
 
 
 def _json_response(payload: FrozenModel, status_code: int = 200) -> Response:
@@ -260,7 +242,7 @@ def build_notification_card(
 
 
 def _handle_inbox_list() -> Response:
-    if not _is_inbox_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_json_error_response("Not authenticated", status_code=401)
     state = get_state()
     backend_resolver = state.backend_resolver
@@ -287,7 +269,7 @@ def _handle_inbox_resolutions() -> Response:
     name, since responses record the system-services sibling that filed the
     request) -- verdicts must not read across workspace boundaries.
     """
-    if not _is_inbox_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_json_error_response("Not authenticated", status_code=401)
     try:
         workspace_agent_id = AgentId(request.args.get("workspace", ""))
@@ -320,7 +302,7 @@ def _handle_inbox_resolutions() -> Response:
 
 
 def _handle_inbox_detail(request_id: str) -> Response:
-    if not _is_inbox_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_json_error_response("Not authenticated", status_code=401)
     state = get_state()
     pending: PendingRequestsInterface | None = state.pending_requests

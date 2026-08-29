@@ -109,11 +109,11 @@ describe("SettingsPage", () => {
     });
   });
 
-  it("ignores a section this build does not offer", async () => {
-    // Updates is desktop-only, so in the browser the name resolves to a panel
-    // that renders nothing and has no nav entry to leave it by.
+  it("ignores a section name it does not know", async () => {
+    // A stale or mistyped deep link would otherwise land on a panel that
+    // renders nothing and has no nav entry to leave it by.
     vi.spyOn(m, "redraw").mockImplementation(() => undefined);
-    vi.spyOn(m.route, "param").mockReturnValue("updates");
+    vi.spyOn(m.route, "param").mockReturnValue("machine-updates");
     await withReceiverGuardedGlobalFetch(settingsOverview(), async () => {
       await withMindsNative(null, async () => {
         const page = openPage();

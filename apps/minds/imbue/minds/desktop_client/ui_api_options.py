@@ -17,26 +17,23 @@ home.
 """
 
 import json
-import os
 import re
 from collections.abc import Sequence
 from typing import Final
 
 from flask import Blueprint
 from flask import Response
-from flask import request
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
@@ -121,22 +118,6 @@ class WorkspaceOptionsData(FrozenModel):
     whole_service: str = Field(description="The share target name that grants the whole machine")
 
 
-def _is_options_request_authenticated() -> bool:
-    """The same signed-cookie check as ui_api.is_ui_request_authenticated.
-
-    Local twin because ui_api imports this module (registration), so importing
-    back would be circular; a shared guard hoisted onto the /ui blueprint
-    would remove the duplication.
-    """
-    if os.getenv("SKIP_AUTH", "0") == "1":
-        return True
-    signing_key = get_state().auth_store.get_signing_key()
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(cookie_value=cookie_value, signing_key=signing_key)
-
-
 @pure
 def split_share_targets(servers: Sequence[str]) -> tuple[list[str], str]:
     """Split a workspace's services into per-app share targets and the whole-machine one.
@@ -213,7 +194,7 @@ def _json_error_response(status_code: int, message: str) -> Response:
 
 
 def _handle_workspace_options_data(agent_id: str) -> Response:
-    if not _is_options_request_authenticated():
+    if not is_ui_request_authenticated():
         return _json_error_response(401, "Not authenticated")
     try:
         parsed_agent_id = AgentId(agent_id)

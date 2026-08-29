@@ -25,8 +25,6 @@ logic is re-derived from the same underlying modules. When the legacy SSE
 surface is deleted, those helpers should collapse into one shared home.
 """
 
-import os
-
 from flask import Blueprint
 from flask import Response
 from flask import request
@@ -36,8 +34,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
@@ -49,6 +45,7 @@ from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KE
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
@@ -187,22 +184,6 @@ class CreateAttemptDetailResponse(FrozenModel):
     record: RecordCreateAttemptDetail | None = Field(default=None, description="Set when kind is record")
 
 
-def _is_create_request_authenticated() -> bool:
-    """Session-cookie check for this area's routes.
-
-    Duplicates ``ui_api.is_ui_request_authenticated`` (importing it would be
-    circular: app -> ui_api -> this module); collapse the two when the legacy
-    surface is deleted.
-    """
-    if os.getenv("SKIP_AUTH", "0") == "1":
-        return True
-    signing_key = get_state().auth_store.get_signing_key()
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(cookie_value=cookie_value, signing_key=signing_key)
-
-
 def _unauthenticated_response() -> Response:
     return Response('{"error": "authentication required"}', status=401, mimetype="application/json")
 
@@ -280,7 +261,7 @@ def _read_retry_prefill(
 
 
 def _handle_create_form_defaults() -> Response:
-    if not _is_create_request_authenticated():
+    if not is_ui_request_authenticated():
         return _unauthenticated_response()
     state = get_state()
     session_store = state.session_store
@@ -351,7 +332,7 @@ def _destroying_statuses(backend_resolver: BackendResolverInterface) -> dict[str
 
 
 def _handle_landing_extras() -> Response:
-    if not _is_create_request_authenticated():
+    if not is_ui_request_authenticated():
         return _unauthenticated_response()
     state = get_state()
     backend_resolver = state.backend_resolver
@@ -373,7 +354,7 @@ def _handle_landing_extras() -> Response:
 
 
 def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
-    if not _is_create_request_authenticated():
+    if not is_ui_request_authenticated():
         return _unauthenticated_response()
     agent_creator = get_state().agent_creator
     if agent_creator is None:

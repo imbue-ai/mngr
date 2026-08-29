@@ -54,50 +54,54 @@ def find_if_elif_without_else(
     return tuple(sorted_chunks)
 
 
+@pure
+def _get_elif_branch(if_node: ast.If) -> ast.If | None:
+    """Return the ``elif`` that continues this chain, or None when there is none.
+
+    An ``elif`` parses into an ``orelse`` holding exactly one ``If``. An ``else:``
+    block whose body merely *starts* with an ``if`` holds the rest of that body too,
+    so it is a real else clause and ends the chain.
+    """
+    if len(if_node.orelse) != 1:
+        return None
+    only_statement = if_node.orelse[0]
+    if isinstance(only_statement, ast.If):
+        return only_statement
+    return None
+
+
+@pure
+def _get_last_if_in_chain(if_node: ast.If) -> ast.If:
+    """Return the final If of an if/elif chain (the node itself when it has no elif)."""
+    current = if_node
+    next_branch = _get_elif_branch(current)
+    while next_branch is not None:
+        current = next_branch
+        next_branch = _get_elif_branch(current)
+    return current
+
+
 def _mark_if_chain_as_visited(if_node: ast.If, visited: set[int]) -> None:
     """Mark all If nodes in an if/elif chain as visited."""
     visited.add(id(if_node))
-    current = if_node
-    while current.orelse:
-        first_in_orelse = current.orelse[0]
-        if isinstance(first_in_orelse, ast.If):
-            visited.add(id(first_in_orelse))
-            current = first_in_orelse
-        else:
-            break
+    current: ast.If | None = _get_elif_branch(if_node)
+    while current is not None:
+        visited.add(id(current))
+        current = _get_elif_branch(current)
 
 
 @pure
 def _has_elif_without_else(if_node: ast.If) -> bool:
     """Check if an If node has elif but no else clause."""
-    if not if_node.orelse:
+    if _get_elif_branch(if_node) is None:
         return False
-
-    first_orelse = if_node.orelse[0]
-
-    if isinstance(first_orelse, ast.If):
-        current = if_node
-        while current.orelse:
-            first_in_orelse = current.orelse[0]
-            if isinstance(first_in_orelse, ast.If):
-                current = first_in_orelse
-            else:
-                return False
-        return True
-
-    return False
+    return not _get_last_if_in_chain(if_node).orelse
 
 
 @pure
 def _get_if_chain_end_line(if_node: ast.If) -> int:
     """Get the last line number of an if/elif chain."""
-    current = if_node
-    while current.orelse:
-        first_in_orelse = current.orelse[0]
-        if isinstance(first_in_orelse, ast.If):
-            current = first_in_orelse
-        else:
-            break
+    current = _get_last_if_in_chain(if_node)
 
     if hasattr(current, "end_lineno") and current.end_lineno is not None:
         return current.end_lineno

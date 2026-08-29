@@ -24,7 +24,7 @@ from flask import Response
 from flask import request
 
 from imbue.minds.desktop_client.static_pages import build_static_page_html
-from imbue.minds.desktop_client.ui_api import is_ui_request_authenticated
+from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 
 
 def _render_login_document(body_html: str, head_extra: str = "") -> Response:

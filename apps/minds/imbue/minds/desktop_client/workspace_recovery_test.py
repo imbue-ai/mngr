@@ -933,6 +933,7 @@ def _dispatcher(
     mngr_binary: str,
     mngr_host_dir: Path,
     connectivity_detector: ConnectivityDetector | None = None,
+    should_decline_dispatch: Callable[[AgentId], bool] | None = None,
 ) -> UnattendedRecoveryDispatcher:
     """The tracker callback wired in ``app.py``, built against test doubles."""
     return UnattendedRecoveryDispatcher(
@@ -945,6 +946,7 @@ def _dispatcher(
         mngr_forward_port=0,
         mngr_forward_preauth_cookie=None,
         connectivity_detector=connectivity_detector,
+        should_decline_dispatch=should_decline_dispatch,
     )
 
 
@@ -2105,6 +2107,55 @@ def test_an_owed_start_is_dropped_for_a_machine_that_is_no_longer_stuck(
         ), "a machine that answered again on its own needs no start"
 
     assert tracker.get_health(workspace_agent) is AgentHealth.HEALTHY
+
+
+def test_an_owed_start_is_dropped_for_a_machine_whose_update_began_applying(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The update veto is re-asked at the release, not trusted from the stuck edge.
+
+    The veto passes a run that is still preparing, and an owed start waits out a
+    whole device outage before it runs -- so the apply can begin in between, and
+    releasing then would restart the machine out from under it.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_for_a_remote_machine(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+    detector, prober = _offline_detector(root_concurrency_group)
+    is_applying = False
+
+    with ConcurrencyGroup(name="test-unattended-owed-apply") as cg:
+        dispatcher = _dispatcher(
+            tracker,
+            resolver,
+            registry,
+            cg,
+            mngr_binary,
+            tmp_path,
+            detector,
+            should_decline_dispatch=lambda _agent_id: is_applying,
+        )
+        detector.add_on_recovery_callback(dispatcher.on_connectivity_recovered)
+        tracker.add_on_stuck_edge_callback(dispatcher)
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+        assert poll_until(
+            lambda: str(workspace_agent) in dispatcher._owed_agent_ids,
+            timeout=_DISPATCH_WAIT_SECONDS,
+            poll_interval=0.02,
+        ), "the edge must have passed the veto while the run was only preparing"
+
+        # The run reached its apply while the device was still offline.
+        is_applying = True
+        bring_stub_network_back(detector, prober)
+        assert not poll_until(
+            lambda: any(line.startswith("start ") for line in _read_fake_mngr_invocations(mngr_binary)),
+            timeout=1.0,
+            poll_interval=0.02,
+        ), "the owed start must stand back from an apply that began during the outage"
 
 
 class _TrackerRecoveringTheNetworkMidGate(SystemInterfaceHealthTracker):

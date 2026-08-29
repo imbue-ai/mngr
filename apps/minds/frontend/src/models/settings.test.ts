@@ -14,15 +14,7 @@ import {
   type SettingsOverview,
 } from "./settings";
 
-const BASE_OVERVIEW: SettingsOverview = {
-  services_overview: [],
-  file_sharing_grants: [],
-  workspace_delegation_grants: [],
-  permissions_unavailable: false,
-  is_master_password_set: false,
-  report_unexpected_errors: true,
-  version: "v-one",
-};
+const BASE_OVERVIEW: SettingsOverview = settingsOverview();
 
 const BASE_PREFS: NotificationPrefs = {
   is_enabled: true,
@@ -731,10 +723,12 @@ describe("SettingsModel release channels", () => {
     });
   });
 
-  it("hides the Updates section in the browser build and shows it on desktop", async () => {
+  it("lists the Updates section in the browser build too, since machine updates are configured there", async () => {
+    // The app-updates half of the panel is desktop-only, but the panel itself
+    // is not: the machine-update window applies to every build.
     await withMindsNative(null, async () => {
       const names = new SettingsModel(undefined, () => {}).visibleSections.map((section) => section.name);
-      expect(names).not.toContain("updates");
+      expect(names).toContain("updates");
       expect(names).toContain("error-reporting");
     });
     await withMindsNative(nativeStub(RUNNING, PEEKED).surface, async () => {

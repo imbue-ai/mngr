@@ -24,6 +24,7 @@ import {
   overlayBehindWorkspaceId,
 } from "./classify";
 import { noticeBandFor } from "./notice-band";
+import { standingUpdateNotice, updateRunOutcome, updateRunPhase } from "../../models/updates";
 import { NoticeBand } from "./NoticeBand";
 import { NotificationsPage } from "../pages/NotificationsPage";
 import type { OverlayShellAttrs } from "./OverlayShell";
@@ -41,6 +42,8 @@ import {
 } from "./update-ready";
 import { UpdateReadyCard } from "./UpdateReadyCard";
 import { RecoveryModal } from "../recovery/RecoveryModal";
+import { UpdateApplyModal } from "../components/UpdateApplyModal";
+import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { electronBridge } from "../../electron-bridge";
 
@@ -344,6 +347,16 @@ export function Shell(): m.Component<ShellAttrs> {
       const unreachableProviderLabel = entry?.is_backend_unreachable
         ? entry.provider_label || null
         : null;
+      const standingNotice =
+        agentScoped === null
+          ? "none"
+          : standingUpdateNotice(shell.stores.updates.forAgent(agentScoped), shell.stores.updates.isUpdating(agentScoped));
+      // The band is where a run reports itself to the reader inside the
+      // machine, who cannot see the row badge.
+      const published = agentScoped === null ? null : shell.stores.updates.publishedFor(agentScoped);
+      const updatePhase =
+        agentScoped === null ? "none" : updateRunPhase(published, shell.stores.updates.isUpdating(agentScoped));
+      const updateOutcome = updateRunOutcome(published);
       const band = noticeBandFor(
         health,
         shell.stores.health.discoveryHealth,
@@ -360,6 +373,10 @@ export function Shell(): m.Component<ShellAttrs> {
           // wifi off. A row we have no entry for keeps the conservative default.
           isWorkspaceNetworkDependent: entry?.is_network_dependent ?? true,
           isDeviceCannotConnect: entry?.is_device_cannot_connect ?? false,
+          updateRunPhase: updatePhase,
+          updateHoldDetail: published?.is_hold_recorded ? (published.hold_detail ?? "") : null,
+          updateRunOutcome: updateOutcome,
+          standingUpdateNotice: standingNotice,
         },
       );
       // The card is a modal of its own, so it is raised only where it can sit
@@ -372,6 +389,15 @@ export function Shell(): m.Component<ShellAttrs> {
         workspaceParam !== null &&
         agentScoped !== null &&
         shell.isRecoveryModalOpenFor(agentScoped);
+      // Not gated on a displayed machine: the machines list opens this for a
+      // row while Home is the surface.
+      const updateModalAgentId = shell.openUpdateModalAgentId();
+      // Covers only the machine the apply is landing in; up exactly while the
+      // run is applying.
+      const isApplyCovering =
+        workspaceParam !== null &&
+        agentScoped !== null &&
+        shell.stores.updates.isApplying(agentScoped);
 
       return m("div", { style: "display: contents" }, [
         m(Titlebar, { shell, routePath }),
@@ -383,7 +409,11 @@ export function Shell(): m.Component<ShellAttrs> {
               onAction: () => {
                 if (band.action?.kind === "restart-app") {
                   electronBridge.restartApp();
-                } else if (agentScoped !== null) {
+                } else if (agentScoped === null) {
+                  return;
+                } else if (band.action?.kind === "update-workspace") {
+                  shell.openUpdateModal(agentScoped);
+                } else {
                   shell.openRecoveryModal(agentScoped);
                 }
               },
@@ -394,6 +424,22 @@ export function Shell(): m.Component<ShellAttrs> {
               workspaceAnyId: workspaceParam,
               isAutoRaised: shell.isRecoveryModalAutoRaised(agentScoped),
               onClose: () => shell.closeRecoveryModal(),
+            })
+          : null,
+        isApplyCovering && workspaceParam !== null
+          ? m(UpdateApplyModal, {
+              workspaceName:
+                shell.stores.workspaces.entryByAnyId(workspaceParam)?.name ??
+                "this machine",
+            })
+          : null,
+        updateModalAgentId !== null
+          ? m(UpdateModal, {
+              agentId: updateModalAgentId,
+              workspaceName:
+                shell.stores.workspaces.entryByAnyId(updateModalAgentId)
+                  ?.name ?? "this machine",
+              onClose: () => shell.closeUpdateModal(),
             })
           : null,
         // The browser sign-in waiting modal: any page (welcome, accounts,

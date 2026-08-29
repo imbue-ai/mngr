@@ -419,6 +419,16 @@ body:has(#notice-band) .workspace-surface {
   border-top-right-radius: 0;
 }
 
+/*
+ * The room a modal has to be centered in: the window less the titlebar and the
+ * notice band (which paint over the overlay, z-100/z-95 over z-50), less a
+ * margin. A card centered in the whole window loses its top behind the chrome.
+ */
+.modal-viewport {
+  padding-top: calc(38px + var(--notice-band-height) + 16px);
+  padding-bottom: 16px;
+}
+
 .accent-spine::before {
   content: "";
   position: absolute;

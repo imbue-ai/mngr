@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.testing import ReadCountingMindsConfig
@@ -288,3 +289,43 @@ def test_set_report_unexpected_errors_if_version_matches_closes_the_check_then_a
     assert second is None
     assert config.write_count == 1
     assert config.get_report_unexpected_errors() is False
+
+
+def test_update_window_round_trips(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_update_window() == DEFAULT_UPDATE_WINDOW
+
+    config.set_update_window(23, 3)
+
+    assert config.get_update_window() == (23, 3)
+    assert _make_config(tmp_path).get_update_window() == (23, 3)
+
+
+def _toml_literal(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return repr(value)
+
+
+@pytest.mark.parametrize(
+    "stored",
+    (
+        {"window_start_hour": 2},
+        {"window_start_hour": "2", "window_end_hour": "5"},
+        {"window_start_hour": True, "window_end_hour": 5},
+        {"window_start_hour": 2, "window_end_hour": 24},
+        {"window_start_hour": -1, "window_end_hour": 5},
+        {"window_start_hour": 3, "window_end_hour": 3},
+    ),
+    ids=["half-written", "wrong-type", "bool-hour", "hour-too-high", "hour-negative", "empty-window"],
+)
+def test_an_unusable_stored_update_window_falls_back_rather_than_raising(
+    tmp_path: Path, stored: dict[str, object]
+) -> None:
+    config = _make_config(tmp_path)
+    config.set_default_account_id("someone")
+    raw = (tmp_path / "config.toml").read_text()
+    lines = [f"{key} = {_toml_literal(value)}" for key, value in stored.items()]
+    (tmp_path / "config.toml").write_text(raw + "\n[updates]\n" + "\n".join(lines) + "\n")
+
+    assert config.get_update_window() == DEFAULT_UPDATE_WINDOW

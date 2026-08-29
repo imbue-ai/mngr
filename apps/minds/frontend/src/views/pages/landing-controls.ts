@@ -34,6 +34,24 @@ export function mindControlsFor(
   };
 }
 
+/** The question a stop or restart asks first, or null for none. An update
+ * that is preparing leaves the live machine untouched, so it changes nothing
+ * here; only the apply is rewriting the machine, and stopping under it is
+ * what leaves one half-updated -- so that is the one case the question names. */
+export function lifecycleConfirmation(action: "stop" | "restart", name: string, isApplying: boolean): string | null {
+  if (action === "restart") {
+    return isApplying
+      ? `Restart "${name}"? An update is being applied to it right now, and restarting can leave it half-updated. ` +
+          "Restart anyway?"
+      : null;
+  }
+  const consequence = "Its agents will stop and its services become inaccessible. Data is preserved and you can start it again.";
+  return isApplying
+    ? `Stop "${name}"? An update is being applied to it right now, and stopping can leave it half-updated. ` +
+        `${consequence} Stop anyway?`
+    : `Stop "${name}"? ${consequence}`;
+}
+
 /** What clicking a machines-list row should do, as a testable pure decision. */
 export type RowClickAction = "enter" | "recover" | "recover-start";
 

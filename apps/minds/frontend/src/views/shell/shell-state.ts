@@ -19,6 +19,9 @@ import {
   workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
+import { recoveryRoute } from "../../models/create";
+import type { UiWorkspaceEntry } from "../../channel/messages";
+import { rowClickActionFor } from "../pages/landing-controls";
 
 /** Posts one permission-resolution message into the mounted workspace frame
  * over the embed contract. Registered by WorkspaceFrame, which owns the
@@ -96,6 +99,10 @@ export class ShellState {
    */
   private openRecovery: { agentId: string; isAutoRaised: boolean } | null =
     null;
+  /** Which machine's update modal is up. Unlike the recovery card this is not
+   * tied to a displayed machine (the machines list opens it from a row); it is
+   * dropped by the next navigation away from its machine. */
+  private openUpdateAgentId: string | null = null;
   /** The mounted content iframe, installed by WorkspaceFrame (null when none is
    * mounted: hub pages, recovery, destroying, the workspace sub-pages). The
    * frame is ALSO mounted behind an app modal that forwarded ?workspace=, which
@@ -170,6 +177,26 @@ export class ShellState {
   enterWorkspace(anyId: string, query: Record<string, string> = {}): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
     m.route.set(`/workspace/${agentScoped}`, query);
+  }
+
+  /** Enter a workspace the way its machines-list row does: onto its surface
+   * when healthy and running, otherwise onto Recovery (with a start for a
+   * stopped container), which returns to the surface. `liveness` is the entry's
+   * raw field or the tracker's displayed reading. */
+  enterWorkspaceOrRecover(entry: UiWorkspaceEntry, liveness: string): void {
+    const isHealthy = this.stores.health.statusFor(entry.id) === "healthy";
+    const returnTo = `/goto/${entry.id}/`;
+    switch (rowClickActionFor(entry, liveness, isHealthy)) {
+      case "recover":
+        m.route.set(recoveryRoute(entry.id, returnTo, null));
+        return;
+      case "recover-start":
+        m.route.set(recoveryRoute(entry.id, returnTo, "start"));
+        return;
+      case "enter":
+        this.enterWorkspace(entry.id);
+        return;
+    }
   }
 
   /** Open the request-review popup over the current surface: forward the
@@ -482,9 +509,32 @@ export class ShellState {
     }
     return (
       this.closeOpenRecoveryModal() ||
+      this.closeOpenUpdateModal() ||
       this.closeWorkspaceOverlay() ||
       this.dismissAppOverlay()
     );
+  }
+
+  /** The machine whose update modal is up, or null when none is. */
+  openUpdateModalAgentId(): string | null {
+    return this.openUpdateAgentId;
+  }
+
+  /** The user asked for the update modal (a badge, the band's "See update"). */
+  openUpdateModal(agentId: string): void {
+    this.openUpdateAgentId = agentId;
+  }
+
+  closeUpdateModal(): void {
+    this.openUpdateAgentId = null;
+  }
+
+  /** Close whichever update modal is up, reporting whether there was one. Not
+   * keyed on the displayed machine, because the modal is not. */
+  closeOpenUpdateModal(): boolean {
+    if (this.openUpdateAgentId === null) return false;
+    this.closeUpdateModal();
+    return true;
   }
 
   /** Route-change hook: track displayed workspace, repaint accent, register. */
@@ -570,6 +620,17 @@ export class ShellState {
       this.openRecovery.agentId !== heldAgentScoped
     ) {
       this.openRecovery = null;
+    }
+    // Dropped by a navigation to anywhere but its own machine: "Update now"
+    // enters the machine before dispatching (so the chat tab has a connected
+    // client to open in), and the modal rides that navigation. Keyed on the
+    // navigation because it can be open with no machine displayed.
+    if (
+      !isSameRoute &&
+      this.openUpdateAgentId !== null &&
+      this.openUpdateAgentId !== heldAgentScoped
+    ) {
+      this.openUpdateAgentId = null;
     }
     this.consumeReviewParam(path, search);
     this.channel?.setClientState(path, agentScoped);
@@ -776,6 +837,12 @@ export class ShellState {
         this.finishRecovery();
       return;
     }
+    // Mid-apply the services are down because an update took them down;
+    // raising the recovery card would blame the machine for it. Only the raise
+    // is withheld: health frames are edge-published, so a card already up must
+    // still come down on the healthy frame. A machine that dies mid-prepare
+    // gets the normal card.
+    if (this.stores.updates.isApplying(agentId)) return;
     if (isSnapshotFrame || health !== "recovery_failed") return;
     if (this.openRecovery !== null) return;
     if (this.stores.health.discoveryHealth === "blocked") return;

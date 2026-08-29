@@ -51,3 +51,41 @@ def test_prevent_raw_post_message_outside_embed_contract() -> None:
             check_regex_ratchet(_DIR, FileExtension(extension), _POST_MESSAGE_PATTERN, _ALLOWED_POST_MESSAGE_FILES)
         )
     assert len(chunks) <= snapshot(0), _RAW_POST_MESSAGE_RULE.format_failure(tuple(chunks))
+
+
+_HOST_LIFECYCLE_ARGV_RULE = RatchetRuleInfo(
+    rule_name="mngr host start/stop argv assembled outside the shared host action",
+    rule_description=(
+        "A host start or stop must go through perform_mind_host_action (desktop_client/"
+        "workspace_lifecycle.py), which is what keeps the optimistic host-state override and the "
+        "unattended-recovery marks in step with the machine. A route that assembles its own argv "
+        "skips both by omission: a start that does not clear the intentional-stop mark leaves the "
+        "machine excluded from unattended recovery for the rest of the process's life, and nothing "
+        "else can clear it -- the only other clear is a successful probe, and the probe loop polls "
+        "agents that are already unhealthy. Call the shared action instead of shelling out."
+    ),
+)
+
+_ALLOWED_HOST_LIFECYCLE_FILES = (
+    # The shared action itself: the one sanctioned home for these argvs.
+    "workspace_lifecycle.py",
+    # The recovery worker drives the health lifecycle directly (mark_recovering /
+    # record_probe_success), so it owns the marks the shared action would set.
+    "workspace_recovery.py",
+    # Quit-time bulk stop: one mngr call over many agents, which the per-workspace
+    # action cannot express. It marks each agent itself.
+    "desktop_control.py",
+)
+
+# Both shapes a host lifecycle call takes: a subprocess argv led by the resolved binary,
+# and an MngrCaller argv, which omits it.
+_HOST_LIFECYCLE_ARGV_PATTERN = RegexPattern(
+    r"""mngr_binary,\s*["'](?:start|stop)["']|\[\s*["'](?:start|stop)["']\s*,""", multiline=False
+)
+
+
+def test_prevent_host_lifecycle_argv_outside_the_shared_action() -> None:
+    chunks = check_regex_ratchet(
+        _DIR, FileExtension(".py"), _HOST_LIFECYCLE_ARGV_PATTERN, _ALLOWED_HOST_LIFECYCLE_FILES
+    )
+    assert len(chunks) <= snapshot(0), _HOST_LIFECYCLE_ARGV_RULE.format_failure(tuple(chunks))

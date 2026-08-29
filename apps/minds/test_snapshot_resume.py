@@ -1847,3 +1847,90 @@ def test_bug_report_diagnostics_stage_beside_an_earlier_reports_files(
         assert _staged_archive_in(staging_dir) is None, (
             f"collection staged no archive ({result.note}) but wrote a file for it anyway"
         )
+
+
+# The update-self apply re-runs ``setup_system.sh`` live inside a running workspace, a path a
+# fresh image build never exercises; the resumed snapshot workspace is where CI can cover it.
+
+_PROVISION_MARKER_DIR: Final[str] = "/var/lib/minds/provision"
+# Not /tmp: the container mounts it as a tmpfs the provisioner writes into and cleans up.
+_RESTIC_HOLD_DIR: Final[str] = "/home/user/.ci-restic-hold"
+_LIVE_REPROVISION_TIMEOUT_SECONDS: Final[int] = 780
+
+
+def _hold_restic_executing(container_name: str) -> str:
+    """Keep the pinned restic binary executing inside the container (as a mid-backup ``host_backup`` would); return its pid.
+
+    A ``restic backup --stdin`` on a FIFO held open read-write never sees EOF; ``setsid``
+    lets it outlive the ``docker exec`` shell.
+    """
+    hold = (
+        f"set -e; rm -rf {_RESTIC_HOLD_DIR}; mkdir -p {_RESTIC_HOLD_DIR}; "
+        f"mkfifo {_RESTIC_HOLD_DIR}/stdin.fifo; "
+        f"RESTIC_PASSWORD=ci restic --repo {_RESTIC_HOLD_DIR}/repo init >/dev/null; "
+        f"exec 3<>{_RESTIC_HOLD_DIR}/stdin.fifo; "
+        f"setsid nohup env RESTIC_PASSWORD=ci restic --repo {_RESTIC_HOLD_DIR}/repo "
+        "backup --stdin --stdin-filename hold <&3 >/dev/null 2>&1 & "
+        "echo $!"
+    )
+    started = _exec_in_container(container_name, hold, timeout=120)
+    assert started.returncode == 0, f"could not start the restic holder: {started.stderr}"
+    pid = started.stdout.strip()
+    # `$!` is echoed while the holder is still in setsid -> nohup -> env; wait for it to reach restic.
+    inside_restic = (
+        f"for _ in $(seq 1 100); do "
+        f"exe=$(readlink /proc/{pid}/exe 2>/dev/null || true); "
+        f'case "$exe" in /usr/local/bin/restic*) break;; esac; sleep 0.2; done; '
+        f"kill -0 {pid} && readlink /proc/{pid}/exe"
+    )
+    alive = _exec_in_container(container_name, inside_restic, timeout=60)
+    assert alive.returncode == 0 and alive.stdout.strip().startswith("/usr/local/bin/restic"), (
+        f"the restic holder (pid {pid}) is not executing /usr/local/bin/restic: "
+        f"exe={alive.stdout.strip()!r} stderr={alive.stderr!r}"
+    )
+    return pid
+
+
+@pytest.mark.minds_snapshot_resume
+@pytest.mark.docker
+@pytest.mark.timeout(1150)
+def test_live_reprovision_succeeds_inside_the_running_workspace(running_workspace: _ResumedWorkspace) -> None:
+    """The PR's ``setup_system.sh`` re-runs cleanly inside a live workspace, as an agent would run it.
+
+    Runs from the workspace tree under ``HOME=/home/user`` (what an agent-driven re-run gets)
+    while restic is busy, with the provision guard cleared so the whole script runs.
+    """
+    container_name = running_workspace.container_name
+    holder_pid = _hold_restic_executing(container_name)
+    try:
+        reprovision = _exec_in_container(
+            container_name,
+            f"rm -f {_PROVISION_MARKER_DIR}/*.setup_system.done; "
+            "cd /home/user/workspace && HOME=/home/user bash system/scripts/setup_system.sh",
+            timeout=_LIVE_REPROVISION_TIMEOUT_SECONDS,
+        )
+        assert reprovision.returncode == 0, (
+            f"live re-provision exited {reprovision.returncode}\n"
+            f"--- stdout (tail) ---\n{reprovision.stdout[-4000:]}\n"
+            f"--- stderr (tail) ---\n{reprovision.stderr[-4000:]}"
+        )
+        # The provision guard's short-circuit also exits 0.
+        assert "[provision-guard]" not in reprovision.stdout, "the provision guard skipped the re-provision"
+        stamped = _exec_in_container(container_name, f"ls {_PROVISION_MARKER_DIR}/*.setup_system.done", timeout=30)
+        assert stamped.returncode == 0, f"no fresh provision marker under {_PROVISION_MARKER_DIR}: {stamped.stderr!r}"
+        # The busy binary was replaced under the running process (no ETXTBSY).
+        pinned = _exec_in_container(
+            container_name,
+            "grep -o 'RESTIC_VERSION:=[0-9.]*' /home/user/workspace/system/scripts/setup_system.sh | cut -d= -f2",
+            timeout=30,
+        ).stdout.strip()
+        assert pinned, "could not read RESTIC_VERSION from setup_system.sh"
+        installed = _exec_in_container(container_name, "/usr/local/bin/restic version", timeout=30)
+        assert installed.returncode == 0 and f"restic {pinned}" in installed.stdout, (
+            f"restic at /usr/local/bin is not the pinned {pinned} after the re-provision: "
+            f"{installed.stdout!r} {installed.stderr!r}"
+        )
+        still_held = _exec_in_container(container_name, f"kill -0 {holder_pid}", timeout=30)
+        assert still_held.returncode == 0, "the restic holder died during the re-provision"
+    finally:
+        _exec_in_container(container_name, f"kill {holder_pid} 2>/dev/null; rm -rf {_RESTIC_HOLD_DIR}", timeout=60)

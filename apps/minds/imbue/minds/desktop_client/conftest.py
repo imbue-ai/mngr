@@ -455,6 +455,12 @@ def build_desktop_client_for_test(
 
 
 @pytest.fixture
+def agent_id() -> AgentId:
+    """A fresh workspace agent id, for tests that need exactly one."""
+    return AgentId.generate()
+
+
+@pytest.fixture
 def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
     """Root ``ConcurrencyGroup`` for tests that construct something requiring one.
 

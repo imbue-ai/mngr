@@ -1,11 +1,41 @@
 import json
+from collections.abc import Mapping
+from collections.abc import Sequence
+from pathlib import Path
+
+from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.minds.desktop_client.workspace_version import parse_git_describe
+from imbue.minds.desktop_client.workspace_version import parse_update_self_ref
 from imbue.minds.desktop_client.workspace_version import parse_upgrade_merges
+from imbue.minds.desktop_client.workspace_version import read_workspace_current_version
 from imbue.minds.desktop_client.workspace_version import read_workspace_git_version
 from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+
+
+class _GitAnsweringCaller(MngrCaller):
+    """Answers the one version-read exec with canned stdout, recording the shell command it was asked to run."""
+
+    stdout: str = Field(default="")
+    _git_commands: list[str] = PrivateAttr(default_factory=list)
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        self._git_commands.append(argv[3])
+        return MngrCallResult(returncode=0, stdout=json.dumps({"results": [{"stdout": self.stdout}]}))
+
+    @property
+    def git_commands(self) -> list[str]:
+        return self._git_commands
 
 
 def test_parse_git_describe_returns_tag() -> None:
@@ -15,6 +45,72 @@ def test_parse_git_describe_returns_tag() -> None:
 def test_parse_git_describe_returns_none_when_empty() -> None:
     assert parse_git_describe("") is None
     assert parse_git_describe("   \n") is None
+
+
+def test_parse_update_self_ref_names_the_ref_the_run_moved_to() -> None:
+    assert parse_update_self_ref("update-self: merge upstream template (minds-v0.4.1)\n") == "minds-v0.4.1"
+
+
+def test_parse_update_self_ref_reports_a_branch_target_as_written() -> None:
+    assert parse_update_self_ref("update-self: merge upstream template (main)") == "main"
+
+
+def test_parse_update_self_ref_ignores_the_templates_own_update_self_commits() -> None:
+    """Upstream commits that change the skill share the prefix and would shadow the real marker."""
+    assert (
+        parse_update_self_ref("update-self: survive cross-version launches -- restore the lead_agent, fail fast")
+        is None
+    )
+    assert parse_update_self_ref("Revert the update-self run (it broke the terminal)") is None
+    assert parse_update_self_ref("") is None
+    assert parse_update_self_ref("update-self: merge upstream template") is None
+
+
+def test_the_update_self_marker_outranks_the_tag() -> None:
+    caller = _GitAnsweringCaller(stdout="update-self: merge upstream template (minds-v0.4.1)\nminds-v0.3.17\n")
+
+    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+
+    assert version == "minds-v0.4.1"
+
+
+def test_the_marker_and_the_tag_are_read_in_one_exec() -> None:
+    """Both git reads ride one ``mngr exec``, and a tagless clone must not fail it: ``describe`` is allowed to fail."""
+    caller = _GitAnsweringCaller(stdout="minds-v0.4.1\n")
+
+    read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+
+    assert len(caller.git_commands) == 1
+    (command,) = caller.git_commands
+    assert "--grep" in command
+    assert "describe" in command
+    assert command.endswith("|| true")
+
+
+def test_a_workspace_with_no_marker_falls_back_to_the_tag() -> None:
+    caller = _GitAnsweringCaller(stdout="minds-v0.4.1\n")
+
+    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+
+    assert version == "minds-v0.4.1"
+
+
+def test_a_tagless_workspace_is_read_from_its_marker() -> None:
+    """The create path checks the release out as a branch, so a fresh clone has no tags to describe."""
+    caller = _GitAnsweringCaller(stdout="update-self: merge upstream template (minds-v0.4.1)\n")
+
+    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == "minds-v0.4.1"
+
+
+def test_a_marker_the_strict_parse_rejects_does_not_shadow_the_tag() -> None:
+    """The grep selects any subject that starts with the marker prefix; only an exact marker names a version."""
+    caller = _GitAnsweringCaller(stdout="update-self: merge upstream template (minds-v0.4.1) [retry]\nminds-v0.3.17\n")
+
+    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == "minds-v0.3.17"
+
+
+def test_a_workspace_with_neither_marker_nor_tag_has_no_version() -> None:
+    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=_GitAnsweringCaller()) is None
 
 
 def test_parse_upgrade_merges_parses_tab_separated_lines() -> None:

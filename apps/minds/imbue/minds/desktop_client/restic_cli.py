@@ -16,7 +16,6 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Final
 from typing import NoReturn
@@ -32,6 +31,7 @@ from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.event_envelope import parse_iso_timestamp
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.errors import BackupProvisioningError
 
@@ -316,38 +316,6 @@ def forget_snapshots(
         raise BackupProvisioningError(f"restic forget failed (exit {result.returncode}): {result.stderr.strip()}")
 
 
-def parse_restic_timestamp(raw: str) -> datetime | None:
-    """Parse a restic RFC3339 timestamp (which may carry nanoseconds) to UTC.
-
-    ``datetime.fromisoformat`` only accepts up to microseconds, so any
-    sub-microsecond fractional digits are trimmed first. Returns None if the
-    value can't be parsed.
-    """
-    text = raw.strip()
-    if not text:
-        return None
-    normalized = text.replace("Z", "+00:00")
-    # Trim a fractional-seconds component to at most 6 digits.
-    if "." in normalized:
-        head, _, tail = normalized.partition(".")
-        digits = ""
-        rest = ""
-        for index, char in enumerate(tail):
-            if char.isdigit():
-                digits += char
-            else:
-                rest = tail[index:]
-                break
-        normalized = f"{head}.{digits[:6]}{rest}"
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
 class ResticSnapshot(FrozenModel):
     """A single snapshot as reported by ``restic snapshots --json``."""
 
@@ -384,7 +352,7 @@ def parse_restic_snapshots(stdout: str) -> tuple[ResticSnapshot, ...]:
             logger.warning("Skipping non-object restic snapshot entry: {!r}", entry)
             continue
         snapshot_id = entry.get("id")
-        snapshot_time = parse_restic_timestamp(str(entry.get("time", "")))
+        snapshot_time = parse_iso_timestamp(str(entry.get("time", "")))
         if not snapshot_id or snapshot_time is None:
             logger.warning("Skipping restic snapshot entry missing id/time: {!r}", entry)
             continue
@@ -515,7 +483,7 @@ def is_backup_in_progress(
             lock = json.loads(shown.stdout)
         except ValueError:
             continue
-        lock_time = parse_restic_timestamp(str(lock.get("time", "")))
+        lock_time = parse_iso_timestamp(str(lock.get("time", "")))
         if lock_time is not None and (now - lock_time).total_seconds() < _LOCK_STALE_SECONDS:
             return True
     return False

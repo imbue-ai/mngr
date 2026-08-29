@@ -21,6 +21,7 @@ channel frames. They live here because the generated TypeScript comes from
 the payload builders import it, never the other way round.
 """
 
+from datetime import datetime
 from enum import auto
 from typing import Annotated
 from typing import Literal
@@ -35,6 +36,11 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
+from imbue.minds.desktop_client.update_status import UpdateActivity
+from imbue.minds.desktop_client.update_status import UpdateAvailability
+from imbue.minds.desktop_client.update_status import UpdateUnknownReason
+from imbue.minds.desktop_client.update_status import UpdateVerdict
 
 # Bumped on ANY breaking change to the models in this module. The server
 # inlines it into the page bootstrap and sends it again in every connection's
@@ -43,7 +49,7 @@ from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 8
+UI_SCHEMA_VERSION: int = 9
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -281,6 +287,100 @@ class UiHealthMessage(FrozenModel):
     )
 
 
+class UiWorkspaceUpdate(FrozenModel):
+    """One workspace's update situation: what the store composes and what the SPA reads, one model.
+
+    A separate frame from :class:`UiWorkspaceEntry` because it changes on its
+    own cadence (sweeps, run events).
+    """
+
+    availability: UpdateAvailability = Field(
+        description="Up to date / out of date / unknown / app behind / needs recreation"
+    )
+    unknown_reason: UpdateUnknownReason | None = Field(
+        default=None,
+        description="On UNKNOWN, whether the machine or this build of minds is the side with no version",
+    )
+    current_version: str = Field(description="The workspace's version, empty when unknown")
+    supported_version: str = Field(
+        description="The ref this app is pinned to; a branch rather than a minds-v* tag when it imposes no ceiling"
+    )
+    is_version_from_label: bool = Field(
+        description="Whether the version came from the create-time label because the machine's own git "
+        "could not be read"
+    )
+    activity: UpdateActivity = Field(description="What an update run is doing right now")
+    run_started_at: datetime | None = Field(
+        default=None,
+        description="When the run began (UTC): the dispatch's claim, or the run's own record; kept after the run "
+        "ends because it is what tells one run's record apart from the next's. None when unknown",
+    )
+    is_hold_recorded: bool = Field(
+        default=False,
+        description="Whether a WAITING run's own record says it is holding for the user; False for a run that "
+        "merely reads idle",
+    )
+    hold_detail: str = Field(default="", description="The run's one line naming what it is waiting on")
+    target_override: str = Field(
+        default="",
+        description="The exact ref the user asked the current run to target; '' for the skill's default",
+    )
+    verdict: UpdateVerdict | None = Field(default=None, description="The last run's terminal verdict, if any")
+    verdict_detail: str = Field(default="", description="The verdict's one-line summary")
+    in_place_compatible_ref: str = Field(
+        default="", description="Newest version still applicable in place, offered alongside a refusal"
+    )
+    is_scheduled: bool = Field(default=False, description="Whether a scheduled update is armed")
+    scheduled_target_ref: str = Field(
+        default="", description="The exact ref the armed schedule targets; '' for the skill's default"
+    )
+    last_skip_reason: str = Field(default="", description="Why the last scheduled attempt did not run")
+    success_note_version: str = Field(
+        default="", description="Version the last successful run landed, for the dismissible row note"
+    )
+    chat_agent_name: str = Field(
+        default="",
+        description="Name of the run's chat agent; empty when no run has claimed this machine",
+    )
+    is_backup_configured: bool = Field(
+        default=False,
+        description="Whether backups exist for this machine (keys the go-ahead-without-backups confirmation)",
+    )
+
+    @property
+    def is_update_offered(self) -> bool:
+        """Whether the app has positively read that this workspace is behind: the badge, the band, and bulk actions."""
+        return self.availability is UpdateAvailability.OUT_OF_DATE
+
+    @property
+    def is_update_dispatchable(self) -> bool:
+        """Whether an update run may be started in this workspace at all.
+
+        Wider than :attr:`is_update_offered` by the UNKNOWN leg: ``/update-self``
+        resolves its own target against the workspace's upstream, so an unreadable
+        workspace is asked rather than guessed about. UP_TO_DATE and APP_BEHIND
+        are positive readings that there is nothing to run.
+        """
+        return self.availability in (UpdateAvailability.OUT_OF_DATE, UpdateAvailability.UNKNOWN)
+
+    @property
+    def is_run_in_flight(self) -> bool:
+        """Whether a run is live: a second dispatch is refused and the row reports the run."""
+        return self.activity in IN_FLIGHT_ACTIVITIES
+
+
+class UiWorkspaceUpdatesMessage(FrozenModel):
+    """Every workspace's update situation, keyed by agent id (always the full map)."""
+
+    type: Literal["workspace_updates"] = "workspace_updates"
+    updates: dict[str, UiWorkspaceUpdate] = Field(
+        description="agent_id -> update state; a workspace absent from the map has nothing to say"
+    )
+    update_window: str = Field(
+        description="Human-readable local window scheduled updates run in, e.g. '2:00 AM-5:00 AM'"
+    )
+
+
 class UiDiscoveryHealthMessage(FrozenModel):
     """App-global discovery-pipeline health."""
 
@@ -368,6 +468,7 @@ UiServerMessage = Annotated[
     | UiNotificationsMessage
     | UiHealthMessage
     | UiDiscoveryHealthMessage
+    | UiWorkspaceUpdatesMessage
     | UiEnvironmentMessage
     | UiWorkspaceStoppedMessage
     | UiOpenHelpMessage
@@ -393,6 +494,7 @@ class UiSnapshot(FrozenModel):
     notifications: UiNotificationsMessage = Field(description="Current notification feed")
     health: tuple[UiHealthMessage, ...] = Field(description="Per-workspace health states (only tracked workspaces)")
     discovery_health: UiDiscoveryHealthMessage = Field(description="Current discovery pipeline health")
+    workspace_updates: UiWorkspaceUpdatesMessage = Field(description="Current per-workspace update state")
     environment: UiEnvironmentMessage = Field(description="Current device-level connectivity condition")
 
 
@@ -631,6 +733,7 @@ class UiWireSchema(FrozenModel):
     notifications: UiNotificationsMessage = Field(description="notifications frame")
     health: UiHealthMessage = Field(description="health frame")
     discovery_health: UiDiscoveryHealthMessage = Field(description="discovery_health frame")
+    workspace_updates: UiWorkspaceUpdatesMessage = Field(description="workspace_updates frame")
     environment: UiEnvironmentMessage = Field(description="environment frame")
     workspace_stopped: UiWorkspaceStoppedMessage = Field(description="workspace_stopped frame")
     open_help: UiOpenHelpMessage = Field(description="open_help frame")

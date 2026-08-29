@@ -4,9 +4,17 @@ import type { ShellState } from "./shell-state";
 import { NoticeBand } from "./NoticeBand";
 import { Shell } from "./Shell";
 import { ToastLayer } from "./ToastLayer";
+import { UpdateApplyModal } from "../components/UpdateApplyModal";
+import { UpdateModal } from "../components/UpdateModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import type { AnyVnode } from "../../testing";
-import { attrsOf, collectVnodes, notificationEntry } from "../../testing";
+import {
+  allText,
+  attrsOf,
+  collectVnodes,
+  notificationEntry,
+  renderRoot,
+} from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
 const OPTIONS_PATH = `/workspace/${WORKSPACE_ID}/options`;
@@ -58,6 +66,22 @@ interface FakeShell {
   state: ShellState;
 }
 
+/** The updates store as the Shell reads it; a stub missing a method only works
+ * until the short-circuit hiding it moves. */
+function updatesStoreStub(
+  availability: "UP_TO_DATE" | "OUT_OF_DATE",
+  isUpdating = false,
+  isApplying = false,
+) {
+  const update = { availability, activity: isApplying ? "APPLYING" : "IDLE" };
+  return {
+    forAgent: () => update,
+    publishedFor: () => update,
+    isApplying: () => isApplying,
+    isUpdating: () => isUpdating,
+  };
+}
+
 /** A shell whose machine is healthy and whose discovery is up, so neither the
  * notice band nor the recovery card floats: these suites are about the overlay
  * layer, and both of those surfaces are covered by their own tests. */
@@ -85,8 +109,10 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
         unresolvedCount: 0,
         hasUnresolvedForWorkspace: () => false,
       },
+      updates: updatesStoreStub("UP_TO_DATE"),
     },
     isRecoveryModalOpenFor: () => false,
+    openUpdateModalAgentId: () => null,
     ...overrides,
   } as unknown as ShellState;
   return { state };
@@ -391,6 +417,7 @@ describe("Shell notifications overlay", () => {
           appEnvironmentCondition: () => "NONE",
           recoveryKindFor: () => null,
         },
+        updates: updatesStoreStub("UP_TO_DATE"),
         notifications: {
         entries: [],
         unresolvedCount: 0,
@@ -713,6 +740,7 @@ describe("Shell notice band wiring", () => {
           appEnvironmentCondition: () => "SSH_BLOCKED",
           recoveryKindFor: () => null,
         },
+        updates: updatesStoreStub("UP_TO_DATE"),
       },
     } as unknown as Partial<ShellState>);
 
@@ -726,6 +754,127 @@ describe("Shell notice band wiring", () => {
     expect(attrsOf(band as AnyVnode).payload).toMatchObject({
       message: "This network blocks the connection to your machines.",
     });
+  });
+
+  it.each([
+    ["reading it as out of date raises the version band", false, "This machine is running an older version of Minds."],
+    [
+      "a run in flight replaces that with what the run is doing",
+      true,
+      "Preparing an update for this machine. Nothing changes until it's ready to land.",
+    ],
+  ])("%s", (_name, isUpdating, expectedMessage) => {
+    // A band still saying "out of date" while the update runs is the two
+    // surfaces disagreeing about one machine.
+    const { state } = makeShell({
+      stores: {
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentCondition: () => "NONE",
+          recoveryKindFor: () => null,
+        },
+        updates: updatesStoreStub("OUT_OF_DATE", isUpdating),
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
+
+    const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
+    expect(attrsOf(band as AnyVnode).payload).toMatchObject({ message: expectedMessage });
+  });
+
+  it("covers a machine whose update is landing with a card nothing dismisses", () => {
+    // A band over a still-usable surface invites the attempt that looks like
+    // the machine breaking; the backdrop starts below the titlebar so the
+    // switcher stays reachable.
+    const { state } = makeShell({
+      stores: {
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => ({ name: "oldie" }),
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentCondition: () => "NONE",
+          recoveryKindFor: () => null,
+        },
+        updates: updatesStoreStub("OUT_OF_DATE", true, true),
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+
+    const modal = collectVnodes(root).find((vnode) => vnode.tag === UpdateApplyModal);
+    expect(attrsOf(modal as AnyVnode)).toMatchObject({ workspaceName: "oldie" });
+    const card = renderRoot(UpdateApplyModal, { workspaceName: "oldie" });
+    expect(allText(card)).toContain("Updating oldie");
+    expect(collectVnodes(card).some((vnode) => vnode.tag === "button")).toBe(false);
+  });
+
+  it("does not cover a machine while its update is only preparing", () => {
+    const { state } = makeShell({
+      stores: {
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentCondition: () => "NONE",
+          recoveryKindFor: () => null,
+        },
+        updates: updatesStoreStub("OUT_OF_DATE", true),
+      },
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+
+    expect(collectVnodes(root).some((vnode) => vnode.tag === UpdateApplyModal)).toBe(false);
+  });
+
+  it("draws an out-of-date machine without raising the update modal over it", () => {
+    // The band carries the version; a draw that opens the modal unasked is the
+    // auto-raise back.
+    let openedAgentId: string | null = null;
+    const { state } = makeShell({
+      stores: {
+        workspaces: {
+          toAgentScopedId: (anyId: string) => anyId,
+          entryByAnyId: () => null,
+        },
+        health: {
+          statusFor: () => "healthy",
+          discoveryHealth: "healthy",
+          appEnvironmentCondition: () => "NONE",
+          recoveryKindFor: () => null,
+        },
+        updates: updatesStoreStub("OUT_OF_DATE"),
+      },
+      openUpdateModal: (agentId: string) => {
+        openedAgentId = agentId;
+      },
+      openUpdateModalAgentId: () => openedAgentId,
+    } as unknown as Partial<ShellState>);
+
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
+
+    expect(openedAgentId).toBeNull();
+    expect(collectVnodes(root).some((vnode) => vnode.tag === UpdateModal)).toBe(false);
   });
 
   it("speaks the device's own condition over a machine nothing has convicted yet", () => {
@@ -748,6 +897,7 @@ describe("Shell notice band wiring", () => {
           appEnvironmentCondition: () => "OFFLINE",
           recoveryKindFor: () => null,
         },
+        updates: updatesStoreStub("UP_TO_DATE"),
       },
     } as unknown as Partial<ShellState>);
 
@@ -784,6 +934,7 @@ describe("Shell notice band wiring", () => {
           appEnvironmentCondition: () => "OFFLINE",
           recoveryKindFor: () => null,
         },
+        updates: updatesStoreStub("UP_TO_DATE"),
       },
     } as unknown as Partial<ShellState>);
 
@@ -826,6 +977,7 @@ describe("Shell toast layer", () => {
           appEnvironmentCondition: () => "NONE",
           recoveryKindFor: () => null,
         },
+        updates: updatesStoreStub("UP_TO_DATE"),
         notifications: { entries: [liveEntry] },
       } as unknown as ShellState["stores"],
     });
@@ -867,6 +1019,7 @@ describe("Shell toast layer", () => {
           appEnvironmentCondition: () => "NONE",
           recoveryKindFor: () => null,
         },
+        updates: updatesStoreStub("UP_TO_DATE"),
         notifications: { entries: [notificationEntry("n1")] },
       } as unknown as ShellState["stores"],
     });

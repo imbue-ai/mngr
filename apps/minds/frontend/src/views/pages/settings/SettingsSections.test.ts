@@ -13,7 +13,7 @@ import {
 } from "../../../models/settings";
 import { SettingsSections } from "./SettingsSections";
 import { Button } from "../../components/Button";
-import { jsonResponse } from "../../../testing";
+import { jsonResponse, settingsOverview } from "../../../testing";
 import type { AnyVnode } from "../../../testing";
 import {
   allText,
@@ -436,12 +436,12 @@ describe("SettingsSections layout", () => {
     });
   });
 
-  it("leaves Updates out of the nav in the browser build", async () => {
-    // There is no binary to update in a browser, so the entry would open a
-    // panel whose whole content is that it is not for you.
+  it("keeps Updates in the nav in the browser build, for the machine-update window", async () => {
+    // There is no binary to update in a browser, but machines update the same
+    // way everywhere, and their window is configured on this panel.
     await withMindsNative(null, async () => {
       const navText = collectText(columns()[0]).join(" ");
-      expect(navText).not.toContain("Updates");
+      expect(navText).toContain("Updates");
       expect(navText).toContain("Error reporting");
     });
   });
@@ -472,21 +472,14 @@ describe("SettingsSections layout", () => {
   });
 });
 
-const NOTIFICATIONS_OVERVIEW: SettingsOverview = {
-  services_overview: [],
-  file_sharing_grants: [],
-  workspace_delegation_grants: [],
-  permissions_unavailable: false,
-  is_master_password_set: false,
-  report_unexpected_errors: true,
+const NOTIFICATIONS_OVERVIEW: SettingsOverview = settingsOverview({
   notification_prefs: {
     is_enabled: true,
     style: "cards",
     is_os_hint_dismissed: false,
     version: "np-1",
   },
-  version: "v-one",
-};
+});
 
 /** A model on the Notifications section with the given overview loaded. */
 async function notificationsModel(

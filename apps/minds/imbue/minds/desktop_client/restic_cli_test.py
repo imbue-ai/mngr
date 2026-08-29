@@ -15,39 +15,8 @@ from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.restic_cli import _env_and_flags
 from imbue.minds.desktop_client.restic_cli import _looks_already_initialized
 from imbue.minds.desktop_client.restic_cli import parse_restic_snapshots
-from imbue.minds.desktop_client.restic_cli import parse_restic_timestamp
 from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.errors import BackupProvisioningError
-
-# --- parse_restic_timestamp ---
-
-
-def test_parse_restic_timestamp_handles_z_and_nanoseconds() -> None:
-    parsed = parse_restic_timestamp("2026-05-29T05:33:16.123456789Z")
-    assert parsed is not None
-    assert parsed.tzinfo is not None
-    assert parsed.year == 2026 and parsed.minute == 33
-
-
-def test_parse_restic_timestamp_handles_offset() -> None:
-    parsed = parse_restic_timestamp("2026-05-29T05:33:16+02:00")
-    assert parsed is not None
-    # Normalized to UTC.
-    offset = parsed.utcoffset()
-    assert offset is not None
-    assert offset.total_seconds() == 0
-
-
-def test_parse_restic_timestamp_assumes_utc_when_naive() -> None:
-    parsed = parse_restic_timestamp("2026-05-29T05:33:16")
-    assert parsed is not None
-    assert parsed.tzinfo is not None
-
-
-def test_parse_restic_timestamp_returns_none_on_garbage() -> None:
-    assert parse_restic_timestamp("") is None
-    assert parse_restic_timestamp("not-a-time") is None
-
 
 # --- _env_and_flags ---
 

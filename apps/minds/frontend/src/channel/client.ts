@@ -208,6 +208,7 @@ export class UiChannelClient {
         // snapshot only carries non-HEALTHY agents: clear the per-workspace
         // health so agents that recovered while disconnected come back clean.
         stores.health.reset();
+        stores.updates.reset();
         this.options.onSnapshotStart?.();
         this.handleHello(message.schema_version);
         break;
@@ -233,6 +234,9 @@ export class UiChannelClient {
         break;
       case "discovery_health":
         stores.health.applyDiscoveryHealthMessage(message);
+        break;
+      case "workspace_updates":
+        stores.updates.applyUpdatesMessage(message);
         break;
       case "environment":
         stores.health.applyEnvironmentMessage(message);

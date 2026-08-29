@@ -50,6 +50,7 @@ from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_sleep_heartbeat_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
+from imbue.minds.desktop_client.app import start_workspace_update_loops
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
@@ -752,6 +753,7 @@ def run(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
+        mngr_caller=mngr_caller,
         connectivity_detector=connectivity_detector,
         sync_scheduler=sync_scheduler,
     )
@@ -782,6 +784,8 @@ def run(
         # seconds nobody was watching.
         sleep_tracker=sleep_tracker,
     )
+
+    start_workspace_update_loops(app=app, root_concurrency_group=root_concurrency_group)
 
     # Wire the permission-requests streaming consumer once the Flask
     # app is built so the on_request callback can mutate the app state

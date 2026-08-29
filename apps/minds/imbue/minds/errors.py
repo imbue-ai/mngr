@@ -114,6 +114,12 @@ class PendingCreateAttemptStoreError(MindError):
     ...
 
 
+class UpdateScheduleStoreError(MindError):
+    """Raised when a scheduled-update intent cannot be written."""
+
+    ...
+
+
 class PendingRequestsUnavailableError(MindError):
     """Raised when a verdict must be recorded but no pending-requests view is configured."""
 

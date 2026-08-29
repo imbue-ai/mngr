@@ -3,6 +3,7 @@ import {
   backupsControlFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
+  lifecycleConfirmation,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
@@ -86,6 +87,27 @@ describe("isMachineStateKnown", () => {
     expect(isMachineStateKnown("healthy")).toBe(true);
     expect(isMachineStateKnown("reconnecting")).toBe(true);
     expect(isMachineStateKnown("blocked")).toBe(false);
+  });
+});
+
+describe("lifecycleConfirmation", () => {
+  // Only the apply rewrites the live machine, so only it changes the question;
+  // a run that is merely preparing (or waiting) must not lock the reader out.
+  it("warns that a stop mid-apply can leave the machine half-updated", () => {
+    const question = lifecycleConfirmation("stop", "Fox", true);
+    expect(question).toContain("half-updated");
+    expect(question).toContain("Stop anyway?");
+  });
+
+  it("asks the ordinary stop question when no apply is under way", () => {
+    const question = lifecycleConfirmation("stop", "Fox", false);
+    expect(question).toContain('Stop "Fox"?');
+    expect(question).not.toContain("half-updated");
+  });
+
+  it("asks before a restart only mid-apply", () => {
+    expect(lifecycleConfirmation("restart", "Fox", false)).toBeNull();
+    expect(lifecycleConfirmation("restart", "Fox", true)).toContain("half-updated");
   });
 });
 

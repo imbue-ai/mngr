@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from pydantic import AnyUrl
 from pydantic import Field
 
@@ -12,6 +13,7 @@ from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
@@ -80,6 +82,51 @@ def test_error_reporting_write_round_trips_with_the_served_version(tmp_path: Pat
     # file too, so the opt-out takes effect without an app restart.
     consent_path = latchkey_forward_sentry_consent_path(minds_config.data_dir)
     assert json.loads(consent_path.read_text())["report_unexpected_errors"] is False
+
+
+def test_update_window_write_round_trips_onto_the_overview(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+    overview = json.loads(client.get("/ui/api/settings").data)
+    assert (overview["update_window_start_hour"], overview["update_window_end_hour"]) == (DEFAULT_UPDATE_WINDOW)
+
+    response = client.post("/ui/api/settings/update-window", json={"start_hour": 23, "end_hour": 3})
+
+    assert response.status_code == 200
+    assert minds_config.get_update_window() == (23, 3)
+    reread = json.loads(client.get("/ui/api/settings").data)
+    assert (reread["update_window_start_hour"], reread["update_window_end_hour"]) == (23, 3)
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        {"start_hour": 2, "end_hour": 24},
+        {"start_hour": -1, "end_hour": 5},
+        {"start_hour": 3, "end_hour": 3},
+        {"start_hour": 2},
+        {"start_hour": 2, "end_hour": "midnight"},
+    ),
+    ids=["hour-too-high", "hour-negative", "empty-window", "half-a-window", "not-a-number"],
+)
+def test_an_unusable_update_window_is_rejected_without_being_stored(tmp_path: Path, body: dict[str, object]) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    response = client.post("/ui/api/settings/update-window", json=body)
+
+    assert response.status_code == 400
+    assert minds_config.get_update_window() == DEFAULT_UPDATE_WINDOW
+
+
+def test_update_window_write_requires_authentication(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
+
+    assert client.post("/ui/api/settings/update-window", json={"start_hour": 1, "end_hour": 4}).status_code == 401
 
 
 def test_error_reporting_write_with_a_malformed_body_is_rejected_with_400(tmp_path: Path) -> None:

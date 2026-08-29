@@ -63,7 +63,7 @@ export function toOptionsTab(raw: string | null | undefined): OptionsTab {
   return OPTIONS_TABS.find((tab) => tab === raw) ?? "share";
 }
 
-export type SettingsGroup = "general" | "account" | "backup";
+export type SettingsGroup = "general" | "account" | "backup" | "updates";
 export type ShareLoadStatus = "idle" | "loading" | "load_failed" | "ready";
 export type SharePendingKind = "enable" | "disable" | "emails";
 

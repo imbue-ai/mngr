@@ -293,6 +293,19 @@ describe("boot seeding", () => {
           },
         ],
         discovery_health: { type: "discovery_health", state: "healthy" },
+        workspace_updates: {
+          type: "workspace_updates",
+          updates: {
+            "agent-a": {
+              availability: "OUT_OF_DATE",
+              current_version: "minds-v0.3.9",
+              supported_version: "minds-v0.4.1",
+              is_version_from_label: false,
+              activity: "IDLE",
+            },
+          },
+          update_window: "2:00 AM-5:00 AM",
+        },
         // Not NONE: an app cold-started on a dead network is the case this
         // frame exists for, and NONE is the value that would read the same
         // whether the seeding happened or not.
@@ -331,6 +344,19 @@ describe("boot seeding", () => {
         notifications: notificationsMessage(["evt-1"]),
         health: [],
         discovery_health: { type: "discovery_health", state: "healthy" },
+        workspace_updates: {
+          type: "workspace_updates",
+          updates: {
+            "agent-a": {
+              availability: "OUT_OF_DATE",
+              current_version: "minds-v0.3.9",
+              supported_version: "minds-v0.4.1",
+              is_version_from_label: false,
+              activity: "IDLE",
+            },
+          },
+          update_window: "2:00 AM-5:00 AM",
+        },
         environment: { type: "environment", state: "OFFLINE" },
       },
     });
@@ -339,5 +365,9 @@ describe("boot seeding", () => {
     expect(stores.accounts.hasAccounts).toBe(true);
     expect(stores.accounts.accountEmail).toBe("a@b.c");
     expect(stores.health.appEnvironmentCondition()).toBe("OFFLINE");
+    // A store the bootstrap snapshot skipped would badge every machine
+    // "version unknown" until the first pushed frame.
+    expect(stores.updates.forAgent("agent-a").availability).toBe("OUT_OF_DATE");
+    expect(stores.updates.updateWindow).toBe("2:00 AM-5:00 AM");
   });
 });

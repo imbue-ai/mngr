@@ -44,6 +44,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -1015,6 +1016,11 @@ class UnattendedRecoveryDispatcher(MutableModel):
     mngr_host_dir: Path = Field(frozen=True, description="MNGR_HOST_DIR for the start's mngr calls.")
     mngr_forward_port: int = Field(frozen=True, description="Forward port used to probe for recovery.")
     mngr_forward_preauth_cookie: str | None = Field(frozen=True, description="Preauth cookie for that probe.")
+    should_decline_dispatch: Callable[[AgentId], bool] | None = Field(
+        default=None,
+        frozen=True,
+        description="Optional veto asked at every dispatch point, deferred ones included; None never declines.",
+    )
     connectivity_detector: ConnectivityDetector | None = Field(
         default=None,
         frozen=True,
@@ -1034,13 +1040,39 @@ class UnattendedRecoveryDispatcher(MutableModel):
     # session restore, which starts it as a matter of course).
     _owed_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _owed_agent_ids: set[str] = PrivateAttr(default_factory=set)
+    # Machines whose update veto is waived: the apply window handed them back,
+    # and the hand-back must reach ``mngr start`` through the gate and the owed
+    # set without the veto re-arming a window that just expired. Cleared by the
+    # next stuck edge, which is a new outage episode with its own veto.
+    _update_veto_waived_agent_ids: set[str] = PrivateAttr(default_factory=set)
 
     def __call__(self, agent_id: AgentId) -> None:
+        with self._owed_lock:
+            self._update_veto_waived_agent_ids.discard(str(agent_id))
+        self._dispatch_from_edge(agent_id)
+
+    def dispatch_after_update_window(self, agent_id: AgentId) -> None:
+        """The apply window's hand-back: a window that expired with the machine still stuck.
+
+        The same flow as the stuck edge -- the suppression check, the
+        connectivity gate, the owed set -- with the update veto waived: the
+        window withdrawing is the update machinery's last word on the machine
+        until a new stuck edge asks it again.
+        """
+        with self._owed_lock:
+            self._update_veto_waived_agent_ids.add(str(agent_id))
+        self._dispatch_from_edge(agent_id)
+
+    def _dispatch_from_edge(self, agent_id: AgentId) -> None:
         # A machine the user stopped is unreachable on purpose. Starting it
         # again here would undo an action they just took, with no window open
         # to explain why it came back.
         if self.tracker.is_unattended_recovery_suppressed(agent_id):
             logger.info("Not auto-starting {}: it was stopped from inside the app", agent_id)
+            return
+        # An update's apply takes the services down on purpose; the veto reads the
+        # workspace's run record over exec, so it goes ahead of the connectivity gate.
+        if self._is_dispatch_declined(agent_id):
             return
         detector = self.connectivity_detector
         if detector is None or not is_network_dependent_workspace(self.backend_resolver, agent_id):
@@ -1066,6 +1098,21 @@ class UnattendedRecoveryDispatcher(MutableModel):
             # Nothing to recover into: the group can no longer run work, which
             # means the app is on its way down.
             logger.warning("Could not start the connectivity gate for {}: {}", agent_id, exc)
+
+    def _is_dispatch_declined(self, agent_id: AgentId) -> bool:
+        """Whether the update machinery vetoes starting ``agent_id`` right now.
+
+        Asked at every dispatch point rather than once on the stuck edge. The
+        veto passes a run that is still preparing, and both deferred paths reach
+        their dispatch well after the edge -- the connectivity gate by the
+        seconds its probe costs, an owed start by the length of a device outage
+        -- so an apply that began in between is exactly what this is here to
+        stand back from.
+        """
+        with self._owed_lock:
+            if str(agent_id) in self._update_veto_waived_agent_ids:
+                return False
+        return self.should_decline_dispatch is not None and self.should_decline_dispatch(agent_id)
 
     def _dispatch_once_connectivity_is_known(self, agent_id: AgentId, detector: ConnectivityDetector) -> None:
         """Worker body: probe the device, then either dispatch or record the start as owed.
@@ -1111,6 +1158,11 @@ class UnattendedRecoveryDispatcher(MutableModel):
             return
         if self.tracker.is_unattended_recovery_suppressed(agent_id):
             logger.info("Dropping the gated start of {}: it was stopped from inside the app", agent_id)
+            return
+        # Dropped rather than owed: the stuck edge already armed the apply
+        # window, and its expiry is what still restarts a machine that really died.
+        if self._is_dispatch_declined(agent_id):
+            logger.info("Dropping the gated start of {}: its update's apply owns the machine", agent_id)
             return
         if block is EnvironmentBlock.NONE:
             self._dispatch(agent_id)
@@ -1181,6 +1233,9 @@ class UnattendedRecoveryDispatcher(MutableModel):
             return
         if self.tracker.is_unattended_recovery_suppressed(agent_id):
             logger.info("Dropping the owed start of {}: it was stopped from inside the app", agent_id)
+            return
+        if self._is_dispatch_declined(agent_id):
+            logger.info("Dropping the owed start of {}: its update's apply owns the machine", agent_id)
             return
         self._dispatch(agent_id)
 

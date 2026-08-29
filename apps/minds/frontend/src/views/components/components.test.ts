@@ -5,6 +5,7 @@ import { routeLinkAttrs } from "./route-link";
 import { Button } from "./Button";
 import { Card, cardClass } from "./Card";
 import { ICONS_12, ICONS_16 } from "./icons";
+import { Modal } from "./Modal";
 import { Notice, noticeClass } from "./Notice";
 import { spinnerClass } from "./Spinner";
 import { navEntryClass, splitPane } from "./SplitPane";
@@ -15,6 +16,13 @@ import { renderRoot } from "../../testing";
 interface ElementVnode {
   tag: string;
   attrs: Record<string, unknown>;
+}
+
+function tokensOf(node: unknown): string[] {
+  const attrs = (node as ElementVnode).attrs ?? {};
+  return String(attrs.className ?? attrs.class ?? "")
+    .split(/\s+/)
+    .filter((token) => token !== "");
 }
 
 describe("Button", () => {
@@ -56,6 +64,38 @@ describe("Card", () => {
     }) as unknown as ElementVnode;
     expect(root.tag).toBe("a");
     expect(root.attrs.href).toBe("/x");
+  });
+});
+
+describe("Modal", () => {
+  it("bounds the card to the window and scrolls its content, not the card", () => {
+    // A card sized to its content centers its overflow, putting its own title
+    // and close X off the top of the screen.
+    const body = m("p", "a very long explanation");
+    const overlay = renderRoot(Modal, { isOpen: true }, body);
+    expect(tokensOf(overlay)).toContain("modal-viewport");
+    const card = (overlay.children as m.Vnode[])[0];
+    expect(tokensOf(card)).toEqual(
+      expect.arrayContaining(["max-h-full", "flex", "flex-col"]),
+    );
+    expect(tokensOf(card)).not.toContain("overflow-y-auto");
+    const scroller = (card.children as m.Vnode[])[0];
+    expect(tokensOf(scroller)).toEqual(
+      expect.arrayContaining(["overflow-y-auto", "min-h-0"]),
+    );
+    expect(scroller.children).toContain(body);
+  });
+
+  it("gives the card exactly the caller's width, and only one", () => {
+    // Two max-w-* utilities on one card are decided by their order in the
+    // generated stylesheet, not by the caller: .max-w-sm follows .max-w-md
+    // there, so a wide modal asking for md silently rendered at sm.
+    const card = (
+      renderRoot(Modal, { isOpen: true, size: "xl" as const })
+        .children as m.Vnode[]
+    )[0];
+    const widths = tokensOf(card).filter((token) => token.startsWith("max-w-"));
+    expect(widths).toEqual(["max-w-xl"]);
   });
 });
 
@@ -139,13 +179,6 @@ describe("class builders keep the legacy recipes", () => {
 });
 
 describe("splitPane", () => {
-  function tokensOf(node: unknown): string[] {
-    const attrs = (node as ElementVnode).attrs ?? {};
-    return String(attrs.className ?? attrs.class ?? "")
-      .split(/\s+/)
-      .filter((token) => token !== "");
-  }
-
   /** The nav column and the panel column, in that order. */
   function columnsOf(row: m.Vnode): ElementVnode[] {
     return row.children as unknown as ElementVnode[];

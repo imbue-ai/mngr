@@ -10,6 +10,7 @@ import pytest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.desktop_client.testing import make_sleep_tracker
@@ -641,19 +642,19 @@ def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# CreateAttempt grace (initial-create-attempt STUCK suppression)
+# Probe grace (bounded suppression of expected outages)
 # ---------------------------------------------------------------------------
 
 
-def test_create_attempt_grace_suppresses_probe_failures_entirely() -> None:
-    """While a create attempt grace is active, probe failures never drive STUCK.
+def test_probe_grace_suppresses_probe_failures_entirely() -> None:
+    """While a probe grace is active, probe failures never drive STUCK.
 
     A zero stuck-threshold would otherwise flip the agent STUCK on the very
     first probe failure; with the grace active, no failure run even starts.
     """
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     agent_id = AgentId.generate()
-    tracker.begin_create_attempt_grace(agent_id, time.monotonic() + 60.0)
+    tracker.begin_probe_grace(agent_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + 60.0)
 
     tracker.record_failure(agent_id)
     tracker.record_probe_failure(agent_id)
@@ -663,11 +664,11 @@ def test_create_attempt_grace_suppresses_probe_failures_entirely() -> None:
     assert agent_id not in tracker.snapshot_all()
 
 
-def test_expired_create_attempt_grace_no_longer_suppresses_stuck() -> None:
+def test_expired_probe_grace_no_longer_suppresses_stuck() -> None:
     """Once the grace deadline passes, the normal stuck accounting applies."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     agent_id = AgentId.generate()
-    tracker.begin_create_attempt_grace(agent_id, time.monotonic() - 1.0)
+    tracker.begin_probe_grace(agent_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() - 1.0)
 
     tracker.record_failure(agent_id)
     tracker.record_probe_failure(agent_id)
@@ -675,15 +676,15 @@ def test_expired_create_attempt_grace_no_longer_suppresses_stuck() -> None:
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
 
 
-def test_end_create_attempt_grace_restores_normal_probe_accounting() -> None:
+def test_end_probe_grace_restores_normal_probe_accounting() -> None:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     agent_id = AgentId.generate()
-    tracker.begin_create_attempt_grace(agent_id, time.monotonic() + 60.0)
+    tracker.begin_probe_grace(agent_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + 60.0)
     tracker.record_failure(agent_id)
     tracker.record_probe_failure(agent_id)
     assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
 
-    tracker.end_create_attempt_grace(agent_id)
+    tracker.end_probe_grace(agent_id, ProbeGracePurpose.CREATE_ATTEMPT)
     tracker.record_probe_failure(agent_id)
 
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
@@ -761,11 +762,11 @@ def test_a_stop_that_has_returned_hands_the_marker_back_to_the_probes() -> None:
     assert tracker.is_unattended_recovery_suppressed(agent_id) is False
 
 
-def test_probe_success_clears_create_attempt_grace() -> None:
+def test_probe_success_clears_probe_grace() -> None:
     """A reachable machine drops its grace: later failures count normally."""
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     agent_id = AgentId.generate()
-    tracker.begin_create_attempt_grace(agent_id, time.monotonic() + 60.0)
+    tracker.begin_probe_grace(agent_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + 60.0)
     tracker.record_failure(agent_id)
     tracker.record_probe_success(agent_id)
 
@@ -776,9 +777,27 @@ def test_probe_success_clears_create_attempt_grace() -> None:
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
 
 
-def test_end_create_attempt_grace_is_idempotent_for_unknown_agent() -> None:
+def test_one_purpose_ending_leaves_another_purpose_suppressing() -> None:
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+    tracker.begin_probe_grace(agent_id, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + 60.0)
+    tracker.begin_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY, time.monotonic() + 60.0)
+
+    tracker.end_probe_grace(agent_id, ProbeGracePurpose.CREATE_ATTEMPT)
+
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+
+    tracker.end_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY)
+    tracker.record_probe_failure(agent_id)
+
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+
+
+def test_end_probe_grace_is_idempotent_for_unknown_agent() -> None:
     tracker = SystemInterfaceHealthTracker()
-    tracker.end_create_attempt_grace(AgentId.generate())
+    tracker.end_probe_grace(AgentId.generate(), ProbeGracePurpose.CREATE_ATTEMPT)
 
 
 @pytest.mark.witnesses(

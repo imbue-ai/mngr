@@ -68,8 +68,18 @@ from imbue.minds.desktop_client.ui_models import UiHealthMessage
 from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
+from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
+from imbue.minds.desktop_client.update_apply_window import AGENTS_BEGIN_SENTINEL
+from imbue.minds.desktop_client.update_apply_window import AGENTS_END_SENTINEL
+from imbue.minds.desktop_client.update_apply_window import AGENTS_FAILED_SENTINEL
+from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
+from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
+from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
+from imbue.minds.desktop_client.update_status import UpdateRunStatus
+from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.primitives import DeviceId
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -423,6 +433,7 @@ def build_ui_state_publisher_for_test(
         derive_discovery_health=lambda: UiDiscoveryHealthMessage(state=DiscoveryHealth.HEALTHY),
         derive_environment=lambda: UiEnvironmentMessage(state=EnvironmentCondition.NONE),
         derive_health_states=derive_health_states,
+        derive_workspace_updates=lambda: UiWorkspaceUpdatesMessage(updates={}, update_window="2:00 AM-5:00 AM"),
     )
     return publisher, broadcaster.register()
 
@@ -797,6 +808,43 @@ def exec_json_envelope(
     ``"outer_results"`` for ``--outer`` ones, mirroring mngr's own output.
     """
     return json.dumps({results_key: [{"stdout": remote_stdout, "stderr": stderr, "success": success}]})
+
+
+def make_update_state_store(tmp_path: Path) -> WorkspaceUpdateStateStore:
+    """An update state store over a fresh schedule store under ``tmp_path``."""
+    return WorkspaceUpdateStateStore(schedule_store=UpdateScheduleStore(records_dir=tmp_path / "update_schedules"))
+
+
+def landed_verdict(
+    verdict: UpdateVerdict,
+    *,
+    chat_agent_name: str = "",
+    detail: str = "",
+    resulting_ref: str = "",
+    in_place_compatible_ref: str = "",
+) -> UpdateRunStatus:
+    """A run record as the skill leaves it once ``verdict`` has landed, timed now."""
+    return UpdateRunStatus(
+        chat_agent_name=chat_agent_name,
+        verdict=verdict,
+        detail=detail,
+        resulting_ref=resulting_ref,
+        in_place_compatible_ref=in_place_compatible_ref,
+        verdict_at=datetime.now(timezone.utc),
+    )
+
+
+def update_run_probe_stdout(*, run: str = "", agents: str | None = "") -> str:
+    """One workspace's answer to the update run probe, in the wire format.
+
+    Section bodies pass through verbatim (no newline added); ``agents=None``
+    renders the listing-failed sentinel.
+    """
+    agent_section = f"{AGENTS_FAILED_SENTINEL}\n" if agents is None else agents
+    return (
+        f"{RUN_BEGIN_SENTINEL}\n{run}{RUN_END_SENTINEL}\n"
+        f"{AGENTS_BEGIN_SENTINEL}\n{agent_section}{AGENTS_END_SENTINEL}\n"
+    )
 
 
 # -- Discovery-health watchdog, for its state machine and its loop --

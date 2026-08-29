@@ -50,7 +50,7 @@ function requestedTab(): OptionsTab {
 
 function requestedGroup(): SettingsGroup {
   const group = panelParam("group");
-  return group === "account" || group === "backup" ? group : "general";
+  return group === "account" || group === "backup" || group === "updates" ? group : "general";
 }
 
 /** The permissions left-nav entry the URL asks for. Any name is accepted here;

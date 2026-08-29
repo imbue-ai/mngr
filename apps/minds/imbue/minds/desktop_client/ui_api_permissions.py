@@ -27,7 +27,6 @@ empty view carrying ``permissions_unavailable``, which the pane renders as its
 conflated with an empty payload.
 """
 
-import os
 from collections.abc import Callable
 from typing import Any
 from typing import assert_never
@@ -40,8 +39,6 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -62,6 +59,7 @@ from imbue.minds.desktop_client.latchkey.permission_toggles import connect_servi
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
+from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import UiAvailableConnection
 from imbue.minds.desktop_client.ui_models import UiConnectCredentialsRequest
 from imbue.minds.desktop_client.ui_models import UiConnectorDisconnectRequest
@@ -73,22 +71,6 @@ from imbue.minds.desktop_client.ui_models import UiSelfToggleRequest
 from imbue.minds.desktop_client.ui_models import UiWaitingPermissionRequest
 from imbue.minds.desktop_client.ui_models import UiWorkspacePermissions
 from imbue.mngr.primitives import AgentId
-
-
-def _is_permissions_request_authenticated() -> bool:
-    """The same signed-cookie check as ui_api.is_ui_request_authenticated.
-
-    Local twin because ui_api imports this module (registration), so importing
-    back would be circular; the final cleanup phase should hoist one shared
-    guard onto the /ui blueprint.
-    """
-    if os.getenv("SKIP_AUTH", "0") == "1":
-        return True
-    signing_key = get_state().auth_store.get_signing_key()
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(cookie_value=cookie_value, signing_key=signing_key)
 
 
 def _json_response(payload: FrozenModel, status_code: int = 200) -> Response:
@@ -234,7 +216,7 @@ def _write_prelude(agent_id: str) -> Response | tuple[dict[str, Any], LatchkeyPe
     workspace id, 400 invalid body, 503 with no permission handler wired), or
     ``(body, handler)`` on success.
     """
-    if not _is_permissions_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_json_error_response("Not authenticated", 401)
     try:
         AgentId(agent_id)
@@ -272,7 +254,7 @@ def _apply_and_refresh(agent_id: str, apply_toggle: Callable[[], object]) -> Res
 
 def _handle_workspace_permissions(agent_id: str) -> Response:
     """GET /ui/api/workspaces/<agent_id>/permissions: the Permissions pane's full payload."""
-    if not _is_permissions_request_authenticated():
+    if not is_ui_request_authenticated():
         return make_json_error_response("Not authenticated", 401)
     try:
         AgentId(agent_id)

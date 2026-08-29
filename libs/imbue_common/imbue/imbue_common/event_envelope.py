@@ -5,6 +5,11 @@ consistent envelope fields across all event sources. See the style guide
 section "Event logging to disk" for conventions.
 """
 
+import re
+from datetime import datetime
+from datetime import timezone
+from typing import Final
+
 from pydantic import ConfigDict
 from pydantic import Field
 
@@ -18,6 +23,30 @@ class IsoTimestamp(NonEmptyStr):
 
     Example: '2026-02-28T00:00:00.123456789Z'
     """
+
+
+# Fractional seconds, trimmed to the microseconds ``fromisoformat`` accepts.
+_SUBSECOND_RE: Final[re.Pattern[str]] = re.compile(r"\.(\d+)")
+
+
+def parse_iso_timestamp(raw: str) -> datetime | None:
+    """Parse an :class:`IsoTimestamp` into an aware UTC datetime, or None if it will not parse.
+
+    Sub-microsecond digits are trimmed; a naive value is read as UTC; an
+    explicit offset is normalized to UTC.
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    # ``2026-02-28T00:00:00.123456789Z`` -> ``2026-02-28T00:00:00.123456+00:00``
+    match = _SUBSECOND_RE.search(text)
+    if match is not None and len(match.group(1)) > 6:
+        text = text[: match.start(1) + 6] + text[match.end(1) :]
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
 class EventType(NonEmptyStr):

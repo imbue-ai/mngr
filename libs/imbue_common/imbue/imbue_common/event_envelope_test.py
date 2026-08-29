@@ -11,6 +11,7 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.event_envelope import LogEvent
+from imbue.imbue_common.event_envelope import parse_iso_timestamp
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
 
@@ -198,3 +199,35 @@ def test_log_event_is_frozen() -> None:
     )
     with pytest.raises(ValidationError):
         event.level = "INFO"  # ty: ignore[invalid-assignment]
+
+
+def test_a_nanosecond_precision_envelope_timestamp_parses() -> None:
+    parsed = parse_iso_timestamp("2026-05-29T05:33:16.123456789Z")
+
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert (parsed.year, parsed.minute, parsed.microsecond) == (2026, 33, 123456)
+
+
+def test_an_explicit_offset_is_normalized_to_utc() -> None:
+    parsed = parse_iso_timestamp("2026-05-29T05:33:16+02:00")
+
+    assert parsed is not None
+    offset = parsed.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
+    assert parsed.hour == 3
+
+
+def test_a_naive_timestamp_is_read_as_utc() -> None:
+    parsed = parse_iso_timestamp("2026-05-29T05:33:16")
+
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert parsed.hour == 5
+
+
+def test_an_unparseable_timestamp_is_none_rather_than_an_exception() -> None:
+    assert parse_iso_timestamp("") is None
+    assert parse_iso_timestamp("   ") is None
+    assert parse_iso_timestamp("not-a-time") is None

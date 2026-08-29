@@ -188,7 +188,7 @@ export function CloudAccountsModal(): m.Component<CloudAccountsModalAttrs> {
         : 100;
       return m(
         Modal,
-        { id: "cloud-accounts-modal", isOpen: state.isOpen, onClose: () => state.close(), cardExtra: "!max-w-xl text-left" },
+        { id: "cloud-accounts-modal", isOpen: state.isOpen, onClose: () => state.close(), size: "xl", cardExtra: "text-left" },
         [
           state.view === "form"
             ? m("div", { id: "ca-form-view" }, [

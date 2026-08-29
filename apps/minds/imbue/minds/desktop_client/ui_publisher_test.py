@@ -45,6 +45,7 @@ def test_publish_now_broadcasts_every_message_type_on_first_pass() -> None:
         "notifications",
         "providers",
         "requests",
+        "workspace_updates",
         "workspaces",
     ]
 
@@ -195,6 +196,7 @@ def test_snapshot_frames_start_with_hello_and_cover_every_snapshot_type() -> Non
         "requests",
         "discovery_health",
         "notifications",
+        "workspace_updates",
         "environment",
     ]
 

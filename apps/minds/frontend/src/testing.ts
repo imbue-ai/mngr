@@ -100,6 +100,8 @@ export function settingsOverview(overrides: Partial<SettingsOverview> = {}): Set
     is_master_password_set: false,
     report_unexpected_errors: true,
     version: "v-one",
+    update_window_start_hour: 2,
+    update_window_end_hour: 5,
     ...overrides,
   };
 }

@@ -23,7 +23,13 @@ import type {
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
+  UiWorkspaceUpdate,
+  UiWorkspaceUpdatesMessage,
   UiWorkspacesMessage,
+  UpdateActivity,
+  UpdateAvailability,
+  UpdateUnknownReason,
+  UpdateVerdict,
 } from "../generated/ui";
 
 export type {
@@ -43,7 +49,13 @@ export type {
   UiWorkspaceEntry,
   UiWorkspaceRefreshMessage,
   UiWorkspaceStoppedMessage,
+  UiWorkspaceUpdate,
+  UiWorkspaceUpdatesMessage,
   UiWorkspacesMessage,
+  UpdateActivity,
+  UpdateAvailability,
+  UpdateUnknownReason,
+  UpdateVerdict,
 };
 
 // pydantic emits literal-defaulted `type` fields as optional in JSON Schema,
@@ -60,6 +72,7 @@ export type UiServerMessage =
   | Framed<UiNotificationsMessage, "notifications">
   | Framed<UiHealthMessage, "health">
   | Framed<UiDiscoveryHealthMessage, "discovery_health">
+  | Framed<UiWorkspaceUpdatesMessage, "workspace_updates">
   | Framed<UiEnvironmentMessage, "environment">
   | Framed<UiWorkspaceStoppedMessage, "workspace_stopped">
   | Framed<UiOpenHelpMessage, "open_help">
@@ -94,6 +107,7 @@ export function parseServerMessage(raw: string): UiServerMessage | null {
     case "notifications":
     case "health":
     case "discovery_health":
+    case "workspace_updates":
     case "environment":
     case "workspace_stopped":
     case "open_help":

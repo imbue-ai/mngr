@@ -16,6 +16,7 @@ from typing import Callable
 from typing import Final
 
 import tomlkit
+from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -24,6 +25,9 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
+
+# Local-clock hours [start, end) scheduled updates run in by default.
+DEFAULT_UPDATE_WINDOW: Final[tuple[int, int]] = (2, 5)
 
 
 class NotificationStyle(LowerCaseStrEnum):
@@ -156,6 +160,38 @@ class MindsConfig(MutableModel):
             provider["region"] = region
             providers[provider_name] = provider
             data["providers"] = providers
+            self._write_raw(data)
+
+    def get_update_window(self) -> tuple[int, int]:
+        """Return the local-clock hours [start, end) during which scheduled updates may run.
+
+        An unusable stored pair falls back to the default: raising would silently
+        stop every scheduled update with no surface to report it on.
+        """
+        with self._lock:
+            data = self._read_raw()
+            updates = _as_str_keyed_dict(data.get("updates"))
+            if updates is None:
+                return DEFAULT_UPDATE_WINDOW
+            start = updates.get("window_start_hour")
+            end = updates.get("window_end_hour")
+            # bool is an int subclass; a stored ``true`` is not hour one.
+            is_bool_hour = isinstance(start, bool) or isinstance(end, bool)
+            if not isinstance(start, int) or not isinstance(end, int) or is_bool_hour:
+                return DEFAULT_UPDATE_WINDOW
+            if not (0 <= start <= 23 and 0 <= end <= 23) or start == end:
+                logger.warning("Ignoring an unusable update window ({}, {})", start, end)
+                return DEFAULT_UPDATE_WINDOW
+            return (start, end)
+
+    def set_update_window(self, start_hour: int, end_hour: int) -> None:
+        """Persist the local-clock hours scheduled updates may run in."""
+        with self._lock:
+            data = self._read_raw()
+            updates = _as_str_keyed_dict(data.get("updates")) or {}
+            updates["window_start_hour"] = start_hour
+            updates["window_end_hour"] = end_hour
+            data["updates"] = updates
             self._write_raw(data)
 
     def _get_bool(self, key: str, default: bool) -> bool:

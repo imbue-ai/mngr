@@ -9,6 +9,7 @@ import { HealthStore } from "./health";
 import { NotificationsStore } from "./notifications";
 import { ProvidersStore } from "./providers";
 import { RequestsStore } from "./requests";
+import { UpdatesStore } from "./updates";
 import { WorkspacesStore } from "./workspaces";
 
 export interface AppStores {
@@ -18,6 +19,7 @@ export interface AppStores {
   notifications: NotificationsStore;
   accounts: AccountsStore;
   providers: ProvidersStore;
+  updates: UpdatesStore;
 }
 
 export interface BootContext {
@@ -40,6 +42,7 @@ export function createEmptyStores(): AppStores {
     notifications: new NotificationsStore(),
     accounts: new AccountsStore(),
     providers: new ProvidersStore(),
+    updates: new UpdatesStore(),
   };
 }
 
@@ -67,4 +70,5 @@ export function applySnapshotToStores(stores: AppStores, bootstrap: Pick<UiBoots
   stores.health.applyDiscoveryHealthMessage(snapshot.discovery_health);
   stores.health.applyEnvironmentMessage(snapshot.environment);
   for (const health of snapshot.health) stores.health.applyHealthMessage(health);
+  stores.updates.applyUpdatesMessage(snapshot.workspace_updates);
 }

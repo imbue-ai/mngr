@@ -47,6 +47,8 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
+from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
+from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
@@ -214,6 +216,19 @@ class DesktopClientState(MutableModel):
         default_factory=MachineSharingLockRegistry,
         frozen=True,
         description="Per-machine locks serializing the machine-sharing PUT/DELETE handlers",
+    )
+    workspace_update_service: WorkspaceUpdateService | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Dispatches and closes out workspace template updates; None for apps built without "
+            "an mngr caller (minimal tests), where every update route answers 503"
+        ),
+    )
+    update_scheduler: UpdateScheduler | None = Field(
+        default=None,
+        frozen=True,
+        description="Runs the scheduled updates inside the update window; None whenever the service is",
     )
     active_share_cache: ActiveShareCache = Field(
         default_factory=ActiveShareCache,

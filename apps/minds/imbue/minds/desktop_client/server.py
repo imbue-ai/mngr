@@ -149,6 +149,14 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # mid-pass call race its teardown and crash the loop's thread.
     if state.sync_scheduler is not None:
         state.sync_scheduler.stop()
+    # Same reason: these all exec through the shared caller stopped just below.
+    update_service = state.workspace_update_service
+    if update_service is not None:
+        update_service.detector.stop()
+        update_service.stop_run_polling()
+        update_service.apply_window.stop()
+    if state.update_scheduler is not None:
+        state.update_scheduler.stop()
     # Terminate the idle pre-warmed mngr process so it doesn't wait out the
     # full shutdown timeout blocked reading its socket for the next request.
     get_default_mngr_caller().stop()

@@ -1193,3 +1193,143 @@ describe("ShellState.handleEscape", () => {
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 });
+
+describe("ShellState update modal", () => {
+  type UpdateActivity = "IDLE" | "RUNNING" | "APPLYING";
+
+  function applyUpdateActivity(shell: ShellState, activity: UpdateActivity): void {
+    shell.stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {
+        [AGENT]: {
+          availability: "OUT_OF_DATE",
+          current_version: "minds-v0.3.9",
+          supported_version: "minds-v0.4.1",
+          is_version_from_label: false,
+          activity,
+        },
+      },
+      update_window: "2:00 AM-5:00 AM",
+    });
+  }
+
+  function outOfDateShell(activity: UpdateActivity = "IDLE"): ShellState {
+    const shell = new ShellState(createEmptyStores());
+    shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
+    applyUpdateActivity(shell, activity);
+    return shell;
+  }
+
+  it("opens for a machine with no machine displayed, which is how the machines list opens it", () => {
+    // From a row on Home there is no displayed machine to key on.
+    const shell = outOfDateShell();
+    shell.openUpdateModal(AGENT);
+    expect(shell.openUpdateModalAgentId()).toBe(AGENT);
+  });
+
+  it("is dismissed by Escape wherever it was opened from", () => {
+    const shell = outOfDateShell();
+    shell.openUpdateModal(AGENT);
+    expect(shell.handleEscape()).toBe(true);
+    expect(shell.openUpdateModalAgentId()).toBeNull();
+  });
+
+  it("is dropped by a navigation to anywhere but its own machine", () => {
+    const shell = outOfDateShell();
+    stubAccentPainting();
+    shell.handleRouteChanged("/");
+    shell.openUpdateModal(AGENT);
+    shell.handleRouteChanged("/settings");
+    expect(shell.openUpdateModalAgentId()).toBeNull();
+  });
+
+  it("rides the navigation into its own machine, which Update now makes before dispatching", () => {
+    // The press enters the machine before dispatching (the chat tab opens only
+    // for connected clients), so the modal must survive that navigation.
+    const shell = outOfDateShell();
+    stubAccentPainting();
+    shell.handleRouteChanged("/");
+    shell.openUpdateModal(AGENT);
+    shell.handleRouteChanged(`/workspace/${AGENT}`);
+    expect(shell.openUpdateModalAgentId()).toBe(AGENT);
+    // Not pinned there: leaving the machine afterwards drops it like any other.
+    shell.handleRouteChanged("/");
+    expect(shell.openUpdateModalAgentId()).toBeNull();
+  });
+
+  it("leaves the recovery card alone while the machine is mid-apply", () => {
+    // The app took the services down itself; a recovery card would blame the
+    // machine for it.
+    const shell = outOfDateShell();
+    applyUpdateActivity(shell, "APPLYING");
+    displaying(shell, AGENT);
+
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
+
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("still retires an auto-raised recovery card once a mid-apply machine answers", () => {
+    // Health frames are edge-published: a healthy frame skipped mid-apply is
+    // the only one the machine sends.
+    const shell = outOfDateShell();
+    displaying(shell, AGENT);
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+    applyUpdateActivity(shell, "APPLYING");
+
+    shell.handleHealthChanged(AGENT, "healthy", false);
+
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
+  });
+
+  it("raises the recovery card for a machine that dies mid-prepare, as for any other outage", () => {
+    // Only the apply is an expected outage.
+    const shell = outOfDateShell();
+    applyUpdateActivity(shell, "RUNNING");
+    displaying(shell, AGENT);
+
+    shell.handleHealthChanged(AGENT, "recovery_failed", false);
+
+    expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(true);
+  });
+});
+
+describe("enterWorkspaceOrRecover", () => {
+  function shellWithMachine(liveness: string): { shell: ShellState; routeSet: ReturnType<typeof vi.fn> } {
+    const shell = new ShellState(createEmptyStores());
+    shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const entry = shell.stores.workspaces.entryByAnyId("agent-aa11");
+    if (entry === null) throw new Error("fixture machine missing");
+    shell.enterWorkspaceOrRecover(entry, liveness);
+    return { shell, routeSet };
+  }
+
+  it("lands a healthy running machine on its surface", () => {
+    const { routeSet } = shellWithMachine("RUNNING");
+    expect(routeSet).toHaveBeenCalledWith("/workspace/agent-aa11", {});
+  });
+
+  it("sends a stopped machine through Recovery with a start, returning to the surface", () => {
+    // Entering a stopped container directly would strand the user on the
+    // loader; Recovery dispatches the start and comes back via /goto.
+    const { routeSet } = shellWithMachine("STOPPED");
+    expect(routeSet).toHaveBeenCalledWith(
+      `/agents/agent-aa11/recovery?return_to=${encodeURIComponent("/goto/agent-aa11/")}&intent=start`,
+    );
+  });
+
+  it("sends an unhealthy machine to Recovery without a start", () => {
+    const shell = new ShellState(createEmptyStores());
+    shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
+    shell.stores.health.applyHealthMessage({ agent_id: "agent-aa11", status: "stuck" });
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const entry = shell.stores.workspaces.entryByAnyId("agent-aa11");
+    if (entry === null) throw new Error("fixture machine missing");
+    shell.enterWorkspaceOrRecover(entry, "RUNNING");
+    expect(routeSet).toHaveBeenCalledWith(
+      `/agents/agent-aa11/recovery?return_to=${encodeURIComponent("/goto/agent-aa11/")}`,
+    );
+  });
+});

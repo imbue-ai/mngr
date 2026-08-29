@@ -195,6 +195,7 @@ def test_ws_connect_receives_hello_then_full_snapshot(tmp_path: Path) -> None:
         "requests",
         "discovery_health",
         "notifications",
+        "workspace_updates",
         "environment",
     ]
     with _serve_ws_capable_app(tmp_path) as (port, cookie, _state):

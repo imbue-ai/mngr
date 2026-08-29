@@ -22,7 +22,6 @@ from ``app.py``'s deleted legacy page handlers).
 """
 
 import json
-import os
 from collections.abc import Iterable
 from collections.abc import Iterator
 from datetime import datetime
@@ -30,7 +29,6 @@ from datetime import timezone
 
 from flask import Blueprint
 from flask import Response
-from flask import request
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -43,13 +41,12 @@ from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_en
 from imbue.minds.desktop_client.backup_reaper import emails_by_bucket_owner_prefix
 from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
 from imbue.minds.desktop_client.backup_reaper import parse_destroyed_at
-from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
-from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
+from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
@@ -121,22 +118,6 @@ class RecoveryInfoResponse(FrozenModel):
     device_error_detail: str = Field(
         description="The forward's verbatim error, empty unless this device is what cannot connect"
     )
-
-
-def _is_lifecycle_request_authenticated() -> bool:
-    """The /ui session check, local to this module to avoid a circular import via ui_api.
-
-    Mirrors ``ui_api.is_ui_request_authenticated`` (including the SKIP_AUTH
-    test escape hatch); a shared helper hoisted onto the /ui blueprint
-    would remove the duplication.
-    """
-    if os.getenv("SKIP_AUTH", "0") == "1":
-        return True
-    signing_key = get_state().auth_store.get_signing_key()
-    cookie_value = request.cookies.get(SESSION_COOKIE_NAME)
-    if cookie_value is None:
-        return False
-    return verify_session_cookie(cookie_value=cookie_value, signing_key=signing_key)
 
 
 def _json_response(model: FrozenModel, status_code: int) -> Response:
@@ -312,14 +293,14 @@ def _is_host_offline(backend_resolver: BackendResolverInterface, agent_id: Agent
 
 
 def _handle_destroyed_workspaces() -> Response:
-    if not _is_lifecycle_request_authenticated():
+    if not is_ui_request_authenticated():
         return _error_response("Not authenticated", 401)
     response = DestroyedWorkspacesResponse(retention_days=_retention_days(), rows=tuple(_collect_destroyed_rows()))
     return _json_response(response, 200)
 
 
 def _handle_delete_destroyed_backup(agent_id: str) -> Response:
-    if not _is_lifecycle_request_authenticated():
+    if not is_ui_request_authenticated():
         return _error_response("Not authenticated", 401)
     reaper = _get_backup_reaper()
     if reaper is None:
@@ -372,7 +353,7 @@ def _handle_delete_destroyed_backup(agent_id: str) -> Response:
 
 
 def _handle_recovery_info(workspace_id: str) -> Response:
-    if not _is_lifecycle_request_authenticated():
+    if not is_ui_request_authenticated():
         return _error_response("Not authenticated", 401)
     resolved_id = _resolve_workspace_coordinate(workspace_id)
     if resolved_id is None:

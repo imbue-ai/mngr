@@ -23,7 +23,9 @@ from pydantic import SecretStr
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
@@ -39,9 +41,8 @@ from imbue.minds.desktop_client.ai_keys import mint_workspace_credential_blob
 from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
-from imbue.minds.desktop_client.assist_chat import AssistSupport
-from imbue.minds.desktop_client.assist_chat import check_assist_support
-from imbue.minds.desktop_client.assist_chat import spawn_assist_chat
+from imbue.minds.desktop_client.assist_chat import ASSIST_SKILL_NAME
+from imbue.minds.desktop_client.assist_chat import build_assist_chat_message
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -82,6 +83,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_works
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
+from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
@@ -97,6 +99,10 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
+from imbue.minds.desktop_client.skill_chat import SkillSupport
+from imbue.minds.desktop_client.skill_chat import check_skill_support
+from imbue.minds.desktop_client.skill_chat import generate_chat_name
+from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -114,6 +120,8 @@ from imbue.minds.desktop_client.ui_api import serve_spa_index
 from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
 from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
+from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
+from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
 from imbue.minds.desktop_client.ui_models import NotificationOutcome
@@ -127,10 +135,20 @@ from imbue.minds.desktop_client.ui_models import UiProviderEntry
 from imbue.minds.desktop_client.ui_models import UiProvidersMessage
 from imbue.minds.desktop_client.ui_models import UiRequestsMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
+from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
+from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
+from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
+from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
+from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_lifecycle import MindHostAction
+from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
+from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
+from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
@@ -139,6 +157,8 @@ from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDisp
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
 from imbue.minds.desktop_client.workspace_recovery import read_backend_unreachable_verdict
 from imbue.minds.desktop_client.workspace_recovery import read_device_cannot_connect_verdict
+from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
+from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
 from imbue.minds.errors import SyncCryptoError
 from imbue.minds.errors import WorkspaceRecordLeaseActiveError
@@ -655,8 +675,8 @@ def _handle_help_assist() -> Response:
     # half-created chat behind. The probe is a quick filesystem check inside the
     # container; on an unsupported/unreachable workspace we return a clear error the
     # modal turns into a "report a bug instead" screen rather than a dead spinner.
-    support = check_assist_support(mngr_caller, workspace_agent_id)
-    if support is AssistSupport.UNSUPPORTED:
+    support = check_skill_support(mngr_caller, workspace_agent_id, ASSIST_SKILL_NAME)
+    if support is SkillSupport.UNSUPPORTED:
         return make_response(
             status_code=409,
             content=json.dumps(
@@ -664,7 +684,7 @@ def _handle_help_assist() -> Response:
             ),
             media_type="application/json",
         )
-    if support is AssistSupport.UNREACHABLE:
+    if support is SkillSupport.UNREACHABLE:
         return make_response(
             status_code=502,
             content=json.dumps(
@@ -676,10 +696,11 @@ def _handle_help_assist() -> Response:
     # Wait for the create to finish before responding so the get-help modal keeps its
     # "starting..." state until the chat exists, rather than dismissing into a blank gap
     # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
-    started = spawn_assist_chat(
-        mngr_caller=mngr_caller,
-        workspace_agent_id=workspace_agent_id,
-        description=description,
+    started = spawn_skill_chat(
+        mngr_caller,
+        workspace_agent_id,
+        chat_name=generate_chat_name(ASSIST_SKILL_NAME),
+        message=build_assist_chat_message(description),
     )
     if not started:
         return make_response(
@@ -2055,6 +2076,10 @@ class _LegacyUiStateDeriver(MutableModel):
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = Field(
         frozen=True, description="Discovery pipeline watchdog"
     )
+    workspace_update_service: WorkspaceUpdateService | None = Field(
+        frozen=True, description="Update state source; None in a build with no mngr caller"
+    )
+    minds_config: MindsConfig | None = Field(frozen=True, description="Where the update window is configured")
     connectivity_detector: ConnectivityDetector | None = Field(
         frozen=True, description="This device's own connectivity condition"
     )
@@ -2083,6 +2108,207 @@ class _LegacyUiStateDeriver(MutableModel):
     def derive_health_states(self) -> tuple[UiHealthMessage, ...]:
         return _derive_ui_health_states(self.system_interface_health_tracker)
 
+    def derive_workspace_updates(self) -> UiWorkspaceUpdatesMessage:
+        window = self.minds_config.get_update_window() if self.minds_config is not None else DEFAULT_UPDATE_WINDOW
+        if self.workspace_update_service is None:
+            return UiWorkspaceUpdatesMessage(updates={}, update_window=format_update_window(window))
+        return build_workspace_updates_message(self.workspace_update_service, window)
+
+
+def _read_default_update_window() -> tuple[int, int]:
+    """The update window for a build with no settings storage to read one from."""
+    return DEFAULT_UPDATE_WINDOW
+
+
+class _UpdateRunHostLifecycle(MutableModel):
+    """Brings a machine up for an update run and puts it back down afterwards.
+
+    Both halves go through :func:`perform_mind_host_action` rather than shelling
+    out to ``mngr`` directly, so an update run leaves the same host-state
+    override and unattended-recovery marks behind as a start or stop the user
+    asked for. A raw ``mngr start`` here would wake a machine the app had
+    stopped without clearing its suppression mark, leaving it excluded from
+    recovery for the rest of the process's life.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    flask_app: Flask = Field(frozen=True, description="App whose state carries the channel publisher.")
+    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the host to act on.")
+    tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Told the stop was intentional.")
+    concurrency_group: ConcurrencyGroup = Field(frozen=True, description="Parent group for the mngr commands.")
+    mngr_binary: str = Field(frozen=True, description="mngr executable both actions shell out to.")
+    mngr_host_dir: Path = Field(frozen=True, description="MNGR_HOST_DIR for those mngr calls.")
+
+    def start_and_wait(self, agent_id: AgentId) -> bool:
+        """Start the machine, blocking until ``mngr`` returns; whether it is up.
+
+        Synchronous because the dispatch's next step execs into the machine.
+        """
+        return self._act(agent_id, MindHostAction.START).is_successful
+
+    def stop_in_background(self, agent_id: AgentId) -> None:
+        """Stop the machine on a one-shot worker.
+
+        The caller is the shared events-reader thread and ``mngr stop --stop-host``
+        can take minutes.
+        """
+        try:
+            self.concurrency_group.start_new_thread(
+                target=self._act,
+                args=(agent_id, MindHostAction.STOP),
+                name=f"scheduled-run-host-stop-{agent_id}",
+                daemon=True,
+                is_checked=False,
+            )
+        # Any of these means the app is shutting down; an escape would kill the events reader.
+        except (OSError, RuntimeError, ConcurrencyGroupError, ConcurrencyExceptionGroup) as exc:
+            logger.warning("Could not start the host stop for {} after its scheduled update: {}", agent_id, exc)
+
+    def _act(self, agent_id: AgentId, action: MindHostAction) -> MindHostActionOutcome:
+        return perform_mind_host_action(
+            workspace_agent_id=agent_id,
+            action=action,
+            backend_resolver=self.backend_resolver,
+            mngr_binary=self.mngr_binary,
+            mngr_host_dir=self.mngr_host_dir,
+            concurrency_group=self.concurrency_group,
+            # Read at call time: the publisher is built after this lifecycle's service.
+            ui_publisher=get_state(self.flask_app).ui_publisher,
+            health_tracker=self.tracker,
+        )
+
+
+def _wire_workspace_updates(
+    service: WorkspaceUpdateService,
+    backend_resolver: BackendResolverInterface,
+    ui_publisher: UiStatePublisher,
+) -> None:
+    """Wire discovery topology into the detector and update state out to the channel.
+
+    Background loops are started separately by :func:`start_workspace_update_loops`.
+    """
+    if isinstance(backend_resolver, MngrCliBackendResolver):
+        # Not ``request_pass``: an unconditional wake per discovery snapshot would
+        # make detection a continuous exec loop.
+        backend_resolver.add_on_change_callback(service.detector.notify_topology_changed)
+    service.state_store.add_on_change_callback(ui_publisher.notify_change)
+
+
+def start_workspace_update_loops(app: Flask, root_concurrency_group: ConcurrencyGroup) -> None:
+    """Start the update machinery's background loops.
+
+    Kept out of ``create_desktop_client`` (like the health probe and discovery
+    watchdog loops) so test-built apps get routes and state without threads.
+    """
+    state = get_state(app)
+    service = state.workspace_update_service
+    if service is None:
+        logger.warning("No workspace-update service was built; machine updates are disabled for this run")
+        return
+    service.detector.start()
+    service.start_run_polling(root_concurrency_group)
+    service.apply_window.start()
+    if state.update_scheduler is not None:
+        state.update_scheduler.start(root_concurrency_group)
+
+
+class WorkspaceUpdateMachinery(FrozenModel):
+    """The update service and the scheduler built from it, assembled together."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    service: WorkspaceUpdateService = Field(description="Dispatches and closes out update runs.")
+    scheduler: UpdateScheduler = Field(description="Runs the armed intents inside the update window.")
+
+
+def _is_recovery_declined_by_an_update(app: Flask, agent_id: AgentId) -> bool:
+    """The update machinery's veto on an unattended start, asked at dispatch time.
+
+    Read off the app's state rather than captured at construction: the
+    dispatcher is built before the update service, whose apply window hands
+    back to it, and the veto is only ever asked once both exist.
+    """
+    service = get_state(app).workspace_update_service
+    return service is not None and service.apply_window.should_decline_recovery_dispatch(agent_id)
+
+
+def _build_workspace_update_machinery(
+    app: Flask,
+    backend_resolver: BackendResolverInterface,
+    mngr_caller: MngrCaller | None,
+    paths: InstallationPaths | None,
+    minds_config: MindsConfig | None,
+    system_interface_health_tracker: SystemInterfaceHealthTracker | None,
+    root_concurrency_group: ConcurrencyGroup | None,
+    dispatch_restart: Callable[[AgentId], None] | None,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+) -> WorkspaceUpdateMachinery | None:
+    """Assemble the update machinery, or None when this build cannot run updates.
+
+    Gated as a unit: a build missing any input has no update surface (routes
+    answer 503) rather than a half-working one. ``dispatch_restart`` is the
+    registered unattended-recovery dispatcher's hand-back, for an apply window
+    that expired with the machine still stuck.
+    """
+    if (
+        mngr_caller is None
+        or paths is None
+        or system_interface_health_tracker is None
+        or root_concurrency_group is None
+        or dispatch_restart is None
+    ):
+        return None
+    schedule_store = UpdateScheduleStore(records_dir=paths.data_dir / "update_schedules")
+    state_store = WorkspaceUpdateStateStore(schedule_store=schedule_store)
+    apply_window = UpdateApplyWindowManager(
+        tracker=system_interface_health_tracker,
+        store=state_store,
+        mngr_caller=mngr_caller,
+        concurrency_group=root_concurrency_group,
+        dispatch_restart=dispatch_restart,
+    )
+    detector = WorkspaceUpdateDetector(
+        store=state_store,
+        backend_resolver=backend_resolver,
+        mngr_caller=mngr_caller,
+        concurrency_group=root_concurrency_group,
+        read_supported_version=default_workspace_template_ref,
+        # The sweep only wants the run-record half of the probe.
+        read_run_record=lambda agent_id: apply_window.probe_run(agent_id).run_status,
+    )
+    host_lifecycle = _UpdateRunHostLifecycle(
+        flask_app=app,
+        backend_resolver=backend_resolver,
+        tracker=system_interface_health_tracker,
+        concurrency_group=root_concurrency_group,
+        mngr_binary=mngr_binary,
+        mngr_host_dir=mngr_host_dir,
+    )
+    service = WorkspaceUpdateService(
+        state_store=state_store,
+        schedule_store=schedule_store,
+        detector=detector,
+        apply_window=apply_window,
+        mngr_caller=mngr_caller,
+        backend_resolver=backend_resolver,
+        paths=paths,
+        start_workspace=host_lifecycle.start_and_wait,
+    )
+    scheduler = UpdateScheduler(
+        schedule_store=schedule_store,
+        read_update_window=(
+            minds_config.get_update_window if minds_config is not None else _read_default_update_window
+        ),
+        read_conditions=service.read_conditions,
+        read_host_state=service.read_host_state,
+        dispatch=service.dispatch_for_scheduler,
+        stop_workspace=host_lifecycle.stop_in_background,
+    )
+    service.add_on_run_finished_callback(scheduler.note_run_finished)
+    return WorkspaceUpdateMachinery(service=service, scheduler=scheduler)
+
 
 def _create_ui_state_publisher(
     app: Flask,
@@ -2092,6 +2318,8 @@ def _create_ui_state_publisher(
     paths: InstallationPaths | None,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None,
+    workspace_update_service: WorkspaceUpdateService | None,
+    minds_config: MindsConfig | None,
     connectivity_detector: ConnectivityDetector | None,
 ) -> UiStatePublisher:
     """Build the channel publisher from the same derivation helpers the legacy SSE uses."""
@@ -2102,6 +2330,8 @@ def _create_ui_state_publisher(
         paths=paths,
         system_interface_health_tracker=system_interface_health_tracker,
         discovery_health_watchdog=discovery_health_watchdog,
+        workspace_update_service=workspace_update_service,
+        minds_config=minds_config,
         connectivity_detector=connectivity_detector,
     )
     return UiStatePublisher(
@@ -2114,6 +2344,7 @@ def _create_ui_state_publisher(
         derive_discovery_health=deriver.derive_discovery_health,
         derive_environment=deriver.derive_environment,
         derive_health_states=deriver.derive_health_states,
+        derive_workspace_updates=deriver.derive_workspace_updates,
     )
 
 
@@ -2240,6 +2471,46 @@ def create_desktop_client(
     # connected SPA window, and the edge-driven publisher derives + diffs the
     # chrome state onto it.
     ui_channel_broadcaster = UiChannelBroadcaster()
+    resolved_mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
+    workspace_operation_registry = InMemoryWorkspaceOperationRegistry()
+    # Registered on the tracker's stuck edge below, once the state it reads
+    # exists; built here because the update machinery's apply window hands an
+    # expired window back to it.
+    unattended_recovery_dispatcher = (
+        UnattendedRecoveryDispatcher(
+            tracker=system_interface_health_tracker,
+            backend_resolver=backend_resolver,
+            registry=workspace_operation_registry,
+            concurrency_group=root_concurrency_group,
+            mngr_binary=mngr_binary,
+            mngr_host_dir=resolved_mngr_host_dir,
+            mngr_forward_port=mngr_forward_port,
+            mngr_forward_preauth_cookie=mngr_forward_preauth_cookie,
+            connectivity_detector=connectivity_detector,
+            # An update's apply takes the services down on purpose; only the
+            # apply window can tell that from a wedge.
+            should_decline_dispatch=lambda agent_id: _is_recovery_declined_by_an_update(app, agent_id),
+        )
+        if system_interface_health_tracker is not None and root_concurrency_group is not None
+        else None
+    )
+    workspace_update_machinery = _build_workspace_update_machinery(
+        app=app,
+        backend_resolver=backend_resolver,
+        mngr_caller=mngr_caller,
+        paths=paths,
+        minds_config=minds_config,
+        system_interface_health_tracker=system_interface_health_tracker,
+        root_concurrency_group=root_concurrency_group,
+        dispatch_restart=(
+            unattended_recovery_dispatcher.dispatch_after_update_window
+            if unattended_recovery_dispatcher is not None
+            else None
+        ),
+        mngr_binary=mngr_binary,
+        mngr_host_dir=resolved_mngr_host_dir,
+    )
+    workspace_update_service = workspace_update_machinery.service if workspace_update_machinery is not None else None
     ui_publisher = _create_ui_state_publisher(
         app=app,
         broadcaster=ui_channel_broadcaster,
@@ -2248,6 +2519,8 @@ def create_desktop_client(
         paths=paths,
         system_interface_health_tracker=system_interface_health_tracker,
         discovery_health_watchdog=discovery_health_watchdog,
+        workspace_update_service=workspace_update_service,
+        minds_config=minds_config,
         connectivity_detector=connectivity_detector,
     )
 
@@ -2285,7 +2558,7 @@ def create_desktop_client(
         root_concurrency_group=root_concurrency_group,
         system_interface_health_tracker=system_interface_health_tracker,
         mngr_binary=mngr_binary,
-        mngr_host_dir=mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr",
+        mngr_host_dir=resolved_mngr_host_dir,
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         discovery_health_watchdog=discovery_health_watchdog,
@@ -2295,6 +2568,9 @@ def create_desktop_client(
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
         notification_feed=notification_feed,
+        workspace_operation_registry=workspace_operation_registry,
+        workspace_update_service=workspace_update_service,
+        update_scheduler=(workspace_update_machinery.scheduler if workspace_update_machinery is not None else None),
     )
     set_state(app, state)
 
@@ -2336,17 +2612,7 @@ def create_desktop_client(
                 connectivity_detector.add_on_recovery_callback(workspace_view_refresher.on_connectivity_recovered)
             # The tracker fires its on-change callbacks before its stuck-edge ones,
             # so the band is already showing STUCK by the time this dispatches.
-            unattended_recovery_dispatcher = UnattendedRecoveryDispatcher(
-                tracker=_health_tracker_for_ui,
-                backend_resolver=backend_resolver,
-                registry=state.workspace_operation_registry,
-                concurrency_group=root_concurrency_group,
-                mngr_binary=state.mngr_binary,
-                mngr_host_dir=state.mngr_host_dir,
-                mngr_forward_port=state.mngr_forward_port or 0,
-                mngr_forward_preauth_cookie=state.mngr_forward_preauth_cookie,
-                connectivity_detector=connectivity_detector,
-            )
+            assert unattended_recovery_dispatcher is not None, "built above from the same tracker and group"
             _health_tracker_for_ui.add_on_stuck_edge_callback(unattended_recovery_dispatcher)
             # The other half of the gate: a start withheld while this device
             # could not reach anything is owed, and the detector is what
@@ -2365,6 +2631,13 @@ def create_desktop_client(
 
     # Mount the SPA surface (/ui, /ui/ws, /ui/api/*).
     app.register_blueprint(create_ui_blueprint())
+
+    if workspace_update_service is not None:
+        _wire_workspace_updates(
+            service=workspace_update_service,
+            backend_resolver=backend_resolver,
+            ui_publisher=ui_publisher,
+        )
 
     # Mount the auth routes (proxy to the mngr_imbue_cloud plugin's auth subcommands)
     if session_store is not None and imbue_cloud_cli is not None:

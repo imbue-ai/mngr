@@ -22,15 +22,31 @@ import {
   backupsControlFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
+  lifecycleConfirmation,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
-  rowClickActionFor,
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
+import type { UpdateBadgeTone } from "../../models/updates";
+import { updateBadgeFor } from "../../models/updates";
 
 const BADGE_CLASS = "inline-flex items-center px-2 py-0.5 rounded-md type-label";
+
+// The update badge is the only pill in a row that does something, so it is a
+// real <button> with a border, hover fill, press scale, focus ring and chevron.
+// The transparent border on the tinted tones keeps every badge the same height.
+const UPDATE_BADGE_CLASS =
+  "inline-flex items-center gap-1 py-0.5 pl-2 pr-1 rounded-md type-label border cursor-pointer " +
+  "transition-transform duration-100 ease-in-out active:scale-[0.98] " +
+  "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+
+const UPDATE_BADGE_TONES: Record<UpdateBadgeTone, string> = {
+  neutral: "bg-fill-subtle text-secondary border-strong hover:bg-fill-hover",
+  warn: "bg-[var(--c-warning-surface)] text-warning border-warning/50 hover:bg-warning/25",
+  error: "bg-important text-white border-transparent hover:opacity-90",
+};
 
 interface LandingState {
   extras: LandingExtras | null;
@@ -43,6 +59,12 @@ interface LandingState {
   isProvidersOpen: boolean;
   pendingProviderToggleAtByName: Map<string, number>;
   isExtrasFailed: boolean;
+  /** `<agent id>:<version>` of each "Updated to X" note dismissed this
+   * session, so a later success on the same machine is news again; hides the
+   * note before the backend's dismissal comes back in a pushed frame. */
+  dismissedNoteKeys: Set<string>;
+  /** Which bulk press is held for the go-ahead-without-backups confirmation. */
+  bulkNoBackupConfirm: "now" | "schedule" | null;
 }
 
 function loadExtras(state: LandingState): void {
@@ -73,6 +95,8 @@ export const LandingPage: m.ClosureComponent = () => {
     isProvidersOpen: false,
     pendingProviderToggleAtByName: new Map(),
     isExtrasFailed: false,
+    dismissedNoteKeys: new Set(),
+    bulkNoBackupConfirm: null,
   };
 
   function submitSyncUnlock(): void {
@@ -173,29 +197,15 @@ export const LandingPage: m.ClosureComponent = () => {
   }
 
   function rowClick(entry: UiWorkspaceEntry): void {
-    const { stores, shell } = getAppContext();
-    const health = stores.health.statusFor(entry.id);
-    const returnTo = `/goto/${entry.id}/`;
+    const { shell } = getAppContext();
     const liveness = state.tracker.displayedLiveness(entry.id, entry.liveness ?? "");
-    const action = rowClickActionFor(entry, liveness, health === "healthy");
-    if (action === "recover") {
-      m.route.set(recoveryRoute(entry.id, returnTo, null));
-    } else if (action === "recover-start") {
-      // The container is stopped: entering directly would strand the user on
-      // the loader, so go straight to Recovery, which dispatches the start.
-      // A start, not a bounce -- there is nothing running to stop first.
-      m.route.set(recoveryRoute(entry.id, returnTo, "start"));
-    } else {
-      shell.enterWorkspace(entry.id);
-    }
+    shell.enterWorkspaceOrRecover(entry, liveness);
   }
 
   function stopMind(entry: UiWorkspaceEntry): void {
-    const isConfirmed = window.confirm(
-      `Stop "${entry.name}"? Its agents will stop and its services become inaccessible. ` +
-        "Data is preserved and you can start it again.",
-    );
-    if (!isConfirmed) return;
+    const isApplying = getAppContext().stores.updates.isApplying(entry.id);
+    const question = lifecycleConfirmation("stop", entry.name, isApplying);
+    if (question !== null && !window.confirm(question)) return;
     void state.tracker.stop(entry.id).then((isOk) => {
       if (!isOk) window.alert(`Could not stop "${entry.name}". Check the machine's provider and try again.`);
     });
@@ -254,6 +264,137 @@ export const LandingPage: m.ClosureComponent = () => {
     return m("span", { class: `${BADGE_CLASS} bg-warning/15 text-warning landing-health-badge` }, label);
   }
 
+  /** The row's update badge, or null when the machine has nothing to say. */
+  function updateBadge(entry: UiWorkspaceEntry): m.Children {
+    const updates = getAppContext().stores.updates;
+    const badge = updateBadgeFor(updates.publishedFor(entry.id), updates.isUpdating(entry.id));
+    if (badge === null) return null;
+    return m(
+      "button",
+      {
+        type: "button",
+        class: `${UPDATE_BADGE_CLASS} ${UPDATE_BADGE_TONES[badge.tone]} landing-update-badge`,
+        "data-update-state": badge.state,
+        "data-tooltip": badge.tooltip,
+        "aria-haspopup": "dialog",
+        // Raised through the shell so it is one modal with one owner (Escape,
+        // navigation). The row behind is clickable, so the press stops here.
+        onclick: (event: MouseEvent) => {
+          event.stopPropagation();
+          getAppContext().shell.openUpdateModal(entry.id);
+        },
+      },
+      [
+        badge.isSpinnerShown ? m(Spinner, { size: "sm" }) : null,
+        m("span", badge.label),
+        m(Icon16, { name: "chevron-right", size: "sm", extra: "opacity-70" }),
+      ],
+    );
+  }
+
+  /** The dismissible "Updated to X" note, whether or not the run was watched.
+   * Under the row rather than in it: it is news, not state. */
+  function updatedNote(entry: UiWorkspaceEntry): m.Children {
+    const updates = getAppContext().stores.updates;
+    const update = updates.forAgent(entry.id);
+    const version = update.success_note_version ?? "";
+    const noteKey = `${entry.id}:${version}`;
+    if (!version || state.dismissedNoteKeys.has(noteKey)) return null;
+    return m("div", { class: "flex items-center gap-2 pl-3 type-helper text-secondary" }, [
+      m(
+        "span",
+        update.verdict === "UPDATED_WITH_REBUILD_ITEMS"
+          ? `Updated to ${version}, with a note for you.`
+          : `Updated to ${version}.`,
+      ),
+      m(
+        Button,
+        {
+          variant: "ghost",
+          "aria-label": "Dismiss",
+          onclick: () => {
+            state.dismissedNoteKeys.add(noteKey);
+            void updates.dismissNote(entry.id).then((result) => {
+              // Put it back on a refusal rather than have the note vanish this
+              // session and return next launch with nothing said.
+              if (!result.isOk) {
+                state.dismissedNoteKeys.delete(noteKey);
+                m.redraw();
+              }
+            });
+          },
+        },
+        "Dismiss",
+      ),
+    ]);
+  }
+
+  function runBulkAction(kind: "now" | "schedule", isNoBackupConfirmed: boolean): void {
+    const updates = getAppContext().stores.updates;
+    const agentIds = updates.updatableAgentIds();
+    if (agentIds.length === 0) return;
+    // Cleared on every press: a prompt left standing from the other bulk
+    // action would offer to proceed with the wrong one.
+    state.bulkNoBackupConfirm = null;
+    if (!isNoBackupConfirmed && agentIds.some((agentId) => updates.needsNoBackupConfirmation(agentId))) {
+      state.bulkNoBackupConfirm = kind;
+      return;
+    }
+    const call = kind === "now" ? updates.updateAllNow(agentIds) : updates.scheduleAllUpdates(agentIds);
+    void call.then((result) => {
+      if (!result.isOk) {
+        window.alert(result.error);
+      }
+      m.redraw();
+    });
+  }
+
+  /** The bulk strip, only when more than one machine is out of date: one
+   * machine has its own row action. */
+  function bulkUpdateActions(): m.Children {
+    const updates = getAppContext().stores.updates;
+    const agentIds = updates.updatableAgentIds();
+    if (agentIds.length < 2) return null;
+    return m(Notice, { extra: "mb-4", id: "landing-bulk-updates" }, [
+      m("div", { class: "flex items-center justify-between gap-3 flex-wrap" }, [
+        m("span", `${agentIds.length} machines have an update available.`),
+        m("div", { class: "flex items-center gap-2" }, [
+          m(Button, { variant: "primary", onclick: () => runBulkAction("schedule", false) }, "Schedule all updates"),
+          m(Button, { variant: "secondary", onclick: () => runBulkAction("now", false) }, "Update all now"),
+        ]),
+      ]),
+      state.bulkNoBackupConfirm !== null
+        ? m("div", { class: "flex items-center justify-between gap-3 pt-2 flex-wrap" }, [
+            m(
+              "span",
+              { class: "type-helper" },
+              "Some of these machines have no backups: their updates keep every version in git " +
+                "and offer a rollback, but there's no full-machine restore to fall back on.",
+            ),
+            m("div", { class: "flex items-center gap-2" }, [
+              m(
+                Button,
+                {
+                  variant: "primary",
+                  onclick: () => {
+                    const kind = state.bulkNoBackupConfirm;
+                    state.bulkNoBackupConfirm = null;
+                    if (kind !== null) runBulkAction(kind, true);
+                  },
+                },
+                "Go ahead without backups",
+              ),
+              m(
+                Button,
+                { variant: "secondary", onclick: () => (state.bulkNoBackupConfirm = null) },
+                "Cancel",
+              ),
+            ]),
+          ])
+        : null,
+    ]);
+  }
+
   function liveRow(entry: UiWorkspaceEntry): m.Children {
     const { stores } = getAppContext();
     const extras = state.extras;
@@ -285,7 +426,7 @@ export const LandingPage: m.ClosureComponent = () => {
         : ("UNKNOWN" as MindLiveness);
     const controls = mindControlsFor(entry, liveness, discoveryHealth);
     const providerLabel = entry.provider_label ?? "";
-    return m(
+    const row = m(
       Card,
       {
         layout: "row",
@@ -302,6 +443,7 @@ export const LandingPage: m.ClosureComponent = () => {
         m("span", { class: "landing-backup-badge hidden" }),
         (entry.supports_shutdown ?? false) ? livenessBadge(liveness) : null,
         healthBadge(entry, liveness),
+        updateBadge(entry),
         backupsButton(entry, liveness),
         controls.isStartShown
           ? m(
@@ -349,6 +491,8 @@ export const LandingPage: m.ClosureComponent = () => {
                 "data-tooltip": "Restart machine",
                 onclick: (event: MouseEvent) => {
                   event.stopPropagation();
+                  const question = lifecycleConfirmation("restart", entry.name, stores.updates.isApplying(entry.id));
+                  if (question !== null && !window.confirm(question)) return;
                   const returnTo = `/goto/${entry.id}/`;
                   m.route.set(recoveryRoute(entry.id, returnTo, "restart"));
                 },
@@ -391,6 +535,8 @@ export const LandingPage: m.ClosureComponent = () => {
         ),
       ],
     );
+    const note = updatedNote(entry);
+    return note === null ? row : m("div", { class: "flex flex-col gap-1" }, [row, note]);
   }
 
   function createAttemptRow(entry: UiWorkspaceEntry): m.Children {
@@ -560,6 +706,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 m("h1", { class: "type-heading text-primary" }, "Machines"),
                 m(ButtonLink, { variant: "primary", ...routeLinkAttrs("/create") }, "Create"),
               ]),
+              bulkUpdateActions(),
               extras !== null && extras.locked_account_emails.length > 0
                 ? m(Notice, { extra: "mb-4", id: "sync-unlock-banner" }, [
                     m("div", { class: "flex flex-col gap-2" }, [
