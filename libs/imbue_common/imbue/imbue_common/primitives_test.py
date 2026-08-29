@@ -2,6 +2,7 @@
 
 import pytest
 from pydantic import BaseModel
+from pydantic import ValidationError
 
 from imbue.imbue_common.primitives import InvalidProbabilityError
 from imbue.imbue_common.primitives import NonEmptyStr
@@ -203,3 +204,74 @@ def test_probability_pydantic_schema() -> None:
     model = TestModel.model_validate({"value": 0.75})
     assert model.value == 0.75
     assert isinstance(model.value, Probability)
+
+
+def test_non_empty_str_pydantic_schema_accepts_and_strips() -> None:
+    """NonEmptyStr should validate and strip through model_validate."""
+
+    class TestModel(BaseModel):
+        value: NonEmptyStr
+
+    model = TestModel.model_validate({"value": "  hello  "})
+    assert model.value == "hello"
+    assert isinstance(model.value, NonEmptyStr)
+
+
+def test_non_empty_str_pydantic_schema_rejects_blank() -> None:
+    """NonEmptyStr's pydantic schema should reject empty/whitespace-only values."""
+
+    class TestModel(BaseModel):
+        value: NonEmptyStr
+
+    with pytest.raises(ValidationError):
+        TestModel.model_validate({"value": "   "})
+
+
+def test_non_negative_int_pydantic_schema_rejects_negative() -> None:
+    """NonNegativeInt's pydantic schema should reject negative values."""
+
+    class TestModel(BaseModel):
+        value: NonNegativeInt
+
+    with pytest.raises(ValidationError):
+        TestModel.model_validate({"value": -1})
+
+
+def test_positive_int_pydantic_schema_rejects_zero() -> None:
+    """PositiveInt's pydantic schema should reject zero."""
+
+    class TestModel(BaseModel):
+        value: PositiveInt
+
+    with pytest.raises(ValidationError):
+        TestModel.model_validate({"value": 0})
+
+
+def test_non_negative_float_pydantic_schema_rejects_negative() -> None:
+    """NonNegativeFloat's pydantic schema should reject negative values."""
+
+    class TestModel(BaseModel):
+        value: NonNegativeFloat
+
+    with pytest.raises(ValidationError):
+        TestModel.model_validate({"value": -0.01})
+
+
+def test_positive_float_pydantic_schema_rejects_zero() -> None:
+    """PositiveFloat's pydantic schema should reject zero."""
+
+    class TestModel(BaseModel):
+        value: PositiveFloat
+
+    with pytest.raises(ValidationError):
+        TestModel.model_validate({"value": 0.0})
+
+
+def test_probability_pydantic_schema_rejects_out_of_range() -> None:
+    """Probability's pydantic schema should reject values above 1.0."""
+
+    class TestModel(BaseModel):
+        value: Probability
+
+    with pytest.raises(ValidationError):
+        TestModel.model_validate({"value": 1.5})
