@@ -1,7 +1,11 @@
 """Unit tests for provider registry and configuration."""
 
+import threading
+from pathlib import Path
+
 import pytest
 
+from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.api.providers import _is_backend_enabled
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
@@ -19,8 +23,10 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.providers.registry import get_backend
 from imbue.mngr.providers.registry import list_backends
@@ -432,3 +438,113 @@ def test_get_all_provider_instances_and_skipped_reports_construction_skips(
         del _provider_config_registry[_UNAVAILABLE_AT_CONSTRUCTION_BACKEND_NAME]
         del _backend_registry[_EMPTY_AT_CONSTRUCTION_BACKEND_NAME]
         del _provider_config_registry[_EMPTY_AT_CONSTRUCTION_BACKEND_NAME]
+
+
+_RACING_CONSTRUCTION_BACKEND_NAME = ProviderBackendName("test-racing-construction-backend")
+
+# Comfortably longer than two threads need to meet, and comfortably shorter than the
+# suite's per-test timeout, so a regression that leaves one caller never building
+# fails the test instead of hanging it.
+_CONSTRUCTION_RACE_TIMEOUT_SECONDS = 5.0
+
+
+class _CloseCountingProvider(MockProviderInstance):
+    """Provider instance that records how many times it was closed."""
+
+    close_count: int = 0
+
+    def close(self) -> None:
+        self.close_count = self.close_count + 1
+
+
+def test_get_provider_instance_racing_on_one_name_shares_the_winner_and_closes_the_loser(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Two callers building the same provider at once must end up holding one instance.
+
+    Construction runs outside the cache lock on purpose: it can take a network round
+    trip, and the discovery stream's whole point is that one provider's slow build does
+    not hold up another's first poll. The cost of that is a same-name race, which
+    ``get_provider_instance`` resolves by caching whoever gets there first and closing
+    the duplicate -- dropping it instead would strand whatever connection it opened, and
+    caching it would leave two callers holding different instances of one provider, only
+    one of which the atexit close will ever reap.
+
+    The race is forced rather than hoped for: construction parks on a barrier, so
+    neither caller can reach the caching block until both are past the cache read.
+    """
+    barrier = threading.Barrier(2, timeout=_CONSTRUCTION_RACE_TIMEOUT_SECONDS)
+    built: list[_CloseCountingProvider] = []
+    built_lock = threading.Lock()
+
+    class _RacingConstructionBackend(ProviderBackendInterface):
+        """Backend whose construction waits for a second caller to be building too."""
+
+        @staticmethod
+        def get_name() -> ProviderBackendName:
+            return _RACING_CONSTRUCTION_BACKEND_NAME
+
+        @staticmethod
+        def get_description() -> str:
+            return "Test backend whose construction blocks until both racing callers are inside it"
+
+        @staticmethod
+        def get_config_class() -> type[ProviderInstanceConfig]:
+            return ProviderInstanceConfig
+
+        @staticmethod
+        def get_build_args_help() -> str:
+            return "No arguments supported."
+
+        @staticmethod
+        def get_start_args_help() -> str:
+            return "No arguments supported."
+
+        @staticmethod
+        def build_provider_instance(
+            name: ProviderInstanceName,
+            config: ProviderInstanceConfig,
+            mngr_ctx: MngrContext,
+        ) -> ProviderInstanceInterface:
+            del config
+            instance = _CloseCountingProvider(name=name, host_dir=temp_host_dir, mngr_ctx=mngr_ctx)
+            with built_lock:
+                built.append(instance)
+            barrier.wait()
+            return instance
+
+    _backend_registry[_RACING_CONSTRUCTION_BACKEND_NAME] = _RacingConstructionBackend
+    _provider_config_registry[_RACING_CONSTRUCTION_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        provider_name = ProviderInstanceName(str(_RACING_CONSTRUCTION_BACKEND_NAME))
+        returned: list[BaseProviderInstance] = []
+        returned_lock = threading.Lock()
+
+        def _get_instance() -> None:
+            instance = get_provider_instance(provider_name, temp_mngr_ctx)
+            with returned_lock:
+                returned.append(instance)
+
+        # Started through the concurrency group so a failure inside either caller
+        # surfaces on join rather than being swallowed by the thread.
+        threads = [
+            temp_mngr_ctx.concurrency_group.start_new_thread(target=_get_instance, name=f"racing-caller-{index}")
+            for index in range(2)
+        ]
+        for thread in threads:
+            thread.join(timeout=_CONSTRUCTION_RACE_TIMEOUT_SECONDS * 2)
+
+        assert len(built) == 2, "both callers should have gone past the cache read and built"
+        assert len(returned) == 2
+        winner = returned[0]
+        assert returned[1] is winner, "both callers must be handed the same instance"
+        assert _instance_cache[(provider_name, id(temp_mngr_ctx))] is winner
+
+        losers = [instance for instance in built if instance is not winner]
+        assert len(losers) == 1
+        assert losers[0].close_count == 1, "the duplicate must be closed, not dropped"
+        assert isinstance(winner, _CloseCountingProvider)
+        assert winner.close_count == 0, "the instance handed to both callers must stay open"
+    finally:
+        del _backend_registry[_RACING_CONSTRUCTION_BACKEND_NAME]
+        del _provider_config_registry[_RACING_CONSTRUCTION_BACKEND_NAME]

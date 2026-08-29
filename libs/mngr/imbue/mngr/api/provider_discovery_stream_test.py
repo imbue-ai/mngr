@@ -1,6 +1,9 @@
 import threading
+from collections.abc import Iterator
 from concurrent.futures import Future
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import PrivateAttr
@@ -13,12 +16,17 @@ from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.provider_discovery_stream import _ProviderDiscoveryPoller
 from imbue.mngr.api.provider_discovery_stream import _discover_one_provider
-from imbue.mngr.api.provider_discovery_stream import _emit_startup_snapshot_for_skipped_provider
-from imbue.mngr.api.providers import SkippedProviderConstruction
+from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.provider_config_registry import _provider_config_registry
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
+from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -30,7 +38,9 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+from imbue.mngr.providers.registry import _backend_registry
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.thread_cleanup import _MngrExecutor
 from imbue.mngr.utils.thread_cleanup import mngr_executor
@@ -67,24 +77,36 @@ class _ControllableProvider(MockProviderInstance):
         self._release_gate.set()
 
 
+_CONTROLLABLE_PROVIDER_NAME: Final[ProviderInstanceName] = ProviderInstanceName("controllable")
+
+
 def _make_controllable_provider(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
     is_released: bool,
+    provider_name: ProviderInstanceName = _CONTROLLABLE_PROVIDER_NAME,
 ) -> _ControllableProvider:
+    """Build a controllable provider and register it as ``provider_name``'s built instance.
+
+    Registering it in the instance cache is how the poller gets hold of it: the poller
+    resolves its provider by name through ``get_provider_instance`` on every poll, which
+    returns a cached instance without consulting any backend. The ``temp_mngr_ctx``
+    fixture clears the cache on teardown.
+    """
     provider = _ControllableProvider(
-        name=ProviderInstanceName("controllable"),
+        name=provider_name,
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
     if is_released:
         provider.release()
+    _instance_cache[(provider_name, id(temp_mngr_ctx))] = provider
     return provider
 
 
 def _submit_discovery(
     executor: _MngrExecutor,
-    provider: _ControllableProvider,
+    provider: BaseProviderInstance,
     mngr_ctx: MngrContext,
     poller: _ProviderDiscoveryPoller,
 ) -> "Future[BoundedProviderDiscoveryResult]":
@@ -98,6 +120,132 @@ def _submit_discovery(
         True,
         poller._host_read_registry,
     )
+
+
+_UNAVAILABLE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("unavailable-at-construction")
+_EMPTY_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("empty-at-construction")
+_UNAUTHORIZED_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("unauthorized-at-construction")
+
+
+class _UnavailableAtConstructionBackend(ProviderBackendInterface):
+    """Backend that cannot be reached, the way a paused Docker Desktop reports itself."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNAVAILABLE_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that is unreachable at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx
+        raise ProviderUnavailableError(provider_name=name, reason="simulated paused backend from test")
+
+
+class _EmptyAtConstructionBackend(ProviderBackendInterface):
+    """Backend that is reachable but holds nothing yet, the way docker reports no state container."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _EMPTY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports itself empty at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx
+        raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
+
+
+class _UnauthorizedAtConstructionBackend(ProviderBackendInterface):
+    """Backend with no usable credentials, which no amount of retrying can fix."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNAUTHORIZED_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend that reports missing credentials at construction time"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        del config, mngr_ctx
+        raise ProviderNotAuthorizedError(provider_name=name, reason="simulated missing credentials from test")
+
+
+@contextmanager
+def _registered_backend(backend: type[ProviderBackendInterface]) -> Iterator[ProviderInstanceName]:
+    """Register a test backend and yield the provider-instance name that resolves to it.
+
+    The name matches the backend name so it resolves as an implicit-default instance,
+    with no ``[providers.<name>]`` block needed.
+    """
+    backend_name = backend.get_name()
+    _backend_registry[backend_name] = backend
+    _provider_config_registry[backend_name] = ProviderInstanceConfig
+    try:
+        yield ProviderInstanceName(str(backend_name))
+    finally:
+        del _backend_registry[backend_name]
+        del _provider_config_registry[backend_name]
+
+
+def _discard_line(line: str) -> None:
+    """Sink for the stream's tail, so its JSONL does not land on the test's stdout."""
+    del line
 
 
 def _generous_config() -> ProviderInstanceConfig:
@@ -151,52 +299,178 @@ def _read_host_ssh_info_events(temp_mngr_ctx: MngrContext) -> list[HostSSHInfoEv
     return events
 
 
-def test_startup_snapshot_for_unavailable_provider_carries_error_and_config(temp_mngr_ctx: MngrContext) -> None:
-    """A provider skipped as unavailable/unauthorized at stream startup gets one snapshot
-    carrying its construction error plus its config, so consumers (e.g. the minds providers
-    panel) see its state from the stream without a full ``mngr list``."""
-    skipped = SkippedProviderConstruction(
-        provider_name=ProviderInstanceName("vultr"),
-        error_type_name="ProviderNotAuthorizedError",
-        error_message="Vultr API key not configured",
-        is_empty=False,
-    )
+@pytest.mark.allow_warnings(match="could not be built")
+def test_a_provider_that_cannot_be_built_keeps_its_poller_and_recovers(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A provider whose *construction* fails must be retried, not written off for the process.
 
-    _emit_startup_snapshot_for_skipped_provider(temp_mngr_ctx, skipped)
+    This is the paused-Docker-Desktop case: the backend reports itself unreachable when
+    the poller tries to build it, and the condition ends the moment the user unpauses.
+    The stream used to build every instance once at startup, so a provider that failed
+    there got a single snapshot and no poller at all -- while a provider that constructed
+    and then failed every poll kept its poller and recovered on its own. Each failed poll
+    now emits the same error snapshot the startup path used to emit once, and a later poll
+    that can build the provider produces a normal snapshot from the same poller.
+    """
+    with _registered_backend(_UnavailableAtConstructionBackend) as provider_name:
+        poller = _ProviderDiscoveryPoller(
+            provider_name=provider_name, mngr_ctx=temp_mngr_ctx, config=_generous_config()
+        )
+        with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+            poller.poll_and_emit(lambda provider: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+            poller.poll_and_emit(lambda provider: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+
+            # Both polls reported the provider as errored, rather than one of them going quiet.
+            errored = _read_snapshots(temp_mngr_ctx)
+            assert len(errored) == 2
+            for snapshot in errored:
+                assert snapshot.provider_name == provider_name
+                assert snapshot.error is not None
+                assert snapshot.error.type_name == "ProviderUnavailableError"
+                assert "simulated paused backend from test" in snapshot.error.message
+                assert snapshot.agents == ()
+                assert snapshot.hosts == ()
+                # The config rides along so the minds providers panel can render the
+                # provider at all while it is failing to construct.
+                assert snapshot.provider is not None
+                assert snapshot.provider.provider_name == provider_name
+
+            # The provider comes back (the user unpauses Docker).
+            host = DiscoveredHost(
+                host_id=HostId.generate(),
+                host_name=HostName("recovered-host"),
+                provider_name=provider_name,
+                host_state=HostState.RUNNING,
+            )
+            recovered = _make_controllable_provider(
+                temp_host_dir, temp_mngr_ctx, is_released=True, provider_name=provider_name
+            )
+            recovered.result_agents_by_host = {host: []}
+
+            poller.poll_and_emit(lambda provider: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 3
+    assert snapshots[-1].error is None
+    assert {h.host_id for h in snapshots[-1].hosts} == {host.host_id}
+
+
+@pytest.mark.allow_warnings(match="could not be built")
+def test_a_provider_whose_backend_is_missing_still_reports_every_poll(temp_mngr_ctx: MngrContext) -> None:
+    """A construction failure the poller does not specifically know about must still be reported.
+
+    ``list_provider_names_to_load`` hands back every name in ``[providers.*]`` without
+    checking that its backend is registered, so a config naming a backend this install
+    does not have produces a poller whose ``get_provider_instance`` raises
+    ``UnknownBackendError``. That is neither empty, unavailable, nor unauthorized, so it
+    would otherwise fall through to the poll loop's warn-and-continue handler, which
+    writes no snapshot -- leaving exactly the invisible provider this whole mechanism
+    exists to prevent, with the process still alive and exit-0.
+    """
+    provider_name = ProviderInstanceName("a-backend-nobody-installed")
+    config = ProviderInstanceConfig(
+        backend=ProviderBackendName(str(provider_name)),
+        discovery_poll_interval_seconds=PositiveFloat(60.0),
+    )
+    poller = _ProviderDiscoveryPoller(provider_name=provider_name, mngr_ctx=temp_mngr_ctx, config=config)
+
+    with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+        poller.poll_and_emit(lambda provider: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+        poller.poll_and_emit(lambda provider: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 2
+    for snapshot in snapshots:
+        assert snapshot.provider_name == provider_name
+        assert snapshot.error is not None
+        assert snapshot.error.type_name == "UnknownBackendError"
+
+
+def test_an_empty_provider_emits_clean_snapshots_until_it_has_something(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A known-empty provider is retried every poll, and its snapshots stay clean.
+
+    ``ProviderEmptyError`` is a sibling of ``ProviderUnavailableError``, not a subclass,
+    so it needs retrying in its own right: docker raises it when its state container does
+    not exist yet, and the user creating a first workspace is exactly what ends that. It
+    is a healthy state, so its snapshot carries no error.
+
+    Retried at the ordinary cadence with no extra backoff. A failing build costs less per
+    poll than a successful one (which pays a full re-read of the provider's hosts and
+    agents), so slowing the retry down would save less than a healthy provider already
+    spends, and would pay for it in how long the user waits for discovery to notice.
+    """
+    with _registered_backend(_EmptyAtConstructionBackend) as provider_name:
+        poller = _ProviderDiscoveryPoller(
+            provider_name=provider_name, mngr_ctx=temp_mngr_ctx, config=_generous_config()
+        )
+
+        with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
+
+            def _poll() -> None:
+                poller.poll_and_emit(lambda provider: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+
+            _poll()
+            _poll()
+            _poll()
+
+            empty_snapshots = _read_snapshots(temp_mngr_ctx)
+            assert len(empty_snapshots) == 3
+            assert [snapshot.error for snapshot in empty_snapshots] == [None, None, None]
+            assert all(snapshot.agents == () for snapshot in empty_snapshots)
+            assert all(snapshot.hosts == () for snapshot in empty_snapshots)
+
+            # The user creates their first workspace, so the provider now builds. It has
+            # to bring a host with it: a successful discovery of a provider holding
+            # nothing writes the same clean zero-host snapshot the empty-construction
+            # skip does, so a bare snapshot count cannot tell recovery from another
+            # failed build.
+            host = DiscoveredHost(
+                host_id=HostId.generate(),
+                host_name=HostName("first-workspace-host"),
+                provider_name=provider_name,
+                host_state=HostState.RUNNING,
+            )
+            recovered = _make_controllable_provider(
+                temp_host_dir, temp_mngr_ctx, is_released=True, provider_name=provider_name
+            )
+            recovered.result_agents_by_host = {host: []}
+            _poll()
+
+    snapshots = _read_snapshots(temp_mngr_ctx)
+    assert len(snapshots) == 4
+    assert snapshots[-1].error is None
+    assert {h.host_id for h in snapshots[-1].hosts} == {host.host_id}
+
+
+@pytest.mark.allow_warnings(match="not authorized")
+def test_an_unauthorized_provider_ends_only_its_own_poller(temp_mngr_ctx: MngrContext) -> None:
+    """Missing credentials end one poller cleanly -- they must not read as a crashed poller.
+
+    Credentials change through a user action that restarts this process, so retrying
+    would just re-report the same thing every poll forever. But the poller has to end by
+    *returning* rather than by raising: one provider's missing API key must not take
+    down the thread, and so the discovery, of every other provider.
+    """
+    stop_event = threading.Event()
+    with _registered_backend(_UnauthorizedAtConstructionBackend) as provider_name:
+        poller = _ProviderDiscoveryPoller(
+            provider_name=provider_name, mngr_ctx=temp_mngr_ctx, config=_generous_config()
+        )
+
+        # Returns on its own: the poll interval is 60s, so anything that waits hangs here.
+        poller.run(stop_event)
+
+    assert not stop_event.is_set()
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
-    snapshot = snapshots[0]
-    assert snapshot.provider_name == ProviderInstanceName("vultr")
-    assert snapshot.error is not None
-    assert snapshot.error.type_name == "ProviderNotAuthorizedError"
-    assert snapshot.error.message == "Vultr API key not configured"
-    assert snapshot.agents == ()
-    assert snapshot.hosts == ()
-    assert snapshot.provider is not None
-    assert snapshot.provider.provider_name == ProviderInstanceName("vultr")
-
-
-def test_startup_snapshot_for_empty_provider_is_clean(temp_mngr_ctx: MngrContext) -> None:
-    """A provider skipped as known-empty (e.g. Modal with no per-user environment) gets a
-    clean zero-agent snapshot: it is a healthy state, not an error."""
-    skipped = SkippedProviderConstruction(
-        provider_name=ProviderInstanceName("modal"),
-        error_type_name="ProviderEmptyError",
-        error_message="Modal environment does not exist yet",
-        is_empty=True,
-    )
-
-    _emit_startup_snapshot_for_skipped_provider(temp_mngr_ctx, skipped)
-
-    snapshots = _read_snapshots(temp_mngr_ctx)
-    assert len(snapshots) == 1
-    snapshot = snapshots[0]
-    assert snapshot.provider_name == ProviderInstanceName("modal")
-    assert snapshot.error is None
-    assert snapshot.agents == ()
-    assert snapshot.hosts == ()
-    assert snapshot.provider is not None
+    assert snapshots[0].provider_name == provider_name
+    assert snapshots[0].error is not None
+    assert snapshots[0].error.type_name == "ProviderNotAuthorizedError"
+    assert snapshots[0].provider is not None
 
 
 def test_poller_emits_host_ssh_info_events_from_discovery_result(
@@ -229,9 +503,9 @@ def test_poller_emits_host_ssh_info_events_from_discovery_result(
     provider.result_agents_by_host = {host: [agent]}
     provider.result_host_ssh_infos = [(host.host_id, ssh_info)]
 
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_generous_config())
     with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
-        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+        poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
 
     ssh_events = _read_host_ssh_info_events(temp_mngr_ctx)
     assert len(ssh_events) == 1
@@ -250,9 +524,9 @@ def test_poller_emits_no_host_ssh_info_when_result_has_none(temp_host_dir: Path,
     )
     provider.result_agents_by_host = {host: []}
 
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_generous_config())
     with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
-        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+        poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
 
     assert _read_host_ssh_info_events(temp_mngr_ctx) == []
 
@@ -274,9 +548,9 @@ def test_poller_emits_success_snapshot(temp_host_dir: Path, temp_mngr_ctx: MngrC
     )
     provider.result_agents_by_host = {host: [agent]}
 
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_generous_config())
     with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
-        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+        poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
@@ -292,9 +566,9 @@ def test_poller_emits_error_snapshot_on_exception(temp_host_dir: Path, temp_mngr
     provider = _make_controllable_provider(temp_host_dir, temp_mngr_ctx, is_released=True)
     provider.should_raise = True
 
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_generous_config())
+    poller = _ProviderDiscoveryPoller(provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_generous_config())
     with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
-        poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+        poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
 
     snapshots = _read_snapshots(temp_mngr_ctx)
     assert len(snapshots) == 1
@@ -322,31 +596,42 @@ def test_poller_timeout_emits_error_then_accepts_late_result(temp_host_dir: Path
         host_state=HostState.RUNNING,
     )
     provider.result_agents_by_host = {host: []}
-    poller = _ProviderDiscoveryPoller(provider=provider, mngr_ctx=temp_mngr_ctx, config=_tiny_timeout_config())
+    poller = _ProviderDiscoveryPoller(
+        provider_name=provider.name, mngr_ctx=temp_mngr_ctx, config=_tiny_timeout_config()
+    )
 
     try:
         with mngr_executor(parent_cg=temp_mngr_ctx.concurrency_group, name="test-discover", max_workers=1) as executor:
             # First poll times out (discovery is blocked) -> error snapshot, orphan kept.
-            poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+            poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
             timeout_snapshots = _read_snapshots(temp_mngr_ctx)
             assert len(timeout_snapshots) == 1
             assert timeout_snapshots[0].error is not None
             # Wait for the orphaned discovery thread to actually begin (it then blocks on the gate).
             poll_until(lambda: provider.discovery_call_count == 1, timeout=5.0)
 
-            # While the orphan is still in flight, another poll must NOT start a second discovery.
-            poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
+            # While the orphan is still in flight, another poll must NOT start a second
+            # discovery -- but must still emit, so a provider that stays wedged keeps
+            # reading as alive-and-erroring rather than fading into silence.
+            poller.poll_and_emit(lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller))
             assert provider.discovery_call_count == 1
+            wedged_snapshots = _read_snapshots(temp_mngr_ctx)
+            assert len(wedged_snapshots) == 2
+            assert wedged_snapshots[-1].error is not None
+            assert wedged_snapshots[-1].discovery_finished_at > wedged_snapshots[0].discovery_finished_at
 
-            # Release the orphaned discovery; once it finishes, a poll harvests its late result.
+            # Release the orphaned discovery; once it finishes, a poll harvests its late
+            # result. Polled until a *non-errored* snapshot lands, since the wedged
+            # re-emits above are themselves errored snapshots.
             provider.release()
             poll_until(
-                lambda: poller.poll_and_emit(lambda: _submit_discovery(executor, provider, temp_mngr_ctx, poller))
-                or len(_read_snapshots(temp_mngr_ctx)) >= 2,
+                lambda: poller.poll_and_emit(
+                    lambda resolved: _submit_discovery(executor, resolved, temp_mngr_ctx, poller)
+                )
+                or _read_snapshots(temp_mngr_ctx)[-1].error is None,
                 timeout=5.0,
             )
             snapshots = _read_snapshots(temp_mngr_ctx)
-            assert len(snapshots) >= 2
             assert snapshots[-1].error is None
             assert {h.host_id for h in snapshots[-1].hosts} == {host.host_id}
     finally:

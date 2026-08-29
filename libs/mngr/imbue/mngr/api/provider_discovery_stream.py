@@ -4,11 +4,13 @@ from concurrent.futures import Future
 from concurrent.futures import wait
 from datetime import datetime
 from datetime import timezone
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.discovery_events import DiscoveredProvider
@@ -18,12 +20,15 @@ from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import tail_discovery_events_from_offset
 from imbue.mngr.api.discovery_events import write_provider_discovery_snapshot
-from imbue.mngr.api.providers import SkippedProviderConstruction
-from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderError
+from imbue.mngr.errors import ProviderNotAuthorizedError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.primitives import ProviderBackendName
@@ -32,6 +37,10 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.error_utils import format_exception_traceback
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+
+# How long the stream's main loop blocks per wait. It only waits, so this bounds
+# how quickly it notices shutdown (and keeps the wait interruptible by Ctrl-C).
+_SHUTDOWN_CHECK_INTERVAL_SECONDS: Final[float] = 1.0
 
 
 def _utc_now() -> datetime:
@@ -52,43 +61,6 @@ def _resolve_provider_config(provider_name: ProviderInstanceName, mngr_ctx: Mngr
     return ProviderInstanceConfig(backend=ProviderBackendName(str(provider_name)))
 
 
-def _emit_startup_snapshot_for_skipped_provider(
-    mngr_ctx: MngrContext,
-    skipped: SkippedProviderConstruction,
-) -> None:
-    """Write one per-provider snapshot for a provider whose construction was skipped at stream startup.
-
-    Skipped providers get no poller (their construction failed or they are
-    known-empty), so without this the stream would never mention them and
-    consumers (e.g. the minds providers panel) would only learn their state
-    from a full ``mngr list`` side effect. An unavailable/unauthorized provider
-    carries its construction error; a known-empty provider gets a clean
-    zero-agent snapshot. Emitted once per stream startup: the provider is not
-    re-polled, so its state is authoritatively "as of startup" until the
-    process restarts (e.g. after the user fixes credentials).
-    """
-    started_at = _utc_now()
-    provider_config = _resolve_provider_config(skipped.provider_name, mngr_ctx)
-    if skipped.is_empty:
-        error = None
-    else:
-        error = DiscoveryError(
-            type_name=skipped.error_type_name,
-            message=skipped.error_message,
-            provider_name=skipped.provider_name,
-        )
-    write_provider_discovery_snapshot(
-        mngr_ctx.config,
-        provider_name=skipped.provider_name,
-        agents=(),
-        hosts=(),
-        discovery_started_at=started_at,
-        discovery_finished_at=_utc_now(),
-        provider=make_discovered_provider(skipped.provider_name, provider_config),
-        error=error,
-    )
-
-
 def _discover_one_provider(
     provider: BaseProviderInstance,
     mngr_ctx: MngrContext,
@@ -104,10 +76,11 @@ def _discover_one_provider(
     reads across polls so a wedged host is not re-read on every poll.
     """
     # Each poll is its own discovery cycle, so clear the provider's per-cycle caches
-    # first. A provider instance is built once at stream startup and reused for every
+    # first. The poller builds its instance on every poll, but ``get_provider_instance``
+    # memoizes the first successful build, so in practice one instance serves every
     # poll; without this reset its per-cycle caches (e.g. imbue_cloud's leased-hosts
     # list, which is even cached when empty) become process-lifetime caches, so any
-    # change after startup -- a host leased later, a host destroyed -- is never seen.
+    # later change -- a host leased afterwards, a host destroyed -- is never seen.
     # Every on-demand discovery path (mngr list, the snapshot side-effect) already
     # passes reset_caches=True for exactly this reason; the streaming poller must match.
     # The cross-poll wedged-host registry is a separate object and is intentionally
@@ -133,10 +106,22 @@ class _ProviderDiscoveryPoller(MutableModel):
     timeout ``DiscoveryError`` and moves on -- the abandoned discovery thread keeps
     running (threads cannot be killed) and its late result is accepted on a later
     poll. While a prior poll is still in flight, no new poll is started for that
-    provider, so threads never pile up.
+    provider, so threads never pile up; the timeout snapshot is re-emitted instead,
+    so every cycle of a live poller produces a snapshot no matter what the provider
+    is doing.
+
+    The poller holds a provider *name*, not an instance, and builds the instance on
+    each poll (``get_provider_instance`` memoizes the successful build, so this costs
+    one lookup once the provider is up). Construction is where a provider reports
+    itself unreachable or not-yet-created -- Docker Desktop paused, or no Docker state
+    container / Modal environment yet -- and it is retried because those conditions end:
+    the user unpauses Docker, or creates their first agent. Previously the stream
+    built every instance once at startup, so a provider that failed *there* got a single
+    snapshot and no poller for the life of the process, while one that failed on every
+    *poll* kept its poller and recovered on its own. That asymmetry is what this removes.
     """
 
-    provider: BaseProviderInstance = Field(frozen=True)
+    provider_name: ProviderInstanceName = Field(frozen=True)
     mngr_ctx: MngrContext = Field(frozen=True)
     config: ProviderInstanceConfig = Field(frozen=True)
     include_destroyed: bool = Field(default=True, frozen=True)
@@ -146,14 +131,19 @@ class _ProviderDiscoveryPoller(MutableModel):
     # Carries in-flight per-host reads across this poller's polls so a wedged host is not
     # re-read every poll (bounding accumulation to at most one abandoned read per host).
     _host_read_registry: HostDiscoveryReadRegistry = PrivateAttr(default_factory=HostDiscoveryReadRegistry)
+    # Whether the last poll's construction failed, so a repeat of the same failure logs
+    # quietly. Cleared as soon as the provider builds.
+    _is_construction_failing: bool = PrivateAttr(default=False)
+    # Set when the provider reports missing credentials, which no retry can fix.
+    _is_ended_pending_credentials: bool = PrivateAttr(default=False)
 
     @property
     def _discovered_provider(self) -> DiscoveredProvider:
-        return make_discovered_provider(self.provider.name, self.config)
+        return make_discovered_provider(self.provider_name, self.config)
 
     def poll_and_emit(
         self,
-        submit_discovery: Callable[[], "Future[BoundedProviderDiscoveryResult]"],
+        submit_discovery: Callable[[BaseProviderInstance], "Future[BoundedProviderDiscoveryResult]"],
     ) -> None:
         """Run (or resume) one bounded discovery poll for this provider and write a snapshot.
 
@@ -164,34 +154,155 @@ class _ProviderDiscoveryPoller(MutableModel):
         subsequent poll. The Future captures any discovery exception (read via
         ``future.exception()``), so a failing provider becomes a per-provider error
         snapshot rather than propagating.
+
+        Every path through this method writes exactly one snapshot, including the one
+        where the provider cannot be built at all: a poller that emits nothing is
+        indistinguishable from a poller that died.
         """
-        # If a previous poll's discovery is still running, only act once it finishes,
-        # so we never run two concurrent discoveries for the same provider.
+        # If a previous poll's discovery is still running, never start a second one
+        # for this provider -- but still emit, because a poller that is alive must be
+        # visible as alive. Going quiet here would make a wedged provider (which can
+        # stay wedged indefinitely) indistinguishable from a dead one.
         if self._in_flight_future is not None:
-            if self._in_flight_future.done():
-                started_at = self._in_flight_started_at or _utc_now()
-                self._harvest_and_emit(self._in_flight_future, started_at)
-                self._in_flight_future = None
-                self._in_flight_started_at = None
+            in_flight_started_at = self._in_flight_started_at or _utc_now()
+            if not self._in_flight_future.done():
+                self._emit_timeout_snapshot(in_flight_started_at, is_newly_timed_out=False)
+                return
+            self._harvest_and_emit(self._in_flight_future, in_flight_started_at)
+            self._in_flight_future = None
+            self._in_flight_started_at = None
             return
 
         started_at = _utc_now()
-        future = submit_discovery()
+        provider = self._build_provider_or_emit_skip(started_at)
+        if provider is None:
+            return
+        future = submit_discovery(provider)
         # Two-threshold wait: warn first, then declare errored.
         if not _wait_for_future(future, self.config.discovery_warn_seconds):
             logger.warning(
                 "Provider {} discovery is slow (still running after {:.0f}s)",
-                self.provider.name,
+                self.provider_name,
                 self.config.discovery_warn_seconds,
             )
             remaining = max(0.0, self.config.discovery_error_timeout_seconds - self.config.discovery_warn_seconds)
             if not _wait_for_future(future, remaining):
-                self._emit_timeout_snapshot(started_at)
+                self._emit_timeout_snapshot(started_at, is_newly_timed_out=True)
                 # Keep the orphaned future; accept its late result on a later poll.
                 self._in_flight_future = future
                 self._in_flight_started_at = started_at
                 return
         self._harvest_and_emit(future, started_at)
+
+    def _build_provider_or_emit_skip(self, started_at: datetime) -> BaseProviderInstance | None:
+        """Build this provider's instance, or emit its construction failure and return None.
+
+        A backend reports two recoverable conditions by raising from construction:
+        ``ProviderEmptyError`` (reached, and definitively holds nothing yet) and
+        ``ProviderUnavailableError`` (could not be reached at all). Both end on their
+        own -- the user creates a first agent, or unpauses Docker -- so both are
+        snapshotted and retried rather than being treated as the provider's final word.
+        They are siblings, not one subclass of the other, so both have to be named here.
+
+        The retry is at the provider's ordinary poll cadence, with no extra backoff on
+        top. A provider that fails to build does strictly *less* work per poll than one
+        that succeeds: a successful build is cached, so a healthy provider spends its
+        poll on a full ``discover_hosts_and_agents_within_timeouts`` (caches reset first,
+        so it really re-reads), while a failing one spends it on the construction check
+        alone -- one lookup for modal's missing environment, an immediate ECONNREFUSED
+        for a paused Docker. Backing off would buy less than a working provider already
+        costs, and would pay for it in the only latency the user actually feels: how long
+        the app waits on an empty provider after Docker comes back.
+        ``discovery_poll_interval_seconds`` is already the per-provider knob for how
+        often it is acceptable to talk to a backend, and it governs the expensive case.
+
+        Any other ``MngrError`` or ``OSError`` is snapshotted the same way, because
+        the snapshot is what tells a consumer this poller is alive. The reachable case
+        is a config block naming a backend this install does not have
+        (``UnknownBackendError``): a name that ``list_provider_names_to_load`` returns
+        without checking the registry, and one no retry can repair inside a running
+        interpreter. Retrying it anyway costs a registry lookup per poll and buys the one
+        thing that matters -- the provider keeps reporting, instead of dropping out of
+        the stream while every other provider keeps writing to it.
+
+        ``ProviderNotAuthorizedError`` is the one exception. It *is* a
+        ``ProviderUnavailableError`` subclass, but credentials only change through a
+        user action that restarts this process anyway, so retrying it just re-reports
+        the same thing forever. Its snapshot is emitted once and this poller ends --
+        by returning, never by raising: ``run``'s exit reads a live exception as a
+        crashed poller and would take the whole process down over one provider's
+        missing API key.
+        """
+        try:
+            provider = get_provider_instance(self.provider_name, self.mngr_ctx)
+        except ProviderNotAuthorizedError as e:
+            logger.warning(
+                "Provider {} is not authorized ({}); emitting its snapshot and ending its discovery poller",
+                self.provider_name,
+                e,
+            )
+            self._emit_construction_skip_snapshot(started_at, e, is_empty=False)
+            self._is_ended_pending_credentials = True
+            return None
+        except (ProviderEmptyError, ProviderUnavailableError, OSError, MngrError) as e:
+            is_empty = isinstance(e, ProviderEmptyError)
+            self._log_construction_skip(e, is_empty=is_empty)
+            self._emit_construction_skip_snapshot(started_at, e, is_empty=is_empty)
+            self._is_construction_failing = True
+            return None
+        self._is_construction_failing = False
+        return provider
+
+    def _log_construction_skip(self, exc: BaseException, is_empty: bool) -> None:
+        """Log a retryable construction failure, at warning only the first time it happens.
+
+        The repeats that follow restate the same fact once per poll for as long as the
+        condition lasts -- which can be the whole life of the process -- and would drown
+        the log. Mirrors the wedged-provider re-emission.
+        """
+        if self._is_construction_failing:
+            logger.debug("Provider {} still cannot be built; re-emitting its snapshot: {}", self.provider_name, exc)
+        elif is_empty:
+            logger.info(
+                "Provider {} has nothing yet ({}); emitting an empty snapshot and retrying next poll",
+                self.provider_name,
+                exc,
+            )
+        else:
+            logger.warning(
+                "Provider {} could not be built ({}); emitting its snapshot and retrying next poll",
+                self.provider_name,
+                exc,
+            )
+
+    def _emit_construction_skip_snapshot(self, started_at: datetime, exc: BaseException, is_empty: bool) -> None:
+        """Write the snapshot for a provider that could not be built this poll.
+
+        A known-empty provider gets a clean zero-agent snapshot -- that is a healthy
+        state, not an error. Anything else carries its construction error, so the minds
+        providers panel can show what is wrong. No traceback: unlike an arbitrary poll
+        failure, these errors state their own cause and remediation, and this line is
+        now written on every poll of a broken provider.
+        """
+        error = (
+            None
+            if is_empty
+            else DiscoveryError(
+                type_name=type(exc).__name__,
+                message=str(exc),
+                provider_name=self.provider_name,
+            )
+        )
+        write_provider_discovery_snapshot(
+            self.mngr_ctx.config,
+            provider_name=self.provider_name,
+            agents=(),
+            hosts=(),
+            discovery_started_at=started_at,
+            discovery_finished_at=_utc_now(),
+            provider=self._discovered_provider,
+            error=error,
+        )
 
     def _harvest_and_emit(
         self,
@@ -208,7 +319,7 @@ class _ProviderDiscoveryPoller(MutableModel):
         result = future.result()
         write_provider_discovery_snapshot(
             self.mngr_ctx.config,
-            provider_name=self.provider.name,
+            provider_name=self.provider_name,
             agents=result.agents,
             hosts=result.hosts,
             discovery_started_at=started_at,
@@ -232,12 +343,12 @@ class _ProviderDiscoveryPoller(MutableModel):
         error = DiscoveryError(
             type_name=type(cause).__name__,
             message=str(cause),
-            provider_name=self.provider.name,
+            provider_name=self.provider_name,
             traceback_text=format_exception_traceback(cause),
         )
         write_provider_discovery_snapshot(
             self.mngr_ctx.config,
-            provider_name=self.provider.name,
+            provider_name=self.provider_name,
             agents=(),
             hosts=(),
             discovery_started_at=started_at,
@@ -246,23 +357,36 @@ class _ProviderDiscoveryPoller(MutableModel):
             error=error,
         )
 
-    def _emit_timeout_snapshot(self, started_at: datetime) -> None:
-        logger.warning(
-            "Provider {} discovery timed out after {:.0f}s; emitting error snapshot and continuing",
-            self.provider.name,
-            self.config.discovery_error_timeout_seconds,
-        )
+    def _emit_timeout_snapshot(self, started_at: datetime, is_newly_timed_out: bool) -> None:
+        """Write this provider's timed-out snapshot, re-emitting for as long as it stays wedged.
+
+        ``is_newly_timed_out`` only picks the log level: the first timeout of an
+        episode is worth a warning, while the repeats that follow it are the same
+        fact restated once per poll interval and would drown the log.
+        """
+        if is_newly_timed_out:
+            logger.warning(
+                "Provider {} discovery timed out after {:.0f}s; emitting error snapshot and continuing",
+                self.provider_name,
+                self.config.discovery_error_timeout_seconds,
+            )
+        else:
+            logger.debug(
+                "Provider {} discovery is still running since {}; re-emitting its timeout snapshot",
+                self.provider_name,
+                started_at,
+            )
         error = DiscoveryError(
             type_name="ProviderDiscoveryTimeoutError",
             message=(
-                f"Discovery for provider '{self.provider.name}' did not complete within "
+                f"Discovery for provider '{self.provider_name}' did not complete within "
                 f"{self.config.discovery_error_timeout_seconds:.0f}s"
             ),
-            provider_name=self.provider.name,
+            provider_name=self.provider_name,
         )
         write_provider_discovery_snapshot(
             self.mngr_ctx.config,
-            provider_name=self.provider.name,
+            provider_name=self.provider_name,
             agents=(),
             hosts=(),
             discovery_started_at=started_at,
@@ -278,22 +402,26 @@ class _ProviderDiscoveryPoller(MutableModel):
         provider's discovery to it. The executor only runs one discovery at a time, but
         a poll never submits while a prior discovery is still in flight, so the abandoned
         (timed-out) discovery is never blocked by a new one.
+
+        Returns normally when the provider turns out to need credentials the user
+        has not supplied. That is the one condition polling cannot resolve, and it
+        belongs to one provider, so it ends one poller and leaves every other
+        provider (and this process) running.
         """
         with mngr_executor(
             parent_cg=self.mngr_ctx.concurrency_group,
-            name=f"discover_provider_{self.provider.name}",
+            name=f"discover_provider_{self.provider_name}",
             max_workers=1,
         ) as executor:
             while not stop_event.is_set():
                 # Expected transient failures (a failed snapshot write, a provider-config
-                # error) must not kill this provider's poll loop; truly unexpected errors
-                # propagate and stop only this poller (its thread is is_checked=False).
+                # error) must not kill this provider's poll loop.
                 try:
-                    with log_span("Polling discovery for provider {}", self.provider.name):
+                    with log_span("Polling discovery for provider {}", self.provider_name):
                         self.poll_and_emit(
-                            lambda: executor.submit(
+                            lambda provider: executor.submit(
                                 _discover_one_provider,
-                                self.provider,
+                                provider,
                                 self.mngr_ctx,
                                 self.config.host_discovery_timeout_seconds,
                                 self.config.agent_discovery_timeout_seconds,
@@ -302,7 +430,9 @@ class _ProviderDiscoveryPoller(MutableModel):
                             )
                         )
                 except (OSError, MngrError) as e:
-                    logger.warning("Provider {} discovery poll failed (continuing): {}", self.provider.name, e)
+                    logger.warning("Provider {} discovery poll failed (continuing): {}", self.provider_name, e)
+                if self._is_ended_pending_credentials:
+                    return
                 stop_event.wait(timeout=self.config.discovery_poll_interval_seconds)
 
 
@@ -310,6 +440,31 @@ def _wait_for_future(future: Future[BoundedProviderDiscoveryResult], timeout_sec
     """Wait up to ``timeout_seconds`` for ``future``; return whether it completed."""
     done, _not_done = wait([future], timeout=timeout_seconds)
     return future in done
+
+
+def _start_poller_thread(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+    stop_event: threading.Event,
+) -> ObservableThread:
+    """Start one provider's poll loop on its own thread."""
+    poller = _ProviderDiscoveryPoller(
+        provider_name=provider_name,
+        mngr_ctx=mngr_ctx,
+        config=_resolve_provider_config(provider_name, mngr_ctx),
+    )
+    # is_checked=False so one provider's poller crashing cannot fail the whole group
+    # (and thus the other providers' pollers); on_failure logs which poller died.
+    return mngr_ctx.concurrency_group.start_new_thread(
+        target=poller.run,
+        args=(stop_event,),
+        daemon=True,
+        name=f"discovery-poller-{provider_name}",
+        is_checked=False,
+        on_failure=lambda exc: logger.opt(exception=exc).error(
+            "Discovery poller for provider {} crashed", provider_name
+        ),
+    )
 
 
 def run_per_provider_discovery_stream(
@@ -325,8 +480,12 @@ def run_per_provider_discovery_stream(
     stdout or ``on_line``, deduplicated by event_id. Because each provider polls
     independently, a slow or hung provider cannot block discovery of any other.
 
-    The set of providers is enumerated once at startup; a provider-set change is applied
-    by restarting this process (e.g. minds bounces ``mngr observe`` on config change).
+    The set of provider *names* is enumerated once at startup; a provider-set change is
+    applied by restarting this process (e.g. minds bounces ``mngr observe`` on config
+    change). Every enumerated name gets a poller, including one whose instance cannot be
+    built right now: construction happens inside the poller and is retried, so a provider
+    that is merely unreachable or not-yet-created at launch is not written off for the
+    life of the process.
     """
     events_path = get_discovery_events_path(mngr_ctx.config)
     stop_event = threading.Event()
@@ -344,43 +503,20 @@ def run_per_provider_discovery_stream(
     )
     tail.start()
 
-    providers, skipped_providers = get_all_provider_instances_and_skipped(mngr_ctx, None)
-    # Providers whose construction was skipped (unauthorized/unavailable/empty) get
-    # no poller, so emit one startup snapshot each -- consumers then see their state
-    # from this stream instead of only from a full `mngr list` side effect.
-    for skipped_provider in skipped_providers:
-        _emit_startup_snapshot_for_skipped_provider(mngr_ctx, skipped_provider)
-    pollers = [
-        _ProviderDiscoveryPoller(
-            provider=provider,
-            mngr_ctx=mngr_ctx,
-            config=_resolve_provider_config(provider.name, mngr_ctx),
-        )
-        for provider in providers
-    ]
-    # is_checked=False so one provider's poller crashing cannot fail the whole group
-    # (and thus the other providers' pollers); on_failure logs which poller died.
-    poller_threads = [
-        mngr_ctx.concurrency_group.start_new_thread(
-            target=poller.run,
-            args=(stop_event,),
-            daemon=True,
-            name=f"discovery-poller-{poller.provider.name}",
-            is_checked=False,
-            on_failure=lambda exc, failed_poller=poller: logger.opt(exception=exc).error(
-                "Discovery poller for provider {} crashed", failed_poller.provider.name
-            ),
-        )
-        for poller in pollers
-    ]
+    # Names, not instances: each poller builds its own provider, so nothing here is
+    # skipped for failing to construct, and no provider's first poll waits behind
+    # another's slow construction.
+    provider_names = list_provider_names_to_load(mngr_ctx)
+    poller_threads = [_start_poller_thread(provider_name, mngr_ctx, stop_event) for provider_name in provider_names]
 
     try:
-        while not stop_event.is_set():
-            stop_event.wait(timeout=1.0)
+        # Each poller drives itself, so there is nothing to do here but wait for shutdown.
+        while not stop_event.wait(timeout=_SHUTDOWN_CHECK_INTERVAL_SECONDS):
+            pass
     except KeyboardInterrupt:
         pass
     finally:
         stop_event.set()
-        for thread in poller_threads:
-            thread.join(timeout=5.0)
+        for poller_thread in poller_threads:
+            poller_thread.join(timeout=5.0)
         tail.join(timeout=5.0)

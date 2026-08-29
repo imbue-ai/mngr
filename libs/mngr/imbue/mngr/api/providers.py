@@ -1,4 +1,5 @@
 import atexit
+import threading
 
 from loguru import logger
 from pydantic import Field
@@ -23,6 +24,11 @@ from imbue.mngr.providers.registry import resolve_backend_and_config
 # is reused across calls within the same context. This prevents accumulating
 # duplicate instances (and their SSH connections) when discovery runs repeatedly.
 _instance_cache: dict[tuple[ProviderInstanceName, int], BaseProviderInstance] = {}
+# Guards ``_instance_cache`` and the atexit-registration flag. The discovery
+# stream builds one provider per poller thread, so these are read and written
+# concurrently; without the lock, the atexit close below can iterate the cache
+# while a still-running poller inserts into it.
+_instance_cache_lock = threading.Lock()
 _atexit_registered: dict[str, bool] = {"registered": False}
 
 
@@ -31,19 +37,26 @@ def _close_all_provider_instances() -> None:
 
     Called via atexit to ensure proper cleanup of resources like Modal app contexts.
     """
-    for instance in _instance_cache.values():
+    with _instance_cache_lock:
+        instances = list(_instance_cache.values())
+        _instance_cache.clear()
+    # Closed outside the lock: a close can block (an SSH teardown, a Modal app
+    # context exit), and holding the lock through it would stall any provider
+    # construction still in flight on another thread.
+    for instance in instances:
         try:
             instance.close()
         except (MngrError, OSError) as e:
             logger.warning("Error closing provider instance {}: {}", instance.name, e)
-    _instance_cache.clear()
 
 
 def _ensure_atexit_registered() -> None:
     """Register the atexit handler if not already registered."""
-    if not _atexit_registered["registered"]:
-        atexit.register(_close_all_provider_instances)
+    with _instance_cache_lock:
+        if _atexit_registered["registered"]:
+            return
         _atexit_registered["registered"] = True
+    atexit.register(_close_all_provider_instances)
 
 
 def reset_provider_instances() -> None:
@@ -53,7 +66,8 @@ def reset_provider_instances() -> None:
     This is primarily used for test isolation to ensure a clean state between tests.
     """
     _close_all_provider_instances()
-    _atexit_registered["registered"] = False
+    with _instance_cache_lock:
+        _atexit_registered["registered"] = False
 
 
 def get_provider_instance(
@@ -71,15 +85,28 @@ def get_provider_instance(
     not bootstrap one-time resources here. Callers about to create a host
     should first call ``backend.bootstrap_for_host_creation(...)`` directly
     (see ``api/create.py``).
+
+    Only successful constructions are cached, so a caller that retries after a
+    failure (the discovery stream's per-provider pollers do, every poll) gets a
+    fresh attempt rather than a memoized failure.
+
+    Safe to call concurrently. Callers racing on *different* names -- one poller
+    thread per provider -- each build in parallel; two callers racing on the same
+    name may both build, and the loser's instance is closed rather than cached.
     """
     _ensure_atexit_registered()
 
     # Return the cached instance if one already exists for this name and context
     cache_key = (name, id(mngr_ctx))
-    if cache_key in _instance_cache:
+    with _instance_cache_lock:
+        cached = _instance_cache.get(cache_key)
+    if cached is not None:
         logger.trace("Returning cached provider instance {}", name)
-        return _instance_cache[cache_key]
+        return cached
 
+    # Built outside the lock: construction can take a network round trip (Modal
+    # checks whether the per-user environment exists), and serializing that across
+    # providers is exactly what the per-provider discovery pollers exist to avoid.
     _, provider_config = resolve_backend_and_config(name, mngr_ctx)
     instance = build_provider_instance(
         instance_name=name,
@@ -89,8 +116,25 @@ def get_provider_instance(
     )
     logger.trace("Built provider instance {} with backend {}", name, provider_config.backend)
 
-    _instance_cache[cache_key] = instance
+    with _instance_cache_lock:
+        existing = _instance_cache.get(cache_key)
+        if existing is None:
+            _instance_cache[cache_key] = instance
+    if existing is not None:
+        # Another thread cached one for this name first. Hand back the cached
+        # instance so every caller shares one, and close the duplicate rather
+        # than dropping it: it may already hold a connection nothing will reap.
+        _close_unused_provider_instance(instance)
+        return existing
     return instance
+
+
+def _close_unused_provider_instance(instance: BaseProviderInstance) -> None:
+    """Close a provider instance that lost a construction race and will never be handed out."""
+    try:
+        instance.close()
+    except (MngrError, OSError) as e:
+        logger.warning("Error closing duplicate provider instance {}: {}", instance.name, e)
 
 
 def get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:
