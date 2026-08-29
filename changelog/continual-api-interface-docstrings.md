@@ -1,0 +1,1 @@
+- Docs: api-package interface docstrings progressively rewritten to focus on the contract rather than implementation details, per the principle established in #1568. Behaviour unchanged.
