@@ -12,7 +12,9 @@ import type { CreateAttemptDetail, LiveCreateAttemptDetail } from "../../models/
 import { CreateAttemptWatcher, fetchCreateAttemptDetail, progressForElapsed } from "../../models/create";
 import { Button } from "../components/Button";
 import { PageContainer } from "../components/Layout";
+import { Link } from "../components/Link";
 import { Notice } from "../components/Notice";
+import { routeLinkAttrs } from "../components/route-link";
 import { Spinner } from "../components/Spinner";
 import { OnboardingWalkthrough } from "./creating/OnboardingWalkthrough";
 
@@ -135,6 +137,15 @@ export const CreatingPage: m.ClosureComponent = () => {
       errorKind === "GIT_AUTH_REQUIRED"
         ? m(Notice, { id: "git-auth-help" }, [
             "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
+          ])
+        : null,
+      errorKind === "QUOTA_EXCEEDED"
+        ? m(Notice, { id: "quota-exceeded-help" }, [
+            "Stop or delete an existing hosted machine from the ",
+            m(Link, routeLinkAttrs("/"), "home page"),
+            ", then retry. To raise the limit, switch plans on the ",
+            m(Link, routeLinkAttrs("/accounts"), "Accounts"),
+            " page.",
           ])
         : null,
       logTail !== null && logTail.length > 0

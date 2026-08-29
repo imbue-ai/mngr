@@ -1,0 +1,1 @@
+Hitting the hosted-machine plan limit (explorer: 2) no longer dumps the raw `mngr create` stderr (exit code, FAST PATH lease log, provider name) onto the creating page. The page now shows a plan-limit sentence ("Your plan allows 2 hosted machines, and 2 are already in use") plus guidance to stop or delete a machine, or switch plans on the Accounts page.
