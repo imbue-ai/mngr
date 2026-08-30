@@ -10,6 +10,9 @@ resolution-markers = [
 [options]
 exclude-newer = "2026-07-20T00:00:00Z"
 
+[options.exclude-newer-package]
+modal = "2026-08-13T00:00:00Z"
+
 [manifest]
 members = [
     "concurrency-group",
@@ -2191,7 +2194,7 @@ dependencies = [
 requires-dist = [
     { name = "dockerfile-parse", specifier = ">=2.0.0" },
     { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "modal", specifier = "==1.4.3" },
+    { name = "modal", specifier = "==1.5.4" },
     { name = "modal-proxy", editable = "libs/modal_proxy" },
 ]
 
@@ -2952,7 +2955,7 @@ requires-dist = [
 
 [[package]]
 name = "modal"
-version = "1.4.3"
+version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -2969,9 +2972,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/7d/4126d0fe879ef3e86002ca821a34cb68a2588ea2e8ccb2bfe421d0f42ffe/modal-1.4.3.tar.gz", hash = "sha256:35b2fc840f759b512e12527afb538e1ea4cc232b84cfbfcef3f5d96d5a66abaa", size = 720488, upload-time = "2026-05-18T22:34:45.842Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8d/0d/1a6e710ab64f0c7b7bec9472203dbf6c7c75556dd2d7632da98c96a4e0b0/modal-1.5.4.tar.gz", hash = "sha256:d611bb47fc07117f5d194f7f9a9c0aba4537573a136349bbe45c5694e64bca92", size = 863571, upload-time = "2026-08-12T21:54:12.62Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/54/400262056c144ceee5edab40efa2541ae8928ae5f244fd9025f3ad26c909/modal-1.4.3-py3-none-any.whl", hash = "sha256:802917181f576458a0cb833322157dab09c4f367326426c5a732661a0c519577", size = 826232, upload-time = "2026-05-18T22:34:43.335Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/93/ca23b7b421e2c9738b710eb1d33eb25a88cba32dff864003a692a0e21f8d/modal-1.5.4-py3-none-any.whl", hash = "sha256:3e54e26037c445af42f9a9ef9862b66bdd2e0b1faeced5fcc7adf3e5f59e44ed", size = 979381, upload-time = "2026-08-12T21:54:10.378Z" },
 ]
 
 [[package]]
@@ -2991,7 +2994,7 @@ requires-dist = [
     { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
-    { name = "modal", specifier = "==1.4.3" },
+    { name = "modal", specifier = "==1.5.4" },
     { name = "resource-guards", editable = "libs/resource_guards" },
 ]
 
@@ -4435,14 +4438,14 @@ wheels = [
 
 [[package]]
 name = "synchronicity"
-version = "0.12.2"
+version = "0.12.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/5e/50ea27817003665c7cc4f5bdad309f13d6329037f657848ee87fe06c3740/synchronicity-0.12.2.tar.gz", hash = "sha256:6fd605a5035d1ec74ce48fffaca80ea00345c84ca34223914e2436fb4f162ff9", size = 60018, upload-time = "2026-04-06T15:06:15.447Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/1c/f51dc54bbd302991026a53f9790735540e0e9e1184e9d5939f02446aa5bc/synchronicity-0.12.5.tar.gz", hash = "sha256:94d96b1d85698e3056b96a793b8c0949af6584e4a7d877fabdeb5385efe230aa", size = 60745, upload-time = "2026-06-18T21:06:23.545Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/41/44/4f6ba4e2c171847e6f9a460213b196bbf26edea43d0e66889c7ccc55d368/synchronicity-0.12.2-py3-none-any.whl", hash = "sha256:9dbaca81fb7f2b57c6dea326e514e1c80e9ccfd9c9618515e84fa6091026273b", size = 41312, upload-time = "2026-04-06T15:06:14.459Z" },
+    { url = "https://files.pythonhosted.org/packages/06/74/ad9b99520f70c0bc3318e582e359d360cfc0f7afd7bf368a7f24013cece7/synchronicity-0.12.5-py3-none-any.whl", hash = "sha256:fdbbb10d437bc08a6b0f814fc66fddd1b58ffed314533d42f1ab555801e781af", size = 41107, upload-time = "2026-06-18T21:06:22.505Z" },
 ]
 
 [[package]]

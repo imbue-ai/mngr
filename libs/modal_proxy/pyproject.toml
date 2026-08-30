@@ -8,7 +8,7 @@ dependencies = [
     "concurrency-group==0.1.20",
     "imbue-common==0.1.20",
     "imbue-mngr==0.2.17",
-    "modal==1.4.3",
+    "modal==1.5.4",
     "resource-guards==0.1.8",
 ]
 

@@ -26,7 +26,7 @@ import modal.exception
 from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
 from modal.stream_type import StreamType as ModalStreamType
-from modal.volume import FileEntryType as ModalFileEntryType
+from modal.types import FileEntryType as ModalFileEntryType
 from pydantic import ConfigDict
 from pydantic import Field
 from tenacity import RetryCallState
@@ -435,8 +435,17 @@ class DirectSandbox(SandboxInterface):
         return DirectImage.model_construct(image=image)
 
     @_translate_exceptions
+    def poll(self) -> int | None:
+        return self.sandbox.poll()
+
+    @_translate_exceptions
     def terminate(self) -> None:
-        self.sandbox.terminate()
+        # wait=True blocks until the sandbox has actually terminated. Modal's V2
+        # terminate is otherwise fire-and-forget, so the sandbox keeps appearing
+        # in Sandbox.list and polling as running for a window afterward, which
+        # makes callers (e.g. start_host) mistake a just-terminated host for a
+        # live one. Synchronous termination also matches the FakeSandbox contract.
+        self.sandbox.terminate(wait=True)
 
 
 class DirectApp(AppInterface):
@@ -475,6 +484,14 @@ class DirectModalInterface(ModalInterface):
     """Implementation of ModalInterface that calls the real Modal Python SDK."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_post_init(self, context: Any) -> None:
+        # Opt every real Modal Sandbox operation into Modal's V2 Sandbox backend. Modal
+        # reads MODAL_SANDBOX_V2 from the environment live on each Sandbox call,
+        # and Sandbox.list only returns V2 sandboxes when it is set, so it must
+        # be process-wide rather than per-create. setdefault preserves an
+        # explicit MODAL_SANDBOX_V2=0 opt-out; GPU sandboxes fall back to V1.
+        os.environ.setdefault("MODAL_SANDBOX_V2", "1")
 
     # =====================================================================
     # Environment

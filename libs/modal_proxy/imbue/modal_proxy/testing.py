@@ -189,6 +189,11 @@ class FakeVolume(VolumeInterface):
         pass
 
 
+# Exit code a terminated fake sandbox reports from poll(), mirroring the 137
+# (128 + SIGKILL) that Modal surfaces for a terminated sandbox.
+_FAKE_TERMINATED_EXIT_CODE: Final[int] = 137
+
+
 class FakeSandbox(SandboxInterface):
     """Sandbox that runs commands locally via ConcurrencyGroup.
 
@@ -266,6 +271,9 @@ class FakeSandbox(SandboxInterface):
         self._snapshot_count += 1
         image_id = f"snap-{self.sandbox_id}-{self._snapshot_count}"
         return FakeImage(image_id=image_id)
+
+    def poll(self) -> int | None:
+        return _FAKE_TERMINATED_EXIT_CODE if self._is_terminated else None
 
     def terminate(self) -> None:
         if self._is_terminated:

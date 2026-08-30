@@ -181,6 +181,16 @@ class SandboxInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
+    def poll(self) -> int | None:
+        """Return the exit code, or None if the sandbox is still running (mirrors modal.Sandbox.poll).
+
+        Unlike presence in ``Sandbox.list``, this reflects the sandbox's
+        authoritative state, so it is the reliable way to tell whether a
+        sandbox is actually alive.
+        """
+        ...
+
+    @abstractmethod
     def terminate(self) -> None:
         """Terminate this sandbox."""
         ...

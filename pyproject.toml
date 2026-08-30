@@ -20,6 +20,12 @@ dependencies = [
 # fresh dep and break resolution. This only buys a detection delay;
 # it can't catch a compromise that stays undetected past the window.
 exclude-newer = "2026-07-20T00:00:00Z"
+# modal 1.5.4 (2026-08-12) is the first release carrying the MODAL_SANDBOX_V2
+# opt-in for Modal's V2 Sandbox backend, so it postdates the global cutoff -- but
+# it has been public well past the 2-week cooldown window. Override just this
+# package rather than advancing the global cutoff, which would adopt every dep's
+# newer releases at once. Mirrors the same override in the private root pyproject.
+exclude-newer-package = { modal = "2026-08-13T00:00:00Z" }
 
 [tool.uv.sources]
 imbue-common = { workspace = true }

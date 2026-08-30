@@ -12,8 +12,9 @@ import modal.exception
 import pytest
 from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
+from modal.config import config
 from modal.stream_type import StreamType as ModalStreamType
-from modal.volume import FileEntryType as ModalFileEntryType
+from modal.types import FileEntryType as ModalFileEntryType
 from tenacity import RetryCallState
 from tenacity import Retrying
 
@@ -24,6 +25,7 @@ from imbue.modal_proxy.direct import DirectApp
 from imbue.modal_proxy.direct import DirectFunction
 from imbue.modal_proxy.direct import DirectImage
 from imbue.modal_proxy.direct import DirectModalInterface
+from imbue.modal_proxy.direct import DirectSandbox
 from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
 from imbue.modal_proxy.direct import _should_retry_volume_op
@@ -479,3 +481,52 @@ def test_get_web_url_does_not_retry_on_other_error() -> None:
         function.get_web_url()
 
     assert fake.call_count == 1, "non-NotFound failures must not be retried"
+
+
+def test_direct_modal_interface_enables_sandbox_v2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Constructing the real Modal boundary opts every Sandbox operation into the V2 Sandbox backend."""
+    monkeypatch.delenv("MODAL_SANDBOX_V2", raising=False)
+
+    DirectModalInterface()
+
+    assert os.environ["MODAL_SANDBOX_V2"] == "1"
+    assert config.get("sandbox_v2") is True
+
+
+def test_direct_modal_interface_respects_explicit_sandbox_v2_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit MODAL_SANDBOX_V2=0 survives construction, so V2 can still be turned off."""
+    monkeypatch.setenv("MODAL_SANDBOX_V2", "0")
+
+    DirectModalInterface()
+
+    assert os.environ["MODAL_SANDBOX_V2"] == "0"
+    assert config.get("sandbox_v2") is False
+
+
+class _FakeModalSandbox:
+    """Minimal stand-in for modal.Sandbox that only supports poll()."""
+
+    def __init__(self, poll_result: int | None = None, error: modal.exception.Error | None = None) -> None:
+        self._poll_result = poll_result
+        self._error = error
+
+    def poll(self) -> int | None:
+        if self._error is not None:
+            raise self._error
+        return self._poll_result
+
+
+def test_direct_sandbox_poll_returns_none_while_running() -> None:
+    sandbox = DirectSandbox.model_construct(sandbox=_FakeModalSandbox(poll_result=None))
+    assert sandbox.poll() is None
+
+
+def test_direct_sandbox_poll_returns_exit_code_when_finished() -> None:
+    sandbox = DirectSandbox.model_construct(sandbox=_FakeModalSandbox(poll_result=137))
+    assert sandbox.poll() == 137
+
+
+def test_direct_sandbox_poll_translates_modal_errors() -> None:
+    sandbox = DirectSandbox.model_construct(sandbox=_FakeModalSandbox(error=modal.exception.NotFoundError("gone")))
+    with pytest.raises(ModalProxyNotFoundError):
+        sandbox.poll()
