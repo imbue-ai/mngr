@@ -61,6 +61,8 @@ from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
+from imbue.minds.desktop_client.mngr_command import format_output_tail
+from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -363,6 +365,12 @@ class CreateAttemptErrorKind(UpperCaseStrEnum):
     # git-credentials guidance for this kind.
     GIT_AUTH_REQUIRED = auto()
 
+    # The connector refused the create because this account is already at its
+    # hosted-machine quota. The creating page replaces the raw ``mngr create``
+    # dump with a plan-limit sentence and points at stopping a machine or
+    # switching plans.
+    QUOTA_EXCEEDED = auto()
+
 
 class AgentCreateAttemptInfo(FrozenModel):
     """Snapshot of agent create attempt state, returned to callers for status polling.
@@ -524,25 +532,74 @@ def _is_remote_git_source(repo_source: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:", repo_source))
 
 
+# Structured marker written by the imbue_cloud plugin (and captured from
+# ``mngr create --format jsonl``) when the connector refuses a lease on a
+# quota entitlement. Kept in sync with
+# ``imbue.mngr_imbue_cloud.errors.ImbueCloudQuotaExceededError``.
+_QUOTA_EXCEEDED_ERROR_CLASS: Final[str] = "ImbueCloudQuotaExceededError"
+# The connector's own user-facing prefix; used only as a fallback when the
+# JSONL ``error_class`` did not make it onto the exception (the creating page
+# used to dump the whole stderr timeline, which still contains this sentence).
+_QUOTA_EXCEEDED_MESSAGE_MARKER: Final[str] = "Quota exceeded:"
+_QUOTA_WORKSPACE_COUNTS = re.compile(
+    r"this account allows (\d+) remote workspaces and (\d+) are already in use",
+    re.IGNORECASE,
+)
+_QUOTA_EXCEEDED_FALLBACK_MESSAGE: Final[str] = "Your plan's hosted-machine limit is already in use."
+
+
+def _is_quota_exceeded_error(error: Exception) -> bool:
+    """True when a create failure is a hosted-machine (or other) quota refusal.
+
+    Prefers the structured ``error_class`` / typed CLI error so we do not
+    substring-match third-party text. The message-marker fallback is only for
+    ``MngrCommandError`` / ``ImbueCloudCliError``, whose text is ours.
+    """
+    if isinstance(error, ImbueCloudQuotaExceededCliError):
+        return True
+    if isinstance(error, MngrCommandError) and error.error_class == _QUOTA_EXCEEDED_ERROR_CLASS:
+        return True
+    if isinstance(error, (MngrCommandError, ImbueCloudCliError)):
+        return _QUOTA_EXCEEDED_MESSAGE_MARKER in str(error)
+    return False
+
+
+def user_facing_create_error(error: Exception, error_kind: CreateAttemptErrorKind | None) -> str:
+    """The creating-page error string: quota cases drop the ``mngr`` dump."""
+    if error_kind is not CreateAttemptErrorKind.QUOTA_EXCEEDED:
+        return str(error)
+    match = _QUOTA_WORKSPACE_COUNTS.search(str(error))
+    if match is not None:
+        return f"Your plan allows {match.group(1)} hosted machines, and {match.group(2)} are already in use."
+    return _QUOTA_EXCEEDED_FALLBACK_MESSAGE
+
+
 def classify_create_attempt_error(repo_source: str, error: Exception) -> CreateAttemptErrorKind | None:
     """Classify a create attempt failure into a ``CreateAttemptErrorKind``, when recognizable.
 
-    Recognizes two cases, both for a failed clone (``GitCloneError``) of a
-    REMOTE git source -- the likely cause is the same (private/nonexistent,
-    no usable credentials on this machine). Deliberately no matching of git's
-    error text (git has no structured error output, and substring matching is
-    brittle across git versions and locales): a remote clone that failed at
-    all is overwhelmingly an access problem, and the creating page's guidance
-    covers it while the raw git error stays visible right above for anything
-    rarer.
+    Recognizes three cases:
 
-    - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
-      the GitHub CLI, which only fits github.com https).
-    - any other remote git source (a URL on another host, or an ssh remote)
-      -> ``GIT_AUTH_REQUIRED`` (generic git-credentials guidance, no GitHub CLI).
+    - a connector quota refusal (``ImbueCloudQuotaExceededError`` / the typed
+      CLI wrapper, or the connector's ``Quota exceeded:`` sentence on an mngr
+      error) -> ``QUOTA_EXCEEDED``.
+    - a failed clone (``GitCloneError``) of a REMOTE git source -- the likely
+      cause is the same (private/nonexistent, no usable credentials on this
+      machine). Deliberately no matching of git's error text (git has no
+      structured error output, and substring matching is brittle across git
+      versions and locales): a remote clone that failed at all is
+      overwhelmingly an access problem, and the creating page's guidance
+      covers it while the raw git error stays visible right above for
+      anything rarer.
+
+      - ``https://github.com/...`` -> ``GITHUB_AUTH_REQUIRED`` (guidance names
+        the GitHub CLI, which only fits github.com https).
+      - any other remote git source (a URL on another host, or an ssh remote)
+        -> ``GIT_AUTH_REQUIRED`` (generic git-credentials guidance, no GitHub CLI).
 
     A local path or unrecognized input returns ``None`` (just the raw error).
     """
+    if _is_quota_exceeded_error(error):
+        return CreateAttemptErrorKind.QUOTA_EXCEEDED
     if not isinstance(error, GitCloneError):
         return None
     if _is_github_https_url(repo_source):
@@ -1555,12 +1612,15 @@ def run_mngr_create(
         )
 
     if result.returncode != 0:
+        # Same contract as ``run_mngr_to_completion``: the message is mngr's
+        # verdict alone (``Error: Quota exceeded: ...``), not the DEBUG
+        # timeline that used to dump "FAST PATH: leasing..." into the creating
+        # page. The full streams ride ``output_tail`` for the persisted log.
+        verdict = mngr_failure_verdict(result.stderr) if result.stderr.strip() else result.stdout.strip()
         raise MngrCommandError(
-            "mngr create failed (exit code {}):\n{}".format(
-                result.returncode,
-                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-            ),
+            "mngr create failed (exit code {}): {}".format(result.returncode, verdict),
             error_class=capture.error_class,
+            output_tail=format_output_tail(result.stdout, result.stderr),
         )
 
     if capture.canonical_agent_id is None or capture.canonical_host_id is None:
@@ -2776,19 +2836,20 @@ class AgentCreator(MutableModel):
             logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[minds] ERROR: {}".format(e))
             error_kind = classify_create_attempt_error(repo_source, e)
+            error_text = user_facing_create_error(e, error_kind)
             # Snapshot the failure (and the create attempt log's tail) into the
             # pending-create-attempt record BEFORE publishing the in-memory
             # FAILED status (mirroring the DONE path): anyone who observes
             # FAILED can rely on the durable record already being terminal.
             self._mark_pending_create_attempt_failed(
                 cid_str,
-                error=str(e),
+                error=error_text,
                 error_kind=error_kind.value if error_kind is not None else None,
                 log_tail=log_sink.tail_lines(FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES),
             )
             with self._lock:
                 self._statuses[cid_str] = AgentCreateAttemptStatus.FAILED
-                self._errors[cid_str] = str(e)
+                self._errors[cid_str] = error_text
                 if error_kind is not None:
                     self._error_kinds[cid_str] = error_kind
             self._notify_create_attempts_changed()
