@@ -412,11 +412,13 @@ def _enable_sharing_with_cli(
         relay_token=share.relay_token.get_secret_value(),
         connector_url=_connector_base_url(client_env_config),
         broker_url=client_env_config.accounts_origin_url(),
-        # The hosted chrome is path-served on the connector origin, which is
-        # also what `minds-admin env deploy` pushes as the connector's own
-        # SHARE_CHROME_ORIGIN -- so desktop-shared workspaces are embeddable
-        # and health-probeable from /web exactly like connector-shared ones.
-        chrome_origin=_connector_base_url(client_env_config),
+        # The connector reports the tier's chrome origin on the create (its own
+        # SHARE_CHROME_ORIGIN -- the same value web-created workspaces get), so
+        # desktop shares admit the real /web chrome even on tiers where it
+        # lives on a custom domain (deploy.toml [origins].chrome_origin). The
+        # fallback covers an old connector or a tier with none configured:
+        # there the chrome is path-served on the bare connector origin.
+        chrome_origin=share.chrome_origin or _connector_base_url(client_env_config),
     )
     # Everything lands in one exec, share.env last -- the gateway brings the
     # stack up the moment it appears, so the grants must already be in place.

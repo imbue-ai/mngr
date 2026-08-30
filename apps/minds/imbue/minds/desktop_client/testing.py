@@ -1,5 +1,6 @@
 """Shared non-fixture test helpers for desktop_client tests."""
 
+import base64
 import hashlib
 import json
 import os
@@ -42,6 +43,7 @@ from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.environment_signals import NetworkProber
 from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
@@ -81,6 +83,7 @@ from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.primitives import DeviceId
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PersistedProviderInstanceConfig
@@ -1066,3 +1069,25 @@ def desktop_state_app_context(
     )
     with app.app_context():
         yield view
+
+
+def read_injected_share_env_text(cli: ImbueCloudCli) -> str:
+    """Decode the share.env body the (recorded) ``mngr exec`` write shipped into the agent.
+
+    Requires the cli's ``mngr_caller`` to be a :class:`RecordingMngrCaller`
+    (the fake CLIs' default), whose recorded calls are scanned for the
+    combined share-materials write.
+    """
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    for argv in caller.calls:
+        command = argv[-1]
+        if "data/.secrets/share.env" not in command or "printf '%s'" not in command:
+            continue
+        # The combined write carries one clause per file; the share.env clause
+        # is the one whose payload lands in $tmp_env.
+        for clause in command.split(" && "):
+            if 'base64 -d > "$tmp_env"' in clause:
+                encoded = clause.split("printf '%s' ", 1)[1].split(" | base64 -d", 1)[0].strip()
+                return base64.b64decode(encoded).decode("utf-8")
+    raise AssertionError("no share.env write was recorded")

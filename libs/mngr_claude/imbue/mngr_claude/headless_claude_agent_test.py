@@ -340,6 +340,11 @@ def test_create_agent_state_persists_prompt_cat_in_command_for_headless_claude(
     assert 'cat "$MNGR_AGENT_STATE_DIR/.mngr-prompt"' in persisted["command"]
 
 
+# assert_posix_compatible shells out to shellcheck; fast locally but its codex
+# sibling was observed exceeding the default 10s pytest-timeout under CI
+# sandbox load, and this test is exposed identically.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_assemble_command_is_posix_compatible(
     local_provider: LocalProviderInstance,
     tmp_path: Path,

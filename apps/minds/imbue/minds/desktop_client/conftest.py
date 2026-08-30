@@ -314,6 +314,13 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
             "(account email, host id, entry label, preferred region, workspace id) for every create_share call, in order"
         ),
     )
+    chrome_origin_to_return: str | None = Field(
+        default=None,
+        description=(
+            "chrome_origin the returned share carries; None (the default) simulates a connector "
+            "that predates the field or a tier with no hosted chrome configured"
+        ),
+    )
 
     def create_share(
         self,
@@ -333,6 +340,7 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
             state="active",
             relay_endpoints=TEST_RELAY_ENDPOINTS,
             relay_token=SecretStr("relay-token-xyz"),
+            chrome_origin=self.chrome_origin_to_return,
         )
 
 

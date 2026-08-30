@@ -30,6 +30,9 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
         "relays": [entry.model_dump() for entry in info.relays],
         "last_tunnel_login_at": info.last_tunnel_login_at,
         "cert_not_after": info.cert_not_after,
+        # The tier's hosted web-chrome origin (None on connectors that predate
+        # it); the desktop stamps it into share.env as SHARE_CHROME_ORIGIN.
+        "chrome_origin": info.chrome_origin,
     }
     if include_token:
         payload["relay_token"] = info.relay_token.get_secret_value() if info.relay_token else None

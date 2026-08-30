@@ -1237,6 +1237,7 @@ def test_create_share_parses_token_and_domain(monkeypatch: pytest.MonkeyPatch) -
                 "region": "us1",
                 "relay_endpoints": [{"relay_id": "relay-" + "1" * 16, "endpoint": "relay-us1.infra.imbue.com:7000"}],
                 "relay_token": "secret-relay-token",
+                "chrome_origin": "https://minds.example.com",
             },
         )
 
@@ -1251,6 +1252,30 @@ def test_create_share_parses_token_and_domain(monkeypatch: pytest.MonkeyPatch) -
     assert info.relay_endpoints[0].relay_id == "relay-" + "1" * 16
     assert info.relay_token is not None
     assert info.relay_token.get_secret_value() == "secret-relay-token"
+    assert info.chrome_origin == "https://minds.example.com"
+
+
+def test_create_share_defaults_chrome_origin_to_none_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A connector that predates the field (or a tier with no hosted chrome)
+    # sends nothing; callers use None to fall back to the connector origin.
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/shares"
+        return httpx.Response(
+            200,
+            json={
+                "host_id": _SHARE_HOST_ID,
+                "workspace_domain": _SHARE_DOMAIN,
+                "region": "us1",
+                "relay_endpoints": [],
+                "relay_token": "secret-relay-token",
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    info = client.create_share(SecretStr("tok"), _SHARE_HOST_ID)
+
+    assert info.chrome_origin is None
 
 
 def test_create_share_sends_preferred_region(monkeypatch: pytest.MonkeyPatch) -> None:

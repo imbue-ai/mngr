@@ -1,6 +1,8 @@
 from click.testing import CliRunner
 
+from imbue.mngr_imbue_cloud.cli.shares import _share_to_json
 from imbue.mngr_imbue_cloud.cli.shares import shares
+from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 
 
 def test_shares_group_lists_subcommands() -> None:
@@ -32,3 +34,26 @@ def test_status_help_documents_arguments() -> None:
     assert result.exit_code == 0
     assert "HOST_ID" in result.output
     assert "--account" in result.output
+
+
+def test_share_to_json_passes_the_chrome_origin_through() -> None:
+    # The desktop reads the chrome origin from this JSON (the CLI enumerates
+    # its keys explicitly), so a wire field the model parses but this dict
+    # drops would silently strand clients on the connector-origin fallback.
+    info = ShareInfo(
+        host_id="host-" + "a" * 32,
+        workspace_domain="host-" + "a" * 32 + ".b.us1.shares.example",
+        region="us1",
+        state="active",
+        chrome_origin="https://minds.example.com",
+    )
+    payload = _share_to_json(info, include_token=False)
+    assert payload["chrome_origin"] == "https://minds.example.com"
+
+    info_without_chrome = ShareInfo(
+        host_id=info.host_id,
+        workspace_domain=info.workspace_domain,
+        region=info.region,
+        state=info.state,
+    )
+    assert _share_to_json(info_without_chrome, include_token=False)["chrome_origin"] is None

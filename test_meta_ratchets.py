@@ -504,6 +504,11 @@ def _conftest_registers_plugin_test_fixtures(conftest_path: Path) -> bool:
     return False
 
 
+# Walks every subproject and AST-parses each of its conftest.py files; fast
+# locally but observed exceeding the default 10s pytest-timeout under CI load.
+# See test_no_import_layer_violations for the flaky/timeout rationale.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_every_mngr_plugin_isolates_home_in_tests() -> None:
     """Ensure each mngr plugin pulls in mngr's shared test fixtures.
 

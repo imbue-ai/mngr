@@ -925,6 +925,10 @@ def test_assemble_command_honors_command_override(codex_agent: CodexAgent) -> No
     assert "/opt/codex --remote" in command
 
 
+# assert_posix_compatible shells out to shellcheck; fast locally but observed
+# exceeding the default 10s pytest-timeout under CI sandbox load.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_assemble_command_is_posix_compatible(codex_agent: CodexAgent) -> None:
     """The assembled command runs in the user's interactive shell (possibly zsh), so it
     must avoid bash-only constructs (the socket-wait loop uses POSIX `[ -S ]` / `$(())`)."""

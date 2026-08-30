@@ -1646,6 +1646,7 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         for entry in (raw_relay_logins if isinstance(raw_relay_logins, list) else [])
         if isinstance(entry, dict)
     )
+    raw_chrome_origin = body.get("chrome_origin")
     return ShareInfo(
         host_id=str(body.get("host_id", "")),
         workspace_domain=str(body.get("workspace_domain", "")),
@@ -1656,4 +1657,5 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         relay_token=SecretStr(relay_token) if relay_token else None,
         last_tunnel_login_at=body.get("last_tunnel_login_at"),
         cert_not_after=body.get("cert_not_after"),
+        chrome_origin=str(raw_chrome_origin) if raw_chrome_origin else None,
     )

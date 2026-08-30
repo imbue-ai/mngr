@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.sharing_handler import pick_lowest_latency_relay
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
 from imbue.minds.desktop_client.sharing_handler import split_relay_endpoint
+from imbue.minds.desktop_client.testing import read_injected_share_env_text
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
@@ -245,6 +246,51 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
     assert "data/.state/share/owner_email" in write_command
     assert document["enabled"] is True
     assert document["grants"]["workspace"] == grants
+
+
+def test_enable_sharing_stamps_the_connector_reported_chrome_origin_into_share_env() -> None:
+    # On tiers whose web chrome lives on a custom domain (deploy.toml
+    # [origins].chrome_origin), the connector reports that origin on the share
+    # create; stamping anything else (e.g. the bare connector URL) locks the
+    # real /web chrome out of the workspace's frame-ancestors CSP.
+    cli = SucceedingCreateShareCli(
+        connector_url=FAKE_CONNECTOR_URL, chrome_origin_to_return="https://minds.shares.example"
+    )
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+    agent_id = AgentId("agent-" + "c" * 32)
+    host_id = "host-" + "d" * 32
+    grants = {"emails": ["owner@example.com"], "email_domains": []}
+
+    _enable_sharing_with_cli(
+        host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+    )
+
+    share_env_text = read_injected_share_env_text(cli)
+    assert "export SHARE_CHROME_ORIGIN=https://minds.shares.example\n" in share_env_text
+    connector_url = str(FAKE_CONNECTOR_URL).rstrip("/")
+    assert f"SHARE_CHROME_ORIGIN={connector_url}" not in share_env_text
+
+
+def test_enable_sharing_falls_back_to_the_connector_origin_without_a_reported_chrome_origin() -> None:
+    # An old connector (or a tier with no hosted chrome configured) reports no
+    # chrome origin; the pre-field behavior -- the bare connector origin, where
+    # dev tiers path-serve the chrome -- must be preserved exactly.
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+    agent_id = AgentId("agent-" + "c" * 32)
+    host_id = "host-" + "d" * 32
+    grants = {"emails": ["owner@example.com"], "email_domains": []}
+
+    _enable_sharing_with_cli(
+        host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+    )
+
+    connector_url = str(FAKE_CONNECTOR_URL).rstrip("/")
+    assert f"export SHARE_CHROME_ORIGIN={connector_url}\n" in read_injected_share_env_text(cli)
 
 
 @pytest.mark.parametrize("is_cloud_row", [True, False])

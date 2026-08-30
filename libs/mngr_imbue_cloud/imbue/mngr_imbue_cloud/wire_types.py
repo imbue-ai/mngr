@@ -243,6 +243,15 @@ class ShareInfo(WireModel):
     )
     last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel Login stamp (any relay)")
     cert_not_after: str | None = Field(default=None, description="Expiry of the newest issued certificate")
+    chrome_origin: str | None = Field(
+        default=None,
+        description=(
+            "The tier's hosted web-chrome origin (e.g. https://minds.imbue.com), for clients to stamp "
+            "into the workspace's share.env as SHARE_CHROME_ORIGIN. None from a connector that predates "
+            "the field or a tier with no chrome origin configured; clients then fall back to the "
+            "connector origin (today's behavior)."
+        ),
+    )
 
 
 class ShareRelayMap(WireModel):
