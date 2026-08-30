@@ -38,9 +38,11 @@ from imbue.mngr.utils.error_utils import format_exception_traceback
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
-# How long the stream's main loop blocks per wait. It only waits, so this bounds
-# how quickly it notices shutdown (and keeps the wait interruptible by Ctrl-C).
-_SHUTDOWN_CHECK_INTERVAL_SECONDS: Final[float] = 1.0
+# How long the stream's main loop blocks per wait. The main thread has nothing
+# to do but notice a stop -- Ctrl-C interrupts the wait directly and stop_event
+# wakes it -- so this is a liveness backstop rather than a poll interval; a
+# short value would only burn idle wakeups (which cost ~3x under gVisor).
+_SHUTDOWN_CHECK_INTERVAL_SECONDS: Final[float] = 3600.0
 
 
 def _utc_now() -> datetime:

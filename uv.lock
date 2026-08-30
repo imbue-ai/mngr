@@ -1805,6 +1805,7 @@ dependencies = [
     { name = "tenacity" },
     { name = "tomlkit" },
     { name = "urwid" },
+    { name = "watchdog" },
 ]
 
 [package.metadata]
@@ -1836,6 +1837,7 @@ requires-dist = [
     { name = "tenacity", specifier = ">=8.0" },
     { name = "tomlkit", specifier = ">=0.12.0" },
     { name = "urwid", specifier = ">=2.2.0" },
+    { name = "watchdog", specifier = ">=4.0" },
 ]
 
 [[package]]

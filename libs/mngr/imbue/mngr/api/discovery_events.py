@@ -56,6 +56,9 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import build_ssh_connect_command
+from imbue.mngr.utils.file_watch import DirectoryWatchGroup
+from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
+from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 
@@ -1479,42 +1482,78 @@ def tail_discovery_events_from_offset(
     warner: MalformedJsonLineWarner,
     on_line: Callable[[str], None] | None,
 ) -> None:
-    """Poll the events file for new content written by other mngr processes."""
+    """Tail the events file for new content written by other mngr processes.
+
+    This tail is the low-latency channel for incremental discovery events
+    (``mngr create`` / ``mngr destroy`` append here), so its wake-up is
+    event-driven: a directory watch fires the moment the file grows, and the
+    poll interval only covers filesystem events the watch missed. When no watch
+    can be established the loop falls back to the short fixed poll, which is
+    then its delivery latency. Setting ``stop_event`` wakes and stops the loop
+    immediately (a parked forwarder thread bridges it to the wake event).
+    """
+    wake_event = threading.Event()
+    watch_group = DirectoryWatchGroup()
+    events_dir = events_path.parent
+    # The file (and its directory) may not exist yet at attach time; create the
+    # directory so the watch can bind now and see the file appear. Writers
+    # create it the same way before appending.
+    try:
+        events_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.debug("Could not create discovery events directory {}: {}", events_dir, e)
+    is_watching = watch_group.watch(events_dir, wake_event)
+    if is_watching:
+        # Only the watched loop sleeps on wake_event; the polling fallback
+        # waits on stop_event directly and needs no bridge.
+        start_event_forwarder(stop_event, wake_event, name="discovery-tail-stop-forwarder")
+
     current_offset = initial_offset
-    while not stop_event.is_set():
-        try:
-            if events_path.exists():
-                file_size = events_path.stat().st_size
-                # Handle file truncation (reset to start). Drop any malformed
-                # line still buffered in the warner: it came from the
-                # pre-truncation file's tail, so treating it as mid-file
-                # corruption in the new content would be misleading.
-                if file_size < current_offset:
-                    logger.debug(
-                        "Discovery events file truncated (size {} < offset {}), resetting", file_size, current_offset
-                    )
-                    current_offset = 0
-                    warner.reset()
-                if file_size > current_offset:
-                    with open(events_path) as f:
-                        f.seek(current_offset)
-                        new_content = f.read()
-                    # Hold back any trailing partial line so a mid-flush write
-                    # doesn't get split across polls and silently lost.
-                    new_lines, bytes_consumed = split_complete_lines(new_content)
-                    current_offset += bytes_consumed
-                    logger.debug(
-                        "Discovery tail: consumed {} new bytes, {} lines from events file",
-                        bytes_consumed,
-                        len(new_lines),
-                    )
-                    for file_line in new_lines:
-                        if stop_event.is_set():
-                            break
-                        _discovery_stream_emit_line(file_line, warner, emitted_event_ids, emit_lock, on_line)
-        except Exception as e:
-            logger.opt(exception=e).error("Error while tailing discovery events file")
-        stop_event.wait(timeout=1.0)
+    try:
+        while not stop_event.is_set():
+            try:
+                if events_path.exists():
+                    file_size = events_path.stat().st_size
+                    # Handle file truncation (reset to start). Drop any malformed
+                    # line still buffered in the warner: it came from the
+                    # pre-truncation file's tail, so treating it as mid-file
+                    # corruption in the new content would be misleading.
+                    if file_size < current_offset:
+                        logger.debug(
+                            "Discovery events file truncated (size {} < offset {}), resetting",
+                            file_size,
+                            current_offset,
+                        )
+                        current_offset = 0
+                        warner.reset()
+                    if file_size > current_offset:
+                        with open(events_path) as f:
+                            f.seek(current_offset)
+                            new_content = f.read()
+                        # Hold back any trailing partial line so a mid-flush write
+                        # doesn't get split across polls and silently lost.
+                        new_lines, bytes_consumed = split_complete_lines(new_content)
+                        current_offset += bytes_consumed
+                        logger.debug(
+                            "Discovery tail: consumed {} new bytes, {} lines from events file",
+                            bytes_consumed,
+                            len(new_lines),
+                        )
+                        for file_line in new_lines:
+                            if stop_event.is_set():
+                                break
+                            _discovery_stream_emit_line(file_line, warner, emitted_event_ids, emit_lock, on_line)
+            except Exception as e:
+                logger.opt(exception=e).error("Error while tailing discovery events file")
+            if is_watching:
+                # A write landing between the clear and the next read sets the
+                # event again, so the next wait returns immediately -- no loss.
+                wake_event.wait(timeout=WATCHED_TAIL_FALLBACK_POLL_SECONDS)
+                wake_event.clear()
+            else:
+                stop_event.wait(timeout=1.0)
+    finally:
+        watch_group.stop()
 
 
 def _emit_lines_from_offset(

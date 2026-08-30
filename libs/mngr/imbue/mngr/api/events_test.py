@@ -12,6 +12,8 @@ from imbue.mngr.api.events import EventRecord
 from imbue.mngr.api.events import EventSourceInfo
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import FOLLOW_POLL_INTERVAL_SECONDS
+from imbue.mngr.api.events import ONLINE_CHECK_INTERVAL_SECONDS
+from imbue.mngr.api.events import SOURCE_SCAN_INTERVAL_SECONDS
 from imbue.mngr.api.events import _AllEventsStreamState
 from imbue.mngr.api.events import _build_event_sources_from_grouped_files
 from imbue.mngr.api.events import _build_event_sources_from_listing
@@ -22,6 +24,7 @@ from imbue.mngr.api.events import _handle_online_offline_transition
 from imbue.mngr.api.events import _maybe_emit_source_mismatch_warning
 from imbue.mngr.api.events import _pygtail_offset_file_path
 from imbue.mngr.api.events import _record_from_event_data
+from imbue.mngr.api.events import _seconds_until_next_housekeeping
 from imbue.mngr.api.events import _sort_rotated_files_oldest_first
 from imbue.mngr.api.events import _start_tail_thread
 from imbue.mngr.api.events import _tail_source_thread
@@ -53,6 +56,7 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -1181,10 +1185,11 @@ def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path, local_prov
     online_event = threading.Event()
     online_event.set()
     target_holder = [_make_local_host_target(local_provider, events_dir)]
+    watch_group = DirectoryWatchGroup()
 
     thread = threading.Thread(
         target=_tail_source_thread,
-        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0),
+        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0, watch_group),
         daemon=True,
     )
     thread.start()
@@ -1214,7 +1219,9 @@ def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path, local_prov
     finally:
         stop_event.set()
         online_event.set()
+        watch_group.wake_all()
         thread.join(timeout=5.0)
+        watch_group.stop()
 
 
 @pytest.mark.timeout(30)
@@ -1248,6 +1255,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
     online_event = threading.Event()
     online_event.set()
 
+    watch_group = DirectoryWatchGroup()
     thread = _start_tail_thread(
         target_holder=[host_target],
         source_path="src",
@@ -1258,6 +1266,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
         online_event=online_event,
         offset_dir_path=offset_dir,
         initial_byte_offset=len(events_file.read_bytes()),
+        watch_group=watch_group,
     )
 
     try:
@@ -1285,7 +1294,9 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
     finally:
         stop_event.set()
         online_event.set()
+        watch_group.wake_all()
         thread.join(timeout=5.0)
+        watch_group.stop()
 
 
 # =============================================================================
@@ -1370,6 +1381,42 @@ def test_refresh_events_target_returns_same_when_no_events_subpath() -> None:
 
 
 # =============================================================================
+# _seconds_until_next_housekeeping tests
+# =============================================================================
+
+
+def test_seconds_until_next_housekeeping_online_uses_earlier_of_both_deadlines() -> None:
+    timeout = _seconds_until_next_housekeeping(
+        now=100.0,
+        last_source_scan_time=100.0,
+        last_online_check_time=100.0,
+        is_online=True,
+    )
+    assert timeout == min(SOURCE_SCAN_INTERVAL_SECONDS, ONLINE_CHECK_INTERVAL_SECONDS)
+
+
+def test_seconds_until_next_housekeeping_offline_ignores_source_scan_deadline() -> None:
+    # Offline targets never rescan sources, so only the online probe bounds the wait.
+    timeout = _seconds_until_next_housekeeping(
+        now=100.0,
+        last_source_scan_time=0.0,
+        last_online_check_time=100.0,
+        is_online=False,
+    )
+    assert timeout == ONLINE_CHECK_INTERVAL_SECONDS
+
+
+def test_seconds_until_next_housekeeping_overdue_deadline_clamps_to_zero() -> None:
+    timeout = _seconds_until_next_housekeeping(
+        now=1000.0,
+        last_source_scan_time=0.0,
+        last_online_check_time=0.0,
+        is_online=True,
+    )
+    assert timeout == 0.0
+
+
+# =============================================================================
 # _handle_online_offline_transition tests
 # =============================================================================
 
@@ -1397,9 +1444,13 @@ def test_handle_online_offline_transition_comes_online_sets_gate(
     # Starts clear (offline).
     online_event = threading.Event()
 
-    _handle_online_offline_transition(target_holder=target_holder, state=state, online_event=online_event)
+    is_transitioned = _handle_online_offline_transition(
+        target_holder=target_holder, state=state, online_event=online_event
+    )
 
-    # The local host resolves as online, so the transition should fire.
+    # The local host resolves as online, so the transition should fire (and
+    # report itself so the consume loop wakes the watched tails).
+    assert is_transitioned is True
     assert state.is_online is True
     assert isinstance(target_holder[0].host, OnlineHostInterface)
     # The gate is opened so the persistent tail threads resume reading.
@@ -1416,9 +1467,12 @@ def test_handle_online_offline_transition_no_change_when_same_state() -> None:
     # Clear, matching the offline state.
     online_event = threading.Event()
 
-    _handle_online_offline_transition(target_holder=target_holder, state=state, online_event=online_event)
+    is_transitioned = _handle_online_offline_transition(
+        target_holder=target_holder, state=state, online_event=online_event
+    )
 
     # No transition should have occurred (no provider to refresh).
+    assert is_transitioned is False
     assert state.is_online is False
     assert target_holder[0] is target
     assert not online_event.is_set()
@@ -1452,9 +1506,12 @@ def test_handle_online_offline_transition_clears_gate_when_going_offline(
     # Currently online.
     online_event.set()
 
-    _handle_online_offline_transition(target_holder=target_holder, state=state, online_event=online_event)
+    is_transitioned = _handle_online_offline_transition(
+        target_holder=target_holder, state=state, online_event=online_event
+    )
 
     # Transitioned online -> offline: the gate is cleared so tailing pauses.
+    assert is_transitioned is True
     assert state.is_online is False
     assert not online_event.is_set()
 
@@ -1493,10 +1550,11 @@ def test_tail_source_thread_does_no_io_while_gate_closed_then_resumes(
     # Clear: gate closed (offline).
     online_event = threading.Event()
     target_holder = [target]
+    watch_group = DirectoryWatchGroup()
 
     thread = threading.Thread(
         target=_tail_source_thread,
-        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0),
+        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0, watch_group),
         daemon=True,
     )
     thread.start()
@@ -1517,7 +1575,9 @@ def test_tail_source_thread_does_no_io_while_gate_closed_then_resumes(
     finally:
         stop_event.set()
         online_event.set()
+        watch_group.wake_all()
         thread.join(timeout=5.0)
+        watch_group.stop()
 
 
 @pytest.mark.timeout(30)
@@ -1550,10 +1610,11 @@ def test_tail_source_thread_follows_target_swap_without_recreation(
     online_event = threading.Event()
     online_event.set()
     target_holder = [_make_local_host_target(local_provider, dir_a)]
+    watch_group = DirectoryWatchGroup()
 
     thread = threading.Thread(
         target=_tail_source_thread,
-        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0),
+        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0, watch_group),
         daemon=True,
     )
     thread.start()
@@ -1567,8 +1628,12 @@ def test_tail_source_thread_follows_target_swap_without_recreation(
         assert first is not None
         assert first.event_id == "a1"
 
-        # Swap to a different path (B); the same thread must follow it.
+        # Swap to a different path (B); the same thread must follow it. A bare
+        # holder swap fires no directory event on the old watch, so wake the
+        # tail explicitly -- exactly what the consume loop does on the
+        # online/offline transition that accompanies every production swap.
         target_holder[0] = _make_local_host_target(local_provider, dir_b)
+        watch_group.wake_all()
 
         second, _, _ = poll_for_value(
             producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
@@ -1580,7 +1645,9 @@ def test_tail_source_thread_follows_target_swap_without_recreation(
     finally:
         stop_event.set()
         online_event.set()
+        watch_group.wake_all()
         thread.join(timeout=5.0)
+        watch_group.stop()
 
 
 # =============================================================================

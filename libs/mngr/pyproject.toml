@@ -52,6 +52,9 @@ dependencies = [
     "tenacity>=8.0",
     "tomlkit>=0.12.0",
     "urwid>=2.2.0",
+    # Directory-change notifications (inotify on Linux, FSEvents on macOS) so
+    # follow-mode event tails sleep instead of polling (utils/file_watch.py).
+    "watchdog>=4.0",
 ]
 
 [project.urls]

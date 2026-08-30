@@ -307,7 +307,11 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # __init__ stores the lazy loader that defers a provider's operator CLI (and its cloud
     # SDK) off `mngr`'s startup path (MIND-179). A click.Group cannot be a pydantic model,
     # so an __init__ is required here.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(4))
+    # 5: _WakeOnDirectoryChangeHandler (utils/file_watch.py) is a watchdog
+    # FileSystemEventHandler subclass whose __init__ stores the wake event it sets.
+    # watchdog keeps handlers in hash-based collections, so a pydantic model (whose
+    # value-based __eq__ breaks hashing) cannot be used; an __init__ is required here.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(5))
 
 
 def test_prevent_cast_usage() -> None:
