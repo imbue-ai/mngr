@@ -47,7 +47,6 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -163,7 +162,6 @@ def test_destroy_short_form(e2e: E2eSession) -> None:
     expect(list_result.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -232,7 +230,6 @@ def test_destroy_remove_branch(e2e: E2eSession) -> None:
     expect(branch_after.stdout).not_to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)
@@ -282,7 +279,6 @@ def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
     expect(branch_after.stdout).to_contain("mngr/my-task")
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -459,7 +455,6 @@ def test_destroy_by_session_name(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(60)

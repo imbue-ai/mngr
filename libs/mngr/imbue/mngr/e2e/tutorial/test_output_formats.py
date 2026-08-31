@@ -36,7 +36,6 @@ def test_default_output_human_readable(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(300)
 def test_list_custom_human_format(e2e: E2eSession) -> None:
@@ -189,7 +188,6 @@ def test_observe_discovery_recap(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.modal
 def test_jsonl_works_across_commands(e2e: E2eSession) -> None:
     """Tutorial block:
         # JSON and JSONL works with most commands

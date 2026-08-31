@@ -155,7 +155,6 @@ def test_list_combine_include_filters(e2e: E2eSession) -> None:
     assert combined_stopped_names == {"backend-stopped"}, combined_stopped_names
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 def test_list_exclude_filter(e2e: E2eSession) -> None:
@@ -469,7 +468,6 @@ def test_list_jq_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(180)
 def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:

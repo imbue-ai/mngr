@@ -98,7 +98,6 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
     expect(e2e.run("mngr exec fix-bug pwd", comment="verify the destroyed agent can no longer be reached")).to_fail()
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)

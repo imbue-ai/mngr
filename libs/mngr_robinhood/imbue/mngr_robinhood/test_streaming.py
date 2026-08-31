@@ -105,6 +105,7 @@ def _run_robinhood(args: list[str], cwd: Path, env: dict[str, str]) -> str:
     return result.stdout
 
 
+@pytest.mark.rsync
 def test_stream_json_emits_partials_before_final_assistant(
     streaming_work_dir: Path,
     streaming_env: dict[str, str],
@@ -138,6 +139,7 @@ def test_stream_json_emits_partials_before_final_assistant(
         assert partial["event"]["delta"]["type"] == "text_delta"
 
 
+@pytest.mark.rsync
 def test_stream_plain_text_streams_once_without_duplication(
     streaming_work_dir: Path,
     streaming_env: dict[str, str],

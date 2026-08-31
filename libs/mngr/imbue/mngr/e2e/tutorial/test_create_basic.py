@@ -379,7 +379,6 @@ def test_create_named_agent(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -611,7 +610,6 @@ def test_create_copy(e2e: E2eSession) -> None:
 # This test also runs four sequential operations (pwd, create, list, and a
 # .git check), each performing full provider discovery, so it needs more than
 # the default 10s timeout.
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -732,7 +730,6 @@ def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
     )
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # This test runs three sequential mngr operations (create, list, exec), each of

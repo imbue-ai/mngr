@@ -84,7 +84,6 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
     assert matching[0]["labels"]["project"] == "my-project"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
@@ -476,7 +475,6 @@ def test_create_with_explicit_branch_name(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.rsync
 def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can disable new branch creation entirely by omitting the :NEW part:
