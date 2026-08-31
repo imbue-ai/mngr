@@ -1,9 +1,8 @@
-"""Bare-origin and subdomain-routing tests for the FastAPI app.
+"""Tests for the FastAPI app: bare-origin and subdomain routing, auth, and forwarding.
 
-The middleware and forwarding handlers depend on real network I/O
-(``httpx`` / paramiko); those paths are exercised via the acceptance
-test, not here. This file covers the deterministic auth + routing
-surfaces using ``starlette.testclient.TestClient``.
+These drive the app in process with ``starlette.testclient.TestClient``. Where a
+path needs real network I/O, the test stands up a backend on loopback rather than
+reaching outside the test process.
 """
 
 import asyncio
@@ -2267,7 +2266,7 @@ def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_bod
 
 
 def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
-    """A ``<service>.host-<hex>.localhost`` origin forwards to that service's registered URL."""
+    """A ``<service>.agent-<hex>.localhost`` origin forwards to that service's registered URL."""
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
@@ -2313,7 +2312,7 @@ def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
 
 
 def test_deep_service_origin_routes_to_owning_service(tmp_path: Path) -> None:
-    """Deeper labels (``sub.svc.host-<hex>.localhost``) route to the same service."""
+    """Deeper labels (``sub.svc.agent-<hex>.localhost``) route to the same service."""
     auth_store = FileAuthStore(data_directory=tmp_path)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()

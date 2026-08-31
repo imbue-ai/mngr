@@ -12,7 +12,7 @@ services own arbitrarily deep sub-origin spaces), and nothing else. Hosts
 that embed workspaces (the minds chrome) opt in via ``--embedder-origin``.
 
 Enforcement of this header is load-bearing for the embed contract's trust
-model (see ``apps/minds/embed_contract/embed-contract.md``): because a
+model (see the minds embed contract): because a
 disallowed embedder can never load a workspace frame at all, the workspace
 side needs no allowlist of its own -- being framed proves the embedder was
 allowed.

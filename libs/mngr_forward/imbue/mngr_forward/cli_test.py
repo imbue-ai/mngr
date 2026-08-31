@@ -1,10 +1,9 @@
 """Tests for ``mngr forward``'s CLI helpers.
 
-Covers option validation (direct calls to the validation helpers, without
-building the FastAPI app or a CLI process) and the hypercorn serving layer's
-TLS teardown behavior (serve-loop exception handling plus an end-to-end
-abandoned-connection repro over a loopback socket). End-to-end CLI invocation
-is exercised by the acceptance test.
+Drives the helpers directly rather than through a CLI process: option
+validation, listen-socket binding and fallback, snapshot filtering, and the
+hypercorn serving layer's TLS teardown behavior (serve-loop exception handling
+plus an end-to-end abandoned-connection repro over a loopback socket).
 """
 
 # asyncio is normally banned, but this file tests the event-loop-level TLS

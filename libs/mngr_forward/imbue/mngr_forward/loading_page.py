@@ -1,9 +1,8 @@
 """The canonical "Loading workspace" page.
 
-A single source of truth for the loading screen so the mngr_forward proxy
-loader and any downstream consumer's loading/recovery page render the *same*
-HTML in their loading state -- rather than two hand-matched markups that drift
-apart.
+Factored into a card and a page half so a consumer that wants to render the
+same loading state inside its own layout can pull in ``render_loading_card``
+and ``LOADING_CARD_CSS`` rather than hand-matching the markup.
 
 The proxy serves it with a small background poll that re-attempts the workspace
 until it answers; a consumer can reuse it and layer its own controls and script
@@ -13,10 +12,8 @@ on top via the ``card_extra`` / ``style_extra`` / ``body_extra`` hooks.
 from typing import Final
 
 # The page-level half of the stylesheet: ``body`` centers a single ``.card``
-# in the viewport. Only the standalone page (the proxy loader) uses this; a
-# consumer that embeds the card in its own layout (e.g. the minds recovery
-# page, which wraps it under the app titlebar) supplies its own centering and
-# pulls in only ``LOADING_CARD_CSS``.
+# in the viewport. A consumer that embeds the card in its own layout supplies
+# its own centering and pulls in only ``LOADING_CARD_CSS``.
 LOADING_PAGE_CENTERING_CSS: Final[str] = """\
       html, body { height: 100%; margin: 0; }
       body {

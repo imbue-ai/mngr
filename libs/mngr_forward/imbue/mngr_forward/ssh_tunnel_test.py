@@ -1,14 +1,12 @@
 """Unit tests for the shared :class:`SSHTunnelManager`.
 
-Most of the SSH I/O paths (reverse port forward, a live agent's container) need
-a real host and are exercised by the acceptance / release tests. These unit
-tests cover the deterministic surfaces that don't need one: the URL-parsing
-helper, the data shapes, and the bits of the manager's repair / setup loops that
-can be driven against fakes.
+These tests cover the surfaces that can be driven deterministically: the
+URL-parsing helper, the data shapes, the repair / setup loops against fakes, and
+the reverse-tunnel bookkeeping.
 
-The one exception is the direct-tcpip refusal classification at the bottom of
-this file, which runs an sshd of its own on loopback. What it settles cannot be
-settled against a fake by construction -- see the comment there.
+The direct-tcpip refusal classification at the bottom of this file runs an sshd
+of its own on loopback. What it settles cannot be settled against a fake by
+construction -- see the comment there.
 
 The manager is the single SSH tunneling implementation in the monorepo:
 ``mngr forward --service`` uses its forward (direct-tcpip) path, and both
@@ -1583,10 +1581,10 @@ def test_a_tunnel_over_a_dead_transport_is_rebuilt_on_the_next_request(tmp_path:
     """The whole recovery, driven through the manager: refuse, retire, rebuild.
 
     The pieces are covered individually above; this is the wiring that turns
-    them into a recovery. It is the only test that calls
-    ``get_tunnel_socket_path``, so it is what holds the accept loop to the
-    per-tunnel stop event, the failure handler to the cached client, and the
-    rebuilt tunnel to the same socket path the retired one unlinked.
+    them into a recovery, driven through ``get_tunnel_socket_path``: it holds
+    the accept loop to the per-tunnel stop event, the failure handler to the
+    cached client, and the rebuilt tunnel to the same socket path the retired
+    one unlinked.
     """
     ssh_info = _sample_ssh_info(tmp_path)
     conn_key = f"{ssh_info.host}:{ssh_info.port}"

@@ -1,6 +1,6 @@
-"""Resolves ``[<service>.]host-<hex>.localhost`` requests to a backend ``ProxyTarget``.
+"""Resolves ``[<service>.]agent-<hex>.localhost`` requests to a backend ``ProxyTarget``.
 
-Holds four pieces of state, all updated externally:
+Holds per-instance state, all updated externally:
 
 - The configured forwarding strategy: either ``ForwardServiceStrategy`` (look
   up a named service URL per agent) or ``ForwardPortStrategy`` (forward to a
@@ -13,6 +13,9 @@ Holds four pieces of state, all updated externally:
   ``resolve_by_origin_label`` reads before resolving by name.
 - ``ssh_by_instance``: per-agent-instance SSH info, populated from the
   ``mngr observe`` stream's ``HOST_SSH_INFO`` events; absent for local agents.
+- ``known_agent_instances``: the instances discovery has reported. ``resolve``
+  gates on this first, so an instance absent from it is unroutable whatever
+  its other state says.
 
 Every agent is identified by its :class:`~imbue.mngr.primitives.AgentInstanceKey`
 (the ``<agent_id>@<host_id>`` pair): agent ids are unique per host, not
@@ -22,9 +25,9 @@ the host coordinate, which is also how ``resolve_agent_for_host`` maps the
 Host-header ``host-<hex>`` coordinate back to the instance whose registered
 services should serve it.
 
-``resolve(instance_key, service_name)`` returns ``None`` when the agent is
-unknown, the requested service URL is not yet discovered, or the agent has
-no SSH info but the strategy requires one.
+``resolve(instance_key, service_name)`` returns ``None`` when the agent is not
+yet known to discovery, or when the requested service URL has not been
+discovered.
 """
 
 import threading
@@ -330,7 +333,7 @@ class ForwardResolver(MutableModel):
         """Resolve ``(instance_key, service_name)`` to a backend ``ProxyTarget``, or None if unroutable.
 
         ``service_name`` is the label parsed from a service origin
-        (``<name>.host-<hex>.localhost``); ``None`` means the bare workspace
+        (``<name>.agent-<hex>.localhost``); ``None`` means the bare workspace
         origin, which maps to the configured strategy (the shell service in
         service mode, the fixed port in manual mode). A named service is
         looked up directly in the instance's registered service map, so any

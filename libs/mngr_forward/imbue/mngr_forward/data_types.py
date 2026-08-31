@@ -25,8 +25,8 @@ class SystemInterfaceBackendFailureReason(UpperCaseStrEnum):
       host a remote backend lives on -- e.g. when the agent's host has
       gone away). It is the residual class: a failure that leaves the
       backend's own health unresolved, where it really may be at fault.
-      The three reasons below were split out of it precisely because they
-      are *not* that. The plugin's own refusal to dial host loopback for
+      ``TUNNEL_SETUP_FAILED``, ``POOL_EXHAUSTED`` and ``BACKEND_NOT_LISTENING``
+      were split out of it precisely because they are *not* that. The plugin's own refusal to dial host loopback for
       an agent with no tunnel is reported here too -- the one case that
       dialed nothing and still leaves the backend unresolved.
     - ``TUNNEL_SETUP_FAILED``: this device could not build its own end of

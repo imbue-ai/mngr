@@ -24,6 +24,7 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+
 [project.entry-points.mngr]
 forward = "imbue.mngr_forward.plugin"
 

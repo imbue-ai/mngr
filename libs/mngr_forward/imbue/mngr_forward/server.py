@@ -2,9 +2,11 @@
 
 Adapted from the subdomain-forwarding portions of minds' desktop client.
 Application-specific routes (create form, accounts, sharing, request inbox,
-telegram, chrome, etc.) stay in the host application; the plugin only handles:
+telegram, chrome, etc.) stay in the host application; the plugin handles the
+proxy surface:
 
 - the bare-origin login flow (``/login``, ``/authenticate``, ``/`` debug index)
+- the ``/_bridge`` browser-bridge handoff
 - the ``/goto/<agent-id>/`` cookie-bridge to workspace-domain auth
 - the ``/_subdomain_auth`` token-redemption handler on each workspace origin
 - byte-level HTTP forwarding for ``[<service>.]agent-<hex>.localhost``
@@ -1813,6 +1815,11 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     on_listening: Callable[[], None] | None,
 ) -> AsyncGenerator[None, None]:
+    # Load the signing key eagerly so a corrupt or unreadable key file fails the
+    # process at startup rather than on the first request that needs it: an empty
+    # or unreadable file raises here, and a missing one is minted once (the key is
+    # never silently re-minted afterward).
+    inner_app.state.auth_store.get_signing_key()
     inner_app.state.http_client = httpx.AsyncClient(
         follow_redirects=False, timeout=_PROXY_TIMEOUT, limits=_PROXY_POOL_LIMITS
     )

@@ -1,7 +1,7 @@
 """Spawns and manages ``mngr observe`` + per-agent ``mngr event`` subprocesses.
 
-Adapted from ``minds.desktop_client.backend_resolver.MngrStreamManager``,
-slimmed to the parts the plugin needs:
+Adapted from minds' desktop-client stream manager, slimmed to the parts the
+plugin needs:
 
 - Discovery events come from one of two sources: a ``mngr observe
   --discovery-only --quiet`` subprocess (default), or, when

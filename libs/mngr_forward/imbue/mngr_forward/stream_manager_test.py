@@ -1,16 +1,9 @@
-"""Unit tests for ForwardStreamManager's line-handling surface.
+"""Unit tests for ForwardStreamManager.
 
-Subprocess spawning (real ConcurrencyGroup, real `mngr observe` /
-`mngr event` children) is exercised by the acceptance test, not here.
-This file calls the private `_on_observe_output` / `_on_event_output`
-hooks directly with canned JSONL strings to exercise:
-
-- envelope passthrough
-- discovery-event routing into the resolver
-- CEL filter behaviour
-- on_agent_discovered / on_agent_destroyed callback firing
-- service URL routing into the resolver
-- bounce_observe no-op when no observe process is running
+Covers the line-handling surface, driving the private ``_on_observe_output`` /
+``_on_event_output`` hooks with canned JSONL, and the spawn / respawn-pacing
+surface, driving ``_start_events_stream`` against a recording ConcurrencyGroup
+double so no real child processes are launched.
 """
 
 import io
