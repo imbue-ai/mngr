@@ -1,5 +1,7 @@
 # Home page
 
+Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+
 The home page is "/" -- the first thing a browser lands on once a session is authenticated on the *browser authorization component* (defined in `browser-authorization/`).
 This folder specifies what an already-*authenticated* user sees at "/", and where "/post-login" sends them once they sign in.
 

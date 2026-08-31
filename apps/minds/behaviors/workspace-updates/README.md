@@ -1,5 +1,7 @@
 # Workspace updates
 
+Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+
 This folder specifies how the desktop client reports that a workspace is running an older workspace template than the app supports, and what it does when asked to fix that.
 
 A workspace's *template version* is the `minds-v*` release of the workspace template it is running.

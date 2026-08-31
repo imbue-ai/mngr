@@ -1,5 +1,7 @@
 # Backup restore
 
+Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+
 This folder specifies the in-place restore of a workspace backup, as observed through the desktop client's restore operation and the state of the workspace afterwards.
 A restore rewinds the workspace's persistent data to a chosen backup snapshot and then brings the workspace's services back up.
 

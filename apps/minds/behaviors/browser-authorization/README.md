@@ -1,5 +1,7 @@
 # Browser authorization
 
+Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+
 The **browser authorization component** -- fully, the *desktop-app backend-server* browser authorization component -- is the browser-facing part of the minds *desktop client*: the bare-origin web UI served by `minds run` (`apps/minds/imbue/minds/desktop_client/`) that serves every page the browser reaches, carries the session, and authenticates it.
 It is the gateway through which the user reaches all their workspaces.
 

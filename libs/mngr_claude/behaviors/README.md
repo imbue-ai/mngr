@@ -1,5 +1,7 @@
 # Claude agent behavior corpus
 
+Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+
 This corpus specifies the externally observable behavior of a *Claude agent*: a Claude Code process that mngr creates and drives.
 A client interacts with a Claude agent by delivering messages to it and observing the resulting conversation and whether the agent is ready for more input.
 This corpus specifies what that client observes; it never specifies how mngr drives the agent's terminal.

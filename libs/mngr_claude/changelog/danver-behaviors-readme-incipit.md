@@ -1,0 +1,1 @@
+The Claude-agent behavior corpus's per-folder `overview.md` files are renamed to `README.md`, each now opening with the mandated incipit that points any reader to the tmr-behaviors skill. Their prose is otherwise unchanged.
