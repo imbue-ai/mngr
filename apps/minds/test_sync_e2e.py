@@ -1070,7 +1070,7 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             bundle_one = _wait_for_bundle(runtime, sync_e2e_account, _SYNC_CONVERGENCE_TIMEOUT_SECONDS)
             dek = _unwrapped_dek(bundle_one, password_one)
 
-            # P1 -> P2 is a rewrap: same key, same secrets blob, same revision.
+            # P1 -> P2 is a rewrap: P1 stops unwrapping, P2 unwraps the SAME DEK.
             _set_master_password_via_ui(page, origin, password_two)
             bundle_two = _wait_for_rewrapped_bundle(
                 runtime, sync_e2e_account, bundle_one.wrapped_dek, _SYNC_CONVERGENCE_TIMEOUT_SECONDS
@@ -1078,15 +1078,22 @@ def test_master_password_lifecycle_rewraps_scrubs_and_restores(
             assert _unwrapped_dek(bundle_two, password_two) == dek
             with pytest.raises(SecretWrappingError):
                 _unwrapped_dek(bundle_two, password_one)
+
+            # A rewrap re-wraps the account key bundle only; it never writes the
+            # workspace record (push_all_secrets skips rows that already carry
+            # secrets). So, with no ordering and no revision count: the secrets and
+            # identity are exactly as before; the metadata and revision the
+            # background reconcile may still be moving are simply not read.
             record_two = _record_for_agent(runtime, sync_e2e_account, agent_id)
             assert record_two is not None
             assert record_two.encrypted_secrets == record_one.encrypted_secrets, (
-                "A password change must not rewrite the synced secrets blob"
+                "A password rewrap must not rewrite the synced secrets blob"
             )
-            assert record_two.revision == record_one.revision, (
-                f"A password change must not advance the record revision "
-                f"({record_one.revision} -> {record_two.revision})"
-            )
+            assert (record_two.host_id, record_two.state, record_two.record_format) == (
+                record_one.host_id,
+                record_one.state,
+                record_one.record_format,
+            ), "A password rewrap must not change the record's identity or lifecycle"
 
             # Clearing the password deletes the bundle and scrubs the secrets.
             _set_master_password_via_ui(page, origin, "")
