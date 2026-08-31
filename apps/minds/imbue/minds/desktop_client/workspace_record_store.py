@@ -70,6 +70,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import has_unpinned_bootstrap_drift
 from imbue.mngr.providers.host_key_store import load_current_host_key_pins
 from imbue.mngr.providers.host_key_store import pin_known_hosts_text
 from imbue.mngr.providers.host_key_store import render_pins_as_known_hosts_text
@@ -1004,7 +1005,9 @@ class WorkspaceRecordStore(MutableModel):
         :meth:`_materialize_record_secrets`) -- converging a drifted backup env
         for any provider kind, and (for cloud rows) writing the synced SSH key
         material into the imbue_cloud provider's per-host state dir so
-        discovery can reach hosts leased on another install. Also sweeps
+        discovery can reach hosts leased on another install (and converging
+        hosts leased here whose material another install has since
+        advanced, e.g. by adopting the host). Also sweeps
         orphaned per-host key dirs. No-op while the account is locked. Returns
         True when SSH material was created or changed, so the caller can
         bounce discovery.
@@ -1044,16 +1047,21 @@ class WorkspaceRecordStore(MutableModel):
           local copy, the only surviving restic credentials, alone). This is
           the convergence path for every provider kind: a device holding a
           stale env picks up the record's rotated one here.
-        - for cloud rows without a local lease, the SSH key files and
-          known_hosts pins are applied as before: pins go through the host-key
-          store as user-origin material with replace-by-(endpoint, keytype)
-          semantics, so a stale first-ordered pin can never shadow the live
-          key and later local bootstrap writes can never displace what the
-          record established. Missing key or known_hosts files (a swept and
-          re-created host dir) re-open the gate regardless of the revision.
-          The lease.json skip covers only this SSH half: the leasing install's
-          keypair is authoritative because it minted it, but its env is no
-          more authoritative than any other device's.
+        - for cloud rows -- leased-here included -- the SSH key files and
+          known_hosts pins are applied: pins go through the host-key store as
+          user-origin material with replace-by-(endpoint, keytype) semantics,
+          so a stale first-ordered pin can never shadow the live key and later
+          local bootstrap writes can never displace what the record
+          established. A lease held here grants no standing authority over
+          the trust material: another install can legitimately advance it
+          (adopting the host rotates its sshd keys, and the synced record is
+          the channel that rotated material arrives through); what protects
+          this install's own newer, not-yet-pushed material is the revision +
+          content-hash gate, not the lease. Missing key or known_hosts files
+          (a swept and re-created host dir) re-open the gate regardless of
+          the revision, as does record known_hosts material whose endpoints
+          still hold only absent-or-bootstrap pins (a device whose earlier
+          client skipped the apply while stamping the revision).
 
         A successful application also stamps ``secrets_content_hash`` with the
         applied payload's digest: local material now mirrors the record, so a
@@ -1074,16 +1082,12 @@ class WorkspaceRecordStore(MutableModel):
                 self._set_ssh_material_error(record.agent_id, "Could not decrypt the synced secrets for this machine.")
             return False
 
-        # The SSH half applies only to cloud rows this install did not lease.
+        # The SSH half applies to every cloud row, leased-here included.
         host_dir = self.imbue_cloud_host_state_dir(account_email, record.host_id) if is_cloud_row else None
-        is_lease_held = host_dir is not None and (host_dir / _LEASE_META_FILENAME).is_file()
-        if is_lease_held:
-            # This install leased the host itself: its own keypair (and the
-            # connector-fed known_hosts pins) are authoritative.
-            self._clear_ssh_material_error(record.agent_id)
-        is_ssh_applicable = host_dir is not None and not is_lease_held and payload.ssh_private_key is not None
+        is_ssh_applicable = host_dir is not None and payload.ssh_private_key is not None
 
-        # The revision gate (with the SSH missing-file escape hatches).
+        # The revision gate (with the SSH escape hatches: missing files, and
+        # record pins the store never absorbed).
         payload_content_hash = secrets_payload_content_hash(payload)
         is_payload_new_here = payload_content_hash != record.secrets_content_hash
         is_due = record.revision > (record.last_applied_secrets_revision or 0) and is_payload_new_here
@@ -1097,6 +1101,10 @@ class WorkspaceRecordStore(MutableModel):
                 is_due
                 or not is_key_pair_present
                 or (payload.ssh_known_hosts is not None and not known_hosts_path.exists())
+                or (
+                    payload.ssh_known_hosts is not None
+                    and has_unpinned_bootstrap_drift(known_hosts_path, payload.ssh_known_hosts)
+                )
             )
         if not is_due:
             self._clear_ssh_material_error(record.agent_id)
@@ -1148,10 +1156,9 @@ class WorkspaceRecordStore(MutableModel):
         # Stamp the local-only tracking fields: the gate closes at this
         # revision, and -- only when the locally collected payload truly
         # matches the applied one -- the parity digest records that local
-        # material now mirrors it. Without parity (e.g. a leased row whose
-        # keypair this pass deliberately does not touch), the previous hash
-        # state is kept, so a device holding partial material stays
-        # ineligible to push its view.
+        # material now mirrors it. Without parity (e.g. local material the
+        # record has not caught up to), the previous hash state is kept, so a
+        # device holding partial material stays ineligible to push its view.
         local_payload = self._collect_secrets_payload(user_id, record.agent_id, record.host_id)
         is_parity = local_payload is not None and secrets_payload_content_hash(local_payload) == payload_content_hash
         stamped = record.model_copy_update(

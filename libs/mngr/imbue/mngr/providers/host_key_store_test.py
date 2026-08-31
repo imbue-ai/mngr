@@ -15,6 +15,7 @@ from imbue.mngr.providers.host_key_store import _apply_pin
 from imbue.mngr.providers.host_key_store import clear_endpoint_pins
 from imbue.mngr.providers.host_key_store import gc_dead_host_key_records
 from imbue.mngr.providers.host_key_store import has_host_key_store
+from imbue.mngr.providers.host_key_store import has_unpinned_bootstrap_drift
 from imbue.mngr.providers.host_key_store import host_key_store_path
 from imbue.mngr.providers.host_key_store import load_current_host_key_pins
 from imbue.mngr.providers.host_key_store import load_host_key_record
@@ -619,3 +620,41 @@ def test_pin_known_hosts_text_with_no_parseable_lines_touches_nothing(tmp_path: 
 
     assert not known_hosts.exists()
     assert not has_host_key_store(known_hosts)
+
+
+# =============================================================================
+# has_unpinned_bootstrap_drift
+# =============================================================================
+
+
+def test_has_unpinned_bootstrap_drift_reports_a_wholly_unpinned_endpoint(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+
+    assert has_unpinned_bootstrap_drift(known_hosts, f"[203.0.113.5]:2222 {_ED25519_KEY_A}\n") is True
+
+
+def test_has_unpinned_bootstrap_drift_is_false_when_every_line_is_already_pinned(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    pin_host_key(known_hosts, "203.0.113.5", 2222, _ED25519_KEY_A, host_id=None, origin=HostKeyOrigin.BOOTSTRAP)
+
+    assert has_unpinned_bootstrap_drift(known_hosts, f"[203.0.113.5]:2222 {_ED25519_KEY_A}\n") is False
+
+
+def test_has_unpinned_bootstrap_drift_reports_a_differing_bootstrap_pin(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    pin_host_key(known_hosts, "203.0.113.5", 2222, _ED25519_KEY_B, host_id=None, origin=HostKeyOrigin.BOOTSTRAP)
+
+    assert has_unpinned_bootstrap_drift(known_hosts, f"[203.0.113.5]:2222 {_ED25519_KEY_A}\n") is True
+
+
+def test_has_unpinned_bootstrap_drift_defers_to_a_differing_user_pin(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    pin_host_key(known_hosts, "203.0.113.5", 2222, _ED25519_KEY_B, host_id=None, origin=HostKeyOrigin.USER)
+
+    assert has_unpinned_bootstrap_drift(known_hosts, f"[203.0.113.5]:2222 {_ED25519_KEY_A}\n") is False
+
+
+def test_has_unpinned_bootstrap_drift_ignores_unparseable_and_blank_lines(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+
+    assert has_unpinned_bootstrap_drift(known_hosts, "junk line\n\n") is False

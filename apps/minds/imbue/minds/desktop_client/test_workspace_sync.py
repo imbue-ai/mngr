@@ -40,7 +40,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.host_key_store import host_key_store_path
+from imbue.mngr.providers.host_key_store import load_current_host_key_pins
 from imbue.mngr.providers.host_key_store import load_host_key_record
+from imbue.mngr.providers.host_key_store import parse_known_hosts_address
 from imbue.mngr.providers.host_key_store import pin_host_key
 
 _USER_ID = "11111111-2222-3333-4444-555555555555"
@@ -278,6 +280,15 @@ def _cloud_host_key_dir(profile_dir: Path, host_id: HostId) -> Path:
     return profile_dir / "providers" / "imbue_cloud" / instance_name / "hosts" / str(host_id)
 
 
+def _pin_at_line_endpoint(
+    known_hosts_path: Path, known_hosts_line: str, public_key: str, host_id: HostId, origin: HostKeyOrigin
+) -> None:
+    """Pin ``public_key`` at the endpoint named by a known_hosts line's leading field."""
+    endpoint = parse_known_hosts_address(known_hosts_line.split()[0])
+    assert endpoint is not None
+    pin_host_key(known_hosts_path, endpoint[0], endpoint[1], public_key, host_id=host_id, origin=origin)
+
+
 def _cloud_resolver_with_workspace(agent_id: AgentId, host_id: HostId, name: str) -> MngrCliBackendResolver:
     instance_name = imbue_cloud_provider_name_for_account(_EMAIL)
     agents = [
@@ -348,24 +359,119 @@ def test_unlock_materializes_cloud_row_ssh_material_on_a_fresh_install(tmp_path:
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
 
 
-def test_materializer_never_touches_a_host_this_install_leased(tmp_path: Path) -> None:
+def test_materializer_applies_advanced_synced_material_to_a_host_this_install_leased(tmp_path: Path) -> None:
+    """A lease held here grants no standing authority once the record advanced past this device.
+
+    Another install can legitimately adopt the host (rotating its sshd keys and
+    per-host client key) and push the rotated material; the leasing install
+    must converge on it or the host becomes permanently unreachable from here.
+    """
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
-    _, host_id, _, _ = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+    _, host_id, synced_key, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
     _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
 
-    # B holds its own lease for this host: lease.json + its own keypair.
+    # B holds its own lease for this host (lease.json + its own keypair), but
+    # the record carries different, never-applied-here material.
     key_dir_b = _cloud_host_key_dir(profile_b, host_id)
     key_dir_b.mkdir(parents=True)
-    local_key = _generate_test_ssh_private_key()
-    (key_dir_b / "ssh_key").write_text(local_key)
+    (key_dir_b / "ssh_key").write_text(_generate_test_ssh_private_key())
     (key_dir_b / "lease.json").write_text("{}")
 
+    assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    assert (key_dir_b / "ssh_key").read_text() == synced_key
+    assert known_hosts_line in (key_dir_b / "known_hosts").read_text()
+
+
+def test_materializer_keeps_leaseholder_material_the_record_has_not_advanced_past(tmp_path: Path) -> None:
+    """The leasing install's local rotation, not yet pushed, is never clobbered by the older record.
+
+    The revision + content-hash gate is what protects it: the record's payload
+    is the one this device contributed, so re-applying is not due -- and the
+    rotated pin is user-origin, so the bootstrap-drift hatch stays closed too.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_b, store_b, session_b, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, host_id, _, known_hosts_line = _provision_cloud_workspace(paths_b, session_b, profile_b, cli)
+
+    # B is the leaseholder and contributed the record's current material; it
+    # then rotates its key material locally, ahead of any push.
+    key_dir_b = _cloud_host_key_dir(profile_b, host_id)
+    (key_dir_b / "lease.json").write_text("{}")
+    rotated_key = _generate_test_ssh_private_key()
+    (key_dir_b / "ssh_key").write_text(rotated_key)
+    (key_dir_b / "ssh_key.pub").write_text("ssh-ed25519 AAAAROTATEDPUB rotated\n")
+    rotated_pin = f"ssh-ed25519 AAAAROTATEDPIN{uuid4().hex}"
+    _pin_at_line_endpoint(
+        key_dir_b / "known_hosts", known_hosts_line, rotated_pin, host_id=host_id, origin=HostKeyOrigin.USER
+    )
+
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
-    assert (key_dir_b / "ssh_key").read_text() == local_key
+    assert (key_dir_b / "ssh_key").read_text() == rotated_key
+    pins = load_current_host_key_pins(key_dir_b / "known_hosts")
+    assert [pin.public_key for pin in pins] == [rotated_pin]
+
+
+def test_materializer_reapplies_record_pins_over_stale_bootstrap_pins_despite_a_stamped_revision(
+    tmp_path: Path,
+) -> None:
+    """Regression: a leased-here host whose apply was skipped by an older client converges anyway.
+
+    Older clients stamped ``last_applied_secrets_revision`` while skipping the
+    SSH half for leased-here hosts, leaving only stale bootstrap (bake-time)
+    pins behind -- so the revision gate alone would never reopen. The
+    bootstrap-drift hatch must detect that the record's pins were never
+    absorbed and re-apply them.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    agent_id, host_id, synced_key, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
+
+    paths_b, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+
+    # B leased the host long ago: lease.json, an old keypair, and a stale
+    # BOOTSTRAP pin (the connector's bake-time key) at the record's endpoint.
+    key_dir_b = _cloud_host_key_dir(profile_b, host_id)
+    key_dir_b.mkdir(parents=True)
+    (key_dir_b / "ssh_key").write_text(_generate_test_ssh_private_key())
+    (key_dir_b / "ssh_key.pub").write_text("ssh-ed25519 AAAAOLDPUB old\n")
+    (key_dir_b / "lease.json").write_text("{}")
+    _pin_at_line_endpoint(
+        key_dir_b / "known_hosts",
+        known_hosts_line,
+        f"ssh-ed25519 AAAABAKETIME{uuid4().hex}",
+        host_id=host_id,
+        origin=HostKeyOrigin.BOOTSTRAP,
+    )
+
+    # Simulate the older client's stamp: revision marked applied with a
+    # non-matching parity hash, persisted in the on-disk replica.
+    replica_path = paths_b.data_dir / "workspace_records" / f"{_USER_ID}.json"
+    replica = json.loads(replica_path.read_text())
+    for row in replica["records"]:
+        if row["agent_id"] == str(agent_id):
+            row["last_applied_secrets_revision"] = row["revision"]
+            row["secrets_content_hash"] = "0" * 64
+    replica_path.write_text(json.dumps(replica))
+    store_fresh = WorkspaceRecordStore(
+        paths=paths_b,
+        mngr_host_dir=profile_b.parent.parent,
+        cli=cli,
+        device_id=device_id_for_test("desktop"),
+        device_label="desktop",
+    )
+
+    assert store_fresh.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
+    assert (key_dir_b / "ssh_key").read_text() == synced_key
+    pins = load_current_host_key_pins(key_dir_b / "known_hosts")
+    assert [pin.public_key for pin in pins] == [" ".join(known_hosts_line.split()[1:])]
+    assert pins[0].origin is HostKeyOrigin.USER
 
 
 def test_materializer_replaces_a_placeholder_keypair(tmp_path: Path) -> None:
