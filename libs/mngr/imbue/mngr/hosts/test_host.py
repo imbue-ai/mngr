@@ -11,6 +11,7 @@ import shlex
 import stat
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from collections.abc import Generator
 from datetime import datetime
@@ -63,6 +64,7 @@ from imbue.mngr.providers.ssh.instance import SSHHostConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.read_deadline import reads_bounded_for
 from imbue.mngr.utils.testing import build_test_known_hosts_file
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import generate_ssh_keypair
@@ -663,47 +665,50 @@ def test_local_host_always_running(host_with_temp_dir: tuple[Host, Path]) -> Non
     assert state == HostState.RUNNING
 
 
-def test_get_uptime(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test getting host uptime."""
+def test_read_boot_info(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """read_boot_info returns a plausible past boot time and a positive uptime."""
     host, _ = host_with_temp_dir
-    uptime = host.get_uptime_seconds()
-    assert uptime > 0
+    boot_info = host.read_boot_info()
 
-
-def test_get_boot_time(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test getting host boot time."""
-    host, _ = host_with_temp_dir
-    boot_time = host.get_boot_time()
-    assert boot_time is not None
-    # Boot time should be in the past
+    assert boot_info.boot_time is not None
     now = datetime.now(timezone.utc)
-    assert boot_time < now
+    assert boot_info.boot_time < now
     # Boot time should be within a reasonable range (not more than 1 year ago)
     one_year_ago = now - dt.timedelta(days=365)
-    assert boot_time > one_year_ago
+    assert boot_info.boot_time > one_year_ago
+    assert boot_info.uptime_seconds is not None
+    assert boot_info.uptime_seconds > 0
 
 
-def test_get_boot_time_and_uptime_are_consistent(host_with_temp_dir: tuple[Host, Path]) -> None:
-    """Test that boot_time and uptime_seconds give consistent results."""
+def test_read_boot_info_boot_time_and_uptime_are_consistent(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """The boot time and uptime from one read_boot_info probe agree with each other."""
+    host, _ = host_with_temp_dir
+    boot_info = host.read_boot_info()
+
+    assert boot_info.boot_time is not None
+    assert boot_info.uptime_seconds is not None
+
+    now = datetime.now(timezone.utc)
+    expected_boot_time = now - dt.timedelta(seconds=boot_info.uptime_seconds)
+
+    # Within a couple of seconds: macOS truncates the host-side uptime to integer
+    # seconds, and a little time elapses between the host measurement and now() here.
+    diff = abs((boot_info.boot_time - expected_boot_time).total_seconds())
+    assert diff < 2.0, f"boot_time and uptime differ by {diff} seconds"
+
+
+def test_reads_bounded_for_clamps_a_slow_command(host_with_temp_dir: tuple[Host, Path]) -> None:
+    """An active read budget clamps a command's timeout so it self-terminates within the budget."""
     host, _ = host_with_temp_dir
 
-    boot_time = host.get_boot_time()
-    uptime = host.get_uptime_seconds()
+    start = time.monotonic()
+    with reads_bounded_for(2.0):
+        result = host.execute_idempotent_command("sleep 36284")
+    elapsed = time.monotonic() - start
 
-    assert boot_time is not None
-
-    # Calculate expected boot time from uptime
-    now = datetime.now(timezone.utc)
-    expected_boot_time = now - dt.timedelta(seconds=uptime)
-
-    # They should be within 1.5 seconds of each other.
-    # We need > 1 second tolerance because:
-    # - get_uptime_seconds() uses `date +%s` which truncates to integer seconds
-    # - datetime.now() has microsecond precision
-    # - If these calls span a second boundary, we get ~1 second of error
-    # The extra 0.5s accounts for time elapsed between the calls.
-    diff = abs((boot_time - expected_boot_time).total_seconds())
-    assert diff < 1.5, f"boot_time and uptime differ by {diff} seconds"
+    # The command was clamped and killed within the budget, not left to run for its full duration.
+    assert elapsed < 20.0, f"command was not clamped: took {elapsed}s"
+    assert not result.success
 
 
 # =============================================================================

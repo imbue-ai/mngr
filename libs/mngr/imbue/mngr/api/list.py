@@ -54,6 +54,7 @@ from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import with_tolerant_paths
 from imbue.mngr.utils.error_utils import format_exception_traceback
 from imbue.mngr.utils.pydantic_utils import unwrap_optional
+from imbue.mngr.utils.read_deadline import reads_bounded_for
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
 
@@ -764,13 +765,17 @@ def _collect_and_emit_details_for_host(
     result: ListResult,
     results_lock: Lock,
 ) -> None:
-    _host_details, agent_details_list = provider.get_host_and_agent_details(
-        host_ref,
-        agent_refs,
-        field_generators=params.field_generators,
-        offline_field_generators=params.offline_field_generators,
-        on_error=lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
-    )
+    # Bound each host's live detail collection by a wall-clock budget so one slow or
+    # contended host's reads self-terminate and fall back to offline/partial data instead
+    # of stalling the whole listing (all hosts are awaited before list_agents returns).
+    with reads_bounded_for(provider.mngr_ctx.config.host_detail_read_timeout_seconds):
+        _host_details, agent_details_list = provider.get_host_and_agent_details(
+            host_ref,
+            agent_refs,
+            field_generators=params.field_generators,
+            offline_field_generators=params.offline_field_generators,
+            on_error=lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
+        )
     for agent_details in agent_details_list:
         # Apply CEL filters if provided
         if params.compiled_include_filters or params.compiled_exclude_filters:

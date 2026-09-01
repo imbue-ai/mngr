@@ -340,6 +340,7 @@ def load_config(
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
     config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
     config_dict["agent_ready_timeout"] = config.agent_ready_timeout
+    config_dict["host_detail_read_timeout_seconds"] = config.host_detail_read_timeout_seconds
     config_dict["allow_settings_key_assignment_narrowing"] = config.allow_settings_key_assignment_narrowing
 
     # Allow plugins to modify config_dict before validation
@@ -1149,6 +1150,7 @@ def parse_config(
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
     kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
     kwargs["agent_ready_timeout"] = raw.pop("agent_ready_timeout", None)
+    kwargs["host_detail_read_timeout_seconds"] = raw.pop("host_detail_read_timeout_seconds", None)
     kwargs["allow_settings_key_assignment_narrowing"] = raw.pop("allow_settings_key_assignment_narrowing", None)
 
     if len(raw) > 0:

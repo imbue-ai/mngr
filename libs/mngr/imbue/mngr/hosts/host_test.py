@@ -58,14 +58,14 @@ from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _increment_local_generation_counter
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_acquired_generation_token
-from imbue.mngr.hosts.host import _parse_boot_time_output
-from imbue.mngr.hosts.host import _parse_uptime_output
+from imbue.mngr.hosts.host import _parse_boot_info_output
 from imbue.mngr.hosts.outer_host import ActiveRemoteLock
 from imbue.mngr.hosts.outer_host import SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
 from imbue.mngr.hosts.outer_host import SSH_KEEPALIVE_INTERVAL_SECONDS
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
@@ -1265,69 +1265,47 @@ def test_build_agent_launch_steps_writes_command_verbatim(tmp_path: Path) -> Non
 
 
 # =========================================================================
-# Tests for _parse_uptime_output
+# Tests for _parse_boot_info_output
 # =========================================================================
 
 
-def test_parse_uptime_output_macos_format() -> None:
-    """Test parsing macOS-style uptime output (boot timestamp + current timestamp)."""
-    # macOS sysctl gives boot time, date gives current time
-    stdout = "1700000000\n1700003600\n"
-    result = _parse_uptime_output(stdout)
-    assert result == 3600.0
+def test_parse_boot_info_output_both_values() -> None:
+    """Line 1 is the boot epoch, line 2 the host-measured uptime (integer or float)."""
+    result = _parse_boot_info_output("1700000000\n3600\n")
+    assert result.boot_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert result.uptime_seconds == 3600.0
+
+    linux = _parse_boot_info_output("1700000000\n12345.67\n")
+    assert linux.boot_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert linux.uptime_seconds == 12345.67
 
 
-def test_parse_uptime_output_linux_format() -> None:
-    """Test parsing Linux-style /proc/uptime output."""
-    stdout = "12345.67 98765.43\n"
-    result = _parse_uptime_output(stdout)
-    assert result == 12345.67
+def test_parse_boot_info_output_empty() -> None:
+    """Empty output leaves both fields unknown."""
+    assert _parse_boot_info_output("") == HostBootInfo()
+    assert _parse_boot_info_output("\n\n") == HostBootInfo()
 
 
-def test_parse_uptime_output_empty() -> None:
-    """Test parsing empty output returns 0."""
-    assert _parse_uptime_output("") == 0.0
-    assert _parse_uptime_output("  \n") == 0.0
+def test_parse_boot_info_output_boot_only() -> None:
+    """A boot line with an empty uptime line leaves uptime unknown."""
+    result = _parse_boot_info_output("1700000000\n\n")
+    assert result.boot_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert result.uptime_seconds is None
 
 
-def test_parse_uptime_output_unexpected_lines() -> None:
-    """Test parsing output with unexpected number of lines returns 0."""
-    stdout = "line1\nline2\nline3\n"
-    assert _parse_uptime_output(stdout) == 0.0
+def test_parse_boot_info_output_uptime_only_is_positional() -> None:
+    """An empty boot line does not shift the uptime into the boot slot (positional read)."""
+    result = _parse_boot_info_output("\n12345.67\n")
+    assert result.boot_time is None
+    assert result.uptime_seconds == 12345.67
 
 
-def test_parse_uptime_output_non_numeric_two_lines() -> None:
-    """Test parsing non-numeric macOS-style output returns 0."""
-    assert _parse_uptime_output("error\nmessage\n") == 0.0
-
-
-def test_parse_uptime_output_non_numeric_single_line() -> None:
-    """Test parsing non-numeric Linux-style output returns 0."""
-    assert _parse_uptime_output("not_a_number\n") == 0.0
-
-
-# =========================================================================
-# Tests for _parse_boot_time_output
-# =========================================================================
-
-
-def test_parse_boot_time_output_valid_timestamp() -> None:
-    """Test parsing a valid Unix timestamp returns the correct datetime."""
-    # Both macOS sysctl and Linux btime produce a single Unix timestamp
-    result = _parse_boot_time_output("1700000000\n")
-    assert result is not None
-    assert result == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
-
-
-def test_parse_boot_time_output_empty() -> None:
-    """Test parsing empty output returns None."""
-    assert _parse_boot_time_output("") is None
-    assert _parse_boot_time_output("  \n") is None
-
-
-def test_parse_boot_time_output_non_numeric() -> None:
-    """Test parsing non-numeric output returns None."""
-    assert _parse_boot_time_output("not_a_number\n") is None
+def test_parse_boot_info_output_non_numeric() -> None:
+    """Non-numeric values leave the corresponding field unknown."""
+    assert _parse_boot_info_output("not_a_number\nalso_bad\n") == HostBootInfo()
+    partial = _parse_boot_info_output("1700000000\nnot_a_number\n")
+    assert partial.boot_time == datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
+    assert partial.uptime_seconds is None
 
 
 # =========================================================================

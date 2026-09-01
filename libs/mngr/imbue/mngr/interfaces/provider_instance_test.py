@@ -3,6 +3,7 @@
 import threading
 from collections.abc import Mapping
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import cast
@@ -19,6 +20,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -90,8 +92,7 @@ def _make_mock_online_host(host_id: HostId) -> MagicMock:
     host.get_name.return_value = "test-host"
     host.get_state.return_value = HostState.RUNNING
     host.get_ssh_connection_info.return_value = None
-    host.get_boot_time.return_value = None
-    host.get_uptime_seconds.return_value = 0.0
+    host.read_boot_info.return_value = HostBootInfo()
     host.get_provider_resources.return_value = None
     host.is_lock_held.return_value = False
     host.get_certified_data.return_value = _make_certified_data(host_id)
@@ -1253,3 +1254,32 @@ def test_discover_agents_on_host_triggers_healing_for_online_hosts(
     assert agents == [live_agent]
     assert ssh_info is None
     assert provider.persisted_agent_data_calls == [(host_id, dict(live_agent.certified_data))]
+
+
+# =============================================================================
+# Detail-collection dedup tests
+# =============================================================================
+
+
+def test_get_host_and_agent_details_populates_boot_time_and_uptime_from_one_probe(
+    host_id: HostId, provider: MockProviderInstance
+) -> None:
+    """HostDetails boot time and uptime come from the single read_boot_info probe."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.return_value = []
+    boot_time = datetime.now(timezone.utc) - timedelta(hours=3)
+    online_host.read_boot_info.return_value = HostBootInfo(boot_time=boot_time, uptime_seconds=3 * 60 * 60)
+    provider.mock_hosts = [online_host]
+    host_ref = DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName("test-host"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    host_details, _agent_details_list = provider.get_host_and_agent_details(host_ref, [])
+
+    assert host_details.boot_time == boot_time
+    assert host_details.uptime_seconds == 3 * 60 * 60
+    # A single probe answers both -- not one shell-out per value.
+    online_host.read_boot_info.assert_called_once()

@@ -986,6 +986,7 @@ def test_load_config_threads_every_field_from_toml(
     assert config.is_error_reporting_enabled is False
     assert config.strict_host_record_parsing is True
     assert config.default_destroyed_host_persisted_seconds == 12345.0
+    assert config.host_detail_read_timeout_seconds == 45.0
     assert config.retry.connect_retry_times == 5
     assert config.retry.connect_retry_delay == "10s"
     assert config.tmux.primary_window_name == "main"
@@ -1102,6 +1103,7 @@ _SAMPLE_CONFIG_VALUES: dict[str, Any] = {
     "default_destroyed_host_persisted_seconds": 12345.0,
     "default_min_online_host_age_seconds": 600.0,
     "agent_ready_timeout": 15.0,
+    "host_detail_read_timeout_seconds": 45.0,
     "allow_settings_key_assignment_narrowing": True,
 }
 
@@ -1121,6 +1123,7 @@ strict_host_record_parsing = true
 default_destroyed_host_persisted_seconds = 12345.0
 default_min_online_host_age_seconds = 600.0
 agent_ready_timeout = 15.0
+host_detail_read_timeout_seconds = 45.0
 allow_settings_key_assignment_narrowing = true
 
 [commands.create]

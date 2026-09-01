@@ -122,8 +122,9 @@ def _build_host_details_from_host(
     is_locked: bool | None = None
     locked_time: datetime | None = None
     if isinstance(host, OnlineHostInterface):
-        boot_time = host.get_boot_time()
-        uptime_seconds = host.get_uptime_seconds()
+        boot_info = host.read_boot_info()
+        boot_time = boot_info.boot_time
+        uptime_seconds = boot_info.uptime_seconds
         resource = host.get_provider_resources()
         is_locked = host.is_lock_held()
         # Only fetch locked_time when the lock is held to avoid a redundant
@@ -281,6 +282,37 @@ def build_agent_details_from_offline_ref(
         host=host_details,
         plugin=plugin_data,
     )
+
+
+def _build_offline_host_and_agent_details(
+    provider: "ProviderInstanceInterface",
+    host_ref: DiscoveredHost,
+    agent_refs: Sequence[DiscoveredAgent],
+    offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]] | None,
+    is_authentication_failure: bool = False,
+) -> tuple[HostDetails, list[AgentDetails]]:
+    """Build a host's details and agents from the provider's offline view, making no live host reads.
+
+    The listing fallback for when a host's live detail collection cannot be
+    completed -- whether it is unreachable or too slow to answer within its budget.
+    Reads only persisted records via ``to_offline_host`` (no SSH), so it is cheap
+    and cannot itself stall. For a non-authentication failure, lets the provider
+    correct the offline-derived state from an out-of-band signal it has (e.g.
+    docker's daemon reports the container is still running -> UNKNOWN rather than
+    CRASHED) so a live host with a dead inner sshd is not misreported as offline.
+    """
+    resolved_offline_field_generators = offline_field_generators or {}
+    host = provider.to_offline_host(host_ref.host_id)
+    host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
+    if not is_authentication_failure:
+        fallback_state = provider.get_connection_error_fallback_state(host_ref.host_id)
+        if fallback_state is not None:
+            host_details = host_details.model_copy_update(to_update(host_details.field_ref().state, fallback_state))
+    agent_details_list = [
+        build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
+        for agent_ref in agent_refs
+    ]
+    return host_details, agent_details_list
 
 
 @contextmanager
@@ -987,26 +1019,13 @@ class ProviderInstanceInterface(MutableModel, ABC):
         except HostConnectionError as e:
             self.on_connection_error(host_ref.host_id)
             logger.debug("Host {} unreachable, falling back to offline data: {}", host_ref.host_id, e)
-            host = self.to_offline_host(host_ref.host_id)
-            is_authentication_failure = isinstance(e, HostAuthenticationError)
-            host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
-            # The offline derivation can only reason from persisted records, so a
-            # shutdown-capable provider reports CRASHED for a host that never
-            # recorded a clean stop. When the connection failure is not an auth
-            # failure, give the provider a chance to correct that from an
-            # out-of-band signal it has (e.g. docker's daemon reports the
-            # container is still running -> UNKNOWN rather than CRASHED), so a
-            # live host with a dead inner sshd is not misreported as offline.
-            if not is_authentication_failure:
-                fallback_state = self.get_connection_error_fallback_state(host_ref.host_id)
-                if fallback_state is not None:
-                    host_details = host_details.model_copy_update(
-                        to_update(host_details.field_ref().state, fallback_state)
-                    )
-            agent_details_list = [
-                build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
-                for agent_ref in agent_refs
-            ]
+            host_details, agent_details_list = _build_offline_host_and_agent_details(
+                self,
+                host_ref,
+                agent_refs,
+                offline_field_generators,
+                is_authentication_failure=isinstance(e, HostAuthenticationError),
+            )
 
         finally:
             if initial_host is not None:

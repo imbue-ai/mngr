@@ -1302,6 +1302,7 @@ def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
         default_destroyed_host_persisted_seconds=98765.0,
         default_min_online_host_age_seconds=4321.0,
         agent_ready_timeout=42.0,
+        host_detail_read_timeout_seconds=PositiveFloat(1234.0),
         allow_settings_key_assignment_narrowing=True,
     )
 

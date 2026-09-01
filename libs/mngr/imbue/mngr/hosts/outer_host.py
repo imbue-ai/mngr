@@ -71,6 +71,7 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.utils.read_deadline import remaining_read_timeout
 
 
 def create_local_pyinfra_host() -> PyinfraHost:
@@ -1229,7 +1230,9 @@ class OuterHost(OuterHostInterface):
             return path.read_bytes()
         else:
             output = io.BytesIO()
-            self._get_file(str(path), output)
+            # Clamp the remote read to any active per-host read budget so a wedged transfer
+            # self-terminates within it (surfacing as HostConnectionError) rather than hanging.
+            self._get_file(str(path), output, timeout_seconds=remaining_read_timeout(None))
             return output.getvalue()
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:

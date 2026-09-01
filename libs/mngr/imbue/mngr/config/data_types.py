@@ -69,6 +69,11 @@ _DEFAULT_DISCOVERY_ERROR_TIMEOUT_SECONDS: Final[float] = 120.0
 _DEFAULT_HOST_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
 _DEFAULT_AGENT_DISCOVERY_TIMEOUT_SECONDS: Final[float] = 30.0
 
+# Wall-clock budget for reading one host's live details while listing agents/hosts.
+# A host slower than this falls back to its offline/partial data so one slow or
+# contended host cannot stall the whole read.
+_DEFAULT_HOST_DETAIL_READ_TIMEOUT_SECONDS: Final[float] = 20.0
+
 # === Helper Functions ===
 
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
@@ -504,6 +509,12 @@ class MngrConfig(FrozenModel):
     retry: RetryConfig = Field(
         default_factory=RetryConfig,
         description="Connection retry configuration",
+    )
+    host_detail_read_timeout_seconds: PositiveFloat = Field(
+        default=PositiveFloat(_DEFAULT_HOST_DETAIL_READ_TIMEOUT_SECONDS),
+        description="How long (in seconds) to wait for a single host's live detail collection while listing "
+        "agents/hosts before falling back to that host's offline/partial data, so one slow or contended host "
+        "cannot stall the whole read.",
     )
     logging: LoggingConfig = Field(
         default_factory=LoggingConfig,

@@ -23,6 +23,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
@@ -627,17 +628,12 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     # =========================================================================
 
     @abstractmethod
-    def get_boot_time(self) -> datetime | None:
-        """Get the host boot time as a datetime.
+    def read_boot_info(self) -> HostBootInfo:
+        """Read the host's boot time and uptime together in a single host-side probe.
 
-        Returns the actual boot time from the OS, not computed from uptime,
-        to avoid timing inconsistencies.
+        Uptime is measured on the host (not the local clock minus the host's boot
+        time), so it is unaffected by clock skew between here and the host.
         """
-        ...
-
-    @abstractmethod
-    def get_uptime_seconds(self) -> float:
-        """Return the number of seconds since this host was last started."""
         ...
 
     @abstractmethod

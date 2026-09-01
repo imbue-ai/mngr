@@ -276,6 +276,15 @@ class HostResources(FrozenModel):
     )
 
 
+class HostBootInfo(FrozenModel):
+    """A host's boot time and its uptime, read together in a single host-side probe."""
+
+    boot_time: datetime | None = Field(default=None, description="When the host was last started (None if unknown)")
+    uptime_seconds: float | None = Field(
+        default=None, description="Seconds since the host was last started, measured on the host (None if unknown)"
+    )
+
+
 class ActivityConfig(FrozenModel):
     """Configuration for host activity detection and idle timeout."""
 

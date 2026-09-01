@@ -82,6 +82,7 @@ from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
+from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -106,6 +107,7 @@ from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.read_deadline import remaining_read_timeout
 
 
 @pure
@@ -688,6 +690,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         ``CommandTimeoutError`` (a ``MngrError``) instead -- for callers that must
         not silently treat a wedged command as "no output".
         """
+        # Clamp to any active per-host read budget so a wedged command self-terminates within it.
+        timeout_seconds = remaining_read_timeout(timeout_seconds)
         logger.trace("Executing command on host {}: {}", self.id, command)
         logger.trace(
             "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
@@ -1401,41 +1405,29 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Return the host last stop time as a datetime, or None if unknown."""
         return None
 
-    def get_uptime_seconds(self) -> float:
-        """Get host uptime in seconds."""
-        # Single command that detects the platform on the host and dispatches accordingly,
-        # so it works for both local and remote hosts regardless of OS
-        result = self.execute_idempotent_command(
-            'if [ "$(uname -s)" = "Darwin" ]; then '
-            "sysctl -n kern.boottime 2>/dev/null | awk -F'[ ,=]+' '{for(i=1;i<=NF;i++) if($i==\"sec\") print $(i+1)}' && date +%s; "
-            "else "
-            "cat /proc/uptime 2>/dev/null; "
-            "fi"
-        )
-        if result.success:
-            return _parse_uptime_output(result.stdout)
+    def read_boot_info(self) -> HostBootInfo:
+        """Read the host's boot time and uptime in a single host-side probe.
 
-        return 0.0
-
-    def get_boot_time(self) -> datetime | None:
-        """Get the host boot time as a datetime.
-
-        Returns the actual boot time from the OS, not computed from uptime,
-        to avoid timing inconsistencies.
+        A single platform-dispatching command emits two lines -- the boot time (epoch
+        seconds) then the uptime (seconds) -- so it works for local and remote hosts
+        regardless of OS. Uptime is computed on the host (Darwin: now - boottime;
+        Linux: /proc/uptime), so it is not skewed by clock drift between here and the host.
         """
-        # Single command that detects the platform on the host and dispatches accordingly,
-        # so it works for both local and remote hosts regardless of OS
         result = self.execute_idempotent_command(
             'if [ "$(uname -s)" = "Darwin" ]; then '
-            "sysctl -n kern.boottime 2>/dev/null | awk -F'[ ,=]+' '{for(i=1;i<=NF;i++) if($i==\"sec\") print $(i+1)}'; "
+            "boot=$(sysctl -n kern.boottime 2>/dev/null | awk -F'[ ,=]+' '{for(i=1;i<=NF;i++) if($i==\"sec\") print $(i+1)}'); "
+            'if [ -n "$boot" ]; then uptime=$(( $(date +%s) - $boot )); else uptime=; fi; '
+            'echo "$boot"; echo "$uptime"; '
             "else "
-            "grep '^btime ' /proc/stat 2>/dev/null | awk '{print $2}'; "
+            "boot=$(grep '^btime ' /proc/stat 2>/dev/null | awk '{print $2}'); "
+            "uptime=$(awk '{print $1}' /proc/uptime 2>/dev/null); "
+            'echo "$boot"; echo "$uptime"; '
             "fi"
         )
         if result.success:
-            return _parse_boot_time_output(result.stdout)
+            return _parse_boot_info_output(result.stdout)
 
-        return None
+        return HostBootInfo()
 
     def get_provider_resources(self) -> HostResources:
         """Get resources from the provider."""
@@ -4211,42 +4203,27 @@ def _build_start_agent_shell_command(
 
 
 @pure
-def _parse_uptime_output(stdout: str) -> float:
-    """Parse the output of the cross-platform uptime command.
+def _parse_boot_info_output(stdout: str) -> HostBootInfo:
+    """Parse the cross-platform boot-info command's two lines: boot epoch, then uptime seconds.
 
-    Handles two formats:
-    - macOS: two lines (boot timestamp, current timestamp) from sysctl + date
-    - Linux: single line from /proc/uptime (uptime_seconds idle_seconds)
+    Either line may be empty (that value is left unknown / None). Lines are read
+    positionally rather than filtered, so a missing boot time does not shift the
+    uptime into its place.
     """
-    output = stdout.strip()
-    output_lines = output.split("\n")
-    try:
-        if len(output_lines) == 2:
-            # macOS: two lines -- boot time and current time
-            boot_time = int(output_lines[0])
-            current_time = int(output_lines[1])
-            return float(current_time - boot_time)
-        elif len(output_lines) == 1 and output:
-            # Linux: single line from /proc/uptime
-            uptime_str = output.split()[0]
-            return float(uptime_str)
-        else:
-            return 0.0
-    except (ValueError, OSError):
-        return 0.0
-
-
-@pure
-def _parse_boot_time_output(stdout: str) -> datetime | None:
-    """Parse the output of the cross-platform boot time command.
-
-    Both macOS (sysctl) and Linux (btime) produce a single Unix timestamp.
-    """
-    try:
-        boot_timestamp = int(stdout.strip())
-        return datetime.fromtimestamp(boot_timestamp, tz=timezone.utc)
-    except (ValueError, OSError):
-        return None
+    lines = stdout.rstrip("\n").split("\n")
+    boot_time: datetime | None = None
+    if lines and lines[0].strip():
+        try:
+            boot_time = datetime.fromtimestamp(int(lines[0].strip()), tz=timezone.utc)
+        except (ValueError, OSError):
+            boot_time = None
+    uptime_seconds: float | None = None
+    if len(lines) >= 2 and lines[1].strip():
+        try:
+            uptime_seconds = float(lines[1].strip())
+        except (ValueError, OSError):
+            uptime_seconds = None
+    return HostBootInfo(boot_time=boot_time, uptime_seconds=uptime_seconds)
 
 
 @pure
