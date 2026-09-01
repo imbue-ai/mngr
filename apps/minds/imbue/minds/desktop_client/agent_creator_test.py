@@ -1366,7 +1366,7 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
 # Create-time credential regression tests
 #
 # AI-provider selection moved out of the create flow entirely: workspaces boot
-# unauthenticated and sign in through the workspace's own Claude modal. These
+# unauthenticated and sign in through the workspace's own provider chooser. These
 # guard the removal -- create attempt must never mint a LiteLLM key (the mint moved
 # to the desktop app's /settings/ai-keys page; see ai_keys_test.py).
 # ---------------------------------------------------------------------------

@@ -681,6 +681,9 @@ class _FakeConnection:
 
 
 class _ClosedConnection:
+    def send(self, message: str) -> None:
+        raise ConnectionClosed(None, None)
+
     def recv(self, timeout: float | None) -> Any:
         raise ConnectionClosed(None, None)
 
@@ -699,6 +702,11 @@ def test_websocket_transport_send_receive_and_close() -> None:
 
 
 def test_websocket_transport_maps_connection_closed_to_transport_error() -> None:
+    """Both directions surface a dead connection as the typed transport error: a request
+    against a closed socket must fail as ``TransportClosedError`` whether the write or the
+    read hits the closure first (callers map that error to a retryable not-ready)."""
     transport = WebsocketAppServerTransport(connection=_ClosedConnection())
     with pytest.raises(TransportClosedError):
         transport.receive(1.0)
+    with pytest.raises(TransportClosedError):
+        transport.send("hello")

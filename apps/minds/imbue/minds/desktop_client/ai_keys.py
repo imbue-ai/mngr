@@ -1,6 +1,6 @@
 """Workspace AI-key minting: account resolution + LiteLLM key creation.
 
-The workspace's in-UI Claude sign-in modal links to the desktop client's
+The workspace's in-UI sign-in flow links to the desktop client's
 mint page (GET /settings/ai-keys, handlers in ``app.py``) when the user
 picks "Sign in with Imbue". The page is keyed by the workspace's id
 (``?workspace=<workspace_id>``; the machine's host id is also accepted
@@ -14,7 +14,7 @@ Mint-only by design: one action mints a LiteLLM virtual key against the
 owning account -- with the workspace id baked into the key's alias and
 metadata, so keys are attributable without any editable input -- and
 produces an env-var-style credential blob (``ANTHROPIC_BASE_URL`` +
-``ANTHROPIC_API_KEY``) for pasting back into the workspace modal. Key
+``ANTHROPIC_API_KEY``) for pasting back into the workspace's sign-in flow. Key
 listing/revocation stays a CLI concern
 (``mngr imbue_cloud keys litellm list/delete``).
 """

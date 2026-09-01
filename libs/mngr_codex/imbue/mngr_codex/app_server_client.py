@@ -90,7 +90,7 @@ class CodexAppServerError(PluginMngrError):
 
 
 class TransportClosedError(CodexAppServerError):
-    """Raised by a transport's ``receive`` when the underlying connection has closed."""
+    """Raised by a transport's ``send`` or ``receive`` when the underlying connection has closed."""
 
 
 @runtime_checkable
@@ -98,9 +98,10 @@ class AppServerTransport(Protocol):
     """A duplex channel of JSON-RPC text frames to a single app-server connection.
 
     The real implementation wraps a WebSocket; tests inject a scripted in-memory
-    double. ``receive`` returns the next inbound frame, raises ``TimeoutError`` if none
-    arrives within ``timeout`` seconds, and raises :class:`TransportClosedError` once
-    the connection is closed.
+    double. ``receive`` returns the next inbound frame and raises ``TimeoutError`` if
+    none arrives within ``timeout`` seconds. Both ``send`` and ``receive`` raise
+    :class:`TransportClosedError` once the connection is closed, so a request against
+    a dead connection surfaces as that typed error on whichever side hits it first.
     """
 
     def send(self, message: str) -> None: ...
@@ -118,7 +119,10 @@ class WebsocketAppServerTransport(MutableModel):
     connection: Any
 
     def send(self, message: str) -> None:
-        self.connection.send(message)
+        try:
+            self.connection.send(message)
+        except ConnectionClosed as exc:
+            raise TransportClosedError("app-server websocket connection closed") from exc
 
     def receive(self, timeout: float | None) -> str:
         try:

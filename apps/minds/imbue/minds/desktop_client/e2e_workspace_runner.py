@@ -700,7 +700,7 @@ def _drive_create_flow(
     form for those modes and ignored (the row is hidden) for others.
 
     There is no AI-provider or API-key field: workspaces boot unauthenticated
-    and sign in through the workspace's own Claude sign-in modal afterwards.
+    and sign in through the workspace's own provider chooser afterwards.
     """
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
@@ -979,9 +979,10 @@ _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
-# The DEFAULT_WORKSPACE_TEMPLATE bootstrap creates the initial chat agent asynchronously after the
-# dockview first renders (it shows "Waiting for initial chat agent..." until
-# then), so the chat input can take a while to appear on a fresh first boot.
+# The workspace boots with no chat: signing in from the first-run provider
+# chooser starts the workspace's first chat, and creating that agent runs
+# asynchronously, so the chat input can take a while to appear on a fresh
+# first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
 _CHAT_REPLY_TIMEOUT_SECONDS: Final[int] = 240
 _DESTROY_TIMEOUT_SECONDS: Final[int] = 300
@@ -1128,7 +1129,7 @@ def _agent_id_for_coordinate(content_page: Page, backend_origin: str, coordinate
 
 def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     """Type a unique-token prompt into the dockview chat and wait for the reply to echo it."""
-    logger.info("Waiting up to {}s for the initial chat agent / chat input", _CHAT_INPUT_TIMEOUT_SECONDS)
+    logger.info("Waiting up to {}s for the first chat's input", _CHAT_INPUT_TIMEOUT_SECONDS)
     page.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
     prompt = f"Reply with exactly this token and nothing else: {token}"
     page.fill(_CHAT_INPUT_SELECTOR, prompt)

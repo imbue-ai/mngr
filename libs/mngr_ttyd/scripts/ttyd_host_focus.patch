@@ -1,0 +1,33 @@
+diff --git a/html/src/components/terminal/xterm/index.ts b/html/src/components/terminal/xterm/index.ts
+index b332154..d05e13b 100644
+--- a/html/src/components/terminal/xterm/index.ts
++++ b/html/src/components/terminal/xterm/index.ts
+@@ -199,6 +199,15 @@ export class Xterm {
+                 this.overlayAddon?.showOverlay('\u2702', 200);
+             })
+         );
++        // Host-driven focus: when this client is embedded as one pane among many, the
++        // embedding app decides when the user navigated to the terminal (a tab click, a
++        // view toggle) and posts this message; the client must never take focus on its
++        // own (see onSocketOpen). Clicking the terminal still focuses it natively.
++        register(
++            addEventListener(window, 'message', (e: Event) => {
++                if ((e as MessageEvent).data?.type === 'ttyd-focus') terminal.focus();
++            })
++        );
+         register(addEventListener(window, 'resize', () => fitAddon.fit()));
+         register(addEventListener(window, 'beforeunload', this.onWindowUnload));
+     }
+@@ -274,7 +283,11 @@ export class Xterm {
+ 
+         this.doReconnect = this.reconnect;
+         this.initListeners();
+-        terminal.focus();
++        // Upstream focuses the terminal on every (re)connect -- right for a standalone
++        // full-page terminal, wrong when embedded: a background pane reconnect-looping
++        // against a dead tmux session would steal the host app's focus several times a
++        // second. Focus is granted only by the host (the 'ttyd-focus' message wired in
++        // initListeners) or by clicking the terminal itself.
+     }
+ 
+     @bind

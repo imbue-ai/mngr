@@ -541,9 +541,9 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
 # snapshot *build* drives that same toolchain to create the first workspace).
 # This test reuses that warm toolchain to drive the real Electron app and create
 # a SECOND workspace -- which boots unauthenticated (the create flow injects no
-# AI credentials anymore), signs in through the workspace's own Claude sign-in
-# modal with a raw API key (the modal auto-appears on the fresh workspace, the
-# designed first-boot step), then sends a chat message to its
+# AI credentials anymore), signs in through the workspace's own provider
+# chooser with a raw API key (the chooser auto-appears on the fresh workspace,
+# the designed first-boot step), then sends a chat message to its
 # ``system_interface`` and asserts the agent replies. It runs in the same
 # offload snapshot stage (carries minds_snapshot_resume), so all the "drive
 # Electron" coverage lives in one place instead of a separate cold-install CI
@@ -651,27 +651,36 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def _sign_in_with_api_key_via_modal(page: Page | Frame, api_key: str) -> None:
-    """Drive the workspace's Claude sign-in modal through the API-key path.
+    """Drive the workspace's provider chooser through the API-key path.
 
-    A freshly created workspace has no AI credentials, so the modal opens on
-    its own (the load-time status check) -- the designed first-boot step.
-    Signing in writes the key into the shared Claude settings env block and
-    restarts the workspace's claude agents, so the success state can take a
-    couple of minutes to appear.
+    A freshly created workspace has no providers, so the chooser opens on its own -- the
+    designed first-boot step. The template's own first-run rule fires it once: no providers
+    signed in and this workspace has never been greeted.
+
+    Signing in MINTS AN ACCOUNT (a folder under ``~/.minds/accounts`` plus an index row) rather
+    than writing into a shared settings block, so nothing is restarted here and the verdict is
+    the harness's own probe answering -- which is why the success wait is still generous.
+
+    Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
+    tailwind class: this drives the template's dialog from the other repo, so it has to survive
+    a wording change or a re-port of the UI. The final wait keys on the chooser's stable
+    ``.claude-login-overlay`` container class disappearing.
     """
-    logger.info("Waiting for the Claude sign-in modal to auto-appear")
-    page.wait_for_selector(".claude-login-modal", timeout=120_000)
-    page.click(".claude-login-alts-toggle")
-    page.click('button.claude-login-alt:has-text("Use an API key")')
-    page.wait_for_selector("#claude-login-api-key-input", timeout=10_000)
-    page.fill("#claude-login-api-key-input", api_key)
-    logger.info("Submitting the API key through the modal")
-    page.click('button:has-text("Save & finish")')
-    # Applying credentials restarts the claude agents before reporting success.
-    page.wait_for_selector(".claude-login-status-icon--success", timeout=300_000)
-    page.click('button:has-text("Done")')
+    logger.info("Waiting for the provider chooser to auto-appear")
+    page.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
+    # Anthropic's lane, then its API-key method under "Other ways to sign in" -- the lane's
+    # PRIMARY method is the browser sign-in, which needs a human.
+    page.click("[data-e2e=lane-anthropic]")
+    page.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
+    page.click("[data-e2e=method-api_key]")
+    page.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
+    page.fill("[data-e2e=api-key-input]", api_key)
+    logger.info("Submitting the API key through the chooser")
+    page.click("[data-e2e=save-key]")
+    page.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
+    page.click("[data-e2e=done]")
     page.wait_for_selector(".claude-login-overlay", state="detached", timeout=10_000)
-    logger.info("Signed in via the modal")
+    logger.info("Signed in via the chooser")
 
 
 def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
@@ -688,26 +697,26 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     monkeypatch: pytest.MonkeyPatch,
     xvfb_display: str,
 ) -> None:
-    """Create an unauthenticated Docker workspace, sign in via the modal, chat.
+    """Create an unauthenticated Docker workspace, sign in via the chooser, chat.
 
     The product-level first-boot round-trip: the create flow injects no AI
-    credentials, so the workspace boots unauthenticated and its Claude
-    sign-in modal auto-appears; the test fills the API-key path in the real
-    modal UI, waits for the settings write + agent restart, then asserts the
-    agent answers a chat message (echoes a unique token) -- end-to-end
+    credentials, so the workspace boots unauthenticated and its provider
+    chooser auto-appears; the test fills the API-key path in the real
+    chooser UI (which mints a provider account holding the key), then asserts
+    the agent answers a chat message (echoes a unique token) -- end-to-end
     through the real Electron app and the desktop client proxy.
 
     Runs in the snapshot offload sandbox, reusing the warm Electron toolchain
     baked into the image (the ``xvfb_display`` fixture supplies the display the
     sandbox lacks). Needs a real Anthropic key: the agent only replies if the
     key works. The key is read from ``ANTHROPIC_API_KEY`` (forwarded into
-    this stage from Vault) and typed into the modal -- the Electron child
-    env scrubs that var, so the key reaches the agent only via the modal,
+    this stage from Vault) and typed into the chooser -- the Electron child
+    env scrubs that var, so the key reaches the agent only via the chooser,
     exercising the real sign-in UX. Skips if the key is absent.
     """
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not anthropic_api_key:
-        pytest.skip("ANTHROPIC_API_KEY is required for the modal sign-in workspace chat round-trip")
+        pytest.skip("ANTHROPIC_API_KEY is required for the chooser sign-in workspace chat round-trip")
 
     default_workspace_template_path, host_config_root = _prepare_electron_workspace_inputs(tmp_path, monkeypatch)
 

@@ -998,29 +998,31 @@ class _WorkspaceResult(BaseModel):
     total_create_s: float = 0.0
 
 
-def _sign_in_via_claude_modal(chat: Frame, *, api_key: str, label: str) -> None:
-    """Drive the workspace's Claude sign-in modal through the API-key path.
+def _sign_in_via_provider_chooser(chat: Frame, *, api_key: str, label: str) -> None:
+    """Drive the workspace's provider chooser through the Anthropic API-key path.
 
-    A freshly created workspace has no AI credentials, so the modal opens on
-    its own (the load-time status check) -- the designed first-boot step.
-    Signing in writes the key into the shared Claude settings env block and
-    restarts the workspace's claude agents, so the success state can take a
-    couple of minutes to appear. Selectors mirror
+    A freshly created workspace has no provider accounts, so the chooser opens
+    on its own -- the designed first-boot step. Signing in mints a provider
+    account holding the key rather than writing a shared settings block, so
+    nothing is restarted and the success state is the harness's own probe
+    answering (which is why the success wait is generous). Selectors mirror
     ``test_snapshot_resume._sign_in_with_api_key_via_modal``.
     """
-    logger.info("[{}] waiting for the Claude sign-in modal to auto-appear", label)
-    chat.wait_for_selector(".claude-login-modal", timeout=120_000)
-    chat.click(".claude-login-alts-toggle")
-    chat.click('button.claude-login-alt:has-text("Use an API key")')
-    chat.wait_for_selector("#claude-login-api-key-input", timeout=10_000)
-    chat.fill("#claude-login-api-key-input", api_key)
-    logger.info("[{}] submitting the API key through the modal", label)
-    chat.click('button:has-text("Save & finish")')
-    # Applying credentials restarts the claude agents before reporting success.
-    chat.wait_for_selector(".claude-login-status-icon--success", timeout=300_000)
-    chat.click('button:has-text("Done")')
+    logger.info("[{}] waiting for the provider chooser to auto-appear", label)
+    chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
+    # Anthropic's lane, then its API-key method under "Other ways to sign in" --
+    # the lane's primary method is the browser sign-in, which needs a human.
+    chat.click("[data-e2e=lane-anthropic]")
+    chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
+    chat.click("[data-e2e=method-api_key]")
+    chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
+    chat.fill("[data-e2e=api-key-input]", api_key)
+    logger.info("[{}] submitting the API key through the chooser", label)
+    chat.click("[data-e2e=save-key]")
+    chat.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
+    chat.click("[data-e2e=done]")
     chat.wait_for_selector(".claude-login-overlay", state="detached", timeout=10_000)
-    logger.info("[{}] signed in via the modal", label)
+    logger.info("[{}] signed in via the chooser", label)
 
 
 def _create_workspace_and_first_message(
@@ -1038,7 +1040,7 @@ def _create_workspace_and_first_message(
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
     poll /api/v1/workspaces/operations/create/<id> until DONE, wait for the
-    app to open the workspace, sign in through the workspace's Claude modal
+    app to open the workspace, sign in through the workspace's provider chooser
     (API_KEY mode only -- the create flow injects no AI credentials, so the
     workspace boots unauthenticated), send FIRST_PROMPT, wait for a
     >=2-occurrence reply of FIRST_EXPECT. Snaps each milestone with names
@@ -1063,7 +1065,7 @@ def _create_workspace_and_first_message(
     # opens the sign-in modal instead of creating. The explicit launch_mode
     # selection below overrides the preset's compute choice. There is no
     # AI-provider or API-key field anymore: the workspace boots
-    # unauthenticated and signs in through its own Claude modal afterwards.
+    # unauthenticated and signs in through its own provider chooser afterwards.
     chrome.click('[data-preset="local"]')
     chrome.click("#toggle-advanced")
     chrome.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
@@ -1187,12 +1189,12 @@ def _create_workspace_and_first_message(
     snap_page(chat, snaps.done)
 
     # The create flow injects no AI credentials, so a fresh workspace boots
-    # unauthenticated and its Claude sign-in modal auto-appears on the chat
-    # page (the load-time status check). In API_KEY mode, sign in through the
-    # modal before the first message; in SUBSCRIPTION mode the synced Claude
-    # credentials keep the workspace authenticated and no modal appears.
+    # unauthenticated and its provider chooser auto-appears on the chat page
+    # (the template's first-run rule). In API_KEY mode, sign in through the
+    # chooser before the first message; in SUBSCRIPTION mode the synced Claude
+    # credentials keep the workspace authenticated and no chooser appears.
     if ai_provider == "API_KEY":
-        _sign_in_via_claude_modal(chat, api_key=anthropic_key, label=label)
+        _sign_in_via_provider_chooser(chat, api_key=anthropic_key, label=label)
 
     inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
     inp.fill(FIRST_PROMPT)
@@ -1425,7 +1427,7 @@ def run_e2e() -> int:
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode field, host_name fill,
         # submit, poll until DONE, navigate to chat, sign in through the
-        # workspace's Claude modal in API_KEY mode, send FIRST_PROMPT, wait
+        # workspace's provider chooser in API_KEY mode, send FIRST_PROMPT, wait
         # for >=2 occurrences of FIRST_EXPECT in body).
         # See _create_workspace_and_first_message for the exact step list.
         ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()

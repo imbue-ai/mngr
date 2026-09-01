@@ -58,8 +58,17 @@ def test_prevent_global_keyword() -> None:
     rc.check_global_keyword(_DIR, snapshot(0))
 
 
+# `test_litellm_via_workspace.py` builds Python SCRIPTS as strings and runs them INSIDE a
+# workspace container; their `print` calls are that script's return protocol, read straight back
+# off stdout by the test. The rule's regex cannot tell a string literal from code, which is the
+# misfire this exists for -- it is not an exemption for the test's own output. The count stays at
+# 5: those are the genuine output primitives (`utils/output.py`, `utils/logging.py`, `main.py`,
+# and the hello-world example's server).
+_EMBEDDED_CONTAINER_SCRIPTS: tuple[str, ...] = ("test_litellm_via_workspace.py",)
+
+
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(5))
+    rc.check_bare_print(_DIR, snapshot(5), excluded_patterns=_EMBEDDED_CONTAINER_SCRIPTS)
 
 
 # --- Exception handling ---

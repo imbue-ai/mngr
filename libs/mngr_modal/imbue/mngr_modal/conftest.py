@@ -21,10 +21,12 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import ModalCleanupOutcome
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import delete_modal_apps_in_environment
@@ -50,6 +52,48 @@ from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.testing import make_testing_modal_interface
 from imbue.mngr_modal.testing import make_testing_provider
 from imbue.modal_proxy.testing import FakeModalInterface
+
+# Modal's server-side error for the workspace-wide ephemeral-app cap; matched on the
+# message because it surfaces as a generic ModalProxyError-wrapped MngrError.
+_APP_QUOTA_ERROR_MARKER = "reached limit of"
+_APP_QUOTA_RETRY_TIMEOUT_SECONDS = 240.0
+_APP_QUOTA_RETRY_INTERVAL_SECONDS = 15.0
+
+
+def _build_modal_provider(
+    instance_name: ProviderInstanceName, config: ModalProviderConfig, mngr_ctx: MngrContext
+) -> ModalProviderInstance:
+    """Bootstrap the env and build the provider instance (both idempotent).
+
+    Acceptance fixtures always need to bootstrap the per-session Modal env, so
+    bootstrap_for_host_creation must run before build_provider_instance.
+    """
+    ModalProviderBackend.bootstrap_for_host_creation(
+        name=instance_name,
+        config=config,
+        mngr_ctx=mngr_ctx,
+    )
+    instance = ModalProviderBackend.build_provider_instance(
+        name=instance_name,
+        config=config,
+        mngr_ctx=mngr_ctx,
+    )
+    if not isinstance(instance, ModalProviderInstance):
+        raise ConfigStructureError(f"Expected ModalProviderInstance, got {type(instance).__name__}")
+    return instance
+
+
+def _build_modal_provider_or_none_on_app_quota(
+    instance_name: ProviderInstanceName, config: ModalProviderConfig, mngr_ctx: MngrContext
+) -> ModalProviderInstance | None:
+    """One provider-build attempt for the quota-retry poll: None = cap hit, retry later."""
+    try:
+        return _build_modal_provider(instance_name, config, mngr_ctx)
+    except MngrError as e:
+        if _APP_QUOTA_ERROR_MARKER not in str(e):
+            raise
+        logger.info("Modal ephemeral-app cap hit while creating test provider; will retry: {}", e)
+        return None
 
 
 def make_modal_provider_real(
@@ -87,21 +131,20 @@ def make_modal_provider_real(
         is_snapshotted_after_create=is_snapshotted_after_create,
         user_id=user_id_override,
     )
-    # Acceptance fixtures always need to bootstrap the per-session Modal env,
-    # so call bootstrap_for_host_creation before build_provider_instance.
     instance_name = ProviderInstanceName("modal-test")
-    ModalProviderBackend.bootstrap_for_host_creation(
-        name=instance_name,
-        config=config,
-        mngr_ctx=mngr_ctx,
+    # The shared CI Modal workspace caps ephemeral apps at 100 across EVERY concurrent CI
+    # run, so when several branches' acceptance runs overlap, provider init can
+    # transiently hit the cap. The colliding runs' apps drain within a few minutes as
+    # their tests finish, so a paced retry rides out the contention instead of failing
+    # the run; any other init failure stays immediately fatal, and the cap error itself
+    # is re-raised once the budget is spent.
+    instance, _, _ = poll_for_value(
+        lambda: _build_modal_provider_or_none_on_app_quota(instance_name, config, mngr_ctx),
+        timeout=_APP_QUOTA_RETRY_TIMEOUT_SECONDS,
+        poll_interval=_APP_QUOTA_RETRY_INTERVAL_SECONDS,
     )
-    instance = ModalProviderBackend.build_provider_instance(
-        name=instance_name,
-        config=config,
-        mngr_ctx=mngr_ctx,
-    )
-    if not isinstance(instance, ModalProviderInstance):
-        raise ConfigStructureError(f"Expected ModalProviderInstance, got {type(instance).__name__}")
+    if instance is None:
+        instance = _build_modal_provider(instance_name, config, mngr_ctx)
     return instance
 
 

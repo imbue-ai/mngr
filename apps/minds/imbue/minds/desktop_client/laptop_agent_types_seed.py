@@ -43,8 +43,8 @@ _WORKSPACE_AGENT_TYPE_SEEDS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         "chat",
         "claude",
-        "every user-facing chat agent -- the initial chat the bootstrap creates, each "
-        "'New Agent' chat, and each /assist chat (all created with `--template chat`)",
+        "every user-facing chat agent -- each chat created from the workspace UI "
+        "and each /assist chat (all created with `--template chat`)",
     ),
     (
         "main",
