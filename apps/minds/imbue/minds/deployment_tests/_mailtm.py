@@ -73,7 +73,11 @@ class MailtmInbox(MutableModel):
         :class:`MailtmFetchError` on timeout or if the message lacks a
         recognizable token.
         """
-        body = self._wait_for_message_body(timeout_seconds=timeout_seconds, subject_substring="verify")
+        # "verif", not "verify": the connector's verification email is
+        # subject-lined "Email verification instructions", which contains
+        # "verification" but not "verify". The shared prefix still excludes the
+        # one-time sign-in email ("sign").
+        body = self._wait_for_message_body(timeout_seconds=timeout_seconds, subject_substring="verif")
         match = re.search(r"verify[^?]*\?token=([^\s&\"]+)", body, re.IGNORECASE)
         if match is None:
             raise MailtmFetchError(
