@@ -128,6 +128,7 @@ from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
@@ -733,7 +734,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         except WorkspacesEndpointUnavailableError:
             logger.debug("imbue_cloud[{}]: connector has no /workspaces; using leased-only listing", self.name)
             self._workspaces_cache = None
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ImbueCloudUnreachableError) as exc:
             raise ProviderUnavailableError(
                 self.name,
                 f"could not reach Imbue Cloud: {exc}",
@@ -792,18 +793,20 @@ class ImbueCloudProvider(BaseProviderInstance):
         #
         # Narrow the propagated type by cause so consumers can tell "the
         # connector is unreachable" apart from "auth/account problem": a
-        # transport-level httpx failure (connection refused, DNS, timeout --
-        # the flaky-wifi / connector-down case) becomes ProviderUnavailableError,
-        # which recovery UIs treat as "don't bother restarting, just retry". A
-        # connector status error (ImbueCloudConnectorError) or an auth failure
+        # transport-level failure (connection refused, DNS, timeout -- the
+        # flaky-wifi / connector-down case, whether raised raw by httpx or as
+        # the client's typed unreachable error once its bounded retry is
+        # exhausted) becomes ProviderUnavailableError, which recovery UIs
+        # treat as "don't bother restarting, just retry". A connector status
+        # error (ImbueCloudConnectorError) or an auth failure
         # (ImbueCloudAuthError) keeps its own type and falls through to the
         # generic "can't reach your workspace" handling instead. The curated
-        # user_help_text keeps ProviderUnavailableError from telling a cloud user
-        # to "start Docker".
+        # user_help_text keeps ProviderUnavailableError from telling a cloud
+        # user to "start Docker".
         try:
             token = self._get_access_token(account)
             self._leased_hosts_cache = self.client.list_hosts(token)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, ImbueCloudUnreachableError) as exc:
             raise ProviderUnavailableError(
                 self.name,
                 f"could not reach Imbue Cloud: {exc}",

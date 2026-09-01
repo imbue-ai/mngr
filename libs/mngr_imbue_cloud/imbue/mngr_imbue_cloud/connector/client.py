@@ -14,7 +14,6 @@ Authentication semantics:
 """
 
 import os
-import time
 from functools import cache
 from importlib import metadata
 from typing import Any
@@ -26,6 +25,13 @@ from pydantic import AnyUrl
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_exception
+from tenacity import stop_after_attempt
+from tenacity import stop_after_delay
+from tenacity import wait_exponential
+from tenacity import wait_random_exponential
 
 from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
@@ -51,6 +57,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.wire import parse_wire_entries
 from imbue.mngr_imbue_cloud.wire import validate_wire
@@ -103,6 +110,10 @@ CONNECTOR_TOO_OLD_REMEDY = (
 # flow through ``_check``/``_check_bucket`` unchanged.
 _TRANSPORT_RETRY_ATTEMPTS = 3
 _TRANSPORT_RETRY_BASE_SLEEP_SECONDS = 0.5
+# Total wall-clock cap across one ``_send`` call's attempts: no new attempt
+# starts past this point, so slow failures (per-request timeouts stacking up)
+# cannot multiply the caller's wait.
+_TRANSPORT_RETRY_TOTAL_SECONDS_CAP = 60.0
 
 # Transport errors raised before the request was put on the wire: the server
 # never saw it, so retrying is safe even for a non-idempotent call. Used to gate
@@ -136,6 +147,24 @@ def get_client_identifier() -> str:
 def _client_id_headers() -> dict[str, str]:
     identifier = get_client_identifier()
     return {CLIENT_ID_HEADER: identifier, "User-Agent": identifier}
+
+
+def _is_retryable_transport_error(exc: BaseException, idempotent: bool) -> bool:
+    """Whether ``_send`` may safely re-send the request after ``exc``."""
+    return isinstance(exc, httpx.TransportError) and (idempotent or isinstance(exc, _CONNECT_PHASE_TRANSPORT_ERRORS))
+
+
+def _warn_before_retry_sleep(retry_state: RetryCallState, method: str, url: str) -> None:
+    """``_send``'s tenacity before_sleep hook: log each transport failure being retried."""
+    assert retry_state.outcome is not None
+    logger.warning(
+        "imbue_cloud connector {} {} transport error (attempt {}/{}); retrying: {}",
+        method,
+        url,
+        retry_state.attempt_number,
+        _TRANSPORT_RETRY_ATTEMPTS,
+        retry_state.outcome.exception(),
+    )
 
 
 class ImbueCloudConnectorClient(MutableModel):
@@ -313,27 +342,24 @@ class ImbueCloudConnectorClient(MutableModel):
         connect-phase errors -- where the request never reached the server --
         are retried, avoiding a double-allocation on a post-send blip.
         """
-        for attempt in range(_TRANSPORT_RETRY_ATTEMPTS):
-            try:
-                return self._http_call(method, url, **kwargs)
-            except httpx.TransportError as exc:
-                is_last_attempt = attempt + 1 >= _TRANSPORT_RETRY_ATTEMPTS
-                may_retry = idempotent or isinstance(exc, _CONNECT_PHASE_TRANSPORT_ERRORS)
-                if may_retry and not is_last_attempt:
-                    logger.warning(
-                        "imbue_cloud connector {} {} transport error (attempt {}/{}); retrying: {}",
-                        method,
-                        url,
-                        attempt + 1,
-                        _TRANSPORT_RETRY_ATTEMPTS,
-                        exc,
-                    )
-                    time.sleep(_TRANSPORT_RETRY_BASE_SLEEP_SECONDS * (2**attempt))
-                    continue
-                raise exc_cls(
-                    f"could not reach the imbue_cloud connector at {url} after {attempt + 1} attempt(s): {exc}"
-                ) from exc
-        raise SwitchError("unreachable: _send exhausted its retry loop without returning or raising")
+        retrying = Retrying(
+            retry=retry_if_exception(lambda exc: _is_retryable_transport_error(exc, idempotent=idempotent)),
+            stop=stop_after_attempt(_TRANSPORT_RETRY_ATTEMPTS) | stop_after_delay(_TRANSPORT_RETRY_TOTAL_SECONDS_CAP),
+            # Equal jitter: the deterministic half keeps a floor under the wait
+            # (a scaling-up connector gets breathing room) and the random half
+            # keeps synchronized clients from re-arriving in lockstep.
+            wait=wait_exponential(multiplier=_TRANSPORT_RETRY_BASE_SLEEP_SECONDS / 2)
+            + wait_random_exponential(multiplier=_TRANSPORT_RETRY_BASE_SLEEP_SECONDS / 2),
+            before_sleep=lambda retry_state: _warn_before_retry_sleep(retry_state, method=method, url=url),
+            reraise=True,
+        )
+        try:
+            return retrying(self._http_call, method, url, **kwargs)
+        except httpx.TransportError as exc:
+            attempt_count = retrying.statistics["attempt_number"]
+            raise exc_cls(
+                f"could not reach the imbue_cloud connector at {url} after {attempt_count} attempt(s): {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Auth (no bearer token required)
@@ -648,11 +674,13 @@ class ImbueCloudConnectorClient(MutableModel):
         return self._check(response, ImbueCloudConnectorError)
 
     def list_hosts(self, access_token: SecretStr) -> list[LeasedHostInfo]:
-        response = httpx.get(
+        """List the account's leased hosts (the discovery read behind ``mngr list``/``mngr create``)."""
+        response = self._send(
+            "GET",
             self._url("/hosts"),
+            exc_cls=ImbueCloudUnreachableError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         body = self._check(response, ImbueCloudConnectorError)
         items = body.get("hosts") if isinstance(body, dict) else body
@@ -689,11 +717,12 @@ class ImbueCloudConnectorClient(MutableModel):
         Raises ``WorkspacesEndpointUnavailableError`` against a connector that
         predates the endpoint (callers fall back to ``list_hosts``).
         """
-        response = httpx.get(
+        response = self._send(
+            "GET",
             self._url("/workspaces"),
+            exc_cls=ImbueCloudUnreachableError,
             headers=self._bearer(access_token),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         self._check_workspaces_supported(response)
         body = self._check(response, ImbueCloudConnectorError)

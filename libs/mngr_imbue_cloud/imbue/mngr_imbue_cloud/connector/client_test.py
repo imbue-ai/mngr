@@ -37,6 +37,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
@@ -811,6 +812,71 @@ def test_get_workspace_retries_transient_transport_error(monkeypatch: pytest.Mon
     workspace = client.get_workspace(SecretStr("tok"), "00000000-0000-0000-0000-000000000042")
     assert workspace.status == WorkspaceStatus.RUNNING
     assert state["calls"] == 2
+
+
+def test_list_hosts_retries_transient_transport_error_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The discovery read behind `mngr list`/`mngr create` must ride out a
+    transport blip instead of surfacing "could not reach Imbue Cloud"."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/hosts"
+        return httpx.Response(200, json={"hosts": []})
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=1, handler=handler)
+    assert client.list_hosts(SecretStr("tok")) == []
+    assert state["calls"] == 2
+
+
+def test_list_workspaces_retries_transient_transport_error_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/workspaces"
+        return httpx.Response(200, json=[_workspace_entry("running")])
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=1, handler=handler)
+    workspaces = client.list_workspaces(SecretStr("tok"))
+    assert [workspace.status for workspace in workspaces] == [WorkspaceStatus.RUNNING]
+    assert state["calls"] == 2
+
+
+def test_list_hosts_exhausted_retries_raise_the_typed_unreachable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Terminal transport failure on the listings surfaces as ImbueCloudUnreachableError,
+    the type the provider maps back to ProviderUnavailableError (the user-facing
+    "could not reach Imbue Cloud" card)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"hosts": []})
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=99, handler=handler)
+    with pytest.raises(ImbueCloudUnreachableError) as exc_info:
+        client.list_hosts(SecretStr("tok"))
+    assert state["calls"] == 3
+    assert "could not reach the imbue_cloud connector" in str(exc_info.value)
+
+
+def test_list_hosts_does_not_retry_auth_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 401 is a response, not a transport failure: fail fast with the auth type,
+    exactly one request on the wire."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "no token"})
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    with pytest.raises(ImbueCloudAuthError):
+        client.list_hosts(SecretStr("tok"))
+    assert state["calls"] == 1
+
+
+def test_list_workspaces_does_not_retry_the_old_connector_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The old-connector fallback signal is status-based, so it must keep failing
+    fast (one request) and keep its type -- callers use it to fall back to /hosts."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+    client, state = _install_flaky_httpx_get(monkeypatch, fail_times=0, handler=handler)
+    with pytest.raises(WorkspacesEndpointUnavailableError):
+        client.list_workspaces(SecretStr("tok"))
+    assert state["calls"] == 1
 
 
 # -- Modal 303 long-request redirects --

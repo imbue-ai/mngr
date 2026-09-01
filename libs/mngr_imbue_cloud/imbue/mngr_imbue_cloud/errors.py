@@ -10,6 +10,16 @@ class ImbueCloudConnectorError(ImbueCloudError):
     """Raised when the remote_service_connector returns an unexpected response."""
 
 
+class ImbueCloudUnreachableError(ImbueCloudConnectorError):
+    """Raised when the connector could not be reached at the transport level (after bounded retries).
+
+    Distinct from its parent so callers can tell "no response ever arrived"
+    (DNS failure, connect/read timeout -- the flaky-network case, worth
+    surfacing as ProviderUnavailableError) apart from "the connector answered
+    with an error status".
+    """
+
+
 class SliceBakeTerminatedError(ImbueCloudError):
     """Raised in the bake's main thread when a SIGTERM/SIGINT arrives, to trigger cleanup."""
 

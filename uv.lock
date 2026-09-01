@@ -2086,6 +2086,7 @@ dependencies = [
     { name = "psutil" },
     { name = "psycopg2-binary" },
     { name = "pydantic" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -2106,6 +2107,7 @@ requires-dist = [
     { name = "psutil" },
     { name = "psycopg2-binary" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "tenacity", specifier = ">=8.0" },
 ]
 
 [[package]]

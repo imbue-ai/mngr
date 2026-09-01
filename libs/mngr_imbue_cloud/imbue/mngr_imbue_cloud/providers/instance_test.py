@@ -51,6 +51,7 @@ from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
@@ -580,6 +581,81 @@ def test_list_leased_hosts_preserves_auth_error() -> None:
 
     with pytest.raises(ImbueCloudAuthError):
         provider._list_leased_hosts_cached()
+
+
+def test_list_leased_hosts_maps_exhausted_transport_retries_to_provider_unavailable() -> None:
+    """When the client's bounded transport retry is exhausted, the typed unreachable
+    error surfaces exactly like a raw transport failure: as ProviderUnavailableError
+    (the retry-not-restart signal)."""
+    provider = _make_discovery_provider(ImbueCloudUnreachableError("could not reach the imbue_cloud connector"))
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        provider._list_leased_hosts_cached()
+
+    assert exc_info.value.provider_name == ProviderInstanceName("imbue-cloud-test")
+    assert "docker" not in (exc_info.value.user_help_text or "").lower()
+
+
+def test_list_leased_hosts_preserves_connector_status_error() -> None:
+    """A connector *status* error (a response arrived, e.g. a 5xx) keeps its own
+    type -- only transport-unreachable failures become ProviderUnavailableError."""
+    provider = _make_discovery_provider(ImbueCloudConnectorError("Connector error 500: boom"))
+
+    with pytest.raises(ImbueCloudConnectorError) as exc_info:
+        provider._list_leased_hosts_cached()
+    assert not isinstance(exc_info.value, ImbueCloudUnreachableError)
+
+
+class _ListWorkspacesClient:
+    """Stub connector client whose ``list_workspaces`` raises a preset exception."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def list_workspaces(self, access_token: SecretStr) -> list[WorkspaceInfo]:
+        raise self._error
+
+
+class _WorkspacesDiscoveryProvider(ImbueCloudProvider):
+    """Provider stub isolating ``_list_workspaces_cached``'s connector failure modes."""
+
+    def _require_account(self, override: str | None = None) -> ImbueCloudAccount:
+        return ImbueCloudAccount("user@example.com")
+
+    def _get_access_token(self, account: ImbueCloudAccount) -> SecretStr:
+        return SecretStr("token")
+
+
+def _make_workspaces_discovery_provider(list_workspaces_error: Exception) -> _WorkspacesDiscoveryProvider:
+    return _WorkspacesDiscoveryProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        client=_ListWorkspacesClient(list_workspaces_error),
+    )
+
+
+def test_list_workspaces_cached_maps_transport_failure_to_provider_unavailable() -> None:
+    provider = _make_workspaces_discovery_provider(httpx.ReadTimeout("timed out"))
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        provider._list_workspaces_cached()
+    assert exc_info.value.provider_name == ProviderInstanceName("imbue-cloud-test")
+
+
+def test_list_workspaces_cached_maps_exhausted_transport_retries_to_provider_unavailable() -> None:
+    provider = _make_workspaces_discovery_provider(
+        ImbueCloudUnreachableError("could not reach the imbue_cloud connector")
+    )
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        provider._list_workspaces_cached()
+    assert exc_info.value.provider_name == ProviderInstanceName("imbue-cloud-test")
+
+
+def test_list_workspaces_cached_preserves_auth_error() -> None:
+    provider = _make_workspaces_discovery_provider(ImbueCloudAuthError("Unauthenticated (401)"))
+
+    with pytest.raises(ImbueCloudAuthError):
+        provider._list_workspaces_cached()
 
 
 class _HostSshInfoProvider(_NoWorkspacesMixin, ImbueCloudProvider):

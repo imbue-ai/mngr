@@ -21,6 +21,7 @@ dependencies = [
     "psutil",
     "psycopg2-binary",
     "boto3",
+    "tenacity>=8.0",
 ]
 
 [project.entry-points.mngr]
