@@ -83,18 +83,21 @@ def _rev_parse(ref: str, repo_root: Path) -> str | None:
 def resolve_diff_base(repo_root: Path) -> str:
     """Return a git ref to diff the PR branch against.
 
-    Tries ``origin/$GITHUB_BASE_REF``, ``$GITHUB_BASE_REF``, ``origin/main``,
-    then ``main``, and returns the first that resolves to a commit *distinct
-    from HEAD*. A base equal to HEAD yields an empty diff and a vacuous pass
-    (the exact bug this gate exists to prevent), so such candidates are
-    rejected. Raises ``RuntimeError`` if none qualify -- the caller turns that
-    into a loud non-zero exit, never a pass.
+    Tries ``$CHANGELOG_DIFF_BASE_REF`` (an explicit override the CI workflow
+    sets from the PR's *live* base branch -- for PRs in a native GitHub stack
+    the webhook payload reports the trunk as ``GITHUB_BASE_REF`` even when the
+    PR is stacked on another branch), then ``origin/$GITHUB_BASE_REF``,
+    ``$GITHUB_BASE_REF``, ``origin/main``, then ``main``, and returns the first
+    that resolves to a commit *distinct from HEAD*. A base equal to HEAD yields
+    an empty diff and a vacuous pass (the exact bug this gate exists to
+    prevent), so such candidates are rejected. Raises ``RuntimeError`` if none
+    qualify -- the caller turns that into a loud non-zero exit, never a pass.
     """
     head = _rev_parse("HEAD", repo_root)
     candidates: list[str] = []
-    base_ref = os.environ.get("GITHUB_BASE_REF", "")
-    if base_ref:
-        candidates.extend([f"origin/{base_ref}", base_ref])
+    for base_ref in (os.environ.get("CHANGELOG_DIFF_BASE_REF", ""), os.environ.get("GITHUB_BASE_REF", "")):
+        if base_ref:
+            candidates.extend([f"origin/{base_ref}", base_ref])
     candidates.extend(["origin/main", "main"])
 
     saw_head_collision = False

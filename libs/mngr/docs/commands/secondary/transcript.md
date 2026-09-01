@@ -6,25 +6,32 @@
 **Synopsis:**
 
 ```text
-mngr transcript TARGET [--role ROLE] [--tail N] [--head N] [--format human|json|jsonl]
+mngr transcript TARGET [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]
 ```
 
 View the message transcript for an agent.
 
 View the common transcript for an agent. The transcript contains
-user messages, assistant messages, and tool call/result summaries in a
-common, agent-agnostic format.
+user turns, agent turns, and tool results in a common, agent-agnostic format.
 
 The command automatically finds the correct transcript file regardless
 of the agent type (e.g. claude, codex).
 
-Use --role to filter by message role (user, assistant, tool). This
+Use --role to filter by message role (user, agent, system, tool). This
 option is repeatable to include multiple roles.
+
+Human output truncates long tool inputs, tool outputs, and thinking for
+readability; pass --full to see them untruncated. Only the display is
+truncated -- the underlying stream (and --format json/jsonl/atif) always
+carries the complete text.
 
 Use --format to control output:
   - human (default): nicely formatted, readable output
   - jsonl: raw JSONL, one event per line (for piping)
   - json: full JSON array (for programmatic use)
+  - atif: a single validated ATIF trajectory document assembled from the
+    stream (Agent Trajectory Interchange Format; embeds resolvable
+    subagent trajectories). Use --output PATH to write it to a file.
 
 **Usage:**
 
@@ -41,7 +48,7 @@ mngr transcript [OPTIONS] TARGET
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--role` | text | Only show messages with this role (repeatable; e.g. user, assistant, tool) | None |
+| `--role` | text | Only show messages with this role (repeatable; user, agent, system, tool) | None |
 
 ## Display
 
@@ -49,6 +56,8 @@ mngr transcript [OPTIONS] TARGET
 | ---- | ---- | ----------- | ------- |
 | `--tail` | integer range | Show only the last N transcript events | None |
 | `--head` | integer range | Show only the first N transcript events | None |
+| `--output` | path | Write the built ATIF document to this file instead of stdout (only with --format atif) | None |
+| `--full` | boolean | Disable display-time truncation of tool inputs/outputs and thinking (human output only) | `False` |
 
 ## Common
 
@@ -85,10 +94,10 @@ $ mngr transcript my-agent
 $ mngr transcript my-agent --role user
 ```
 
-**View user and assistant messages**
+**View user and agent messages**
 
 ```bash
-$ mngr transcript my-agent --role user --role assistant
+$ mngr transcript my-agent --role user --role agent
 ```
 
 **View last 20 events**
@@ -107,4 +116,10 @@ $ mngr transcript my-agent --format jsonl
 
 ```bash
 $ mngr transcript my-agent --format json
+```
+
+**Build a full ATIF trajectory document**
+
+```bash
+$ mngr transcript my-agent --format atif
 ```

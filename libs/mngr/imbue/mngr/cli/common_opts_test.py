@@ -596,6 +596,39 @@ def test_parse_output_options_max_log_size_override(mngr_test_prefix: str) -> No
     assert logging_config.max_log_size_mb == 10
 
 
+def test_parse_output_options_extra_builtin_format_name(mngr_test_prefix: str) -> None:
+    """A command-specific extra format name is reported on extra_format, not as a template."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    output_opts, _logging_config = parse_output_options(
+        output_format="ATIF",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        config=config,
+        extra_builtin_format_names=frozenset({"atif"}),
+    )
+    assert output_opts.extra_format == "atif"
+    assert output_opts.format_template is None
+    assert output_opts.output_format == OutputFormat.JSON
+
+
+def test_parse_output_options_unknown_format_is_still_a_template(mngr_test_prefix: str) -> None:
+    """A format name that is in neither set stays a template even when extras are declared."""
+    config = MngrConfig(prefix=mngr_test_prefix)
+    output_opts, _logging_config = parse_output_options(
+        output_format="{agent.name}",
+        quiet=False,
+        verbose=0,
+        log_file=None,
+        log_commands=None,
+        config=config,
+        extra_builtin_format_names=frozenset({"atif"}),
+    )
+    assert output_opts.extra_format is None
+    assert output_opts.format_template == "{agent.name}"
+
+
 def test_parse_output_options_format_template(mngr_test_prefix: str) -> None:
     """parse_output_options should recognize a non-builtin format as a template string."""
     config = MngrConfig(prefix=mngr_test_prefix)

@@ -5,8 +5,8 @@ The plugin runs in-process on the ``opencode serve`` Node process and owns the
 pi extension is exercised: load the real ``.ts`` under Node, hand it a synthetic
 stream of OpenCode events, and assert on the files it writes. The conversion logic
 moved into TypeScript (so it no longer runs in CI as Python), making this the only
-CI-runnable check that opencode's emitter still produces the canonical envelope --
-without it, emitter drift would surface only in the (non-CI) release test.
+CI-runnable check that opencode's emitter still produces the canonical ATIF-shaped
+records -- without it, emitter drift would surface only in the (non-CI) release test.
 
 Skipped automatically when Node (with TypeScript support) is unavailable, e.g. a CI
 sandbox without it -- the ``.ts`` is a resource, not Python, so it does not count
@@ -15,6 +15,7 @@ toward coverage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -96,8 +97,9 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 # A realistic single turn: the root session is created, a user message and an
-# assistant message (with a completed bash tool call) stream in, and the session
-# goes idle -- which is what triggers the common-transcript rebuild.
+# assistant message (with a reasoning part and a completed bash tool call) stream
+# in, and the session goes idle -- which is what triggers the common-transcript
+# rebuild.
 _TURN_EVENTS: list[dict[str, Any]] = [
     {"type": "session.created", "properties": {"info": {"id": "ses_root"}}},
     {
@@ -124,6 +126,10 @@ _TURN_EVENTS: list[dict[str, Any]] = [
     },
     {
         "type": "message.part.updated",
+        "properties": {"part": {"id": "p0", "messageID": "m2", "type": "reasoning", "text": "counting is easy"}},
+    },
+    {
+        "type": "message.part.updated",
         "properties": {"part": {"id": "p2", "messageID": "m2", "type": "text", "text": "one two three"}},
     },
     {
@@ -142,31 +148,199 @@ _TURN_EVENTS: list[dict[str, Any]] = [
     {"type": "session.status", "properties": {"sessionID": "ses_root", "status": {"type": "idle"}}},
 ]
 
+_EMITTER = "opencode/common_transcript"
+
+# The id of the bash tool part inside _TURN_EVENTS, so a variant turn can swap in a
+# differently-shaped tool state without restating the whole event stream.
+_TOOL_PART_ID = "p3"
+
+
+def _turn_with_tool_state(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """``_TURN_EVENTS`` with the bash tool part's ``state`` replaced by ``state``."""
+
+    def replaced(event: dict[str, Any]) -> dict[str, Any]:
+        part = event["properties"].get("part")
+        if part is None or part["id"] != _TOOL_PART_ID:
+            return event
+        return {"type": event["type"], "properties": {"part": {**part, "state": state}}}
+
+    return [replaced(event) for event in _TURN_EVENTS]
+
 
 def test_emitted_common_records_conform_to_canonical_schema(tmp_path: Path) -> None:
-    """Every record the plugin emits must validate against the shared envelope schema.
+    """Every record the plugin emits must validate against the shared record schema.
 
     Guards against the opencode emitter (resources/mngr_opencode_plugin.ts) and the
     canonical schema (imbue.mngr.agents.common_transcript_records) drifting apart.
     """
     state = _run_plugin(tmp_path, _TURN_EVENTS)
     records = _read_jsonl(state / _COMMON_TRANSCRIPT)
-    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    record_types = {r["type"] for r in records}
+    assert record_types <= {"header", "step", "observation"}
+    # The fixture drives all three, so an empty or degenerate stream cannot pass.
+    assert record_types == {"header", "step", "observation"}
     for record in records:
         assert validate_common_transcript_record(record) is None, record
 
 
-def test_user_and_assistant_text_captured(tmp_path: Path) -> None:
+def test_stream_opens_with_the_atif_header(tmp_path: Path) -> None:
+    state = _run_plugin(tmp_path, _TURN_EVENTS)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    # The plugin derives the header id from the state-dir basename (the agent id).
+    header_digest = hashlib.sha256(f"{state.name}:{_EMITTER}".encode()).hexdigest()[:32]
+    assert records[0] == {
+        "type": "header",
+        "event_id": f"header-{header_digest}",
+        "emitter": _EMITTER,
+        "schema_version": "ATIF-v1.7",
+    }
+
+
+def test_header_is_written_exactly_once_per_rebuild(tmp_path: Path) -> None:
+    """The plugin rewrites the whole stream on every idle, so two idles must not
+    leave two headers (nor duplicate any record)."""
+    events = _TURN_EVENTS + [{"type": "session.idle", "properties": {"sessionID": "ses_root"}}]
+    state = _run_plugin(tmp_path, events)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    assert [r["type"] for r in records].count("header") == 1
+    assert len({r["event_id"] for r in records}) == len(records)
+
+
+def test_user_and_assistant_turns_become_atif_steps(tmp_path: Path) -> None:
     """Sanity check on the conversion itself (the marker/transcript single-writer path)."""
     state = _run_plugin(tmp_path, _TURN_EVENTS)
     records = _read_jsonl(state / _COMMON_TRANSCRIPT)
-    by_type = {r["type"]: r for r in records}
-    assert by_type["user_message"]["content"] == "Count slowly"
-    assert by_type["assistant_message"]["text"] == "one two three"
-    assert by_type["assistant_message"]["model"] == "opencode/deepseek-v4-flash-free"
-    assert by_type["assistant_message"]["tool_calls"][0]["tool_name"] == "bash"
-    assert by_type["tool_result"]["output"] == "hi"
-    assert by_type["tool_result"]["is_error"] is False
+    steps = [r for r in records if r["type"] == "step"]
+    user_step, agent_step = steps
+    assert user_step["source"] == "user"
+    assert user_step["message"] == "Count slowly"
+    assert user_step["extra"] == {"conversation_id": "ses_root", "message_id": "m1"}
+    assert agent_step["source"] == "agent"
+    assert agent_step["message"] == "one two three"
+    assert agent_step["model_name"] == "opencode/deepseek-v4-flash-free"
+    assert agent_step["reasoning_content"] == "counting is easy"
+    assert agent_step["extra"]["finish_reason"] == "stop"
+    # opencode reports no per-message usage, so no metrics are claimed.
+    assert "metrics" not in agent_step
+    assert agent_step["tool_calls"] == [
+        {"tool_call_id": "call_1", "function_name": "bash", "arguments": {"command": "echo hi"}}
+    ]
+    assert all(r["emitter"] == _EMITTER for r in records)
+
+
+def test_tool_results_become_observation_records(tmp_path: Path) -> None:
+    state = _run_plugin(tmp_path, _TURN_EVENTS)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (observation,) = [r for r in records if r["type"] == "observation"]
+    assert observation["results"] == [
+        {
+            "source_call_id": "call_1",
+            "content": "hi",
+            # The result repeats the step's provenance, so it stands on its own.
+            "extra": {
+                "conversation_id": "ses_root",
+                "message_id": "m2",
+                "is_error": False,
+                "tool_name": "bash",
+            },
+        }
+    ]
+
+
+def test_errored_tool_result_is_flagged_on_the_result_extra(tmp_path: Path) -> None:
+    events = _turn_with_tool_state({"status": "error", "input": {"command": "false"}, "error": "boom"})
+    state = _run_plugin(tmp_path, events)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (observation,) = [r for r in records if r["type"] == "observation"]
+    assert observation["results"][0]["content"] == "boom"
+    assert observation["results"][0]["extra"] == {
+        "conversation_id": "ses_root",
+        "message_id": "m2",
+        "is_error": True,
+        "tool_name": "bash",
+    }
+
+
+# Fidelity: ATIF streams carry complete tool arguments and untruncated outputs.
+# Display truncation is the reader's job, so nothing here may shorten them.
+_LONG_COMMAND = "echo " + "a" * 500
+_LONG_OUTPUT = "b" * 5000
+
+
+def test_tool_arguments_and_output_are_never_truncated(tmp_path: Path) -> None:
+    events = _turn_with_tool_state(
+        {"status": "completed", "input": {"command": _LONG_COMMAND}, "output": _LONG_OUTPUT}
+    )
+    state = _run_plugin(tmp_path, events)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (agent_step,) = [r for r in records if r["type"] == "step" and r["source"] == "agent"]
+    assert agent_step["tool_calls"][0]["arguments"] == {"command": _LONG_COMMAND}
+    (observation,) = [r for r in records if r["type"] == "observation"]
+    assert observation["results"][0]["content"] == _LONG_OUTPUT
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
+
+
+def test_non_object_tool_input_is_preserved_under_raw(tmp_path: Path) -> None:
+    """ATIF requires an arguments object; a native non-object is wrapped, not dropped."""
+    events = _turn_with_tool_state({"status": "completed", "input": "not-json", "output": "hi"})
+    state = _run_plugin(tmp_path, events)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (agent_step,) = [r for r in records if r["type"] == "step" and r["source"] == "agent"]
+    assert agent_step["tool_calls"][0]["arguments"] == {"_raw": "not-json"}
+
+
+def test_empty_tool_input_becomes_an_empty_arguments_object(tmp_path: Path) -> None:
+    """An absent or empty native payload means "no arguments", not a raw empty string."""
+    events = _turn_with_tool_state({"status": "completed", "input": "   ", "output": "hi"})
+    state = _run_plugin(tmp_path, events)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (agent_step,) = [r for r in records if r["type"] == "step" and r["source"] == "agent"]
+    assert agent_step["tool_calls"][0]["arguments"] == {}
+
+
+def test_image_parts_become_the_text_placeholder(tmp_path: Path) -> None:
+    events = [
+        {"type": "session.created", "properties": {"info": {"id": "ses_root"}}},
+        {
+            "type": "message.updated",
+            "properties": {"info": {"id": "m1", "role": "user", "sessionID": "ses_root", "time": {"created": 1000}}},
+        },
+        {
+            "type": "message.part.updated",
+            "properties": {"part": {"id": "p1", "messageID": "m1", "type": "text", "text": "look: "}},
+        },
+        {
+            "type": "message.part.updated",
+            "properties": {
+                "part": {"id": "p2", "messageID": "m1", "type": "file", "mime": "image/png", "url": "data:..."}
+            },
+        },
+        {"type": "session.idle", "properties": {"sessionID": "ses_root"}},
+    ]
+    state = _run_plugin(tmp_path, events)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (user_step,) = [r for r in records if r["type"] == "step"]
+    assert user_step["message"] == "look: [image omitted]"
+
+
+def test_message_without_a_creation_time_gets_the_epoch_timestamp(tmp_path: Path) -> None:
+    """ATIF requires an ISO 8601 timestamp, so a message with no ``time.created``
+    falls back to the epoch -- stable across rebuilds, unlike "now"."""
+    events = [
+        {"type": "session.created", "properties": {"info": {"id": "ses_root"}}},
+        {"type": "message.updated", "properties": {"info": {"id": "m1", "role": "user", "sessionID": "ses_root"}}},
+        {
+            "type": "message.part.updated",
+            "properties": {"part": {"id": "p1", "messageID": "m1", "type": "text", "text": "no clock"}},
+        },
+        {"type": "session.idle", "properties": {"sessionID": "ses_root"}},
+    ]
+    state = _run_plugin(tmp_path, events)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (user_step,) = [r for r in records if r["type"] == "step"]
+    assert user_step["timestamp"] == "1970-01-01T00:00:00Z"
+    assert validate_common_transcript_record(user_step) is None
 
 
 # Permission events: the running opencode server (verified against the 1.16.2

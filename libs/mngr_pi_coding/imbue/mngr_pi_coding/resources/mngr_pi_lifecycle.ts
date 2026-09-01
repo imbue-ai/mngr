@@ -24,11 +24,14 @@
 //
 //   3. Transcript emission. On `message_end` it appends the raw pi message to
 //      `$MNGR_AGENT_STATE_DIR/logs/<type>_transcript/events.jsonl` and, when
-//      `MNGR_PI_EMIT_COMMON_TRANSCRIPT=1`, a record in mngr's agent-agnostic
-//      common envelope to
+//      `MNGR_PI_EMIT_COMMON_TRANSCRIPT=1`, an ATIF-shaped record to mngr's
+//      agent-agnostic stream at
 //      `$MNGR_AGENT_STATE_DIR/events/<type>/common_transcript/events.jsonl`,
-//      which `mngr transcript` reads. Emitting straight from the structured
-//      events avoids re-parsing pi's tree-structured session JSONL.
+//      which `mngr transcript` reads: a `header` line when the file is created,
+//      then `step` and `observation` records at full fidelity (complete tool
+//      arguments, untruncated outputs, thinking as `reasoning_content`). See
+//      specs/atif-transcript-alignment/spec.md. Emitting straight from the
+//      structured events avoids re-parsing pi's tree-structured session JSONL.
 //
 //   4. Model/effort state. pi carries no static per-agent model config file (its
 //      model comes from launch args / pi settings, its effort from the thinking
@@ -224,8 +227,11 @@ const RETRACT_KEY = "minds_interrupt_retract";
 const CONTROL_NAME = "pi_control.json";
 const CONTROL_POLL_MS = 200;
 
-const INPUT_PREVIEW_LIMIT = 200;
-const TOOL_OUTPUT_LIMIT = 2000;
+// The ATIF revision the emitted common-transcript records follow. Kept in sync with
+// PINNED_ATIF_SCHEMA_VERSION in imbue/mngr/agents/common_transcript_records.py.
+const ATIF_SCHEMA_VERSION = "ATIF-v1.7";
+
+const IMAGE_PLACEHOLDER = "[image omitted]";
 
 // --- Helpers. ---------------------------------------------------------------
 
@@ -270,15 +276,13 @@ function countLines(filePath: string): number {
   return parts.length;
 }
 
-function truncate(text: string, limit: number): string {
-  return text.length > limit ? text.slice(0, limit) + "..." : text;
-}
-
 function isoTimestamp(message: AgentMessage): string {
   const ms = typeof message.timestamp === "number" ? message.timestamp : Date.now();
   return new Date(ms).toISOString();
 }
 
+// Text extraction. Images carry no text, so they become the placeholder the spec's
+// fidelity rules prescribe rather than vanishing.
 function textFromContent(content: string | ContentBlock[] | undefined): string {
   if (typeof content === "string") {
     return content;
@@ -287,11 +291,65 @@ function textFromContent(content: string | ContentBlock[] | undefined): string {
     return "";
   }
   return content
-    .filter((block): block is TextBlock => block != null && (block as ContentBlock).type === "text")
-    .map((block) => block.text)
+    .map((block) => {
+      if (block == null) {
+        return "";
+      }
+      const blockType = (block as ContentBlock).type;
+      if (blockType === "text") {
+        return (block as TextBlock).text;
+      }
+      return blockType === "image" ? IMAGE_PLACEHOLDER : "";
+    })
     .join("");
 }
 
+// The agent's thinking, as ATIF `reasoning_content`: several blocks in one
+// inference are joined with blank lines.
+function reasoningFromContent(content: ContentBlock[] | undefined): string {
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const blocks: string[] = [];
+  for (const block of content) {
+    if (block != null && (block as ContentBlock).type === "thinking") {
+      const thinking = (block as { thinking?: unknown }).thinking;
+      if (typeof thinking === "string" && thinking) {
+        blocks.push(thinking);
+      }
+    }
+  }
+  return blocks.join("\n\n");
+}
+
+// ATIF requires `arguments` to be a JSON object. A native value that is not one is
+// preserved verbatim under `_raw` rather than dropped.
+function argumentsObject(value: unknown): Record<string, unknown> {
+  if (value === null || value === undefined) {
+    return {};
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === "string") {
+    // An absent or empty native payload means "no arguments", not a raw empty string.
+    if (!value.trim()) {
+      return {};
+    }
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // not JSON; fall through to the _raw wrapper
+    }
+    return { _raw: value };
+  }
+  return { _raw: JSON.stringify(value) ?? String(value) };
+}
+
+// The ATIF tool calls of an assistant turn, each with its complete arguments object.
 function toolCallsFromContent(content: ContentBlock[] | undefined): Array<Record<string, unknown>> {
   if (!Array.isArray(content)) {
     return [];
@@ -302,46 +360,45 @@ function toolCallsFromContent(content: ContentBlock[] | undefined): Array<Record
       const call = block as ToolCallBlock;
       calls.push({
         tool_call_id: call.id,
-        tool_name: call.name,
-        input_preview: truncate(JSON.stringify(call.arguments ?? {}), INPUT_PREVIEW_LIMIT),
+        function_name: call.name,
+        arguments: argumentsObject(call.arguments),
       });
     }
   }
   return calls;
 }
 
-// Ordered text/tool_call segments of an assistant turn, preserving the source
-// interleaving (unlike the flat text + tool_calls split). Unknown block types
-// (thinking, image, ...) carry no transcript-visible content and are skipped.
-function partsFromContent(content: ContentBlock[] | undefined): Array<Record<string, unknown>> {
-  if (!Array.isArray(content)) {
-    return [];
+// pi's per-message usage in ATIF `MetricsSchema` names, or null when the message
+// reports none. ATIF's prompt_tokens is ALL input including cache hits and cache
+// writes; cached_tokens is the cache-read subset. The cache-write count has no ATIF
+// field, so it rides under metrics.extra.
+function metricsFromUsage(usage: PiUsage | undefined): Record<string, unknown> | null {
+  if (!usage) {
+    return null;
   }
-  const parts: Array<Record<string, unknown>> = [];
-  for (const block of content) {
-    if (block == null) {
-      continue;
-    }
-    const blockType = (block as ContentBlock).type;
-    if (blockType === "text") {
-      const text = (block as TextBlock).text;
-      if (text) {
-        parts.push({ type: "text", content: text });
-      }
-    } else if (blockType === "toolCall") {
-      const call = block as ToolCallBlock;
-      parts.push({
-        type: "tool_call",
-        tool_call_id: call.id,
-        tool_name: call.name,
-        input_preview: truncate(JSON.stringify(call.arguments ?? {}), INPUT_PREVIEW_LIMIT),
-      });
-    }
+  const hasTokens =
+    usage.input != null || usage.output != null || usage.cacheRead != null || usage.cacheWrite != null;
+  const cost = usage.cost?.total;
+  if (!hasTokens && typeof cost !== "number") {
+    return null;
   }
-  return parts;
+  const cacheRead = usage.cacheRead ?? 0;
+  const metrics: Record<string, unknown> = {};
+  if (hasTokens) {
+    metrics.prompt_tokens = (usage.input ?? 0) + cacheRead + (usage.cacheWrite ?? 0);
+    metrics.completion_tokens = usage.output ?? 0;
+    metrics.cached_tokens = cacheRead;
+  }
+  if (typeof cost === "number") {
+    metrics.cost_usd = cost;
+  }
+  if (usage.cacheWrite != null) {
+    metrics.extra = { cache_creation_input_tokens: usage.cacheWrite };
+  }
+  return metrics;
 }
 
-// --- Shell-command safety guards (see system/apps/system_interface/imbue/system_interface/harnesses/core-contracts/tool-call-policies.md). -------
+// --- Shell-command safety guards (see system/scripts/POLICY_HOOKS.md). -------
 //
 // Rules that hold for every pi agent, applied in the `tool_call` handler: return
 // `{block, reason}` to refuse a command, or mutate `event.input.command` to
@@ -365,28 +422,17 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-/** The reason to block a command, or null if it is allowed. Cannot throw.
- *
- * These strings are copied VERBATIM from system/scripts/agent_block_pipe_tail_head.sh and
- * agent_prevent_commit_rewrite.sh, which claude/codex/agy run directly. pi has no shell-hook
- * surface, so it re-expresses the rules here -- and the tool-call policy contract requires a
- * harness that reproduces rather than executes to copy the wording verbatim, so an agent gets
- * an identical explanation on every harness. Change the scripts and this together.
- */
+/** The reason to block a command, or null if it is allowed. Cannot throw. */
 function commandBlockReason(command: string): string | null {
   if (PIPE_TAIL_HEAD_RE.test(command)) {
-    return (
-      "Do not pipe commands through tail or head. Instead, redirect output to a temp file " +
-      "(e.g. cmd > /tmp/output.txt) and then read from that file separately using the Read tool " +
-      "or a separate tail/head command on the file."
-    );
+    return "Do not pipe commands through tail or head. Redirect to a temp file (e.g. cmd > /tmp/out.txt) and read that instead.";
   }
-  if (GIT_REBASE_RE.test(command)) return "Blocked: git rebase commands are not allowed";
+  if (GIT_REBASE_RE.test(command)) return "git rebase is not allowed.";
   if (GIT_COMMIT_RE.test(command) && GIT_COMMIT_REWRITE_RE.test(command)) {
-    return "Blocked: git commit with --amend or --fixup is not allowed";
+    return "git commit with --amend or --fixup is not allowed.";
   }
   if (GIT_PULL_RE.test(command) && GIT_PULL_REBASE_RE.test(command)) {
-    return "Blocked: git pull --rebase commands are not allowed (use git pull --merge instead)";
+    return "git pull --rebase is not allowed (use git pull --merge instead).";
   }
   return null;
 }
@@ -451,7 +497,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   const modelStatePath = join(stateDir, MODEL_STATE_NAME);
   const rawPath = join(stateDir, "logs", `${agentType}_transcript`, "events.jsonl");
   const commonPath = join(stateDir, "events", agentType, "common_transcript", "events.jsonl");
-  const commonSource = `${agentType}/common_transcript`;
+  const commonEmitter = `${agentType}/common_transcript`;
 
   // Usage events (per-message cost/tokens for `mngr usage`). Written only when
   // mngr_pi_coding_usage provisioned its gate marker -- that package ships the
@@ -464,8 +510,10 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   const usagePath = join(stateDir, "events", "pi-coding", "usage", "events.jsonl");
 
   // Event ids hash the message's own timestamp and content: unique per event
-  // globally (analytics dedupes transcripts fleet-wide by event id), and
-  // stable for the single moment each message is appended.
+  // globally (analytics dedupes transcripts fleet-wide by event id), and stable
+  // for the single moment each message is appended -- so a `--continue` restart,
+  // which reuses the session id but only fires message_end for *new* messages,
+  // cannot collide with the ids written before it.
   const makeEventId = (prefix: string, message: AgentMessage): string => {
     const rawContent = (message as { content?: unknown }).content ?? "";
     const contentText = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent);
@@ -474,6 +522,20 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       .digest("hex")
       .slice(0, 32);
     return `${prefix}-${digest}`;
+  };
+
+  // The stream's first line is the header, so a non-empty file already has one.
+  let commonLineCount = emitCommon ? countLines(commonPath) : 0;
+
+  // Write the header on file creation. pi appends incrementally (unlike opencode,
+  // which rewrites the whole stream), so this fires once in the life of the file:
+  // a restart finds a non-empty file and leaves the existing header alone.
+  const ensureCommonHeader = (): void => {
+    if (commonLineCount > 0) {
+      return;
+    }
+    appendLine(commonPath, JSON.stringify(commonHeaderRecord(commonEmitter, basename(stateDir))));
+    commonLineCount = 1;
   };
 
   // Record this (main) agent's session file so the plugin can resume it
@@ -797,11 +859,6 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     controlTimer.unref();
   }
 
-  // Also covers /new, /resume and fork: pi fires session_start for each with
-  // `reason: "new" | "resume" | "fork"`, so recording here is enough. A separate
-  // `session_switch` handler used to sit below this one; pi declares no such event and emits
-  // it nowhere, so it never ran -- and `pi.on()` does not validate event names, so a wrong
-  // one is a silent no-op rather than an error.
   pi.on("session_start", (_event, ctx) => {
     safe("session_start", () => {
       // Hold the ctx so the control-file drain can reach ctx.modelRegistry (see drainControl).
@@ -814,6 +871,12 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       recordModelState(ctx);
       mkdirSync(dirname(sentinelPath), { recursive: true });
       writeFileSync(sentinelPath, "1");
+    });
+  });
+
+  pi.on("session_switch", (_event, ctx) => {
+    safe("session_switch", () => {
+      recordSessionFile(ctx);
     });
   });
 
@@ -843,7 +906,7 @@ export default function mngrPiLifecycle(pi: PiApi): void {
 
   // Policy guard: block disallowed bash commands and rewrite the rest with the
   // oom self-tag + git identity (see the "Policy guards" section above and
-  // system/apps/system_interface/imbue/system_interface/harnesses/core-contracts/tool-call-policies.md). NOT wrapped in safe() -- a guard that
+  // system/scripts/POLICY_HOOKS.md). NOT wrapped in safe() -- a guard that
   // swallowed its error would fail OPEN. The block check is a pure regex over a
   // string and cannot throw; the best-effort rewrite is isolated so a failure
   // leaves the command unchanged rather than blocking a legitimate command.
@@ -857,27 +920,15 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     if (typeof command !== "string" || !command) return;
     const reason = commandBlockReason(command);
     if (reason !== null) return { block: true, reason };
-    // Record the agent's own command BEFORE rewriting it, in its own try.
-    //
-    // The rewrite prepends `export ...; test -w ...; `, and pi calls every extension's
-    // tool_call handler on this same event -- and the project extensions load AFTER this one
-    // (CLI `-e` paths come first in resource-loader's mergePaths), so `.pi/extensions/`
-    // guards always read a command this handler has already rewritten. They therefore rely on
-    // `mngrOriginalCommand`; without it they see the prefix as a command chained ahead of the
-    // agent's and refuse EVERY permission request and EVERY `tk start`/`tk close`.
-    //
-    // These were one try block, recording after the rewrite so "a frozen event cannot cost the
-    // rewrite itself". That trade is the wrong way round: if the event ever became partly
-    // frozen, the rewrite would land, the recording would throw, the catch would swallow it,
-    // and the guards would then block every request -- fail-closed-wrong. Losing the rewrite
-    // only costs an OOM band; losing the recording breaks the guards.
-    try {
-      event.mngrOriginalCommand = command;
-    } catch {
-      // Nothing to do: the guards fall back to `input.command`, which is still unrewritten here.
-    }
     try {
       input.command = rewriteBashCommand(command);
+      // The rewrite prepends `export ...; test -w ...; `, and pi calls every extension's
+      // tool_call handler on this same event: a guard in another extension that reads
+      // `input.command` after us would see the prefix as a command chained ahead of the
+      // agent's, and refuse it. On claude/codex the rewriter runs LAST for exactly this
+      // reason; pi offers no ordering control, so carry the agent's own command instead.
+      // Recorded after the rewrite so a frozen event cannot cost the rewrite itself.
+      event.mngrOriginalCommand = command;
     } catch {
       // Rewrite is best-effort (matches claude's pass-through-on-failure); never block on it.
     }
@@ -926,9 +977,11 @@ export default function mngrPiLifecycle(pi: PiApi): void {
       if (!emitCommon) {
         return;
       }
-      const record = toCommonRecord(message, commonSource, () => makeEventId("pi", message));
+      const record = toCommonRecord(message, commonEmitter, () => makeEventId("pi", message));
       if (record !== null) {
+        ensureCommonHeader();
         appendLine(commonPath, JSON.stringify(record));
+        commonLineCount += 1;
       }
     });
   });
@@ -985,62 +1038,121 @@ export function toUsageRecord(
   };
 }
 
-// Convert a pi AgentMessage into an mngr common-transcript record, or null for
-// message roles the common schema does not represent (bashExecution, custom,
-// branchSummary, compactionSummary). `nextId` is called at most once and only
-// for emitted records.
+// The `header` line every stream opens with, pinning the ATIF revision its records
+// follow. pi appends incrementally, so the emitter writes this once, when the
+// common-transcript file is created (see ensureCommonHeader). Its event_id hashes
+// the agent id and emitter: a fixed "header" id repeats identically across the
+// fleet, so analytics' event-id dedupe would collapse every agent's header to one.
+export function commonHeaderRecord(emitter: string, agentId: string): Record<string, unknown> {
+  const digest = createHash("sha256").update(`${agentId}:${emitter}`).digest("hex").slice(0, 32);
+  return { type: "header", event_id: `header-${digest}`, emitter, schema_version: ATIF_SCHEMA_VERSION };
+}
+
+// Convert a pi AgentMessage into an ATIF-shaped common-transcript record (see
+// specs/atif-transcript-alignment/spec.md), or null for message roles the stream
+// does not represent (bashExecution, custom, branchSummary). `nextId` is called at
+// most once, and only for emitted records.
+//
+// One assistant message becomes ONE agent step: ATIF models no interleaving, so its
+// text blocks concatenate into `message`, its thinking into `reasoning_content`, and
+// its toolCall blocks into `tool_calls` with complete arguments. Tool results are
+// separate `observation` records, matched back to their call by `source_call_id`.
 export function toCommonRecord(
   message: AgentMessage,
-  source: string,
+  emitter: string,
   nextId: () => string,
 ): Record<string, unknown> | null {
   const timestamp = isoTimestamp(message);
   if (message.role === "user") {
     const user = message as UserMessage;
     return {
-      timestamp,
-      type: "user_message",
+      type: "step",
       event_id: nextId(),
-      source,
-      role: "user",
-      content: textFromContent(user.content),
+      emitter,
+      timestamp,
+      source: "user",
+      message: textFromContent(user.content),
     };
   }
   if (message.role === "assistant") {
     const assistant = message as AssistantMessage;
-    const usage = assistant.usage ?? {};
-    return {
-      timestamp,
-      type: "assistant_message",
+    const reasoning = reasoningFromContent(assistant.content);
+    const toolCalls = toolCallsFromContent(assistant.content);
+    const metrics = metricsFromUsage(assistant.usage);
+    const step: Record<string, unknown> = {
+      type: "step",
       event_id: nextId(),
-      source,
-      role: "assistant",
-      model: assistant.model ?? "",
-      text: textFromContent(assistant.content),
-      tool_calls: toolCallsFromContent(assistant.content),
-      parts: partsFromContent(assistant.content),
-      parts_ordered: true,
-      finish_reason: assistant.stopReason ?? "",
-      usage: {
-        input_tokens: usage.input ?? null,
-        output_tokens: usage.output ?? null,
-        cache_read_tokens: usage.cacheRead ?? null,
-        cache_write_tokens: usage.cacheWrite ?? null,
-      },
+      emitter,
+      timestamp,
+      source: "agent",
+      message: textFromContent(assistant.content),
     };
+    if (assistant.model) {
+      step.model_name = assistant.model;
+    }
+    if (reasoning) {
+      step.reasoning_content = reasoning;
+    }
+    if (toolCalls.length > 0) {
+      step.tool_calls = toolCalls;
+    }
+    if (metrics !== null) {
+      step.metrics = metrics;
+    }
+    if (assistant.stopReason) {
+      // ATIF has no stop-reason field, so it rides as a step-level extra.
+      step.extra = { finish_reason: assistant.stopReason };
+    }
+    return step;
   }
   if (message.role === "toolResult") {
     const result = message as ToolResultMessage;
     return {
-      timestamp,
-      type: "tool_result",
+      type: "observation",
       event_id: nextId(),
-      source,
-      tool_call_id: result.toolCallId,
-      tool_name: result.toolName,
-      output: truncate(textFromContent(result.content), TOOL_OUTPUT_LIMIT),
-      is_error: result.isError === true,
+      emitter,
+      timestamp,
+      results: [
+        {
+          // The schema requires a call id and a tool name on every streamed result, so a
+          // message missing either (pi's types say they are always present) degrades to
+          // the empty string rather than emitting a line that fails validation.
+          source_call_id: result.toolCallId ?? "",
+          content: textFromContent(result.content),
+          // is_error / tool_name have no ATIF field of their own.
+          extra: { is_error: result.isError === true, tool_name: result.toolName ?? "" },
+        },
+      ],
+    };
+  }
+  if (message.role === "compactionSummary") {
+    // Compaction is a system-initiated operation whose result (the summary) already
+    // exists at emission time, so it rides inline on the step -- ATIF v1.7's
+    // context_management convention marks what happened to the context.
+    // The compactionSummary message shape read here, and the assumption that pi always
+    // replaces (rather than truncates) the compacted context, are asserted by synthetic
+    // fixtures rather than confirmed against captured native output.
+    const summary = compactionSummaryText(message);
+    return {
+      type: "step",
+      event_id: nextId(),
+      emitter,
+      timestamp,
+      source: "system",
+      message: "",
+      observation: { results: [{ content: summary }] },
+      extra: { context_management: { type: "compaction", boundary: "replace" } },
     };
   }
   return null;
+}
+
+// The summary text of a compactionSummary message. pi carries it either as a
+// `summary` string or as ordinary content blocks depending on how the compaction ran.
+function compactionSummaryText(message: AgentMessage): string {
+  const summary = (message as { summary?: unknown }).summary;
+  if (typeof summary === "string" && summary) {
+    return summary;
+  }
+  return textFromContent((message as { content?: string | ContentBlock[] }).content);
 }

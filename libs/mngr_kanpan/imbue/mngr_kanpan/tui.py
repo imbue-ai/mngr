@@ -1371,13 +1371,14 @@ def _focus_row_by_instance_key(state: _KanpanState, instance_key: AgentInstanceK
 
 
 def _run_transcript(agent: str) -> subprocess.CompletedProcess[str]:  # pragma: no cover
-    """Read the agent's user/assistant messages. Called from a background thread.
+    """Read the agent's user/agent messages. Called from a background thread.
 
-    The role filter excludes tool turns, keeping the readable conversation. No
-    ``--tail`` window -- the whole thing is fetched and the panel keeps the tail.
+    The role filter excludes tool and system turns, keeping the readable
+    conversation. No ``--tail`` window -- the whole thing is fetched and the panel
+    keeps the tail.
     """
     return subprocess.run(
-        ["mngr", "transcript", agent, "--role", "user", "--role", "assistant"],
+        ["mngr", "transcript", agent, "--role", "user", "--role", "agent"],
         capture_output=True,
         text=True,
         timeout=30,

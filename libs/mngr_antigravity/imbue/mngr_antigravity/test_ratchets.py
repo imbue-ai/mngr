@@ -65,11 +65,19 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    # The two allowed catches are in common_transcript_convert.py, a stdlib-only
-    # resource script that converts a live-appended JSONL transcript stream: a
-    # truncated trailing line caught mid-write is expected and benign (it re-reads
-    # complete on the next poll), so it is skipped silently rather than logged.
-    rc.check_silent_decode_error_catches(_DIR, snapshot(2))
+    # All three allowed catches are in common_transcript_convert.py, a stdlib-only
+    # resource script (no logger is importable, and anything it writes to stderr is
+    # reported as a converter error in the agent's pane). Two convert a live-appended
+    # JSONL stream: a truncated trailing line caught mid-write is expected and benign
+    # (it re-reads complete on the next poll), so it is skipped silently rather than
+    # logged. The third is _parse_arguments, where the handler does not swallow the
+    # failure: it preserves the undecodable args payload verbatim in the emitted
+    # record's arguments._raw, which the ATIF fidelity rule requires.
+    # Tightening the ratchet's regex instead was considered and rejected: the
+    # pattern matches the `except json.JSONDecodeError` handler itself, and no
+    # regex over that handler can tell a swallowed failure from one whose body
+    # preserves the undecodable payload under `_raw`.
+    rc.check_silent_decode_error_catches(_DIR, snapshot(3))
 
 
 # --- Import style ---

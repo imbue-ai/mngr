@@ -479,6 +479,61 @@ def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
 # =============================================================================
 
 
+COMMON_TRANSCRIPT_SOURCE_SUFFIX: Final[str] = "common_transcript"
+
+
+def find_common_transcript_source(target: EventsTarget) -> str:
+    """Find the event source path ending with 'common_transcript'.
+
+    Discovers all event sources for the target and returns the one whose
+    source_path ends with 'common_transcript' (e.g. 'claude/common_transcript'),
+    so callers do not need to know the agent type prefix. Raises MngrError when
+    there is no such source, or more than one.
+    """
+    sources = discover_event_sources(target)
+    matching_sources = [
+        s
+        for s in sources
+        if (
+            (
+                s.source_path == COMMON_TRANSCRIPT_SOURCE_SUFFIX
+                or s.source_path.endswith(f"/{COMMON_TRANSCRIPT_SOURCE_SUFFIX}")
+            )
+            and not s.source_path.startswith("logs/")
+        )
+    ]
+    if len(matching_sources) == 0:
+        raise MngrError(
+            f"No common transcript found for {target.display_name}. "
+            "The agent may not have produced any transcript events yet."
+        )
+    if len(matching_sources) > 1:
+        source_paths = ", ".join(s.source_path for s in matching_sources)
+        raise MngrError(
+            f"Multiple common transcript sources found for {target.display_name}: {source_paths}. "
+            "This is unexpected -- please report this as a bug."
+        )
+    return matching_sources[0].source_path
+
+
+def read_common_transcript_content(target: EventsTarget) -> tuple[str, str]:
+    """Read the target's common-transcript stream file.
+
+    Returns ``(event_file_name, content)`` where ``event_file_name`` is the
+    path of the stream relative to the events directory (e.g.
+    ``claude/common_transcript/events.jsonl``), suitable for use as a
+    human-readable source description. Raises :class:`MngrError` when the
+    source cannot be found or read.
+    """
+    source_path = find_common_transcript_source(target)
+    event_file_name = f"{source_path}/events.jsonl"
+    try:
+        content = read_event_content(target, event_file_name)
+    except (MngrError, OSError) as e:
+        raise MngrError(f"Failed to read transcript for {target.display_name}: {e}") from e
+    return event_file_name, content
+
+
 def discover_event_sources(target: EventsTarget) -> list[EventSourceInfo]:
     """Find all event sources (subdirectories containing events.jsonl files).
 

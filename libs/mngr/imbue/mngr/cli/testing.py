@@ -113,6 +113,7 @@ def create_agent_with_events_dir(
     agent_name: str,
     events_source: str | None = None,
     agent_type: str = PLACEHOLDER_AGENT_TYPE,
+    labels: Mapping[str, str] | None = None,
 ) -> tuple[AgentId, Path]:
     """Create a minimal agent directory with an events subdirectory.
 
@@ -123,7 +124,7 @@ def create_agent_with_events_dir(
     agent_id = AgentId.generate()
     agent_dir = get_agent_state_dir_path(per_host_dir, agent_id)
     agent_dir.mkdir(parents=True, exist_ok=True)
-    data = {
+    data: dict[str, Any] = {
         "id": str(agent_id),
         "name": agent_name,
         "type": agent_type,
@@ -131,6 +132,8 @@ def create_agent_with_events_dir(
         "work_dir": "/tmp/test",
         "create_time": "2026-01-01T00:00:00+00:00",
     }
+    if labels is not None:
+        data["labels"] = dict(labels)
     (agent_dir / "data.json").write_text(json.dumps(data))
     if events_source is not None:
         events_dir = agent_dir / "events" / events_source
@@ -148,7 +151,10 @@ def write_common_transcript_events(
     (events_dir / "events.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
 
 
-SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
+# A pre-ATIF stream, kept only to exercise the unsupported-old-format error paths
+# (the reader and the doc-builder both refuse a stream carrying these retired record
+# types). Tests that need a readable transcript use SAMPLE_ATIF_STREAM_EVENTS below.
+LEGACY_SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
     {
         "timestamp": "2026-01-01T00:00:00Z",
         "type": "user_message",
@@ -181,6 +187,44 @@ SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
 ]
 
 
+# A minimal valid ATIF-shaped stream (header, user step, agent step with one tool
+# call, and its streamed observation) for doc-builder and reader tests.
+SAMPLE_ATIF_STREAM_EVENTS: list[dict[str, Any]] = [
+    {
+        "type": "header",
+        "event_id": "header-" + "0" * 32,
+        "emitter": "claude/common_transcript",
+        "schema_version": "ATIF-v1.7",
+    },
+    {
+        "type": "step",
+        "event_id": "u1-user",
+        "emitter": "claude/common_transcript",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "source": "user",
+        "message": "Hello",
+    },
+    {
+        "type": "step",
+        "event_id": "a1-assistant",
+        "emitter": "claude/common_transcript",
+        "timestamp": "2026-01-01T00:00:01Z",
+        "source": "agent",
+        "message": "World",
+        "model_name": "test-model",
+        "tool_calls": [{"tool_call_id": "call_1", "function_name": "Bash", "arguments": {"command": "echo ok"}}],
+        "extra": {"finish_reason": "tool_use"},
+    },
+    {
+        "type": "observation",
+        "event_id": "a1-tool_result-call_1",
+        "emitter": "claude/common_transcript",
+        "timestamp": "2026-01-01T00:00:02Z",
+        "results": [{"source_call_id": "call_1", "content": "ok", "extra": {"is_error": False, "tool_name": "Bash"}}],
+    },
+]
+
+
 def create_agent_with_sample_transcript(
     per_host_dir: Path,
     agent_name: str,
@@ -188,8 +232,8 @@ def create_agent_with_sample_transcript(
 ) -> tuple[AgentId, Path]:
     """Create an agent with a populated common_transcript events file.
 
-    Uses SAMPLE_TRANSCRIPT_EVENTS (user, assistant, tool_result) if no
-    events are provided. Returns (agent_id, events_dir).
+    Uses SAMPLE_ATIF_STREAM_EVENTS (header, user step, agent step, observation) if
+    no events are provided. Returns (agent_id, events_dir).
     """
     agent_id, events_dir = create_agent_with_events_dir(
         per_host_dir,
@@ -197,7 +241,7 @@ def create_agent_with_sample_transcript(
         events_source="claude/common_transcript",
         agent_type="claude",
     )
-    write_common_transcript_events(events_dir, events if events is not None else SAMPLE_TRANSCRIPT_EVENTS)
+    write_common_transcript_events(events_dir, events if events is not None else SAMPLE_ATIF_STREAM_EVENTS)
     return agent_id, events_dir
 
 

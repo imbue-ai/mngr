@@ -498,50 +498,58 @@ def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> Non
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) -> None:
+def test_tips_transcript_tail_agent(e2e: E2eSession, temp_host_dir: Path) -> None:
     """Tutorial block:
         # check the transcript to see what an agent has been up to
         # (helpful to see the last messages without even having to bring the host back online!)
-        mngr transcript my-task --tail 5 --role assistant
+        mngr transcript my-task --tail 5 --role agent
 
-    Scope: `mngr transcript --tail 5 --role assistant` reads an offline agent's
-    seeded transcript and surfaces only the last five assistant messages -- the
-    most recent assistant turns shown, earlier ones omitted, and user messages
-    filtered out entirely by `--role assistant`.
+    Scope: `mngr transcript --tail 5 --role agent` reads an offline agent's seeded
+    transcript and surfaces only the last five agent messages -- the most recent
+    agent turns shown, earlier ones omitted, and user messages filtered out
+    entirely by the role filter.
     """
     _create_my_task(e2e, 101016)
-    # Seven assistant turns interleaved with user turns; --tail 5 --role
-    # assistant should surface only the last five assistant messages.
-    events: list[dict[str, Any]] = []
+    # Seven agent turns interleaved with user turns; --tail 5 with the role
+    # filter should surface only the last five agent messages.
+    events: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "event_id": "header-" + "0" * 32,
+            "emitter": "claude/common_transcript",
+            "schema_version": "ATIF-v1.7",
+        }
+    ]
     for i in range(1, 8):
         events.append(
             {
                 "timestamp": f"2026-01-01T00:00:{2 * i - 1:02d}Z",
-                "type": "user_message",
-                "role": "user",
-                "content": f"USER_MSG_{i}",
+                "type": "step",
+                "event_id": f"evt-user-{i}",
+                "emitter": "claude/common_transcript",
+                "source": "user",
+                "message": f"USER_MSG_{i}",
             }
         )
         events.append(
             {
                 "timestamp": f"2026-01-01T00:00:{2 * i:02d}Z",
-                "type": "assistant_message",
-                "role": "assistant",
-                "text": f"ASSISTANT_MSG_{i}",
-                "tool_calls": [],
-                "parts": [{"type": "text", "content": f"ASSISTANT_MSG_{i}"}],
-                "parts_ordered": True,
+                "type": "step",
+                "event_id": f"evt-agent-{i}",
+                "emitter": "claude/common_transcript",
+                "source": "agent",
+                "message": f"AGENT_MSG_{i}",
             }
         )
     _seed_claude_transcript(temp_host_dir, events)
 
     result = e2e.run(
-        "mngr transcript my-task --tail 5 --role assistant",
+        "mngr transcript my-task --tail 5 --role agent",
         comment="check the transcript to see what an agent has been up to",
     )
     expect(result).to_succeed()
-    # Only the last five assistant messages, and no user messages.
-    assert "ASSISTANT_MSG_7" in result.stdout, result.stdout
-    assert "ASSISTANT_MSG_3" in result.stdout, result.stdout
-    assert "ASSISTANT_MSG_2" not in result.stdout, result.stdout
+    # Only the last five agent messages, and no user messages.
+    assert "AGENT_MSG_7" in result.stdout, result.stdout
+    assert "AGENT_MSG_3" in result.stdout, result.stdout
+    assert "AGENT_MSG_2" not in result.stdout, result.stdout
     assert "USER_MSG" not in result.stdout, result.stdout

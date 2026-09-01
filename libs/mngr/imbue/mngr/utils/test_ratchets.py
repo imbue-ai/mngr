@@ -10,6 +10,25 @@ from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
 # so the source dir is parent.parent instead of parent.parent.parent
 _DIR = Path(__file__).parent.parent
 
+# agents/data_types/atif/ is a vendored copy of harbor's ATIF models (see its README.md): upstream
+# style is deliberately preserved there, so it is carved out of the ratchets its
+# patterns would trip rather than counted against this project. The vendored modules
+# are listed one by one rather than globbed, so that mngr-authored files in the same
+# directory (trajectory_test.py) stay subject to the ratchets, and a re-vendor that
+# adds a module fails loudly instead of silently widening the carve-out.
+_VENDORED_ATIF_PATTERNS = (
+    "agents/data_types/atif/agent.py",
+    "agents/data_types/atif/content.py",
+    "agents/data_types/atif/final_metrics.py",
+    "agents/data_types/atif/metrics.py",
+    "agents/data_types/atif/observation.py",
+    "agents/data_types/atif/observation_result.py",
+    "agents/data_types/atif/step.py",
+    "agents/data_types/atif/subagent_trajectory_ref.py",
+    "agents/data_types/atif/tool_call.py",
+    "agents/data_types/atif/trajectory.py",
+)
+
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
@@ -41,11 +60,13 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # 34 includes the blessed `write_stderr_line` helper in cli/output_helpers.py -- the
+    # 35 includes the blessed `write_stderr_line` helper in cli/output_helpers.py -- the
     # stderr sibling of `write_human_line`, used for the `mngr list` end-of-output error
     # block so piped stdout stays clean. Call sites route through it rather than writing
-    # to sys.stderr directly.
-    rc.check_bare_print(_DIR, snapshot(34), excluded_patterns=("_kqueue_tty_test_script.py",))
+    # to sys.stderr directly. It also includes cli/transcript.py's ATIF-document write,
+    # which is machine-readable output on stdout exactly like the JSONL/JSON writes
+    # beside it in `_emit_transcript`.
+    rc.check_bare_print(_DIR, snapshot(35), excluded_patterns=("_kqueue_tty_test_script.py",))
 
 
 # --- Exception handling ---
@@ -64,7 +85,7 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(0))
+    rc.check_builtin_exception_raises(_DIR, snapshot(0), excluded_patterns=_VENDORED_ATIF_PATTERNS)
 
 
 def test_prevent_silent_decode_error_catches() -> None:
@@ -107,7 +128,7 @@ def test_prevent_getattr() -> None:
     # (HOST_PROVISIONING_FIELD_MAP). Both are data-driven traversals where
     # the attribute name only exists in the map; static field access is not
     # possible.
-    rc.check_getattr(_DIR, snapshot(9))
+    rc.check_getattr(_DIR, snapshot(9), excluded_patterns=_VENDORED_ATIF_PATTERNS)
 
 
 def test_prevent_setattr() -> None:
@@ -185,19 +206,19 @@ def test_prevent_init_docstrings() -> None:
 
 @pytest.mark.timeout(10)
 def test_prevent_args_in_docstrings() -> None:
-    rc.check_args_in_docstrings(_DIR, snapshot(0))
+    rc.check_args_in_docstrings(_DIR, snapshot(0), excluded_patterns=_VENDORED_ATIF_PATTERNS)
 
 
 @pytest.mark.timeout(10)
 def test_prevent_returns_in_docstrings() -> None:
-    rc.check_returns_in_docstrings(_DIR, snapshot(0))
+    rc.check_returns_in_docstrings(_DIR, snapshot(0), excluded_patterns=_VENDORED_ATIF_PATTERNS)
 
 
 # --- Type safety ---
 
 
 def test_prevent_literal_with_multiple_options() -> None:
-    rc.check_literal_with_multiple_options(_DIR, snapshot(1))
+    rc.check_literal_with_multiple_options(_DIR, snapshot(1), excluded_patterns=_VENDORED_ATIF_PATTERNS)
 
 
 def test_prevent_bare_generic_types() -> None:
@@ -291,7 +312,7 @@ def test_prevent_direct_subprocess() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(0))
+    rc.check_if_elif_without_else(_DIR, snapshot(0), excluded_patterns=_VENDORED_ATIF_PATTERNS)
 
 
 def test_prevent_inline_functions() -> None:

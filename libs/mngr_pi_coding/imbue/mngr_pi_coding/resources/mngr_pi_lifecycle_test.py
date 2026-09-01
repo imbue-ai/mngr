@@ -12,6 +12,7 @@ count toward coverage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -110,19 +111,11 @@ def test_session_start_writes_readiness_sentinel(tmp_path: Path) -> None:
 
 
 def test_session_file_recorded_on_start_and_switch(tmp_path: Path) -> None:
-    """A switch is just another session_start: pi fires it for /new, /resume and fork alike
-    (its event carries `reason`), so the recorded file follows the live session.
-
-    This used to drive a `session_switch` event. pi declares no such event and emits it
-    nowhere, so the handler it exercised could never run in production -- the test passed
-    because it invoked the handler directly. Driving the real event keeps the behaviour pinned
-    without asserting on a code path pi will never take.
-    """
     state = _run_extension(
         tmp_path,
         [
             {"event": "session_start", "sessionId": "s1", "sessionFile": "/s/s1.jsonl"},
-            {"event": "session_start", "sessionId": "s2", "sessionFile": "/s/s2.jsonl"},
+            {"event": "session_switch", "sessionId": "s2", "sessionFile": "/s/s2.jsonl"},
         ],
     )
     assert (state / "pi_session_file").read_text() == "/s/s2.jsonl"
@@ -133,8 +126,8 @@ def test_in_memory_session_does_not_clobber_recorded_file(tmp_path: Path) -> Non
         tmp_path,
         [
             {"event": "session_start", "sessionId": "s1", "sessionFile": "/s/s1.jsonl"},
-            # A session_start with no sessionFile models an in-memory session.
-            {"event": "session_start", "sessionId": "mem"},
+            # session_switch with no sessionFile models an in-memory session.
+            {"event": "session_switch", "sessionId": "mem"},
         ],
     )
     assert (state / "pi_session_file").read_text() == "/s/s1.jsonl"
@@ -252,117 +245,222 @@ def test_session_shutdown_clears_marker(tmp_path: Path) -> None:
     assert not (state / "active").exists()
 
 
+_EMITTER = "pi-coding/common_transcript"
+
+
+def _message_end(**message: Any) -> dict[str, Any]:
+    """A ``message_end`` event whose payload carries the given pi message."""
+    return {"event": "message_end", "payload": {"message": message}}
+
+
+# One message of each role the stream represents: a user turn, an assistant
+# inference with thinking + a tool call, and that call's result.
+_ONE_TURN_EVENTS: list[dict[str, Any]] = [
+    _message_end(role="user", content="hi", timestamp=1),
+    _message_end(
+        role="assistant",
+        content=[
+            {"type": "thinking", "thinking": "let me look"},
+            {"type": "text", "text": "ok"},
+            {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}},
+        ],
+        model="m",
+        stopReason="toolUse",
+        usage={"input": 7, "output": 3, "cacheRead": 1, "cacheWrite": 2, "cost": {"total": 0.25}},
+        timestamp=2,
+    ),
+    _message_end(
+        role="toolResult",
+        toolCallId="c1",
+        toolName="bash",
+        content=[{"type": "text", "text": "out"}],
+        isError=False,
+        timestamp=3,
+    ),
+]
+
+
 def test_common_transcript_records_for_each_role(tmp_path: Path) -> None:
     state = _run_extension(
         tmp_path,
+        _ONE_TURN_EVENTS
+        # Roles the stream does not model are skipped.
+        + [_message_end(role="bashExecution", command="x", timestamp=4)],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    assert [r["type"] for r in records] == ["header", "step", "step", "observation"]
+    header, user_step, agent_step, observation = records
+    # The extension derives the header id from the state-dir basename (the agent id).
+    header_digest = hashlib.sha256(f"{state.name}:{_EMITTER}".encode()).hexdigest()[:32]
+    assert header == {
+        "type": "header",
+        "event_id": f"header-{header_digest}",
+        "emitter": _EMITTER,
+        "schema_version": "ATIF-v1.7",
+    }
+    assert user_step["source"] == "user"
+    assert user_step["message"] == "hi"
+    assert agent_step["source"] == "agent"
+    assert agent_step["message"] == "ok"
+    assert agent_step["model_name"] == "m"
+    assert agent_step["reasoning_content"] == "let me look"
+    assert agent_step["extra"] == {"finish_reason": "toolUse"}
+    assert agent_step["tool_calls"] == [
+        {"tool_call_id": "c1", "function_name": "bash", "arguments": {"command": "ls"}}
+    ]
+    assert observation["results"] == [
+        {"source_call_id": "c1", "content": "out", "extra": {"is_error": False, "tool_name": "bash"}}
+    ]
+    assert all(r["emitter"] == _EMITTER for r in records)
+    assert len({r["event_id"] for r in records}) == len(records)
+
+
+def test_tool_result_without_a_call_id_still_validates(tmp_path: Path) -> None:
+    """The schema requires a call id and a tool name on every streamed result, so a
+    message missing either degrades to the empty string rather than an invalid line."""
+    state = _run_extension(
+        tmp_path,
+        [_message_end(role="toolResult", content=[{"type": "text", "text": "out"}], timestamp=1)],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (observation,) = [r for r in records if r["type"] == "observation"]
+    assert observation["results"][0]["source_call_id"] == ""
+    assert observation["results"][0]["extra"]["tool_name"] == ""
+    assert validate_common_transcript_record(observation) is None
+
+
+def test_assistant_usage_maps_to_atif_metric_names(tmp_path: Path) -> None:
+    """ATIF's prompt_tokens counts ALL input (cache hits and writes included) and
+    cached_tokens only the cache reads; the cache-write count has no ATIF field, so
+    it rides under metrics.extra. pi's client-side per-message cost fills cost_usd."""
+    state = _run_extension(tmp_path, _ONE_TURN_EVENTS)
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (agent_step,) = [r for r in records if r["type"] == "step" and r["source"] == "agent"]
+    assert agent_step["metrics"] == {
+        "prompt_tokens": 10,
+        "completion_tokens": 3,
+        "cached_tokens": 1,
+        "cost_usd": 0.25,
+        "extra": {"cache_creation_input_tokens": 2},
+    }
+
+
+def test_assistant_without_usage_claims_no_metrics(tmp_path: Path) -> None:
+    state = _run_extension(
+        tmp_path,
+        [_message_end(role="assistant", content=[{"type": "text", "text": "ok"}], timestamp=1)],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (agent_step,) = [r for r in records if r["type"] == "step"]
+    assert "metrics" not in agent_step
+    # An absent model is omitted rather than reported as the empty string.
+    assert "model_name" not in agent_step
+    assert "extra" not in agent_step
+    assert validate_common_transcript_record(agent_step) is None
+
+
+# Fidelity: ATIF streams carry complete tool arguments and untruncated outputs.
+# Display truncation is the reader's job, so nothing here may shorten them.
+_LONG_COMMAND = "echo " + "a" * 500
+_LONG_OUTPUT = "b" * 5000
+
+
+def test_tool_arguments_and_output_are_never_truncated(tmp_path: Path) -> None:
+    state = _run_extension(
+        tmp_path,
         [
-            {"event": "message_end", "payload": {"message": {"role": "user", "content": "hi", "timestamp": 1}}},
-            {
-                "event": "message_end",
-                "payload": {
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": "ok"},
-                            {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}},
-                        ],
-                        "model": "m",
-                        "stopReason": "toolUse",
-                        "usage": {"input": 7, "output": 3, "cacheRead": 1, "cacheWrite": 0},
-                        "timestamp": 2,
-                    }
-                },
-            },
-            {
-                "event": "message_end",
-                "payload": {
-                    "message": {
-                        "role": "toolResult",
-                        "toolCallId": "c1",
-                        "toolName": "bash",
-                        "content": [{"type": "text", "text": "out"}],
-                        "isError": False,
-                        "timestamp": 3,
-                    }
-                },
-            },
-            # Roles the common schema does not model are skipped.
-            {
-                "event": "message_end",
-                "payload": {"message": {"role": "bashExecution", "command": "x", "timestamp": 4}},
-            },
+            _message_end(
+                role="assistant",
+                content=[{"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": _LONG_COMMAND}}],
+                model="m",
+                timestamp=1,
+            ),
+            _message_end(
+                role="toolResult",
+                toolCallId="c1",
+                toolName="bash",
+                content=[{"type": "text", "text": _LONG_OUTPUT}],
+                timestamp=2,
+            ),
         ],
     )
     records = _read_jsonl(state / _COMMON_TRANSCRIPT)
-    assert [r["type"] for r in records] == ["user_message", "assistant_message", "tool_result"]
-    assert records[0]["content"] == "hi"
-    assert records[1]["text"] == "ok"
-    assert records[1]["tool_calls"] == [
-        {"tool_call_id": "c1", "tool_name": "bash", "input_preview": '{"command":"ls"}'}
-    ]
-    # parts preserve the source order of the text and tool_call blocks.
-    assert records[1]["parts"] == [
-        {"type": "text", "content": "ok"},
-        {"type": "tool_call", "tool_call_id": "c1", "tool_name": "bash", "input_preview": '{"command":"ls"}'},
-    ]
-    assert records[1]["usage"] == {
-        "input_tokens": 7,
-        "output_tokens": 3,
-        "cache_read_tokens": 1,
-        "cache_write_tokens": 0,
-    }
-    assert records[2]["tool_call_id"] == "c1"
-    assert records[2]["output"] == "out"
-    assert records[2]["is_error"] is False
-    assert all(r["source"] == "pi-coding/common_transcript" for r in records)
-    assert len({r["event_id"] for r in records}) == 3
+    (agent_step,) = [r for r in records if r["type"] == "step"]
+    assert agent_step["tool_calls"][0]["arguments"] == {"command": _LONG_COMMAND}
+    (observation,) = [r for r in records if r["type"] == "observation"]
+    assert observation["results"][0]["content"] == _LONG_OUTPUT
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
+
+
+def test_non_object_tool_arguments_are_preserved_under_raw(tmp_path: Path) -> None:
+    """ATIF requires an arguments object; a native non-object is wrapped, not dropped."""
+    state = _run_extension(
+        tmp_path,
+        [
+            _message_end(
+                role="assistant",
+                content=[{"type": "toolCall", "id": "c1", "name": "bash", "arguments": "ls -la"}],
+                model="m",
+                timestamp=1,
+            )
+        ],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (agent_step,) = [r for r in records if r["type"] == "step"]
+    assert agent_step["tool_calls"][0]["arguments"] == {"_raw": "ls -la"}
+
+
+def test_empty_tool_arguments_become_an_empty_arguments_object(tmp_path: Path) -> None:
+    """An absent or empty native payload means "no arguments", not a raw empty string."""
+    state = _run_extension(
+        tmp_path,
+        [
+            _message_end(
+                role="assistant",
+                content=[{"type": "toolCall", "id": "c1", "name": "bash", "arguments": "   "}],
+                model="m",
+                timestamp=1,
+            )
+        ],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (agent_step,) = [r for r in records if r["type"] == "step"]
+    assert agent_step["tool_calls"][0]["arguments"] == {}
+
+
+def test_compaction_summary_becomes_a_system_step(tmp_path: Path) -> None:
+    """Compaction is a system-initiated operation whose result exists at emission
+    time, so it rides inline on the step with ATIF v1.7's context_management mark."""
+    state = _run_extension(
+        tmp_path,
+        [_message_end(role="compactionSummary", summary="we did things", timestamp=1)],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    (step,) = [r for r in records if r["type"] == "step"]
+    assert step["source"] == "system"
+    assert step["extra"] == {"context_management": {"type": "compaction", "boundary": "replace"}}
+    assert step["observation"] == {"results": [{"content": "we did things"}]}
+    assert validate_common_transcript_record(step) is None
 
 
 def test_emitted_common_records_conform_to_canonical_schema(tmp_path: Path) -> None:
-    """Every record the extension emits must validate against the shared envelope schema.
+    """Every record the extension emits must validate against the shared record schema.
 
     Guards against the pi emitter (resources/mngr_pi_lifecycle.ts) and the canonical
     schema (imbue.mngr.agents.common_transcript_records) drifting apart -- a divergence
-    no other plugin's tests would catch. Drives all three record types from real pi
+    no other plugin's tests would catch. Drives every record type from real pi
     message_end payloads and asserts each emitted record conforms.
     """
     state = _run_extension(
         tmp_path,
-        [
-            {"event": "message_end", "payload": {"message": {"role": "user", "content": "hi", "timestamp": 1}}},
-            {
-                "event": "message_end",
-                "payload": {
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": "ok"},
-                            {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}},
-                        ],
-                        "model": "m",
-                        "stopReason": "toolUse",
-                        "usage": {"input": 7, "output": 3, "cacheRead": 1, "cacheWrite": 0},
-                        "timestamp": 2,
-                    }
-                },
-            },
-            {
-                "event": "message_end",
-                "payload": {
-                    "message": {
-                        "role": "toolResult",
-                        "toolCallId": "c1",
-                        "toolName": "bash",
-                        "content": [{"type": "text", "text": "out"}],
-                        "isError": False,
-                        "timestamp": 3,
-                    }
-                },
-            },
-        ],
+        _ONE_TURN_EVENTS + [_message_end(role="compactionSummary", summary="so far", timestamp=4)],
     )
     records = _read_jsonl(state / _COMMON_TRANSCRIPT)
-    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    record_types = {r["type"] for r in records}
+    assert record_types <= {"header", "step", "observation"}
+    # The fixture drives all three, so an empty or degenerate stream cannot pass.
+    assert record_types == {"header", "step", "observation"}
     for record in records:
         assert validate_common_transcript_record(record) is None, record
 
@@ -384,26 +482,17 @@ def test_raw_transcript_captures_every_message(tmp_path: Path) -> None:
     assert raw[1]["message"]["role"] == "bashExecution"
 
 
-def test_common_transcript_event_ids_stay_unique_across_restart(tmp_path: Path) -> None:
-    """A second process (resume) must not reuse event_ids written by the first.
+def _rerun_extension_against_state(tmp_path: Path, state: Path, events: list[dict[str, Any]]) -> None:
+    """Replay ``events`` through a second extension load against an existing state dir.
 
-    event_id hashes the message's own timestamp and content, so ids stay
-    unique across a stop/start even though the resumed session reuses its id
-    and only new messages fire message_end.
+    Simulates a resumed restart: a fresh process over a stream the previous one wrote.
+    The caller must already have run :func:`_run_extension` (which sets the work dir up,
+    and skips the test when node is unavailable).
     """
-    events = [{"event": "message_end", "payload": {"message": {"role": "user", "content": "hi", "timestamp": 1}}}]
-    # First run writes one record.
-    state = _run_extension(tmp_path, events)
-    # Second run against the SAME state dir (simulating a resumed restart).
-    # The first run would have skipped the whole test if node were unavailable.
     node = shutil.which("node")
     assert node is not None
     work_dir = tmp_path / "work"
-    (work_dir / "events.json").write_text(
-        json.dumps(
-            [{"event": "message_end", "payload": {"message": {"role": "user", "content": "again", "timestamp": 2}}}]
-        )
-    )
+    (work_dir / "events.json").write_text(json.dumps(events))
     result = subprocess.run(
         [node, str(work_dir / "driver.mjs"), str(work_dir / "events.json")],
         capture_output=True,
@@ -416,9 +505,45 @@ def test_common_transcript_event_ids_stay_unique_across_restart(tmp_path: Path) 
         },
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_common_transcript_event_ids_stay_unique_across_restart(tmp_path: Path) -> None:
+    """A second process (resume) must not reuse event_ids written by the first.
+
+    event_id hashes the message's own timestamp and content, so ids stay unique
+    across a stop/start even though the resumed session reuses its id and only
+    new messages fire message_end.
+    """
+    state = _run_extension(
+        tmp_path, [{"event": "message_end", "payload": {"message": {"role": "user", "content": "hi", "timestamp": 1}}}]
+    )
+    _rerun_extension_against_state(
+        tmp_path,
+        state,
+        [{"event": "message_end", "payload": {"message": {"role": "user", "content": "again", "timestamp": 2}}}],
+    )
     records = _read_jsonl(state / _COMMON_TRANSCRIPT)
-    assert len(records) == 2
-    assert len({r["event_id"] for r in records}) == 2
+    assert [r["type"] for r in records] == ["header", "step", "step"]
+    assert len({r["event_id"] for r in records}) == 3
+
+
+def test_header_is_written_once_across_restarts(tmp_path: Path) -> None:
+    """The header is the first line of the file, written on creation only: a restart
+    appends to the existing stream rather than opening a second header."""
+    state = _run_extension(
+        tmp_path, [{"event": "message_end", "payload": {"message": {"role": "user", "content": "hi", "timestamp": 1}}}]
+    )
+    _rerun_extension_against_state(
+        tmp_path,
+        state,
+        [{"event": "message_end", "payload": {"message": {"role": "user", "content": "again", "timestamp": 2}}}],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    assert [r["type"] for r in records].count("header") == 1
+    assert records[0]["type"] == "header"
+    # The header is not part of the id derivation: each step carries its own hash.
+    assert all(r["event_id"].startswith("pi-") for r in records[1:])
+    assert len({r["event_id"] for r in records[1:]}) == 2
 
 
 def test_no_common_transcript_when_disabled(tmp_path: Path) -> None:
@@ -435,8 +560,8 @@ def test_no_common_transcript_when_disabled(tmp_path: Path) -> None:
 def test_unknown_content_and_roles_degrade_gracefully(tmp_path: Path) -> None:
     """Unknown content blocks/roles and malformed messages must not crash the extension.
 
-    The common (lossy) envelope surfaces only what it models; the raw stream
-    preserves everything verbatim, so unknown shapes are never lost.
+    The stream surfaces only what ATIF models; the raw stream preserves everything
+    verbatim, so unknown shapes are never lost.
     """
     state = _run_extension(
         tmp_path,
@@ -478,16 +603,17 @@ def test_unknown_content_and_roles_degrade_gracefully(tmp_path: Path) -> None:
 
     common = _read_jsonl(state / _COMMON_TRANSCRIPT)
     # Unknown roles are skipped; only modelled roles surface.
-    assert [r["type"] for r in common] == ["assistant_message", "user_message"]
-    assistant = next(r for r in common if r["type"] == "assistant_message")
-    # Unknown content blocks (thinking/image/future) are dropped; text + tool call survive.
-    assert assistant["text"] == "hello"
-    assert [c["tool_name"] for c in assistant["tool_calls"]] == ["bash"]
-    # Thinking content is not surfaced in the lossy common envelope.
-    assert "secret reasoning" not in json.dumps(common)
-    user = next(r for r in common if r["type"] == "user_message")
+    assert [r["type"] for r in common] == ["header", "step", "step"]
+    assistant, user = common[1], common[2]
+    assert assistant["source"] == "agent"
+    # Images become the placeholder; a future block type carries no text and is dropped.
+    assert assistant["message"] == "hello[image omitted]"
+    assert [c["function_name"] for c in assistant["tool_calls"]] == ["bash"]
+    # Thinking is captured as ATIF reasoning_content rather than dropped.
+    assert assistant["reasoning_content"] == "secret reasoning"
+    assert user["source"] == "user"
     # Non-string/array content coerces to empty rather than crashing.
-    assert user["content"] == ""
+    assert user["message"] == ""
 
     # Raw preserves every well-formed message verbatim -- unknown roles AND unknown blocks.
     raw = _read_jsonl(state / _RAW_TRANSCRIPT)
@@ -520,21 +646,9 @@ _SESSION_BOOKKEEPING_LINE_TYPES = {
     "thinking_level_change",
 }
 
-# pi message roles the common schema deliberately does not model (kept verbatim
-# in the raw transcript instead).
-_EXCLUDED_MESSAGE_ROLES = {"bashExecution", "custom", "branchSummary", "compactionSummary"}
-
-# Assistant content block types that carry no transcript-visible content.
-_EXCLUDED_ASSISTANT_BLOCK_TYPES = {"thinking"}
-
-# Mirrors of the extension's INPUT_PREVIEW_LIMIT / TOOL_OUTPUT_LIMIT and its
-# truncate() (which appends "..." past the limit).
-_PI_INPUT_PREVIEW_LIMIT = 200
-_PI_TOOL_OUTPUT_LIMIT = 2000
-
-
-def _truncate_like_emitter(text: str, limit: int) -> str:
-    return text[:limit] + "..." if len(text) > limit else text
+# pi message roles the stream deliberately does not model (kept verbatim in the raw
+# transcript instead).
+_EXCLUDED_MESSAGE_ROLES = {"bashExecution", "custom", "branchSummary"}
 
 
 def _pi_text(content: Any) -> str:
@@ -565,9 +679,9 @@ def _native_session_messages() -> list[dict[str, Any]]:
     return messages
 
 
-# A turn descriptor: ("user_message", text), ("assistant_message", (text, calls)),
-# or ("tool_result", (call_id, tool_name, output, is_error)). pi preserves the
-# native toolCall ids end to end, so descriptor equality covers pairing.
+# A turn descriptor: ("user", text), ("agent", (text, reasoning, calls)), or
+# ("tool", (call_id, tool_name, output, is_error)). pi preserves the native toolCall
+# ids end to end, so descriptor equality covers pairing.
 def _enumerate_expected_turns(messages: list[dict[str, Any]]) -> list[tuple[str, Any]]:
     """Classify every native message as a user-visible turn or an explicitly excluded shape."""
     turns: list[tuple[str, Any]] = []
@@ -576,29 +690,37 @@ def _enumerate_expected_turns(messages: list[dict[str, Any]]) -> list[tuple[str,
         if role in _EXCLUDED_MESSAGE_ROLES:
             continue
         if role == "user":
-            turns.append(("user_message", _pi_text(message.get("content"))))
+            turns.append(("user", _pi_text(message.get("content"))))
         elif role == "assistant":
             calls: list[tuple[str, str, str]] = []
+            thinking: list[str] = []
             for block in message.get("content") or []:
                 block_type = block.get("type") if isinstance(block, dict) else None
                 if block_type == "text":
                     continue
                 elif block_type == "toolCall":
-                    preview = _truncate_like_emitter(
-                        json.dumps(block.get("arguments") or {}, separators=(",", ":")), _PI_INPUT_PREVIEW_LIMIT
+                    calls.append(
+                        (block["id"], block["name"], json.dumps(block.get("arguments") or {}, sort_keys=True))
                     )
-                    calls.append((block["id"], block["name"], preview))
-                elif block_type in _EXCLUDED_ASSISTANT_BLOCK_TYPES:
-                    continue
+                elif block_type == "thinking":
+                    if block.get("thinking"):
+                        thinking.append(block["thinking"])
                 else:
                     pytest.fail(
                         f"unclassified assistant content block type {block_type!r}: classify it or exclude it deliberately"
                     )
-            turns.append(("assistant_message", (_pi_text(message.get("content")), tuple(calls))))
+            turns.append(("agent", (_pi_text(message.get("content")), "\n\n".join(thinking), tuple(calls))))
         elif role == "toolResult":
-            output = _truncate_like_emitter(_pi_text(message.get("content")), _PI_TOOL_OUTPUT_LIMIT)
             turns.append(
-                ("tool_result", (message["toolCallId"], message["toolName"], output, message.get("isError") is True))
+                (
+                    "tool",
+                    (
+                        message["toolCallId"],
+                        message["toolName"],
+                        _pi_text(message.get("content")),
+                        message.get("isError") is True,
+                    ),
+                )
             )
         else:
             pytest.fail(
@@ -611,19 +733,31 @@ def _normalize_emitted_common(records: list[dict[str, Any]]) -> list[tuple[str, 
     normalized: list[tuple[str, Any]] = []
     for record in records:
         record_type = record["type"]
-        if record_type == "user_message":
-            normalized.append(("user_message", record["content"]))
-        elif record_type == "assistant_message":
+        if record_type == "header":
+            continue
+        if record_type == "step" and record["source"] == "user":
+            normalized.append(("user", record["message"]))
+        elif record_type == "step" and record["source"] == "agent":
             calls = tuple(
-                (call["tool_call_id"], call["tool_name"], call["input_preview"]) for call in record["tool_calls"]
+                (call["tool_call_id"], call["function_name"], json.dumps(call["arguments"], sort_keys=True))
+                for call in record.get("tool_calls") or []
             )
-            normalized.append(("assistant_message", (record["text"], calls)))
-        elif record_type == "tool_result":
+            normalized.append(("agent", (record["message"], record.get("reasoning_content") or "", calls)))
+        elif record_type == "observation":
+            (result,) = record["results"]
             normalized.append(
-                ("tool_result", (record["tool_call_id"], record["tool_name"], record["output"], record["is_error"]))
+                (
+                    "tool",
+                    (
+                        result["source_call_id"],
+                        result["extra"]["tool_name"],
+                        result["content"],
+                        result["extra"]["is_error"],
+                    ),
+                )
             )
         else:
-            pytest.fail(f"unexpected common-transcript record type: {record_type!r}")
+            pytest.fail(f"unexpected common-transcript record: {record!r}")
     return normalized
 
 
@@ -642,8 +776,8 @@ def test_every_native_turn_appears_in_common_transcript_exactly_once(tmp_path: P
 
     # Guard against a degenerate enumeration: the captured session ran a tool
     # and had genuine typed turns, so the expected side must contain both.
-    assert any(kind == "tool_result" for kind, _ in expected)
-    assert any(kind == "user_message" for kind, _ in expected)
+    assert any(kind == "tool" for kind, _ in expected)
+    assert any(kind == "user" for kind, _ in expected)
 
     # Exactly once, in order, with the same content and pairing (pi preserves
     # native toolCall ids, so equality covers call/result pairing).

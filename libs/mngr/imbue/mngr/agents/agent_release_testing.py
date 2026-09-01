@@ -19,10 +19,10 @@ The shared assertions are keyed on the **common transcript** (which every agent 
 and which `imbue.mngr.agents.common_transcript_records` makes canonical). Every agent is
 held to the same core arc -- it surfaces the RUNNING marker and resumes on stop/start and
 adoption. Two capabilities still vary by agent: forcing a bash tool call (so the transcript
-carries a tool_call nested on the assistant turn plus its tool_result) is gated by
+carries a tool call on the agent step plus its observation record) is gated by
 ``forces_tool_call`` because antigravity cannot satisfy it (it runs the command async and
 ends the turn before the result settles, so a single forced-tool turn carries no
-tool_result -- see its profile), and reporting per-message token usage is gated by
+observation -- see its profile), and reporting per-turn token usage is gated by
 ``asserts_usage`` since not every CLI exposes it.
 
 These tests are not run in CI (release-marked); run a profile's test manually with the
@@ -98,8 +98,8 @@ class AgentReleaseProfile(abc.ABC):
     # Capability flags. Observing the RUNNING marker is required of every agent, so it is
     # not a flag. ``forces_tool_call`` is gated because antigravity cannot satisfy it (its
     # tool result is captured only at the next turn boundary, so a single forced-tool turn
-    # never carries a tool_result -- see its profile). ``asserts_usage`` is gated because
-    # not every CLI reports per-message token usage (codex, opencode, antigravity do not).
+    # never carries an observation record -- see its profile). ``asserts_usage`` is gated
+    # because not every CLI reports per-turn token usage (codex, opencode, antigravity do not).
     forces_tool_call: bool = False
     asserts_usage: bool = False
     # Paths (relative to the agent state dir, mirrored under the preserved dir) of the
@@ -120,12 +120,12 @@ class AgentReleaseProfile(abc.ABC):
     unknown_slash_command: str | None = None
 
     def count_injected_deliveries(self, host_dir: Path, token: str) -> int:
-        """Count deliveries of ``token`` that produced no user-message record.
+        """Count deliveries of ``token`` that produced no user step.
 
         Some TUIs deliver a queued message by removing it from the queue and
         injecting it into the running turn, writing no user record (Claude Code
         does this as of 2.1.21x, via a ``queue-operation``/``remove`` record).
-        The journey counts these as deliveries alongside user-message records.
+        The journey counts these as deliveries alongside user steps.
         Default: no such mechanism.
         """
         return 0
@@ -151,7 +151,7 @@ class AgentReleaseProfile(abc.ABC):
 
         Overridable; the default plants the secret verbatim so the recall turn can prove
         resume, and -- when ``forces_tool_call`` -- forces a tool call so the transcript
-        carries a tool_result.
+        carries an observation record.
         """
         if self.forces_tool_call:
             return (
@@ -219,17 +219,27 @@ def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
     return _read_common_records_in_state_dir(_agent_state_dir(host_dir), subdir)
 
 
-# Predicates over the current common-transcript records. Module-level (the call sites
-# adapt them to poll_until's no-arg condition with a small lambda).
+# Predicates over the current common-transcript records (ATIF-shaped: a `step` record per
+# turn, discriminated by its ATIF `source`, with tool results streamed as `observation`
+# records). Module-level (the call sites adapt them to poll_until's no-arg condition with a
+# small lambda).
+def _is_step_from(record: dict[str, Any], source: str) -> bool:
+    return record["type"] == "step" and record.get("source") == source
+
+
+def _step_message(record: dict[str, Any]) -> str:
+    return str(record.get("message", ""))
+
+
 def _seed_turn_captured(records: list[dict[str, Any]], secret: str, forces_tool_call: bool) -> bool:
-    has_user_secret = any(r["type"] == "user_message" and secret in str(r.get("content", "")) for r in records)
-    has_assistant = any(r["type"] == "assistant_message" for r in records)
-    has_tool = (not forces_tool_call) or any(r["type"] == "tool_result" for r in records)
-    return has_user_secret and has_assistant and has_tool
+    has_user_secret = any(_is_step_from(r, "user") and secret in _step_message(r) for r in records)
+    has_agent = any(_is_step_from(r, "agent") for r in records)
+    has_tool = (not forces_tool_call) or any(r["type"] == "observation" for r in records)
+    return has_user_secret and has_agent and has_tool
 
 
-def _assistant_recalled_secret(records: list[dict[str, Any]], secret: str) -> bool:
-    return any(r["type"] == "assistant_message" and secret in str(r.get("text", "")) for r in records)
+def _agent_recalled_secret(records: list[dict[str, Any]], secret: str) -> bool:
+    return any(_is_step_from(r, "agent") and secret in _step_message(r) for r in records)
 
 
 def _wait_for_records(
@@ -369,7 +379,7 @@ def _adopt_preserved_and_recall(
         _wait_for_records(
             host_dir,
             subdir,
-            lambda records: _assistant_recalled_secret(records, secret),
+            lambda records: _agent_recalled_secret(records, secret),
             timeout=_RESPONSE_TIMEOUT_SECONDS,
             description=f"adopting agent did not recall the secret {secret!r} from the preserved session",
         )
@@ -423,8 +433,8 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
             poll_interval=0.2,
         ), "agent never reported RUNNING"
 
-        # 3. The seed turn must be captured: user_message carries the secret, plus a reply
-        #    (and a tool_result when the agent forces a tool call).
+        # 3. The seed turn must be captured: a user step carries the secret, plus a reply
+        #    (and an observation record when the agent forces a tool call).
         records = _wait_for_records(
             host_dir,
             subdir,
@@ -434,22 +444,23 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         )
 
         # 4. The captured records must all match the canonical envelope, plus the forced-tool
-        #    assertions (the call nested on the assistant turn, and its result) when applicable.
+        #    assertions (the call on the agent step, and its observation record) when applicable.
         _assert_records_conform(records)
-        assert all(r["source"] == f"{subdir}/common_transcript" for r in records), records
+        # Every record carries the emitting source, the header included.
+        assert all(r["emitter"] == f"{subdir}/common_transcript" for r in records), records
         assert len({r["event_id"] for r in records}) == len(records), "event_ids must be unique"
         if profile.forces_tool_call:
             assert any(
-                c.get("tool_name")
-                for r in records
-                if r["type"] == "assistant_message"
-                for c in r.get("tool_calls", [])
-            ), f"expected an assistant tool_call: {records}"
-            assert any(r["type"] == "tool_result" for r in records), records
+                c.get("function_name") for r in records if _is_step_from(r, "agent") for c in r.get("tool_calls") or []
+            ), f"expected a tool call on an agent step: {records}"
+            assert any(r["type"] == "observation" for r in records), records
         if profile.asserts_usage:
-            usage_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}
-            assistant = [r for r in records if r["type"] == "assistant_message"]
-            assert assistant and all(usage_keys <= set(r.get("usage") or {}) for r in assistant), assistant
+            # One agent step suffices: claude omits ``metrics`` entirely on lines that report no
+            # usage, and pi can emit a cost-only metrics block, so the counters are not universal.
+            metric_keys = {"prompt_tokens", "completion_tokens", "cached_tokens"}
+            assert any(_is_step_from(r, "agent") and metric_keys <= set(r.get("metrics") or {}) for r in records), (
+                records
+            )
 
         # 5. Stop then start -> the launch command must resume the prior conversation.
         stop = profile.run_mngr(ctx, "stop", agent_name, timeout=_LIFECYCLE_TIMEOUT_SECONDS)
@@ -465,14 +476,14 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         post = _wait_for_records(
             host_dir,
             subdir,
-            lambda records: _assistant_recalled_secret(records, secret),
+            lambda records: _agent_recalled_secret(records, secret),
             timeout=_RESPONSE_TIMEOUT_SECONDS,
             description=f"agent did not recall the secret {secret!r} after stop/start (resume failed)",
         )
 
-        # 7. History survived the restart: the pre-restart seed user_message is still present
+        # 7. History survived the restart: the pre-restart seed user step is still present
         #    (guards the opencode rebuild-on-idle raw-seeding; trivially holds for append-only emitters).
-        assert any(r["type"] == "user_message" and secret in str(r.get("content", "")) for r in post), (
+        assert any(_is_step_from(r, "user") and secret in _step_message(r) for r in post), (
             "pre-restart turn was lost from the common transcript after stop/start"
         )
         _assert_records_conform(post)
@@ -536,20 +547,20 @@ def _read_common_records_for_agent(host_dir: Path, subdir: str, agent_name: str)
     return _read_common_records_in_state_dir(_agent_state_dir_by_name(host_dir, agent_name), subdir)
 
 
-def _count_user_messages_containing(records: list[dict[str, Any]], token: str) -> int:
-    return sum(1 for r in records if r["type"] == "user_message" and token in str(r.get("content", "")))
+def _count_user_steps_containing(records: list[dict[str, Any]], token: str) -> int:
+    return sum(1 for r in records if _is_step_from(r, "user") and token in _step_message(r))
 
 
 def _is_delivered_exactly_once(host_dir: Path, subdir: str, agent_name: str, token: str) -> bool:
     records = _read_common_records_for_agent(host_dir, subdir, agent_name)
-    return _count_user_messages_containing(records, token) == 1
+    return _count_user_steps_containing(records, token) == 1
 
 
 def _wait_for_user_message(host_dir: Path, subdir: str, token: str, *, description: str) -> None:
     _wait_for_records(
         host_dir,
         subdir,
-        lambda records: _count_user_messages_containing(records, token) >= 1,
+        lambda records: _count_user_steps_containing(records, token) >= 1,
         timeout=_RESPONSE_TIMEOUT_SECONDS,
         description=description,
     )
@@ -558,16 +569,16 @@ def _wait_for_user_message(host_dir: Path, subdir: str, token: str, *, descripti
 def _wait_for_delivery(
     profile: AgentReleaseProfile, host_dir: Path, subdir: str, token: str, *, description: str
 ) -> None:
-    """Wait until ``token`` was delivered: a user-message record OR an injected delivery.
+    """Wait until ``token`` was delivered: a user step OR an injected delivery.
 
     Used for sends that may be queued: the TUI either dequeues the message as a
-    user record or injects it into the running turn with no user record (see
+    user step or injects it into the running turn with no user step (see
     ``count_injected_deliveries``).
     """
     _wait_for_records(
         host_dir,
         subdir,
-        lambda records: _count_user_messages_containing(records, token) >= 1
+        lambda records: _count_user_steps_containing(records, token) >= 1
         or profile.count_injected_deliveries(host_dir, token) >= 1,
         timeout=_RESPONSE_TIMEOUT_SECONDS,
         description=description,
@@ -709,18 +720,17 @@ def run_message_delivery_journey(profile: AgentReleaseProfile, tmp_path: Path) -
             _wait_for_rejection_event(host_dir, profile.unknown_slash_command)
 
         # Exactly-once: no token was delivered twice (the engine re-sends Enter,
-        # never the text, so duplicate user records would mean the gating is
+        # never the text, so duplicate user steps would mean the gating is
         # broken). A queued message the TUI injected into the running turn has
-        # no user record at all; one injected delivery counts instead.
+        # no user step at all; one injected delivery counts instead.
         final_records = _read_common_records(host_dir, subdir)
         for token in [idle_token, busy_token, *rapid_tokens, long_token]:
-            count = _count_user_messages_containing(final_records, token)
-            assert count <= 1, f"expected at most one user-message delivery of {token}, found {count}"
+            count = _count_user_steps_containing(final_records, token)
+            assert count <= 1, f"expected at most one user-step delivery of {token}, found {count}"
             if count == 0:
                 injected = profile.count_injected_deliveries(host_dir, token)
                 assert injected == 1, (
-                    f"expected exactly one delivery of {token}, found no user record and "
-                    f"{injected} injected deliveries"
+                    f"expected exactly one delivery of {token}, found no user step and {injected} injected deliveries"
                 )
 
         destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
@@ -800,12 +810,12 @@ def run_concurrent_message_delivery(profile: AgentReleaseProfile, tmp_path: Path
                 poll_interval=2.0,
             )
             records = _read_common_records_for_agent(host_dir, subdir, agent_name)
-            delivery_count = _count_user_messages_containing(records, token)
+            delivery_count = _count_user_steps_containing(records, token)
             assert found, (
                 f"expected exactly one delivery of {token} to {agent_name}, found {delivery_count}: "
                 f"{json.dumps(records, indent=2)[:2000]}"
             )
-            assert _count_user_messages_containing(records, other_token) == 0, (
+            assert _count_user_steps_containing(records, other_token) == 0, (
                 f"agent {agent_name} received the OTHER agent's message {other_token}"
             )
     finally:

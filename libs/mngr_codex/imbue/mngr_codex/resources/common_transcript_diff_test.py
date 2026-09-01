@@ -41,13 +41,7 @@ _EXCLUDED_LINE_TYPES = {
     "turn_context",
 }
 
-# response_item payload types that carry no user-visible turn.
-_EXCLUDED_PAYLOAD_TYPES = {
-    # Model thinking; never surfaced in the transcript.
-    "reasoning",
-}
-
-# Message roles that are instruction injections, not conversation turns.
+# Message roles that are harness plumbing, not conversation turns.
 _EXCLUDED_MESSAGE_ROLES = {
     # Harness/system injections: codex-specific instructions, the multi-agent
     # preamble, step-tracking reminders.
@@ -55,9 +49,11 @@ _EXCLUDED_MESSAGE_ROLES = {
 }
 
 # User-role messages that are instruction injections rather than typed turns:
-# the AGENTS.md context blob and codex's own initial-context envelopes.
-# Re-encoded here (not imported from the converter) so a converter filter that
-# broadens to swallow genuine user turns fails the diff.
+# the AGENTS.md context blob and codex's own initial-context envelopes. They are
+# turns in their own right (system steps carrying the session's configuration), so
+# the enumeration classifies them rather than excluding them. Re-encoded here (not
+# imported from the converter) so a converter filter that broadens to swallow
+# genuine user turns fails the diff.
 _AGENTS_MD_PREFIX = "# AGENTS.md instructions for "
 _AGENTS_MD_ENVELOPE = "<INSTRUCTIONS>"
 _CONTEXT_ENVELOPE_PREFIXES = ("<user_instructions>", "<environment_context>")
@@ -81,9 +77,16 @@ def _joined_text(content: Any, item_type: str) -> str:
 
 
 # A turn descriptor: (kind, pairing token, payload). The pairing token ties a
-# tool call to its result (native call_id on the expected side, emitted
-# tool_call_id on the actual side); it is compared structurally, not literally,
-# because the converter synthesizes its own ids.
+# tool call to its result; it is codex's native call_id on both sides because the
+# emitter records that id verbatim as the ATIF tool_call_id / source_call_id, so
+# the descriptors are compared literally.
+#
+# The payloads for reasoning, arguments, and tool output are built by calling the
+# converter's own text helpers (_join_reasoning_text / _parse_arguments /
+# _stringify_output), so this diff cannot detect a bug inside them. That is
+# deliberate: the diff answers "is every native turn present, exactly once, in
+# order, still paired with its result?", and the fidelity of each individual
+# transformation is pinned by the converter's unit tests instead.
 def _enumerate_native_turns(rollout_lines: list[str]) -> list[tuple[str, str, Any]]:
     """Classify every native rollout line as a user-visible turn or an explicitly excluded shape."""
     turns: list[tuple[str, str, Any]] = []
@@ -98,9 +101,14 @@ def _enumerate_native_turns(rollout_lines: list[str]) -> list[tuple[str, str, An
             )
         payload = record["payload"]
         payload_type = payload.get("type")
-        if payload_type in _EXCLUDED_PAYLOAD_TYPES:
-            continue
-        if payload_type == "message":
+        if payload_type == "reasoning":
+            reasoning = common_transcript_convert._join_reasoning_text(payload)
+            if not reasoning:
+                # Excluded: this build's reasoning items carry only an opaque
+                # encrypted payload, so there is no thinking text to surface.
+                continue
+            turns.append(("reasoning", "", reasoning))
+        elif payload_type == "message":
             role = payload.get("role")
             if role in _EXCLUDED_MESSAGE_ROLES:
                 continue
@@ -109,27 +117,25 @@ def _enumerate_native_turns(rollout_lines: list[str]) -> list[tuple[str, str, An
                 if not text:
                     # Excluded: an empty user message carries no signal.
                     continue
-                if _is_injected_user_context(text):
-                    # Excluded: instruction injection riding in as a user-role message.
-                    continue
-                turns.append(("user", "", text))
+                kind = "system" if _is_injected_user_context(text) else "user"
+                turns.append((kind, "", text))
             elif role == "assistant":
-                turns.append(("assistant_text", "", _joined_text(payload.get("content"), "output_text")))
+                text = _joined_text(payload.get("content"), "output_text")
+                if not text:
+                    # Excluded: an assistant message with no text carries no signal
+                    # (codex models a tool invocation as its own rollout item).
+                    continue
+                turns.append(("agent_text", "", text))
             else:
                 pytest.fail(
                     f"unclassified native message role {role!r}: classify it as a turn or exclude it deliberately"
                 )
         elif payload_type in ("custom_tool_call", "function_call"):
             invocation = payload["input"] if payload_type == "custom_tool_call" else payload["arguments"]
-            preview = common_transcript_convert._truncate(
-                invocation, common_transcript_convert._MAX_INPUT_PREVIEW_LENGTH
-            )
-            turns.append(("tool_call", payload["call_id"], (payload["name"], preview)))
+            arguments = common_transcript_convert._parse_arguments(invocation)
+            turns.append(("tool_call", payload["call_id"], (payload["name"], arguments)))
         elif payload_type in ("custom_tool_call_output", "function_call_output"):
-            output = common_transcript_convert._truncate(
-                common_transcript_convert._stringify_output(payload.get("output", "")),
-                common_transcript_convert._MAX_OUTPUT_LENGTH,
-            )
+            output = common_transcript_convert._stringify_output(payload.get("output", ""))
             turns.append(("tool_result", payload["call_id"], output))
         else:
             pytest.fail(
@@ -138,37 +144,40 @@ def _enumerate_native_turns(rollout_lines: list[str]) -> list[tuple[str, str, An
     return turns
 
 
-def _normalize_emitted(events: list[dict[str, Any]]) -> list[tuple[str, str, Any]]:
+def _normalize_emitted(records: list[dict[str, Any]]) -> list[tuple[str, str, Any]]:
     normalized: list[tuple[str, str, Any]] = []
-    for event in events:
-        event_type = event["type"]
-        if event_type == "user_message":
-            normalized.append(("user", "", event["content"]))
-        elif event_type == "assistant_message":
-            if event["tool_calls"]:
-                if len(event["tool_calls"]) != 1 or event["text"]:
-                    pytest.fail(f"codex emits each tool call as its own bare assistant record, got: {event!r}")
-                call = event["tool_calls"][0]
-                normalized.append(("tool_call", call["tool_call_id"], (call["tool_name"], call["input_preview"])))
+    for record in records:
+        record_type = record["type"]
+        if record_type == "header":
+            # Stream framing, not a turn; its position is asserted separately.
+            continue
+        if record_type == "step":
+            source = record["source"]
+            if source == "user":
+                normalized.append(("user", "", record["message"]))
+            elif source == "system":
+                normalized.append(("system", "", record["message"]))
+            elif source == "agent":
+                if record.get("tool_calls"):
+                    if len(record["tool_calls"]) != 1 or record["message"]:
+                        pytest.fail(f"codex emits each tool call as its own bare agent step, got: {record!r}")
+                    call = record["tool_calls"][0]
+                    normalized.append(("tool_call", call["tool_call_id"], (call["function_name"], call["arguments"])))
+                elif record.get("reasoning_content"):
+                    normalized.append(("reasoning", "", record["reasoning_content"]))
+                else:
+                    normalized.append(("agent_text", "", record["message"]))
             else:
-                normalized.append(("assistant_text", "", event["text"]))
-        elif event_type == "tool_result":
-            normalized.append(("tool_result", event["tool_call_id"], event["output"]))
+                pytest.fail(f"unexpected step source: {source!r}")
+        elif record_type == "observation":
+            for result in record["results"]:
+                normalized.append(("tool_result", result["source_call_id"], result["content"]))
         else:
-            pytest.fail(f"unexpected common-transcript record type: {event_type!r}")
+            pytest.fail(f"unexpected common-transcript record type: {record_type!r}")
     return normalized
 
 
-def _pairing_groups(turns: list[tuple[str, str, Any]]) -> list[tuple[int, ...]]:
-    """Positions that share a pairing token, i.e. which tool_call goes with which tool_result."""
-    positions_by_token: dict[str, list[int]] = {}
-    for index, (kind, token, _) in enumerate(turns):
-        if kind in ("tool_call", "tool_result"):
-            positions_by_token.setdefault(token, []).append(index)
-    return sorted(tuple(positions) for positions in positions_by_token.values())
-
-
-def _events(path: Path) -> list[dict[str, Any]]:
+def _records(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
@@ -177,31 +186,30 @@ def test_every_native_turn_appears_in_common_transcript_exactly_once(tmp_path: P
     duplicates, order preserved, tool calls paired with their results."""
     output_file = tmp_path / "out.jsonl"
     common_transcript_convert.convert(str(_REAL_0146_ROLLOUT), str(output_file))
-    events = _events(output_file)
+    records = _records(output_file)
 
     expected = _enumerate_native_turns(_REAL_0146_ROLLOUT.read_text().splitlines())
-    actual = _normalize_emitted(events)
+    actual = _normalize_emitted(records)
 
     # Guard against a degenerate enumeration: the captured turn ran a command,
     # so the expected side must itself contain tool activity and a user turn.
     assert any(kind == "tool_call" for kind, _, _ in expected)
     assert any(kind == "user" for kind, _, _ in expected)
 
-    # Exactly once, in order, with the same content (drop, duplicate, and
-    # reorder all fail); pairing is compared structurally since the converter
-    # synthesizes its own tool_call ids.
-    assert [(kind, payload) for kind, _, payload in actual] == [(kind, payload) for kind, _, payload in expected]
-    assert _pairing_groups(actual) == _pairing_groups(expected)
+    # Exactly once, in order, with the same content and the same native call ids
+    # (drop, duplicate, reorder, and mispairing all fail).
+    assert actual == expected
 
-    assert len({event["event_id"] for event in events}) == len(events)
+    assert records[0]["type"] == "header"
+    assert len({record["event_id"] for record in records}) == len(records)
     # Schema validity is necessary (but alone would not have caught the drift).
-    for event in events:
-        assert validate_common_transcript_record(event) is None, event
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
 
 
 def test_reconverting_the_same_rollout_appends_nothing(tmp_path: Path) -> None:
     """Exactly-once across passes: re-running convert over the same rollout
-    must not duplicate any turn."""
+    must not duplicate any turn (or re-write the header)."""
     output_file = tmp_path / "out.jsonl"
     assert common_transcript_convert.convert(str(_REAL_0146_ROLLOUT), str(output_file)) > 0
     content_after_first_pass = output_file.read_text()

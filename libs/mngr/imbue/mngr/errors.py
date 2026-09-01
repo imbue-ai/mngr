@@ -215,6 +215,18 @@ class NoCommandDefinedError(AgentError, ValueError):
     """Raised when no command is defined for an agent type."""
 
 
+class TrajectoryBuildError(AgentError):
+    """Raised when a common-transcript stream cannot be assembled into a valid ATIF trajectory."""
+
+
+class InvalidCommonTranscriptRecordError(AgentError, ValueError):
+    """Raised by parse_common_transcript_record when a stream record violates the canonical ATIF-shaped schema.
+
+    Raises from inside the record model validators get rewrapped by pydantic, so the
+    parse boundary re-raises this domain error around pydantic's ValidationError.
+    """
+
+
 class AgentNotFoundError(AgentError):
     """No agent with this ID exists."""
 

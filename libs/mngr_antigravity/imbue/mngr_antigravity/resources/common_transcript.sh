@@ -1,40 +1,20 @@
 #!/usr/bin/env bash
-# Common transcript converter for antigravity agents.
+# Common transcript converter daemon for antigravity agents.
 #
-# Reads the raw antigravity transcript at
-# logs/antigravity_transcript/events.jsonl (produced by stream_transcript.sh,
-# with each event augmented to carry `_mngr_conv_id`) and converts
-# semantically important events into the agent-agnostic common format at
-# events/antigravity/common_transcript/events.jsonl.
+# Polls the raw antigravity transcript at
+# logs/antigravity_transcript/events.jsonl (written by stream_transcript.sh,
+# with each event augmented to carry `_mngr_conv_id`) and, whenever it has
+# grown, shells out to common_transcript_convert.py to append new records to
+# events/antigravity/common_transcript/events.jsonl. Each pass runs under the
+# shared convert lock, which serializes the poll loop against the turn-end
+# --single-pass flush, and the converter's stdout/stderr never reaches this
+# watcher's own -- appended counts and converter errors are logged to
+# events/logs/common_transcript instead of surfacing in the agent's pane.
 #
-# Antigravity's transcript shape (captured live against agy 1.0.0):
-#   {"step_index":N, "source":<USER_EXPLICIT|MODEL|SYSTEM>,
-#    "type":<USER_INPUT|PLANNER_RESPONSE|CODE_ACTION|CONVERSATION_HISTORY|...>,
-#    "status":<DONE|...>, "created_at":"<ISO8601>",
-#    "content":"...", "thinking":"...", "tool_calls":[{...}], ...}
-#
-# This converter emits:
-#   USER_EXPLICIT/USER_INPUT       -> user_message  (the clean typed text
-#                                       agy records in CortexStepUserInput.query)
-#   MODEL/PLANNER_RESPONSE         -> assistant_message  (any tool_calls
-#                                       attached as tool_calls[])
-#   MODEL/CODE_ACTION              -> tool_result (paired with the most
-#                                       recent PLANNER_RESPONSE tool_call
-#                                       in the same conversation)
-#   SYSTEM/CONVERSATION_HISTORY    -> dropped (bookkeeping)
-#   everything else                -> dropped (best-effort: forward-compat
-#                                       with future agy schema additions)
-#
-# Tool-call ids are synthetic: agy's transcript does not carry an id on
-# tool_calls (only `name` + `args`), so we mint
-# "<conv_id>-<step_index>-tc<idx>" using the conversation id smuggled in
-# from the streamer's `_mngr_conv_id` field. Pairing with CODE_ACTION
-# uses last-seen-tool-call-in-conversation since agy emits CODE_ACTION
-# immediately after the PLANNER_RESPONSE that called the tool.
-#
-# Event ids are derived deterministically so re-processing the same input
-# never produces duplicates (the converter dedupes against the set of
-# event_ids already in the output file).
+# What is converted, how the emitted records are shaped, and which native agy
+# events are deliberately dropped is decided entirely by
+# common_transcript_convert.py; its module docstring is the single source of
+# truth for that contract.
 #
 # Usage: common_transcript.sh [--single-pass]
 #

@@ -34,7 +34,7 @@ def _init_repo(tmp_path: Path) -> Path:
 @pytest.fixture(autouse=True)
 def _clear_github_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear GitHub Actions env so branch/base detection uses the temp repo's git."""
-    for var in ("GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_BASE_REF"):
+    for var in ("GITHUB_HEAD_REF", "GITHUB_REF_NAME", "GITHUB_BASE_REF", "CHANGELOG_DIFF_BASE_REF"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -57,6 +57,34 @@ def test_resolve_diff_base_returns_main_when_distinct(tmp_path: Path) -> None:
     run_git_command(repo, "commit", "-m", "change")
 
     assert resolve_diff_base(repo) == "main"
+
+
+def test_resolve_diff_base_prefers_the_explicit_override_over_the_payload_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stacked PRs: the CI workflow resolves the live base branch into
+    CHANGELOG_DIFF_BASE_REF because the webhook payload (GITHUB_BASE_REF)
+    reports the trunk for PRs in a native GitHub stack. The override must win."""
+    repo = _init_repo(tmp_path)
+    # A stack: main <- layer-one <- feature. The payload claims main; the live
+    # base is layer-one.
+    run_git_command(repo, "checkout", "-b", "layer-one")
+    (repo / "libs" / "mngr" / "lower.py").write_text("x = 1\n")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "lower layer")
+    run_git_command(repo, "checkout", "-b", "feature")
+    (repo / "libs" / "mngr" / "upper.py").write_text("x = 2\n")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "upper layer")
+    monkeypatch.setenv("GITHUB_BASE_REF", "main")
+    monkeypatch.setenv("CHANGELOG_DIFF_BASE_REF", "layer-one")
+
+    base = resolve_diff_base(repo)
+
+    assert base == "layer-one"
+    changed = changed_files_against_base(base, repo)
+    assert "libs/mngr/upper.py" in changed
+    assert "libs/mngr/lower.py" not in changed
 
 
 def test_changed_files_detects_project_change(tmp_path: Path) -> None:

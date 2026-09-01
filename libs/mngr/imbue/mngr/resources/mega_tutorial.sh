@@ -679,13 +679,13 @@ mngr event my-task --tail 20
 mngr event my-task --head 10
 
 # include only events matching a CEL expression
-mngr event my-task --include 'type == "user_message"'
+mngr event my-task --include 'type == "step"'
 
 # view the transcript of an agent's conversation
 mngr transcript my-task
 
-# view only assistant messages
-mngr transcript my-task --role assistant
+# view only the agent's own messages
+mngr transcript my-task --role agent
 
 # view the last 5 messages
 mngr transcript my-task --tail 5
@@ -1341,7 +1341,7 @@ mngr list --include 'host.provider == "modal"' --ids | xargs -P 5 -I {} mngr exe
 
 # check the transcript to see what an agent has been up to
 # (helpful to see the last messages without even having to bring the host back online!)
-mngr transcript my-task --tail 5 --role assistant
+mngr transcript my-task --tail 5 --role agent
 
 ##############################################################################
 # TROUBLESHOOTING

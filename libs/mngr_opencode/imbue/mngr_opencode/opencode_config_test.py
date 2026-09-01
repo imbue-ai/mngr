@@ -16,8 +16,8 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_opencode import resources as _opencode_resources
 from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import AGENT_OPENCODE_DB_RELPATH
+from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_EMITTER
 from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_RELATIVE_PATH
-from imbue.mngr_opencode.opencode_config import COMMON_TRANSCRIPT_SOURCE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
 from imbue.mngr_opencode.opencode_config import OPENCODE_BIN_ENV_VAR
@@ -164,7 +164,7 @@ def test_plugin_resource_literals_stay_in_sync_with_constants() -> None:
     assert f'"{RAW_TRANSCRIPT_RELATIVE_PATH}"' in plugin_source
     # The plugin now also emits the common transcript in-process.
     assert f'"{COMMON_TRANSCRIPT_RELATIVE_PATH}"' in plugin_source
-    assert f'"{COMMON_TRANSCRIPT_SOURCE}"' in plugin_source
+    assert f'"{COMMON_TRANSCRIPT_EMITTER}"' in plugin_source
     assert f'"{ROLE_ENV_VAR}"' in plugin_source
     assert f'"{SERVER_ROLE}"' in plugin_source
     assert f'"{EMIT_COMMON_ENV_VAR}"' in plugin_source

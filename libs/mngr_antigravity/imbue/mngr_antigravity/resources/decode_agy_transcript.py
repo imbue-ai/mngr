@@ -271,7 +271,7 @@ def decode_step(conv_id: str, idx: int, step_type: int, status: int, payload: by
             if thinking:
                 record["thinking"] = thinking
             # tool_calls is a repeated ChatToolCall; common_transcript.sh reads name + args
-            # (args may be a JSON string, which its _short_value renders as-is).
+            # (args is a JSON string, which its converter parses into the ATIF arguments object).
             tool_calls = [
                 {"name": _first_str(call, _TOOL_CALL_NAME), "args": _first_str(call, _TOOL_CALL_ARGS)}
                 for call in _all_messages(planner, _PLANNER_TOOL_CALLS)

@@ -1,15 +1,21 @@
-"""Test helpers for building synthetic agy conversation ``.db`` fixtures.
+"""Test helpers for the antigravity resource scripts.
 
 agy stores each conversation as a protobuf SQLite ``.db`` whose ``steps.step_payload`` is a
 serialized ``gemini_coder.Step`` (see ``decode_agy_transcript.py`` and ``regenerating_protobuf_schema.md``).
-These helpers are the inverse of the decoder's wire-walk: they encode minimal ``Step`` blobs
-and write a ``steps`` table, so tests can exercise decoding/streaming without a live agy.
+The ``*_step`` / ``make_conversation_db`` helpers are the inverse of the decoder's wire-walk: they
+encode minimal ``Step`` blobs and write a ``steps`` table, so tests can exercise decoding/streaming
+without a live agy.
+
+The ``*_event`` builders mint decoded raw-transcript events as plain dicts -- the shape
+``stream_transcript.sh`` appends and ``common_transcript_convert.py`` reads. They are shared by the
+converter's unit tests and the shell-level tests, which JSON-encode them.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 # CortexStepStatus / CortexStepSource values used by the builders.
 STATUS_DONE = 3
@@ -17,6 +23,8 @@ STATUS_GENERATING = 8
 SOURCE_MODEL = 2
 SOURCE_USER_EXPLICIT = 4
 SOURCE_SYSTEM = 5
+
+_DEFAULT_TRANSCRIPT_TIMESTAMP = "2026-05-21T07:00:00Z"
 
 
 def _varint(value: int) -> bytes:
@@ -114,3 +122,82 @@ def make_conversation_db(path: Path, rows: list[tuple[int, int, int, bytes]]) ->
         connection.commit()
     finally:
         connection.close()
+
+
+def transcript_event(
+    *,
+    conv_id: str,
+    step_index: int,
+    source: str,
+    type_: str,
+    timestamp: str = _DEFAULT_TRANSCRIPT_TIMESTAMP,
+    # Deliberately untyped: tests seed malformed raw-stream shapes through these too.
+    content: Any = None,
+    tool_calls: list[Any] | None = None,
+    thinking: str | None = None,
+    status: str = "DONE",
+) -> dict[str, Any]:
+    """One raw-transcript event, including the ``_mngr_conv_id`` the streamer adds."""
+    body: dict[str, Any] = {
+        "step_index": step_index,
+        "source": source,
+        "type": type_,
+        "status": status,
+        "created_at": timestamp,
+        "_mngr_conv_id": conv_id,
+    }
+    if content is not None:
+        body["content"] = content
+    if tool_calls is not None:
+        body["tool_calls"] = tool_calls
+    if thinking is not None:
+        body["thinking"] = thinking
+    return body
+
+
+def user_input_event(conv_id: str, step_index: int, prompt_text: Any, **kwargs: Any) -> dict[str, Any]:
+    """USER_EXPLICIT/USER_INPUT carrying the clean typed text agy's SQLite store records."""
+    return transcript_event(
+        conv_id=conv_id,
+        step_index=step_index,
+        source="USER_EXPLICIT",
+        type_="USER_INPUT",
+        content=prompt_text,
+        **kwargs,
+    )
+
+
+def planner_response_event(
+    conv_id: str,
+    step_index: int,
+    text: Any = "",
+    tool_calls: list[Any] | None = None,
+    thinking: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    return transcript_event(
+        conv_id=conv_id,
+        step_index=step_index,
+        source="MODEL",
+        type_="PLANNER_RESPONSE",
+        content=text,
+        tool_calls=tool_calls,
+        thinking=thinking,
+        **kwargs,
+    )
+
+
+def code_action_event(conv_id: str, step_index: int, content: Any, status: str = "DONE") -> dict[str, Any]:
+    return transcript_event(
+        conv_id=conv_id,
+        step_index=step_index,
+        source="MODEL",
+        type_="CODE_ACTION",
+        content=content,
+        status=status,
+    )
+
+
+def conversation_history_event(conv_id: str, step_index: int) -> dict[str, Any]:
+    """SYSTEM/CONVERSATION_HISTORY bookkeeping, which the converter must drop."""
+    return transcript_event(conv_id=conv_id, step_index=step_index, source="SYSTEM", type_="CONVERSATION_HISTORY")

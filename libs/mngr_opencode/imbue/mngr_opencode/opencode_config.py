@@ -151,8 +151,9 @@ RAW_TRANSCRIPT_RELATIVE_PATH: str = "logs/opencode_transcript/events.jsonl"
 # transcript`` reads. The converter writes it. The converter hardcodes this literal.
 COMMON_TRANSCRIPT_RELATIVE_PATH: str = "events/opencode/common_transcript/events.jsonl"
 
-# ``source`` stamped on every common-transcript event (mirrors agy's scheme).
-COMMON_TRANSCRIPT_SOURCE: str = "opencode/common_transcript"
+# ``emitter`` stamped on every common-transcript record (ATIF claims ``source`` for
+# the step originator; mirrors agy's scheme).
+COMMON_TRANSCRIPT_EMITTER: str = "opencode/common_transcript"
 
 # OpenCode's native resumable session store (relative to ``$MNGR_AGENT_STATE_DIR``,
 # POSIX strings), preserved on destroy so the session can be resumed/adopted. These

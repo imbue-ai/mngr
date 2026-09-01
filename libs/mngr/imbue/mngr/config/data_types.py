@@ -701,6 +701,10 @@ class OutputOptions(FrozenModel):
         default=False,
         description="Whether to suppress all stdout output (set by --quiet)",
     )
+    extra_format: str | None = Field(
+        default=None,
+        description="A command-specific extra format name (e.g. 'atif') that matched instead of a builtin OutputFormat",
+    )
 
 
 def get_or_create_user_id(profile_dir: Path) -> UserId:

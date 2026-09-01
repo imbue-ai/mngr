@@ -55,6 +55,7 @@ import pytest
 
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import _is_step_from
 from imbue.mngr.agents.agent_release_testing import _read_common_records
 from imbue.mngr.agents.agent_release_testing import _send_expecting_success
 from imbue.mngr.agents.agent_release_testing import _wait_for_user_message
@@ -859,7 +860,7 @@ def test_claude_bang_prefix_does_not_strand_agent_in_shell_mode(tmp_path: Path) 
         )
         # The follow-up is the ONLY delivered turn: the bare `!` contributed no user turn of its own.
         final_records = _read_common_records(ctx.host_dir, subdir)
-        user_turn_count = sum(1 for r in final_records if r["type"] == "user_message")
+        user_turn_count = sum(1 for r in final_records if _is_step_from(r, "user"))
         assert user_turn_count == 1, (
             f"expected exactly one user turn (the follow-up); the bare `!` must add none, got {user_turn_count}"
         )

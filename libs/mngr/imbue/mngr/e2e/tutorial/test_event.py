@@ -230,26 +230,26 @@ def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
 def test_event_include_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # include only events matching a CEL expression
-        mngr event my-task --include 'type == "user_message"'
+        mngr event my-task --include 'type == "step"'
 
     Scope: `--include` with a CEL expression exits 0 and keeps only events
-    satisfying the predicate -- every returned event has type == "user_message",
-    and the filtered set is a subset of the full unfiltered stream (the filter may
-    only drop events, never invent or alter them).
+    satisfying the predicate -- every returned event has type == "step", and the
+    filtered set is a subset of the full unfiltered stream (the filter may only
+    drop events, never invent or alter them).
     """
     _create_my_task(e2e, 100705)
 
     # The exact tutorial command. Whatever the filter returns, every event must
     # satisfy the CEL predicate -- the filter must never let a non-matching event
-    # through. (A command/sleep agent emits no "user_message" events, so in
+    # through. (A command/sleep agent emits no transcript "step" events, so in
     # practice the result is empty.)
     filtered = e2e.run(
-        "mngr event my-task --include 'type == \"user_message\"'",
+        "mngr event my-task --include 'type == \"step\"'",
         comment="include only events matching a CEL expression",
     )
     expect(filtered).to_succeed()
     filtered_events = _parse_jsonl_events(filtered.stdout)
-    assert all(event["type"] == "user_message" for event in filtered_events)
+    assert all(event["type"] == "step" for event in filtered_events)
 
     # The filtered result must be a subset of the full, unfiltered stream: the
     # filter is only allowed to drop events, never invent or alter them.
@@ -269,7 +269,7 @@ def test_event_include_filter(e2e: E2eSession) -> None:
 def test_event_include_filter_rejects_invalid_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # include only events matching a CEL expression
-        mngr event my-task --include 'type == "user_message"'
+        mngr event my-task --include 'type == "step"'
 
     Scope: the unhappy path of the same `--include` block. A syntactically
     invalid CEL expression fails loudly -- the command fails with a stderr error

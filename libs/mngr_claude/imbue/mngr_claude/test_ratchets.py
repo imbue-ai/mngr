@@ -4,7 +4,6 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
-from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_BARE_PRINT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_INIT_IN_NON_EXCEPTION_CLASSES
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_SILENT_DECODE_ERROR_CATCH
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_TIME_SLEEP
@@ -20,10 +19,11 @@ _DIR = Path(__file__).parent.parent.parent
 _STANDALONE_RESOURCE_SCRIPTS: tuple[str, ...] = (
     "sync_keychain_credentials.py",
     "stream_snapshot.py",
-    # Prints its appended-event count to stdout for common_transcript.sh to capture.
-    "common_transcript_convert.py",
 )
-_RATCHET_SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py", "standard_ratchet_checks.py")
+# common_transcript_convert.py is standalone too, but it is waived only for bare print
+# (it prints its appended-event count to stdout for common_transcript.sh to capture, its
+# data interface) and __init__ methods (stdlib only, so no pydantic models).
+_COMMON_TRANSCRIPT_CONVERT_SCRIPT: tuple[str, ...] = ("common_transcript_convert.py",)
 
 pytestmark = pytest.mark.xdist_group(name="ratchets")
 
@@ -50,8 +50,7 @@ def test_prevent_while_true() -> None:
 def test_prevent_time_sleep() -> None:
     # Standalone resource scripts are long-running poll-loop daemons that must
     # sleep between polls and cannot use mngr's wait helpers.
-    excluded = _RATCHET_SELF_EXCLUSION + _STANDALONE_RESOURCE_SCRIPTS
-    chunks = check_ratchet_rule(PREVENT_TIME_SLEEP, _DIR, excluded)
+    chunks = check_ratchet_rule(PREVENT_TIME_SLEEP, _DIR, _STANDALONE_RESOURCE_SCRIPTS)
     assert len(chunks) <= snapshot(0), PREVENT_TIME_SLEEP.format_failure(chunks)
 
 
@@ -60,9 +59,9 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    excluded = _RATCHET_SELF_EXCLUSION + _STANDALONE_RESOURCE_SCRIPTS
-    chunks = check_ratchet_rule(PREVENT_BARE_PRINT, _DIR, excluded)
-    assert len(chunks) <= snapshot(0), PREVENT_BARE_PRINT.format_failure(chunks)
+    rc.check_bare_print(
+        _DIR, snapshot(0), excluded_patterns=_STANDALONE_RESOURCE_SCRIPTS + _COMMON_TRANSCRIPT_CONVERT_SCRIPT
+    )
 
 
 # --- Exception handling ---
@@ -85,13 +84,20 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    # Standalone resource scripts (stdlib only) cannot use loguru; they skip
-    # malformed JSONL transcript lines silently rather than spamming stderr. Two of
-    # the allowed catches are in common_transcript_convert.py, which converts a
-    # live-appended JSONL stream: a truncated trailing line caught mid-write is
-    # expected and benign (it re-reads complete on the next poll).
-    chunks = find_silent_decode_error_catches(_DIR, TEST_FILE_PATTERNS + _STANDALONE_RESOURCE_SCRIPTS)
-    assert len(chunks) <= snapshot(3), PREVENT_SILENT_DECODE_ERROR_CATCH.format_failure(chunks)
+    # No file is excluded, so every catch in the package is counted here. Three of the
+    # allowed ones read a live-appended JSONL stream from a stdlib-only resource script
+    # (no logger is importable, and anything written to stderr is reported as an error in
+    # the agent's pane): two in common_transcript_convert.py (the raw transcript and the
+    # converter's own output) and one in stream_snapshot.py (the raw transcript again).
+    # A truncated trailing line caught mid-write is expected and benign there -- it
+    # re-reads complete on the next poll -- so it is skipped silently rather than logged.
+    # The other three are read probes over data mngr does not own: two credential
+    # checks in plugin.py, where an unparsable .credentials.json or keychain blob just
+    # means "not on a Claude subscription", and one in stream_json_impl.py, where a
+    # non-JSON line is the documented normal case (blank lines and the debug output
+    # claude leaks to stdout).
+    chunks = find_silent_decode_error_catches(_DIR, TEST_FILE_PATTERNS)
+    assert len(chunks) <= snapshot(6), PREVENT_SILENT_DECODE_ERROR_CATCH.format_failure(chunks)
 
 
 # --- Import style ---
@@ -296,7 +302,9 @@ def test_prevent_underscore_imports() -> None:
 def test_prevent_init_methods_in_non_exception_classes() -> None:
     # Standalone resource scripts (stdlib only) cannot use pydantic models, so
     # their small state classes legitimately define __init__.
-    chunks = find_init_methods_in_non_exception_classes(_DIR, _STANDALONE_RESOURCE_SCRIPTS)
+    chunks = find_init_methods_in_non_exception_classes(
+        _DIR, _STANDALONE_RESOURCE_SCRIPTS + _COMMON_TRANSCRIPT_CONVERT_SCRIPT
+    )
     assert len(chunks) <= snapshot(0), PREVENT_INIT_IN_NON_EXCEPTION_CLASSES.format_failure(chunks)
 
 

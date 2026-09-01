@@ -510,16 +510,18 @@ class HasCommonTranscriptMixin(HasTranscriptMixin):
 
     Subclasses promise to produce a JSONL transcript at
     ``$MNGR_AGENT_STATE_DIR/events/<agent_type>/common_transcript/events.jsonl``
-    using the shared event envelope (``timestamp``, ``type``, ``event_id``,
-    ``source``) and one of three message types: ``user_message``,
-    ``assistant_message``, ``tool_result``. ``mngr transcript`` discovers
-    any such file regardless of agent type, so any agent that satisfies
-    this contract gets ``mngr transcript`` support for free.
+    in the ATIF-shaped stream format defined by
+    :mod:`imbue.mngr.agents.common_transcript_records`: a ``header`` line pinning
+    the ATIF revision, then one ``step`` record per turn and an ``observation``
+    record per streamed tool result. ``mngr transcript`` discovers any such file
+    regardless of agent type, so any agent that satisfies this contract gets
+    ``mngr transcript`` support for free.
 
-    Because the common schema is lossy (truncated previews, dropped
-    metadata), the converter always runs on top of the raw transcript
-    captured by :class:`HasTranscriptMixin`. Subclasses therefore inherit
-    from that mixin and must also implement ``get_raw_transcript_scripts``.
+    The stream is full-fidelity (complete tool arguments and outputs), but it is
+    an agent-agnostic projection of the native transcript, so the converter always
+    runs on top of the raw transcript captured by :class:`HasTranscriptMixin`.
+    Subclasses therefore inherit from that mixin and must also implement
+    ``get_raw_transcript_scripts``.
 
     Subclasses implement ``get_common_transcript_scripts`` to return the
     per-agent converter scripts that read the raw transcript and write to

@@ -7,7 +7,14 @@ transcript produced by ``stream_transcript.sh``), so tests seed that file
 directly rather than running agy. Each event in the seeded raw transcript
 must carry the ``_mngr_conv_id`` field that the streamer adds; this is the
 key the converter uses to scope tool-call/result pairing within a single
-conversation.
+conversation. The output is the ATIF-shaped record stream (``header`` /
+``step`` / ``observation``).
+
+These are the shell-level tests: they cover what only running the script can
+show -- that the pass reaches the converter, stays silent on the watcher's
+stdout/stderr, and serializes on the convert lock. The event-by-event
+conversion rules are asserted directly against ``convert`` in
+common_transcript_convert_test.py.
 
 Each test sets up:
   - A fake agent state dir at tmp_path/agent
@@ -30,83 +37,13 @@ import pytest
 
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+from imbue.mngr_antigravity.resources.testing import code_action_event as _code_action
+from imbue.mngr_antigravity.resources.testing import conversation_history_event as _conversation_history
+from imbue.mngr_antigravity.resources.testing import planner_response_event as _planner_response
+from imbue.mngr_antigravity.resources.testing import transcript_event as _make_event
+from imbue.mngr_antigravity.resources.testing import user_input_event as _user_input
 
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
-
-
-def _make_event(
-    *,
-    conv_id: str,
-    step_index: int,
-    source: str,
-    type_: str,
-    timestamp: str = "2026-05-21T07:00:00Z",
-    content: str | None = None,
-    tool_calls: list[dict[str, Any]] | None = None,
-    status: str = "DONE",
-) -> str:
-    """Build one raw-transcript line, including the ``_mngr_conv_id`` the streamer adds."""
-    body: dict[str, Any] = {
-        "step_index": step_index,
-        "source": source,
-        "type": type_,
-        "status": status,
-        "created_at": timestamp,
-        "_mngr_conv_id": conv_id,
-    }
-    if content is not None:
-        body["content"] = content
-    if tool_calls is not None:
-        body["tool_calls"] = tool_calls
-    return json.dumps(body)
-
-
-def _user_input(conv_id: str, step_index: int, prompt_text: str) -> str:
-    """USER_EXPLICIT/USER_INPUT carrying the clean typed text agy's SQLite store records."""
-    return _make_event(
-        conv_id=conv_id,
-        step_index=step_index,
-        source="USER_EXPLICIT",
-        type_="USER_INPUT",
-        content=prompt_text,
-    )
-
-
-def _planner_response(
-    conv_id: str,
-    step_index: int,
-    text: str = "",
-    tool_calls: list[dict[str, Any]] | None = None,
-) -> str:
-    return _make_event(
-        conv_id=conv_id,
-        step_index=step_index,
-        source="MODEL",
-        type_="PLANNER_RESPONSE",
-        content=text,
-        tool_calls=tool_calls,
-    )
-
-
-def _code_action(conv_id: str, step_index: int, content: str, status: str = "DONE") -> str:
-    return _make_event(
-        conv_id=conv_id,
-        step_index=step_index,
-        source="MODEL",
-        type_="CODE_ACTION",
-        content=content,
-        status=status,
-    )
-
-
-def _conversation_history(conv_id: str, step_index: int) -> str:
-    """SYSTEM/CONVERSATION_HISTORY bookkeeping event that must be dropped by the converter."""
-    return _make_event(
-        conv_id=conv_id,
-        step_index=step_index,
-        source="SYSTEM",
-        type_="CONVERSATION_HISTORY",
-    )
 
 
 @pytest.fixture
@@ -124,9 +61,10 @@ def state_dir(tmp_path: Path, stub_mngr_log_sh: str) -> Path:
     return state
 
 
-def _write_raw_transcript(state_dir: Path, lines: list[str]) -> None:
+def _write_raw_transcript(state_dir: Path, lines: list[Any]) -> None:
+    """Seed the raw transcript; a line is either a built event or raw text."""
     raw_path = state_dir / "logs" / "antigravity_transcript" / "events.jsonl"
-    raw_path.write_text("\n".join(lines) + "\n")
+    raw_path.write_text("\n".join(line if isinstance(line, str) else json.dumps(line) for line in lines) + "\n")
 
 
 def _run_converter(state_dir: Path) -> str:
@@ -161,24 +99,32 @@ def _run_single_pass(state_dir: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _read_common_events(state_dir: Path) -> list[dict[str, Any]]:
+def _read_common_records(state_dir: Path) -> list[dict[str, Any]]:
     output_path = state_dir / "events" / "antigravity" / "common_transcript" / "events.jsonl"
     if not output_path.exists():
         return []
-    events: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     for line in output_path.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
-        events.append(json.loads(line))
-    return events
+        records.append(json.loads(line))
+    return records
+
+
+def _steps(state_dir: Path) -> list[dict[str, Any]]:
+    return [r for r in _read_common_records(state_dir) if r["type"] == "step"]
+
+
+def _observations(state_dir: Path) -> list[dict[str, Any]]:
+    return [r for r in _read_common_records(state_dir) if r["type"] == "observation"]
 
 
 # -- Tests --
 
 
-def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
-    """USER_EXPLICIT/USER_INPUT -> user_message carrying agy's clean typed text.
+def test_user_input_is_converted_to_a_user_step(state_dir: Path) -> None:
+    """USER_EXPLICIT/USER_INPUT -> user step carrying agy's clean typed text.
 
     agy's SQLite store (via decode_agy_transcript.py) records the bare typed text in
     ``CortexStepUserInput.query``; the converter passes it through, stripped of surrounding
@@ -188,18 +134,16 @@ def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert len(events) == 1
-    event = events[0]
-    assert event["type"] == "user_message"
-    assert event["role"] == "user"
-    assert event["content"] == "What is 2+2?"
-    assert event["conversation_id"] == "conv-A"
-    assert event["step_index"] == 0
-    assert event["source"] == "antigravity/common_transcript"
+    steps = _steps(state_dir)
+    assert len(steps) == 1
+    step = steps[0]
+    assert step["source"] == "user"
+    assert step["message"] == "What is 2+2?"
+    assert step["extra"] == {"conversation_id": "conv-A", "step_index": 0}
+    assert step["emitter"] == "antigravity/common_transcript"
 
 
-def test_planner_response_without_tool_calls_is_assistant_message(state_dir: Path) -> None:
+def test_planner_response_without_tool_calls_is_an_agent_step(state_dir: Path) -> None:
     _write_raw_transcript(
         state_dir,
         [
@@ -210,13 +154,11 @@ def test_planner_response_without_tool_calls_is_assistant_message(state_dir: Pat
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert [e["type"] for e in events] == ["user_message", "assistant_message"]
-    assistant = events[1]
-    assert assistant["role"] == "assistant"
-    assert assistant["text"] == "Hello back."
-    assert assistant["tool_calls"] == []
-    assert assistant["conversation_id"] == "conv-A"
+    steps = _steps(state_dir)
+    assert [s["source"] for s in steps] == ["user", "agent"]
+    assert steps[1]["message"] == "Hello back."
+    assert "tool_calls" not in steps[1]
+    assert steps[1]["extra"]["conversation_id"] == "conv-A"
 
 
 def test_planner_response_with_tool_calls_emits_synthetic_tool_call_ids(state_dir: Path) -> None:
@@ -229,7 +171,7 @@ def test_planner_response_with_tool_calls_emits_synthetic_tool_call_ids(state_di
                 "conv-A",
                 2,
                 tool_calls=[
-                    {"name": "write_to_file", "args": {"path": "/tmp/x", "content": "hi"}},
+                    {"name": "write_to_file", "args": json.dumps({"path": "/tmp/x", "content": "hi"})},
                 ],
             ),
         ],
@@ -237,18 +179,17 @@ def test_planner_response_with_tool_calls_emits_synthetic_tool_call_ids(state_di
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assistant = events[1]
-    assert len(assistant["tool_calls"]) == 1
-    tc = assistant["tool_calls"][0]
-    assert tc["tool_call_id"] == "conv-A-2-tc0"
-    assert tc["tool_name"] == "write_to_file"
-    # Args are JSON-serialized into the preview
-    assert "/tmp/x" in tc["input_preview"]
+    assert _steps(state_dir)[1]["tool_calls"] == [
+        {
+            "tool_call_id": "conv-A-2-tc0",
+            "function_name": "write_to_file",
+            "arguments": {"path": "/tmp/x", "content": "hi"},
+        }
+    ]
 
 
 def test_code_action_pairs_with_preceding_planner_response_tool_call(state_dir: Path) -> None:
-    """MODEL/CODE_ACTION -> tool_result whose tool_call_id matches the last assistant tool call in the same conversation."""
+    """MODEL/CODE_ACTION -> observation whose source_call_id matches the last tool call in the same conversation."""
     _write_raw_transcript(
         state_dir,
         [
@@ -256,22 +197,27 @@ def test_code_action_pairs_with_preceding_planner_response_tool_call(state_dir: 
             _planner_response(
                 "conv-A",
                 2,
-                tool_calls=[{"name": "write_to_file", "args": {"path": "test.txt"}}],
+                tool_calls=[{"name": "write_to_file", "args": json.dumps({"path": "test.txt"})}],
             ),
-            _code_action("conv-A", 3, content="Created test.txt"),
+            _code_action("conv-A", 3, "Created test.txt"),
         ],
     )
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    types = [e["type"] for e in events]
-    assert types == ["user_message", "assistant_message", "tool_result"]
-    tool_result = events[2]
-    assert tool_result["tool_call_id"] == "conv-A-2-tc0"
-    assert tool_result["tool_name"] == "write_to_file"
-    assert tool_result["output"] == "Created test.txt"
-    assert tool_result["is_error"] is False
+    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
+    assert _observations(state_dir)[0]["results"] == [
+        {
+            "source_call_id": "conv-A-2-tc0",
+            "content": "Created test.txt",
+            "extra": {
+                "is_error": False,
+                "tool_name": "write_to_file",
+                "conversation_id": "conv-A",
+                "step_index": 3,
+            },
+        }
+    ]
 
 
 def test_planner_response_with_multiple_tool_calls_pairs_last_with_code_action(state_dir: Path) -> None:
@@ -279,12 +225,11 @@ def test_planner_response_with_multiple_tool_calls_pairs_last_with_code_action(s
     gets paired with the subsequent CODE_ACTION.
 
     This documents the converter's current behavior: agy emits one CODE_ACTION
-    per planner response (per the script's top-level docstring) regardless of
+    per planner response (per the converter module's docstring) regardless of
     how many tool_calls the response contained, so only the last tool_call has
-    a matching tool_result event. The earlier tool_calls still appear in the
-    assistant_message.tool_calls array. If agy's emit pattern ever changes to
-    one CODE_ACTION per tool_call, this test (and the pairing logic) will need
-    to be revisited.
+    a matching observation. The earlier tool_calls still appear in the step's
+    tool_calls array. If agy's emit pattern ever changes to one CODE_ACTION per
+    tool_call, this test (and the pairing logic) will need to be revisited.
     """
     _write_raw_transcript(
         state_dir,
@@ -294,60 +239,25 @@ def test_planner_response_with_multiple_tool_calls_pairs_last_with_code_action(s
                 "conv-A",
                 2,
                 tool_calls=[
-                    {"name": "first_tool", "args": {"a": 1}},
-                    {"name": "second_tool", "args": {"b": 2}},
+                    {"name": "first_tool", "args": json.dumps({"a": 1})},
+                    {"name": "second_tool", "args": json.dumps({"b": 2})},
                 ],
             ),
-            _code_action("conv-A", 3, content="paired output"),
+            _code_action("conv-A", 3, "paired output"),
         ],
     )
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assistant = next(e for e in events if e["type"] == "assistant_message")
-    assert [tc["tool_name"] for tc in assistant["tool_calls"]] == ["first_tool", "second_tool"]
-    assert [tc["tool_call_id"] for tc in assistant["tool_calls"]] == ["conv-A-2-tc0", "conv-A-2-tc1"]
+    agent_step = next(s for s in _steps(state_dir) if s["source"] == "agent")
+    assert [tc["function_name"] for tc in agent_step["tool_calls"]] == ["first_tool", "second_tool"]
+    assert [tc["tool_call_id"] for tc in agent_step["tool_calls"]] == ["conv-A-2-tc0", "conv-A-2-tc1"]
 
-    tool_results = [e for e in events if e["type"] == "tool_result"]
-    assert len(tool_results) == 1
+    observations = _observations(state_dir)
+    assert len(observations) == 1
     # The CODE_ACTION pairs with the LAST tool_call (tc1), not the first.
-    assert tool_results[0]["tool_call_id"] == "conv-A-2-tc1"
-    assert tool_results[0]["tool_name"] == "second_tool"
-
-
-def test_code_action_with_failed_status_marks_is_error(state_dir: Path) -> None:
-    _write_raw_transcript(
-        state_dir,
-        [
-            _planner_response(
-                "conv-A",
-                2,
-                tool_calls=[{"name": "write_to_file", "args": {}}],
-            ),
-            _code_action("conv-A", 3, content="permission denied", status="ERROR"),
-        ],
-    )
-
-    _run_converter(state_dir)
-
-    events = _read_common_events(state_dir)
-    tool_result = next(e for e in events if e["type"] == "tool_result")
-    assert tool_result["is_error"] is True
-
-
-def test_code_action_without_preceding_tool_call_is_dropped(state_dir: Path) -> None:
-    """A bare CODE_ACTION (no PLANNER_RESPONSE tool_calls earlier) has nothing to pair with."""
-    _write_raw_transcript(
-        state_dir,
-        [
-            _code_action("conv-A", 0, content="orphan"),
-        ],
-    )
-
-    _run_converter(state_dir)
-
-    assert _read_common_events(state_dir) == []
+    assert observations[0]["results"][0]["source_call_id"] == "conv-A-2-tc1"
+    assert observations[0]["results"][0]["extra"]["tool_name"] == "second_tool"
 
 
 def test_conversation_history_is_dropped(state_dir: Path) -> None:
@@ -363,9 +273,7 @@ def test_conversation_history_is_dropped(state_dir: Path) -> None:
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    types = [e["type"] for e in events]
-    assert types == ["user_message", "assistant_message"]
+    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
 
 
 def test_unknown_source_type_combination_is_dropped(state_dir: Path) -> None:
@@ -387,9 +295,7 @@ def test_unknown_source_type_combination_is_dropped(state_dir: Path) -> None:
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    types = [e["type"] for e in events]
-    assert types == ["user_message", "assistant_message"]
+    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
 
 
 def test_tool_call_pairing_is_scoped_per_conversation(state_dir: Path) -> None:
@@ -397,60 +303,29 @@ def test_tool_call_pairing_is_scoped_per_conversation(state_dir: Path) -> None:
     _write_raw_transcript(
         state_dir,
         [
-            _planner_response(
-                "conv-A",
-                2,
-                tool_calls=[{"name": "tool_a", "args": {}}],
-            ),
-            _planner_response(
-                "conv-B",
-                2,
-                tool_calls=[{"name": "tool_b", "args": {}}],
-            ),
+            _planner_response("conv-A", 2, tool_calls=[{"name": "tool_a", "args": "{}"}]),
+            _planner_response("conv-B", 2, tool_calls=[{"name": "tool_b", "args": "{}"}]),
             # Pair conv-A's CODE_ACTION; if conv-A's pending call leaked into conv-B
             # bucket the pairing would be wrong.
-            _code_action("conv-A", 3, content="result_a"),
-            _code_action("conv-B", 3, content="result_b"),
+            _code_action("conv-A", 3, "result_a"),
+            _code_action("conv-B", 3, "result_b"),
         ],
     )
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    tool_results = [e for e in events if e["type"] == "tool_result"]
-    assert {tr["tool_name"]: tr["output"] for tr in tool_results} == {
+    results = [result for o in _observations(state_dir) for result in o["results"]]
+    assert {result["extra"]["tool_name"]: result["content"] for result in results} == {
         "tool_a": "result_a",
         "tool_b": "result_b",
     }
 
 
-def test_converter_is_idempotent_across_runs(state_dir: Path) -> None:
-    """Re-running the converter must not duplicate events.
-
-    Event ids are derived deterministically from (conv_id, step_index, kind);
-    the converter dedupes against the existing output file on each pass.
-    """
-    raw = [
-        _user_input("conv-A", 0, "hi"),
-        _planner_response("conv-A", 2, text="hello"),
-    ]
-    _write_raw_transcript(state_dir, raw)
-
-    _run_converter(state_dir)
-    first = _read_common_events(state_dir)
-    _run_converter(state_dir)
-    second = _read_common_events(state_dir)
-
-    assert first == second
-    assert len(second) == 2
-
-
-def test_converter_appends_only_new_events_on_incremental_runs(state_dir: Path) -> None:
+def test_converter_appends_only_new_records_on_incremental_runs(state_dir: Path) -> None:
     """A second pass with extra raw events appends only the new ones."""
     _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "first")])
     _run_converter(state_dir)
-    first_pass = _read_common_events(state_dir)
-    assert len(first_pass) == 1
+    assert len(_steps(state_dir)) == 1
 
     _write_raw_transcript(
         state_dir,
@@ -460,38 +335,7 @@ def test_converter_appends_only_new_events_on_incremental_runs(state_dir: Path) 
         ],
     )
     _run_converter(state_dir)
-    second_pass = _read_common_events(state_dir)
-    assert [e["type"] for e in second_pass] == ["user_message", "assistant_message"]
-
-
-def test_events_without_mngr_conv_id_are_dropped(state_dir: Path) -> None:
-    """The streamer always injects _mngr_conv_id; without it the converter can't correlate."""
-    raw = json.dumps(
-        {
-            "step_index": 0,
-            "source": "USER_EXPLICIT",
-            "type": "USER_INPUT",
-            "created_at": "2026-05-21T07:00:00Z",
-            "content": "hi",
-        }
-    )
-    _write_raw_transcript(state_dir, [raw])
-
-    _run_converter(state_dir)
-
-    assert _read_common_events(state_dir) == []
-
-
-def test_malformed_lines_are_skipped_not_fatal(state_dir: Path) -> None:
-    """A partial / truncated JSON line shouldn't abort the rest of the conversion."""
-    raw_path = state_dir / "logs" / "antigravity_transcript" / "events.jsonl"
-    raw_path.write_text("{ not valid json\n" + _user_input("conv-A", 0, "after the broken line") + "\n")
-
-    _run_converter(state_dir)
-
-    events = _read_common_events(state_dir)
-    assert len(events) == 1
-    assert events[0]["content"] == "after the broken line"
+    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
 
 
 def test_missing_output_file_emits_nothing_to_pane(state_dir: Path) -> None:
@@ -506,21 +350,19 @@ def test_missing_output_file_emits_nothing_to_pane(state_dir: Path) -> None:
     result = _run_single_pass(state_dir)
     assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
     assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
-    assert len(_read_common_events(state_dir)) == 1
+    assert len(_steps(state_dir)) == 1
 
 
 def test_dropped_lines_emit_nothing_to_pane(state_dir: Path) -> None:
     """Malformed lines are dropped silently and must produce no output on the
     watcher's stdout/stderr; the valid line still converts.
     """
-    raw_path = state_dir / "logs" / "antigravity_transcript" / "events.jsonl"
-    raw_path.write_text("{ not valid json\n" + _user_input("conv-A", 0, "kept") + "\n")
+    _write_raw_transcript(state_dir, ["{ not valid json", _user_input("conv-A", 0, "kept")])
 
     result = _run_single_pass(state_dir)
     assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
     assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
-    events = _read_common_events(state_dir)
-    assert [e["content"] for e in events] == ["kept"]
+    assert [s["message"] for s in _steps(state_dir)] == ["kept"]
 
 
 def test_event_ids_are_stable_and_per_conversation(state_dir: Path) -> None:
@@ -535,17 +377,16 @@ def test_event_ids_are_stable_and_per_conversation(state_dir: Path) -> None:
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    ids = sorted(e["event_id"] for e in events)
+    ids = sorted(s["event_id"] for s in _steps(state_dir))
     assert ids == ["conv-A-0-user", "conv-B-0-user"]
 
 
 def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> None:
-    """Every record antigravity's converter emits must validate against the shared envelope schema.
+    """Every record antigravity's converter emits must validate against the canonical schema.
 
     Guards against the antigravity emitter (common_transcript.sh) and the canonical schema
-    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
-    types and asserts each emitted record conforms.
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives every record type
+    the emitter can produce and asserts each emitted record conforms.
     """
     _write_raw_transcript(
         state_dir,
@@ -555,16 +396,18 @@ def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> 
                 "conv-A",
                 2,
                 text="hi there",
-                tool_calls=[{"name": "write_to_file", "args": {"path": "test.txt"}}],
+                thinking="a file needs writing",
+                tool_calls=[{"name": "write_to_file", "args": json.dumps({"path": "test.txt"})}],
             ),
-            _code_action("conv-A", 3, content="Created test.txt"),
+            _code_action("conv-A", 3, "Created test.txt"),
         ],
     )
 
     _run_converter(state_dir)
 
-    records = _read_common_events(state_dir)
-    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    records = _read_common_records(state_dir)
+    assert {r["type"] for r in records} <= {"header", "step", "observation"}
+    assert {"header", "step"} <= {r["type"] for r in records}
     for record in records:
         assert validate_common_transcript_record(record) is None, record
 
@@ -588,11 +431,11 @@ def test_held_convert_lock_skips_pass(state_dir: Path) -> None:
         ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
     )
     assert "Traceback" not in result.stderr, result.stderr
-    assert _read_common_events(state_dir) == []
+    assert _read_common_records(state_dir) == []
 
     _lock_dir(state_dir).rmdir()
     _run_converter(state_dir)
-    assert len(_read_common_events(state_dir)) == 1
+    assert len(_steps(state_dir)) == 1
 
 
 def test_stale_convert_lock_is_broken(state_dir: Path) -> None:
@@ -609,12 +452,12 @@ def test_stale_convert_lock_is_broken(state_dir: Path) -> None:
         ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
     )
     assert "Traceback" not in result.stderr, result.stderr
-    assert len(_read_common_events(state_dir)) == 1
+    assert len(_steps(state_dir)) == 1
 
 
 def test_concurrent_passes_do_not_duplicate(state_dir: Path) -> None:
     """Two passes racing over the same input must not both append the same
-    events: the lock serializes them so the second sees the first's output in
+    records: the lock serializes them so the second sees the first's output in
     its dedup set. Without the lock this produces duplicate event_ids."""
     _write_raw_transcript(state_dir, [_user_input(f"conv-{i}", i, f"msg {i}") for i in range(20)])
 
@@ -631,7 +474,7 @@ def test_concurrent_passes_do_not_duplicate(state_dir: Path) -> None:
     for proc in procs:
         assert proc.wait(timeout=30) == 0
 
-    events = _read_common_events(state_dir)
-    event_ids = [e["event_id"] for e in events]
+    records = _read_common_records(state_dir)
+    event_ids = [r["event_id"] for r in records]
     assert len(event_ids) == len(set(event_ids)), "convert lock failed to prevent duplicate events"
-    assert len(events) == 20
+    assert len(_steps(state_dir)) == 20

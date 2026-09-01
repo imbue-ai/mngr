@@ -43,7 +43,12 @@
 //      latest message/part state in memory and, on session.idle, rebuilds the
 //      agent-agnostic common transcript (events/opencode/common_transcript/
 //      events.jsonl, what `mngr transcript` reads) from that state and writes it
-//      atomically. Rebuilding from full state on idle is robust (self-healing, no
+//      atomically. Its records are the ATIF-shaped stream defined in
+//      specs/atif-transcript-alignment/spec.md -- a `header` line followed by
+//      `step` and `observation` records, at full fidelity (complete tool
+//      arguments, untruncated outputs). Because the whole file is rewritten, the
+//      header is simply the first record of every rebuild.
+//      Rebuilding from full state on idle is robust (self-healing, no
 //      message-completion detection) and needs no background converter/supervisor.
 //      Once per turn is sufficient: the live in-progress view is the tmux pane
 //      (mngr connect), and `mngr transcript` reads on demand. To survive
@@ -53,47 +58,98 @@
 //      full history rather than truncating pre-restart turns.
 //
 // The root session id (for resume) is owned by mngr (opencode_launch.sh). Paths,
-// the role/emit env vars, and the common `source` below are kept in sync with
+// the role/emit env vars, and the common `emitter` below are kept in sync with
 // opencode_config.py (the Python side cannot be imported here). Every fs touch is
 // wrapped so a transient error never disrupts OpenCode's loop.
 
 import type { Plugin } from "@opencode-ai/plugin"
+import { createHash } from "node:crypto"
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 // Keep in sync with opencode_config.py: ACTIVE_MARKER_FILENAME,
 // PERMISSIONS_WAITING_FILENAME, RAW_TRANSCRIPT_RELATIVE_PATH,
-// COMMON_TRANSCRIPT_RELATIVE_PATH, COMMON_TRANSCRIPT_SOURCE, ROLE_ENV_VAR,
+// COMMON_TRANSCRIPT_RELATIVE_PATH, COMMON_TRANSCRIPT_EMITTER, ROLE_ENV_VAR,
 // SERVER_ROLE, EMIT_COMMON_ENV_VAR.
 const ACTIVE_MARKER_FILENAME = "active"
 const PERMISSIONS_WAITING_FILENAME = "permissions_waiting"
 const RAW_TRANSCRIPT_RELATIVE_PATH = "logs/opencode_transcript/events.jsonl"
 const COMMON_TRANSCRIPT_RELATIVE_PATH = "events/opencode/common_transcript/events.jsonl"
-const COMMON_TRANSCRIPT_SOURCE = "opencode/common_transcript"
+const COMMON_TRANSCRIPT_EMITTER = "opencode/common_transcript"
 const ROLE_ENV_VAR = "MNGR_OPENCODE_ROLE"
 const SERVER_ROLE = "server"
 const EMIT_COMMON_ENV_VAR = "MNGR_OPENCODE_EMIT_COMMON"
 
-const _MAX_INPUT_PREVIEW_LENGTH = 200
-const _MAX_OUTPUT_LENGTH = 2000
+// The ATIF revision the emitted records follow. Kept in sync with
+// PINNED_ATIF_SCHEMA_VERSION in imbue/mngr/agents/common_transcript_records.py.
+const ATIF_SCHEMA_VERSION = "ATIF-v1.7"
 
-const _truncate = (text: string, limit: number): string => (text.length <= limit ? text : text.slice(0, limit) + "...")
+const IMAGE_PLACEHOLDER = "[image omitted]"
 
-const _shortValue = (value: unknown): string => (typeof value === "string" ? value : JSON.stringify(value))
+const _asText = (value: unknown): string => (typeof value === "string" ? value : (JSON.stringify(value) ?? ""))
 
+// A step timestamp must parse as ISO 8601, so a message with no usable
+// `time.created` gets the epoch rather than an empty string -- and the epoch rather
+// than "now" so a rebuild does not rewrite the record with a different timestamp.
 const _isoFromMs = (createdMs: unknown): string =>
-  typeof createdMs === "number" ? new Date(createdMs).toISOString().replace(/\.\d+Z$/, "Z") : ""
+  new Date(typeof createdMs === "number" ? createdMs : 0).toISOString().replace(/\.\d+Z$/, "Z")
+
+// ATIF requires `arguments` to be a JSON object. A native value that is not one is
+// preserved verbatim under `_raw` rather than dropped.
+const _argumentsObject = (value: unknown): Record<string, unknown> => {
+  if (value === null || value === undefined) {
+    return {}
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  if (typeof value === "string") {
+    // An absent or empty native payload means "no arguments", not a raw empty string.
+    if (!value.trim()) {
+      return {}
+    }
+    try {
+      const parsed = JSON.parse(value)
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>
+      }
+    } catch {
+      // not JSON; fall through to the _raw wrapper
+    }
+    return { _raw: value }
+  }
+  return { _raw: _asText(value) }
+}
+
+// The image file-part shape read here is asserted by synthetic fixtures, not confirmed
+// against captured native opencode output.
+const _isImagePart = (part: any): boolean =>
+  part?.type === "file" && typeof part?.mime === "string" && part.mime.startsWith("image/")
 
 const _messageText = (parts: any[]): string =>
   parts
-    .filter((part) => part?.type === "text" && !part?.synthetic && typeof part?.text === "string")
-    .map((part) => part.text)
+    .map((part) => {
+      if (part?.type === "text" && !part?.synthetic && typeof part?.text === "string") {
+        return part.text
+      }
+      return _isImagePart(part) ? IMAGE_PLACEHOLDER : ""
+    })
     .join("")
+
+// Thinking, where opencode surfaces it. Several reasoning parts in one inference
+// are joined with blank lines (the spec's reasoning_content rule). The reasoning
+// part shape read here is asserted by synthetic fixtures, not confirmed against
+// captured native opencode output.
+const _reasoningText = (parts: any[]): string =>
+  parts
+    .filter((part) => part?.type === "reasoning" && typeof part?.text === "string" && part.text)
+    .map((part) => part.text)
+    .join("\n\n")
 
 const _toolCallFromPart = (part: any): Record<string, unknown> => ({
   tool_call_id: part?.callID ?? "",
-  tool_name: part?.tool ?? "",
-  input_preview: _truncate(_shortValue(part?.state?.input ?? {}), _MAX_INPUT_PREVIEW_LENGTH),
+  function_name: part?.tool ?? "",
+  arguments: _argumentsObject(part?.state?.input),
 })
 
 const _toolStateOutput = (state: any): { output: string; isError: boolean } => {
@@ -101,9 +157,9 @@ const _toolStateOutput = (state: any): { output: string; isError: boolean } => {
     return { output: "", isError: false }
   }
   if (state.status === "error") {
-    return { output: _shortValue(state.error ?? ""), isError: true }
+    return { output: _asText(state.error ?? ""), isError: true }
   }
-  return { output: _shortValue(state.output ?? ""), isError: false }
+  return { output: _asText(state.output ?? ""), isError: false }
 }
 
 export const MngrLifecyclePlugin: Plugin = async () => {
@@ -249,8 +305,26 @@ export const MngrLifecyclePlugin: Plugin = async () => {
     return parent === undefined || parent === ""
   }
 
+  // The ATIF-shaped stream: a header line, one `step` record per message, and one
+  // `observation` record per finished tool call (see
+  // specs/atif-transcript-alignment/spec.md). Per-agent annotations live under the
+  // ATIF `extra` objects -- the record schema forbids unknown top-level fields.
   const buildCommonRecords = (): Record<string, unknown>[] => {
-    const records: Record<string, unknown>[] = []
+    // The header id hashes the agent id and emitter: a fixed "header" id repeats
+    // identically across the fleet, so analytics' event-id dedupe would collapse
+    // every agent's header to one.
+    const headerDigest = createHash("sha256")
+      .update(`${basename(stateDir)}:${COMMON_TRANSCRIPT_EMITTER}`)
+      .digest("hex")
+      .slice(0, 32)
+    const records: Record<string, unknown>[] = [
+      {
+        type: "header",
+        event_id: `header-${headerDigest}`,
+        emitter: COMMON_TRANSCRIPT_EMITTER,
+        schema_version: ATIF_SCHEMA_VERSION,
+      },
+    ]
     const messages = [...messageById.values()].sort(
       (a, b) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0),
     )
@@ -266,14 +340,13 @@ export const MngrLifecyclePlugin: Plugin = async () => {
           continue
         }
         records.push({
+          type: "step",
+          event_id: `${message.id}-user`,
+          emitter: COMMON_TRANSCRIPT_EMITTER,
           timestamp,
-          type: "user_message",
-          event_id: message.id + "-user",
-          source: COMMON_TRANSCRIPT_SOURCE,
-          role: "user",
-          content: text,
-          conversation_id: sessionId,
-          message_id: message.id,
+          source: "user",
+          message: text,
+          extra: { conversation_id: sessionId, message_id: message.id },
         })
         continue
       }
@@ -281,35 +354,37 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         continue
       }
 
-      const toolCalls = toolParts.map(_toolCallFromPart)
-      // Build the ordered parts[] by walking the message's parts in arrival order, so the
-      // text/tool_call interleaving is preserved (faithful -> parts_ordered: true).
-      const commonParts: Array<Record<string, unknown>> = []
-      for (const part of parts) {
-        if (part?.type === "text" && !part?.synthetic && typeof part?.text === "string" && part.text) {
-          commonParts.push({ type: "text", content: part.text })
-        } else if (part?.type === "tool") {
-          commonParts.push({ type: "tool_call", ..._toolCallFromPart(part) })
-        }
-      }
       const providerId = message?.providerID ?? ""
       const modelId = message?.modelID ?? ""
-      records.push({
+      const reasoning = _reasoningText(parts)
+      const finishReason = message?.finish
+      const extra: Record<string, unknown> = { conversation_id: sessionId, message_id: message.id }
+      if (finishReason) {
+        // ATIF has no stop-reason field, so it rides as a step-level extra.
+        extra.finish_reason = finishReason
+      }
+      const step: Record<string, unknown> = {
+        type: "step",
+        event_id: `${message.id}-assistant`,
+        emitter: COMMON_TRANSCRIPT_EMITTER,
         timestamp,
-        type: "assistant_message",
-        event_id: message.id + "-assistant",
-        source: COMMON_TRANSCRIPT_SOURCE,
-        role: "assistant",
-        model: providerId && modelId ? `${providerId}/${modelId}` : null,
-        text,
-        tool_calls: toolCalls,
-        parts: commonParts,
-        parts_ordered: true,
-        finish_reason: message?.finish ?? null,
-        usage: null,
-        conversation_id: sessionId,
-        message_id: message.id,
-      })
+        // One agent step per assistant message: ATIF has no interleaving concept, so
+        // the message text is concatenated and the tool calls are an ordered list.
+        source: "agent",
+        message: text,
+        extra,
+      }
+      if (providerId && modelId) {
+        step.model_name = `${providerId}/${modelId}`
+      }
+      if (reasoning) {
+        step.reasoning_content = reasoning
+      }
+      if (toolParts.length > 0) {
+        step.tool_calls = toolParts.map(_toolCallFromPart)
+      }
+      // opencode reports no per-message token usage, so the step carries no metrics.
+      records.push(step)
 
       for (const part of toolParts) {
         const status = part?.state?.status
@@ -318,16 +393,24 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         }
         const { output, isError } = _toolStateOutput(part?.state)
         records.push({
+          type: "observation",
+          event_id: `${part.id}-tool_result`,
+          emitter: COMMON_TRANSCRIPT_EMITTER,
           timestamp,
-          type: "tool_result",
-          event_id: part.id + "-tool_result",
-          source: COMMON_TRANSCRIPT_SOURCE,
-          tool_call_id: part?.callID ?? "",
-          tool_name: part?.tool ?? "",
-          output: _truncate(output, _MAX_OUTPUT_LENGTH),
-          is_error: isError,
-          conversation_id: sessionId,
-          message_id: part?.messageID ?? "",
+          results: [
+            {
+              source_call_id: part?.callID ?? "",
+              content: output,
+              // is_error / tool_name have no ATIF field of their own; the ids repeat the
+              // step's provenance so a result stands on its own.
+              extra: {
+                conversation_id: sessionId,
+                message_id: message.id,
+                is_error: isError,
+                tool_name: part?.tool ?? "",
+              },
+            },
+          ],
         })
       }
     }
@@ -343,12 +426,23 @@ export const MngrLifecyclePlugin: Plugin = async () => {
       const body = buildCommonRecords()
         .map((record) => JSON.stringify(record))
         .join("\n")
-      const tmpPath = commonTranscriptPath + ".tmp"
-      writeFileSync(tmpPath, body.length > 0 ? body + "\n" : "")
+      const tmpPath = `${commonTranscriptPath}.tmp`
+      // The header is always the first record, so the body is never empty.
+      writeFileSync(tmpPath, body + "\n")
       renameSync(tmpPath, commonTranscriptPath)
     } catch {
       // best-effort
     }
+  }
+
+  // A session finished its turn. Newer opencode reports this as a `session.status`
+  // carrying an idle status; older builds emit the now-deprecated standalone
+  // `session.idle`. opencode self-upgrades, so both arms route here.
+  const handleTurnIdle = (sessionId: string): void => {
+    if (isRootSession(sessionId)) {
+      clearMarkersForRootIdle()
+    }
+    rebuildCommon()
   }
 
   return {
@@ -366,18 +460,12 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         if (status === "busy" || status === "retry") {
           touchMarker()
         } else if (status === "idle") {
-          if (isRootSession(event.properties.sessionID)) {
-            clearMarkersForRootIdle()
-          }
-          rebuildCommon()
+          handleTurnIdle(event.properties.sessionID)
         }
         return
       }
       if (type === "session.idle") {
-        if (isRootSession(event.properties.sessionID)) {
-          clearMarkersForRootIdle()
-        }
-        rebuildCommon()
+        handleTurnIdle(event.properties.sessionID)
         return
       }
 

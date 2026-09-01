@@ -1,37 +1,19 @@
 #!/usr/bin/env bash
-# Common transcript converter for codex agents.
+# Common transcript converter daemon for codex agents.
 #
-# Reads the raw codex rollout stream at logs/codex_transcript/events.jsonl
-# (produced verbatim by stream_transcript.sh) and converts the semantically
-# important rollout items into the agent-agnostic common format at
-# events/codex/common_transcript/events.jsonl.
+# Polls the raw codex rollout stream at logs/codex_transcript/events.jsonl
+# (written verbatim by stream_transcript.sh) and, whenever it has grown, shells
+# out to common_transcript_convert.py to append new records to
+# events/codex/common_transcript/events.jsonl. Each pass runs under the shared
+# convert lock, which serializes the poll loop against the turn-end
+# --single-pass flush, and the converter's stdout/stderr never reaches this
+# watcher's own -- appended counts and converter errors are logged to
+# events/logs/common_transcript instead of surfacing in the agent's pane.
 #
-# codex rollout wire shape (verified live against codex 0.64.0):
-#   {"timestamp":"<ISO8601>","type":<t>,"payload":<p>}
-# with the item kinds this converter cares about carried under type
-# "response_item":
-#   payload.type=="message", role=="user"      -> user_message
-#       (text = join of payload.content[] items with type "input_text", .text)
-#   payload.type=="message", role=="assistant" -> assistant_message
-#       (text = join of payload.content[] items with type "output_text", .text)
-#   payload.type=="function_call"              -> remembered by payload.call_id
-#       (name=payload.name, arguments=payload.arguments [a raw JSON string])
-#   payload.type=="function_call_output"       -> tool_result, paired by call_id
-#       (output=payload.output, EITHER a string OR an array of content items)
-#
-# Deliberately ignored:
-#   type=="event_msg"   -- display duplicates of the response items above
-#                          (a user_message event_msg mirrors the response_item
-#                          message); emitting them would double every message.
-#   session_meta / turn_context / compacted / ghost_snapshot / token_count / ...
-#                       -- bookkeeping, not conversation content.
-#
-# Event ids: the rollout carries no global per-line id, so we synthesize a
-# stable id from the line's 1-based index in the raw input file (the stream is
-# append-only, so a given line keeps its index across restarts) plus the item
-# kind. Re-processing the same input therefore never produces duplicates; the
-# converter also dedupes against the set of event_ids already in the output file.
-# function_call/function_call_output are paired by payload.call_id.
+# What is converted, how the emitted records are shaped, and which native
+# rollout items are deliberately dropped is decided entirely by
+# common_transcript_convert.py; its module docstring is the single source of
+# truth for that contract.
 #
 # Usage: common_transcript.sh [--single-pass]
 #

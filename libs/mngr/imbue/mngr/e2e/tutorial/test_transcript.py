@@ -3,7 +3,7 @@
 ``mngr transcript`` only works for agent types that produce a *common
 transcript* (e.g. claude); it fails fast on a ``command`` agent, which has
 none. Each test therefore creates a real (local) claude agent with an initial
-message and waits until the agent has produced at least one assistant reply
+message and waits until the agent has produced at least one agent reply
 before exercising the transcript command.
 """
 
@@ -27,7 +27,7 @@ _INITIAL_MESSAGE = "Reply with just the single word: hello"
 _AGENT_READY_TIMEOUT = 300
 _CREATE_TIMEOUT = 300.0
 # Once `mngr create --message` returns, the message has been delivered but the
-# agent may still be mid-turn; poll until the first assistant reply lands.
+# agent may still be mid-turn; poll until the first agent reply lands.
 _TRANSCRIPT_POLL_TIMEOUT = 180.0
 _TRANSCRIPT_POLL_INTERVAL = 5.0
 
@@ -35,9 +35,9 @@ _TRANSCRIPT_POLL_INTERVAL = 5.0
 def _create_my_task(e2e: E2eSession) -> None:
     """Create a local claude agent and wait until it has produced a transcript.
 
-    Returns once the agent has emitted at least one assistant message into its
-    common transcript, so that every ``mngr transcript`` variant (including
-    ``--role assistant``) has real content to display.
+    Returns once the agent has emitted at least one agent step into its common
+    transcript, so that every ``mngr transcript`` variant (including
+    ``--role agent``) has real content to display.
     """
     result = e2e.run(
         f"MNGR__AGENT_READY_TIMEOUT={_AGENT_READY_TIMEOUT} mngr create my-task --type claude "
@@ -55,59 +55,66 @@ def _create_my_task(e2e: E2eSession) -> None:
             f"{diagnostics}"
         )
 
-    def _transcript_has_assistant_reply() -> bool:
+    def _transcript_has_agent_reply() -> bool:
         probe = e2e.run(
-            "mngr transcript my-task --role assistant --format jsonl",
-            comment="wait for the agent's first assistant reply",
+            "mngr transcript my-task --role agent --format jsonl",
+            comment="wait for the agent's first reply",
             timeout=60.0,
         )
         return probe.exit_code == 0 and probe.stdout.strip() != ""
 
     if not poll_until(
-        condition=_transcript_has_assistant_reply,
+        condition=_transcript_has_agent_reply,
         timeout=_TRANSCRIPT_POLL_TIMEOUT,
         poll_interval=_TRANSCRIPT_POLL_INTERVAL,
     ):
         diagnostics = e2e.collect_remote_diagnostics("my-task")
         raise AssertionError(
-            f"Agent 'my-task' did not produce an assistant transcript message "
+            f"Agent 'my-task' did not produce an agent transcript step "
             f"within {_TRANSCRIPT_POLL_TIMEOUT}s.\n{diagnostics}"
         )
 
 
-# A realistic common transcript: one user message, one assistant reply, and one
-# tool result. Mirrors the schema the claude common_transcript converter emits
-# (see imbue/mngr/cli/testing.py::SAMPLE_TRANSCRIPT_EVENTS). The text fields are
-# distinctive so role filtering can be verified by substring matching.
+# A realistic common transcript: the stream header, one user step, one agent step,
+# and its observation. Mirrors the ATIF-shaped records the claude common_transcript
+# converter emits (see imbue/mngr/cli/testing.py::SAMPLE_ATIF_STREAM_EVENTS). The
+# text fields are distinctive so role filtering can be verified by substring matching.
 _SAMPLE_TRANSCRIPT_EVENTS: list[dict[str, Any]] = [
     {
+        "type": "header",
+        "event_id": "header-" + "0" * 32,
+        "emitter": "claude/common_transcript",
+        "schema_version": "ATIF-v1.7",
+    },
+    {
         "timestamp": "2026-01-01T00:00:00Z",
-        "type": "user_message",
+        "type": "step",
         "event_id": "evt-user-1",
-        "source": "claude/common_transcript",
-        "role": "user",
-        "content": "USER_MESSAGE_MARKER please help",
+        "emitter": "claude/common_transcript",
+        "source": "user",
+        "message": "USER_MESSAGE_MARKER please help",
     },
     {
         "timestamp": "2026-01-01T00:00:01Z",
-        "type": "assistant_message",
-        "event_id": "evt-assistant-1",
-        "source": "claude/common_transcript",
-        "role": "assistant",
-        "text": "ASSISTANT_MESSAGE_MARKER on it",
-        "tool_calls": [],
-        "parts": [{"type": "text", "content": "ASSISTANT_MESSAGE_MARKER on it"}],
-        "parts_ordered": True,
-        "model": "test-model",
+        "type": "step",
+        "event_id": "evt-agent-1",
+        "emitter": "claude/common_transcript",
+        "source": "agent",
+        "message": "AGENT_MESSAGE_MARKER on it",
+        "model_name": "test-model",
     },
     {
         "timestamp": "2026-01-01T00:00:02Z",
-        "type": "tool_result",
+        "type": "observation",
         "event_id": "evt-tool-1",
-        "source": "claude/common_transcript",
-        "tool_name": "Bash",
-        "output": "TOOL_RESULT_MARKER ok",
-        "is_error": False,
+        "emitter": "claude/common_transcript",
+        "results": [
+            {
+                "source_call_id": "call_1",
+                "content": "TOOL_RESULT_MARKER ok",
+                "extra": {"is_error": False, "tool_name": "Bash"},
+            }
+        ],
     },
 ]
 
@@ -126,9 +133,9 @@ def _create_claude_task_with_transcript(e2e: E2eSession, host_dir: Path, sleep_v
     discovery (it never instantiates the claude agent class), so this faithfully
     exercises ``mngr transcript`` while avoiding the trust/binary dependencies.
 
-    A representative common_transcript events file (user, assistant, tool result)
-    is then written into the agent's events directory so the role-filtering
-    behavior can be verified.
+    A representative common_transcript events file (header, user step, agent
+    step, observation) is then written into the agent's events directory so the
+    role-filtering behavior can be verified.
     """
     expect(
         e2e.run(
@@ -169,16 +176,16 @@ def test_transcript_default(e2e: E2eSession) -> None:
 
     Scope: `mngr transcript my-task` renders the agent's conversation as
     human-readable text, showing both the user message we sent (`user:` plus the
-    initial message text) and at least one assistant reply (`assistant:`).
+    initial message text) and at least one agent reply (`agent:`).
     """
     _create_my_task(e2e)
     result = e2e.run("mngr transcript my-task", comment="view the transcript")
     expect(result).to_succeed()
     # The human-readable transcript must show the conversation we started: both
-    # the user message we sent and at least one assistant reply.
+    # the user message we sent and at least one agent reply.
     assert result.stdout.strip() != "", "Expected a non-empty transcript"
     assert "user:" in result.stdout, f"Expected a user message in the transcript, got:\n{result.stdout}"
-    assert "assistant:" in result.stdout, f"Expected an assistant message in the transcript, got:\n{result.stdout}"
+    assert "agent:" in result.stdout, f"Expected an agent message in the transcript, got:\n{result.stdout}"
     assert _INITIAL_MESSAGE in result.stdout, (
         f"Expected the initial message text in the transcript, got:\n{result.stdout}"
     )
@@ -187,21 +194,24 @@ def test_transcript_default(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.timeout(600)
-def test_transcript_assistant_only(e2e: E2eSession, temp_host_dir: Path) -> None:
+def test_transcript_agent_only(e2e: E2eSession, temp_host_dir: Path) -> None:
     """Tutorial block:
-        # view only assistant messages
-        mngr transcript my-task --role assistant
+        # view only the agent's own messages
+        mngr transcript my-task --role agent
 
-    Scope: `--role assistant` filters the transcript to assistant messages only,
-    showing the assistant message while dropping both the user message and the
-    tool result.
+    Scope: `--role agent` filters the transcript to the agent's own steps only,
+    showing the agent message while dropping both the user message and the tool
+    observation.
     """
     _create_claude_task_with_transcript(e2e, temp_host_dir, 100801)
-    result = e2e.run("mngr transcript my-task --role assistant", comment="view only assistant messages")
+    result = e2e.run(
+        "mngr transcript my-task --role agent",
+        comment="view only the agent's own messages",
+    )
     expect(result).to_succeed()
-    # --role assistant must show the assistant message and filter out the user
-    # message and the tool result.
-    assert "ASSISTANT_MESSAGE_MARKER on it" in result.stdout, result.stdout
+    # --role agent must show the agent message and filter out the user message
+    # and the tool observation.
+    assert "AGENT_MESSAGE_MARKER on it" in result.stdout, result.stdout
     assert "USER_MESSAGE_MARKER" not in result.stdout, result.stdout
     assert "TOOL_RESULT_MARKER" not in result.stdout, result.stdout
 

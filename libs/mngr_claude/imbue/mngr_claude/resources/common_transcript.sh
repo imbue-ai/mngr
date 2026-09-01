@@ -10,9 +10,10 @@
 # Noise like progress events, file-history snapshots, and system
 # bookkeeping is dropped.
 #
-# Each output line is a self-describing JSON object with the standard
-# event envelope (timestamp, type, event_id, source) plus
-# message-specific fields.
+# Each output line is a self-describing JSON object: a `header`, `step` or
+# `observation` record in the ATIF-shaped stream format (framing fields
+# type/event_id/emitter plus ATIF fields; see
+# specs/atif-transcript-alignment/spec.md).
 #
 # The converter uses an ID-based dedup strategy: each output event_id
 # is derived from the source event's uuid, so re-processing the same
@@ -34,6 +35,9 @@ AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
 INPUT_FILE="$AGENT_DATA_DIR/logs/claude_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/claude/common_transcript/events.jsonl"
 POLL_INTERVAL=5
+# How long a turn-end flush waits before its one retry for the convert lock (see
+# convert_new_events).
+LOCK_RETRY_DELAY=2
 
 # Size and mtime of the input file as of the last completed conversion pass. A
 # pass re-reads the whole input file and the whole output file, so running one
@@ -68,27 +72,53 @@ _input_signature() {
 # Reads the full input file and the set of event_ids already in the output
 # file, then appends any new events whose IDs are not yet present. The
 # ID-based dedup ensures correctness even if the input file is replayed.
+#
+# $1: "true" when this pass reads an input that is known to be complete, which
+#     lets the converter emit the last (otherwise still-growing) assistant
+#     inference. See the comment on _MNGR_EMIT_TRAILING_ASSISTANT_GROUP below.
 convert_new_events() {
+    local is_input_complete="$1"
     if [ ! -f "$INPUT_FILE" ]; then
         log_debug "Input file not found: $INPUT_FILE"
         return
     fi
 
-    # Report the skip to the caller so the poll loop retries on the next cycle
-    # instead of recording this input as already converted.
     if ! mngr_common_transcript_acquire_lock; then
-        log_warn "could not acquire convert lock; skipping pass"
-        return 1
+        # A poll pass reports the skip to the caller, which retries on the next
+        # cycle instead of recording this input as already converted. A turn-end
+        # flush has no next cycle -- it is the only pass allowed to emit the turn's
+        # final inference -- so it waits and tries once more before giving up.
+        if [ "$is_input_complete" != true ]; then
+            log_warn "could not acquire convert lock; skipping pass"
+            return 1
+        fi
+        sleep "$LOCK_RETRY_DELAY"
+        if ! mngr_common_transcript_acquire_lock; then
+            log_warn "could not acquire convert lock (after one retry); skipping flush"
+            return 1
+        fi
     fi
 
     local convert_stderr
     convert_stderr=$(mktemp)
+    # Claude fans one API response out over several JSONL lines that arrive over
+    # seconds, and the converter emits one record per response and dedups by
+    # event_id -- so a response emitted before its last line landed would stay
+    # truncated forever. The converter therefore holds back the file's final
+    # assistant response unless this variable says the input is complete. Only the
+    # --single-pass path (the turn-end flush, where the turn is over) may say so;
+    # the poll loop below runs mid-turn and must not.
+    local emit_trailing_group=""
+    if [ "$is_input_complete" = true ]; then
+        emit_trailing_group=1
+    fi
     # The converter prints the count of appended events to stdout; capture it
     # here so it never reaches this watcher's stdout (which would surface in the
     # agent's pane). Genuine errors go to stderr.
     local result
     result=$(_INPUT_FILE="$INPUT_FILE" \
         _OUTPUT_FILE="$OUTPUT_FILE" \
+        _MNGR_EMIT_TRAILING_ASSISTANT_GROUP="$emit_trailing_group" \
         python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
     # The read-modify-write is done; drop the lock before the (lock-free)
@@ -126,7 +156,7 @@ main() {
     if [ "$is_single_pass" = true ]; then
         # A pass skipped for a held lock is not a script failure -- the caller
         # only needs to know the flush was attempted.
-        convert_new_events || true
+        convert_new_events true || true
         return
     fi
 
@@ -137,7 +167,7 @@ main() {
         local current_signature
         current_signature=$(_input_signature)
         if [ "$current_signature" != "$_LAST_CONVERTED_INPUT_SIGNATURE" ]; then
-            if convert_new_events; then
+            if convert_new_events false; then
                 _LAST_CONVERTED_INPUT_SIGNATURE="$current_signature"
             fi
         fi

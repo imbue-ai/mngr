@@ -5,7 +5,14 @@ The converter reads its input from
 ``$MNGR_AGENT_STATE_DIR/logs/codex_transcript/events.jsonl`` (the verbatim
 rollout stream produced by stream_transcript.sh), so tests seed that file
 directly rather than running codex. Each line is a codex rollout record of the
-form ``{"timestamp":..,"type":<t>,"payload":<p>}``.
+form ``{"timestamp":..,"type":<t>,"payload":<p>}``; the output is the
+ATIF-shaped record stream (``header`` / ``step`` / ``observation``).
+
+These are the shell-level tests: they cover what only running the script can
+show -- that the pass reaches the converter, stays silent on the watcher's
+stdout/stderr, and serializes on the convert lock. The record-by-record
+conversion rules are asserted directly against ``convert`` in
+common_transcript_convert_test.py.
 
 Each test sets up:
   - A fake agent state dir at tmp_path/agent
@@ -28,37 +35,15 @@ import pytest
 
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+from imbue.mngr_codex.resources.testing import rollout_assistant_message as _assistant
+from imbue.mngr_codex.resources.testing import rollout_event_msg_user as _event_msg_user
+from imbue.mngr_codex.resources.testing import rollout_function_call as _function_call
+from imbue.mngr_codex.resources.testing import rollout_function_call_output as _function_call_output
+from imbue.mngr_codex.resources.testing import rollout_line as _line
+from imbue.mngr_codex.resources.testing import rollout_reasoning as _reasoning
+from imbue.mngr_codex.resources.testing import rollout_user_message as _user
 
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
-
-
-def _line(type_: str, payload: dict[str, Any], timestamp: str = "2026-06-09T07:00:00.000Z") -> str:
-    return json.dumps({"timestamp": timestamp, "type": type_, "payload": payload})
-
-
-def _user(text: str) -> str:
-    return _line(
-        "response_item", {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
-    )
-
-
-def _assistant(text: str) -> str:
-    return _line(
-        "response_item", {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
-    )
-
-
-def _function_call(name: str, arguments: str, call_id: str) -> str:
-    return _line("response_item", {"type": "function_call", "name": name, "arguments": arguments, "call_id": call_id})
-
-
-def _function_call_output(call_id: str, output: Any) -> str:
-    return _line("response_item", {"type": "function_call_output", "call_id": call_id, "output": output})
-
-
-def _event_msg_user(text: str) -> str:
-    """The display-duplicate event_msg codex also writes for each user message."""
-    return _line("event_msg", {"type": "user_message", "message": text, "images": []})
 
 
 @pytest.fixture
@@ -76,9 +61,10 @@ def state_dir(tmp_path: Path, stub_mngr_log_sh: str) -> Path:
     return state
 
 
-def _write_raw_stream(state_dir: Path, lines: list[str]) -> None:
+def _write_raw_stream(state_dir: Path, lines: list[Any]) -> None:
+    """Seed the raw rollout stream; a line is either a built record or raw text."""
     raw_path = state_dir / "logs" / "codex_transcript" / "events.jsonl"
-    raw_path.write_text("\n".join(lines) + "\n")
+    raw_path.write_text("\n".join(line if isinstance(line, str) else json.dumps(line) for line in lines) + "\n")
 
 
 def _run_converter(state_dir: Path) -> str:
@@ -104,35 +90,42 @@ def _run_single_pass(state_dir: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _read_common_events(state_dir: Path) -> list[dict[str, Any]]:
+def _read_common_records(state_dir: Path) -> list[dict[str, Any]]:
     output_path = state_dir / "events" / "codex" / "common_transcript" / "events.jsonl"
     if not output_path.exists():
         return []
-    events: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     for line in output_path.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
-        events.append(json.loads(line))
-    return events
+        records.append(json.loads(line))
+    return records
+
+
+def _steps(state_dir: Path) -> list[dict[str, Any]]:
+    return [r for r in _read_common_records(state_dir) if r["type"] == "step"]
+
+
+def _observations(state_dir: Path) -> list[dict[str, Any]]:
+    return [r for r in _read_common_records(state_dir) if r["type"] == "observation"]
 
 
 # -- Tests --
 
 
 def test_user_message_is_converted(state_dir: Path) -> None:
-    """response_item/message/user -> user_message with joined input_text."""
+    """response_item/message/user -> user step with joined input_text."""
     _write_raw_stream(state_dir, [_user("What is 2+2?")])
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert len(events) == 1
-    event = events[0]
-    assert event["type"] == "user_message"
-    assert event["role"] == "user"
-    assert event["content"] == "What is 2+2?"
-    assert event["source"] == "codex/common_transcript"
+    steps = _steps(state_dir)
+    assert len(steps) == 1
+    step = steps[0]
+    assert step["source"] == "user"
+    assert step["message"] == "What is 2+2?"
+    assert step["emitter"] == "codex/common_transcript"
 
 
 def test_user_message_joins_multiple_input_text_items(state_dir: Path) -> None:
@@ -152,30 +145,27 @@ def test_user_message_joins_multiple_input_text_items(state_dir: Path) -> None:
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert events[0]["content"] == "part one part two"
+    assert _steps(state_dir)[0]["message"] == "part one part two"
 
 
 def test_assistant_message_is_converted(state_dir: Path) -> None:
-    """response_item/message/assistant -> assistant_message with joined output_text."""
+    """response_item/message/assistant -> agent step with joined output_text."""
     _write_raw_stream(state_dir, [_user("hi"), _assistant("Hello back.")])
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert [e["type"] for e in events] == ["user_message", "assistant_message"]
-    assistant = events[1]
-    assert assistant["role"] == "assistant"
-    assert assistant["text"] == "Hello back."
-    assert assistant["tool_calls"] == []
+    steps = _steps(state_dir)
+    assert [s["source"] for s in steps] == ["user", "agent"]
+    assert steps[1]["message"] == "Hello back."
+    assert "tool_calls" not in steps[1]
 
 
-def test_function_call_emits_assistant_message_with_tool_call(state_dir: Path) -> None:
-    """function_call -> assistant_message whose tool_calls carry the invocation.
+def test_function_call_emits_agent_step_with_native_tool_call_id(state_dir: Path) -> None:
+    """function_call -> agent step whose tool_calls carry the invocation.
 
     codex models the call as a standalone rollout item (no assistant `message`),
-    so the converter surfaces it on an assistant turn -- matching the other ports.
-    The assistant tool_call_id must match the paired tool_result's.
+    so the converter surfaces it as its own bare agent step. The tool_call_id is
+    codex's own call_id, which the paired observation result points back to.
     """
     _write_raw_stream(
         state_dir,
@@ -188,51 +178,19 @@ def test_function_call_emits_assistant_message_with_tool_call(state_dir: Path) -
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert [e["type"] for e in events] == ["user_message", "assistant_message", "tool_result"]
-    assistant, tool_result = events[1], events[2]
-    assert assistant["text"] == ""
-    assert len(assistant["tool_calls"]) == 1
-    call = assistant["tool_calls"][0]
-    assert call["tool_name"] == "shell_command"
-    assert call["input_preview"] == '{"command":"ls"}'
-    assert tool_result["tool_name"] == "shell_command"
-    assert tool_result["output"] == "file_a\nfile_b\n"
-    assert tool_result["is_error"] is False
-    # The assistant tool_call and its tool_result share the synthetic id minted on
-    # the function_call line, so a reader can pair them.
-    assert call["tool_call_id"] == "line-2-tc"
-    assert tool_result["tool_call_id"] == "line-2-tc"
-
-
-def test_function_call_output_as_content_array_is_stringified(state_dir: Path) -> None:
-    """function_call_output.output can be an array of content items, not just a string."""
-    _write_raw_stream(
-        state_dir,
-        [
-            _function_call("read_file", "{}", "call_arr"),
-            _function_call_output(
-                "call_arr",
-                [{"type": "output_text", "text": "line1\n"}, {"type": "output_text", "text": "line2"}],
-            ),
-        ],
-    )
-
-    _run_converter(state_dir)
-
-    events = _read_common_events(state_dir)
-    tool_results = [e for e in events if e["type"] == "tool_result"]
-    assert len(tool_results) == 1
-    assert tool_results[0]["output"] == "line1\nline2"
-
-
-def test_function_call_output_without_matching_call_is_dropped(state_dir: Path) -> None:
-    """A bare function_call_output (no preceding function_call) has nothing to pair with."""
-    _write_raw_stream(state_dir, [_function_call_output("call_orphan", "orphan output")])
-
-    _run_converter(state_dir)
-
-    assert _read_common_events(state_dir) == []
+    steps = _steps(state_dir)
+    assert [s["source"] for s in steps] == ["user", "agent"]
+    assert steps[1]["message"] == ""
+    assert steps[1]["tool_calls"] == [
+        {"tool_call_id": "call_xyz", "function_name": "shell_command", "arguments": {"command": "ls"}}
+    ]
+    assert _observations(state_dir)[0]["results"] == [
+        {
+            "source_call_id": "call_xyz",
+            "content": "file_a\nfile_b\n",
+            "extra": {"is_error": False, "tool_name": "shell_command"},
+        }
+    ]
 
 
 def test_event_msg_duplicates_are_ignored(state_dir: Path) -> None:
@@ -248,10 +206,8 @@ def test_event_msg_duplicates_are_ignored(state_dir: Path) -> None:
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    types = [e["type"] for e in events]
-    # Exactly one user_message and one assistant_message -- the event_msg is dropped.
-    assert types == ["user_message", "assistant_message"]
+    # Exactly one user step and one agent step -- the event_msg is dropped.
+    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
 
 
 def test_bookkeeping_records_are_dropped(state_dir: Path) -> None:
@@ -268,80 +224,44 @@ def test_bookkeeping_records_are_dropped(state_dir: Path) -> None:
 
     _run_converter(state_dir)
 
-    events = _read_common_events(state_dir)
-    assert [e["type"] for e in events] == ["user_message", "assistant_message"]
-
-
-def test_empty_user_message_is_dropped(state_dir: Path) -> None:
-    """A message with no input_text carries no signal."""
-    raw = _line(
-        "response_item", {"type": "message", "role": "user", "content": [{"type": "input_image", "image_url": "x"}]}
-    )
-    _write_raw_stream(state_dir, [raw])
-
-    _run_converter(state_dir)
-
-    assert _read_common_events(state_dir) == []
+    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
 
 
 def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> None:
-    """Every record codex's converter emits must validate against the shared envelope schema.
+    """Every record codex's converter emits must validate against the canonical schema.
 
     Guards against the codex emitter (common_transcript.sh) and the canonical schema
-    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
-    types and asserts each emitted record conforms.
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives every record
+    type the emitter can produce and asserts each emitted record conforms.
     """
     _write_raw_stream(
         state_dir,
         [
+            _user("<environment_context>\ncwd: /tmp\n</environment_context>"),
             _user("hello"),
+            _reasoning("thinking it through"),
             _assistant("hi there"),
             _function_call("shell", '{"command": "ls"}', "call_1"),
             _function_call_output("call_1", "file.txt"),
         ],
     )
     _run_converter(state_dir)
-    records = _read_common_events(state_dir)
-    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    records = _read_common_records(state_dir)
+    assert {r["type"] for r in records} <= {"header", "step", "observation"}
+    assert {"header", "step"} <= {r["type"] for r in records}
     for record in records:
         assert validate_common_transcript_record(record) is None, record
 
 
-def test_converter_is_idempotent_across_runs(state_dir: Path) -> None:
-    """Re-running on the same input must not duplicate events (dedupe by event_id)."""
-    _write_raw_stream(state_dir, [_user("hi"), _assistant("hello")])
-
-    _run_converter(state_dir)
-    first = _read_common_events(state_dir)
-    _run_converter(state_dir)
-    second = _read_common_events(state_dir)
-
-    assert first == second
-    assert len(second) == 2
-
-
-def test_converter_appends_only_new_events_on_incremental_runs(state_dir: Path) -> None:
+def test_converter_appends_only_new_records_on_incremental_runs(state_dir: Path) -> None:
     """A second pass with extra raw lines appends only the new ones."""
     _write_raw_stream(state_dir, [_user("first")])
     _run_converter(state_dir)
-    assert len(_read_common_events(state_dir)) == 1
+    assert len(_steps(state_dir)) == 1
 
     _write_raw_stream(state_dir, [_user("first"), _assistant("second")])
     _run_converter(state_dir)
-    second_pass = _read_common_events(state_dir)
-    assert [e["type"] for e in second_pass] == ["user_message", "assistant_message"]
-
-
-def test_malformed_lines_are_skipped_not_fatal(state_dir: Path) -> None:
-    """A truncated / partial JSON line shouldn't abort the rest of the conversion."""
-    raw_path = state_dir / "logs" / "codex_transcript" / "events.jsonl"
-    raw_path.write_text("{ not valid json\n" + _user("after the broken line") + "\n")
-
-    _run_converter(state_dir)
-
-    events = _read_common_events(state_dir)
-    assert len(events) == 1
-    assert events[0]["content"] == "after the broken line"
+    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
 
 
 def test_missing_output_file_emits_nothing_to_pane(state_dir: Path) -> None:
@@ -356,7 +276,7 @@ def test_missing_output_file_emits_nothing_to_pane(state_dir: Path) -> None:
     result = _run_single_pass(state_dir)
     assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
     assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
-    assert len(_read_common_events(state_dir)) == 1
+    assert len(_steps(state_dir)) == 1
 
 
 def test_dropped_lines_emit_nothing_to_pane(state_dir: Path) -> None:
@@ -368,22 +288,22 @@ def test_dropped_lines_emit_nothing_to_pane(state_dir: Path) -> None:
     result = _run_single_pass(state_dir)
     assert result.stdout == "", f"unexpected stdout: {result.stdout!r}"
     assert result.stderr == "", f"unexpected stderr: {result.stderr!r}"
-    events = _read_common_events(state_dir)
-    assert [e["content"] for e in events] == ["kept"]
+    assert [s["message"] for s in _steps(state_dir)] == ["kept"]
 
 
-def test_event_ids_are_stable_across_reruns(state_dir: Path) -> None:
-    """Event ids hash the line's timestamp and content, so re-running the
-    converter yields the same ids and appends nothing."""
+def test_event_ids_are_unique_and_stable_across_runs(state_dir: Path) -> None:
+    """Event ids hash the line's own timestamp and content, so they are unique per
+    record and a re-run yields the same ids and appends nothing."""
     _write_raw_stream(state_dir, [_user("a-message"), _assistant("b-message")])
 
     _run_converter(state_dir)
-    first_ids = [e["event_id"] for e in _read_common_events(state_dir)]
+    first_ids = [r["event_id"] for r in _read_common_records(state_dir)]
     _run_converter(state_dir)
-    second_ids = [e["event_id"] for e in _read_common_events(state_dir)]
+    second_ids = [r["event_id"] for r in _read_common_records(state_dir)]
 
-    assert len(set(first_ids)) == 2
-    assert all(event_id.startswith("evt-") for event_id in first_ids)
+    assert first_ids[0].startswith("header-")
+    assert len(set(first_ids)) == 3
+    assert all(event_id.startswith("evt-") for event_id in first_ids[1:])
     assert second_ids == first_ids
 
 
@@ -403,11 +323,11 @@ def test_held_convert_lock_skips_pass(state_dir: Path) -> None:
         ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
     )
     assert "Traceback" not in result.stderr, result.stderr
-    assert _read_common_events(state_dir) == []
+    assert _read_common_records(state_dir) == []
 
     _lock_dir(state_dir).rmdir()
     _run_converter(state_dir)
-    assert len(_read_common_events(state_dir)) == 1
+    assert len(_steps(state_dir)) == 1
 
 
 def test_stale_convert_lock_is_broken(state_dir: Path) -> None:
@@ -424,12 +344,12 @@ def test_stale_convert_lock_is_broken(state_dir: Path) -> None:
         ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
     )
     assert "Traceback" not in result.stderr, result.stderr
-    assert len(_read_common_events(state_dir)) == 1
+    assert len(_steps(state_dir)) == 1
 
 
 def test_concurrent_passes_do_not_duplicate(state_dir: Path) -> None:
     """Two passes racing over the same input must not both append the same
-    events: the lock serializes them so the second sees the first's output in
+    records: the lock serializes them so the second sees the first's output in
     its dedup set. Without the lock this produces duplicate event_ids."""
     _write_raw_stream(state_dir, [_user(f"msg {i}") for i in range(20)])
 
@@ -446,7 +366,7 @@ def test_concurrent_passes_do_not_duplicate(state_dir: Path) -> None:
     for proc in procs:
         assert proc.wait(timeout=30) == 0
 
-    events = _read_common_events(state_dir)
-    event_ids = [e["event_id"] for e in events]
+    records = _read_common_records(state_dir)
+    event_ids = [r["event_id"] for r in records]
     assert len(event_ids) == len(set(event_ids)), "convert lock failed to prevent duplicate events"
-    assert len(events) == 20
+    assert len(_steps(state_dir)) == 20

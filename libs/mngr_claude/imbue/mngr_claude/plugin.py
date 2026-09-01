@@ -412,8 +412,8 @@ class ClaudeAgentConfig(AgentTypeConfig):
         default=True,
         description="Emit a common, agent-agnostic transcript alongside the raw Claude transcript. "
         "When enabled, a background process converts raw transcript events into a common format at "
-        "events/claude/common_transcript/events.jsonl. The common format includes user messages, "
-        "assistant messages, and tool call/result summaries.",
+        "events/claude/common_transcript/events.jsonl. The common format is an ATIF-shaped stream of "
+        "user turns, agent turns, and tool results.",
     )
     preserve_sessions_on_destroy: bool = Field(
         default=True,

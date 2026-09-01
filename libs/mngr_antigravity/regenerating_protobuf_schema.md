@@ -87,13 +87,13 @@ CortexStepSource: 2 MODEL   3 USER_IMPLICIT   4 USER_EXPLICIT   5 SYSTEM   6 SYS
 CortexStepStatus: 1 PENDING 2 RUNNING 3 DONE 7 ERROR 8 GENERATING 9 WAITING 11 QUEUED ...
 ```
 
-Common-transcript mapping (mirrors the old JSONL converter's source/type mapping):
+Common-transcript mapping (the record kinds `common_transcript_convert.py` emits):
 
-| Step.type | role | text field |
+| Step.type | common-transcript record | text field |
 |---|---|---|
-| `USER_INPUT` (14) | `user_message` | `user_input.query` or `user_input.user_response` |
-| `PLANNER_RESPONSE` (15) | `assistant_message` | `planner_response.response` (+ `thinking`, `tool_calls`) |
-| `CODE_ACTION` (5) | `tool_result` | none decoded yet (the converter emits the paired `tool_result` with empty output; agy records command output in step types the decoder does not map, and file-edit CODE_ACTION steps do not occur in practice -- a follow-up if needed) |
+| `USER_INPUT` (14) | user step | `user_input.query` or `user_input.user_response` |
+| `PLANNER_RESPONSE` (15) | agent step | `planner_response.response` (+ `thinking` as `reasoning_content`, `tool_calls`) |
+| `CODE_ACTION` (5) | observation | none decoded yet, so the converter drops the observation rather than emit an empty result; agy records command output in step types the decoder does not map, and file-edit CODE_ACTION steps do not occur in practice -- a follow-up if needed |
 | `CONVERSATION_HISTORY` (98) | dropped | -- |
 
 ## Decoding a conversation

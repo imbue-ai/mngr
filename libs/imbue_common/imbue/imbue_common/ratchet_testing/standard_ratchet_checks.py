@@ -76,9 +76,14 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_underscore_imports
 _SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py", "standard_ratchet_checks.py")
 
 
-def assert_ratchet(rule: RegexRatchetRule, source_dir: Path, max_count: int) -> None:
+def assert_ratchet(
+    rule: RegexRatchetRule,
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
     """Check a regex-based ratchet rule and assert the count is within the limit."""
-    chunks = check_ratchet_rule(rule, source_dir, _SELF_EXCLUSION)
+    chunks = check_ratchet_rule(rule, source_dir, _SELF_EXCLUSION + excluded_patterns)
     assert len(chunks) <= max_count, rule.format_failure(chunks)
 
 
@@ -133,11 +138,14 @@ def check_base_exception_catch(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_BASE_EXCEPTION_CATCH, source_dir, max_count)
 
 
-def check_builtin_exception_raises(source_dir: Path, max_count: int) -> None:
+def check_builtin_exception_raises(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
     # Test files are excluded: tests legitimately raise built-in exceptions to simulate error
     # conditions, and the custom-exception requirement only applies to production code.
-    chunks = check_ratchet_rule(PREVENT_BUILTIN_EXCEPTION_RAISES, source_dir, _SELF_EXCLUSION + TEST_FILE_PATTERNS)
-    assert len(chunks) <= max_count, PREVENT_BUILTIN_EXCEPTION_RAISES.format_failure(chunks)
+    assert_ratchet(PREVENT_BUILTIN_EXCEPTION_RAISES, source_dir, max_count, TEST_FILE_PATTERNS + excluded_patterns)
 
 
 def check_silent_decode_error_catches(source_dir: Path, max_count: int) -> None:
@@ -164,8 +172,12 @@ def check_importlib_import_module(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_IMPORTLIB_IMPORT_MODULE, source_dir, max_count)
 
 
-def check_getattr(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_GETATTR, source_dir, max_count)
+def check_getattr(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    assert_ratchet(PREVENT_GETATTR, source_dir, max_count, excluded_patterns)
 
 
 def check_setattr(source_dir: Path, max_count: int) -> None:
@@ -250,19 +262,31 @@ def check_init_docstrings(source_dir: Path, max_count: int) -> None:
     assert_ratchet(PREVENT_INIT_DOCSTRINGS, source_dir, max_count)
 
 
-def check_args_in_docstrings(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_ARGS_IN_DOCSTRINGS, source_dir, max_count)
+def check_args_in_docstrings(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    assert_ratchet(PREVENT_ARGS_IN_DOCSTRINGS, source_dir, max_count, excluded_patterns)
 
 
-def check_returns_in_docstrings(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_RETURNS_IN_DOCSTRINGS, source_dir, max_count)
+def check_returns_in_docstrings(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    assert_ratchet(PREVENT_RETURNS_IN_DOCSTRINGS, source_dir, max_count, excluded_patterns)
 
 
 # --- Type safety ---
 
 
-def check_literal_with_multiple_options(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_LITERAL_MULTIPLE_OPTIONS, source_dir, max_count)
+def check_literal_with_multiple_options(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    assert_ratchet(PREVENT_LITERAL_MULTIPLE_OPTIONS, source_dir, max_count, excluded_patterns)
 
 
 def check_bare_generic_types(source_dir: Path, max_count: int) -> None:
@@ -367,8 +391,12 @@ def check_unpinned_modal_pip_install(source_dir: Path, max_count: int) -> None:
 # --- AST-based ratchets ---
 
 
-def check_if_elif_without_else(source_dir: Path, max_count: int) -> None:
-    chunks = find_if_elif_without_else(source_dir, _SELF_EXCLUSION)
+def check_if_elif_without_else(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    chunks = find_if_elif_without_else(source_dir, _SELF_EXCLUSION + excluded_patterns)
     assert len(chunks) <= max_count, PREVENT_IF_ELIF_WITHOUT_ELSE.format_failure(chunks)
 
 

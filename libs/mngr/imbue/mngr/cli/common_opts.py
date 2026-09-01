@@ -4,6 +4,7 @@ import sys
 import uuid
 from collections.abc import Callable
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
@@ -142,6 +143,7 @@ def setup_command_context(
     strict: bool | None = None,
     silent_unknown_fields: bool = False,
     max_log_size_mb: int | None = None,
+    extra_builtin_format_names: AbstractSet[str] = frozenset(),
 ) -> tuple[MngrContext, OutputOptions, TCommandOptions]:
     """Set up config and logging for a command.
 
@@ -156,6 +158,11 @@ def setup_command_context(
     config fields and unknown provider backends (used by ``mngr plugin add``,
     where the config is expected to reference plugins that are not yet
     installed). Only takes effect when ``strict=False``.
+
+    ``extra_builtin_format_names`` lists command-specific ``--format`` values
+    beyond the builtin OutputFormats (e.g. transcript's ``atif``). A match is
+    reported on ``output_opts.extra_format`` for the command to branch on,
+    rather than being treated as a format template.
 
     ``max_log_size_mb`` pins this command's rotated-log size cap (in MB),
     overriding ``config.logging.max_log_size_mb``. Long-running daemons that
@@ -306,6 +313,7 @@ def setup_command_context(
         log_commands=opts.log_commands,
         config=mngr_ctx.config,
         max_log_size_mb=max_log_size_mb,
+        extra_builtin_format_names=extra_builtin_format_names,
     )
 
     # Reject format templates on commands that don't support them
@@ -359,6 +367,7 @@ def parse_output_options(
     log_commands: bool | None,
     config: MngrConfig,
     max_log_size_mb: int | None = None,
+    extra_builtin_format_names: AbstractSet[str] = frozenset(),
 ) -> tuple[OutputOptions, LoggingConfig]:
     """Parse output-related CLI options. CLI flags can override config values.
 
@@ -371,16 +380,25 @@ def parse_output_options(
     the general mngr default). ``None`` keeps the config value.
 
     If output_format is a built-in format name (human, json, jsonl), it is parsed
-    as an OutputFormat enum. Otherwise it is treated as a format template string:
-    the output_format is set to HUMAN and the template is stored in format_template
+    as an OutputFormat enum. A name in ``extra_builtin_format_names`` is a
+    command-specific extra format (e.g. transcript's ``atif``): it is reported on
+    ``extra_format`` for the command to branch on, with JSON as the nominal
+    output_format. Anything else is treated as a format template string: the
+    output_format is set to HUMAN and the template is stored in format_template
     (with shell escape sequences like \\t and \\n interpreted).
     """
-    # Detect whether the format string is a built-in format or a template
+    # Detect whether the format string is a built-in format, a command-specific
+    # extra format, or a template
     parsed_output_format: OutputFormat
     format_template: str | None = None
+    extra_format: str | None = None
 
-    if output_format.lower() in _BUILTIN_FORMAT_NAMES:
+    normalized_format = output_format.lower()
+    if normalized_format in _BUILTIN_FORMAT_NAMES:
         parsed_output_format = OutputFormat(output_format.upper())
+    elif normalized_format in extra_builtin_format_names:
+        parsed_output_format = OutputFormat.JSON
+        extra_format = normalized_format
     else:
         # Validate template syntax early
         try:
@@ -424,6 +442,7 @@ def parse_output_options(
         output_format=parsed_output_format,
         format_template=format_template,
         is_quiet=quiet,
+        extra_format=extra_format,
     )
 
     return output_opts, resolved_logging_config
