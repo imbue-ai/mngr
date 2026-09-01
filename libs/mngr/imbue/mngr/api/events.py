@@ -47,6 +47,7 @@ from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
+from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 
@@ -1061,11 +1062,14 @@ def _tail_source_thread(
     thread sleeps until something in the directory changes and its fallback
     interval only covers missed filesystem events. Remote sources (and local
     ones whose watch could not be established) keep the short poll, which is
-    their delivery latency.
+    their delivery latency. Setting ``stop_event`` wakes and stops the loop
+    immediately in every branch (a parked forwarder thread bridges it to the
+    wake event, as in the discovery tail).
     """
     warner = MalformedJsonLineWarner(source_description=f"event source '{source_path}'")
     byte_offset = initial_byte_offset
     wake_event = threading.Event()
+    start_event_forwarder(stop_event, wake_event, name=f"events-tail-stop-forwarder-{source_path}")
     watched_dir: Path | None = None
     # Seed the switch-detection key from the target the thread was created
     # against, so the first online poll on the initial target uses the
@@ -1099,7 +1103,7 @@ def _tail_source_thread(
         desired_watch_dir = events_file_path.parent if is_local else None
         if desired_watch_dir != watched_dir:
             if watched_dir is not None:
-                watch_group.unwatch(watched_dir)
+                watch_group.unwatch(watched_dir, wake_event)
             if desired_watch_dir is not None:
                 watched_dir = desired_watch_dir if watch_group.watch(desired_watch_dir, wake_event) else None
             else:

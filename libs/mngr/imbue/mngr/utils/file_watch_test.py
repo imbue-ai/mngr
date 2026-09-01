@@ -33,11 +33,61 @@ def test_directory_watch_group_unwatched_directory_no_longer_wakes(tmp_path: Pat
     wake_event = threading.Event()
     try:
         assert watch_group.watch(tmp_path, wake_event) is True
-        watch_group.unwatch(tmp_path)
+        watch_group.unwatch(tmp_path, wake_event)
 
         (tmp_path / f"events-{uuid4().hex}.jsonl").write_text("line\n")
 
         # Bounded negative check: the unwatched directory's event stays clear.
+        assert wake_event.wait(timeout=0.5) is False
+    finally:
+        watch_group.stop()
+
+
+def test_directory_watch_group_wakes_every_subscriber_of_a_shared_directory(tmp_path: Path) -> None:
+    watch_group = DirectoryWatchGroup()
+    first_wake = threading.Event()
+    second_wake = threading.Event()
+    try:
+        assert watch_group.watch(tmp_path, first_wake) is True
+        assert watch_group.watch(tmp_path, second_wake) is True
+
+        (tmp_path / f"events-{uuid4().hex}.jsonl").write_text("line\n")
+
+        assert first_wake.wait(timeout=5.0) is True
+        assert second_wake.wait(timeout=5.0) is True
+    finally:
+        watch_group.stop()
+
+
+def test_directory_watch_group_unwatch_removes_only_the_callers_subscription(tmp_path: Path) -> None:
+    watch_group = DirectoryWatchGroup()
+    departing_wake = threading.Event()
+    remaining_wake = threading.Event()
+    try:
+        assert watch_group.watch(tmp_path, departing_wake) is True
+        assert watch_group.watch(tmp_path, remaining_wake) is True
+        watch_group.unwatch(tmp_path, departing_wake)
+
+        (tmp_path / f"events-{uuid4().hex}.jsonl").write_text("line\n")
+
+        assert remaining_wake.wait(timeout=5.0) is True
+        # Bounded negative check: the departed subscriber's event stays clear.
+        assert departing_wake.wait(timeout=0.5) is False
+    finally:
+        watch_group.stop()
+
+
+def test_directory_watch_group_rewatching_same_event_stays_single_subscription(tmp_path: Path) -> None:
+    watch_group = DirectoryWatchGroup()
+    wake_event = threading.Event()
+    try:
+        assert watch_group.watch(tmp_path, wake_event) is True
+        assert watch_group.watch(tmp_path, wake_event) is True
+        watch_group.unwatch(tmp_path, wake_event)
+
+        (tmp_path / f"events-{uuid4().hex}.jsonl").write_text("line\n")
+
+        # One unwatch fully removes the doubly-watched event's subscription.
         assert wake_event.wait(timeout=0.5) is False
     finally:
         watch_group.stop()

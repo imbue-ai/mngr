@@ -1,13 +1,17 @@
 import json
 import queue as queue_mod
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
 import pytest
 from inline_snapshot import snapshot
+from pydantic import ConfigDict
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.events import EventRecord
 from imbue.mngr.api.events import EventSourceInfo
 from imbue.mngr.api.events import EventsTarget
@@ -1169,13 +1173,28 @@ def test_resolve_events_target_populates_provider_and_host_id(
 # =============================================================================
 
 
-@pytest.mark.timeout(30)
-def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path, local_provider) -> None:
-    """The persistent tail thread detects new content appended to a local events.jsonl (pygtail path)."""
+class _RunningTailSourceThread(FrozenModel):
+    """A started ``_tail_source_thread`` plus the handles its tests interact with."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    events_file: Path
+    event_queue: queue_mod.Queue[EventRecord]
+    stop_event: threading.Event
+    thread: threading.Thread
+
+
+@contextmanager
+def _running_local_tail_source_thread(tmp_path: Path, local_provider) -> Iterator[_RunningTailSourceThread]:
+    """Run ``_tail_source_thread`` over a fresh, empty local "src" source.
+
+    Yields once the thread has completed its first read (the offset file
+    exists, so the directory watch is bound by then), and stops and joins the
+    thread on exit.
+    """
     events_dir = tmp_path / "events"
     (events_dir / "src").mkdir(parents=True)
     events_file = events_dir / "src" / "events.jsonl"
-    # Start with an empty file
     events_file.write_text("")
 
     offset_dir = tmp_path / "offsets"
@@ -1195,33 +1214,52 @@ def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path, local_prov
     thread.start()
 
     try:
-        # Wait for the thread to initialize pygtail by polling until the offset file exists
         offset_file = offset_dir / "src.offset"
         poll_for_value(
             producer=lambda: True if offset_file.exists() else None,
             timeout=5.0,
             poll_interval=0.2,
         )
-
-        # Append an event
-        with events_file.open("a") as f:
-            f.write('{"timestamp":"2026-01-01T00:00:00Z","event_id":"t1","source":"src"}\n')
-            f.flush()
-
-        # Poll for the event to appear in the queue
-        result, _, _ = poll_for_value(
-            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
-            timeout=15.0,
-            poll_interval=0.5,
+        yield _RunningTailSourceThread(
+            events_file=events_file,
+            event_queue=event_queue,
+            stop_event=stop_event,
+            thread=thread,
         )
-        assert result is not None
-        assert result.event_id == "t1"
     finally:
         stop_event.set()
         online_event.set()
         watch_group.wake_all()
         thread.join(timeout=5.0)
         watch_group.stop()
+
+
+@pytest.mark.timeout(30)
+def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path, local_provider) -> None:
+    """The persistent tail thread detects new content appended to a local events.jsonl (pygtail path)."""
+    with _running_local_tail_source_thread(tmp_path, local_provider) as tail:
+        with tail.events_file.open("a") as f:
+            f.write('{"timestamp":"2026-01-01T00:00:00Z","event_id":"t1","source":"src"}\n')
+            f.flush()
+
+        result, _, _ = poll_for_value(
+            producer=lambda: tail.event_queue.get_nowait() if not tail.event_queue.empty() else None,
+            timeout=15.0,
+            poll_interval=0.5,
+        )
+        assert result is not None
+        assert result.event_id == "t1"
+
+
+@pytest.mark.timeout(30)
+def test_tail_source_thread_watched_tail_stops_on_stop_event_alone(tmp_path: Path, local_provider) -> None:
+    """A tail sleeping on its directory-watch wake event exits promptly on stop_event, without wake_all."""
+    with _running_local_tail_source_thread(tmp_path, local_provider) as tail:
+        # Stop without wake_all: the stop forwarder must wake the watched wait,
+        # well inside the 10s fallback poll the wait would otherwise sleep for.
+        tail.stop_event.set()
+        tail.thread.join(timeout=5.0)
+        assert not tail.thread.is_alive()
 
 
 @pytest.mark.timeout(30)

@@ -39,15 +39,21 @@ WATCHED_TAIL_FALLBACK_POLL_SECONDS: Final[float] = 10.0
 
 
 class _WakeOnDirectoryChangeHandler(FileSystemEventHandler):
-    """Sets a wake event on any content-changing filesystem event."""
+    """Sets every subscribed wake event on any content-changing filesystem event."""
 
-    def __init__(self, wake_event: threading.Event) -> None:
-        self._wake_event = wake_event
+    def __init__(self, wake_events: tuple[threading.Event, ...]) -> None:
+        # Replaced wholesale (never mutated) by DirectoryWatchGroup under its
+        # lock; read here on the observer thread without that lock, which is
+        # safe because an attribute swap of an immutable tuple is atomic.
+        # Taking the group lock here instead would deadlock against callers
+        # that hold it across observer.schedule/unschedule.
+        self.wake_events = wake_events
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.event_type in NON_CONTENT_CHANGE_EVENT_TYPES:
             return
-        self._wake_event.set()
+        for wake_event in self.wake_events:
+            wake_event.set()
 
 
 class DirectoryWatchGroup(MutableModel):
@@ -57,12 +63,16 @@ class DirectoryWatchGroup(MutableModel):
     cannot be scheduled (inotify watch limits, a missing directory), it returns
     False and the caller keeps its polling fallback. The observer thread is a
     daemon, so an unstopped group never blocks process exit.
+
+    A directory may be watched by multiple callers, each with its own wake
+    event; ``unwatch`` removes only the given caller's subscription, and the
+    underlying filesystem watch is released when the last subscription goes.
     """
 
     _observer: BaseObserver | None = PrivateAttr(default=None)
     _is_observer_broken: bool = PrivateAttr(default=False)
     _watch_by_dir: dict[str, ObservedWatch] = PrivateAttr(default_factory=dict)
-    _wake_event_by_dir: dict[str, threading.Event] = PrivateAttr(default_factory=dict)
+    _handler_by_dir: dict[str, _WakeOnDirectoryChangeHandler] = PrivateAttr(default_factory=dict)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def _get_or_start_observer_locked(self) -> BaseObserver | None:
@@ -85,43 +95,56 @@ class DirectoryWatchGroup(MutableModel):
     def watch(self, directory: Path, wake_event: threading.Event) -> bool:
         """Start setting ``wake_event`` on changes in ``directory``. Returns whether the watch is active.
 
-        Re-watching an already-watched directory replaces its previous wake event.
+        Subscribing an already-subscribed (directory, wake_event) pair is a no-op.
         """
         directory_key = str(directory)
         with self._lock:
             observer = self._get_or_start_observer_locked()
             if observer is None:
                 return False
-            self._unwatch_locked(directory_key)
-            handler = _WakeOnDirectoryChangeHandler(wake_event)
+            existing_handler = self._handler_by_dir.get(directory_key)
+            if existing_handler is not None:
+                if not any(subscribed is wake_event for subscribed in existing_handler.wake_events):
+                    existing_handler.wake_events = existing_handler.wake_events + (wake_event,)
+                return True
+            handler = _WakeOnDirectoryChangeHandler((wake_event,))
             try:
                 watch = observer.schedule(handler, directory_key, recursive=False)
             except OSError as e:
                 logger.debug("Failed to watch directory {}, tail falls back to polling: {}", directory_key, e)
                 return False
             self._watch_by_dir[directory_key] = watch
-            self._wake_event_by_dir[directory_key] = wake_event
+            self._handler_by_dir[directory_key] = handler
             return True
 
-    def unwatch(self, directory: Path) -> None:
-        """Stop watching ``directory``. Idempotent."""
+    def unwatch(self, directory: Path, wake_event: threading.Event) -> None:
+        """Remove ``wake_event``'s subscription to ``directory``. Idempotent."""
+        directory_key = str(directory)
         with self._lock:
-            self._unwatch_locked(str(directory))
-
-    def _unwatch_locked(self, directory_key: str) -> None:
-        watch = self._watch_by_dir.pop(directory_key, None)
-        self._wake_event_by_dir.pop(directory_key, None)
-        if watch is None or self._observer is None:
-            return
-        try:
-            self._observer.unschedule(watch)
-        except (OSError, KeyError) as e:
-            logger.debug("Failed to unschedule watch for {}: {}", directory_key, e)
+            handler = self._handler_by_dir.get(directory_key)
+            if handler is None:
+                return
+            remaining_wake_events = tuple(
+                subscribed for subscribed in handler.wake_events if subscribed is not wake_event
+            )
+            if remaining_wake_events:
+                handler.wake_events = remaining_wake_events
+                return
+            self._handler_by_dir.pop(directory_key)
+            watch = self._watch_by_dir.pop(directory_key, None)
+            if watch is None or self._observer is None:
+                return
+            try:
+                self._observer.unschedule(watch)
+            except (OSError, KeyError) as e:
+                logger.debug("Failed to unschedule watch for {}: {}", directory_key, e)
 
     def wake_all(self) -> None:
         """Set every registered wake event (used to unblock waiting tails at shutdown)."""
         with self._lock:
-            wake_events = list(self._wake_event_by_dir.values())
+            wake_events = [
+                wake_event for handler in self._handler_by_dir.values() for wake_event in handler.wake_events
+            ]
         for wake_event in wake_events:
             wake_event.set()
 
@@ -132,7 +155,7 @@ class DirectoryWatchGroup(MutableModel):
             self._observer = None
             self._is_observer_broken = True
             self._watch_by_dir.clear()
-            self._wake_event_by_dir.clear()
+            self._handler_by_dir.clear()
         if observer is not None:
             observer.stop()
             observer.join(timeout=2.0)
