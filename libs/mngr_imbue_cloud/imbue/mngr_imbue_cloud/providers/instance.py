@@ -37,6 +37,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from pathlib import PurePosixPath
+from threading import Lock
 from typing import Any
 from typing import Final
 from typing import assert_never
@@ -50,6 +51,8 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
@@ -162,6 +165,10 @@ _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
 # (download + boot + container relaunch), so the poll window is generous.
 _WORKSPACE_START_TIMEOUT_SECONDS: Final[float] = 1200.0
 _WORKSPACE_START_POLL_SECONDS: Final[float] = 5.0
+# Provisional: picked with no imbue_cloud-specific data on a safe concurrent-SSH
+# ceiling (mngr_vps uses 32 for a different provider; not assumed to transfer).
+# Bump once MIND-230 gets an answer from whoever owns the imbue_cloud backend.
+_DISCOVERY_MAX_WORKERS: Final[int] = 8
 
 
 def _resolve_fast_path_attributes(attributes: LeaseAttributes) -> LeaseAttributes:
@@ -898,117 +905,31 @@ class ImbueCloudProvider(BaseProviderInstance):
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
         leased = self._list_leased_hosts_cached()
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-        for entry in leased:
-            host_id = HostId(entry.host_id)
-            raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
-            if raw is None:
-                # Outer SSH itself failed; fall back to a lease-only stub
-                # so the host doesn't disappear from `mngr list`. An auth
-                # mismatch means the host answered but rejected this
-                # machine's key -> UNAUTHENTICATED: observation of the container
-                # is impossible and a retry or restart routes through the
-                # same rejected credential, so consumers should treat it as
-                # terminal rather than restart-worthy. Any other failure means
-                # we could not observe the host at all -- the box may be down,
-                # or the network path from this client may be broken -- so the
-                # state is UNKNOWN, not CRASHED: an unreachable host is
-                # non-evidence about the container, and consumers (e.g. the
-                # minds recovery page) must not read it as a positive
-                # "container is down" verdict.
-                fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
-                host_ref = DiscoveredHost(
-                    host_id=host_id,
-                    host_name=HostName(entry.host_name),
-                    provider_name=self.name,
-                    host_state=fallback_state,
-                )
-                # Re-attach the full set of agents last seen on this host (each
-                # with its cached certified_data, marked stale) so the workspace
-                # keeps its labels -- and its is_primary sidebar/restart guard --
-                # through the unreachable window. Only when nothing was ever
-                # cached (first-ever discovery) do we fall back to the bare
-                # lease stub, preserving today's behavior for that case. The
-                # host state stays truthfully UNKNOWN/UNAUTHENTICATED: cached
-                # data restores identity, not liveness.
-                agent_refs = self._load_last_known_agents(host_id) or [
-                    DiscoveredAgent(
-                        agent_id=AgentId(entry.agent_id),
-                        agent_name=AgentName(entry.agent_id),
-                        host_id=host_id,
-                        provider_name=self.name,
-                    )
-                ]
-                # Stash the outer error so get_host_and_agent_details can
-                # surface it in failure_reason without re-trying SSH.
-                self._listing_raw_cache[host_id] = {
-                    "outer_ssh_error": outer_error,
-                    "outer_ssh_is_auth_failure": is_auth_failure,
-                }
-                result[host_ref] = agent_refs
-                continue
-            self._listing_raw_cache[host_id] = raw
-            # Record which layout this container actually uses while we have a
-            # live answer, so the host objects built later (`mngr exec`,
-            # `mngr start`) address the same directory this pass just read.
-            # Only a pass that found certified data proves the resolution: an
-            # empty container reports the configured default by construction,
-            # which would overwrite a good record with a guess.
-            resolved_host_dir = raw.get("host_dir")
-            if isinstance(resolved_host_dir, str) and resolved_host_dir and raw.get("certified_data"):
-                self._persist_resolved_host_dir(host_id, resolved_host_dir)
-            host_state = derive_host_state_from_raw(raw)
-            if host_state == HostState.DESTROYED and not include_destroyed:
-                continue
-            # ``entry.host_name`` is the canonical user-supplied name from the
-            # connector. On-host certified data may lag (e.g. the bake's
-            # initial value before a lease overwrites it), so the lease wins.
-            host_ref = DiscoveredHost(
-                host_id=host_id,
-                host_name=HostName(entry.host_name),
-                provider_name=self.name,
-                host_state=host_state,
-            )
-            agent_refs: list[DiscoveredAgent] = []
-            for agent_raw in raw.get("agents", []):
-                data = agent_raw.get("data", {})
-                agent_id_str = data.get("id")
-                agent_name_str = data.get("name")
-                if not agent_id_str or not agent_name_str:
-                    continue
-                # Carry the raw per-agent data (its labels, type, work_dir, etc.) as
-                # certified_data, exactly the same ``agent_raw["data"]`` the rich
-                # ``get_host_and_agent_details`` path reads. Without it these streaming
-                # refs are label-less, so any consumer that filters on labels -- e.g. the
-                # minds system_interface forward's ``--agent-include
-                # has(agent.labels.is_primary)`` -- silently drops every imbue_cloud agent.
-                agent_refs.append(
-                    DiscoveredAgent(
-                        agent_id=AgentId(agent_id_str),
-                        agent_name=AgentName(agent_name_str),
-                        host_id=host_id,
-                        provider_name=self.name,
-                        certified_data=data,
-                    )
-                )
-            if agent_refs:
-                # A real listing: refresh the sticky-identity cache so a later
-                # unreachable pass can re-attach exactly these agents.
-                self._persist_last_known_agents(host_id, agent_refs)
-            else:
-                # The outer-SSH discovery returned no agents (e.g. container
-                # gone, or data.json is empty). Re-attach the last-known agents
-                # (marked stale) if we have them, so the host keeps its labels;
-                # otherwise synthesize a single agent from the lease so the host
-                # still shows in the listing (unchanged first-discovery behavior).
-                agent_refs = self._load_last_known_agents(host_id) or [
-                    DiscoveredAgent(
-                        agent_id=AgentId(entry.agent_id),
-                        agent_name=AgentName(entry.agent_id),
-                        host_id=host_id,
-                        provider_name=self.name,
-                    )
-                ]
-            result[host_ref] = agent_refs
+        # Each leased host needs its own outer-SSH round trip (connect + run the
+        # listing script), so a sequential loop's wall time is the sum across every
+        # leased host rather than the slowest one -- confirmed to reach ~30s on a
+        # 13-host account (MIND-230), enough to blow through every 30-second-budgeted
+        # caller of this discovery path. Fan out with a bounded pool, mirroring
+        # mngr_vps's identical-shaped fan-out (instance.py's
+        # ``_discover_host_records_with_agents``); results are collected in
+        # submission order so this returns the same host ordering as before.
+        cache_lock = Lock()
+        if leased:
+            with log_span("Reading outer listings from {} leased host(s) in parallel", len(leased)):
+                with ConcurrencyGroupExecutor(
+                    parent_cg=cg,
+                    name=f"{type(self).__name__}-discover_outer_listing",
+                    max_workers=min(len(leased), _DISCOVERY_MAX_WORKERS),
+                ) as executor:
+                    futures = [
+                        executor.submit(self._discover_one_leased_host, entry, include_destroyed, cache_lock)
+                        for entry in leased
+                    ]
+                for future in futures:
+                    pair = future.result()
+                    if pair is not None:
+                        host_ref, agent_refs = pair
+                        result[host_ref] = agent_refs
         # Non-running workspaces have no box to SSH: surface them from the
         # lifecycle listing alone, re-attaching the last-known agents so the
         # workspace keeps its labels (and its is_primary guard) while stopped.
@@ -1026,6 +947,140 @@ class ImbueCloudProvider(BaseProviderInstance):
                 _synthesize_services_agent_for_lifecycle_entry(workspace, host_id, self.name)
             ]
         return result
+
+    def _discover_one_leased_host(
+        self,
+        entry: LeasedHostInfo,
+        include_destroyed: bool,
+        cache_lock: Lock,
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]] | None:
+        """Run one leased host's outer-SSH listing and shape it into a discovery result.
+
+        Runs on a worker thread from ``discover_hosts_and_agents``'s fan-out.
+        ``cache_lock`` guards ``self._listing_raw_cache`` (a plain dict shared
+        across every in-flight host's thread); the sticky-identity and
+        resolved-host-dir persistence calls need no lock of their own since
+        each writes a distinct per-host file. Returns ``None`` only for a
+        destroyed host when the caller doesn't want those included.
+        """
+        host_id = HostId(entry.host_id)
+        raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
+        if raw is None:
+            # Per-host failure isolation and its WARNING-level logging
+            # (inside _collect_listing_raw_via_outer, above) predate this PR
+            # unchanged: introduced in 668ad81ad1b757102588ba70a8f338e639d1b12b
+            # ("Surface outer-SSH auth failures as UNAUTHENTICATED, not
+            # CRASHED", Josh Albrecht, 2026-05-11). Parallelizing the caller
+            # does not change what happens when one host's outer SSH fails.
+            #
+            # Outer SSH itself failed; fall back to a lease-only stub
+            # so the host doesn't disappear from `mngr list`. An auth
+            # mismatch means the host answered but rejected this
+            # machine's key -> UNAUTHENTICATED: observation of the container
+            # is impossible and a retry or restart routes through the
+            # same rejected credential, so consumers should treat it as
+            # terminal rather than restart-worthy. Any other failure means
+            # we could not observe the host at all -- the box may be down,
+            # or the network path from this client may be broken -- so the
+            # state is UNKNOWN, not CRASHED: an unreachable host is
+            # non-evidence about the container, and consumers (e.g. the
+            # minds recovery page) must not read it as a positive
+            # "container is down" verdict.
+            fallback_state = HostState.UNAUTHENTICATED if is_auth_failure else HostState.UNKNOWN
+            host_ref = DiscoveredHost(
+                host_id=host_id,
+                host_name=HostName(entry.host_name),
+                provider_name=self.name,
+                host_state=fallback_state,
+            )
+            # Re-attach the full set of agents last seen on this host (each
+            # with its cached certified_data, marked stale) so the workspace
+            # keeps its labels -- and its is_primary sidebar/restart guard --
+            # through the unreachable window. Only when nothing was ever
+            # cached (first-ever discovery) do we fall back to the bare
+            # lease stub, preserving today's behavior for that case. The
+            # host state stays truthfully UNKNOWN/UNAUTHENTICATED: cached
+            # data restores identity, not liveness.
+            agent_refs = self._load_last_known_agents(host_id) or [
+                DiscoveredAgent(
+                    agent_id=AgentId(entry.agent_id),
+                    agent_name=AgentName(entry.agent_id),
+                    host_id=host_id,
+                    provider_name=self.name,
+                )
+            ]
+            # Stash the outer error so get_host_and_agent_details can
+            # surface it in failure_reason without re-trying SSH.
+            with cache_lock:
+                self._listing_raw_cache[host_id] = {
+                    "outer_ssh_error": outer_error,
+                    "outer_ssh_is_auth_failure": is_auth_failure,
+                }
+            return host_ref, agent_refs
+        with cache_lock:
+            self._listing_raw_cache[host_id] = raw
+        # Record which layout this container actually uses while we have a
+        # live answer, so the host objects built later (`mngr exec`,
+        # `mngr start`) address the same directory this pass just read.
+        # Only a pass that found certified data proves the resolution: an
+        # empty container reports the configured default by construction,
+        # which would overwrite a good record with a guess.
+        resolved_host_dir = raw.get("host_dir")
+        if isinstance(resolved_host_dir, str) and resolved_host_dir and raw.get("certified_data"):
+            self._persist_resolved_host_dir(host_id, resolved_host_dir)
+        host_state = derive_host_state_from_raw(raw)
+        if host_state == HostState.DESTROYED and not include_destroyed:
+            return None
+        # ``entry.host_name`` is the canonical user-supplied name from the
+        # connector. On-host certified data may lag (e.g. the bake's
+        # initial value before a lease overwrites it), so the lease wins.
+        host_ref = DiscoveredHost(
+            host_id=host_id,
+            host_name=HostName(entry.host_name),
+            provider_name=self.name,
+            host_state=host_state,
+        )
+        agent_refs: list[DiscoveredAgent] = []
+        for agent_raw in raw.get("agents", []):
+            data = agent_raw.get("data", {})
+            agent_id_str = data.get("id")
+            agent_name_str = data.get("name")
+            if not agent_id_str or not agent_name_str:
+                continue
+            # Carry the raw per-agent data (its labels, type, work_dir, etc.) as
+            # certified_data, exactly the same ``agent_raw["data"]`` the rich
+            # ``get_host_and_agent_details`` path reads. Without it these streaming
+            # refs are label-less, so any consumer that filters on labels -- e.g. the
+            # minds system_interface forward's ``--agent-include
+            # has(agent.labels.is_primary)`` -- silently drops every imbue_cloud agent.
+            agent_refs.append(
+                DiscoveredAgent(
+                    agent_id=AgentId(agent_id_str),
+                    agent_name=AgentName(agent_name_str),
+                    host_id=host_id,
+                    provider_name=self.name,
+                    certified_data=data,
+                )
+            )
+        if agent_refs:
+            # A real listing: refresh the sticky-identity cache so a later
+            # unreachable pass can re-attach exactly these agents.
+            self._persist_last_known_agents(host_id, agent_refs)
+        else:
+            # The outer-SSH discovery returned no agents (e.g. container
+            # gone, or data.json is empty). Re-attach the last-known agents
+            # (marked stale) if we have them, so the host keeps its labels;
+            # otherwise synthesize a single agent from the lease so the host
+            # still shows in the listing (unchanged first-discovery behavior).
+            agent_refs = self._load_last_known_agents(host_id) or [
+                DiscoveredAgent(
+                    agent_id=AgentId(entry.agent_id),
+                    agent_name=AgentName(entry.agent_id),
+                    host_id=host_id,
+                    provider_name=self.name,
+                )
+            ]
+        return host_ref, agent_refs
 
     def _collect_listing_raw_via_outer(
         self,
