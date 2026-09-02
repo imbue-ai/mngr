@@ -79,6 +79,7 @@ from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
+from imbue.mngr.providers.local.backend import LOCAL_BACKEND_NAME
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
@@ -1803,13 +1804,22 @@ def _make_list_params(
 
 
 def _make_broken_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
-    """Build a MngrContext with a configured provider that has an unknown backend."""
-    failing_config = ProviderInstanceConfig(backend=ProviderBackendName("nonexistent-backend-xyz"))
+    """Build a MngrContext with a configured provider that has an unknown backend.
+
+    Pin ``enabled_backends`` so a full-enumeration ``list_agents`` only constructs the
+    ``local`` and broken providers. Otherwise it also discovers over every other
+    registered backend -- e.g. the ``lima`` default instance, whose discovery shells out
+    to ``limactl`` and reads the real ``/mngr`` host dir -- whose environment-dependent
+    failures would add a spurious second error (MIND-229).
+    """
+    broken_backend = ProviderBackendName("nonexistent-backend-xyz")
+    failing_config = ProviderInstanceConfig(backend=broken_backend)
     updated_config = temp_mngr_ctx.config.model_copy_update(
         to_update(
             temp_mngr_ctx.config.field_ref().providers,
             {ProviderInstanceName("broken-provider"): failing_config},
         ),
+        to_update(temp_mngr_ctx.config.field_ref().enabled_backends, [LOCAL_BACKEND_NAME, broken_backend]),
     )
     return temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, updated_config),
@@ -1861,8 +1871,44 @@ def test_list_agents_batch_continue_mode_records_failing_provider_error(
     assert "nonexistent-backend-xyz" in result.errors[0].message
 
 
+@pytest.mark.allow_warnings(match=r"Error discovering agents for provider")
+def test_list_agents_continue_mode_ignores_incidental_backends(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A full-enumeration continue-mode listing only touches the ctx's enabled backends.
+
+    MIND-229 regression guard: a registered backend outside the ctx's ``enabled_backends``
+    must never be constructed or discovered, so its failures cannot leak into
+    ``result.errors``. This is what keeps the continue-mode provider-error tests hermetic
+    against incidental backends like the ``lima`` default instance.
+    """
+    _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME] = _RaisingDiscoveryProviderBackend
+    _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        failing_ctx = _make_broken_provider_ctx(temp_mngr_ctx)
+
+        result = list_agents(
+            mngr_ctx=failing_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+
+        provider_errors = [e for e in result.errors if isinstance(e, ProviderErrorInfo)]
+        assert len(provider_errors) == 1
+        assert provider_errors[0].provider_name == ProviderInstanceName("broken-provider")
+    finally:
+        del _backend_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_RAISING_DISCOVERY_BACKEND_NAME]
+
+
 def _make_not_authorized_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
-    """Build a MngrContext with the default local provider plus one unauthenticated provider."""
+    """Build a MngrContext with the default local provider plus one unauthenticated provider.
+
+    Pin ``enabled_backends`` so a full-enumeration ``list_agents`` only discovers the
+    ``local`` and unauthenticated providers; otherwise an incidental backend (e.g. ``lima``)
+    erroring during discovery would break the "all provider errors are inaccessible"
+    assertion (MIND-229).
+    """
     provider_config = ProviderInstanceConfig(backend=_NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME)
     merged_providers = {
         **temp_mngr_ctx.config.providers,
@@ -1870,6 +1916,10 @@ def _make_not_authorized_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> Mngr
     }
     updated_config = temp_mngr_ctx.config.model_copy_update(
         to_update(temp_mngr_ctx.config.field_ref().providers, merged_providers),
+        to_update(
+            temp_mngr_ctx.config.field_ref().enabled_backends,
+            [LOCAL_BACKEND_NAME, _NOT_AUTHORIZED_DISCOVERY_BACKEND_NAME],
+        ),
     )
     return temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, updated_config),
