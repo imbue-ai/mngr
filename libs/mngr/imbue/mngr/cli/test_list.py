@@ -49,6 +49,9 @@ def test_list_command_json_format_no_agents(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_list_command_with_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -239,6 +242,9 @@ def test_list_command_with_include_filter(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_list_command_with_exclude_filter(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -348,6 +354,9 @@ def test_list_command_with_host_provider_filter(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_list_command_with_host_name_filter(
     cli_runner: CliRunner,
     temp_work_dir: Path,

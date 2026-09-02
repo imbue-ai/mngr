@@ -187,6 +187,9 @@ def test_create_agent_with_new_host(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_create_agent_work_dir_is_created(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
