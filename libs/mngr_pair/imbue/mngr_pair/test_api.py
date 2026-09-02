@@ -366,16 +366,8 @@ def test_unison_syncer_syncs_file_changes(tmp_path: Path, cg: ConcurrencyGroup) 
 
 
 @pytest.mark.unison
-@pytest.mark.flaky
 def test_unison_syncer_syncs_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """Test that UnisonSyncer correctly syncs symlinks.
-
-    Marked flaky because the ``wait_for`` only waits for the symlink to appear in
-    ``target``, but the very next assertion checks that the symlink's target file
-    ``real_file.txt`` also exists. Unison gives no ordering guarantee between two
-    unrelated files in a single sync sweep, so the symlink can land in ``target``
-    before its real file does.
-    """
+    """Test that UnisonSyncer correctly syncs symlinks."""
     source = tmp_path / "source"
     target = tmp_path / "target"
     source.mkdir()
@@ -396,10 +388,12 @@ def test_unison_syncer_syncs_symlinks(tmp_path: Path, cg: ConcurrencyGroup) -> N
     try:
         syncer.start()
 
-        # Wait for sync to complete
+        # link_to_file.txt.exists() follows the link to its absolute target inside
+        # source (always present), so it is true as soon as the link syncs -- before
+        # real_file.txt necessarily reaches target. Wait on the real file itself.
         wait_for(
-            lambda: (target / "link_to_file.txt").exists(),
-            error_message="Symlink was not synced within timeout",
+            lambda: (target / "real_file.txt").exists() and (target / "link_to_file.txt").is_symlink(),
+            error_message="Symlink and its target were not synced within timeout",
         )
 
         # Both files should exist in target
@@ -436,10 +430,12 @@ def test_unison_syncer_syncs_directory_symlinks(tmp_path: Path, cg: ConcurrencyG
     try:
         syncer.start()
 
-        # Wait for sync to complete
+        # Same trap as the file case: link_to_dir.exists() follows the link to its
+        # absolute target inside source (always present), so it is true as soon as the
+        # link syncs -- before real_dir necessarily reaches target. Wait on the dir.
         wait_for(
-            lambda: (target / "link_to_dir").exists(),
-            error_message="Directory symlink was not synced within timeout",
+            lambda: (target / "real_dir").exists() and (target / "link_to_dir").is_symlink(),
+            error_message="Directory symlink and its target were not synced within timeout",
         )
 
         # Both the directory and symlink should exist
