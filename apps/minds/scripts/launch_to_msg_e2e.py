@@ -97,6 +97,7 @@ from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 
@@ -998,7 +999,7 @@ class _WorkspaceResult(BaseModel):
     total_create_s: float = 0.0
 
 
-def _sign_in_via_provider_chooser(chat: Frame, *, api_key: str, label: str) -> None:
+def _sign_in_via_provider_chooser(chat: Frame, *, api_key: SecretStr, label: str) -> None:
     """Drive the workspace's provider chooser through the Anthropic API-key path.
 
     A freshly created workspace has no provider accounts, so the chooser opens
@@ -1016,7 +1017,7 @@ def _sign_in_via_provider_chooser(chat: Frame, *, api_key: str, label: str) -> N
     chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
     chat.click("[data-e2e=method-api_key]")
     chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
-    chat.fill("[data-e2e=api-key-input]", api_key)
+    chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
     logger.info("[{}] submitting the API key through the chooser", label)
     chat.click("[data-e2e=save-key]")
     chat.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
@@ -1032,7 +1033,7 @@ def _create_workspace_and_first_message(
     origin: str,
     host_name: str,
     ai_provider: str,
-    anthropic_key: str,
+    anthropic_key: SecretStr,
     snaps: _SnapPrefixes,
     label: str,
 ) -> tuple[_WorkspaceResult, Frame]:
@@ -1433,7 +1434,7 @@ def run_e2e() -> int:
         ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
         if ai_provider not in ("API_KEY", "SUBSCRIPTION"):
             raise E2EFailure(f"MINDS_AI_PROVIDER={ai_provider!r} -- must be API_KEY or SUBSCRIPTION")
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        anthropic_key = SecretStr(os.environ.get("ANTHROPIC_API_KEY", ""))
         if ai_provider == "API_KEY" and not anthropic_key:
             raise E2EFailure(
                 "MINDS_AI_PROVIDER=API_KEY but ANTHROPIC_API_KEY not set; "
@@ -2333,7 +2334,7 @@ def _advance_approval(
 
 def main() -> int:
     logger.remove()
-    logger.add(sys.stderr, level="INFO", format="<level>[{level: <7}]</level> {message}")
+    logger.add(sys.stderr, level="INFO", format="<level>[{level: <7}]</level> {message}", diagnose=False)
     try:
         return run_e2e()
     except KeyboardInterrupt:
