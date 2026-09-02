@@ -603,12 +603,12 @@ def test_tampered_session_cookie_rejected(tmp_path: Path) -> None:
         # Sanity: the untouched cookie is accepted (signed in).
         signed_in = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: valid_cookie})
         assert "Discovered agents" in signed_in.text
-        # Every single-byte alteration must invalidate the cookie. Flip each
-        # position to a different character drawn from the URL-safe alphabet the
-        # cookie itself uses, so the value stays a well-formed cookie yet fails
-        # signature verification.
+        # Every single-byte alteration must invalidate the cookie. The replacement
+        # must differ in the high bits: the final base64 character of a segment
+        # carries padding bits that decoding discards, so altering only those
+        # yields the same decoded credential -- correctly accepted, not a tamper.
         for position, original in enumerate(valid_cookie):
-            replacement = "A" if original != "A" else "B"
+            replacement = "Q" if original in "ABCD" else "A"
             tampered = valid_cookie[:position] + replacement + valid_cookie[position + 1 :]
             response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: tampered})
             assert response.status_code == 200, f"position {position}"
