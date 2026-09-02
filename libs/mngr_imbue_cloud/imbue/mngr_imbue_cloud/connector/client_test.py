@@ -116,6 +116,63 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.attributes == {"cpus": 2}
 
 
+def test_lease_host_retries_connect_error_then_succeeds() -> None:
+    # ConnectError is a connect-phase failure (e.g. DNS EAI_NONAME); it is retried.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("simulated DNS failure", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "host_db_id": "00000000-0000-0000-0000-000000000001",
+                "vps_address": "10.0.0.1",
+                "ssh_port": 22,
+                "ssh_user": "root",
+                "container_ssh_port": 2222,
+                "agent_id": "agent-abc",
+                "host_id": "host-xyz",
+                "host_name": "my-host",
+                "attributes": {"cpus": 2},
+            },
+        )
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    result = client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
+    assert result.vps_address == "10.0.0.1"
+    assert calls["n"] == 2
+
+
+def test_lease_host_does_not_retry_post_send_error() -> None:
+    # ReadError is a post-send failure, so a non-idempotent lease must not retry it.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadError("simulated post-send failure", request=request)
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    with pytest.raises(ImbueCloudUnreachableError):
+        client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
+    assert calls["n"] == 1
+
+
+def test_auth_signin_transport_error_raises_typed_auth_error() -> None:
+    # A transport failure surfaces as a typed ImbueCloudAuthError, not a raw httpx error.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadError("simulated post-send failure", request=request)
+
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
+    with pytest.raises(ImbueCloudAuthError):
+        client.auth_signin("alice@imbue.com", "hunter2")
+    assert calls["n"] == 1
+
+
 def test_rename_host_success_posts_new_name(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

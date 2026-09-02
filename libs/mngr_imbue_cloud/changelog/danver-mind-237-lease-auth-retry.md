@@ -1,0 +1,3 @@
+Workspace creation and sign-in now survive a brief network hiccup. The imbue_cloud connector client's `lease_host` (workspace host allocation) and its `auth_*` calls (sign-up, sign-in, forgot/reset password, get-user) are routed through the same bounded, connect-phase retry the discovery reads already use: a transient DNS or connection failure -- where the request never reached the server -- is retried a few times before surfacing an error, instead of failing on the first blip.
+
+Post-send failures on the non-idempotent calls (lease, sign-up, sign-in) are deliberately not retried, so a lease never double-allocates and a sign-in never mints a duplicate session. On exhaustion these calls raise a typed unreachable/auth error rather than a raw transport traceback.

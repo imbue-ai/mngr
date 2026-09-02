@@ -337,8 +337,8 @@ class ImbueCloudConnectorClient(MutableModel):
         still fails, raises ``exc_cls`` with a concise message (never the raw
         httpx traceback). ``idempotent`` (default ``True``) controls retry
         breadth: idempotent calls (every GET/PUT/DELETE and the upsert-style
-        POSTs) retry on any ``httpx.TransportError``; non-idempotent POSTs
-        (lease, key/bucket creation) pass ``idempotent=False`` so only
+        POSTs) retry on any ``httpx.TransportError``; non-idempotent POSTs pass
+        ``idempotent=False`` so only
         connect-phase errors -- where the request never reached the server --
         are retried, avoiding a double-allocation on a post-send blip.
         """
@@ -366,22 +366,28 @@ class ImbueCloudConnectorClient(MutableModel):
     # ------------------------------------------------------------------
 
     def auth_signup(self, email: str, password: str) -> AuthRawResponse:
-        response = httpx.post(
+        # A post-send retry could create a duplicate account.
+        response = self._send(
+            "POST",
             self._url("/auth/signup"),
+            exc_cls=ImbueCloudAuthError,
+            idempotent=False,
             headers=_client_id_headers(),
             json={"email": email, "password": password},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return validate_wire(AuthRawResponse, self._check(response, ImbueCloudAuthError))
 
     def auth_signin(self, email: str, password: str) -> AuthRawResponse:
-        response = httpx.post(
+        # Sign-in mints a session; a post-send retry could create a second.
+        response = self._send(
+            "POST",
             self._url("/auth/signin"),
+            exc_cls=ImbueCloudAuthError,
+            idempotent=False,
             headers=_client_id_headers(),
             json={"email": email, "password": password},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return validate_wire(AuthRawResponse, self._check(response, ImbueCloudAuthError))
 
@@ -537,31 +543,38 @@ class ImbueCloudConnectorClient(MutableModel):
         return verified
 
     def auth_forgot_password(self, email: str) -> None:
-        response = httpx.post(
+        # A post-send retry could send the reset email twice.
+        response = self._send(
+            "POST",
             self._url("/auth/password/forgot"),
+            exc_cls=ImbueCloudAuthError,
+            idempotent=False,
             headers=_client_id_headers(),
             json={"email": email},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         self._check(response, ImbueCloudAuthError)
 
     def auth_reset_password(self, token: str, new_password: str) -> None:
-        response = httpx.post(
+        # The reset token is single-use; a post-send retry would replay it.
+        response = self._send(
+            "POST",
             self._url("/auth/password/reset"),
+            exc_cls=ImbueCloudAuthError,
+            idempotent=False,
             headers=_client_id_headers(),
             json={"token": token, "new_password": new_password},
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         self._check(response, ImbueCloudAuthError)
 
     def auth_get_user(self, user_id: str) -> dict[str, Any]:
-        response = httpx.get(
+        response = self._send(
+            "GET",
             self._url(f"/auth/users/{user_id}"),
+            exc_cls=ImbueCloudAuthError,
             headers=_client_id_headers(),
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         return self._check(response, ImbueCloudAuthError)
 
@@ -587,12 +600,15 @@ class ImbueCloudConnectorClient(MutableModel):
         # unconstrained.
         if region is not None:
             body["region"] = region
-        response = httpx.post(
+        # A post-send retry could double-lease the pool host.
+        response = self._send(
+            "POST",
             self._url("/hosts/lease"),
+            exc_cls=ImbueCloudUnreachableError,
+            idempotent=False,
             headers=self._bearer(access_token),
             json=body,
             timeout=self.timeout_seconds,
-            follow_redirects=True,
         )
         if response.status_code == 503:
             try:
