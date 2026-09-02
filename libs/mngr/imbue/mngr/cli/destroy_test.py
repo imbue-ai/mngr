@@ -18,6 +18,7 @@ from imbue.mngr.cli.destroy import _destroy_single_offline_host
 from imbue.mngr.cli.destroy import _drop_targets_covered_by_explicit_hosts
 from imbue.mngr.cli.destroy import _emit_dry_run_entries
 from imbue.mngr.cli.destroy import _output_result
+from imbue.mngr.cli.destroy import _provider_names_for_host_discovery
 from imbue.mngr.cli.destroy import _warn_on_multi_instance_id_addresses
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
@@ -785,3 +786,27 @@ def test_warn_on_multi_instance_id_addresses_is_silent_when_not_ambiguous() -> N
         _warn_on_multi_instance_id_addresses([AgentAddress(agent=AgentName("migrating-agent"))], matches)
 
     assert log_output.getvalue() == ""
+
+
+def test_provider_names_for_host_discovery_narrows_when_every_address_is_scoped() -> None:
+    """Fully provider-scoped host addresses narrow discovery to exactly the named
+    providers (deduplicated, first-seen order), so an unrelated provider's broken
+    discovery cannot abort the destroy."""
+    addresses = [
+        HostAddress(host=HostId.generate(), provider=ProviderInstanceName("docker")),
+        HostAddress(host=HostName("shared-box"), provider=ProviderInstanceName("modal")),
+        HostAddress(host=HostId.generate(), provider=ProviderInstanceName("docker")),
+    ]
+
+    assert _provider_names_for_host_discovery(addresses) == ("docker", "modal")
+
+
+def test_provider_names_for_host_discovery_full_scan_when_any_address_is_unscoped() -> None:
+    """One provider-less address can match a host on any provider, so the scan
+    stays full (None) -- including for the empty address list."""
+    scoped = HostAddress(host=HostId.generate(), provider=ProviderInstanceName("docker"))
+    unscoped = HostAddress(host=HostName("wandering-host"))
+
+    assert _provider_names_for_host_discovery([scoped, unscoped]) is None
+    assert _provider_names_for_host_discovery([unscoped]) is None
+    assert _provider_names_for_host_discovery([]) is None

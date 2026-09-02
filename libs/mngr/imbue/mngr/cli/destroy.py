@@ -12,6 +12,7 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discovery_events import emit_agent_destroyed
@@ -371,6 +372,28 @@ def destroy(ctx: click.Context, **kwargs) -> None:
     ctx.exit(exit_code_for_failures(failures))
 
 
+@pure
+def _provider_names_for_host_discovery(host_addresses: Sequence[HostAddress]) -> tuple[str, ...] | None:
+    """The providers host-resolution discovery should query, or None for a full scan.
+
+    A host address scoped to a provider (``@host-....docker``) can only ever match
+    hosts from that provider -- ``filter_all_hosts`` applies the same exact
+    instance-name equality -- so when EVERY address names one, discovery is
+    narrowed to exactly the named providers (deduplicated, first-seen order).
+    Querying the rest buys nothing and costs everything when an unrelated
+    provider's discovery raises: an expired imbue_cloud sign-in must not abort
+    the destroy of a perfectly healthy local docker host.
+
+    Any UNscoped address can match a host on any provider, so one such address
+    keeps the full scan -- and the full scan's fail-fast on a broken provider is
+    then load-bearing, because silently skipping that provider would let
+    ``--force`` treat a host it owns as already gone.
+    """
+    if not host_addresses or any(address.provider is None for address in host_addresses):
+        return None
+    return tuple(dict.fromkeys(str(address.provider) for address in host_addresses))
+
+
 def _find_hosts_to_destroy(
     host_addresses: Sequence[HostAddress],
     mngr_ctx: MngrContext,
@@ -387,7 +410,7 @@ def _find_hosts_to_destroy(
     """
     outcome = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
+        provider_names=_provider_names_for_host_discovery(host_addresses),
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,
