@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import MutableMapping
 from contextlib import asynccontextmanager
@@ -22,10 +23,14 @@ from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
+from urllib.parse import parse_qs
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from itsdangerous import TimestampSigner
+from itsdangerous import URLSafeTimedSerializer
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -34,6 +39,7 @@ from starlette.responses import Response
 from starlette.testclient import TestClient
 from starlette.types import Message
 from starlette.websockets import WebSocketDisconnect
+from websockets import Subprotocol
 from websockets.sync.server import ServerConnection
 from websockets.sync.server import serve as ws_serve
 
@@ -44,12 +50,17 @@ from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_forward.auth import FileAuthStore
+from imbue.mngr_forward.cookie import _COOKIE_SALT
+from imbue.mngr_forward.cookie import _SESSION_PAYLOAD
+from imbue.mngr_forward.cookie import _SUBDOMAIN_AUTH_SALT
 from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
+from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.embedding import EmbedderOrigin
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.errors import MngrForwardError
+from imbue.mngr_forward.primitives import CookieSigningKey
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
@@ -65,6 +76,7 @@ from imbue.mngr_forward.server import _SSE_READ_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _STALL_NOTICE_SECONDS
 from imbue.mngr_forward.server import _StallGuardedStreamingResponse
 from imbue.mngr_forward.server import _TUNNEL_POOL_LIMITS
+from imbue.mngr_forward.server import _WS_CLOSE_REASON_LOOPBACK_REFUSED
 from imbue.mngr_forward.server import _forward_workspace_http
 from imbue.mngr_forward.server import _get_tunnel_http_client
 from imbue.mngr_forward.server import _is_loopback_url
@@ -78,6 +90,8 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
+from imbue.mngr_forward.testing import TEST_AGENT_ID_2
+from imbue.mngr_forward.testing import TEST_HOST_ID_1
 
 # The workspace host every test agent runs on, and the shared test agent id:
 # requests route by the ``agent-<hex>.localhost`` Host header (the canonical
@@ -86,6 +100,12 @@ _TEST_HOST_ID = "host-" + "0123456789abcdef0123456789abcdef"
 # A deliberately different hex payload from the host id, so the legacy-origin
 # redirect assertions prove a real resolver lookup rather than a prefix swap.
 _TEST_AGENT_ID = "agent-" + "feedfacefeedfacefeedfacefeedface"
+# A well-formed coordinate that is deliberately *not* a registered agent:
+# ``/goto/`` mints a token for any syntactically valid coordinate, so these
+# tests need an id the resolver has never heard of.
+_UNREGISTERED_HOST_ID: Final = TEST_HOST_ID_1
+# The port the proxy is told to listen on, and so the port its origins carry.
+_LISTEN_PORT: Final = 18421
 
 
 def _make_test_instance_key() -> AgentInstanceKey:
@@ -93,54 +113,103 @@ def _make_test_instance_key() -> AgentInstanceKey:
     return AgentInstanceKey.build(AgentId(_TEST_AGENT_ID), HostId(_TEST_HOST_ID))
 
 
-@pytest.fixture
-def app_setup(tmp_path: Path) -> tuple[TestClient, FileAuthStore, ForwardResolver]:
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-    )
-    client = TestClient(app, follow_redirects=False)
-    return client, auth_store, resolver
+def _register_default_service(resolver: ForwardResolver, service_url: str) -> AgentInstanceKey:
+    """Register the shared test agent with one backend on its default service."""
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    resolver.update_services(instance_key, {"system_interface": service_url}, {})
+    return instance_key
 
 
-@pytest.fixture
-def http2_app_setup(tmp_path: Path) -> tuple[TestClient, FileAuthStore, ForwardResolver]:
-    """Same as ``app_setup`` but with ``use_http2=True`` so client-facing URLs
+def _agent_origin(
+    *labels: str,
+    coordinate: str = _TEST_AGENT_ID,
+    scheme: str = "http",
+    port: int = _LISTEN_PORT,
+) -> str:
+    """The origin the proxy serves an agent on, under any leading service labels."""
+    return f"{scheme}://{''.join(f'{label}.' for label in labels)}{coordinate}.localhost:{port}"
 
-    become ``https``/``wss`` and the session cookie is marked ``Secure``.
+
+def _make_forward_app(
+    data_directory: Path,
+    *,
+    tunnel_manager: SSHTunnelManager | None = None,
+    envelope_output: io.StringIO | None = None,
+    listen_port: int = _LISTEN_PORT,
+    preauth_cookie_value: str | None = None,
+    allow_host_loopback: bool = False,
+    use_http2: bool = False,
+    browser_bridge_token: str | None = None,
+    embedder_origins: tuple[EmbedderOrigin, ...] = (),
+    stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
+) -> tuple[FastAPI, FileAuthStore, ForwardResolver]:
+    """Build a forward app on this module's shared test wiring.
+
+    The returned resolver knows no agents yet; callers seed it, which the app
+    sees because it holds the resolver rather than a copy of its contents.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
+    auth_store = FileAuthStore(data_directory=data_directory)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
+        tunnel_manager=SSHTunnelManager() if tunnel_manager is None else tunnel_manager,
+        envelope_writer=EnvelopeWriter(output=io.StringIO() if envelope_output is None else envelope_output),
         listen_host="127.0.0.1",
-        listen_port=18421,
-        use_http2=True,
+        listen_port=listen_port,
+        preauth_cookie_value=preauth_cookie_value,
+        allow_host_loopback=allow_host_loopback,
+        use_http2=use_http2,
+        browser_bridge_token=browser_bridge_token,
+        embedder_origins=embedder_origins,
+        stall_notice_seconds=stall_notice_seconds,
     )
-    client = TestClient(app, follow_redirects=False)
-    return client, auth_store, resolver
+    return app, auth_store, resolver
 
 
+@pytest.fixture
+def app_setup(tmp_path: Path) -> Iterator[tuple[TestClient, FileAuthStore, ForwardResolver]]:
+    app, auth_store, resolver = _make_forward_app(tmp_path)
+    with TestClient(app, follow_redirects=False) as client:
+        yield client, auth_store, resolver
+
+
+@pytest.fixture
+def http2_app_setup(tmp_path: Path) -> Iterator[tuple[TestClient, FileAuthStore, ForwardResolver]]:
+    """Like ``app_setup`` but with ``use_http2=True``, so client-facing URLs become
+    ``https``/``wss`` and the session cookie is marked ``Secure``."""
+    app, auth_store, resolver = _make_forward_app(tmp_path, use_http2=True)
+    with TestClient(app, follow_redirects=False) as client:
+        yield client, auth_store, resolver
+
+
+@pytest.mark.witnesses("authentication.signed-out-home")
 def test_bare_origin_unauthenticated_returns_login_page(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
-    client, _store, _resolver = app_setup
+    client, _store, resolver = app_setup
+    # Discover a resolved and an unresolved agent so we can prove the signed-out
+    # home page reveals nothing about which agents exist -- neither reaches the
+    # response.
+    resolved_key = _register_default_service(resolver, "http://stub-backend")
+    unresolved_key = AgentInstanceKey.build(
+        AgentId("agent-" + "abcdefabcdefabcdefabcdefabcdef12"), HostId("host-" + "fedcba9876543210fedcba9876543210")
+    )
+    resolver.add_known_agent(unresolved_key)
     response = client.get("/")
     assert response.status_code == 200
+    # A sign-in prompt that points the visitor at the login URL printed in the
+    # proxy's terminal.
     assert "Sign in" in response.text
+    assert "login URL printed in the terminal" in response.text
+    # The page reveals nothing about which agents exist: no discovered agent (or
+    # its host) leaks into the signed-out response.
+    assert str(resolved_key.agent_id) not in response.text
+    assert str(resolved_key.host_id) not in response.text
+    assert str(unresolved_key.agent_id) not in response.text
+    assert str(unresolved_key.host_id) not in response.text
+    assert "Discovered agents" not in response.text
 
 
 def test_login_url_redirect_renders_js_redirect_page(
@@ -155,6 +224,40 @@ def test_login_url_redirect_renders_js_redirect_page(
     assert "/authenticate" in response.text
 
 
+@pytest.mark.witnesses(
+    "fetch-never-spends",
+    partial="witnesses the login URL -- the only proxy URL that carries a code; the 'every URL is inert' quantifier stays open",
+)
+def test_fetch_of_login_url_does_not_spend_the_code(
+    app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """GETting the login URL renders an inert shim and never consumes the code.
+
+    Spending the code requires executing the sign-in page's script (which hits
+    /authenticate). A plain fetch -- even repeated -- must leave the code
+    spendable, so software that follows the URL without running its scripts
+    cannot consume the code on the user's behalf.
+    """
+    client, store, _resolver = app_setup
+    code = OneTimeCode("fetch-inert-code-1")
+    store.add_one_time_code(code=code)
+    # Fetch the login URL repeatedly; none of these executes the redirect script.
+    for _ in range(3):
+        fetched = client.get(f"/login?one_time_code={code}")
+        assert fetched.status_code == 200
+    # The code was never spent: the authentication step still succeeds and
+    # establishes a session.
+    authenticated = client.get(f"/authenticate?one_time_code={code}")
+    assert authenticated.status_code == 307
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME in authenticated.cookies
+
+
+@pytest.mark.witnesses("authentication.authenticate-sets-session")
+@pytest.mark.witnesses("spent-code-refused")
+@pytest.mark.witnesses(
+    "single-use-codes",
+    partial="only the /authenticate re-presentation of a spent code at the HTTP surface, not every interleaving of requests or the /goto path",
+)
 def test_authenticate_consumes_otp_and_sets_cookie(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
@@ -162,12 +265,16 @@ def test_authenticate_consumes_otp_and_sets_cookie(
     code = OneTimeCode("auth-test-code-1")
     store.add_one_time_code(code=code)
     response = client.get(f"/authenticate?one_time_code={code}")
+    # A session cookie is set and the browser is redirected to the bare-origin home page "/".
     assert response.status_code == 307
     assert response.headers["location"] == "/"
     assert MNGR_FORWARD_SESSION_COOKIE_NAME in response.cookies
-    # Code is single-use: re-presenting it returns 403.
+    # Code is single-use: re-presenting the now-spent code is refused (403) and
+    # establishes no session -- the refusal must not hand out a session cookie.
     response2 = client.get(f"/authenticate?one_time_code={code}")
     assert response2.status_code == 403
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME not in response2.cookies
+    assert "set-cookie" not in response2.headers
 
 
 def test_authenticate_cookie_not_secure_without_http2(
@@ -204,38 +311,21 @@ def test_http2_goto_authenticated_redirects_to_https_subdomain(
     """With ``use_http2`` on, the /goto bridge sends the browser to an https subdomain URL."""
     client, store, _resolver = http2_app_setup
     cookie = create_session_cookie(store.get_signing_key())
-    valid_host_id = "host-" + "0" * 31 + "a"
     response = client.get(
-        f"/goto/{valid_host_id}/",
+        f"/goto/{_UNREGISTERED_HOST_ID}/",
         cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
     )
     assert response.status_code == 302
     location = response.headers["location"]
-    assert location.startswith(f"https://{valid_host_id}.localhost:18421/_subdomain_auth?token=")
+    assert location.startswith(f"https://{_UNREGISTERED_HOST_ID}.localhost:18421/_subdomain_auth?token=")
 
 
 def test_http2_subdomain_unauthenticated_html_redirects_to_https_goto(tmp_path: Path) -> None:
     """With ``use_http2`` on, a stale-cookie subdomain HTML load redirects to the https /goto bridge."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
     listen_port = 18421
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=listen_port,
-        use_http2=True,
-    )
-    with TestClient(
-        app, base_url=f"https://{_TEST_AGENT_ID}.localhost:{listen_port}", follow_redirects=False
-    ) as client:
+    app, _auth_store, resolver = _make_forward_app(tmp_path, listen_port=listen_port, use_http2=True)
+    _register_default_service(resolver, "http://stub-backend")
+    with TestClient(app, base_url=_agent_origin(scheme="https", port=listen_port), follow_redirects=False) as client:
         response = client.get(
             "/",
             headers={
@@ -249,25 +339,14 @@ def test_http2_subdomain_unauthenticated_html_redirects_to_https_goto(tmp_path: 
 
 def test_http2_subdomain_auth_bridge_sets_secure_cookie(tmp_path: Path) -> None:
     """With ``use_http2`` on, the /_subdomain_auth bridge sets a Secure session cookie."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        use_http2=True,
+    app, auth_store, _resolver = _make_forward_app(tmp_path, use_http2=True)
+    token = create_subdomain_auth_token(
+        signing_key=auth_store.get_signing_key(), origin_coordinate=_UNREGISTERED_HOST_ID
     )
-    valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=/",
-            headers={"host": f"{valid_host_id}.localhost:18421"},
+            headers={"host": f"{_UNREGISTERED_HOST_ID}.localhost:18421"},
         )
     assert response.status_code == 302
     set_cookie = response.headers["set-cookie"]
@@ -275,72 +354,306 @@ def test_http2_subdomain_auth_bridge_sets_secure_cookie(tmp_path: Path) -> None:
     assert "secure" in set_cookie.lower()
 
 
-def test_invalid_otp_returns_403(
+@pytest.mark.parametrize(
+    "route, one_time_code",
+    [
+        ("/authenticate", "never-issued"),
+        # An empty or whitespace-only code must not reach OneTimeCode validation
+        # as a 500; the refusal is the same clean 403 an unknown code gets.
+        ("/authenticate", ""),
+        ("/authenticate", "%20%20%20"),
+        ("/login", ""),
+    ],
+    ids=("unknown", "empty", "whitespace", "empty-on-login"),
+)
+def test_unusable_one_time_code_is_refused_with_403(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+    route: str,
+    one_time_code: str,
 ) -> None:
     client, _store, _resolver = app_setup
-    response = client.get("/authenticate?one_time_code=never-issued")
+    response = client.get(f"{route}?one_time_code={one_time_code}")
     assert response.status_code == 403
 
 
-def test_empty_otp_on_authenticate_returns_403_not_500(
+@pytest.mark.witnesses("authentication.fresh-code")
+def test_open_fresh_login_url_signs_in(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
-    """Empty `?one_time_code=` must produce a clean 403, not a 500 from OneTimeCode validation."""
-    client, _store, _resolver = app_setup
-    response = client.get("/authenticate?one_time_code=")
-    assert response.status_code == 403
+    """Opening a fresh login URL drives the browser through the shim to a signed-in home page."""
+    client, store, _resolver = app_setup
+    code = OneTimeCode("fresh-login-code-1")
+    store.add_one_time_code(code=code)
+    # The user starts signed out: the bare-origin home page is the sign-in prompt.
+    assert "Sign in" in client.get("/").text
+    # Opening the login URL renders the shim whose script navigates to /authenticate.
+    login_page = client.get(f"/login?one_time_code={code}")
+    assert login_page.status_code == 200
+    assert "/authenticate" in login_page.text
+    # The script drives the browser to /authenticate, establishing the session and redirecting home.
+    authenticated = client.get(f"/authenticate?one_time_code={code}")
+    assert authenticated.status_code == 307
+    assert authenticated.headers["location"] == "/"
+    session_cookie = authenticated.cookies[MNGR_FORWARD_SESSION_COOKIE_NAME]
+    # The browser lands signed in on "/": the home page now renders the signed-in view.
+    home = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: session_cookie})
+    assert home.status_code == 200
+    assert "Discovered agents" in home.text
 
 
-def test_empty_otp_on_login_returns_403_not_500(
+@pytest.mark.witnesses("authentication.login-page-inert")
+@pytest.mark.witnesses(
+    "fetch-never-spends",
+    partial="only the login URL is shown inert under fetching, not every URL the proxy hands out",
+)
+def test_fetching_login_url_spends_no_code(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
-    """Empty `?one_time_code=` against /login must produce a clean 403, not a 500."""
-    client, _store, _resolver = app_setup
-    response = client.get("/login?one_time_code=")
-    assert response.status_code == 403
+    """Fetching the login URL without running its script sets no session and leaves the code unspent."""
+    client, store, _resolver = app_setup
+    code = OneTimeCode("inert-login-code-1")
+    store.add_one_time_code(code=code)
+    response = client.get(f"/login?one_time_code={code}")
+    assert response.status_code == 200
+    # No code is spent, and the user is still signed out: the fetch sets no session cookie...
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME not in response.cookies
+    # ...and the home page still shows the sign-in prompt.
+    assert "Sign in" in client.get("/").text
+    # The code is still unspent: the authentication step can still consume it.
+    authenticated = client.get(f"/authenticate?one_time_code={code}")
+    assert authenticated.status_code == 307
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME in authenticated.cookies
 
 
-def test_whitespace_otp_on_authenticate_returns_403_not_500(
+@pytest.mark.witnesses("authentication.already-signed-in")
+def test_login_url_while_signed_in_goes_home(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
-    """Whitespace-only `?one_time_code=   ` must produce a clean 403, not a 500."""
-    client, _store, _resolver = app_setup
-    response = client.get("/authenticate?one_time_code=%20%20%20")
-    assert response.status_code == 403
+    """Opening the login URL while already signed in redirects home without spending the code."""
+    client, store, _resolver = app_setup
+    code = OneTimeCode("already-signed-in-code-1")
+    store.add_one_time_code(code=code)
+    session_cookie = create_session_cookie(store.get_signing_key())
+    response = client.get(
+        f"/login?one_time_code={code}",
+        cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: session_cookie},
+    )
+    # They are redirected to the bare-origin home page "/".
+    assert response.status_code == 307
+    assert response.headers["location"] == "/"
+    # No code is spent: the still-valid code authenticates when finally presented to /authenticate.
+    consumed = client.get(f"/authenticate?one_time_code={code}")
+    assert consumed.status_code == 307
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME in consumed.cookies
 
 
+@pytest.mark.witnesses("authentication.bad-code-refused")
+@pytest.mark.witnesses(
+    "single-use-codes",
+    partial="only the spent-code refusal via /authenticate, not all interleavings or the /goto path",
+)
+@pytest.mark.parametrize("code_case", ["no code", "unknown code", "spent code"])
+def test_bad_code_refused_without_session(
+    app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+    code_case: str,
+) -> None:
+    """A missing, unknown, or spent code is refused at /authenticate and establishes no session."""
+    client, store, _resolver = app_setup
+    if code_case == "no code":
+        one_time_code = ""
+    elif code_case == "unknown code":
+        one_time_code = "never-was-issued"
+    else:
+        code = OneTimeCode("to-be-spent-code-1")
+        store.add_one_time_code(code=code)
+        first = client.get(f"/authenticate?one_time_code={code}")
+        # The code was valid exactly once.
+        assert first.status_code == 307
+        one_time_code = str(code)
+    response = client.get(f"/authenticate?one_time_code={one_time_code}")
+    # Authentication is refused (the step leaves the exact status open) and no session is established.
+    assert response.status_code >= 400
+    assert MNGR_FORWARD_SESSION_COOKIE_NAME not in response.cookies
+
+
+@pytest.mark.witnesses("authentication.lists-known-agents")
 def test_bare_origin_authenticated_renders_debug_index(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
-    client, store, _resolver = app_setup
+    client, store, resolver = app_setup
+    # Discover two resolved (reachable) agents so we can prove that every one is
+    # listed by its agent id and links to its own origin through the goto bridge.
+    first_key = _make_test_instance_key()
+    second_key = AgentInstanceKey.build(
+        AgentId("agent-" + "abcdefabcdefabcdefabcdefabcdef12"), HostId("host-" + "fedcba9876543210fedcba9876543210")
+    )
+    for instance_key in (first_key, second_key):
+        resolver.add_known_agent(instance_key)
+        resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     cookie = create_session_cookie(store.get_signing_key())
     response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie})
     assert response.status_code == 200
     assert "Discovered agents" in response.text
+    # Every discovered agent is listed by its agent id, and each reachable agent
+    # links to its own origin through the goto bridge (``/goto/<coordinate>/``).
+    for instance_key in (first_key, second_key):
+        assert str(instance_key.agent_id) in response.text
+        assert f"/goto/{instance_key.host_id}/" in response.text
 
 
+@pytest.mark.witnesses("authentication.unresolved-still-listed")
+def test_bare_origin_authenticated_marks_unresolved_agent(
+    app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """A discovered agent whose backend is not yet resolved is still listed, but
+    visibly marked as not yet reachable."""
+    client, store, resolver = app_setup
+    # A known agent with no registered services never resolves, so the index
+    # marks it as unresolved.
+    instance_key = _make_test_instance_key()
+    resolver.add_known_agent(instance_key)
+    assert resolver.resolve(instance_key) is None
+    cookie = create_session_cookie(store.get_signing_key())
+    response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie})
+    assert response.status_code == 200
+    # The agent is listed by its id...
+    assert str(instance_key.agent_id) in response.text
+    # ...but its row carries the "unresolved" mark that a reachable agent's does
+    # not, so it is visibly marked as not yet reachable.
+    assert 'class="unresolved"' in response.text
+
+
+class _EpochTimestampSigner(TimestampSigner):
+    """A timestamp signer that stamps tokens at the unix epoch, so any cookie it
+    produces is decades old -- used to build an expired-but-correctly-signed
+    cookie without waiting or manipulating the clock."""
+
+    def get_timestamp(self) -> int:
+        return 0
+
+
+@contextmanager
+def _make_forward_app_on(data_directory: Path) -> Iterator[tuple[TestClient, FileAuthStore]]:
+    """Build a proxy app whose signing key lives in ``data_directory``.
+
+    Two calls with the same directory model a stop-and-restart from the same
+    state directory (the persisted signing key is reused); two calls with
+    different directories model two independent installations.
+    """
+    app, auth_store, _resolver = _make_forward_app(data_directory)
+    with TestClient(app, follow_redirects=False) as client:
+        yield client, auth_store
+
+
+@pytest.mark.witnesses("authentication.survives-restart")
+@pytest.mark.witnesses(
+    "sessions-unforgeable",
+    partial="only the accepted case (a key-signed cookie stays valid across a restart); the invalidation clauses are witnessed by the foreign/tampered/expired tests",
+)
+def test_session_survives_proxy_restart(tmp_path: Path) -> None:
+    """A signed-in browser stays signed in after the proxy restarts from the same
+    state directory, and does not have to sign in again."""
+    state_dir = tmp_path / "state"
+    # Sign in for real on the first proxy process, capturing the cookie the
+    # browser would then hold.
+    with _make_forward_app_on(state_dir) as (client_a, store_a):
+        code = OneTimeCode("restart-code-1")
+        store_a.add_one_time_code(code=code)
+        auth_response = client_a.get(f"/authenticate?one_time_code={code}")
+        assert auth_response.status_code == 307
+        session_cookie = auth_response.cookies[MNGR_FORWARD_SESSION_COOKIE_NAME]
+    # Stop and start again from the same state directory.
+    with _make_forward_app_on(state_dir) as (client_b, _store_b):
+        # The pre-restart cookie is presented as-is: no OTP is issued or consumed,
+        # so the browser did not have to sign in again.
+        response = client_b.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: session_cookie})
+    assert response.status_code == 200
+    assert "Discovered agents" in response.text
+    assert "Sign in" not in response.text
+
+
+@pytest.mark.witnesses("authentication.foreign-installation-rejected")
+@pytest.mark.witnesses(
+    "sessions-unforgeable",
+    partial="only the cross-state-directory clause; the tamper and expiry clauses are witnessed elsewhere",
+)
+def test_session_from_foreign_state_directory_rejected(tmp_path: Path) -> None:
+    """A cookie signed by a proxy started from a different state directory is
+    treated as signed out here."""
+    with (
+        _make_forward_app_on(tmp_path / "this") as (this_proxy, _this_store),
+        _make_forward_app_on(tmp_path / "foreign") as (_foreign_client, foreign_store),
+    ):
+        foreign_cookie = create_session_cookie(foreign_store.get_signing_key())
+        response = this_proxy.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: foreign_cookie})
+    assert response.status_code == 200
+    assert "Sign in" in response.text
+    assert "Discovered agents" not in response.text
+
+
+@pytest.mark.witnesses("authentication.tampered-cookie-rejected")
+@pytest.mark.witnesses(
+    "sessions-unforgeable",
+    partial="only the tamper clause (each single-byte alteration of one valid cookie); the cross-directory and expiry clauses are witnessed elsewhere",
+)
+def test_tampered_session_cookie_rejected(tmp_path: Path) -> None:
+    """Altering any one byte of a valid session cookie makes it signed out."""
+    with _make_forward_app_on(tmp_path) as (client, store):
+        valid_cookie = create_session_cookie(store.get_signing_key())
+        # Sanity: the untouched cookie is accepted (signed in).
+        signed_in = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: valid_cookie})
+        assert "Discovered agents" in signed_in.text
+        # Every single-byte alteration must invalidate the cookie. Flip each
+        # position to a different character drawn from the URL-safe alphabet the
+        # cookie itself uses, so the value stays a well-formed cookie yet fails
+        # signature verification.
+        for position, original in enumerate(valid_cookie):
+            replacement = "A" if original != "A" else "B"
+            tampered = valid_cookie[:position] + replacement + valid_cookie[position + 1 :]
+            response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: tampered})
+            assert response.status_code == 200, f"position {position}"
+            assert "Sign in" in response.text, f"position {position} was still accepted"
+            assert "Discovered agents" not in response.text, f"position {position} was still accepted"
+
+
+@pytest.mark.witnesses("authentication.expired-cookie-rejected")
+@pytest.mark.witnesses(
+    "sessions-unforgeable",
+    partial="only the older-than-30-days clause; the tamper and cross-directory clauses are witnessed elsewhere",
+)
+def test_expired_session_cookie_rejected(tmp_path: Path) -> None:
+    """A session cookie older than the 30-day window is treated as signed out,
+    even though it carries this proxy's own valid signature."""
+    with _make_forward_app_on(tmp_path) as (client, store):
+        signing_key = store.get_signing_key()
+        # Mint a cookie signed with this proxy's real key but stamped at the unix
+        # epoch, so its age far exceeds the 30-day max: the signature is valid, only
+        # the age disqualifies it.
+        aged_serializer = URLSafeTimedSerializer(
+            secret_key=signing_key.get_secret_value(), signer=_EpochTimestampSigner
+        )
+        expired_cookie = aged_serializer.dumps(_SESSION_PAYLOAD, salt=_COOKIE_SALT)
+        response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: expired_cookie})
+    assert response.status_code == 200
+    assert "Sign in" in response.text
+    assert "Discovered agents" not in response.text
+
+
+@pytest.mark.witnesses(
+    "forwarding.default-service-redirect",
+    partial="covers the redirect + path preservation; the 'non-HTML served unchanged' clause is in test_bare_origin_non_html_does_not_redirect",
+)
 def test_bare_origin_html_navigation_redirects_to_shell_label(tmp_path: Path) -> None:
     """An authenticated HTML navigation to the bare workspace origin 302s to the
     shell service's own label origin (keeping local grammar identical to a share)."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    app, auth_store, resolver = _make_forward_app(tmp_path)
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
     resolver.update_services(
         instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
     )
-    tunnel_manager = SSHTunnelManager()
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-    )
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         response = client.get(
             "/some/page?x=1",
             headers={"accept": "text/html"},
@@ -353,30 +666,25 @@ def test_bare_origin_html_navigation_redirects_to_shell_label(tmp_path: Path) ->
     )
 
 
+@pytest.mark.witnesses(
+    "forwarding.default-service-redirect",
+    partial="covers only the 'non-HTML served unchanged' clause; the redirect is in test_bare_origin_html_navigation_redirects_to_shell_label",
+)
 def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
     """A non-HTML request to the bare origin (e.g. the readiness probe) is served
     by the shell directly rather than redirected, so probes are unaffected."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    app, auth_store, resolver = _make_forward_app(tmp_path)
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
     resolver.update_services(
         instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
-    )
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
     )
 
     async def _ok(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": True})
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_ok), follow_redirects=False)
         response = client.get(
             "/api/health",
@@ -384,6 +692,71 @@ def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
             cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
         )
     assert response.status_code == 200
+
+
+@pytest.mark.witnesses("forwarding.agent-default-origin")
+@pytest.mark.parametrize("host_suffix", ["localhost", "localhost:8421", "127.0.0.1:8421"])
+def test_bare_agent_origin_resolves_to_the_default_service(tmp_path: Path, host_suffix: str) -> None:
+    """Every accepted bare ``agent-<hex>`` Host form -- plain, with a port, and with
+    ``127.0.0.1`` in place of ``localhost`` -- routes to that agent's default-service backend."""
+    preauth = "preauth-default-origin"
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-default-service")
+
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=b"ok")
+
+    with TestClient(app, follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        response = client.get(
+            "/api/whatever",
+            headers={
+                "host": f"{_TEST_AGENT_ID}.{host_suffix}",
+                "accept": "application/json",
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+            },
+        )
+
+    assert response.status_code == 200
+    assert len(captured) == 1
+    assert str(captured[0].url).startswith("http://stub-default-service/")
+
+
+@pytest.mark.witnesses("forwarding.other-hosts-are-bare-origin")
+@pytest.mark.parametrize(
+    "host",
+    ["localhost:8421", "agent-0f3c.localhost", "agent-nothex.localhost", "foo.localhost", "example.com"],
+)
+def test_non_agent_hosts_are_served_by_the_bare_origin(tmp_path: Path, host: str) -> None:
+    """A host that is not a full ``agent-<32hex>`` origin -- the bare origin itself,
+    an id of the wrong length, a non-hex id, or an unrelated host -- is served by the
+    bare origin and nothing is forwarded to any backend."""
+    app, auth_store, resolver = _make_forward_app(tmp_path)
+    _register_default_service(resolver, "http://stub-backend")
+
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, content=b"forwarded")
+
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        response = client.get(
+            "/",
+            headers={"host": host, "accept": "text/html"},
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+
+    # The debug index is served only by the bare origin, so its presence proves
+    # the request was not routed onto an agent origin.
+    assert response.status_code == 200
+    assert "Discovered agents" in response.text
+    assert captured == []
 
 
 def _make_legacy_workspace_app(tmp_path: Path) -> tuple[FastAPI, FileAuthStore]:
@@ -394,8 +767,7 @@ def _make_legacy_workspace_app(tmp_path: Path) -> tuple[FastAPI, FileAuthStore]:
     shell serves on the bare origin and services resolve via the
     label-as-name fallback.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    app, auth_store, resolver = _make_forward_app(tmp_path)
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
     resolver.update_services(
@@ -407,14 +779,6 @@ def _make_legacy_workspace_app(tmp_path: Path) -> tuple[FastAPI, FileAuthStore]:
         },
         {},
     )
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-    )
     return app, auth_store
 
 
@@ -424,7 +788,7 @@ def test_legacy_service_path_navigation_redirects_to_service_origin(tmp_path: Pa
     service iframes skip their service-worker bootstrap entirely."""
     app, auth_store = _make_legacy_workspace_app(tmp_path)
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         response = client.get(
             "/service/terminal/?arg=_&arg=session&arg=terminal-1",
             headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
@@ -441,7 +805,7 @@ def test_legacy_service_path_navigation_preserves_subpath(tmp_path: Path) -> Non
     """The path after the ``/service/<name>`` prefix survives the redirect verbatim."""
     app, auth_store = _make_legacy_workspace_app(tmp_path)
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         response = client.get(
             "/service/browser/viewer/index.html?session=abc",
             headers={"accept": "text/html", "sec-fetch-mode": "navigate"},
@@ -464,7 +828,7 @@ def test_legacy_service_path_unknown_service_passes_through_to_shell(tmp_path: P
         return httpx.Response(200, text="shell served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
         response = client.get(
             "/service/never-registered/",
@@ -485,7 +849,7 @@ def test_legacy_service_path_non_navigation_passes_through_to_shell(tmp_path: Pa
         return httpx.Response(200, text="shell served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_shell_marker), follow_redirects=False)
         response = client.get(
             "/service/terminal/__sw.js",
@@ -505,9 +869,7 @@ def test_legacy_service_path_on_non_shell_origin_passes_through(tmp_path: Path) 
         return httpx.Response(200, text="terminal served this")
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(
-        app, base_url=f"http://terminal.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
-    ) as client:
+    with TestClient(app, base_url=_agent_origin("terminal"), follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(
             transport=httpx.MockTransport(_terminal_marker), follow_redirects=False
         )
@@ -520,6 +882,7 @@ def test_legacy_service_path_on_non_shell_origin_passes_through(tmp_path: Path) 
     assert response.text == "terminal served this"
 
 
+@pytest.mark.witnesses("forwarding.owner-identity-stamped")
 def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path: Path) -> None:
     """The proxy stamps X-Share-Owner=true and never trusts a client-supplied identity.
 
@@ -527,20 +890,11 @@ def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path:
     X-Share-Email on the inbound request must be dropped and the authoritative
     owner flag injected before the backend sees it.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    app, auth_store, resolver = _make_forward_app(tmp_path)
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
     resolver.update_services(
         instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
-    )
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
     )
 
     seen_headers: dict[str, str] = {}
@@ -550,7 +904,7 @@ def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path:
         return httpx.Response(200, json={"ok": True})
 
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/api/health",
@@ -566,6 +920,181 @@ def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path:
     assert SHARE_EMAIL_HEADER.lower() not in seen_headers
 
 
+# -- HTTP byte-forwarding fidelity (request/response passthrough) -----------
+#
+# These drive a proxied request through the real forward handler against a
+# ``MockTransport`` backend, so the assertions are on exactly the request the
+# backend received and the response the client got back.
+
+
+def _make_forwarding_app(
+    tmp_path: Path,
+    handler: Callable[[httpx.Request], httpx.Response],
+    preauth: str,
+) -> tuple[FastAPI, httpx.AsyncClient]:
+    """A forward app whose sole agent proxies to a ``MockTransport`` running ``handler``."""
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-backend")
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
+    return app, mock_client
+
+
+@pytest.mark.witnesses(
+    "forwarding.request-preserved",
+    partial="does not assert the session cookie is excluded from forwarded cookies (see test_subdomain_forward_strips_session_cookie_before_proxying_to_backend)",
+)
+def test_forwarded_request_preserves_method_path_query_body_and_host(tmp_path: Path) -> None:
+    """The backend receives the same method, path, query string, and body, with a Host naming the backend."""
+    preauth = "preauth-request-preserved"
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    app, mock_client = _make_forwarding_app(tmp_path, _capture, preauth)
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.request(
+            "POST",
+            "/some/deep/path?alpha=1&beta=two",
+            headers={"accept": "application/json", "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            content=b'{"payload":"body-bytes"}',
+        )
+
+    assert response.status_code == 200
+    assert len(captured) == 1
+    forwarded = captured[0]
+    assert forwarded.method == "POST"
+    assert forwarded.url.path == "/some/deep/path"
+    assert forwarded.url.query == b"alpha=1&beta=two"
+    assert forwarded.content == b'{"payload":"body-bytes"}'
+    # The Host header names the backend, not the agent origin the client addressed.
+    assert forwarded.headers["host"] == "stub-backend"
+    assert f"{_TEST_AGENT_ID}.localhost" not in forwarded.headers["host"]
+
+
+@pytest.mark.witnesses("forwarding.response-preserved")
+def test_buffered_backend_response_returns_to_client_unchanged(tmp_path: Path) -> None:
+    """A buffered response's status, remaining headers (duplicates included), and body pass back untouched."""
+    preauth = "preauth-response-preserved"
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            201,
+            headers=[
+                ("x-backend-marker", "backend-value"),
+                ("set-cookie", "first=1"),
+                ("set-cookie", "second=2"),
+            ],
+            content=b"backend body bytes",
+        )
+
+    app, mock_client = _make_forwarding_app(tmp_path, _answer, preauth)
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/thing",
+            headers={"accept": "application/json", "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+        )
+
+    assert response.status_code == 201
+    assert response.content == b"backend body bytes"
+    assert response.headers["x-backend-marker"] == "backend-value"
+    # Duplicate headers pass through intact: both Set-Cookie values reach the client.
+    assert response.headers.get_list("set-cookie") == ["first=1", "second=2"]
+
+
+@pytest.mark.witnesses("forwarding.frame-ancestors-appended")
+def test_forwarded_response_carries_backend_headers_plus_appended_frame_ancestors(tmp_path: Path) -> None:
+    """A proxied response keeps the backend's own headers and gains an appended frame-ancestors CSP.
+
+    The backend sets its own content-security-policy; the proxy appends its
+    frame-ancestors policy as an additional CSP header rather than replacing it,
+    so the two compose by intersection.
+    """
+    preauth = "preauth-frame-ancestors"
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            headers=[("x-backend-marker", "backend-value"), ("content-security-policy", "default-src 'self'")],
+            content=b"ok",
+        )
+
+    app, mock_client = _make_forwarding_app(tmp_path, _answer, preauth)
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/page",
+            headers={"accept": "application/json", "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+        )
+
+    assert response.status_code == 200
+    # The backend's own header passes through unchanged.
+    assert response.headers["x-backend-marker"] == "backend-value"
+    # The proxy APPENDS its frame-ancestors policy as an additional CSP header
+    # (the two compose by intersection) rather than altering the backend's.
+    policies = response.headers.get_list("content-security-policy")
+    assert "default-src 'self'" in policies
+    assert any("frame-ancestors" in policy for policy in policies)
+    assert len(policies) == 2
+
+
+@pytest.mark.witnesses("forwarding.redirects-not-followed")
+def test_backend_redirect_is_forwarded_and_not_followed(tmp_path: Path) -> None:
+    """A backend 3xx reaches the client as-is; the proxy never follows it to a second request."""
+    preauth = "preauth-redirect"
+    request_count = [0]
+
+    def _redirect(request: httpx.Request) -> httpx.Response:
+        del request
+        request_count[0] += 1
+        return httpx.Response(302, headers=[("location", "https://elsewhere.example/landing")])
+
+    app, mock_client = _make_forwarding_app(tmp_path, _redirect, preauth)
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/go",
+            headers={"accept": "application/json", "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+        )
+
+    # The client receives the backend's redirect itself, unchanged.
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://elsewhere.example/landing"
+    # The proxy does not follow it: exactly one backend request was made.
+    assert request_count[0] == 1
+
+
+@pytest.mark.witnesses("forwarding.backend-error-forwarded")
+@pytest.mark.witnesses(
+    "forwarding.errors-pass-through",
+    partial="witnesses passthrough for a representative non-success status (418); the rule quantifies over all non-success statuses and bodies, which no finite test set closes",
+)
+def test_backend_error_status_and_body_reach_the_client_unchanged(tmp_path: Path) -> None:
+    """A backend error response (its own status and body) is forwarded to the client exactly."""
+    preauth = "preauth-error-passthrough"
+
+    def _error(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(418, content=b"backend's own teapot page")
+
+    app, mock_client = _make_forwarding_app(tmp_path, _error, preauth)
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        response = client.get(
+            "/api/thing",
+            headers={"accept": "application/json", "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+        )
+
+    assert response.status_code == 418
+    assert response.content == b"backend's own teapot page"
+
+
+@pytest.mark.witnesses("authentication.bridge-signed-out")
 def test_goto_unauthenticated_redirects_to_root(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
@@ -575,23 +1104,83 @@ def test_goto_unauthenticated_redirects_to_root(
     assert response.headers["location"] == "/"
 
 
+@pytest.mark.witnesses(
+    "single-credential",
+    partial="witnesses the bare-origin session minting a bridge token without user interaction; the redemption half and the every-agent reach are witnessed separately",
+)
 def test_goto_authenticated_redirects_to_subdomain_with_token(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
     client, store, _resolver = app_setup
     cookie = create_session_cookie(store.get_signing_key())
     # Use a 32-hex id so the HostId() validator accepts it.
-    valid_host_id = "host-" + "0" * 31 + "a"
     response = client.get(
-        f"/goto/{valid_host_id}/",
+        f"/goto/{_UNREGISTERED_HOST_ID}/",
         cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
     )
     assert response.status_code == 302
     location = response.headers["location"]
-    assert location.startswith(f"http://{valid_host_id}.localhost:18421/_subdomain_auth?token=")
+    assert location.startswith(f"http://{_UNREGISTERED_HOST_ID}.localhost:18421/_subdomain_auth?token=")
     assert "next=%2F" in location
 
 
+@pytest.mark.witnesses(
+    "single-credential",
+    partial="witnesses that one bare-origin session mints bridge tokens for distinct agents without re-auth; the 'current and future' quantifier over all agents stays open",
+)
+def test_one_session_reaches_multiple_agents_without_reauth(
+    app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
+) -> None:
+    """A single bare-origin sign-in carries onto every agent origin.
+
+    The same session cookie mints a bridge token for two distinct agents with
+    no interactive re-auth in between -- the user never handles a second,
+    per-agent credential.
+    """
+    client, store, _resolver = app_setup
+    cookie = create_session_cookie(store.get_signing_key())
+    agent_a = "agent-" + "a" * 32
+    agent_b = "agent-" + "b" * 32
+    for agent_id in (agent_a, agent_b):
+        response = client.get(f"/goto/{agent_id}/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie})
+        assert response.status_code == 302, agent_id
+        assert response.headers["location"].startswith(f"http://{agent_id}.localhost:18421/_subdomain_auth?token="), (
+            agent_id
+        )
+
+
+@pytest.mark.witnesses("unsafe-next-ignored")
+def test_goto_bridge_ignores_cross_origin_next_and_lands_on_root(tmp_path: Path) -> None:
+    """Following the goto bridge with a cross-origin destination lands on "/".
+
+    The signed-in user asks the bridge for an off-origin ``next``; the bridge
+    carries only the sanitized destination onto the agent origin, and redeeming
+    the minted token there lands the browser on "/" -- never off-origin.
+    """
+    app, auth_store, _resolver = _make_forward_app(tmp_path)
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    agent_id = "agent-" + "a" * 32
+    with TestClient(app, follow_redirects=False) as client:
+        goto = client.get(
+            f"/goto/{agent_id}/?next=//evil.com/path",
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+        assert goto.status_code == 302
+        assert "evil.com" not in goto.headers["location"]
+        bridge_location = urlsplit(goto.headers["location"])
+        # The bridge already collapsed the cross-origin destination to "/".
+        assert parse_qs(bridge_location.query)["next"] == ["/"]
+        # Follow the bridge to the agent origin's token-redemption endpoint.
+        redeemed = client.get(
+            f"{bridge_location.path}?{bridge_location.query}",
+            headers={"host": bridge_location.netloc},
+        )
+    assert redeemed.status_code == 302
+    # The destination actually used is the default, not the cross-origin target.
+    assert redeemed.headers["location"] == "/"
+
+
+@pytest.mark.witnesses("authentication.bridge-unparseable-coordinate")
 def test_goto_rejects_malformed_host_ids(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
@@ -621,15 +1210,18 @@ def test_goto_lowercases_uppercase_host_ids(
     assert location.startswith(f"http://{upper_host_id.lower()}.localhost:18421/_subdomain_auth?token=")
 
 
+@pytest.mark.witnesses(
+    "no-open-redirects",
+    partial="witnesses the goto bridge call site; the full input space and every route are witnessed elsewhere",
+)
 def test_goto_rejects_protocol_relative_next(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
     """`/goto/<agent>/?next=//evil.com` must be sanitized to `/`, not propagated as-is."""
     client, store, _resolver = app_setup
     cookie = create_session_cookie(store.get_signing_key())
-    valid_host_id = "host-" + "0" * 31 + "a"
     response = client.get(
-        f"/goto/{valid_host_id}/?next=//evil.com/path",
+        f"/goto/{_UNREGISTERED_HOST_ID}/?next=//evil.com/path",
         cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
     )
     assert response.status_code == 302
@@ -640,35 +1232,33 @@ def test_goto_rejects_protocol_relative_next(
     assert "evil.com" not in location
 
 
+@pytest.mark.witnesses(
+    "no-open-redirects",
+    partial="witnesses the /_subdomain_auth bridge call site; the full input space and every route are witnessed elsewhere",
+)
 def test_subdomain_auth_bridge_rejects_protocol_relative_next(tmp_path: Path) -> None:
     """`/_subdomain_auth?next=//evil.com&token=<valid>` must Location: / not //evil.com.
 
     Uses ``TestClient`` as a context manager so the FastAPI lifespan runs and the
     subdomain-routing middleware can read ``app.state.http_client``.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
+    app, auth_store, _resolver = _make_forward_app(tmp_path)
+    token = create_subdomain_auth_token(
+        signing_key=auth_store.get_signing_key(), origin_coordinate=_UNREGISTERED_HOST_ID
     )
-    valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=//evil.com/path",
-            headers={"host": f"{valid_host_id}.localhost:18421"},
+            headers={"host": f"{_UNREGISTERED_HOST_ID}.localhost:18421"},
         )
     assert response.status_code == 302
     assert response.headers["location"] == "/"
 
 
+@pytest.mark.witnesses(
+    "no-open-redirects",
+    partial="enumerates the destination classification (leading slash, scheme, host, protocol-relative); the universal 'no open redirect on any route' claim stays open",
+)
 def test_sanitize_next_url() -> None:
     """Direct unit coverage of the helper used by both bridge call sites."""
     assert _sanitize_next_url("/") == "/"
@@ -681,25 +1271,41 @@ def test_sanitize_next_url() -> None:
     assert _sanitize_next_url("") == "/"
 
 
+@pytest.mark.witnesses("authentication.preauth-accepted")
 def test_preauth_cookie_short_circuit(tmp_path: Path) -> None:
-    """A pre-shared cookie value is accepted without a signature check."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value="opaque-pre-shared-token",
-    )
+    """A pre-shared cookie value is accepted without a signature check.
+
+    Witnesses ``authentication.preauth-accepted``: a browser whose session
+    cookie is exactly the preauth value is treated as signed in on the bare
+    origin (the signed-in index, not the login page), and no one-time code is
+    spent (a code registered beforehand is still consumable afterward, since
+    the preauth path never touches the OTP store).
+    """
+    app, auth_store, _resolver = _make_forward_app(tmp_path, preauth_cookie_value="opaque-pre-shared-token")
+    code = OneTimeCode("unspent-during-preauth")
+    auth_store.add_one_time_code(code=code)
     client = TestClient(app, follow_redirects=False)
     response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: "opaque-pre-shared-token"})
     assert response.status_code == 200
     assert "Discovered agents" in response.text
+    # The code is still valid, so nothing consumed it during the preauth request.
+    assert auth_store.validate_and_consume_code(code=code) is True
+
+
+@pytest.mark.witnesses("authentication.preauth-near-miss")
+def test_preauth_near_miss_is_signed_out(tmp_path: Path) -> None:
+    """Witnesses ``authentication.preauth-near-miss``: with a preauth value
+    configured, a bare-origin cookie that differs from it in any way and is not
+    a signed token issued by this proxy falls back to signature verification
+    and is treated as signed out (the login page, not the signed-in index).
+    """
+    app, _auth_store, _resolver = _make_forward_app(tmp_path, preauth_cookie_value="opaque-pre-shared-token")
+    client = TestClient(app, follow_redirects=False)
+    # One character off the preauth value, and not a signed session token.
+    response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: "opaque-pre-shared-token-almost"})
+    assert response.status_code == 200
+    assert "Sign in" in response.text
+    assert "Discovered agents" not in response.text
 
 
 def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path) -> None:
@@ -717,25 +1323,10 @@ def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path)
     subdomain handler then sets a fresh subdomain cookie, and the user
     lands in their workspace without an interactive re-auth.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
     listen_port = 18421
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=listen_port,
-    )
-    with TestClient(
-        app, base_url=f"http://{_TEST_AGENT_ID}.localhost:{listen_port}", follow_redirects=False
-    ) as client:
+    app, _auth_store, resolver = _make_forward_app(tmp_path, listen_port=listen_port)
+    _register_default_service(resolver, "http://stub-backend")
+    with TestClient(app, base_url=_agent_origin(port=listen_port), follow_redirects=False) as client:
         response = client.get(
             "/",
             headers={
@@ -750,29 +1341,33 @@ def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path)
     assert response.headers["Location"] == f"http://localhost:{listen_port}/goto/{_TEST_AGENT_ID}/?next=%2F"
 
 
+@pytest.mark.witnesses("unauthenticated-agent-non-html")
+@pytest.mark.witnesses(
+    "no-data-without-session",
+    partial="witnesses the non-HTML agent-origin surface; not every surface or interleaving",
+)
 def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
     """Stale cookie on a non-HTML request still returns 403 (no goto redirect).
 
     The /goto/ self-heal applies only to navigational HTML loads; an
     XHR / API call carrying a stale cookie has no browser to follow
-    the redirect and should get a clean 403 instead.
+    the redirect and should get a clean 403 instead. The refusal happens
+    before any backend is dialed, so the agent's registered backend is never
+    contacted.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-    )
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    app, _auth_store, resolver = _make_forward_app(tmp_path)
+    _register_default_service(resolver, "http://stub-backend")
+
+    contacted: list[httpx.Request] = []
+
+    def _record_contact(request: httpx.Request) -> httpx.Response:
+        contacted.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_record_contact), follow_redirects=False
+        )
         response = client.get(
             "/api/something",
             headers={
@@ -782,11 +1377,30 @@ def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
         )
 
     assert response.status_code == 403
+    # 403, not a redirect: the response carries no Location.
+    assert "location" not in response.headers
+    # No backend is contacted -- the refusal precedes any resolution/forwarding.
+    assert contacted == []
 
 
+@pytest.mark.witnesses("authentication.preauth-on-agent-origins")
+@pytest.mark.witnesses(
+    "forwarding.request-preserved",
+    partial="covers only that the session cookie is not among the forwarded cookies; method/path/query/body/Host preservation is witnessed by test_forwarded_request_preserves_method_path_query_body_and_host",
+)
+@pytest.mark.witnesses("only-session-cookie-stripped")
+@pytest.mark.witnesses(
+    "credential-not-forwarded",
+    partial="witnesses the HTTP forward path with a co-present cookie; not every request or method",
+)
 def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_path: Path) -> None:
     """The plugin must NEVER forward its own session cookie to the agent's
     system_interface.
+
+    Also witnesses ``authentication.preauth-on-agent-origins``: the request
+    carries the exact preauth value as its session cookie on an agent origin
+    and is treated as signed in there -- it is forwarded to the backend rather
+    than refused (a signed-out agent-origin request never reaches a backend).
 
     The cookie value is the plugin's auth credential -- a backend that sees
     it could replay it against ``localhost:<plugin_port>`` and reach every
@@ -794,23 +1408,9 @@ def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_
     forwarder explicitly strips ``mngr_forward_session=...`` from the
     outbound ``Cookie`` header; this regression test locks that in.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "opaque-preauth-cookie-value"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-backend")
 
     captured: list[httpx.Request] = []
 
@@ -820,7 +1420,7 @@ def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         # Replace the lifespan-created http_client with one whose transport we
         # control. Local agents (``ssh_info is None``) use ``app.state.http_client``
         # directly -- no SSH tunnel client to override.
@@ -845,6 +1445,11 @@ def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_
     )
 
 
+@pytest.mark.witnesses("only-session-cookie-stripped")
+@pytest.mark.witnesses(
+    "credential-not-forwarded",
+    partial="witnesses the HTTP forward path when the session cookie is the sole cookie; not every request or method",
+)
 def test_subdomain_forward_strips_session_cookie_when_only_session_cookie_present(
     tmp_path: Path,
 ) -> None:
@@ -852,23 +1457,9 @@ def test_subdomain_forward_strips_session_cookie_when_only_session_cookie_presen
     the outbound request must end up with no Cookie header at all (not an
     empty-string Cookie that some backends might still parse).
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "opaque-preauth-cookie-value"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-backend")
 
     captured: list[httpx.Request] = []
 
@@ -878,7 +1469,7 @@ def test_subdomain_forward_strips_session_cookie_when_only_session_cookie_presen
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/whatever",
@@ -915,6 +1506,11 @@ def test_is_loopback_url() -> None:
         "http://[::1]:8000",
     ],
 )
+@pytest.mark.witnesses("forwarding.loopback-refused")
+@pytest.mark.witnesses(
+    "forwarding.never-serves-host-loopback",
+    partial="witnesses the HTTP request surface only; the rule quantifies over every request and connection",
+)
 def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     tmp_path: Path,
     loopback_url: str,
@@ -928,24 +1524,14 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     treatment as an SSH-tunnel setup failure -- so a consumer can drive its
     own recovery UI instead of the user seeing a raw error.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": loopback_url}, {})
-    tunnel_manager = SSHTunnelManager()
     envelope_output = io.StringIO()
-    envelope_writer = EnvelopeWriter(output=envelope_output)
     preauth = "opaque-preauth-cookie-value"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        envelope_output=envelope_output,
         preauth_cookie_value=preauth,
     )
+    _register_default_service(resolver, loopback_url)
 
     captured: list[httpx.Request] = []
 
@@ -955,7 +1541,7 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/whatever",
@@ -977,26 +1563,15 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     assert payload["reason"] == "CONNECT_ERROR"
 
 
+@pytest.mark.witnesses(
+    "forwarding.never-serves-host-loopback",
+    partial="witnesses the operator opt-in escape hatch only, not the default refusal across every request and connection",
+)
 def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path) -> None:
     """``allow_host_loopback=True`` (the legacy DEV-mode escape hatch) restores the old fallback path."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://127.0.0.1:8000"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "opaque-preauth-cookie-value"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-        allow_host_loopback=True,
-    )
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True)
+    _register_default_service(resolver, "http://127.0.0.1:8000")
 
     captured: list[httpx.Request] = []
 
@@ -1006,7 +1581,7 @@ def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/whatever",
@@ -1020,25 +1595,11 @@ def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path
 def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path: Path) -> None:
     """When the backend refuses the connection (system_interface still booting), HTML callers
     must get the auto-refresh retry page rather than a hard 502."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
+    preauth = "opaque-preauth-cookie-value"
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
     # Non-loopback URL so we don't trip the loopback-refusal path; the
     # retry-page behaviour is independent of that check.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    preauth = "opaque-preauth-cookie-value"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
+    _register_default_service(resolver, "http://stub-backend")
 
     async def _refuse(request: httpx.Request) -> httpx.Response:
         del request
@@ -1046,7 +1607,7 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_refuse), follow_redirects=False)
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         html_response = client.get(
             "/",
@@ -1075,12 +1636,108 @@ def test_subdomain_forward_returns_retry_page_on_backend_connect_error(tmp_path:
     assert json_response.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "condition, accepts_html",
+    [
+        ("not_yet_known", True),
+        ("not_yet_known", False),
+        ("cannot_be_reached", True),
+        ("cannot_be_reached", False),
+    ],
+)
+@pytest.mark.witnesses("forwarding.unavailable-503")
+def test_unavailable_backend_answers_503_shaped_for_the_caller(
+    tmp_path: Path, condition: str, accepts_html: bool
+) -> None:
+    """Before any response header arrives, a not-yet-known backend and one that
+    cannot be reached are indistinguishable to the client: each is a clean 503,
+    the styled loading page for a browser and a plain body with no redirect for
+    a programmatic caller.
+
+    Witnesses forwarding.unavailable-503 across all four example rows.
+    """
+    preauth = "preauth-503-shape"
+    accept = "text/html,application/xhtml+xml" if accepts_html else "application/json"
+    cookie = f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"
+
+    if condition == "cannot_be_reached":
+        # A known agent whose (registered) backend the proxy cannot reach: the
+        # dial raises ConnectError before any response header arrives.
+        instance_key = _make_test_instance_key()
+        app, _captured, _env_out, mock_client = _make_forward_app_with_capture(
+            tmp_path, instance_key, preauth, raise_error=httpx.ConnectError
+        )
+        with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+            app.state.http_client = mock_client
+            response = client.get("/", headers={"cookie": cookie, "accept": accept})
+    else:
+        # A known agent whose backend is not yet known: the requested service
+        # origin has no registered backend, so the resolver returns nothing.
+        app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+        instance_key = _register_default_service(resolver, "http://stub-default-service")
+        with TestClient(app, base_url=_agent_origin("notyet"), follow_redirects=False) as client:
+            response = client.get("/", headers={"cookie": cookie, "accept": accept})
+
+    assert response.status_code == 503
+    if accepts_html:
+        assert "Loading workspace" in response.text
+    else:
+        # A plain body, and no redirect: 503 is not a 3xx and carries no Location.
+        assert "Loading workspace" not in response.text
+        assert "location" not in {header_name.lower() for header_name in response.headers}
+
+
+@pytest.mark.witnesses(
+    "forwarding.loading-page-self-heals",
+    partial="asserts the page's self-healing poll+reload script and that the reload target answers; a real browser executing that script is out of the in-process HTTP surface",
+)
+def test_loading_page_self_heals_once_the_backend_answers(tmp_path: Path) -> None:
+    """The loading page waits and enters the agent on its own once the backend answers.
+
+    Witnesses forwarding.loading-page-self-heals at the HTTP surface: the served
+    503 page carries a script that polls the origin in the background (fetch) and
+    reloads itself (location.reload) when the backend answers -- the user never
+    reloads manually -- and the URL that script reloads returns the workspace
+    itself once the backend starts answering.
+    """
+    preauth = "preauth-self-heal"
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-backend")
+
+    is_backend_up = threading.Event()
+
+    async def _backend(request: httpx.Request) -> httpx.Response:
+        del request
+        if not is_backend_up.is_set():
+            raise httpx.ConnectError("backend still starting")
+        return httpx.Response(200, text="workspace is up")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_backend), follow_redirects=False)
+    cookie = f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"
+    html_headers = {"cookie": cookie, "accept": "text/html,application/xhtml+xml"}
+
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        loading = client.get("/", headers=html_headers)
+        # The page notices on its own and reloads itself when the backend answers.
+        assert loading.status_code == 503
+        assert "Loading workspace" in loading.text
+        assert "fetch(" in loading.text
+        assert "location.reload" in loading.text
+
+        # When that agent's backend starts answering, the URL the loader reloads
+        # returns the workspace, so the page lands the user in the agent.
+        is_backend_up.set()
+        healed = client.get("/", headers=html_headers)
+        assert healed.status_code == 200
+        assert "workspace is up" in healed.text
+
+
 # -- system_interface_backend_failure envelope + recovery redirect tests --
 
 
 def _make_forward_app_with_capture(
     tmp_path: Path,
-    capture: list[httpx.Request],
     instance_key: AgentInstanceKey,
     preauth: str,
     *,
@@ -1088,24 +1745,17 @@ def _make_forward_app_with_capture(
     raise_error: type[Exception] | None = None,
     backend_delay_seconds: float = 0.0,
     stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
-) -> tuple[FastAPI, io.StringIO, httpx.AsyncClient]:
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    tunnel_manager = SSHTunnelManager()
+) -> tuple[FastAPI, list[httpx.Request], io.StringIO, httpx.AsyncClient]:
+    capture: list[httpx.Request] = []
     envelope_output = io.StringIO()
-    envelope_writer = EnvelopeWriter(output=envelope_output)
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        envelope_output=envelope_output,
         preauth_cookie_value=preauth,
         stall_notice_seconds=stall_notice_seconds,
     )
+    resolver.add_known_agent(instance_key)
+    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
 
     async def _capture(request: httpx.Request) -> httpx.Response:
         capture.append(request)
@@ -1123,37 +1773,52 @@ def _make_forward_app_with_capture(
     mock_client = httpx.AsyncClient(
         transport=httpx.MockTransport(_capture), follow_redirects=False, timeout=_PROXY_TIMEOUT
     )
-    return app, envelope_output, mock_client
+    return app, capture, envelope_output, mock_client
 
 
 def _envelope_lines(envelope_output: io.StringIO) -> list[str]:
     return [line for line in envelope_output.getvalue().splitlines() if line.strip()]
 
 
-def test_subdomain_forward_emits_system_interface_backend_failure_on_5xx(tmp_path: Path) -> None:
-    """A 5xx backend response triggers an ``ERROR_RESPONSE`` ``system_interface_backend_failure`` envelope."""
+@pytest.mark.parametrize(
+    "method, path, backend_status, preauth",
+    [
+        ("GET", "/api/state", 503, "preauth-cookie-1"),
+        # The plugin does not interpret which status codes matter: it forwards
+        # the response unchanged and surfaces the status for the consumer.
+        ("GET", "/api/agents/agent-deadbeef/screen", 404, "preauth-cookie-404"),
+        # Method-agnostic; it previously skipped non-GET 404s.
+        ("POST", "/api/agents/agent-deadbeef/message", 404, "preauth-cookie-404-post"),
+        # Application-layer 5xx too; it previously suppressed non-infrastructure
+        # 500s, and now leaves that policy to the consumer.
+        ("GET", "/api/state", 500, "preauth-cookie-500"),
+    ],
+    ids=("5xx", "404", "404-on-post", "application-500"),
+)
+def test_subdomain_forward_emits_error_response_for_any_non_2xx(
+    tmp_path: Path, method: str, path: str, backend_status: int, preauth: str
+) -> None:
+    """Every non-2xx backend response emits exactly one ``ERROR_RESPONSE`` envelope carrying its status."""
     instance_key = _make_test_instance_key()
-    preauth = "preauth-cookie-1"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
-        backend_status=503,
+        backend_status=backend_status,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
-        response = client.get(
-            "/api/state",
+        response = client.request(
+            method,
+            path,
             headers={
                 "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
                 "accept": "application/json",
             },
         )
 
-    assert response.status_code == 503
+    assert response.status_code == backend_status
     lines = _envelope_lines(env_out)
     assert len(lines) == 1
     envelope = json.loads(lines[0])
@@ -1162,23 +1827,21 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_5xx(tmp_pat
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == "ERROR_RESPONSE"
-    assert payload["status_code"] == 503
+    assert payload["status_code"] == backend_status
 
 
 def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
     """A successful backend response must not produce a failure envelope."""
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-ok"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         backend_status=200,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1190,115 +1853,6 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert _envelope_lines(env_out) == []
-
-
-def test_subdomain_forward_emits_error_response_on_404(tmp_path: Path) -> None:
-    """Any non-2xx response (here a 404) emits a single ``ERROR_RESPONSE`` envelope.
-
-    The plugin does not interpret which status codes matter; it forwards the
-    response unchanged and surfaces the status code so the consumer can decide.
-    """
-    instance_key = _make_test_instance_key()
-    preauth = "preauth-cookie-404"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
-        tmp_path,
-        captured,
-        instance_key,
-        preauth,
-        backend_status=404,
-    )
-
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
-        app.state.http_client = mock_client
-        response = client.get(
-            "/api/agents/agent-deadbeef/screen",
-            headers={
-                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
-                "accept": "application/json",
-            },
-        )
-
-    assert response.status_code == 404
-    lines = _envelope_lines(env_out)
-    assert len(lines) == 1
-    payload = json.loads(lines[0])["payload"]
-    assert payload["type"] == "system_interface_backend_failure"
-    assert payload["reason"] == "ERROR_RESPONSE"
-    assert payload["status_code"] == 404
-
-
-def test_subdomain_forward_emits_error_response_regardless_of_method(tmp_path: Path) -> None:
-    """Emission is method-agnostic: a non-GET non-2xx response also emits ``ERROR_RESPONSE``.
-
-    The plugin no longer special-cases the request method (it previously
-    skipped non-GET 404s). Any non-2xx is surfaced with its status code and
-    the consumer decides what to do with it.
-    """
-    instance_key = _make_test_instance_key()
-    preauth = "preauth-cookie-404-post"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
-        tmp_path,
-        captured,
-        instance_key,
-        preauth,
-        backend_status=404,
-    )
-
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
-        app.state.http_client = mock_client
-        response = client.post(
-            "/api/agents/agent-deadbeef/message",
-            headers={
-                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
-                "accept": "application/json",
-            },
-        )
-
-    assert response.status_code == 404
-    lines = _envelope_lines(env_out)
-    assert len(lines) == 1
-    payload = json.loads(lines[0])["payload"]
-    assert payload["type"] == "system_interface_backend_failure"
-    assert payload["reason"] == "ERROR_RESPONSE"
-    assert payload["status_code"] == 404
-
-
-def test_subdomain_forward_emits_error_response_on_application_500(tmp_path: Path) -> None:
-    """An application-layer 500 now emits ``ERROR_RESPONSE`` too.
-
-    The plugin used to suppress non-infrastructure 5xx (e.g. a 500 stack
-    trace). It now surfaces every non-2xx and leaves that policy to the
-    consumer (a consumer may, for instance, choose to ignore app 500s).
-    """
-    instance_key = _make_test_instance_key()
-    preauth = "preauth-cookie-500"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
-        tmp_path,
-        captured,
-        instance_key,
-        preauth,
-        backend_status=500,
-    )
-
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
-        app.state.http_client = mock_client
-        response = client.get(
-            "/api/state",
-            headers={
-                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
-                "accept": "application/json",
-            },
-        )
-
-    assert response.status_code == 500
-    lines = _envelope_lines(env_out)
-    assert len(lines) == 1
-    payload = json.loads(lines[0])["payload"]
-    assert payload["reason"] == "ERROR_RESPONSE"
-    assert payload["status_code"] == 500
 
 
 def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
@@ -1314,16 +1868,14 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-sse-startup"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         raise_error=httpx.RemoteProtocolError,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/events",
@@ -1348,16 +1900,14 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
     """Non-HTML callers (API clients) get the plain 503 with no location header."""
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-json"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         raise_error=httpx.ConnectError,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1371,6 +1921,10 @@ def test_subdomain_forward_returns_plain_503_for_non_html_on_connect_failure(tmp
     assert "location" not in {k.lower() for k in response.headers}
 
 
+@pytest.mark.witnesses(
+    "forwarding.wedged-backend-504",
+    partial="the SSE-startup variant of a backend that accepts but never answers; the buffered variant is witnessed separately",
+)
 def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_timeout(tmp_path: Path) -> None:
     """``TimeoutException`` on an SSE-startup ``send()`` must emit ``CONNECT_ERROR``.
 
@@ -1382,16 +1936,14 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-sse-timeout"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         raise_error=httpx.ConnectTimeout,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/events",
@@ -1412,6 +1964,7 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup
     assert payload["reason"] == "CONNECT_ERROR"
 
 
+@pytest.mark.witnesses("forwarding.wedged-backend-504")
 def test_subdomain_forward_emits_system_interface_backend_failure_on_non_sse_timeout(tmp_path: Path) -> None:
     """``TimeoutException`` on a non-SSE backend request must emit ``CONNECT_ERROR``.
 
@@ -1422,16 +1975,14 @@ def test_subdomain_forward_emits_system_interface_backend_failure_on_non_sse_tim
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-json-timeout"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         raise_error=httpx.ConnectTimeout,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/state",
@@ -1465,10 +2016,9 @@ def test_sse_backend_requests_keep_a_tighter_read_budget_than_buffered_ones(tmp_
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-read-budget"
-    captured: list[httpx.Request] = []
-    app, _env_out, mock_client = _make_forward_app_with_capture(tmp_path, captured, instance_key, preauth)
+    app, captured, _env_out, mock_client = _make_forward_app_with_capture(tmp_path, instance_key, preauth)
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         cookie = f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"
         sse_response = client.get("/api/events", headers={"cookie": cookie, "accept": "text/event-stream"})
@@ -1491,17 +2041,15 @@ def test_subdomain_forward_reports_a_stalled_backend_without_abandoning_the_requ
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-stall"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         backend_delay_seconds=0.5,
         stall_notice_seconds=0.05,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/slow",
@@ -1533,17 +2081,15 @@ def test_subdomain_forward_emits_no_stall_envelope_when_the_backend_answers_in_t
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-no-stall"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         backend_delay_seconds=0.0,
         stall_notice_seconds=0.05,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/api/quick",
@@ -1618,67 +2164,39 @@ async def _drive_request_until_client_disconnects(
     return time.monotonic() - started_at, sent_types, sent_status
 
 
-def test_subdomain_forward_abandons_the_backend_when_the_client_gives_up(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "path, accept_header, preauth",
+    [
+        # Buffered: the handler never reads the receive channel, so the
+        # disconnect goes unnoticed and the request runs on to the backstop.
+        ("/api/state", b"application/json", "preauth-cookie-disconnect"),
+        # SSE: starlette guards the body once the streaming response exists
+        # (hypercorn advertises ASGI spec 2.1, so ``StreamingResponse.__call__``
+        # races ``listen_for_disconnect``), but nothing guarded the window
+        # before it -- opening the backend stream -- so a client that left
+        # during the handoff held its pooled connection until the read budget.
+        ("/api/events", b"text/event-stream", "preauth-cookie-sse-disconnect"),
+    ],
+    ids=("buffered", "sse-handoff"),
+)
+def test_subdomain_forward_abandons_the_backend_when_the_client_gives_up(
+    tmp_path: Path, path: str, accept_header: bytes, preauth: str
+) -> None:
     """A client that disconnects releases the backend request instead of pinning it.
 
     minds' health probe allows a workspace 2 seconds and then hangs up, but the
-    plugin-side handler outlives that timeout -- a buffered handler never reads
-    the receive channel, so the disconnect goes unnoticed. Left running to the
-    backstop, those abandoned probes accumulate at roughly one every four
-    seconds against the proxy's connection pool, and for a remote agent each one
-    also pins an SSH channel and its relay thread.
+    plugin-side handler outlives that timeout. Left running to the backstop,
+    those abandoned probes accumulate at roughly one every four seconds against
+    the proxy's connection pool, and for a remote agent each one also pins an
+    SSH channel and its relay thread.
     """
     instance_key = _make_test_instance_key()
-    preauth = "preauth-cookie-disconnect"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         # Far longer than the disconnect, so finishing early can only mean the
         # request was abandoned rather than awaited.
-        backend_delay_seconds=5.0,
-        stall_notice_seconds=_STALL_NOTICE_SECONDS,
-    )
-    app.state.http_client = mock_client
-    app.state.ssh_http_clients = {}
-    app.state.ssh_http_clients_lock = threading.Lock()
-
-    elapsed_seconds, sent_types, sent_status = asyncio.run(
-        _drive_request_until_client_disconnects(app, "/api/state", preauth, disconnect_after_seconds=0.05)
-    )
-
-    assert elapsed_seconds < 2.0, "the handler waited for the backend instead of abandoning the request"
-    assert sent_types == ["http.response.start", "http.response.body"]
-    # 499, not the 504 a genuinely-timed-out backend gets: nothing answered
-    # wrongly here, the client stopped listening. The status is only there to
-    # end the ASGI exchange, but it must not claim success or blame the backend.
-    assert sent_status == 499
-    assert len(captured) == 1, "the backend request should have been started before being abandoned"
-    # A client hanging up says nothing about the backend's health.
-    assert _envelope_lines(env_out) == []
-
-
-def test_subdomain_forward_abandons_the_backend_stream_when_the_client_gives_up(tmp_path: Path) -> None:
-    """An SSE client that disconnects during the backend handoff releases the pooled slot.
-
-    Once the streaming response exists, starlette guards the body: hypercorn
-    advertises ASGI spec 2.1, so ``StreamingResponse.__call__`` races
-    ``listen_for_disconnect`` against the body loop. Nothing guarded the window
-    *before* that -- opening the backend stream -- so a client that left during
-    the handoff held its pooled connection until the SSE read budget expired.
-    """
-    instance_key = _make_test_instance_key()
-    preauth = "preauth-cookie-sse-disconnect"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
-        tmp_path,
-        captured,
-        instance_key,
-        preauth,
-        # Far longer than the disconnect, so finishing early can only mean the
-        # handoff was abandoned rather than awaited.
         backend_delay_seconds=5.0,
     )
     app.state.http_client = mock_client
@@ -1687,12 +2205,15 @@ def test_subdomain_forward_abandons_the_backend_stream_when_the_client_gives_up(
 
     elapsed_seconds, sent_types, sent_status = asyncio.run(
         _drive_request_until_client_disconnects(
-            app, "/api/events", preauth, disconnect_after_seconds=0.05, accept_header=b"text/event-stream"
+            app, path, preauth, disconnect_after_seconds=0.05, accept_header=accept_header
         )
     )
 
-    assert elapsed_seconds < 2.0, "the handler waited for the backend stream instead of abandoning the handoff"
+    assert elapsed_seconds < 2.0, "the handler waited for the backend instead of abandoning the request"
     assert sent_types == ["http.response.start", "http.response.body"]
+    # 499, not the 504 a genuinely-timed-out backend gets: nothing answered
+    # wrongly here, the client stopped listening. The status is only there to
+    # end the ASGI exchange, but it must not claim success or blame the backend.
     assert sent_status == 499
     assert len(captured) == 1, "the backend request should have been started before being abandoned"
     # A client hanging up says nothing about the backend's health.
@@ -1742,29 +2263,22 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(
     failure as CONNECT_ERROR is what makes minds blame (and "restart") a
     workspace that was answering all along.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-tunnel-fail"
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        tunnel_manager=_FailingTunnelManager(phase=phase),
+        envelope_output=envelope_output,
+        preauth_cookie_value=preauth,
+    )
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
+    instance_key = _register_default_service(resolver, "http://stub-backend:8000")
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
     )
-    envelope_output = io.StringIO()
-    preauth = "preauth-cookie-tunnel-fail"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=_FailingTunnelManager(phase=phase),
-        envelope_writer=EnvelopeWriter(output=envelope_output),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         html_response = client.get(
             "/",
             headers={
@@ -1790,6 +2304,15 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(
     assert "Unable to connect to port 8000 on stub-backend" in payload["detail"]
 
 
+@pytest.mark.witnesses("forwarding.ws-backend-unavailable")
+@pytest.mark.witnesses(
+    "forwarding.ws-refused-at-handshake",
+    partial=(
+        "witnesses the unreachable-backend refusal cause (closed before accept, so the client sees a "
+        "failed upgrade rather than an accepted socket); the 'carries no reason on the WebSocket layer' "
+        "clause is RFC/browser-level and not observable through the in-process ASGI test client"
+    ),
+)
 @pytest.mark.parametrize(
     "phase, expected_reason",
     [
@@ -1815,30 +2338,23 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(
     agent was never enrolled as a probe suspect, so it never reached STUCK and
     the chrome never redirected to the recovery page.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-ws-tunnel-fail"
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        tunnel_manager=_FailingTunnelManager(phase=phase),
+        envelope_output=envelope_output,
+        preauth_cookie_value=preauth,
+    )
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path,
     # where the failing tunnel manager raises during tunnel setup.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
+    instance_key = _register_default_service(resolver, "http://stub-backend:8000")
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
     )
-    envelope_output = io.StringIO()
-    preauth = "preauth-cookie-ws-tunnel-fail"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=_FailingTunnelManager(phase=phase),
-        envelope_writer=EnvelopeWriter(output=envelope_output),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421") as client:
+    with TestClient(app, base_url=_agent_origin()) as client:
         # ``websocket_connect`` ignores ``base_url`` and builds the URL against
         # ``ws://testserver``, so the agent subdomain must be in the URL itself
         # for the handler to route on the right host header. The handler closes
@@ -1861,6 +2377,55 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(
     payload = envelope["payload"]
     assert payload["type"] == "system_interface_backend_failure"
     assert payload["reason"] == expected_reason
+
+
+@pytest.mark.witnesses(
+    "forwarding.never-serves-host-loopback",
+    partial="witnesses the WebSocket connection surface only; the rule quantifies over every request and connection",
+)
+def test_subdomain_forward_websocket_refuses_loopback_without_tunnel(tmp_path: Path) -> None:
+    """A websocket to a loopback backend with no SSH tunnel must be refused, not dialed on the proxy's host.
+
+    The WebSocket analogue of
+    ``test_subdomain_forward_routes_loopback_without_tunnel_to_recovery``: a
+    loopback registered URL with no tunnel is what a stopped container looks
+    like once discovery drops its SSH info, and dialing the proxy's own
+    loopback there would serve whatever happens to be listening locally. The
+    handler refuses to dial, closes the socket with the retry code, and emits a
+    ``CONNECT_ERROR`` backend-failure envelope.
+    """
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-ws-loopback-refused"
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        envelope_output=envelope_output,
+        preauth_cookie_value=preauth,
+    )
+    # Loopback URL with no ssh_info: the handler resolves a loopback target with
+    # no tunnel, so it takes the loopback-refusal path rather than dialing.
+    _register_default_service(resolver, "http://127.0.0.1:8000")
+
+    with TestClient(app, base_url=_agent_origin()) as client:
+        # The handler closes the socket before accepting, which the test client
+        # surfaces as a WebSocketDisconnect on connect.
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws",
+                headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            ):
+                pass
+
+    # 1013 (try again later) plus the loopback-refused reason: the backend is
+    # treated as unavailable, and the refusal is the loopback path specifically
+    # rather than some other close.
+    assert exc_info.value.code == 1013
+    assert exc_info.value.reason == _WS_CLOSE_REASON_LOOPBACK_REFUSED
+    # The failure envelope is what lets a consumer drive its recovery flow.
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
 
 
 class _AcceptThenCloseTunnelManager(SSHTunnelManager):
@@ -1955,31 +2520,25 @@ def test_websocket_emits_failure_when_backend_closes_during_handshake(
     suspect -- plus the client never received the 1011 close that tells it to
     reconnect promptly.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-ws-handshake-eof"
+    tunnel_manager = _AcceptThenCloseTunnelManager(is_refusal_recorded=is_refusal_recorded)
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        tunnel_manager=tunnel_manager,
+        envelope_output=envelope_output,
+        listen_port=18422,
+        preauth_cookie_value=preauth,
+    )
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
+    instance_key = _register_default_service(resolver, "http://stub-backend:8000")
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
     )
-    envelope_output = io.StringIO()
-    preauth = "preauth-cookie-ws-handshake-eof"
-    tunnel_manager = _AcceptThenCloseTunnelManager(is_refusal_recorded=is_refusal_recorded)
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=EnvelopeWriter(output=envelope_output),
-        listen_host="127.0.0.1",
-        listen_port=18422,
-        preauth_cookie_value=preauth,
-    )
 
     try:
-        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18422") as client:
+        with TestClient(app, base_url=_agent_origin(port=18422)) as client:
             with pytest.raises(WebSocketDisconnect):
                 with client.websocket_connect(
                     f"ws://{_TEST_AGENT_ID}.localhost:18422/api/ws",
@@ -2016,31 +2575,25 @@ def test_http_forward_reports_a_refused_channel_as_the_backend_not_listening(
     passive replacement for the deleted in-container LISTEN scan: it says the
     container is up and its server is not, at every retry rather than once.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-http-refused-channel"
+    tunnel_manager = _AcceptThenCloseTunnelManager(is_refusal_recorded=is_refusal_recorded)
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        tunnel_manager=tunnel_manager,
+        envelope_output=envelope_output,
+        listen_port=18423,
+        preauth_cookie_value=preauth,
+    )
     # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path.
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend:8000"}, {})
+    instance_key = _register_default_service(resolver, "http://stub-backend:8000")
     resolver.update_ssh_info(
         instance_key,
         RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
     )
-    envelope_output = io.StringIO()
-    preauth = "preauth-cookie-http-refused-channel"
-    tunnel_manager = _AcceptThenCloseTunnelManager(is_refusal_recorded=is_refusal_recorded)
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=EnvelopeWriter(output=envelope_output),
-        listen_host="127.0.0.1",
-        listen_port=18423,
-        preauth_cookie_value=preauth,
-    )
 
     try:
-        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18423", follow_redirects=False) as client:
+        with TestClient(app, base_url=_agent_origin(port=18423), follow_redirects=False) as client:
             response = client.get(
                 "/api/state",
                 headers={
@@ -2144,23 +2697,17 @@ def _failing_backend(mode: _BackendFailureMode) -> Iterator[int]:
 
 def _make_loopback_backend_app(tmp_path: Path, port: int, preauth: str) -> tuple[FastAPI, io.StringIO]:
     """Build a forward app whose backend is a loopback port, so no tunnel is involved."""
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{port}"}, {})
     envelope_output = io.StringIO()
-    app = create_forward_app(
-        auth_store=FileAuthStore(data_directory=tmp_path),
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=envelope_output),
-        listen_host="127.0.0.1",
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        envelope_output=envelope_output,
         listen_port=18424,
         preauth_cookie_value=preauth,
         # The backend is a real socket on this machine, which is exactly what
         # the proxy otherwise refuses to dial.
         allow_host_loopback=True,
     )
+    _register_default_service(resolver, f"http://127.0.0.1:{port}")
     return app, envelope_output
 
 
@@ -2176,7 +2723,7 @@ def test_http_forward_reports_a_reset_before_the_headers_as_a_connect_failure(tm
     preauth = "preauth-cookie-reset-before-headers"
     with _failing_backend(_BackendFailureMode.RESET_BEFORE_HEADERS) as port:
         app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
-        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18424", follow_redirects=False) as client:
+        with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
             response = client.get(
                 "/api/state",
                 headers={
@@ -2196,6 +2743,7 @@ def test_http_forward_reports_a_reset_before_the_headers_as_a_connect_failure(tm
     assert payload["detail"] == "ReadError"
 
 
+@pytest.mark.witnesses("forwarding.mid-response-loss-502")
 def test_http_forward_reports_a_reset_after_the_headers_as_a_lost_body(tmp_path: Path) -> None:
     """A backend that answers and then dies mid-body is still a mid-response failure.
 
@@ -2206,7 +2754,7 @@ def test_http_forward_reports_a_reset_after_the_headers_as_a_lost_body(tmp_path:
     preauth = "preauth-cookie-reset-after-headers"
     with _failing_backend(_BackendFailureMode.RESET_AFTER_HEADERS) as port:
         app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
-        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18424", follow_redirects=False) as client:
+        with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
             response = client.get(
                 "/api/state",
                 headers={
@@ -2230,6 +2778,10 @@ def test_http_forward_reports_a_reset_after_the_headers_as_a_lost_body(tmp_path:
 _STALLED_BODY_READ_TIMEOUT_SECONDS: Final[float] = 2.0
 
 
+@pytest.mark.witnesses(
+    "forwarding.mid-response-loss-502",
+    partial="the read-timeout-under-the-body variant of a lost response; the connection-reset variant is witnessed separately",
+)
 def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_body(tmp_path: Path) -> None:
     """A read timeout under the body is a mid-response failure, not an unreachable backend.
 
@@ -2243,7 +2795,7 @@ def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_bod
     preauth = "preauth-cookie-stalled-body"
     with _failing_backend(_BackendFailureMode.STALL_AFTER_HEADERS) as port:
         app, envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
-        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18424", follow_redirects=False) as client:
+        with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
             app.state.http_client.timeout = httpx.Timeout(
                 connect=_PROXY_CONNECT_TIMEOUT_SECONDS,
                 pool=_PROXY_CONNECT_TIMEOUT_SECONDS,
@@ -2268,28 +2820,86 @@ def test_http_forward_reports_a_body_that_stalls_after_its_headers_as_a_lost_bod
     assert payload["detail"] == "ReadTimeout"
 
 
+@contextmanager
+def _sse_backend_dropping_midstream(chunk_count: int) -> Iterator[int]:
+    """Serve one SSE connection that streams ``chunk_count`` chunks, then drops.
+
+    The 200 response head and headers are delivered, then a few chunked SSE
+    events, and then the connection is reset without the terminating zero-length
+    chunk -- a backend lost partway through an event stream. Yields the loopback
+    port to point a backend URL at.
+    """
+    server = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+    server.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    server.settimeout(_STUB_BACKEND_ACCEPT_TIMEOUT_SECONDS)
+    port = int(server.getsockname()[1])
+
+    def _serve() -> None:
+        try:
+            conn, _ = server.accept()
+        except OSError:
+            return
+        with conn:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n")
+            for _ in range(chunk_count):
+                conn.sendall(b"%x\r\n%s\r\n" % (len(_SSE_KEEPALIVE_CHUNK), _SSE_KEEPALIVE_CHUNK))
+            # Drop mid-stream: reset without the terminating ``0\r\n\r\n`` chunk,
+            # so the proxy's read of the backend body fails partway through.
+            _arm_reset_on_close(conn)
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        thread.join(timeout=_STUB_BACKEND_ACCEPT_TIMEOUT_SECONDS + 1.0)
+        server.close()
+
+
+@pytest.mark.witnesses("forwarding.stream-ends")
+def test_event_stream_ends_when_the_backend_connection_is_lost_midstream(tmp_path: Path) -> None:
+    """An event stream that loses its backend simply ends.
+
+    The status and headers have already been delivered as a 200, so a mid-stream
+    loss cannot be revised into an error status; the client receives the events
+    sent before the loss and the stream then ends.
+    """
+    preauth = "preauth-stream-ends"
+    with _sse_backend_dropping_midstream(chunk_count=3) as port:
+        app, _envelope_output = _make_loopback_backend_app(tmp_path, port, preauth)
+        with TestClient(app, base_url=_agent_origin(port=18424), follow_redirects=False) as client:
+            with client.stream(
+                "GET",
+                "/api/events",
+                headers={
+                    "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+                    "accept": "text/event-stream",
+                },
+            ) as response:
+                # The stream is live: status and headers were delivered before the loss.
+                assert response.status_code == 200
+                # Iterating to exhaustion returns rather than hanging or erroring:
+                # the stream ends once the backend connection is lost. Reaching the
+                # end of this loop is the observation; what the stream carried before
+                # the loss is timing-dependent and outside the unit's claim.
+                for _ in response.iter_bytes():
+                    pass
+
+
+@pytest.mark.witnesses("forwarding.service-origin")
 def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
     """A ``<service>.agent-<hex>.localhost`` origin forwards to that service's registered URL."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
+    preauth = "preauth-service-origin"
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
     resolver.add_known_agent(instance_key)
     resolver.update_services(
         instance_key,
         {"system_interface": "http://stub-shell", "terminal": "http://stub-terminal"},
         {},
-    )
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    preauth = "preauth-service-origin"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
     )
 
     captured: list[httpx.Request] = []
@@ -2300,9 +2910,7 @@ def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(
-        app, base_url=f"http://terminal.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
-    ) as client:
+    with TestClient(app, base_url=_agent_origin("terminal"), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/ws-info",
@@ -2314,25 +2922,14 @@ def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
     assert str(captured[0].url).startswith("http://stub-terminal/")
 
 
+@pytest.mark.witnesses("forwarding.deeper-labels-same-service")
 def test_deep_service_origin_routes_to_owning_service(tmp_path: Path) -> None:
     """Deeper labels (``sub.svc.agent-<hex>.localhost``) route to the same service."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
     instance_key = _make_test_instance_key()
+    preauth = "preauth-deep-origin"
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
     resolver.add_known_agent(instance_key)
     resolver.update_services(instance_key, {"svc": "http://stub-svc"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    preauth = "preauth-deep-origin"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
 
     captured: list[httpx.Request] = []
 
@@ -2342,9 +2939,7 @@ def test_deep_service_origin_routes_to_owning_service(tmp_path: Path) -> None:
 
     mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
 
-    with TestClient(
-        app, base_url=f"http://deep.svc.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
-    ) as client:
+    with TestClient(app, base_url=_agent_origin("deep", "svc"), follow_redirects=False) as client:
         app.state.http_client = mock_client
         response = client.get(
             "/asset.js",
@@ -2358,25 +2953,11 @@ def test_deep_service_origin_routes_to_owning_service(tmp_path: Path) -> None:
 
 def test_service_origin_unregistered_service_serves_loading_page(tmp_path: Path) -> None:
     """An unknown-but-plausible service label serves the auto-retrying loader, not a 404."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-shell"}, {})
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
     preauth = "preauth-unregistered"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-shell")
 
-    with TestClient(app, base_url=f"http://notyet.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin("notyet"), follow_redirects=False) as client:
         response = client.get(
             "/",
             headers={
@@ -2395,14 +2976,13 @@ def test_goto_with_service_param_redirects_to_service_origin(
     """The /goto/ bridge carries the service label chain so the bounce lands on the exact origin."""
     client, store, _resolver = app_setup
     cookie = create_session_cookie(store.get_signing_key())
-    valid_host_id = "host-" + "0" * 31 + "a"
     response = client.get(
-        f"/goto/{valid_host_id}/?service=deep.svc&next=/panel",
+        f"/goto/{_UNREGISTERED_HOST_ID}/?service=deep.svc&next=/panel",
         cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
     )
     assert response.status_code == 302
     location = response.headers["location"]
-    assert location.startswith(f"http://deep.svc.{valid_host_id}.localhost:18421/_subdomain_auth?token=")
+    assert location.startswith(f"http://deep.svc.{_UNREGISTERED_HOST_ID}.localhost:18421/_subdomain_auth?token=")
     assert "next=%2Fpanel" in location
 
 
@@ -2417,14 +2997,13 @@ def test_goto_accepts_looser_sub_origin_labels_before_the_service(
     """
     client, store, _resolver = app_setup
     cookie = create_session_cookie(store.get_signing_key())
-    valid_host_id = "host-" + "0" * 31 + "a"
     response = client.get(
-        f"/goto/{valid_host_id}/?service=a--b.svc",
+        f"/goto/{_UNREGISTERED_HOST_ID}/?service=a--b.svc",
         cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
     )
     assert response.status_code == 302
     assert response.headers["location"].startswith(
-        f"http://a--b.svc.{valid_host_id}.localhost:18421/_subdomain_auth?token="
+        f"http://a--b.svc.{_UNREGISTERED_HOST_ID}.localhost:18421/_subdomain_auth?token="
     )
 
 
@@ -2434,10 +3013,9 @@ def test_goto_still_rejects_a_malformed_service_name_even_with_valid_sub_origins
     # The LAST label is the service name and keeps the strict ServiceLabel rule.
     client, store, _resolver = app_setup
     cookie = create_session_cookie(store.get_signing_key())
-    valid_host_id = "host-" + "0" * 31 + "a"
     for bad_chain in ("sub.a--b", "sub..svc", "UP.svc"):
         response = client.get(
-            f"/goto/{valid_host_id}/?service={bad_chain}",
+            f"/goto/{_UNREGISTERED_HOST_ID}/?service={bad_chain}",
             cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
         )
         assert response.status_code == 404, bad_chain
@@ -2449,38 +3027,31 @@ def test_goto_rejects_invalid_service_labels(
     """Crafted ``service`` values that are not valid labels must 404, not redirect."""
     client, store, _resolver = app_setup
     cookie = create_session_cookie(store.get_signing_key())
-    valid_host_id = "host-" + "0" * 31 + "a"
     response = client.get(
-        f"/goto/{valid_host_id}/?service=EVIL",
+        f"/goto/{_UNREGISTERED_HOST_ID}/?service=EVIL",
         cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
     )
     assert response.status_code == 404
 
 
+@pytest.mark.witnesses(
+    "single-credential",
+    partial="witnesses that redeeming a bridge token sets one domain-scoped cookie covering the default service and every service origin, without a second credential; the minting half is witnessed separately",
+)
 def test_subdomain_auth_bridge_sets_workspace_domain_cookie(tmp_path: Path) -> None:
     """The bridge cookie is domain-scoped so one hop covers the shell and every service origin."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    tunnel_manager = SSHTunnelManager()
-    envelope_writer = EnvelopeWriter(output=io.StringIO())
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=tunnel_manager,
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
+    app, auth_store, _resolver = _make_forward_app(tmp_path)
+    token = create_subdomain_auth_token(
+        signing_key=auth_store.get_signing_key(), origin_coordinate=_UNREGISTERED_HOST_ID
     )
-    valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=/",
-            headers={"host": f"svc.{valid_host_id}.localhost:18421"},
+            headers={"host": f"svc.{_UNREGISTERED_HOST_ID}.localhost:18421"},
         )
     assert response.status_code == 302
     set_cookie = response.headers["set-cookie"].lower()
-    assert f"domain={valid_host_id}.localhost" in set_cookie
+    assert f"domain={_UNREGISTERED_HOST_ID}.localhost" in set_cookie
 
 
 def test_select_ws_receive_payload_selects_by_value_not_key() -> None:
@@ -2499,6 +3070,15 @@ def test_select_ws_receive_payload_selects_by_value_not_key() -> None:
     assert _select_ws_receive_payload({"type": "websocket.receive", "bytes": None, "text": None}) is None
 
 
+@pytest.mark.witnesses("forwarding.ws-backend-drop-closes-client")
+@pytest.mark.witnesses(
+    "forwarding.ws-relay",
+    partial=(
+        "witnesses only the backend-closes direction of the 'when either side closes, the other side "
+        "is closed too' clause; path/query, subprotocol negotiation, and text/binary relay are "
+        "witnessed by test_ws_relay_forwards_path_query_subprotocol_and_messages_both_ways"
+    ),
+)
 def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> None:
     """When the backend WS closes, the client leg must be closed too.
 
@@ -2520,24 +3100,13 @@ def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> Non
     server_thread = threading.Thread(target=backend_server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        auth_store = FileAuthStore(data_directory=tmp_path)
-        resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-        instance_key = _make_test_instance_key()
-        resolver.add_known_agent(instance_key)
-        resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{backend_port}"}, {})
         preauth = "preauth-cookie-ws-backend-close"
-        app = create_forward_app(
-            auth_store=auth_store,
-            resolver=resolver,
-            tunnel_manager=SSHTunnelManager(),
-            envelope_writer=EnvelopeWriter(output=io.StringIO()),
-            listen_host="127.0.0.1",
-            listen_port=18421,
-            preauth_cookie_value=preauth,
-            allow_host_loopback=True,
+        app, _auth_store, resolver = _make_forward_app(
+            tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True
         )
+        _register_default_service(resolver, f"http://127.0.0.1:{backend_port}")
 
-        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421") as client:
+        with TestClient(app, base_url=_agent_origin()) as client:
             with client.websocket_connect(
                 f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws",
                 headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
@@ -2547,13 +3116,15 @@ def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> Non
                 # the receive on a bounded thread so a regression (client leg
                 # left half-open) fails fast instead of hanging the suite.
                 outcomes: list[str] = []
+                close_codes: list[int] = []
 
                 def _receive_until_close() -> None:
                     try:
                         websocket_session.receive_text()
                         outcomes.append("unexpected-message")
-                    except WebSocketDisconnect:
+                    except WebSocketDisconnect as disconnect:
                         outcomes.append("disconnect")
+                        close_codes.append(disconnect.code)
 
                 receiver = threading.Thread(target=_receive_until_close, daemon=True)
                 receiver.start()
@@ -2561,10 +3132,21 @@ def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> Non
                 assert outcomes == ["disconnect"], (
                     f"client leg did not observe the backend close (outcomes={outcomes})"
                 )
+                # The client must be able to read *why*: the relay accepted this
+                # socket, so the backend drop surfaces as a real 1011 close frame.
+                assert close_codes == [1011]
     finally:
         backend_server.shutdown()
 
 
+@pytest.mark.witnesses(
+    "forwarding.ws-no-client-headers",
+    partial=(
+        "witnesses that a representative custom client header and forged owner/email identity headers "
+        "do not reach the backend, and that the owner identity is stamped; does not enumerate every "
+        "possible client header (open-world)"
+    ),
+)
 def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> None:
     """The WS forward must stamp X-Share-Owner=true and never forward a client-supplied identity.
 
@@ -2583,6 +3165,7 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
         assert connection.request is not None
         captured["owner"] = connection.request.headers.get(SHARE_OWNER_HEADER)
         captured["email"] = connection.request.headers.get(SHARE_EMAIL_HEADER)
+        captured["sniff"] = connection.request.headers.get("x-client-sniff")
         connection.send("hello-from-backend")
 
     backend_server = ws_serve(backend_handler, "127.0.0.1", 0)
@@ -2590,30 +3173,20 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
     server_thread = threading.Thread(target=backend_server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        auth_store = FileAuthStore(data_directory=tmp_path)
-        resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-        instance_key = _make_test_instance_key()
-        resolver.add_known_agent(instance_key)
-        resolver.update_services(instance_key, {"system_interface": f"http://127.0.0.1:{backend_port}"}, {})
         preauth = "preauth-cookie-ws-owner-header"
-        app = create_forward_app(
-            auth_store=auth_store,
-            resolver=resolver,
-            tunnel_manager=SSHTunnelManager(),
-            envelope_writer=EnvelopeWriter(output=io.StringIO()),
-            listen_host="127.0.0.1",
-            listen_port=18421,
-            preauth_cookie_value=preauth,
-            allow_host_loopback=True,
+        app, _auth_store, resolver = _make_forward_app(
+            tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True
         )
+        _register_default_service(resolver, f"http://127.0.0.1:{backend_port}")
 
-        with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421") as client:
+        with TestClient(app, base_url=_agent_origin()) as client:
             with client.websocket_connect(
                 f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws",
                 headers={
                     "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
                     SHARE_OWNER_HEADER: "false",
                     SHARE_EMAIL_HEADER: "attacker@evil.example",
+                    "x-client-sniff": "should-not-arrive",
                 },
             ) as websocket_session:
                 # Receiving the backend's message guarantees its handler ran and
@@ -2621,6 +3194,132 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
                 assert websocket_session.receive_text() == "hello-from-backend"
         assert captured["owner"] == "true"
         assert captured["email"] is None
+        # An arbitrary client header does not survive onto the backend handshake.
+        assert captured["sniff"] is None
+    finally:
+        backend_server.shutdown()
+
+
+@pytest.mark.witnesses("forwarding.ws-relay")
+def test_ws_relay_forwards_path_query_subprotocol_and_messages_both_ways(tmp_path: Path) -> None:
+    """An authenticated WebSocket is connected through to the backend and relayed both ways.
+
+    Witnesses every observable relay claim of ``forwarding.ws-relay`` except the
+    backend-closes direction of the close-propagation clause (that side is
+    ``test_ws_forward_closes_client_leg_when_backend_closes``):
+
+    - the backend connection is at the same path and query as the client opened,
+    - the subprotocol accepted to the client is the one the backend negotiated
+      from the offer,
+    - text and binary messages are relayed unchanged in both directions, and
+    - closing the client leg closes the backend leg too.
+    """
+    backend_closed = threading.Event()
+
+    def backend_handler(connection: ServerConnection) -> None:
+        assert connection.request is not None
+        # Echo the request target back first so the client can assert the
+        # backend was reached at the same path and query, then mirror every
+        # message (preserving text vs binary) to prove both-directions relay.
+        connection.send(connection.request.path)
+        try:
+            for message in connection:
+                connection.send(message)
+        finally:
+            backend_closed.set()
+
+    backend_server = ws_serve(backend_handler, "127.0.0.1", 0, subprotocols=[Subprotocol("chat")])
+    backend_port = backend_server.socket.getsockname()[1]
+    server_thread = threading.Thread(target=backend_server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        preauth = "preauth-cookie-ws-relay"
+        app, _auth_store, resolver = _make_forward_app(
+            tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True
+        )
+        _register_default_service(resolver, f"http://127.0.0.1:{backend_port}")
+
+        with TestClient(app, base_url=_agent_origin()) as client:
+            with client.websocket_connect(
+                f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws?foo=bar&baz=1",
+                subprotocols=["chat", "superchat"],
+                headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            ) as session:
+                # The backend negotiated "chat" from the offer; that is the one accepted to the client.
+                assert session.accepted_subprotocol == "chat"
+                # Same path and query reached the backend.
+                assert session.receive_text() == "/api/ws?foo=bar&baz=1"
+                # Text relayed unchanged, client -> backend -> client.
+                session.send_text("ping")
+                assert session.receive_text() == "ping"
+                # Binary relayed unchanged, client -> backend -> client.
+                session.send_bytes(b"\x00\x01\x02")
+                assert session.receive_bytes() == b"\x00\x01\x02"
+            # Closing the client leg (on context exit) closes the backend leg too.
+            assert backend_closed.wait(timeout=10)
+    finally:
+        backend_server.shutdown()
+
+
+@pytest.mark.witnesses("forwarding.ws-unknown-host")
+@pytest.mark.witnesses(
+    "forwarding.ws-refused-at-handshake",
+    partial=(
+        "witnesses the non-agent-host refusal cause (refused on connect); the 'carries no reason on the "
+        "WebSocket layer' clause is RFC/browser-level and not observable through the in-process ASGI "
+        "test client"
+    ),
+)
+def test_ws_to_non_agent_host_is_refused(tmp_path: Path) -> None:
+    """A WebSocket opened with a host that is not an agent origin is refused at the handshake."""
+    app, _auth_store, _resolver = _make_forward_app(tmp_path)
+    with TestClient(app) as client:
+        # ``notanagent.localhost`` is a well-formed host that is not an agent
+        # origin (no ``agent-<hex>`` coordinate), so the handshake never gets
+        # past routing; the test client surfaces the pre-accept close as a
+        # WebSocketDisconnect raised on connect.
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("ws://notanagent.localhost:18421/api/ws"):
+                pass
+
+
+@pytest.mark.witnesses("forwarding.ws-not-authenticated")
+@pytest.mark.witnesses(
+    "forwarding.ws-refused-at-handshake",
+    partial=(
+        "witnesses the no-valid-session refusal cause (refused on connect, before any backend contact); "
+        "the 'carries no reason on the WebSocket layer' clause is RFC/browser-level and not observable "
+        "through the in-process ASGI test client"
+    ),
+)
+def test_ws_without_session_is_refused_before_backend_contact(tmp_path: Path) -> None:
+    """A WebSocket without a valid session is refused, and the backend is never contacted."""
+    backend_contacted = threading.Event()
+
+    def backend_handler(connection: ServerConnection) -> None:
+        backend_contacted.set()
+
+    backend_server = ws_serve(backend_handler, "127.0.0.1", 0)
+    backend_port = backend_server.socket.getsockname()[1]
+    server_thread = threading.Thread(target=backend_server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        preauth = "preauth-cookie-ws-noauth"
+        app, _auth_store, resolver = _make_forward_app(
+            tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True
+        )
+        # A live, reachable backend: were the refusal to happen after resolving,
+        # this handler would run -- so its silence proves the refusal preceded
+        # any backend contact.
+        _register_default_service(resolver, f"http://127.0.0.1:{backend_port}")
+
+        with TestClient(app, base_url=_agent_origin()) as client:
+            # No session cookie is sent, so the handshake is refused on connect.
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect(f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws"):
+                    pass
+        # The backend must never have been dialed.
+        assert not backend_contacted.wait(timeout=1.0)
     finally:
         backend_server.shutdown()
 
@@ -2661,124 +3360,119 @@ def test_plain_http_authenticate_cookie_stays_lax(
 
 
 def test_http2_subdomain_auth_bridge_cookie_is_none_and_partitioned(tmp_path: Path) -> None:
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        use_http2=True,
+    app, auth_store, _resolver = _make_forward_app(tmp_path, use_http2=True)
+    token = create_subdomain_auth_token(
+        signing_key=auth_store.get_signing_key(), origin_coordinate=_UNREGISTERED_HOST_ID
     )
-    valid_host_id = "host-" + "0" * 31 + "a"
-    token = create_subdomain_auth_token(signing_key=auth_store.get_signing_key(), origin_coordinate=valid_host_id)
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
             f"/_subdomain_auth?token={token}&next=/",
-            headers={"host": f"{valid_host_id}.localhost:18421"},
+            headers={"host": f"{_UNREGISTERED_HOST_ID}.localhost:18421"},
         )
     set_cookie = response.headers["set-cookie"].lower()
     assert "samesite=none" in set_cookie
     assert "partitioned" in set_cookie
-    assert f"domain={valid_host_id}.localhost" in set_cookie
+    assert f"domain={_UNREGISTERED_HOST_ID}.localhost" in set_cookie
 
 
-def _bridge_app(tmp_path: Path, browser_bridge_token: str | None) -> tuple[TestClient, FileAuthStore]:
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        use_http2=True,
-        browser_bridge_token=browser_bridge_token,
-    )
-    return TestClient(app, follow_redirects=False), auth_store
+@contextmanager
+def _make_browser_bridge_app(
+    tmp_path: Path, browser_bridge_token: str | None
+) -> Iterator[tuple[TestClient, FileAuthStore]]:
+    app, auth_store, _resolver = _make_forward_app(tmp_path, use_http2=True, browser_bridge_token=browser_bridge_token)
+    with TestClient(app, follow_redirects=False) as client:
+        yield client, auth_store
 
 
+@pytest.mark.witnesses("authentication.browser-bridge-absent")
 def test_browser_bridge_is_404_when_no_token_configured(tmp_path: Path) -> None:
-    client, _store = _bridge_app(tmp_path, browser_bridge_token=None)
-    response = client.get("/_bridge?token=anything&next=/")
+    """Witnesses ``authentication.browser-bridge-absent``: with no browser-bridge
+    token configured, the browser-bridge route does not exist (HTTP 404)."""
+    with _make_browser_bridge_app(tmp_path, browser_bridge_token=None) as (client, _store):
+        response = client.get("/_bridge?token=anything&next=/")
     assert response.status_code == 404
 
 
+@pytest.mark.witnesses("authentication.browser-bridge-forged")
 def test_browser_bridge_rejects_wrong_token(tmp_path: Path) -> None:
-    client, _store = _bridge_app(tmp_path, browser_bridge_token="right-token")
-    response = client.get("/_bridge?token=wrong-token&next=/")
-    assert response.status_code == 403
-    assert "set-cookie" not in response.headers
-    # A missing token is rejected the same way (never treated as a match).
-    assert client.get("/_bridge").status_code == 403
-    # A non-ASCII token is a clean 403, not a 500 (compare_digest raises
-    # TypeError on non-ASCII str; the compare must happen on bytes).
-    assert client.get("/_bridge?token=%C3%A9&next=/").status_code == 403
+    """Witnesses ``authentication.browser-bridge-forged``: a token presented to
+    the browser-bridge route that does not match the configured one is refused
+    with HTTP 403 and establishes no session (no Set-Cookie)."""
+    with _make_browser_bridge_app(tmp_path, browser_bridge_token="right-token") as (client, _store):
+        response = client.get("/_bridge?token=wrong-token&next=/")
+        assert response.status_code == 403
+        assert "set-cookie" not in response.headers
+        # A missing token is rejected the same way (never treated as a match).
+        assert client.get("/_bridge").status_code == 403
+        # A non-ASCII token is a clean 403, not a 500 (compare_digest raises
+        # TypeError on non-ASCII str; the compare must happen on bytes).
+        assert client.get("/_bridge?token=%C3%A9&next=/").status_code == 403
 
 
+@pytest.mark.witnesses("authentication.browser-bridge-token")
+@pytest.mark.witnesses(
+    "no-open-redirects",
+    partial="witnesses the /_bridge call site; the full input space and every route are witnessed elsewhere",
+)
 def test_browser_bridge_sets_cookie_and_redirects_to_sanitized_next(tmp_path: Path) -> None:
     """The bridge is the browser twin of Electron's preauth cookie injection.
 
-    A matching spawn-time token yields the bare-origin session cookie and an
-    onward redirect; an off-origin ``next`` collapses to ``/`` so the bridge
-    cannot be used as an open redirector.
+    Witnesses ``authentication.browser-bridge-token``: presenting the exact
+    spawn-time token mints a bare-origin session (the minted cookie actually
+    signs a subsequent bare-origin request in), spends no one-time code, and
+    redirects to a same-origin destination; an off-origin ``next`` collapses
+    to ``/`` so the bridge cannot be used as an open redirector.
     """
-    client, _store = _bridge_app(tmp_path, browser_bridge_token="right-token")
-    response = client.get("/_bridge?token=right-token&next=/goto/host-00000000000000000000000000000000/")
-    assert response.status_code == 302
-    assert response.headers["location"] == "/goto/host-00000000000000000000000000000000/"
-    set_cookie = response.headers["set-cookie"].lower()
-    assert MNGR_FORWARD_SESSION_COOKIE_NAME in set_cookie
-    assert "samesite=none" in set_cookie
-    evil = client.get("/_bridge?token=right-token&next=//evil.com/")
-    assert evil.headers["location"] == "/"
+    with _make_browser_bridge_app(tmp_path, browser_bridge_token="right-token") as (client, store):
+        code = OneTimeCode("unspent-during-bridge")
+        store.add_one_time_code(code=code)
+        response = client.get("/_bridge?token=right-token&next=/goto/host-00000000000000000000000000000000/")
+        assert response.status_code == 302
+        # A same-origin (root-relative) destination.
+        assert response.headers["location"] == "/goto/host-00000000000000000000000000000000/"
+        set_cookie = response.headers["set-cookie"].lower()
+        assert MNGR_FORWARD_SESSION_COOKIE_NAME in set_cookie
+        assert "samesite=none" in set_cookie
+        # The minted cookie really signs the browser in on the bare origin: a
+        # follow-up request carrying it lands on the signed-in index, not login.
+        minted = response.cookies.get(MNGR_FORWARD_SESSION_COOKIE_NAME)
+        assert minted is not None
+        index = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: minted})
+        assert index.status_code == 200
+        assert "Discovered agents" in index.text
+        # The bridge consumed no one-time code: a code registered beforehand is
+        # still valid afterward.
+        assert store.validate_and_consume_code(code=code) is True
+        evil = client.get("/_bridge?token=right-token&next=//evil.com/")
+        assert evil.headers["location"] == "/"
 
 
-def test_workspace_responses_carry_default_deny_frame_ancestors(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "embedder_origins, expected_extra_sources",
+    [
+        ((), ""),
+        ((EmbedderOrigin("http://localhost:8420"),), " http://localhost:8420"),
+    ],
+    ids=("default-deny", "with-embedder"),
+)
+def test_workspace_responses_carry_the_frame_ancestors_policy(
+    tmp_path: Path,
+    embedder_origins: tuple[EmbedderOrigin, ...],
+    expected_extra_sources: str,
+) -> None:
     """Every proxied workspace-origin response gets the appended frame-ancestors CSP.
 
     The unauthenticated redirect is proxy-generated, but it flows through the
     same middleware seam as real proxied responses, so asserting on it proves
     the injection point without a live backend.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        use_http2=True,
-    )
-    with TestClient(app, base_url=f"https://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    app, _auth_store, _resolver = _make_forward_app(tmp_path, use_http2=True, embedder_origins=embedder_origins)
+    with TestClient(app, base_url=_agent_origin(scheme="https"), follow_redirects=False) as client:
         response = client.get("/", headers={"accept": "text/html"})
-    policy = response.headers["content-security-policy"]
-    assert policy == (
-        f"frame-ancestors 'self' https://{_TEST_AGENT_ID}.localhost:18421 https://*.{_TEST_AGENT_ID}.localhost:18421"
+    assert response.headers["content-security-policy"] == (
+        f"frame-ancestors 'self' https://{_TEST_AGENT_ID}.localhost:18421 "
+        f"https://*.{_TEST_AGENT_ID}.localhost:18421{expected_extra_sources}"
     )
-
-
-def test_workspace_responses_include_configured_embedder_origins(tmp_path: Path) -> None:
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        use_http2=True,
-        embedder_origins=(EmbedderOrigin("http://localhost:8420"),),
-    )
-    with TestClient(app, base_url=f"https://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
-        response = client.get("/", headers={"accept": "text/html"})
-    assert response.headers["content-security-policy"].endswith("http://localhost:8420")
 
 
 def test_bare_origin_responses_carry_no_frame_ancestors(
@@ -3140,6 +3834,65 @@ def test_forwarded_sse_stream_returns_its_pooled_backend_connection_when_a_clien
     assert _envelope_lines(envelope_output) == []
 
 
+async def _collect_incremental_sse_deliveries() -> list[dict[str, Any]]:
+    """Proxy an unbounded SSE backend and capture the messages delivered before the client leg tears down.
+
+    The backend streams keepalive chunks forever, so any body message the client
+    receives is proof the proxy relays bytes as they arrive rather than waiting
+    for the response to complete. A ``_RaisingSendChannel`` accepts the response
+    head plus two body chunks and then tears down, unwinding the ASGI call at
+    once instead of waiting on the stall guard.
+    """
+    async with _running_sse_backend() as listen_port:
+        send_channel = _RaisingSendChannel(accepted_message_count=3)
+        receive_channel = _NeverDisconnectingReceiveChannel()
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.1"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/events",
+            "raw_path": b"/api/events",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"accept", b"text/event-stream")],
+            "client": ("127.0.0.1", 54321),
+            "server": ("127.0.0.1", 18421),
+        }
+        http_client = httpx.AsyncClient(follow_redirects=False, timeout=httpx.Timeout(5.0))
+        try:
+            response = await _forward_workspace_http(
+                request=Request(scope, receive_channel),
+                backend_url=f"http://127.0.0.1:{listen_port}",
+                http_client=http_client,
+                agent_id=AgentId(),
+                envelope_writer=EnvelopeWriter(output=io.StringIO()),
+                stall_notice_seconds=_STALL_NOTICE_SECONDS,
+                was_backend_refused=_never_refused,
+            )
+            with pytest.raises(MngrForwardError):
+                async with asyncio.timeout(10.0):
+                    await response(scope, receive_channel, send_channel)
+            return send_channel.sent_messages
+        finally:
+            await http_client.aclose()
+
+
+@pytest.mark.witnesses("forwarding.sse-streamed")
+def test_sse_stream_delivers_backend_bytes_to_the_client_as_they_arrive() -> None:
+    """Event-stream bytes flow to the client incrementally, without waiting for the backend to finish."""
+    messages = asyncio.run(_collect_incremental_sse_deliveries())
+
+    assert messages[0]["type"] == "http.response.start"
+    body_messages = [message for message in messages if message["type"] == "http.response.body"]
+    # Two chunks were delivered while the backend's stream was still open (it
+    # emits keepalives without end), so the proxy did not wait for completion.
+    assert len(body_messages) == 2
+    # The delivered bytes are the backend's own SSE payload, passed through.
+    assert all(_SSE_KEEPALIVE_CHUNK in message["body"] for message in body_messages)
+
+
 def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tmp_path: Path) -> None:
     """``PoolTimeout`` (proxy pool exhausted, backend never dialed) must be tellable apart from a backend timeout.
 
@@ -3150,16 +3903,14 @@ def test_subdomain_forward_distinguishes_pool_exhaustion_from_backend_timeout(tm
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-pool-timeout"
-    captured: list[httpx.Request] = []
-    app, env_out, mock_client = _make_forward_app_with_capture(
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
         tmp_path,
-        captured,
         instance_key,
         preauth,
         raise_error=httpx.PoolTimeout,
     )
 
-    with TestClient(app, base_url=f"http://{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
         sse_response = client.get(
             "/api/events",
@@ -3229,10 +3980,10 @@ def test_both_proxying_http_clients_are_built_with_explicit_pool_ceilings(tmp_pa
     """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-pool-limits"
-    app, _env_out, _mock_client = _make_forward_app_with_capture(tmp_path, [], instance_key, preauth)
+    app, _captured, _env_out, _mock_client = _make_forward_app_with_capture(tmp_path, instance_key, preauth)
 
     # Entered so the lifespan builds the direct client the way production does.
-    with TestClient(app, base_url=f"http://{_TEST_HOST_ID}.localhost:18421", follow_redirects=False):
+    with TestClient(app, base_url=_agent_origin(coordinate=_TEST_HOST_ID), follow_redirects=False):
         assert _pool_ceiling_of(app.state.http_client) == _PROXY_POOL_LIMITS.max_connections
 
     # No socket is opened: the tunnel client is only constructed, never dialed.
@@ -3387,28 +4138,17 @@ def test_unresolved_service_origin_logs_a_rate_limited_warning(tmp_path: Path, l
     ignored by the health machinery -- so a wedged label map was undiagnosable
     from a log bundle. One rate-limited warning per agent+label is the trace.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    # The shell is routable; the app's label is not (its registration never arrived).
-    resolver.update_services(instance_key, {"system_interface": "http://stub-shell"}, {})
     envelope_output = io.StringIO()
-    envelope_writer = EnvelopeWriter(output=envelope_output)
     preauth = "preauth-unresolved-log"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=envelope_writer,
-        listen_host="127.0.0.1",
-        listen_port=18421,
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        envelope_output=envelope_output,
         preauth_cookie_value=preauth,
     )
+    # The shell is routable; the app's label is not (its registration never arrived).
+    _register_default_service(resolver, "http://stub-shell")
 
-    with TestClient(
-        app, base_url=f"http://myapp-x7k9q2w1.{_TEST_AGENT_ID}.localhost:18421", follow_redirects=False
-    ) as client:
+    with TestClient(app, base_url=_agent_origin("myapp-x7k9q2w1"), follow_redirects=False) as client:
         for _ in range(3):
             response = client.get(
                 "/",
@@ -3439,23 +4179,15 @@ def test_unresolved_service_origin_on_a_websocket_logs_a_rate_limited_warning(
     one that leaves minds blind. The reconnect loop retries about once a
     second, so this line is rate-limited exactly like the HTTP one.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    # The shell is routable; the app's label is not (its registration never arrived).
-    resolver.update_services(instance_key, {"system_interface": "http://stub-shell"}, {})
     envelope_output = io.StringIO()
     preauth = "preauth-unresolved-ws-log"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=envelope_output),
-        listen_host="127.0.0.1",
-        listen_port=18421,
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        envelope_output=envelope_output,
         preauth_cookie_value=preauth,
     )
+    # The shell is routable; the app's label is not (its registration never arrived).
+    _register_default_service(resolver, "http://stub-shell")
 
     with TestClient(app) as client:
         for _ in range(2):
@@ -3478,23 +4210,16 @@ def test_unresolved_service_origin_on_a_websocket_logs_a_rate_limited_warning(
     assert [p["reason"] for p in payloads] == ["UNRESOLVED", "UNRESOLVED"]
 
 
+@pytest.mark.witnesses(
+    "forwarding.legacy-host-origin",
+    partial="covers the HTML-navigation redirect and the non-navigation HTTP refusal; the websocket refusal is in test_legacy_host_origin_websocket_closes_with_the_origin_moved_code",
+)
 def test_legacy_host_origin_html_navigation_redirects_to_the_agent_origin(tmp_path: Path) -> None:
     """A persisted pre-agent-keying URL (host-<hex> origin) 301s to the canonical agent origin."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-    )
+    app, auth_store, resolver = _make_forward_app(tmp_path)
+    _register_default_service(resolver, "http://stub-backend")
     cookie = create_session_cookie(auth_store.get_signing_key())
-    with TestClient(app, base_url=f"http://svc.{_TEST_HOST_ID}.localhost:18421", follow_redirects=False) as client:
+    with TestClient(app, base_url=_agent_origin("svc", coordinate=_TEST_HOST_ID), follow_redirects=False) as client:
         html_response = client.get(
             "/some/page?x=1",
             headers={"accept": "text/html"},
@@ -3511,6 +4236,19 @@ def test_legacy_host_origin_html_navigation_redirects_to_the_agent_origin(tmp_pa
     assert non_html_response.status_code == 404
 
 
+@pytest.mark.witnesses(
+    "forwarding.legacy-host-origin",
+    partial="covers only the websocket refusal ('any other request refused, not forwarded'); the navigation redirect is in test_legacy_host_origin_html_navigation_redirects_to_the_agent_origin",
+)
+@pytest.mark.witnesses("forwarding.ws-legacy-host-coordinate")
+@pytest.mark.witnesses(
+    "forwarding.ws-refused-at-handshake",
+    partial=(
+        "witnesses the legacy-host-coordinate refusal cause (refused on connect, before any accepted "
+        "socket); the 'carries no reason on the WebSocket layer' clause is RFC/browser-level and not "
+        "observable through the in-process ASGI test client"
+    ),
+)
 def test_legacy_host_origin_websocket_closes_with_the_origin_moved_code(tmp_path: Path) -> None:
     """A websocket to a legacy host-<hex> origin closes with 4004 even though the agent resolves.
 
@@ -3519,22 +4257,10 @@ def test_legacy_host_origin_websocket_closes_with_the_origin_moved_code(tmp_path
     onto the canonical agent origin. Asserting 4004 rather than 1013 also
     proves the resolvable agent did not take the unresolved branch.
     """
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
-    instance_key = _make_test_instance_key()
-    resolver.add_known_agent(instance_key)
-    resolver.update_services(instance_key, {"system_interface": "http://stub-backend"}, {})
     preauth = "preauth-cookie-legacy-ws"
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-        preauth_cookie_value=preauth,
-    )
-    with TestClient(app, base_url=f"http://svc.{_TEST_HOST_ID}.localhost:18421") as client:
+    app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
+    _register_default_service(resolver, "http://stub-backend")
+    with TestClient(app, base_url=_agent_origin("svc", coordinate=_TEST_HOST_ID)) as client:
         # ``websocket_connect`` ignores ``base_url``, so the legacy origin must
         # be in the URL itself for the handler to route on the host header. The
         # handler closes the socket before accepting, which the test client
@@ -3549,20 +4275,12 @@ def test_legacy_host_origin_websocket_closes_with_the_origin_moved_code(tmp_path
     assert exc_info.value.reason == "Origin moved to its agent-keyed URL"
 
 
+@pytest.mark.witnesses("authentication.bridge-canonicalizes-host-coordinate")
 def test_goto_canonicalizes_a_legacy_host_coordinate(tmp_path: Path) -> None:
     """/goto/<host-id>/ (a persisted window URL) bridges onto the canonical agent origin."""
-    auth_store = FileAuthStore(data_directory=tmp_path)
-    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    app, auth_store, resolver = _make_forward_app(tmp_path)
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
-    app = create_forward_app(
-        auth_store=auth_store,
-        resolver=resolver,
-        tunnel_manager=SSHTunnelManager(),
-        envelope_writer=EnvelopeWriter(output=io.StringIO()),
-        listen_host="127.0.0.1",
-        listen_port=18421,
-    )
     cookie = create_session_cookie(auth_store.get_signing_key())
     with TestClient(app, follow_redirects=False) as client:
         response = client.get(
@@ -3571,3 +4289,268 @@ def test_goto_canonicalizes_a_legacy_host_coordinate(tmp_path: Path) -> None:
         )
     assert response.status_code == 302
     assert response.headers["Location"].startswith(f"http://{_TEST_AGENT_ID}.localhost:18421/_subdomain_auth?")
+
+
+# -- goto-bridge behavior witnesses ---------------------------------------
+#
+# These drive the whole cookie bridge end to end: the bare origin's
+# ``/goto/<coordinate>/`` route mints a short-lived token bound to one agent
+# and 302s the browser to that agent, whose ``/_subdomain_auth`` endpoint
+# verifies the token and sets the agent's domain-scoped session cookie.
+
+# A second well-formed agent id, distinct from ``_TEST_AGENT_ID``, for the
+# token-audience test (a token minted for one agent, presented on another).
+_OTHER_AGENT_ID: Final = TEST_AGENT_ID_2
+
+
+def _make_goto_bridge_app(tmp_path: Path) -> tuple[FastAPI, FileAuthStore]:
+    """A plain forward app (no registered backends) for the ``/goto`` cookie bridge."""
+    app, auth_store, _resolver = _make_forward_app(tmp_path)
+    return app, auth_store
+
+
+def _session_cookie_from_set_cookie(set_cookie_header: str) -> str:
+    """Extract the ``mngr_forward_session`` value from a ``Set-Cookie`` header."""
+    name, _, value = set_cookie_header.split(";", 1)[0].partition("=")
+    assert name == MNGR_FORWARD_SESSION_COOKIE_NAME, set_cookie_header
+    return value
+
+
+def _make_expired_subdomain_auth_token(signing_key: CookieSigningKey, origin_coordinate: str, age_seconds: int) -> str:
+    """Mint a subdomain-auth token stamped ``age_seconds`` in the past.
+
+    Backdating the signer's timestamp lets a test drive the token's expiry
+    window (seconds long) without controlling the wall clock or waiting.
+    """
+
+    class _BackdatedSigner(TimestampSigner):
+        def get_timestamp(self) -> int:
+            return int(time.time()) - age_seconds
+
+    serializer = URLSafeTimedSerializer(
+        secret_key=signing_key.get_secret_value(), salt=_SUBDOMAIN_AUTH_SALT, signer=_BackdatedSigner
+    )
+    return serializer.dumps(origin_coordinate)
+
+
+@pytest.mark.witnesses("authentication.bridge-roundtrip")
+def test_bridge_roundtrip_lands_signed_in_on_agent_origin(tmp_path: Path) -> None:
+    """Following the bridge lands the user signed in on the agent origin, at "/", with no credential asked."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    signing_key = store.get_signing_key()
+    bare_session = create_session_cookie(signing_key)
+    with TestClient(app, follow_redirects=False) as client:
+        # Hop 1: the bare-origin bridge 302s the browser to the agent origin.
+        hop1 = client.get(
+            f"/goto/{_TEST_AGENT_ID}/",
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: bare_session},
+        )
+        assert hop1.status_code == 302
+        redemption = urlsplit(hop1.headers["location"])
+        assert redemption.netloc == f"{_TEST_AGENT_ID}.localhost:18421"
+        # Hop 2: redeeming the token on the agent origin sets the session cookie
+        # and sends the browser on to the agent path "/".
+        hop2 = client.get(f"/_subdomain_auth?{redemption.query}", headers={"host": redemption.netloc})
+    assert hop2.status_code == 302
+    assert hop2.headers["location"] == "/"
+    # Signed in there: the cookie the bridge set is a valid session cookie.
+    session_value = _session_cookie_from_set_cookie(hop2.headers["set-cookie"])
+    assert verify_session_cookie(cookie_value=session_value, signing_key=signing_key) is True
+    # The user was never asked for a credential: the whole flow was automatic
+    # 302 redirects driven by the pre-existing bare-origin session -- no OTP
+    # was presented (neither hop returned a sign-in prompt or an auth refusal).
+    assert "set-cookie" not in hop1.headers
+
+
+@pytest.mark.witnesses(
+    "authentication.bridge-covers-service-origins",
+    partial="witnesses the Domain-scoped cookie plus one representative service origin; that it covers every service origin at any depth is the browser's domain-match rule",
+)
+def test_bridge_cookie_covers_default_service_and_service_origins(tmp_path: Path) -> None:
+    """One bridge hop sets a domain-scoped cookie that authenticates the default service and a service origin alike."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    signing_key = store.get_signing_key()
+    bare_session = create_session_cookie(signing_key)
+    with TestClient(app, follow_redirects=False) as client:
+        hop1 = client.get(
+            f"/goto/{_TEST_AGENT_ID}/",
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: bare_session},
+        )
+        redemption = urlsplit(hop1.headers["location"])
+        hop2 = client.get(f"/_subdomain_auth?{redemption.query}", headers={"host": redemption.netloc})
+        set_cookie = hop2.headers["set-cookie"]
+        session_value = _session_cookie_from_set_cookie(set_cookie)
+        # The cookie is scoped to the whole agent domain, so the browser sends
+        # it to the default-service origin and every service origin beneath it.
+        assert f"domain={_TEST_AGENT_ID}.localhost" in set_cookie.lower()
+        # No separate bridge hop per origin: the one cookie authenticates the
+        # default-service origin and a service origin alike. An authenticated request to
+        # an origin with no resolved backend yields the 503 loader; only an
+        # *unauthenticated* one is bounced back to /goto -- so a 503 (not a
+        # 302) is the proof the cookie was accepted at that origin.
+        default_service = client.get(
+            "/",
+            headers={
+                "host": f"{_TEST_AGENT_ID}.localhost:18421",
+                "accept": "text/html",
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={session_value}",
+            },
+        )
+        service = client.get(
+            "/",
+            headers={
+                "host": f"svc.{_TEST_AGENT_ID}.localhost:18421",
+                "accept": "text/html",
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={session_value}",
+            },
+        )
+    assert default_service.status_code == 503
+    assert service.status_code == 503
+
+
+@pytest.mark.witnesses("authentication.bridge-destination")
+def test_bridge_destination_survives_the_bridge(tmp_path: Path) -> None:
+    """A same-origin destination path is carried through the bridge to the final landing."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    bare_session = create_session_cookie(store.get_signing_key())
+    with TestClient(app, follow_redirects=False) as client:
+        hop1 = client.get(
+            f"/goto/{_TEST_AGENT_ID}/?next=/some/page",
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: bare_session},
+        )
+        redemption = urlsplit(hop1.headers["location"])
+        hop2 = client.get(f"/_subdomain_auth?{redemption.query}", headers={"host": redemption.netloc})
+    assert hop2.status_code == 302
+    assert hop2.headers["location"] == "/some/page"
+
+
+@pytest.mark.witnesses("authentication.bridge-service-destination")
+def test_bridge_returns_to_the_exact_service_origin(tmp_path: Path) -> None:
+    """A navigation to a service origin without an agent session is bridged back to that same service origin."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    bare_session = create_session_cookie(store.get_signing_key())
+    service_origin = f"svc.{_TEST_AGENT_ID}.localhost:18421"
+    with TestClient(app, follow_redirects=False) as client:
+        # A navigation to the service origin with no agent session there is sent
+        # through the goto bridge, carrying the service label so the bounce
+        # returns to the exact origin that sent the user.
+        navigation = client.get("/", headers={"host": service_origin, "accept": "text/html"})
+        assert navigation.status_code == 302
+        goto = urlsplit(navigation.headers["location"])
+        assert goto.path == f"/goto/{_TEST_AGENT_ID}/"
+        assert "service=svc" in goto.query
+        # Following the bridge with the bare session returns to the service origin.
+        hop1 = client.get(
+            f"{goto.path}?{goto.query}",
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: bare_session},
+        )
+        assert hop1.status_code == 302
+        redemption = urlsplit(hop1.headers["location"])
+        assert redemption.netloc == service_origin
+        # Redeeming on that service origin lands the user back on it, at "/".
+        hop2 = client.get(f"/_subdomain_auth?{redemption.query}", headers={"host": redemption.netloc})
+    assert hop2.status_code == 302
+    assert hop2.headers["location"] == "/"
+
+
+@pytest.mark.witnesses("authentication.token-bound-to-agent")
+def test_bridge_token_is_bound_to_its_agent(tmp_path: Path) -> None:
+    """A bridge token minted for one agent is refused on a different agent's origin, setting no cookie."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    token = create_subdomain_auth_token(signing_key=store.get_signing_key(), origin_coordinate=_TEST_AGENT_ID)
+    with TestClient(app, follow_redirects=False) as client:
+        response = client.get(
+            f"/_subdomain_auth?token={token}&next=/",
+            headers={"host": f"{_OTHER_AGENT_ID}.localhost:18421"},
+        )
+    assert response.status_code == 403
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.witnesses("authentication.token-expires")
+def test_bridge_token_expires(tmp_path: Path) -> None:
+    """A bridge token presented after its short validity window is refused, setting no cookie."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    # Stamped well past the seconds-long validity window.
+    expired_token = _make_expired_subdomain_auth_token(
+        store.get_signing_key(), origin_coordinate=_TEST_AGENT_ID, age_seconds=3600
+    )
+    with TestClient(app, follow_redirects=False) as client:
+        response = client.get(
+            f"/_subdomain_auth?token={expired_token}&next=/",
+            headers={"host": f"{_TEST_AGENT_ID}.localhost:18421"},
+        )
+    assert response.status_code == 403
+    assert "set-cookie" not in response.headers
+
+
+@pytest.mark.witnesses("authentication.token-forged")
+def test_bridge_token_forged_or_altered_is_refused(tmp_path: Path) -> None:
+    """A token not minted by this proxy, or altered in transit, is refused on the agent origin with no cookie."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    agent_origin = f"{_TEST_AGENT_ID}.localhost:18421"
+    # Not minted by this proxy: signed under a foreign key.
+    foreign_token = create_subdomain_auth_token(
+        signing_key=CookieSigningKey("a-different-signing-key"), origin_coordinate=_TEST_AGENT_ID
+    )
+    # Altered in transit: a valid token with its signature bytes flipped.
+    valid_token = create_subdomain_auth_token(signing_key=store.get_signing_key(), origin_coordinate=_TEST_AGENT_ID)
+    altered_token = valid_token[:-3] + ("aaa" if valid_token[-3:] != "aaa" else "bbb")
+    with TestClient(app, follow_redirects=False) as client:
+        for bad_token in (foreign_token, altered_token):
+            response = client.get(
+                f"/_subdomain_auth?token={bad_token}&next=/",
+                headers={"host": agent_origin},
+            )
+            assert response.status_code == 403, bad_token
+            assert "set-cookie" not in response.headers, bad_token
+
+
+@pytest.mark.witnesses("authentication.direct-navigation")
+def test_direct_navigation_heals_a_missing_agent_session(tmp_path: Path) -> None:
+    """A direct navigation to an agent page with no agent session self-heals to the requested page, no sign-in."""
+    app, store = _make_goto_bridge_app(tmp_path)
+    signing_key = store.get_signing_key()
+    bare_session = create_session_cookie(signing_key)
+    agent_origin = f"{_TEST_AGENT_ID}.localhost:18421"
+    with TestClient(app, follow_redirects=False) as client:
+        # Direct navigation to an agent page with no valid agent session there
+        # is sent through that agent's goto bridge.
+        navigation = client.get("/some/page", headers={"host": agent_origin, "accept": "text/html"})
+        assert navigation.status_code == 302
+        goto = urlsplit(navigation.headers["location"])
+        assert goto.netloc == "localhost:18421"
+        assert goto.path == f"/goto/{_TEST_AGENT_ID}/"
+        # The bare session drives the bridge; the destination is preserved.
+        hop1 = client.get(
+            f"{goto.path}?{goto.query}",
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: bare_session},
+        )
+        redemption = urlsplit(hop1.headers["location"])
+        hop2 = client.get(f"/_subdomain_auth?{redemption.query}", headers={"host": redemption.netloc})
+    # Ends up on the requested page, signed in, without ever being asked to sign in.
+    assert hop2.status_code == 302
+    assert hop2.headers["location"] == "/some/page"
+    session_value = _session_cookie_from_set_cookie(hop2.headers["set-cookie"])
+    assert verify_session_cookie(cookie_value=session_value, signing_key=signing_key) is True
+
+
+@pytest.mark.witnesses("authentication.signed-out-agent")
+def test_signed_out_visitor_to_agent_origin_ends_at_sign_in(tmp_path: Path) -> None:
+    """A fully signed-out visitor to an agent origin is bridged to the bare origin's sign-in prompt."""
+    app, _store = _make_goto_bridge_app(tmp_path)
+    agent_origin = f"{_TEST_AGENT_ID}.localhost:18421"
+    with TestClient(app, follow_redirects=False) as client:
+        # No session of any kind: the agent-origin navigation is sent to the bridge.
+        navigation = client.get("/", headers={"host": agent_origin, "accept": "text/html"})
+        assert navigation.status_code == 302
+        goto = urlsplit(navigation.headers["location"])
+        assert goto.path == f"/goto/{_TEST_AGENT_ID}/"
+        # The signed-out bridge redirects to the bare-origin home.
+        hop1 = client.get(f"{goto.path}?{goto.query}")
+        assert hop1.status_code == 302
+        assert hop1.headers["location"] == "/"
+        # The bare-origin home for a signed-out visitor is the sign-in prompt.
+        home = client.get("/")
+    assert home.status_code == 200
+    assert "Sign in" in home.text

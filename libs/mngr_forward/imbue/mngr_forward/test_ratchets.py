@@ -179,7 +179,13 @@ def test_prevent_async_await() -> None:
     # them means awaiting the send, the read, and the close separately, and they
     # stay in one coroutine so the caller still races a single task against the
     # client disconnect.
-    rc.check_async_await(_DIR, snapshot(109))
+    # 114: witnessing that event streams reach the client incrementally. The
+    # claim is about arrival *ordering*, so the test has to interleave with the
+    # streaming producer; TestClient's synchronous API only returns once the
+    # response is complete, which is exactly the information the unit is about.
+    # Observing it means driving the real handler and its async send channel
+    # against an async stub backend.
+    rc.check_async_await(_DIR, snapshot(114))
 
 
 # --- Hardcoded paths ---

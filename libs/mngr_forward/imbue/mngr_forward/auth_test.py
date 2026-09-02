@@ -19,6 +19,10 @@ def test_otp_unknown_rejected(tmp_path: Path) -> None:
     assert store.validate_and_consume_code(code=OneTimeCode("never-issued")) is False
 
 
+@pytest.mark.witnesses(
+    "single-use-codes",
+    partial="store-level single-use (one consume, then refused); not the HTTP /authenticate surface or interleavings",
+)
 def test_otp_single_use(tmp_path: Path) -> None:
     store = FileAuthStore(data_directory=tmp_path)
     code = OneTimeCode("once")
