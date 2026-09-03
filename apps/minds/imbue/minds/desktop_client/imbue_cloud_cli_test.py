@@ -15,10 +15,13 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCl
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import _ACCOUNTS_URL_SUBPROCESS_ENV
 from imbue.minds.desktop_client.imbue_cloud_cli import _CONNECTOR_URL_SUBPROCESS_ENV
+from imbue.minds.desktop_client.imbue_cloud_cli import _WEB_LOGIN_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_conflict_stored
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_stderr_error_message
+from imbue.minds.desktop_client.supertokens_routes import _WEB_LOGIN_FLOW_TTL_SECONDS
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.mngr_imbue_cloud.cli.auth import _LOGIN_LISTEN_TIMEOUT_SECONDS
 
 
 def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
@@ -113,6 +116,19 @@ def test_expect_success_unstructured_failure_is_not_reported_as_an_auth_verdict(
         cli._expect_success(result, "auth signin")
 
     assert not isinstance(exc_info.value, ImbueCloudAuthFailedCliError)
+
+
+def test_web_login_timeouts_stay_coherent_and_cover_a_slow_browser_leg() -> None:
+    """The three coupled web-login deadlines must stay ordered as the listen window widens.
+
+    The subprocess-kill deadline must exceed the listen window, so the plugin's own
+    timeout message surfaces instead of a kill; the flow-status TTL must cover the
+    whole subprocess lifetime, so the polling frontend never reports the flow
+    expired while a sign-in is still in progress.
+    """
+    assert _LOGIN_LISTEN_TIMEOUT_SECONDS >= 600
+    assert _WEB_LOGIN_TIMEOUT_SECONDS > _LOGIN_LISTEN_TIMEOUT_SECONDS
+    assert _WEB_LOGIN_FLOW_TTL_SECONDS >= _WEB_LOGIN_TIMEOUT_SECONDS
 
 
 def test_parse_stderr_error_message_survives_surrounding_log_lines() -> None:

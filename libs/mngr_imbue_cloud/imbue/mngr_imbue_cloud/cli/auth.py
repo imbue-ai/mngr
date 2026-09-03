@@ -37,7 +37,11 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 
-_LOGIN_LISTEN_TIMEOUT_SECONDS = 300.0
+# The browser leg can legitimately take minutes, and the account is created
+# partway through it. Kept below the desktop's subprocess kill deadline and
+# flow-status TTL (imbue_cloud_cli._WEB_LOGIN_TIMEOUT_SECONDS,
+# supertokens_routes._WEB_LOGIN_FLOW_TTL_SECONDS).
+_LOGIN_LISTEN_TIMEOUT_SECONDS = 600.0
 _LOGIN_CALLBACK_PATH = "/callback"
 
 

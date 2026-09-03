@@ -188,7 +188,11 @@ def wake_ui_state_publisher() -> None:
 # copy-the-link fallback) without blocking on the subprocess.
 # ---------------------------------------------------------------------------
 
-_WEB_LOGIN_FLOW_TTL_SECONDS = 10 * 60
+# Kept above the desktop's web-login subprocess kill deadline
+# (imbue_cloud_cli._WEB_LOGIN_TIMEOUT_SECONDS) so a slow-but-valid browser
+# sign-in never has its flow status swept out from under the polling frontend as
+# a spurious "sign-in flow expired".
+_WEB_LOGIN_FLOW_TTL_SECONDS = 11 * 60
 
 # Passed to the plugin's login subcommand so its browser success page bounces
 # straight back to the desktop app: a bare minds:// deeplink focuses the app
