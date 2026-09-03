@@ -39,7 +39,7 @@ fallback_branch = "minds-v0.4.2"
 rollout_percentage = 100
 
 [channels.alpha]
-build_id = "260825un55i8ix7"
-version = "0.4.2"
-fallback_branch = "minds-v0.4.2"
+build_id = "260902shwco3ynx"
+version = "0.5.0"
+fallback_branch = "minds-v0.5.0"
 rollout_percentage = 100
