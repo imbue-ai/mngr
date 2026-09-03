@@ -40,7 +40,7 @@ snapshot, which the relock leaves untouched -- so the vendor-match invariant
 (`system/vendor/mngr` equals the archive of its mngr SHA, blob for blob) still
 holds. The full release procedure -- including the vendor-match
 invariant (DEFAULT_WORKSPACE_TEMPLATE `system/vendor/mngr` must be the `git archive` of the exact mngr SHA it
-is tagged with) -- is in `apps/minds/docs/deploy/release.md`.
+is tagged with) -- is in `apps/minds/docs/deploy/ops/app-release.md`.
 
 ## `rsync` -- the dev / bake sync
 

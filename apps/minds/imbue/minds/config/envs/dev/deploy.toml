@@ -102,7 +102,7 @@ max_active_synced_workspaces = 200
 # here: web creates lease only exact matches, so a committed ref silently
 # goes stale the moment the dev pool is re-baked at a newer version. Every
 # dev-tier deploy must instead state the ref explicitly, matching what the
-# dev pool is baked at (see `just bake-slice-dev` / `bake-slice-prod`):
+# dev pool is baked at (see `just pool-bake-from-worktree` / `pool-bake`):
 #   MINDS_WEB_TEMPLATE_REF=<branch-or-tag> uv run minds-admin env deploy
 [web_workspaces]
 template_repo = "github.com/imbue-ai/default-workspace-template"

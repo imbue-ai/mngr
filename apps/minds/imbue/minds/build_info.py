@@ -32,7 +32,7 @@ UNKNOWN_GIT_SHA = "unknown"
 # The default-workspace-template release this app build is pinned to: an
 # annotated DEFAULT_WORKSPACE_TEMPLATE tag, so a shipped binary clones the
 # exact template snapshot it was verified against. Bumped by the release
-# process (see docs/deploy/release.md); bump to a newer tag only after re-verifying
+# process (see docs/deploy/ops/app-release.md); bump to a newer tag only after re-verifying
 # launch-to-msg CI against (this binary, the new tag). Lives here (not in the
 # desktop client) so deploy-time code (`minds-admin env deploy`) can read it
 # without importing the whole desktop client.

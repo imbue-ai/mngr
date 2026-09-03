@@ -39,7 +39,7 @@ ask your agent to run it, or read it directly -- for the build/run loop.
       credentials (Neon, SuperTokens, ...) from HCP Vault at command time. Run
       `vault login -method=oidc` once per session; the deploy CLI applies the
       imbue HCP `VAULT_ADDR` / `VAULT_NAMESPACE` defaults itself, so login is
-      all you need. Install + layout: [vault-setup.md](./deploy/vault-setup.md).
+      all you need. Install + layout: [vault-setup.md](./deploy/setup/vault.md).
 
 - [ ] **Membership in the `minds-dev` Modal workspace + a matching
       `~/.modal.toml` profile.** `minds-dev` is a *separate*, workspace-bound
@@ -50,7 +50,7 @@ ask your agent to run it, or read it directly -- for the build/run loop.
       show workspace `minds-dev` -- a profile *named* `minds-dev` that holds a
       token for another workspace passes `minds-admin env activate --deploy` but is
       caught (with a clear error) by `minds-admin env deploy`'s preflight. Full
-      detail: [environments.md](./deploy/environments.md).
+      detail: [environments.md](./deploy/reference/environments.md).
 
 ## Then: build and run
 

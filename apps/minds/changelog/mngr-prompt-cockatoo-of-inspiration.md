@@ -8,4 +8,4 @@ Each install buckets itself off the UUID at `~/.minds/.updaterId`, so widening o
 
 Evaluating a ramp needs Sentry's crash-free-*users* rate per release, which until recently missed exactly the launch failures a ramp exists to catch. That fix ships in the change this one is stacked on, not here.
 
-The Release channels section of `apps/minds/docs/deploy/release.md` documents the ladder, lowering the percentage as the partial halt, and `git revert` as the undo for either dial — a ramp step or a version bump.
+The Release channels section of `apps/minds/docs/deploy/ops/app-release.md` documents the ladder, lowering the percentage as the partial halt, and `git revert` as the undo for either dial — a ramp step or a version bump.

@@ -4,4 +4,4 @@ The template's root `uv.lock` pins the vendored mngr libraries as editable path 
 
 The relock writes the template root's own lock, never the `system/vendor/mngr/uv.lock` inside the snapshot, so the vendor-match invariant that the release flow checks in step 6 is unaffected.
 
-`docs/deploy/release.md` and `docs/vendor-mngr-sync.md` describe the added step.
+`docs/deploy/ops/app-release.md` and `docs/vendor-mngr-sync.md` describe the added step.

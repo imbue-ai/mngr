@@ -136,5 +136,5 @@ def test_box_tier_audit_is_exclusive_only_with_one_key_and_no_foreign_slices() -
 
 
 def test_box_tier_audit_serializes_the_exclusivity_verdict() -> None:
-    # The verdict is what `just audit-boxes` readers act on, so it must be in the JSON.
+    # The verdict is what `just server-audit` readers act on, so it must be in the JSON.
     assert _audit().model_dump(mode="json")["is_exclusive_to_tier"] is True

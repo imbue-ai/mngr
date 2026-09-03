@@ -18,7 +18,7 @@
 # Removing an entry withdraws nothing: no manifest is ever deleted, so the
 # channel keeps serving its last build and the run reports that rather than a
 # promotion. See scripts/release_channel/publish.py for the gates each entry has
-# to pass, and the Release channels section of apps/minds/docs/deploy/release.md
+# to pass, and the Release channels section of apps/minds/docs/deploy/ops/app-release.md
 # for withdrawing a build.
 #
 # `rollout_percentage` is how much of the channel is offered the build. It is

@@ -108,4 +108,4 @@ Key concepts in the minds system:
   On lease -- and on the first connect for hosts leased earlier -- the client rotates both of the slice's sshd host keys to fresh user-generated keys (pinned user-origin in mngr's host-key store, which connector bake-time material can never displace) and installs an in-VM reconciler that re-asserts the owner's `authorized_keys` and host key on every boot, after cloud-init's replay.
   After adoption, host-key trust flows only through the user's synced workspace records; the connector is trusted exactly once, at lease handoff.
   Idempotent and marker-driven; a served key that matches neither the pins nor an in-flight rotation is refused, never re-trusted.
-  See `libs/mngr_imbue_cloud/README.md` ("Adoption and key rotation") and [the lost-device runbook](../deploy/lost-device-runbook.md).
+  See `libs/mngr_imbue_cloud/README.md` ("Adoption and key rotation") and [the lost-device runbook](../deploy/reference/lost-device-runbook.md).

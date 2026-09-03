@@ -478,7 +478,7 @@ def foreign_tier_slice_names(box_names: AbstractSet[str], env_name: str) -> set[
     box rather than from one env's rows. It is never legitimate *across* tiers,
     and the reason is the pool keypair, not the database: a box carrying two
     tiers' slices is a box both tiers' pool keys can SSH, which is precisely the
-    "zero cross-tier reach" boundary (see ``apps/minds/docs/deploy/environments.md``) --
+    "zero cross-tier reach" boundary (see ``apps/minds/docs/deploy/reference/environments.md``) --
     each tier's operators and connector gain limactl, and so root, over the
     other's workspaces. Separate ``host_pool`` databases do not distinguish the
     two cases: every dev env has its own database too, and the orphan reap is

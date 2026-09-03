@@ -59,14 +59,14 @@ After creation, the agent is accessible at:
 
 The remote service connector URL is taken from the per-env
 `client.toml` that `minds-admin env activate` pointed `MINDS_CLIENT_CONFIG_PATH`
-at (see `apps/minds/docs/deploy/environments.md`). That URL hosts both the
+at (see `apps/minds/docs/deploy/reference/environments.md`). That URL hosts both the
 share endpoints and the `/auth/*` routes the desktop client uses
 for sign-in. Every share request authenticates with the signed-in
 user's SuperTokens session, and who may access a share is controlled
 by its grants document -- so no Basic-auth credentials or
 `OWNER_EMAIL` need to be configured on the client. SuperTokens
 credentials (API key, OAuth client secrets) live in HCP Vault (see
-`apps/minds/docs/deploy/vault-setup.md`) and are pushed into Modal Secrets at
+`apps/minds/docs/deploy/setup/vault.md`) and are pushed into Modal Secrets at
 deploy time; they never need to be set on the client.
 
 To switch envs, run `minds-admin env activate <name>` in your shell. The
