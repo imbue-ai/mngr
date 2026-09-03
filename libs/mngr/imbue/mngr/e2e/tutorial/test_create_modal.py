@@ -932,9 +932,9 @@ def test_create_modal_basic_recap(e2e: E2eSession) -> None:
     # just that "my-task" and "modal" both appear somewhere in the output).
     # Scope the listing to --provider modal so it does not fan out to other
     # enabled-but-unconfigured providers (e.g. the installed aws plugin), which
-    # would abort a bare `mngr list` with EXIT_CODE_PROVIDER_INACCESSIBLE before
-    # it could report our modal agent. The host fields the scope checks
-    # (provider_name, state) are present regardless of the provider filter.
+    # would make a bare `mngr list` exit non-zero (EXIT_CODE_PROVIDER_INACCESSIBLE)
+    # even though our modal agent is still reported. The host fields the scope
+    # checks (provider_name, state) are present regardless of the provider filter.
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="verify the agent is running on Modal",

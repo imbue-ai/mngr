@@ -96,7 +96,8 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     # `--provider modal` (matching the sibling modal tests): an unscoped `mngr
     # list` queries every enabled provider, and any that is unreachable in the
     # test environment (e.g. aws without credentials) makes the command exit
-    # non-zero before it can print the agent we created.
+    # non-zero (even though the agent we created is still printed), which would
+    # fail this to_succeed() check.
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="Verify the idle settings took effect on the modal host",
@@ -355,13 +356,14 @@ def test_create_with_message(e2e: E2eSession) -> None:
     expect(create_result.stderr).to_contain("Sending initial message")
 
     # Verify the agent was created. Scope the listing to the local provider
-    # (where this default-provider agent lives): `mngr list` defaults to
-    # --on-error abort, so an unrelated enabled-but-unreachable provider (e.g. a
+    # (where this default-provider agent lives): a bare `mngr list` fans out to
+    # every enabled provider, so an unrelated enabled-but-unreachable one (e.g. a
     # Docker daemon that is not running, or an unconfigured cloud backend that is
-    # installed in the monorepo venv) would abort the whole listing with exit 6
-    # before the agent is ever reported. Listing just the local provider is the
-    # established pattern for this "was the agent created?" check (see
-    # test_errors.py) and fully covers "the agent is created and listed".
+    # installed in the monorepo venv) makes the command exit non-zero (exit 6)
+    # even though the agent is still reported -- which would fail this to_succeed()
+    # check. Listing just the local provider is the established pattern for this
+    # "was the agent created?" check (see test_errors.py) and fully covers "the
+    # agent is created and listed".
     list_result = e2e.run(
         "mngr list --provider local --format json", comment="Verify agent created with initial message"
     )

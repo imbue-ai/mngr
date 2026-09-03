@@ -86,10 +86,11 @@ def test_create_docker_default_image(e2e: E2eSession) -> None:
 
     # Confirm the agent really landed on the docker provider, not just that the
     # command exited 0. Scope with `--provider docker` rather than filtering the
-    # output with `--include`: `mngr list` defaults to --on-error abort and
-    # discovers across every enabled provider, so an enabled-but-unreachable one
-    # aborts the whole listing with exit 6 before any agent is reported.
-    # `--include` cannot prevent that -- it only filters what discovery returned.
+    # output with `--include`: a bare `mngr list` discovers across every enabled
+    # provider, so an enabled-but-unreachable one makes the command exit non-zero
+    # (EXIT_CODE_PROVIDER_INACCESSIBLE) even though the reachable agents are still
+    # listed. `--include` cannot prevent that -- it only filters what discovery
+    # returned.
     docker_agents = e2e.run(
         "mngr list --provider docker",
         comment="confirm the agent is running on the docker provider",

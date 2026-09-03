@@ -62,7 +62,7 @@ mngr list [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going) | `abort` |
+| `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when errors occur: abort (stop immediately) or continue (keep going). The default is continue, so a single unreachable or unauthenticated provider does not block a listing the other providers can still serve -- its failure is reported in the errors channel and the process still exits non-zero (provider-inaccessible). | `continue` |
 
 ## Common
 

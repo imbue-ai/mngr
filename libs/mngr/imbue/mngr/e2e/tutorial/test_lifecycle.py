@@ -205,8 +205,9 @@ def test_start_dry_run(e2e: E2eSession) -> None:
     # Capture every agent's lifecycle state before the dry-run so we can prove
     # the dry-run leaves all of them untouched. Scope the query to the local
     # provider: this test only ever creates local agents, so enumerating remote
-    # providers (which it never uses) would be outside its scope and can fail the
-    # listing outright when a remote provider is enabled but unreachable.
+    # providers (which it never uses) would be outside its scope and can make the
+    # listing exit non-zero (failing this to_succeed() check) when a remote
+    # provider is enabled but unreachable.
     state_before = e2e.run(
         "mngr list --provider local --format '{name}={state}'", comment="capture agent state before the dry-run"
     )

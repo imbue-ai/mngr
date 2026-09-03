@@ -96,7 +96,8 @@ def test_create_command_custom_script(e2e: E2eSession) -> None:
     # exited 0. Scope discovery to the local provider so the check stays fast and
     # never queries remote providers (the agent was created on the local
     # provider); an enabled-but-unreachable cloud backend without credentials
-    # (e.g. aws) would otherwise fail the whole listing with a non-zero exit.
+    # (e.g. aws) would otherwise make the listing exit non-zero (even though the
+    # local agents are still emitted), failing this to_succeed() check.
     list_result = e2e.run(
         "mngr list --provider local --format json", comment="verify the custom command was forwarded"
     )

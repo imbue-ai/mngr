@@ -216,7 +216,8 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
     ).to_succeed()
     # Locate the agent's modal host. Scoping the list to the modal provider keeps
     # the unavailable ``aws`` provider (enabled by default, but without
-    # credentials here) from aborting a full cross-provider discovery scan.
+    # credentials here) from making the listing exit non-zero (even though the
+    # modal agents are still reported), which would fail this to_succeed() check.
     list_result = e2e.run(
         "mngr list --provider modal --format json",
         comment="locate the modal host to exec against",
