@@ -19,7 +19,6 @@ from imbue.mngr.primitives import InvalidAgentInstanceKey
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import MAX_HOST_NAME_LENGTH
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.primitives import default_branch_name
 
 
@@ -221,22 +220,6 @@ def test_discovered_agent_created_branch_name_raises_on_unexpected_type() -> Non
     ref = _make_discovered_agent({"created_branch_name": 42})
     with pytest.raises(CertifiedDataError, match="Expected str or None"):
         _ = ref.created_branch_name
-
-
-def test_build_ssh_connect_command_includes_pin_options_when_known_hosts_is_known() -> None:
-    command = build_ssh_connect_command("root", "203.0.113.5", 2222, Path("/keys/id"), Path("/keys/known_hosts"))
-    assert command == (
-        'ssh -i /keys/id -o "UserKnownHostsFile=/keys/known_hosts" -o StrictHostKeyChecking=yes '
-        "-p 2222 root@203.0.113.5"
-    )
-
-
-def test_build_ssh_connect_command_omits_pin_options_when_no_known_hosts() -> None:
-    command = build_ssh_connect_command("root", "203.0.113.5", 2222, Path("/keys/id"), None)
-    assert command == "ssh -i /keys/id -p 2222 root@203.0.113.5"
-
-
-# === AgentInstanceKey ===
 
 
 def test_agent_instance_key_round_trips_agent_and_host_ids() -> None:

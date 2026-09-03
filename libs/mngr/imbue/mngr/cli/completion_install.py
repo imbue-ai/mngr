@@ -20,6 +20,7 @@ on the per-TAB path stays cheap.
 
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -37,7 +38,7 @@ from imbue.mngr.config.host_dir import read_default_host_dir
 # the user's installed completion predates the current logic (the old
 # self-contained rc function, or a managed file written by an older mngr) and
 # should be refreshed via ``mngr extras completion``.
-_COMPLETION_SHIM_VERSION: Final[int] = 1
+_COMPLETION_SHIM_VERSION: Final[int] = 2
 _SHIM_VERSION_ENV_VAR: Final[str] = "MNGR_COMPLETION_SHIM_VERSION"
 
 # How often (seconds) to re-warn about an out-of-date installed completion, so
@@ -50,8 +51,8 @@ _STALE_WARNING_INTERVAL_SECONDS: Final[float] = 24 * 60 * 60
 COMPLETION_SHIM_MARKER: Final[str] = "# mngr shell completion (managed"
 
 
-def generate_zsh_script() -> str:
-    """Generate the zsh completion *function* (the managed file body), python path baked in.
+def generate_zsh_script(python_path: str) -> str:
+    """Generate the zsh completion *function* (the managed file body), baking in ``python_path``.
 
     This is written to the managed completion file (see
     ``write_managed_completion_scripts``); the user's rc only holds the small shim
@@ -64,11 +65,11 @@ def generate_zsh_script() -> str:
     normally. The completer is invoked with ``MNGR_COMPLETION_SHIM_VERSION`` so it
     can tell an up-to-date install from an out-of-date one.
     """
-    python_path = sys.executable
+    quoted_python_path = shlex.quote(python_path)
     return f"""_mngr_complete() {{
     local -a completions branches leaves
     (( ! $+commands[mngr] )) && return 1
-    completions=(${{(@f)"$(COMP_WORDS="${{words[*]}}" COMP_CWORD=$((CURRENT-1)) {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {python_path} -m imbue.mngr.cli.complete)"}})
+    completions=(${{(@f)"$(COMP_WORDS="${{words[*]}}" COMP_CWORD=$((CURRENT-1)) {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {quoted_python_path} -m imbue.mngr.cli.complete)"}})
     local c
     for c in $completions; do
         if [[ $c == *. || $c == *= ]]; then branches+=$c; else leaves+=$c; fi
@@ -79,8 +80,8 @@ def generate_zsh_script() -> str:
 compdef _mngr_complete mngr"""
 
 
-def generate_bash_script() -> str:
-    """Generate the bash completion *function* (the managed file body), python path baked in.
+def generate_bash_script(python_path: str) -> str:
+    """Generate the bash completion *function* (the managed file body), baking in ``python_path``.
 
     Written to the managed completion file; the rc only holds the shim from
     ``generate_bash_shim`` that sources it.
@@ -93,10 +94,10 @@ def generate_bash_script() -> str:
     ``MNGR_COMPLETION_SHIM_VERSION`` so it can tell an up-to-date install from an
     out-of-date one.
     """
-    python_path = sys.executable
+    quoted_python_path = shlex.quote(python_path)
     return f"""_mngr_complete() {{
     local IFS=$'\\n'
-    COMPREPLY=($(COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD="$COMP_CWORD" {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {python_path} -m imbue.mngr.cli.complete))
+    COMPREPLY=($(COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD="$COMP_CWORD" {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {quoted_python_path} -m imbue.mngr.cli.complete))
     if [[ ${{#COMPREPLY[@]}} -eq 1 && ( ${{COMPREPLY[0]}} == *. || ${{COMPREPLY[0]}} == *= ) ]]; then
         compopt -o nospace
     fi
@@ -249,7 +250,8 @@ def write_managed_completion_scripts() -> None:
     rewrites a file whose content changed. Filesystem errors are swallowed so
     this never breaks the caller.
     """
-    for shell, content in (("zsh", generate_zsh_script()), ("bash", generate_bash_script())):
+    python_path = sys.executable
+    for shell, content in (("zsh", generate_zsh_script(python_path)), ("bash", generate_bash_script(python_path))):
         path = get_managed_completion_script_path(shell)
         try:
             if path.is_file() and path.read_text() == content:

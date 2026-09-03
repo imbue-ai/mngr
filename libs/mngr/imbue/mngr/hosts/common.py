@@ -21,6 +21,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import WaitingReason
+from imbue.mngr.utils.ssh import quote_ssh_option_value_for_shell
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
 
@@ -86,9 +87,8 @@ def build_ssh_transport_command(
         "IdentityAgent=none",
     ]
     if known_hosts_file is not None:
-        parts.extend(
-            ["-o", f"UserKnownHostsFile={shlex.quote(str(known_hosts_file))}", "-o", "StrictHostKeyChecking=yes"]
-        )
+        quoted_known_hosts = quote_ssh_option_value_for_shell(known_hosts_file)
+        parts.extend(["-o", f"UserKnownHostsFile={quoted_known_hosts}", "-o", "StrictHostKeyChecking=yes"])
     else:
         parts.extend(["-o", "StrictHostKeyChecking=yes"])
     return " ".join(parts)

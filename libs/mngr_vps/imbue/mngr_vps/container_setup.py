@@ -33,6 +33,7 @@ from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoi
 from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
+from imbue.mngr.utils.ssh import quote_ssh_option_value_for_shell
 from imbue.mngr_vps.errors import ContainerSetupError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_store import AGENTS_SUBPATH
@@ -941,6 +942,7 @@ def build_ssh_transport_for_outer(outer: OuterHostInterface) -> tuple[str, str, 
     # so rsync's ssh subprocess uses the same trust store as the outer host.
     host_data = outer.connector.host.data
     known_hosts = host_data.get("ssh_known_hosts_file", "")
+    quoted_known_hosts = quote_ssh_option_value_for_shell(known_hosts)
     # Pass the SSH port explicitly. VPS outers listen on 22, but the lima
     # docker-mode outer is the VM reached via a Lima-forwarded port on
     # 127.0.0.1 (e.g. 38519). Without -p, rsync's ssh would connect to
@@ -949,7 +951,7 @@ def build_ssh_transport_for_outer(outer: OuterHostInterface) -> tuple[str, str, 
     ssh_cmd = (
         f"ssh -i {shlex.quote(str(key_path))} "
         f"-p {port} "
-        f"-o UserKnownHostsFile={shlex.quote(str(known_hosts))} "
+        f"-o UserKnownHostsFile={quoted_known_hosts} "
         f"-o StrictHostKeyChecking=yes "
         f"-o BatchMode=yes "
         f"-o ConnectTimeout=15 "

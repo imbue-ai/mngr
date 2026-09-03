@@ -6,6 +6,7 @@ that records issued commands and returns canned ``CommandResult``s, which
 keeps these unit tests fast and free of any real SSH/Docker dependency.
 """
 
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -996,9 +997,26 @@ def test_build_ssh_transport_passes_the_ssh_port() -> None:
     outer = _SshTransportOuter(info=("root", "127.0.0.1", 38519, Path("/k/key")), known_hosts_file="/k/known_hosts")
     ssh_cmd, user, hostname, port, key = build_ssh_transport_for_outer(cast(OuterHostInterface, outer))
     assert "-p 38519" in ssh_cmd
-    assert "-o UserKnownHostsFile=/k/known_hosts" in ssh_cmd
+    # Double-quoted for ssh: UserKnownHostsFile is a whitespace-separated list.
+    assert "-o UserKnownHostsFile='\"/k/known_hosts\"'" in ssh_cmd
     assert "-o StrictHostKeyChecking=yes" in ssh_cmd
     assert (user, hostname, port) == ("root", "127.0.0.1", 38519)
+
+
+def test_build_ssh_transport_quotes_a_known_hosts_path_with_spaces() -> None:
+    """A spaced known_hosts path survives both parsers of the rsync ``-e`` transport.
+
+    rsync tokenises the transport string with shell-style quoting, and ssh then splits
+    UserKnownHostsFile on whitespace itself, so the value has to carry its own quotes.
+    """
+    outer = _SshTransportOuter(
+        info=("root", "127.0.0.1", 38519, Path("/k/key")),
+        known_hosts_file="/path with spaces/known_hosts",
+    )
+    ssh_cmd, _user, _hostname, _port, _key = build_ssh_transport_for_outer(cast(OuterHostInterface, outer))
+
+    option = next(arg for arg in shlex.split(ssh_cmd) if arg.startswith("UserKnownHostsFile="))
+    assert option == 'UserKnownHostsFile="/path with spaces/known_hosts"', option
 
 
 def test_build_ssh_transport_raises_for_local_outer() -> None:

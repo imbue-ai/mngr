@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr.primitives import HostId
@@ -52,6 +54,27 @@ def test_box_ssh_command_targets_the_lima_user_with_the_pool_key() -> None:
     # non-login shell still finds limactl (extracted to /usr/local/bin by prep).
     assert command[-1].endswith("limactl list --json")
     assert "/usr/local/bin" in command[-1]
+
+
+def test_box_ssh_command_quotes_a_known_hosts_path_containing_a_space(tmp_path: Path) -> None:
+    """ssh splits UserKnownHostsFile on whitespace, so the pinned path needs its own quotes.
+
+    The known_hosts file is written beside the pool key, so a key directory whose
+    name contains a space produces a spaced path here without anyone choosing one.
+    """
+    key_dir = tmp_path / "pool keys"
+    key_dir.mkdir()
+    client = LimaSliceVpsClient(
+        box_address="box.example",
+        box_ssh_user="limahost",
+        private_key_path=str(key_dir / "id"),
+        box_host_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 20,
+    )
+    command = client._box_ssh_command("limactl list --json")
+    option = next(arg for arg in command if arg.startswith("UserKnownHostsFile="))
+    value = option.removeprefix("UserKnownHostsFile=")
+    assert value.startswith('"') and value.endswith('"'), option
+    assert " " in value, option
 
 
 def test_box_ssh_command_requires_a_private_key() -> None:

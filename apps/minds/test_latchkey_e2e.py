@@ -68,6 +68,7 @@ from loguru import logger
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.ssh import quote_ssh_option_value
 from imbue.mngr.utils.testing import build_test_known_hosts_file
 from imbue.mngr.utils.testing import find_free_port
 from imbue.mngr.utils.testing import generate_ssh_keypair
@@ -312,8 +313,8 @@ def _write_ssh_client_setup(home: Path, private_key: Path, host_key_path: Path, 
 Host {_VPS_SSH_HOST}
   User root
   Port {port}
-  IdentityFile {identity_path}
-  UserKnownHostsFile {known_hosts_path}
+  IdentityFile {quote_ssh_option_value(identity_path)}
+  UserKnownHostsFile {quote_ssh_option_value(known_hosts_path)}
   StrictHostKeyChecking accept-new
 """
     )

@@ -1,6 +1,6 @@
 import hashlib
-import sys
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -19,6 +19,11 @@ from imbue.mngr.cli.completion_install import write_managed_completion_scripts
 # =============================================================================
 # Managed completion files, rc shim, and stale-completion warning
 # =============================================================================
+
+# Interpreter path handed to the generators, so what they emit -- and the fingerprint
+# below -- does not depend on which interpreter runs the tests. The space keeps the
+# fingerprint sensitive to the shell quoting of the baked path.
+_STAND_IN_PYTHON_PATH: Final[str] = "/stand in/bin/python3"
 
 
 def test_completion_shim_sources_managed_file_zsh() -> None:
@@ -43,22 +48,33 @@ def test_managed_script_carries_version_sentinel() -> None:
 
     This is what lets the completer recognise an up-to-date install vs an old one.
     """
-    script = generate_zsh_script()
+    script = generate_zsh_script(_STAND_IN_PYTHON_PATH)
     assert f"{_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION}" in script
 
 
-# Fingerprint of the generated zsh+bash completion function bodies, with the baked
-# python path normalised out (it varies by environment). Pinned so a change to the
-# generated function can't land silently: such a change alters the contract with the
-# completer (how candidate strings are interpreted), so it must be paired with a bump
+def test_generated_functions_quote_an_interpreter_path_with_a_space() -> None:
+    """The baked interpreter path must survive a directory name containing a space.
+
+    An embedder may place its virtualenv under one -- ``~/Library/Application
+    Support/<App>/`` on macOS, for instance -- and the path is baked into a
+    shell function, where an unquoted one word-splits.
+    """
+    spaced = "/Users/u/Library/Application Support/Example App/.venv/bin/python3"
+    for body in (generate_zsh_script(spaced), generate_bash_script(spaced)):
+        assert f"'{spaced}'" in body, f"interpreter path is not shell-quoted in:\n{body}"
+
+
+# Fingerprint of the generated zsh+bash completion function bodies. Pinned so a change
+# to the generated function can't land silently: such a change alters the contract with
+# the completer (how candidate strings are interpreted), so it must be paired with a bump
 # of ``_COMPLETION_SHIM_VERSION`` -- which keeps out-of-date installs getting the
 # refresh nudge. See ``test_completion_function_change_requires_version_bump``.
-_EXPECTED_COMPLETION_FUNCTION_FINGERPRINT = "395ccc884fbb8fbe0e30d50022128f2bdfdb14785521456e368d29cf524f44aa"
+_EXPECTED_COMPLETION_FUNCTION_FINGERPRINT = "f1a1b635880f0c8078ffbce248e9ee145e5e783d369b4bcc1c672ceffe8c0043"
 
 
 def _completion_function_fingerprint() -> str:
-    """sha256 of the generated zsh+bash function bodies, with the baked python path removed."""
-    bodies = (generate_zsh_script() + "\n" + generate_bash_script()).replace(sys.executable, "PYTHON")
+    """sha256 of the generated zsh+bash function bodies, for a fixed baked python path."""
+    bodies = generate_zsh_script(_STAND_IN_PYTHON_PATH) + "\n" + generate_bash_script(_STAND_IN_PYTHON_PATH)
     return hashlib.sha256(bodies.encode("utf-8")).hexdigest()
 
 

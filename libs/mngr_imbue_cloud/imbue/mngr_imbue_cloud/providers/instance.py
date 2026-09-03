@@ -104,7 +104,6 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
-from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_dir_layouts import host_dir_fallbacks
 from imbue.mngr.providers.host_key_store import move_host_endpoint_pins
@@ -118,6 +117,7 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token

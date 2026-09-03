@@ -324,7 +324,7 @@ def test_build_ssh_info_from_host_returns_ssh_info_for_remote_host() -> None:
     assert result.key_path == Path("/tmp/key")
     assert result.known_hosts_path == Path("/tmp/pins/known_hosts")
     assert result.command == (
-        'ssh -i /tmp/key -o "UserKnownHostsFile=/tmp/pins/known_hosts" -o StrictHostKeyChecking=yes '
+        "ssh -i /tmp/key -o UserKnownHostsFile='\"/tmp/pins/known_hosts\"' -o StrictHostKeyChecking=yes "
         "-p 2222 root@remote.example.com"
     )
 

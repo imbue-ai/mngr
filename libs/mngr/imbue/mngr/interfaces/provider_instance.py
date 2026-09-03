@@ -58,8 +58,8 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
-from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.utils.name_generator import generate_host_name
+from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 

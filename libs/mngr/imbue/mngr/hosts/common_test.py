@@ -644,7 +644,8 @@ def test_build_ssh_transport_command_with_known_hosts_uses_strict_checking() -> 
     assert "ssh" in result
     assert "-i /tmp/test_key" in result
     assert "-p 2222" in result
-    assert "-o UserKnownHostsFile=/tmp/known_hosts" in result
+    # Double-quoted for ssh: UserKnownHostsFile is a whitespace-separated list.
+    assert "-o UserKnownHostsFile='\"/tmp/known_hosts\"'" in result
     assert "-o StrictHostKeyChecking=yes" in result
     assert "-o IdentitiesOnly=yes" in result
     assert "-o IdentityAgent=none" in result
@@ -677,10 +678,14 @@ def test_build_ssh_transport_command_quotes_known_hosts_path_with_spaces() -> No
         port=22,
         known_hosts_file=Path("/path with spaces/known_hosts"),
     )
-    assert "'/path with spaces/known_hosts'" in result
-    # Verify the full command parses correctly when split
+    # The shell is the first parser: the option must survive its split as one
+    # argument.
     parsed = shlex.split(result)
-    assert any("UserKnownHostsFile=/path with spaces/known_hosts" in arg for arg in parsed)
+    option = next(arg for arg in parsed if arg.startswith("UserKnownHostsFile="))
+
+    # ssh is the second, and splits on whitespace itself, so the value it sees
+    # has to carry its own quotes.
+    assert option == 'UserKnownHostsFile="/path with spaces/known_hosts"', option
 
 
 # =========================================================================

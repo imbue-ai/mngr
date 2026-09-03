@@ -16,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr.utils.ssh import quote_ssh_option_value
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.bare_metal import count_authorized_key_lines
@@ -163,7 +164,7 @@ class LimaSliceVpsClient(VpsClientInterface):
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
-            f"UserKnownHostsFile={self._box_known_hosts_file()}",
+            f"UserKnownHostsFile={quote_ssh_option_value(self._box_known_hosts_file())}",
             "-o",
             f"ConnectTimeout={_BOX_CONNECT_TIMEOUT_SECONDS}",
             "-o",

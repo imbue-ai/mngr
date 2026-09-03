@@ -17,6 +17,7 @@ from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.ssh import quote_ssh_option_value
 
 # Exit codes used by the remote SSH wrapper script to signal post-disconnect actions.
 # These are checked by connect_to_agent after the SSH session ends to determine
@@ -129,7 +130,7 @@ def build_ssh_base_args(
 
     # Use the known_hosts file if provided (for pre-trusted host keys)
     if ssh_known_hosts_file and ssh_known_hosts_file != "/dev/null":
-        ssh_args.extend(["-o", f"UserKnownHostsFile={ssh_known_hosts_file}"])
+        ssh_args.extend(["-o", f"UserKnownHostsFile={quote_ssh_option_value(ssh_known_hosts_file)}"])
         ssh_args.extend(["-o", "StrictHostKeyChecking=yes"])
     elif is_unknown_host_allowed:
         ssh_args.extend(["-o", "StrictHostKeyChecking=no"])

@@ -695,15 +695,6 @@ class SSHInfo(FrozenModel):
     command: str = Field(description="Full SSH command to connect")
 
 
-def build_ssh_connect_command(user: str, host: str, port: int, key_path: Path, known_hosts_path: Path | None) -> str:
-    """Build the human-facing ssh command for an SSHInfo, verifying pins when a known_hosts file is known."""
-    if known_hosts_path is not None:
-        pin_options = f' -o "UserKnownHostsFile={known_hosts_path}" -o StrictHostKeyChecking=yes'
-    else:
-        pin_options = ""
-    return f"ssh -i {key_path}{pin_options} -p {port} {user}@{host}"
-
-
 class DiscoveredHost(FrozenModel):
     """Lightweight host data collected during discovery (without connecting to the host)."""
 

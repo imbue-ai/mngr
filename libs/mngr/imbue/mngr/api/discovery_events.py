@@ -55,12 +55,12 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
-from imbue.mngr.primitives import build_ssh_connect_command
 from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
 from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
+from imbue.mngr.utils.ssh import build_ssh_connect_command
 
 DISCOVERY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/discovery")
 

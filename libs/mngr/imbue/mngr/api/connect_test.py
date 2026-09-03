@@ -250,9 +250,27 @@ def test_build_ssh_args_with_known_hosts_file(
     assert "/home/user/.ssh/id_rsa" in args
     assert "-p" in args
     assert "22" in args
-    assert "UserKnownHostsFile=/tmp/known_hosts" in " ".join(args)
+    # Double-quoted for ssh: UserKnownHostsFile is a whitespace-separated list.
+    assert 'UserKnownHostsFile="/tmp/known_hosts"' in args
     assert "StrictHostKeyChecking=yes" in " ".join(args)
     assert "ubuntu@example.com" in args
+
+
+def test_build_ssh_args_quotes_a_known_hosts_path_with_spaces(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A spaced known_hosts path stays one file: these args are exec'd, so ssh is the only parser.
+
+    ssh splits UserKnownHostsFile on whitespace itself, so an unquoted spaced path becomes
+    several nonexistent files and StrictHostKeyChecking=yes then refuses the connection.
+    """
+    host = _make_ssh_host(local_provider, temp_mngr_ctx, ssh_known_hosts_file="/path with spaces/known_hosts")
+    opts = ConnectionOptions(is_unknown_host_allowed=False)
+
+    args = _build_ssh_args(host, opts)
+
+    assert 'UserKnownHostsFile="/path with spaces/known_hosts"' in args
 
 
 def test_build_ssh_args_with_allow_unknown_host(
