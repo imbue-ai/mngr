@@ -27,6 +27,7 @@ members = [
     "imbue-mngr-codex",
     "imbue-mngr-codex-usage",
     "imbue-mngr-file",
+    "imbue-mngr-foreman",
     "imbue-mngr-forward",
     "imbue-mngr-gcp",
     "imbue-mngr-imbue-cloud",
@@ -1099,6 +1100,19 @@ wheels = [
 ]
 
 [[package]]
+name = "flask-sock"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flask" },
+    { name = "simple-websocket" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8d/8f/c6ab717dc90f4e46d1430335cd4ab13e3629410bb760c0ead6de476760fb/flask-sock-0.7.0.tar.gz", hash = "sha256:e023b578284195a443b8d8bdb4469e6a6acf694b89aeb51315b1a34fcf427b7d", size = 4334, upload-time = "2023-10-02T22:32:42.973Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/98/107728ce3f430b5481eb426ccc5e1f7c8ab0bd01eaf231c62a8d528ff721/flask_sock-0.7.0-py3-none-any.whl", hash = "sha256:caac4d679392aaf010d02fabcf73d52019f5bdaf1c9c131ec5a428cb3491204a", size = 3982, upload-time = "2023-10-02T22:32:41.778Z" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1995,6 +2009,35 @@ requires-dist = [
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "tabulate", specifier = ">=0.9.0" },
+]
+
+[[package]]
+name = "imbue-mngr-foreman"
+version = "0.1.0"
+source = { editable = "libs/mngr_foreman" }
+dependencies = [
+    { name = "click" },
+    { name = "concurrency-group" },
+    { name = "flask" },
+    { name = "flask-sock" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "loguru" },
+    { name = "pluggy" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click" },
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "flask", specifier = ">=3.0" },
+    { name = "flask-sock", specifier = ">=0.7" },
+    { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "loguru" },
+    { name = "pluggy" },
+    { name = "pydantic", specifier = ">=2.0" },
 ]
 
 [[package]]
@@ -4357,6 +4400,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/61/ac/2a84c37171c0cf5a10ea4b0a27d43eb0a1d29bd98b49c2c5ffe17ad24bbe/shellcheck_py-0.11.0.1-py2.py3-none-macosx_11_0_arm64.whl", hash = "sha256:6b88d0a244c82ed07e06a53e444da841f69330ca59ae15d4a66c391655dae7a0", size = 11381835, upload-time = "2025-08-09T17:53:36.852Z" },
     { url = "https://files.pythonhosted.org/packages/96/55/250e0e3367613a5c22bd82e33b16b889287d81ab0f7dda67e6514a4cccf4/shellcheck_py-0.11.0.1-py2.py3-none-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:1b274df81de5b000ff78db433e7328b87e52e3c38481c60f8e488c3095beef05", size = 3800600, upload-time = "2025-08-09T17:53:38.643Z" },
     { url = "https://files.pythonhosted.org/packages/15/5b/bb14c0a7474463b1aa3c09e866cb172dffc66ed2993b7ea8f1db581e86ee/shellcheck_py-0.11.0.1-py2.py3-none-win_amd64.whl", hash = "sha256:784156289ecb17e91c692cd783ab5152333309588cabb10032a047331c63e759", size = 8027541, upload-time = "2025-08-09T17:53:40.889Z" },
+]
+
+[[package]]
+name = "simple-websocket"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wsproto" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b0/d4/bfa032f961103eba93de583b161f0e6a5b63cebb8f2c7d0c6e6efe1e3d2e/simple_websocket-1.1.0.tar.gz", hash = "sha256:7939234e7aa067c534abdab3a9ed933ec9ce4691b0713c78acb195560aa52ae4", size = 17300, upload-time = "2024-10-10T22:39:31.412Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/52/59/0782e51887ac6b07ffd1570e0364cf901ebc36345fea669969d2084baebb/simple_websocket-1.1.0-py3-none-any.whl", hash = "sha256:4af6069630a38ed6c561010f0e11a5bc0d4ca569b36306eb257cd9a192497c8c", size = 13842, upload-time = "2024-10-10T22:39:29.645Z" },
 ]
 
 [[package]]

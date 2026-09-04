@@ -1,0 +1,1 @@
+- Excluded binary font files (`.woff`, `.woff2`, `.ttf`, `.otf`) from the ratchet testing `BINARY_FILE_EXCLUSION`, so all-files ratchets (e.g. the bare-tmux-target check) no longer choke on vendored web fonts with a `UnicodeDecodeError`.
