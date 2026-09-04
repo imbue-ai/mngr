@@ -6,6 +6,7 @@ from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.uv_tool import ToolReceipt
 from imbue.mngr.uv_tool import ToolRequirement
 from imbue.mngr.uv_tool import _build_uv_tool_install_command
+from imbue.mngr.uv_tool import _format_git_url
 from imbue.mngr.uv_tool import _requirement_to_with_arg
 from imbue.mngr.uv_tool import build_base_specifier
 from imbue.mngr.uv_tool import build_uv_tool_install_add
@@ -54,6 +55,77 @@ def test_requirement_to_with_arg_git() -> None:
     """Git should produce --with 'name @ git+url'."""
     requirement = ToolRequirement(name="my-plugin", git="https://github.com/user/repo.git")
     assert _requirement_to_with_arg(requirement) == ("--with", "my-plugin @ git+https://github.com/user/repo.git")
+
+
+@pytest.mark.parametrize(
+    "receipt_url,expected",
+    [
+        # uv writes a monorepo git dependency with the ref and subdirectory as query
+        # parameters, but only reads them back in PEP 508 position.
+        (
+            "https://github.com/imbue-ai/mngr?subdirectory=libs%2Fmngr&rev=main",
+            "https://github.com/imbue-ai/mngr@main#subdirectory=libs/mngr",
+        ),
+        (
+            "https://github.com/imbue-ai/mngr?subdirectory=libs%2Fmngr_claude&rev=3e28046e",
+            "https://github.com/imbue-ai/mngr@3e28046e#subdirectory=libs/mngr_claude",
+        ),
+        ("https://github.com/imbue-ai/mngr?rev=v0.2.17", "https://github.com/imbue-ai/mngr@v0.2.17"),
+        ("https://github.com/imbue-ai/mngr?tag=v0.2.17", "https://github.com/imbue-ai/mngr@v0.2.17"),
+        (
+            "https://github.com/imbue-ai/mngr?subdirectory=libs%2Fmngr&branch=main",
+            "https://github.com/imbue-ai/mngr@main#subdirectory=libs/mngr",
+        ),
+        (
+            "https://github.com/imbue-ai/mngr?subdirectory=libs%2Fmngr",
+            "https://github.com/imbue-ai/mngr#subdirectory=libs/mngr",
+        ),
+        # Nothing to rewrite: left exactly as-is.
+        ("https://github.com/user/repo.git", "https://github.com/user/repo.git"),
+        ("ssh://git@github.com/user/repo.git", "ssh://git@github.com/user/repo.git"),
+    ],
+)
+def test_format_git_url(receipt_url: str, expected: str) -> None:
+    assert _format_git_url(receipt_url) == expected
+
+
+def test_format_git_url_puts_the_ref_before_a_surviving_query() -> None:
+    """The ref binds to the path, so a preserved query parameter must follow it.
+
+    Verified against uv: with the ref after the query, uv ignores it and resolves the
+    default branch -- ``...@v0.2.16`` placed after ``?foo=bar`` installed HEAD instead.
+    """
+    rewritten = _format_git_url("https://example.com/repo?other=1&rev=abc&subdirectory=pkg")
+    assert rewritten == "https://example.com/repo@abc?other=1#subdirectory=pkg"
+
+
+def test_format_git_url_keeps_an_existing_fragment_and_merges_the_subdirectory() -> None:
+    """A ref appended after a fragment is ignored, and a second ``#`` is not a URL."""
+    assert _format_git_url("https://example.com/repo?rev=abc#egg=thing") == "https://example.com/repo@abc#egg=thing"
+    assert (
+        _format_git_url("https://example.com/repo?rev=abc&subdirectory=pkg#egg=thing")
+        == "https://example.com/repo@abc#egg=thing&subdirectory=pkg"
+    )
+
+
+def test_build_base_specifier_keeps_a_git_installed_base_on_git() -> None:
+    """Emitting the bare name would silently re-resolve the base from PyPI."""
+    base = ToolRequirement(name="imbue-mngr", git="https://github.com/imbue-ai/mngr?subdirectory=libs%2Fmngr&rev=main")
+    assert build_base_specifier(base) == (
+        "imbue-mngr @ git+https://github.com/imbue-ai/mngr@main#subdirectory=libs/mngr"
+    )
+
+
+def test_requirement_to_with_arg_rewrites_a_receipt_git_url() -> None:
+    """A receipt-form git URL must come back out in PEP 508 form, or uv builds the repo root."""
+    requirement = ToolRequirement(
+        name="imbue-mngr-claude",
+        git="https://github.com/imbue-ai/mngr?subdirectory=libs%2Fmngr_claude&rev=main",
+    )
+    assert _requirement_to_with_arg(requirement) == (
+        "--with",
+        "imbue-mngr-claude @ git+https://github.com/imbue-ai/mngr@main#subdirectory=libs/mngr_claude",
+    )
 
 
 # =============================================================================

@@ -15,6 +15,10 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Final
+from urllib.parse import parse_qsl
+from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 from loguru import logger
 from pydantic import Field
@@ -24,6 +28,11 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.output_helpers import AbortError
 
 _RECEIPT_FILENAME: Final[str] = "uv-receipt.toml"
+# uv's receipt spells a git ref and a monorepo subdirectory as query parameters; a PEP 508
+# requirement spells them as "@<ref>" and "#subdirectory=<path>".
+_GIT_REF_QUERY_KEYS: Final[frozenset[str]] = frozenset({"rev", "tag", "branch"})
+_GIT_SUBDIRECTORY_QUERY_KEY: Final[str] = "subdirectory"
+_GIT_REWRITTEN_QUERY_KEYS: Final[frozenset[str]] = _GIT_REF_QUERY_KEYS | {_GIT_SUBDIRECTORY_QUERY_KEY}
 
 
 class ToolRequirement(FrozenModel):
@@ -44,6 +53,30 @@ class ToolReceipt(FrozenModel):
 
 
 @pure
+def _format_git_url(url: str) -> str:
+    """Rewrite a git URL from uv's receipt form into the form ``uv tool install`` accepts.
+
+    Input, as uv writes it into uv-receipt.toml:
+    ``https://github.com/imbue-ai/mngr?subdirectory=libs%2Fmngr&rev=v0.2.17``
+    Output, as ``uv tool install`` reads it back:
+    ``https://github.com/imbue-ai/mngr@v0.2.17#subdirectory=libs/mngr``
+    """
+    parsed = urlsplit(url)
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    ref = next((value for key, value in params if key in _GIT_REF_QUERY_KEYS), None)
+    subdirectory = next((value for key, value in params if key == _GIT_SUBDIRECTORY_QUERY_KEY), None)
+    if ref is None and subdirectory is None:
+        return url
+    # uv only honors "@<ref>" directly after the path; anywhere else it is silently
+    # ignored and the default branch is installed, e.g. "repo?foo=bar@v0.2.17" ignores @v0.2.17.
+    path = parsed.path if ref is None else f"{parsed.path}@{ref}"
+    query = urlencode([(key, value) for key, value in params if key not in _GIT_REWRITTEN_QUERY_KEYS])
+    subdirectory_fragment = "" if subdirectory is None else f"{_GIT_SUBDIRECTORY_QUERY_KEY}={subdirectory}"
+    fragment = "&".join(part for part in (parsed.fragment, subdirectory_fragment) if part)
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, fragment))
+
+
+@pure
 def _requirement_to_with_arg(requirement: ToolRequirement) -> tuple[str, str]:
     """Convert a requirement to a (flag, value) pair for ``uv tool install``.
 
@@ -56,7 +89,7 @@ def _requirement_to_with_arg(requirement: ToolRequirement) -> tuple[str, str]:
         return ("--with-editable", requirement.directory)
 
     if requirement.git is not None:
-        return ("--with", f"{requirement.name} @ git+{requirement.git}")
+        return ("--with", f"{requirement.name} @ git+{_format_git_url(requirement.git)}")
 
     if requirement.specifier is not None:
         return ("--with", f"{requirement.name}{requirement.specifier}")
@@ -166,8 +199,13 @@ def get_installed_plugin_package_names(
 def build_base_specifier(base: ToolRequirement) -> str:
     """Build the positional specifier for ``uv tool install <specifier>``.
 
-    Examples: ``"imbue-mngr"``, ``"imbue-mngr>=0.1.0"``.
+    Examples: ``"imbue-mngr"``, ``"imbue-mngr>=0.1.0"``,
+    ``"imbue-mngr @ git+https://host/repo@<ref>#subdirectory=libs/mngr"``.
     """
+    if base.git is not None:
+        # A git-installed mngr must keep its git source: emitting the bare name would
+        # re-resolve the base from PyPI
+        return f"{base.name} @ git+{_format_git_url(base.git)}"
     if base.specifier is not None:
         return f"{base.name}{base.specifier}"
     return base.name
