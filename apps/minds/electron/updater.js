@@ -64,10 +64,9 @@ function getAppId() {
 /**
  * Whether electron-updater can run at all.
  *
- * Only a packaged build has Contents/Resources/app-update.yml, without which
- * every check rejects with ENOENT -- which would read as a broken feed rather
- * than as updates being switched off in dev. A dev run has nothing to update
- * either way: there is no signed bundle for Squirrel to swap.
+ * A dev run has nothing to update: it executes a source folder out of
+ * `node_modules/electron`, so there is no signed bundle for Squirrel to swap,
+ * and `_bundled/` ships empty so it names no feed either.
  */
 function isUpdaterUsable() {
   return app.isPackaged;
@@ -77,13 +76,15 @@ function resolveFeed(channel) {
   return channels.feedForChannel(channel, { appId: getAppId(), feedBaseUrl: readFeedBaseUrl() });
 }
 
-/** The stored channel, falling back to stable and saying so in the log. */
-function currentChannel() {
-  const { channel, reason } = channels.readChannel(paths.getDataDir());
-  if (reason) {
-    console.warn(`[update] Falling back to ${channel}: stored channel ${reason}`);
-  }
-  return channel;
+/**
+ * The stored channel narrowed to one this build serves, and why it was narrowed.
+ *
+ * `reason` is null on a clean read, and only `init` reports it -- a fallback is
+ * news at startup, where a preference left by an older build or another tier is
+ * the only thing that can produce one.
+ */
+function storedChannel() {
+  return channels.readChannel(paths.getDataDir(), readFeedBaseUrl());
 }
 
 function setStatus(status) {
@@ -208,12 +209,12 @@ async function check() {
 
 async function runCheck() {
   if (!isUpdaterUsable()) {
-    const channel = currentChannel();
-    setStatus({ type: 'disabled', reason: 'not-packaged' });
+    const channel = storedChannel().channel;
+    setStatus({ type: 'disabled' });
     return { channel, status: 'disabled' };
   }
   const run = async () => {
-    const channel = currentChannel();
+    const channel = storedChannel().channel;
     try {
       setStatus({ type: 'checking', channel });
       const outcome = await checkChannel(channel);
@@ -264,7 +265,7 @@ function startDownload(channel) {
   // handler until the next serialize() call.
   void serialize(async () => {
     try {
-      if (currentChannel() !== channel) {
+      if (storedChannel().channel !== channel) {
         console.log(`[update] Dropping the ${channel} download: the channel changed`);
         return;
       }
@@ -383,6 +384,7 @@ async function peekChannels() {
           version: feedVersion,
           wouldPark:
             channels.computeUpdateStatus({ currentVersion, feedVersion, isUpdateAvailable }) === 'parked',
+          isOutsideRollout: channels.isOutsideRollout({ currentVersion, feedVersion, isUpdateAvailable }),
         };
       } catch (err) {
         // The panel renders every one of these the same way ("Unavailable right
@@ -390,11 +392,11 @@ async function peekChannels() {
         // promoted to and a manifest host that is down is lost here.
         const message = String((err && err.message) || err);
         console.error(`[update] Could not read what the ${channel} channel serves: ${message}`);
-        peeked[channel] = { version: null, wouldPark: false, error: message };
+        peeked[channel] = { version: null, wouldPark: false, isOutsideRollout: false, error: message };
       }
     }
     // Leave the updater pointed back at the channel the user is actually on.
-    channels.applyFeedToUpdater(autoUpdater, resolveFeed(currentChannel()));
+    channels.applyFeedToUpdater(autoUpdater, resolveFeed(storedChannel().channel));
     return peeked;
   });
 }
@@ -402,7 +404,7 @@ async function peekChannels() {
 function describe() {
   const feedBaseUrl = readFeedBaseUrl();
   return {
-    channel: currentChannel(),
+    channel: storedChannel().channel,
     currentVersion: app.getVersion(),
     available: channels.availableChannels(feedBaseUrl),
     status: getStatus(),
@@ -419,8 +421,15 @@ function init({ onStatus } = {}) {
   statusListener = onStatus || null;
   if (!isUpdaterUsable()) {
     console.log('[update] Skipping auto-update (dev build -- not packaged)');
-    setStatus({ type: 'disabled', reason: 'not-packaged' });
+    setStatus({ type: 'disabled' });
     return;
+  }
+  // Startup is the only moment a fallback is news: setChannel asserts the
+  // channel is available before writing, so nothing this process does can store
+  // one it cannot serve -- only an older build or another tier can.
+  const { channel, reason } = storedChannel();
+  if (reason) {
+    console.warn(`[update] Falling back to ${channel}: stored channel ${reason}`);
   }
   // Debug included: on macOS the handover to Squirrel is reported only at that
   // level, and it is the slowest step of an install by a wide margin. Without

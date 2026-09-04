@@ -34,6 +34,10 @@ test('normalizeChannel accepts only the known channels', () => {
   assert.equal(channels.normalizeChannel({ channel: 'alpha' }), null);
 });
 
+// A tier that configures a feed serves every channel; one that does not serves
+// stable alone, which is what readChannel resolves a stored preference against.
+const FEED = 'https://updates.example.com';
+
 test('an absent preference means stable, with nothing to report', () => {
   const { channel, reason } = channels.readChannel(tempDataDir());
   assert.equal(channel, 'stable');
@@ -43,13 +47,13 @@ test('an absent preference means stable, with nothing to report', () => {
 test('a stored channel round-trips', () => {
   const dir = tempDataDir();
   channels.writeChannel(dir, 'alpha');
-  assert.deepEqual(channels.readChannel(dir), { channel: 'alpha', reason: null });
+  assert.deepEqual(channels.readChannel(dir, FEED), { channel: 'alpha', reason: null });
 });
 
 test('writeChannel creates the data dir when the app has not yet', () => {
   const dir = path.join(tempDataDir(), 'not-created-yet');
   channels.writeChannel(dir, 'beta');
-  assert.equal(channels.readChannel(dir).channel, 'beta');
+  assert.equal(channels.readChannel(dir, FEED).channel, 'beta');
 });
 
 test('an unrecognized stored value falls back to stable AND says why', () => {
@@ -59,6 +63,23 @@ test('an unrecognized stored value falls back to stable AND says why', () => {
   assert.equal(channel, 'stable');
   // The reason is what turns a silent re-cadencing into something a log shows.
   assert.match(reason, /nightly/);
+});
+
+test('a stored channel this build cannot serve falls back AND says why', () => {
+  // A tier that configures no update_feed_base_url serves stable alone. Resolved
+  // here rather than at feedForChannel, which raises by name and would take
+  // every check, peek and switch down with it.
+  const dir = tempDataDir();
+  channels.writeChannel(dir, 'alpha');
+  const { channel, reason } = channels.readChannel(dir, null);
+  assert.equal(channel, 'stable');
+  assert.match(reason, /alpha/);
+});
+
+test('a stored channel the build does serve reads back clean', () => {
+  const dir = tempDataDir();
+  channels.writeChannel(dir, 'beta');
+  assert.deepEqual(channels.readChannel(dir, FEED), { channel: 'beta', reason: null });
 });
 
 test('a corrupt preference file falls back to stable AND says why', () => {
@@ -290,4 +311,44 @@ test('nothing staged is never already staged, even when the feed version is unkn
   // as already downloaded.
   assert.equal(channels.isAlreadyStaged({ isUpdateAvailable: true, feedVersion: null }, null), false);
   assert.equal(channels.isAlreadyStaged({ isUpdateAvailable: true, feedVersion: '0.5.0' }, null), false);
+});
+
+test('a newer feed version the updater will not offer reads as outside the rollout', () => {
+  // `stagingPercentage` keeps this install out of the bucket, so
+  // electron-updater answers isUpdateAvailable false while the manifest plainly
+  // carries a newer build.
+  assert.equal(
+    channels.isOutsideRollout({ currentVersion: '0.4.2', feedVersion: '0.5.0', isUpdateAvailable: false }),
+    true,
+  );
+});
+
+test('being offered the update, or level with it, is not outside the rollout', () => {
+  assert.equal(
+    channels.isOutsideRollout({ currentVersion: '0.4.2', feedVersion: '0.5.0', isUpdateAvailable: true }),
+    false,
+  );
+  assert.equal(
+    channels.isOutsideRollout({ currentVersion: '0.5.0', feedVersion: '0.5.0', isUpdateAvailable: false }),
+    false,
+  );
+});
+
+test('running ahead of the channel is parked, never outside the rollout', () => {
+  // Both states answer isUpdateAvailable false. Only the version comparison
+  // separates "there is something newer you are not being offered" from
+  // "you are past what this channel serves".
+  assert.equal(
+    channels.isOutsideRollout({ currentVersion: '0.5.0', feedVersion: '0.4.2', isUpdateAvailable: false }),
+    false,
+  );
+});
+
+test('an unreadable or unparseable feed version is not outside the rollout', () => {
+  for (const feedVersion of [null, undefined, '', 'latest']) {
+    assert.equal(
+      channels.isOutsideRollout({ currentVersion: '0.4.2', feedVersion, isUpdateAvailable: false }),
+      false,
+    );
+  }
 });

@@ -36,12 +36,14 @@ function normalizeChannel(raw) {
 }
 
 /**
- * Read the stored channel, plus why the default was used when it was.
+ * Read the stored channel, falling back to stable when it is missing, malformed,
+ * or one this build cannot serve (see `availableChannels`).
  *
- * `reason` is null on a clean read. Callers log it -- a preference that silently
- * resets to stable is how an alpha tester quietly stops being one.
+ * `reason` says why the fallback was used, or is null on a clean read. Callers
+ * log it -- a preference that silently resets to stable is how an alpha tester
+ * quietly stops being one.
  */
-function readChannel(dataDir) {
+function readChannel(dataDir, feedBaseUrl) {
   let raw;
   try {
     raw = JSON.parse(fs.readFileSync(preferencePath(dataDir), 'utf8'));
@@ -52,6 +54,9 @@ function readChannel(dataDir) {
   const channel = normalizeChannel(raw && raw.channel);
   if (channel === null) {
     return { channel: DEFAULT_CHANNEL, reason: `unrecognized value ${JSON.stringify(raw && raw.channel)}` };
+  }
+  if (!availableChannels(feedBaseUrl).includes(channel)) {
+    return { channel: DEFAULT_CHANNEL, reason: `${channel}, which this build does not serve` };
   }
   return { channel, reason: null };
 }
@@ -167,6 +172,22 @@ function computeUpdateStatus({ currentVersion, feedVersion, isUpdateAvailable })
 }
 
 /**
+ * Whether this install sits outside a rollout the channel has already started.
+ *
+ * `stagingPercentage` paces a release by having electron-updater answer
+ * `isUpdateAvailable: false` for an install outside the bucket, which is why
+ * that alone does not mean the channel has nothing newer.
+ */
+function isOutsideRollout({ currentVersion, feedVersion, isUpdateAvailable }) {
+  if (isUpdateAvailable) {
+    return false;
+  }
+  return Boolean(
+    feedVersion && semver.valid(feedVersion) && semver.valid(currentVersion) && semver.gt(feedVersion, currentVersion),
+  );
+}
+
+/**
  * Whether a check found the very update already staged for the next restart.
  *
  * An update stays "available" until it is installed, so every check after a
@@ -180,6 +201,7 @@ function isAlreadyStaged({ isUpdateAvailable, feedVersion }, downloadedVersion) 
 
 module.exports = {
   isAlreadyStaged,
+  isOutsideRollout,
   normalizeChannel,
   readChannel,
   writeChannel,

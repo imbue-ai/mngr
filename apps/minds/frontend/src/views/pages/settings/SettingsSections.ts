@@ -6,7 +6,7 @@
 // desktop-only and has no jinja original.
 
 import m from "mithril";
-import type { UpdateChannel, UpdateState } from "../../../electron-bridge";
+import type { PeekedChannel, UpdateChannel, UpdateState } from "../../../electron-bridge";
 import type {
   PendingRevoke,
   ServiceAccountOverview,
@@ -968,40 +968,69 @@ function updateStatusLine(model: SettingsModel): m.Children {
   const state = model.updateState;
   if (state === null) return null;
   const status = state.status;
-  // `parked` gets no notice. Being ahead of your channel is temporary and
-  // self-correcting -- the channel catches up -- and every channel already
-  // prints what it serves, which is the same fact without the alarm. Warning
-  // that you are "not receiving updates" reads as a fault when nothing is
-  // wrong.
   if (status.type === "error") {
     return m(Notice, { variant: "warn" }, `Update check failed: ${status.message}`);
   }
   if (status.type === "update-downloaded") {
     return m(Notice, { variant: "info" }, `Minds ${status.version} is downloaded. Restart to install.`);
   }
-  if (status.type === "update-available") {
-    return m(Notice, { variant: "info" }, `Downloading ${status.feedVersion}...`);
-  }
-  if (status.type === "disabled") {
-    return m(Notice, { variant: "info" }, "Updates are only available in installed builds.");
-  }
-  if (status.type === "parked" && status.feedVersion != null && status.currentVersion !== undefined) {
-    // Stated, but not as an alarm: nothing is wrong, and the versions beside
-    // each channel already imply it. Left unsaid, though, a channel switch
-    // looks like it did nothing -- the panel redraws identically to up-to-date.
-    return m(
-      "p",
-      { class: "type-helper text-tertiary" },
-      `${channelLabel(status.channel)} is at ${status.feedVersion}, so you will stay on ` +
-        `${status.currentVersion} until it catches up.`,
-    );
-  }
   return null;
 }
 
-/** A channel's display name, so a sentence never drops the bare `alpha` into prose. */
-function channelLabel(channel: UpdateChannel | undefined): string {
-  return CHANNEL_COPY.find((entry) => entry.name === channel)?.label ?? "That channel";
+/**
+ * Where you stand with your channel: the second of the panel's two fixed lines.
+ *
+ * Reads "up to date" through a canary this install has not been offered yet,
+ * where nothing is waiting to be installed -- but never after a failed check,
+ * which would be claiming it on no evidence.
+ */
+function updateStandingLine(model: SettingsModel): m.Children {
+  const state = model.updateState;
+  if (state === null) return null;
+  const status = state.status;
+  const line = (text: string, tone = "text-secondary"): m.Children =>
+    m("p", { class: `type-body ${tone} mb-3` }, text);
+  if (status.type === "disabled") {
+    return line("Updates are disabled in dev builds.");
+  }
+  if (status.type === "error") {
+    return line("Couldn't check for updates.");
+  }
+  if (status.type === "update-downloaded") {
+    return null;
+  }
+  if (status.type === "update-available") {
+    return line(`Downloading ${status.feedVersion}...`);
+  }
+  if (status.type === "parked") {
+    return line(
+      `You're ahead of ${channelLabel(state.channel)} and will get updates when it catches up.`,
+      "text-tertiary",
+    );
+  }
+  return line(`You're up to date with ${channelLabel(state.channel)}.`);
+}
+
+/**
+ * The version a channel serves, appended to its blurb.
+ *
+ * Never a percentage: the pacing is ours to run, not the reader's to act on.
+ */
+function channelVersionText(peeked: PeekedChannel | undefined): string | null {
+  if (peeked === undefined || peeked.version === null) return null;
+  return peeked.isOutsideRollout === true
+    ? `Currently rolling out ${peeked.version}.`
+    : `Currently on ${peeked.version}.`;
+}
+
+/**
+ * A channel's display name, so a sentence never drops the bare `alpha` into prose.
+ *
+ * CHANNEL_COPY covers every UpdateChannel, but it is an array -- it carries the
+ * order the panel lists channels in -- so `find` is still typed as optional.
+ */
+function channelLabel(channel: UpdateChannel): string {
+  return CHANNEL_COPY.find((entry) => entry.name === channel)?.label ?? channel;
 }
 
 function channelSwitchDialog(model: SettingsModel): m.Children {
@@ -1096,17 +1125,14 @@ function channelRow(
     },
     [
       m("span", [
-        // The version rides in the heading rather than on its own line: it is
-        // what the channel *is* right now, and a second line repeated the word
-        // "Currently" down the whole list.
+        m("span", { class: "type-body text-primary font-semibold" }, channel.label),
+        // Mid-canary a channel serves two versions at once, so there is no
+        // single one to put beside its name.
         m(
           "span",
-          { class: "type-body text-primary font-semibold" },
-          peeked !== undefined && peeked.version !== null
-            ? `${channel.label} (${peeked.version})`
-            : channel.label,
+          { class: "block type-helper text-tertiary" },
+          [channel.blurb, channelVersionText(peeked)].filter((part) => part !== null).join(" "),
         ),
-        m("span", { class: "block type-helper text-tertiary" }, channel.blurb),
         isUnavailable
           ? m("span", { class: "block type-helper text-warning" }, "Unavailable right now.")
           : null,
@@ -1188,11 +1214,8 @@ function updatesPanel(model: SettingsModel): m.Children {
   const concealed = visible.filter((channel) => channel.name === INTERNAL_CHANNEL);
   return m("section", [
     m("h2", { class: "type-heading-lg text-primary mb-2" }, "Updates"),
-    m(
-      "p",
-      { class: "type-body text-secondary mb-3" },
-      `You are running Minds ${state.currentVersion}.`,
-    ),
+    m("p", { class: "type-body text-secondary" }, `You're on Minds ${state.currentVersion}.`),
+    updateStandingLine(model),
     updateStatusLine(model),
     ...listed.map((channel) => channelRow(model, state, channel)),
     concealed.length > 0 ? internalChannelDisclosure(model, state, concealed) : null,
