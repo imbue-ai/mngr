@@ -538,10 +538,16 @@ configured, so re-running only prompts for what is still unset. Run
 automatically by the installer.
 
 Steps:
+  Default agent type           The default agent type for `mngr create`
+                               (skipped when no agent types are registered yet).
   Claude config dir isolation  Whether each local Claude agent gets its own
                                config dir (mngr leaves your default Claude
                                config untouched) or shares your default config
                                (needed for Claude subscriptions on macOS).
+  Docker host-volume isolation Whether each docker host sees only its own
+                               host_dir sub-folder (the recommended, forthcoming
+                               default; requires Docker Engine >= 25.0) or shares
+                               one state volume.
 
 **Usage:**
 
