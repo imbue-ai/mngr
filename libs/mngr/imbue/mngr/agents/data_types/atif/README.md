@@ -10,7 +10,7 @@ doc-builder validates assembled documents against `Trajectory`.
 
 - Source repo: <https://github.com/harbor-framework/harbor>
 - Source path: `src/harbor/models/trajectories/`
-- Vendored from: tag `v0.21.0`, commit `64afbbcb62165950301e1a6407c729aa26d844ff`
+- Vendored from: tag `v0.22.0`, commit `4407eb5227a2ff4f0d3f16b2eb48849382fdf276`
 - Pinned schema version: `ATIF-v1.7` (the RFC lives at `rfcs/0001-trajectory-format.md`
   in the harbor repo)
 
