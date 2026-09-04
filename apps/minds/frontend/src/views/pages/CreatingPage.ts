@@ -11,8 +11,11 @@ import { getAppContext } from "../../app-context";
 import type { CreateAttemptDetail, LiveCreateAttemptDetail } from "../../models/create";
 import { CreateAttemptWatcher, fetchCreateAttemptDetail, progressForElapsed } from "../../models/create";
 import { Button } from "../components/Button";
+import { Card } from "../components/Card";
 import { PageContainer } from "../components/Layout";
+import { Link } from "../components/Link";
 import { Notice } from "../components/Notice";
+import { routeLinkAttrs } from "../components/route-link";
 import { Spinner } from "../components/Spinner";
 import { OnboardingWalkthrough } from "./creating/OnboardingWalkthrough";
 
@@ -77,7 +80,6 @@ export const CreatingPage: m.ClosureComponent = () => {
         state.isFailed = true;
         state.errorText = error;
         state.errorKind = errorKind;
-        state.stageText = "";
       },
       onStageText(text) {
         if (!state.isFailed) state.stageText = text;
@@ -117,53 +119,62 @@ export const CreatingPage: m.ClosureComponent = () => {
       });
   }
 
-  function failureView(
+  function failureCard(
     workspaceName: string,
     logTail: string[] | null,
     errorText: string,
     errorKind: string,
   ): m.Children {
-    return m("div", { id: "failure-view", class: "flex flex-col gap-4 max-w-[640px] mx-auto pt-12" }, [
-      m("h1", { class: "type-heading text-primary" }, `Could not create ${workspaceName || "the machine"}`),
-      m(Notice, { variant: "error" }, m("span", { id: "error-message" }, errorText || "unknown error")),
-      errorKind === "GITHUB_AUTH_REQUIRED"
-        ? m(Notice, { id: "github-auth-help" }, [
-            "This repository looks private. Install the GitHub app or use a repository URL that includes ",
-            "credentials, then retry.",
-          ])
-        : null,
-      errorKind === "GIT_AUTH_REQUIRED"
-        ? m(Notice, { id: "git-auth-help" }, [
-            "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
-          ])
-        : null,
-      logTail !== null && logTail.length > 0
-        ? m(
-            "pre",
-            { class: "type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-64 overflow-y-auto" },
-            logTail.join("\n"),
-          )
-        : null,
-      m("div", { class: "flex gap-3" }, [
-        m(
-          Button,
-          {
-            variant: "secondary",
-            onclick: () => m.route.set(`/create?retry=${encodeURIComponent(state.createAttemptId)}`),
-          },
-          "Retry",
-        ),
-        m(
-          Button,
-          {
-            variant: "danger",
-            id: "create-attempt-dismiss-btn",
-            disabled: state.isActionPending,
-            onclick: dismissAttempt,
-          },
-          "Dismiss",
-        ),
-      ]),
+    return m(Card, { extra: "flex flex-col gap-4 max-w-[560px] w-full" }, [
+        m("h1", { class: "type-heading text-primary" }, `Could not create ${workspaceName || "the machine"}`),
+        m(Notice, { variant: "error", extra: "!my-0" }, m("span", { id: "error-message" }, errorText || "unknown error")),
+        errorKind === "GITHUB_AUTH_REQUIRED"
+          ? m(Notice, { id: "github-auth-help", extra: "!my-0" }, [
+              "This repository looks private. Install the GitHub app or use a repository URL that includes ",
+              "credentials, then retry.",
+            ])
+          : null,
+        errorKind === "GIT_AUTH_REQUIRED"
+          ? m(Notice, { id: "git-auth-help", extra: "!my-0" }, [
+              "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
+            ])
+          : null,
+        errorKind === "QUOTA_EXCEEDED"
+          ? m(Notice, { id: "quota-exceeded-help", extra: "!my-0" }, [
+              "Stop or delete an existing hosted machine from the ",
+              m(Link, routeLinkAttrs("/"), "home page"),
+              ", then retry. To raise the limit, switch plans on the ",
+              m(Link, routeLinkAttrs("/accounts"), "Accounts page"),
+              ".",
+            ])
+          : null,
+        logTail !== null && logTail.length > 0
+          ? m(
+              "pre",
+              { class: "type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-64 overflow-y-auto" },
+              logTail.join("\n"),
+            )
+          : null,
+        m("div", { class: "flex gap-3" }, [
+          m(
+            Button,
+            {
+              variant: "secondary",
+              onclick: () => m.route.set(`/create?retry=${encodeURIComponent(state.createAttemptId)}`),
+            },
+            "Retry",
+          ),
+          m(
+            Button,
+            {
+              variant: "danger",
+              id: "create-attempt-dismiss-btn",
+              disabled: state.isActionPending,
+              onclick: dismissAttempt,
+            },
+            "Dismiss",
+          ),
+        ]),
     ]);
   }
 
@@ -224,6 +235,7 @@ export const CreatingPage: m.ClosureComponent = () => {
         isRemote: live?.is_remote ?? false,
         onboardingServices: live?.onboarding_services ?? [],
         isReady: state.isDone,
+        isPaused: state.isFailed,
         onEnter: () => {
           if (state.redirectUrl) enterWorkspaceFromRedirect(state.redirectUrl);
         },
@@ -237,7 +249,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     if (record.state === "failed") {
       // Derive the error from the record here rather than writing component
       // state during render (view code must stay side-effect free).
-      return failureView(record.workspace_name, record.log_tail, record.error ?? "unknown error", record.error_kind ?? "");
+      return failureCard(record.workspace_name, record.log_tail, record.error ?? "unknown error", record.error_kind ?? "");
     }
     return m("div", { class: "flex flex-col gap-4 max-w-[640px] mx-auto pt-12" }, [
       m("h1", { class: "type-heading text-primary" }, `${record.workspace_name} was interrupted`),
@@ -284,31 +296,42 @@ export const CreatingPage: m.ClosureComponent = () => {
     },
     view() {
       const detail = state.detail;
-      if (detail !== null && detail.kind !== "record" && !state.isFailed) {
+      if (detail !== null && detail.kind !== "record") {
         // The walkthrough is laid out to fit the window rather than to scroll:
         // this column is exactly as tall as the scroll card it sits in, the
         // progress block above takes its natural height, and #onboarding takes
         // what is left -- scaling the illustration into whatever that comes to
         // (see OnboardingWalkthrough). Opening the logs is just another claim
         // on the same budget: the picture gets smaller, the page does not grow.
+        // A failed create keeps this same frame and floats the error card on it.
         return m(
           "div",
           {
             id: "creating",
             "data-agent-id": state.createAttemptId,
-            class: "h-full flex flex-col gap-4 px-6 py-6",
+            class: "relative h-full flex flex-col gap-4 px-6 py-6",
           },
-          progressView(detail.live?.workspace_name ?? "", detail.live),
+          [
+            progressView(detail.live?.workspace_name ?? "", detail.live),
+            state.isFailed
+              ? m(
+                  "div",
+                  {
+                    id: "failure-view",
+                    class: "absolute inset-0 z-10 flex items-center justify-center p-6",
+                  },
+                  failureCard(detail.live?.workspace_name ?? "", null, state.errorText, state.errorKind),
+                )
+              : null,
+          ],
         );
       }
-      // The failure and interrupted-record views are ordinary pages: they hold
-      // as much text as the create produced, so they scroll if they are tall.
+      // The interrupted-record view is an ordinary page: it holds as much
+      // text as the create produced, so it scrolls if it is tall.
       return m(PageContainer, { id: "creating", "data-agent-id": state.createAttemptId }, [
         detail === null
           ? m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" }))
-          : detail.kind === "record"
-            ? recordView(detail)
-            : failureView(detail.live?.workspace_name ?? "", null, state.errorText, state.errorKind),
+          : recordView(detail),
       ]);
     },
   };
