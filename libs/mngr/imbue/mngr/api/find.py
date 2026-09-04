@@ -2,6 +2,7 @@ from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 from typing import NoReturn
 from typing import assert_never
 
@@ -22,6 +23,7 @@ from imbue.mngr.errors import AgentIdNotFoundError
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStateInconsistencyError
+from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import NoMatchingHostsError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import UserInputError
@@ -48,6 +50,13 @@ from imbue.mngr.primitives import LOCAL_PROVIDER_NAME
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+
+# Bound on waiting for the host lock before a start: long enough to outlast any healthy
+# holder (a ``create`` on the same host -- git transfer plus provisioning -- is the long
+# pole and normally finishes within a few minutes), so a wait this long means the holder
+# is wedged, and a loud failure beats queueing behind it forever. Boot-time callers are
+# re-run by their systemd unit and interactive callers can simply retry.
+_START_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 600.0
 
 
 @pure
@@ -385,6 +394,11 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
     agent's lingering session (and its pane content) is left exactly as it was.
     Callers that need a DONE agent actually relaunched (e.g. to deliver a message)
     must use ``revive_done_agent`` instead.
+
+    The start runs under the host lock (``start_agents_locked``): two concurrent
+    unlocked starts of the same stopped agent -- e.g. two ``mngr message`` calls
+    -- could otherwise both see no session, and the slower one's pre-launch reap
+    would kill the tree the faster one had just launched.
     """
     lifecycle_state = agent.get_lifecycle_state()
     if lifecycle_state not in (
@@ -397,7 +411,7 @@ def ensure_agent_started(agent: AgentInterface, host: OnlineHostInterface, is_st
             logger.info("Agent {} is stopped, starting it", agent.name)
             agent.wait_for_ready_signal(
                 is_readiness_awaited=False,
-                start_action=lambda: host.start_agents([agent.id]),
+                start_action=lambda: start_agents_locked(host, [agent.id], is_restart=False),
                 timeout=agent.get_ready_timeout_seconds(),
             )
         else:
@@ -412,10 +426,12 @@ def start_agents_locked(host: OnlineHostInterface, agent_ids: Sequence[AgentId],
 
     The lock serializes the (re)launch against any other operation on this host --
     e.g. the minds desktop client (remote, over SSH) racing a VM/container boot
-    hook (local), or a concurrent ``mngr gc``. The lock blocks indefinitely; gc
-    shares it, so a gc that tore down an agent is serialized before us, and the
-    state-dir check below makes a doomed (re)launch fail with a clear error instead
-    of trying to boot an agent gc already removed.
+    hook (local), or a concurrent ``mngr gc``. gc shares it, so a gc that tore down
+    an agent is serialized before us, and the state-dir check below makes a doomed
+    (re)launch fail with a clear error instead of trying to boot an agent gc already
+    removed. The wait is bounded (``_START_HOST_LOCK_TIMEOUT_SECONDS``): a holder
+    that never releases surfaces as a ``LockNotHeldError`` naming the host, rather
+    than a silent hang that (for a boot-time oneshot) leaves the host's agents down for good.
 
     When ``is_restart`` is False the launch is purely additive: an already-running
     agent's start is a no-op (the start command exits early when its tmux session
@@ -423,18 +439,26 @@ def start_agents_locked(host: OnlineHostInterface, agent_ids: Sequence[AgentId],
     first -- destructive: each agent's lingering session and every window in it are
     killed.
     """
-    with host.lock_cooperatively(timeout_seconds=None):
-        for agent_id in agent_ids:
-            agent_state_dir = get_agent_state_dir_path(host.host_dir, agent_id)
-            if not host.path_exists(agent_state_dir):
-                raise AgentNotFoundOnHostError(agent_id, host.id)
+    try:
+        with host.lock_cooperatively(timeout_seconds=_START_HOST_LOCK_TIMEOUT_SECONDS):
+            for agent_id in agent_ids:
+                agent_state_dir = get_agent_state_dir_path(host.host_dir, agent_id)
+                if not host.path_exists(agent_state_dir):
+                    raise AgentNotFoundOnHostError(agent_id, host.id)
 
-        if is_restart:
-            with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
-                host.stop_agents(agent_ids)
+            if is_restart:
+                with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
+                    host.stop_agents(agent_ids)
 
-        with log_span("Starting {} agent(s)", len(agent_ids)):
-            host.start_agents(agent_ids)
+            with log_span("Starting {} agent(s)", len(agent_ids)):
+                host.start_agents(agent_ids)
+    except LockNotHeldError as e:
+        agent_id_list = ", ".join(str(agent_id) for agent_id in agent_ids)
+        raise LockNotHeldError(
+            f"Could not acquire the host lock on host {host.id} within "
+            f"{_START_HOST_LOCK_TIMEOUT_SECONDS:.0f}s to start agent(s) {agent_id_list}: another mngr "
+            "operation (create, start, or gc) is holding it. If that operation is wedged, stop it and retry."
+        ) from e
 
 
 def revive_done_agent(agent: AgentInterface, host: OnlineHostInterface) -> None:

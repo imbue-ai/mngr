@@ -270,19 +270,19 @@ def is_transient_ssh_error(exception: BaseException) -> bool:
     return False
 
 
-# Shared retry decorator for SSH operations that encounter transient
-# connection errors. Retries after (0, 1, 3, 6) seconds for a total
-# backoff window of ~10 seconds. Also used by the Host subclass in
+# Retry policy for SSH operations that encounter transient connection errors: one
+# pause per retry, so the attempt count follows from the backoff list. Exposed as
+# constants so callers that bound a command per attempt can size the bound against the
+# worst case (every attempt plus every backoff).
+SSH_TRANSIENT_RETRY_BACKOFFS_SECONDS: Final[tuple[float, ...]] = (0.0, 1.0, 3.0, 6.0)
+SSH_TRANSIENT_RETRY_MAX_ATTEMPTS: Final[int] = len(SSH_TRANSIENT_RETRY_BACKOFFS_SECONDS) + 1
+
+# Shared retry decorator built from the policy above. Also used by the Host subclass in
 # ``imbue.mngr.hosts.host``.
 retry_on_transient_ssh_error = retry(
     retry=retry_if_exception(is_transient_ssh_error),
-    stop=stop_after_attempt(5),
-    wait=wait_chain(
-        wait_fixed(0),
-        wait_fixed(1),
-        wait_fixed(3),
-        wait_fixed(6),
-    ),
+    stop=stop_after_attempt(SSH_TRANSIENT_RETRY_MAX_ATTEMPTS),
+    wait=wait_chain(*(wait_fixed(seconds) for seconds in SSH_TRANSIENT_RETRY_BACKOFFS_SECONDS)),
     reraise=True,
 )
 
@@ -497,8 +497,8 @@ class OuterHost(OuterHostInterface):
         An ``OSError`` naming a dead connection (see
         :func:`is_dead_ssh_connection_error`) means the channel died
         mid-operation; any other ``OSError`` propagates unchanged. Pass
-        ``timed_out=None`` to let a raw ``TimeoutError`` propagate (the
-        list-directory path's existing behavior).
+        ``timed_out=None`` to let a raw ``TimeoutError`` propagate, for callers
+        that classify a timeout themselves instead of as a connection error.
         """
         try:
             yield

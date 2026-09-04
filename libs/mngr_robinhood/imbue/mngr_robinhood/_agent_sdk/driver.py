@@ -41,6 +41,7 @@ from imbue.mngr.api.events import try_build_events_target_for_agent
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
+from imbue.mngr.api.find import start_agents_locked
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.api.providers import get_local_host
@@ -684,7 +685,9 @@ def restart_agent_with_resume(session: LiveSession) -> None:
         host.stop_agents([agent.id])
     except CleanupFailedGroup as exc:
         logger.warning("Cleanup left resources behind while stopping agent {} for restart: {}", agent.name, exc)
-    host.start_agents([agent.id])
+    # Under the host lock, like every other start path: an unlocked launch can race a
+    # concurrent start of the same agent, whose pre-launch reap would kill this one.
+    start_agents_locked(host, [agent.id], is_restart=False)
     is_ready = poll_until(
         lambda: agent.get_lifecycle_state() == AgentLifecycleState.WAITING,
         timeout=AGENT_READY_TIMEOUT_SECONDS,

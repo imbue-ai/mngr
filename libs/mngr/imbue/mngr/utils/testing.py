@@ -22,8 +22,10 @@ from datetime import timezone
 from enum import auto
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from typing import Final
 from typing import IO
+from typing import TypeVar
 from typing import assert_never
 from uuid import uuid4
 
@@ -43,6 +45,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
@@ -856,6 +859,32 @@ def create_test_agent_via_cli(
     )
 
     return session_name
+
+
+HostSubclassT = TypeVar("HostSubclassT", bound=Host)
+
+
+def make_local_host_of_class(
+    local_provider: LocalProviderInstance,
+    host_class: type[HostSubclassT],
+    **extra_fields: Any,
+) -> HostSubclassT:
+    """Build a ``Host`` subclass instance standing in for the local provider's real host.
+
+    The instance shares the real host's id, name, and local connector, so anything the
+    subclass does not override (file reads and writes, agent discovery) still hits the
+    real temp host dir. ``extra_fields`` are the subclass's own pydantic fields.
+    """
+    real_host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(real_host, Host)
+    return host_class(
+        id=real_host.id,
+        host_name=real_host.host_name,
+        connector=real_host.connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+        **extra_fields,
+    )
 
 
 def make_local_provider(

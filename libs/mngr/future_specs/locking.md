@@ -34,7 +34,7 @@ A single cooperative host lock coordinates all state-changing operations on a ho
 
 3. **Release**: The lock auto-releases when the operation's block exits, even on error. On remote hosts the SSH channel closes, the remote shell exits, the fd closes, and the lock releases -- so a crashed/interrupted controller never leaves a stale lock.
 
-4. **Timeout / blocking**: `create` and `start` block indefinitely until the lock is acquired (a contended operation waits rather than failing); `gc` and other callers use a bounded wait and raise `LockNotHeldError` on timeout (over SSH via `flock -w`).
+4. **Timeout / blocking**: `create` blocks indefinitely until the lock is acquired (a contended create waits rather than failing). `start` waits with a generous bound (10 minutes, longer than any healthy holder) and raises `LockNotHeldError` naming the host on timeout, so a wedged holder surfaces as a diagnosable error instead of a silent hang; `gc` and other callers use a shorter bounded wait (over SSH via `flock -w`).
 
 5. **Concurrent attempts**: Because the operations share one lock, they serialize. After a `gc` that destroyed a host/agent releases the lock, a waiting `start` re-checks that the target agent's state directory still exists and fails with a clear not-found error rather than booting a removed agent.
 

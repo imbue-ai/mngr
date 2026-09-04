@@ -207,8 +207,9 @@ _HOST_LOCK_FILENAME: Final[str] = "host_lock"
 # every acquire and so cannot hold durable state.
 _HOST_LOCK_GENERATION_FILENAME: Final[str] = "host_lock.generation"
 
-# Default timeout for callers that want a bounded wait (e.g. gc). ``create`` and
-# ``start`` pass ``None`` to block indefinitely until the lock is acquired.
+# Default timeout for callers that want a bounded wait (e.g. gc). ``create`` passes
+# ``None`` to block indefinitely until the lock is acquired; ``start`` uses its own,
+# longer bound (see ``api.find.start_agents_locked``).
 _DEFAULT_HOST_LOCK_TIMEOUT_SECONDS: Final[float] = 300.0
 
 # Env var that retains a failed host (and keeps its lock held) for debugging.
@@ -452,6 +453,20 @@ _TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
 # before declaring a command wedged.
 _STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 
+# Per-attempt bound on the single shell batch that launches one agent (tmux session
+# creation, the launch-script write and send-keys, activity recording, and the
+# backgrounded monitor). Every step is a tmux client call or a small file write, so a
+# healthy host finishes in well under a second; the bound is headroom for a slow remote
+# host before declaring the tmux server or client wedged. Without it a hung tmux client
+# blocks `mngr start` forever -- and, because the start runs under the host lock,
+# everything queued behind it as well. Over SSH a timed-out command is retried as
+# transient (``outer_host.SSH_TRANSIENT_RETRY_MAX_ATTEMPTS`` attempts, with
+# ``SSH_TRANSIENT_RETRY_BACKOFFS_SECONDS`` between them), so the worst case is that many
+# times this value plus the backoff; it is sized so that worst case still ends before
+# the start path's own host-lock wait (``api.find._START_HOST_LOCK_TIMEOUT_SECONDS``)
+# gives up.
+_START_AGENT_LAUNCH_TIMEOUT_SECONDS: Final[float] = 90.0
+
 # Lowercased stderr substrings that mark a *benign* stop-command failure: the target
 # resource was already gone, so nothing is left behind. A non-empty stderr line that
 # matches none of the relevant set is treated as a real failure (see
@@ -606,9 +621,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         Prefer using execute_command() instead whenever possible.
 
         When ``_raise_on_timeout`` is set, a local timeout raises
-        ``ProcessTimeoutError`` (the remote SSH path already raises
-        ``socket.timeout`` on its own), so opt-in callers see a timeout as a hard
-        failure on both backends rather than an ordinary failed result.
+        ``ProcessTimeoutError`` and a remote one propagates as the raw
+        ``socket.timeout`` (instead of being folded into ``HostConnectionError``
+        with the other post-retry SSH failures), so opt-in callers see a timeout
+        as a distinguishable hard failure on both backends rather than an
+        ordinary failed result or a generic connection error.
         """
         if self.is_local:
             # Bypass pyinfra's LocalConnector, which spawns local processes via
@@ -654,7 +671,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         with (
             self._notify_on_connection_error(),
             self._translate_ssh_errors(
-                timed_out="SSH command timed out reading output",
+                timed_out=None if _raise_on_timeout else "SSH command timed out reading output",
                 closed="Connection was closed while running command",
                 failed="Could not execute command due to connection error",
             ),
@@ -684,11 +701,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         so commands passed here are assumed to be idempotent.
 
         By default a timeout is reported like any other failed command
-        (``success=False`` on local; the remote SSH layer's ``socket.timeout``
-        propagates as-is, preserving prior behavior). When ``raise_on_timeout``
-        is set, a timeout on either backend is normalized into a single loud
-        ``CommandTimeoutError`` (a ``MngrError``) instead -- for callers that must
-        not silently treat a wedged command as "no output".
+        (``success=False`` on local; on remote the post-retry ``socket.timeout``
+        surfaces as a ``HostConnectionError`` like every other SSH failure). When
+        ``raise_on_timeout`` is set, a timeout on either backend is normalized into
+        a single loud ``CommandTimeoutError`` (a ``MngrError``) instead -- for
+        callers that must not silently treat a wedged command as "no output".
         """
         # Clamp to any active per-host read budget so a wedged command self-terminates within it.
         timeout_seconds = remaining_read_timeout(timeout_seconds)
@@ -706,12 +723,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 _raise_on_timeout=raise_on_timeout,
             )
         except (ProcessTimeoutError, TimeoutError) as e:
-            # ProcessTimeoutError: local backend (only when raise_on_timeout).
-            # TimeoutError: remote SSH socket.timeout (raised regardless of the
-            # flag). Re-raise unchanged unless the caller opted into the loud,
-            # typed CommandTimeoutError.
-            if not raise_on_timeout:
-                raise
+            # Only reached when raise_on_timeout is set: ProcessTimeoutError from the
+            # local backend, the raw socket.timeout from the SSH backend. Without the
+            # flag each backend reports the timeout itself (a failed result locally, a
+            # HostConnectionError over SSH).
             raise CommandTimeoutError(f"Command timed out after {timeout_seconds}s: {command}") from e
         return CommandResult(
             stdout=output.stdout,
@@ -859,8 +874,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         the fd closes, and the lock releases.
 
         ``timeout_seconds=None`` blocks indefinitely until the lock is acquired
-        (used by ``create`` and ``start``); a finite value raises
-        ``LockNotHeldError`` if the lock cannot be acquired in time.
+        (used by ``create``); a finite value raises ``LockNotHeldError`` if the
+        lock cannot be acquired in time.
 
         On error, if ``MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1``,
         a detached on-host process re-holds the lock so the failed (remote) host
@@ -3273,11 +3288,12 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     raise AgentNotFoundOnHostError(agent_id, self.id)
 
                 # Before launching, reap any stale process tree from a prior incarnation
-                # of this agent id -- but only when it isn't already running, so an
-                # idempotent start never tears down a live agent. This clears orphans an
-                # earlier abrupt teardown left behind (e.g. a bootstrap supervisord and
-                # its ttyd reparented to PID 1) so the relaunch can't collide with the
-                # survivors (e.g. EADDRINUSE on a fixed service port).
+                # of this agent id -- but only on a definitive "no session" answer, so an
+                # idempotent start never tears down a live agent (the probe raises on a
+                # timeout instead of guessing). This clears orphans an earlier abrupt teardown left
+                # behind (e.g. a bootstrap supervisord and its ttyd reparented to PID 1)
+                # so the relaunch can't collide with the survivors (e.g. EADDRINUSE on a
+                # fixed service port).
                 if not self._does_agent_session_exist(agent):
                     for reap_failure in self.reap_agent_process_tree(agent):
                         logger.warning(
@@ -3316,7 +3332,23 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         tmux_options=self.get_agent_tmux_options(agent),
                         onboarding_text=onboarding_text,
                     )
-                    result = self.execute_stateful_command(combined_command, cwd=agent.work_dir)
+                    # The batch is idempotent by construction (its has-session guard exits
+                    # early on a re-run), so it takes the retrying idempotent path -- which is
+                    # also the one that can bound the launch and report a timeout loudly
+                    # instead of hanging on a wedged tmux client.
+                    try:
+                        result = self.execute_idempotent_command(
+                            combined_command,
+                            cwd=agent.work_dir,
+                            timeout_seconds=_START_AGENT_LAUNCH_TIMEOUT_SECONDS,
+                            raise_on_timeout=True,
+                        )
+                    except CommandTimeoutError as e:
+                        raise AgentStartError(
+                            str(agent.name),
+                            f"the launch did not complete within {_START_AGENT_LAUNCH_TIMEOUT_SECONDS:.0f}s "
+                            "(is the tmux server on the host wedged?)",
+                        ) from e
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
 
@@ -3649,13 +3681,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         return failures
 
     def _does_agent_session_exist(self, agent: AgentInterface) -> bool:
-        """Return True iff the agent's tmux session already exists (it is likely running)."""
+        """Return True iff the agent's tmux session already exists (it is likely running).
+
+        Raises ``CommandTimeoutError`` when the probe times out (a tmux server wedged or
+        slow under load) rather than answering: callers gate destructive actions (the
+        pre-launch process-tree reap) on a "no" answer, so an unknown must never be
+        reported as absence -- otherwise one slow probe would make an idempotent start
+        kill a live agent's entire tree.
+        """
         session_name = self.mngr_ctx.config.agent_session_name(agent.name)
         target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
         result = self.execute_idempotent_command(
             f"tmux has-session -t {target} 2>/dev/null",
             timeout_seconds=_STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
-            raise_on_timeout=False,
+            raise_on_timeout=True,
         )
         return result.success
 
