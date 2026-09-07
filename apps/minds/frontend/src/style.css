@@ -670,10 +670,12 @@ body:has(#notice-band) .workspace-surface {
   opacity: 0.5;
   cursor: not-allowed;
 }
-/* A flip whose write is still in flight: keep the control visibly busy so a
-   second click (ignored while the request runs) reads as "wait", not
-   "broken". */
-.perm-switch.is-busy {
+/* A flip whose write is still in flight. The control is disabled for the
+   duration (the change has not happened yet, and a second one must not race
+   it), so this has to out-specify the :disabled rule above: a switch that is
+   working reads as "wait", not as "broken". */
+.perm-switch.is-busy,
+.perm-switch.is-busy:disabled {
   opacity: 0.6;
   cursor: progress;
 }

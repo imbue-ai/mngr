@@ -11,16 +11,27 @@ A pair whose host file is not there yet is retried on later resolver changes
 rather than dropped: on a brand-new workspace, discovery beats the file into
 existence.
 
+A registration that changes the host file is also pushed to the host's own
+machine, when it has one: a remote workspace's gateway enforces its own copy of
+the policy, and the baseline ``register_agent_for_host`` brings up to date is
+checked there. The push runs off the resolver's callback thread (which must
+stay non-blocking) and is coalesced per host, so a burst of registrations costs
+one round trip that carries the latest snapshot.
+
 """
 
 import threading
+from collections.abc import Callable
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
@@ -39,6 +50,8 @@ class LatchkeyAutoRegister(MutableModel):
 
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     backend_resolver: MngrCliBackendResolver = Field(
         frozen=True,
         description="Discovery state to subscribe to. Must already be receiving updates from the envelope consumer.",
@@ -49,6 +62,18 @@ class LatchkeyAutoRegister(MutableModel):
             "Latchkey instance whose ``plugin_data_dir`` holds the per-host "
             "``latchkey_permissions.json`` files this callback writes to."
         ),
+    )
+    push_permissions_to_machine: Callable[[str], None] = Field(
+        frozen=True,
+        description=(
+            "Makes this computer's copy of a workspace's policy the one its machine enforces, given the "
+            "workspace's agent id; a no-op for a workspace with no machine of its own. Raises "
+            "``MachineOperationError`` when the machine does not take it."
+        ),
+    )
+    concurrency_group: ConcurrencyGroup = Field(
+        frozen=True,
+        description="Owns the background threads the pushes run on; the app's root group, so they live as long as it.",
     )
 
     # ``(host_id, agent_id)`` pairs we have reached a terminal verdict on --
@@ -64,6 +89,15 @@ class LatchkeyAutoRegister(MutableModel):
     # pair is dropped again once it reaches a terminal verdict.
     _deferred_pairs: set[tuple[HostId, AgentId]] = PrivateAttr(default_factory=set)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    # Hosts whose file changed since their machine last received it, each with an
+    # agent on it (how the push addresses the workspace), and the hosts a push
+    # worker is currently running for. Both guarded by ``_push_lock``: the worker
+    # keeps going while its host is re-marked, so a change made mid-push is
+    # carried by the next iteration rather than by a second, racing thread.
+    _hosts_awaiting_push: dict[HostId, AgentId] = PrivateAttr(default_factory=dict)
+    _hosts_being_pushed: set[HostId] = PrivateAttr(default_factory=set)
+    _push_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def start(self) -> None:
         """Subscribe to the resolver's change stream.
@@ -145,7 +179,7 @@ class LatchkeyAutoRegister(MutableModel):
                 return
 
             try:
-                register_agent_for_host(self.latchkey.plugin_data_dir, host_id, agent_id)
+                is_file_changed = register_agent_for_host(self.latchkey.plugin_data_dir, host_id, agent_id)
             except (LatchkeyStoreError, OSError) as e:
                 logger.warning(
                     "Failed to auto-register agent {} on host {} in latchkey permissions: {}",
@@ -159,5 +193,54 @@ class LatchkeyAutoRegister(MutableModel):
                     agent_id,
                     host_id,
                 )
+                if is_file_changed:
+                    self._schedule_push(host_id, agent_id)
             self._processed_pairs.add((host_id, agent_id))
             self._deferred_pairs.discard((host_id, agent_id))
+
+    def _schedule_push(self, host_id: HostId, agent_id: AgentId) -> None:
+        """Mark ``host_id``'s file as changed and make sure a worker will carry it over."""
+        with self._push_lock:
+            self._hosts_awaiting_push[host_id] = agent_id
+            if host_id in self._hosts_being_pushed:
+                return
+            self._hosts_being_pushed.add(host_id)
+        self.concurrency_group.start_new_thread(
+            target=self._push_until_settled,
+            args=(host_id,),
+            name=f"latchkey-auto-register-push-{host_id}",
+            is_checked=False,
+        )
+
+    def _push_until_settled(self, host_id: HostId) -> None:
+        """Push ``host_id``'s policy to its machine until no change is left waiting.
+
+        Each push reads the canonical file at push time, so the last one to run
+        carries everything registered up to then.
+
+        A machine that will not take a push is logged as an error and not
+        retried here. There is no user waiting on an auto-registration to tell,
+        and the registration does *not* heal itself later: the machine owns the
+        policy, so the next read of it adopts the machine's copy over this one
+        and the registration is lost. Recover with ``mngr latchkey
+        register-agent`` once the machine is reachable again.
+        """
+        while (agent_id := self._claim_pending_push(host_id)) is not None:
+            try:
+                self.push_permissions_to_machine(str(agent_id))
+            except MachineOperationError as e:
+                logger.error(
+                    "Failed to push the latchkey permissions of host {} to its machine after registering agent {}; "
+                    "the registration will be lost when the machine is next read: {}",
+                    host_id,
+                    agent_id,
+                    e,
+                )
+
+    def _claim_pending_push(self, host_id: HostId) -> AgentId | None:
+        """Take the change waiting for ``host_id``, releasing the host's worker when there is none."""
+        with self._push_lock:
+            agent_id = self._hosts_awaiting_push.pop(host_id, None)
+            if agent_id is None:
+                self._hosts_being_pushed.discard(host_id)
+            return agent_id

@@ -85,6 +85,7 @@ export function permissionsView(overrides: Partial<UiWorkspacePermissions> = {})
     workspace_toggles: [],
     waiting_requests: [],
     permissions_unavailable: false,
+    is_credential_store_shared: true,
     ...overrides,
   };
 }

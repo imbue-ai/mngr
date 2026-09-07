@@ -9,7 +9,7 @@ import click
 import pluggy
 from click.testing import CliRunner
 
-import imbue.mngr.main
+import imbue.mngr.cli.plugin_manager
 from imbue.mngr import hookimpl
 from imbue.mngr.main import reset_plugin_manager
 from imbue.mngr.plugins import hookspecs
@@ -101,8 +101,8 @@ def _test_cli_with_plugins(
     for plugin in plugins:
         pm.register(plugin)
 
-    old_pm = imbue.mngr.main._plugin_manager_container["pm"]
-    imbue.mngr.main._plugin_manager_container["pm"] = pm
+    old_pm = imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"]
+    imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = pm
 
     @click.group()
     @click.pass_context
@@ -121,7 +121,7 @@ def _test_cli_with_plugins(
     try:
         yield test_cli
     finally:
-        imbue.mngr.main._plugin_manager_container["pm"] = old_pm
+        imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = old_pm
 
 
 def test_plugin_registers_simple_command() -> None:

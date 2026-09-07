@@ -5,7 +5,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-import imbue.mngr.main
+import imbue.mngr.cli.plugin_manager
 from imbue.mngr import hookimpl
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.main import cli
@@ -57,7 +57,7 @@ def lifecycle_tracker(plugin_manager: pluggy.PluginManager) -> _LifecycleTracker
     """Register a lifecycle tracker plugin and install the plugin manager as the module singleton."""
     tracker = _LifecycleTracker()
     plugin_manager.register(tracker)
-    imbue.mngr.main._plugin_manager_container["pm"] = plugin_manager
+    imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = plugin_manager
     return tracker
 
 
@@ -187,7 +187,7 @@ def test_multiple_plugin_hooks_all_fire(
     tracker2 = _LifecycleTracker()
     plugin_manager.register(tracker1)
     plugin_manager.register(tracker2)
-    imbue.mngr.main._plugin_manager_container["pm"] = plugin_manager
+    imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = plugin_manager
 
     cli_runner.invoke(cli, ["list"])
 
@@ -216,7 +216,7 @@ def test_blocked_plugin_hooks_do_not_fire(
     # for config-disabled plugins
     plugin_manager.set_blocked("test-blocked-plugin")
 
-    imbue.mngr.main._plugin_manager_container["pm"] = plugin_manager
+    imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = plugin_manager
 
     cli_runner.invoke(cli, ["list"])
 

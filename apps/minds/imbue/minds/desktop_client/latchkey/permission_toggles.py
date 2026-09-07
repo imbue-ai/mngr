@@ -47,6 +47,7 @@ route recomputes the full set server-side (so a buggy client can never clobber
 unrelated ``latchkey-self`` baselines), and the gateway merges the write.
 """
 
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Final
@@ -58,6 +59,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.machine_latchkey import is_machine_store_of_its_own
 from imbue.minds.desktop_client.latchkey.permission_overview import FILE_SHARING_READ_LABEL
 from imbue.minds.desktop_client.latchkey.permission_overview import FILE_SHARING_WRITE_LABEL
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
@@ -253,6 +255,13 @@ class WorkspacePermissionsView(FrozenModel):
     )
     file_sharing_toggles: tuple[SelfPermissionToggle, ...] = Field(description="Shared-path toggle rows.")
     workspace_toggles: tuple[SelfPermissionToggle, ...] = Field(description="Cross-workspace verb toggle rows.")
+    is_credential_store_shared: bool = Field(
+        description=(
+            "Whether this machine's credentials live in this computer's store, which every local "
+            "machine reads -- so signing an account out here signs it out of all of them. False "
+            "when the machine holds its own credentials, where a sign-out reaches only it."
+        ),
+    )
 
 
 @pure
@@ -424,9 +433,17 @@ def build_workspace_permissions_view(
     gateway_client: LatchkeyGatewayClient,
     services_catalog: ServicesCatalog,
     latchkey: Latchkey,
+    machine_latchkey: Latchkey,
     workspace_agent_id: str,
 ) -> WorkspacePermissionsView:
     """Assemble the Permissions tab's full view for one workspace.
+
+    ``latchkey`` is the desktop's, which owns the permission files of every
+    machine; ``machine_latchkey`` is the store holding *this* machine's
+    credentials (see
+    :mod:`imbue.minds.desktop_client.latchkey.machine_latchkey`), which is what
+    the connections are read from -- a machine's connectors are the accounts
+    connected for it, not the ones connected on the user's computer.
 
     Reads the workspace host's permissions file once (through the gateway
     extension) and one ``latchkey auth list --offline`` snapshot. A connection
@@ -450,12 +467,14 @@ def build_workspace_permissions_view(
         )
     config = gateway_client.get_permissions_config(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
     granted = _granted_by_scope_account(services_catalog, config)
-    accounts_by_service = latchkey.auth_list(is_offline=True)
+    accounts_by_service = machine_latchkey.auth_list(is_offline=True)
     # Every catalog service is offered somewhere in the pane -- under Add
     # connection when it has no account, under Add another account when it has
     # one -- so how each one connects has to be known here. The answers are
     # remembered per process, so this costs a burst of probes once rather than
-    # on every toggle write (each of which rebuilds this payload).
+    # on every toggle write (each of which rebuilds this payload). They are
+    # probed against the desktop's store because they are properties of the
+    # latchkey binary and the service catalog, identical for every machine.
     service_info_by_name = probe_service_sign_in_options(
         latchkey,
         tuple(service_name for service_name, infos in services_catalog.as_mapping().items() if infos),
@@ -511,6 +530,7 @@ def build_workspace_permissions_view(
         available_connections=tuple(sorted(available, key=lambda entry: entry.display_name.lower())),
         file_sharing_toggles=build_file_sharing_toggles(config),
         workspace_toggles=build_workspace_toggles(backend_resolver, config),
+        is_credential_store_shared=not is_machine_store_of_its_own(latchkey, machine_latchkey),
     )
 
 
@@ -641,6 +661,7 @@ def apply_connector_toggle(
     account: str,
     permission: str,
     enabled: bool,
+    push_permissions_to_machine: Callable[[str], None],
 ) -> None:
     """Flip one connector permission for ``(scope, account)`` on the workspace's host.
 
@@ -648,9 +669,12 @@ def apply_connector_toggle(
     set from the flip, and writes it back with the generated per-account
     schema (:func:`build_account_grant`). Turning the last permission off
     deletes the rule instead of leaving an empty one behind, matching the
-    revoke paths. Raises :class:`PermissionToggleError` for unknown scopes /
-    permissions / unresolvable workspaces; gateway failures propagate as
-    :class:`LatchkeyGatewayClientError`.
+    revoke paths. The edited policy is then pushed to the workspace's own
+    machine, and this does not return until it lands there. Raises
+    :class:`PermissionToggleError` for unknown scopes / permissions /
+    unresolvable workspaces; gateway failures propagate as
+    :class:`LatchkeyGatewayClientError` and a machine that would not take the
+    policy as :class:`MachineOperationError`.
     """
     info = services_catalog.get_by_scope(scope)
     if info is None:
@@ -674,8 +698,9 @@ def apply_connector_toggle(
     rule_key, granted_permissions, schemas = build_account_grant(scope, account, updated)
     if not updated:
         gateway_client.delete_permission_rule(path, current_rule_key or rule_key)
-        return
-    gateway_client.set_permission_rule(path, rule_key, granted_permissions, schemas)
+    else:
+        gateway_client.set_permission_rule(path, rule_key, granted_permissions, schemas)
+    push_permissions_to_machine(workspace_agent_id)
 
 
 def connect_service_with_credentials(
@@ -684,14 +709,16 @@ def connect_service_with_credentials(
     service_name: str,
     value_by_parameter_name: Mapping[str, str],
     account_name: str,
-) -> None:
-    """Store credentials the user typed in as an account of ``service_name``.
+) -> str:
+    """Store credentials the user typed in as an account of ``service_name``, and return that account.
 
     The command that stores them comes from the service's own
     ``setCredentialsExample``; only the ``<placeholder>`` values are the
-    user's, and they are never logged. The account it is pinned to is the name
-    the user gave, or latchkey's unnamed default when the service has no stored
-    account yet -- the same rule the permission dialog follows.
+    user's, and they are never logged. The account it is pinned to -- which is
+    what the returned name reports, so a caller can hand exactly that account
+    onward -- is the name the user gave, or latchkey's unnamed default when the
+    service has no stored account yet: the same rule the permission dialog
+    follows.
 
     Nothing is granted here: the account joins the pane with no permissions,
     exactly as a completed browser sign-in does.
@@ -738,7 +765,7 @@ def connect_service_with_credentials(
 
     is_success, detail = latchkey.auth_set_credentials(service_name, argv)
     if is_success:
-        return
+        return account
     # The service itself usually says which value it did not like; its usage
     # lines (and any crash noise) are not worth showing.
     described_failure = describe_credential_command_failure(detail)
@@ -791,13 +818,17 @@ def apply_self_toggle(
     workspace_agent_id: str,
     permission: str,
     enabled: bool,
+    push_permissions_to_machine: Callable[[str], None],
 ) -> None:
     """Flip one ``latchkey-self`` toggle (shared path / cross-workspace verb) on the workspace's host.
 
     Rewrites the whole ``latchkey-self`` rule with the recomputed full list
-    (unrelated names preserved); a no-op flip writes nothing. Raises
-    :class:`PermissionToggleError` per :func:`compute_self_permissions`;
-    gateway failures propagate as :class:`LatchkeyGatewayClientError`.
+    (unrelated names preserved); a no-op flip writes nothing. The edited policy
+    is then pushed to the workspace's own machine, and this does not return
+    until it lands there. Raises :class:`PermissionToggleError` per
+    :func:`compute_self_permissions`; gateway failures propagate as
+    :class:`LatchkeyGatewayClientError` and a machine that would not take the
+    policy as :class:`MachineOperationError`.
     """
     host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
     if host_id is None:
@@ -809,3 +840,4 @@ def apply_self_toggle(
     if updated is None:
         return
     gateway_client.set_permission_rule(path, SELF_SCOPE, updated)
+    push_permissions_to_machine(workspace_agent_id)

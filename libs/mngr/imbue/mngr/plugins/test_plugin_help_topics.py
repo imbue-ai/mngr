@@ -10,7 +10,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-import imbue.mngr.main
+import imbue.mngr.cli.plugin_manager
 from imbue.mngr import hookimpl
 from imbue.mngr.cli.help import load_help_topics_from_plugins
 from imbue.mngr.cli.help_topics import _topic_alias_to_canonical
@@ -121,15 +121,15 @@ def _registered_plugin_topics(plugin: Any) -> Generator[pluggy.PluginManager, No
     pm.add_hookspecs(hookspecs)
     pm.register(plugin)
 
-    old_pm = imbue.mngr.main._plugin_manager_container["pm"]
-    imbue.mngr.main._plugin_manager_container["pm"] = pm
+    old_pm = imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"]
+    imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = pm
 
     try:
         with preserve_topic_registry():
             load_help_topics_from_plugins(pm)
             yield pm
     finally:
-        imbue.mngr.main._plugin_manager_container["pm"] = old_pm
+        imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = old_pm
 
 
 def test_plugin_topic_is_registered() -> None:

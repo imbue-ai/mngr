@@ -1,6 +1,5 @@
 import json
 import os
-import threading
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -70,16 +69,9 @@ from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
-from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
-from imbue.minds.desktop_client.latchkey.permission_overview import PermissionOverviewError
-from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_all_workspaces
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
@@ -1496,260 +1488,6 @@ def _handle_mint_ai_key() -> Response:
     )
 
 
-# The revoke routes below (predefined services, file sharing, workspace
-# delegation; per-workspace and across-all-workspaces) share the same plumbing.
-# ``_revoke_prelude`` does auth + body parsing + locating the
-# predefined-permission handler (which owns the shared gateway client +
-# latchkey); ``_apply_revoke`` runs the route-specific revoke and maps its two
-# failure modes to status codes. Each route is then a short, linear body that
-# extracts its fields between the two.
-
-
-def _revoke_prelude() -> Response | tuple[Mapping[str, Any], LatchkeyPermissionGrantHandler]:
-    """Auth + JSON-body + handler lookup shared by the revoke routes.
-
-    Returns an error :class:`Response` (403 unauthenticated, 400 invalid body,
-    503 when the predefined-permission handler is unavailable), or ``(body,
-    handler)`` on success.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
-    handler = _find_predefined_permission_handler()
-    if handler is None:
-        return make_json_error_response("Permission management is unavailable", status_code=503)
-    return body, handler
-
-
-def _apply_revoke(revoke: Callable[..., object], **kwargs: Any) -> Response:
-    """Run a revoke call and map its outcome to an HTTP response (its return value is ignored).
-
-    :class:`PermissionOverviewError` (bad request / unresolvable target) -> 400;
-    :class:`LatchkeyGatewayClientError` (gateway unreachable) -> 502; success ->
-    ``200 {"status": "ok"}``.
-    """
-    try:
-        revoke(**kwargs)
-    except PermissionOverviewError as e:
-        return make_json_error_response(str(e), status_code=400)
-    except LatchkeyGatewayClientError as e:
-        logger.warning("Could not revoke through the latchkey gateway: {}", e)
-        return make_json_error_response(f"Could not revoke through the latchkey gateway: {e}", status_code=502)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
-
-
-def _handle_revoke_service_for_workspace() -> Response:
-    """Revoke one connector account's grants for one workspace (POST /settings/permissions/revoke).
-
-    Body: ``{"workspace_agent_id": "...", "service_name": "...", "account": "..."}``
-    (the unnamed default account is the empty string). Removes the account-scoped
-    rule of every scope the service owns from that workspace's host permissions
-    file, leaving the service's other accounts and the stored credentials
-    untouched.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    body, handler = prelude
-    workspace_agent_id = str(body.get("workspace_agent_id", ""))
-    service_name = str(body.get("service_name", ""))
-    if not workspace_agent_id or not service_name or "account" not in body:
-        return make_json_error_response("workspace_agent_id, service_name and account are required.", status_code=400)
-    return _apply_revoke(
-        revoke_service_account_for_workspace,
-        backend_resolver=get_state().backend_resolver,
-        gateway_client=handler.gateway_client,
-        services_catalog=handler.services_catalog,
-        latchkey=handler.latchkey,
-        workspace_agent_id=workspace_agent_id,
-        service_name=service_name,
-        account=str(body.get("account", "")),
-    )
-
-
-def _handle_revoke_service_for_all_workspaces() -> Response:
-    """Revoke one connector account's grants everywhere (POST /settings/permissions/revoke-all).
-
-    Body: ``{"service_name": "...", "account": "..."}``.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    body, handler = prelude
-    service_name = str(body.get("service_name", ""))
-    if not service_name or "account" not in body:
-        return make_json_error_response("service_name and account are required.", status_code=400)
-    return _apply_revoke(
-        revoke_service_account_for_all_workspaces,
-        backend_resolver=get_state().backend_resolver,
-        gateway_client=handler.gateway_client,
-        services_catalog=handler.services_catalog,
-        latchkey=handler.latchkey,
-        service_name=service_name,
-        account=str(body.get("account", "")),
-    )
-
-
-def _handle_revoke_file_sharing_for_workspace() -> Response:
-    """Revoke all file-sharing grants for one workspace (POST /settings/permissions/file-sharing/revoke).
-
-    Body: ``{"workspace_agent_id": "..."}``. Removes every ``minds-file-server-*``
-    permission from that workspace's host file, leaving unrelated permissions
-    intact.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    body, handler = prelude
-    workspace_agent_id = str(body.get("workspace_agent_id", ""))
-    if not workspace_agent_id:
-        return make_json_error_response("workspace_agent_id is required.", status_code=400)
-    return _apply_revoke(
-        revoke_file_sharing_for_workspace,
-        backend_resolver=get_state().backend_resolver,
-        gateway_client=handler.gateway_client,
-        latchkey=handler.latchkey,
-        workspace_agent_id=workspace_agent_id,
-    )
-
-
-def _handle_revoke_file_sharing_for_all_workspaces() -> Response:
-    """Revoke file-sharing grants across every active workspace (POST /settings/permissions/file-sharing/revoke-all).
-
-    Takes no body parameters.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    _, handler = prelude
-    return _apply_revoke(
-        revoke_file_sharing_for_all_workspaces,
-        backend_resolver=get_state().backend_resolver,
-        gateway_client=handler.gateway_client,
-        latchkey=handler.latchkey,
-    )
-
-
-def _handle_revoke_workspace_delegation_verb() -> Response:
-    """Revoke one cross-workspace-management verb for one granting workspace.
-
-    Route: POST /settings/permissions/workspace/revoke. Body:
-    ``{"workspace_agent_id": "...", "verb": "minds-workspaces-<verb>"}``. Removes
-    that verb across every target it was granted on for the given workspace.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    body, handler = prelude
-    workspace_agent_id = str(body.get("workspace_agent_id", ""))
-    verb = str(body.get("verb", ""))
-    if not workspace_agent_id or not verb:
-        return make_json_error_response("workspace_agent_id and verb are required.", status_code=400)
-    return _apply_revoke(
-        revoke_workspace_verb_for_workspace,
-        backend_resolver=get_state().backend_resolver,
-        gateway_client=handler.gateway_client,
-        latchkey=handler.latchkey,
-        workspace_agent_id=workspace_agent_id,
-        verb_permission=verb,
-    )
-
-
-def _handle_add_connector_account() -> Response:
-    """Sign in to a new account for a connector service (POST /settings/connectors/add-account).
-
-    Body: ``{"service_name": "..."}``. Runs the ephemeral-browser sign-in
-    (:meth:`Latchkey.add_account`) synchronously -- exactly like clicking Approve
-    on a permission request whose service has no credentials yet, but starting
-    from a fresh browser session so the user can add a *new* account. Blocks
-    until the browser flow finishes; the settings page reloads on success.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    body, handler = prelude
-    service_name = str(body.get("service_name", ""))
-    if not service_name:
-        return make_json_error_response("service_name is required.", status_code=400)
-    is_success, detail = handler.latchkey.add_account(service_name)
-    if not is_success:
-        return make_json_error_response(detail or "Sign-in did not complete.", status_code=502)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
-
-
-def _handle_disconnect_connector_account() -> Response:
-    """Disconnect one account from a connector service (POST /settings/connectors/disconnect-account).
-
-    Body: ``{"service_name": "...", "account": "..."}`` (the default account is the
-    empty string). Clears that account's stored credentials and then strips the
-    account's now-inert grants from every workspace, so reconnecting the same
-    account later starts from no permissions rather than silently resurrecting
-    the old ones. The cleanup runs in the background and the route returns
-    immediately.
-    """
-    prelude = _revoke_prelude()
-    if isinstance(prelude, Response):
-        return prelude
-    body, handler = prelude
-    service_name = str(body.get("service_name", ""))
-    account = str(body.get("account", ""))
-    if not service_name:
-        return make_json_error_response("service_name is required.", status_code=400)
-    try:
-        disconnect_account(handler.latchkey, service_name, account)
-    except PermissionOverviewError as e:
-        return make_json_error_response(str(e), status_code=502)
-    _revoke_service_account_for_all_workspaces_in_background(handler, service_name, account)
-    return make_response(content='{"status": "ok"}', media_type="application/json")
-
-
-def _revoke_service_account_for_all_workspaces_in_background(
-    handler: LatchkeyPermissionGrantHandler,
-    service_name: str,
-    account: str,
-) -> None:
-    """Fire off ``revoke_service_account_for_all_workspaces`` on a daemon thread.
-
-    A disconnected account's grants have no credentials to back them, so we
-    strip them from every workspace's host file. This touches one gateway call
-    per active host, so it runs off the request thread to keep the Disconnect
-    click responsive; failures are logged rather than surfaced (the grants are
-    inert without credentials, and the user can retry via the account's "Revoke
-    all").
-    """
-    backend_resolver = get_state().backend_resolver
-    threading.Thread(
-        target=_run_revoke_service_account_for_all_workspaces,
-        args=(backend_resolver, handler, service_name, account),
-        name=f"revoke-all-{service_name}",
-        daemon=True,
-    ).start()
-
-
-def _run_revoke_service_account_for_all_workspaces(
-    backend_resolver: BackendResolverInterface,
-    handler: LatchkeyPermissionGrantHandler,
-    service_name: str,
-    account: str,
-) -> None:
-    """Body of the thread spawned by :func:`_revoke_service_account_for_all_workspaces_in_background`."""
-    try:
-        revoke_service_account_for_all_workspaces(
-            backend_resolver=backend_resolver,
-            gateway_client=handler.gateway_client,
-            services_catalog=handler.services_catalog,
-            latchkey=handler.latchkey,
-            service_name=service_name,
-            account=account,
-        )
-    except (PermissionOverviewError, LatchkeyGatewayClientError) as e:
-        logger.warning(
-            "Background revoke-all for {} account {!r} after disconnect failed: {}", service_name, account, e
-        )
-
-
 def _handle_set_default_account() -> Response:
     """Set the default account for new workspaces."""
     if not _is_request_authenticated():
@@ -2402,6 +2140,7 @@ def create_desktop_client(
     mngr_host_dir: Path | None = None,
     minds_api_key: str | None = None,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = None,
+    machine_operator: MachineOperator | None = None,
     discovery_health_watchdog: DiscoveryHealthWatchdog | None = None,
     mngr_caller: MngrCaller | None = None,
     sync_scheduler: WorkspaceSyncScheduler | None = None,
@@ -2561,6 +2300,7 @@ def create_desktop_client(
         mngr_host_dir=resolved_mngr_host_dir,
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
+        machine_operator=machine_operator,
         discovery_health_watchdog=discovery_health_watchdog,
         connectivity_detector=connectivity_detector,
         mngr_caller=mngr_caller,
@@ -2706,35 +2446,6 @@ def create_desktop_client(
 
     # Account management action routes
     app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
-    app.add_url_rule("/settings/permissions/revoke", view_func=_handle_revoke_service_for_workspace, methods=["POST"])
-    app.add_url_rule(
-        "/settings/permissions/revoke-all", view_func=_handle_revoke_service_for_all_workspaces, methods=["POST"]
-    )
-    app.add_url_rule(
-        "/settings/permissions/file-sharing/revoke",
-        view_func=_handle_revoke_file_sharing_for_workspace,
-        methods=["POST"],
-    )
-    app.add_url_rule(
-        "/settings/permissions/file-sharing/revoke-all",
-        view_func=_handle_revoke_file_sharing_for_all_workspaces,
-        methods=["POST"],
-    )
-    app.add_url_rule(
-        "/settings/permissions/workspace/revoke",
-        view_func=_handle_revoke_workspace_delegation_verb,
-        methods=["POST"],
-    )
-    app.add_url_rule(
-        "/settings/connectors/add-account",
-        view_func=_handle_add_connector_account,
-        methods=["POST"],
-    )
-    app.add_url_rule(
-        "/settings/connectors/disconnect-account",
-        view_func=_handle_disconnect_connector_account,
-        methods=["POST"],
-    )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule(

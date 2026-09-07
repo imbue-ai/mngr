@@ -24,10 +24,14 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
+from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
+from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.request_handler import UiAccountsPermissionDetail
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_accounts_permission_request
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
 
@@ -56,13 +60,16 @@ def _build_gateway_client(handler: _HttpxHandler) -> LatchkeyGatewayClient:
 def _make_accounts_handler(
     tmp_path: Path,
     gateway_handler: _HttpxHandler,
+    push_permissions_to_machine: Callable[[str], None] = leave_permissions_on_this_computer,
 ) -> tuple[AccountsPermissionGrantHandler, _RecordingMessageSender]:
     sender = _RecordingMessageSender(sent_messages=[])
     return (
         AccountsPermissionGrantHandler(
             data_dir=tmp_path,
+            latchkey=make_full_fake_latchkey(tmp_path),
             gateway_client=_build_gateway_client(gateway_handler),
             mngr_message_sender=sender,
+            push_permissions_to_machine=push_permissions_to_machine,
         ),
         sender,
     )
@@ -72,9 +79,11 @@ def _build_authenticated_client(
     tmp_path: Path,
     handler: AccountsPermissionGrantHandler,
     inbox: StaticPendingRequests,
+    backend_resolver: BackendResolverInterface | None = None,
 ) -> FlaskClient:
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    backend_resolver: BackendResolverInterface = StaticBackendResolver(url_by_agent_and_service={})
+    if backend_resolver is None:
+        backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
@@ -175,3 +184,29 @@ def test_build_request_detail_payload_carries_the_rationale(tmp_path: Path) -> N
         pytest.fail(f"expected a accounts detail payload, got {payload!r}")
     assert payload.request_id == event.request_id
     assert payload.rationale == "needs to find the right account"
+
+
+def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: Path) -> None:
+    """The gateway splices the grant into this computer's copy; the machine enforces its own."""
+    carried: list[str] = []
+    handler, _sender = _make_accounts_handler(
+        tmp_path,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        push_permissions_to_machine=carried.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = create_accounts_permission_request(agent_id=str(agent_id), rationale="need data")
+    client = _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=(event,)),
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)
+        ),
+    )
+
+    response = client.post(f"/requests/{event.request_id}/grant")
+
+    assert response.status_code == 200
+    assert carried == [str(agent_id)]

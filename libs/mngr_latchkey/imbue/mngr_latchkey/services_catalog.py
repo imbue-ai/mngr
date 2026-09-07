@@ -20,7 +20,7 @@ know which of the two a service came from.
 This module is the single chokepoint for that file. All access goes
 through :class:`ServicesCatalog`, which serves two layers:
 
-* The credential-sync path (``remote_gateway``) uses
+* The credential-sync path (:mod:`imbue.mngr_latchkey.remote`) uses
   :meth:`ServicesCatalog.services_for_permissions` /
   :meth:`ServicesCatalog.all_service_names` to map the scopes a host has
   been granted back to the canonical service names whose credentials

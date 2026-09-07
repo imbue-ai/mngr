@@ -34,8 +34,10 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
+from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _DEFAULT_LATCHKEY_DIRECTORY
@@ -48,6 +50,8 @@ from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
+from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
+from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -632,6 +636,80 @@ def test_forward_refuses_to_start_when_another_supervisor_is_alive(
     assert persisted is not None
     assert persisted.pid == pid
     assert persisted.gateway_port == 12345
+
+
+# -- register-agent ---------------------------------------------------------
+
+
+def _registered_agent_ids(latchkey_root: Path, host_id: HostId) -> set[str]:
+    """The agent ids the host's canonical file admits to the Minds API proxy."""
+    config = json.loads(permissions_path_for_host(plugin_data_dir(latchkey_root), host_id).read_text())
+    any_of = config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
+    return {_extract_agent_id_from_anyof_entry(entry) for entry in any_of}
+
+
+def test_register_agent_writes_the_local_file_for_a_host_with_no_machine_of_its_own(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A local host's gateway reads this computer's file, so the edit is the whole change."""
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    agent_id = AgentId.generate()
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["register-agent", "--host-id", str(_HOST_ID_ONE), "--agent-id", str(agent_id)],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
+
+
+def test_register_agent_fails_loudly_when_the_host_has_a_machine_it_cannot_reach(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A host with a machine of its own must be handed the file; when it cannot be, the exit says so.
+
+    The machine's gateway enforces its own copy, so a registration that stops at
+    this computer's file has not admitted the agent there. The local edit still
+    stands -- the next read of the machine carries it over -- and the message
+    says as much.
+    """
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # A recorded machine key is what marks a host as having a machine of its
+    # own; no discovery event stream exists here, so its agent resolves to nothing.
+    store_machine_encryption_key(plugin_data_dir(latchkey_root), _HOST_ID_ONE, generate_machine_encryption_key())
+    agent_id = AgentId.generate()
+
+    result = cli_runner.invoke(
+        latchkey,
+        ["register-agent", "--host-id", str(_HOST_ID_ONE), "--agent-id", str(agent_id)],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code != 0
+    assert "Registered locally" in result.output
+    assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
 
 
 # -- Group wiring -----------------------------------------------------------

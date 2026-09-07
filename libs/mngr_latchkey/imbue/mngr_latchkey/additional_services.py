@@ -32,7 +32,7 @@ things the catalog does not carry:
   :func:`additional_service_registration_entries`, consumed by
   :mod:`imbue.mngr_latchkey.core` to write the ``registeredServices`` block of
   every gateway's ``config.json`` (the desktop's and, via
-  :mod:`imbue.mngr_latchkey.remote_gateway`, each VPS's).
+  :mod:`imbue.mngr_latchkey.remote.provisioning`, each VPS's).
 * the inline detent schemas -- :func:`additional_service_schemas`, which the
   agent baseline folds into every host ``permissions.json`` so a granted
   additional-service scope resolves from the file itself.

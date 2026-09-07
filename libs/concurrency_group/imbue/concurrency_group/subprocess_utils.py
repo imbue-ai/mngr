@@ -277,11 +277,20 @@ def run_local_command_modern_version(
     on_initialization_complete: Callable[[BaseException | None], None] = lambda success: None,
     name: str | None = None,
     is_output_accumulated: bool = True,
+    stdin_bytes: bytes | None = None,
 ) -> FinishedProcess:
     """
     Run a subprocess command and return the result.
 
     This function handles reading stdout/stderr in real-time while monitoring for shutdown events.
+
+    ``stdin_bytes`` is handed to the child on its standard input, which is then closed -- the way
+    to pass a value a command must not receive in ``argv`` (where it would show up in a process
+    listing), such as a secret. It is written in one go immediately after the spawn, before any
+    output is read, so it must stay well under the pipe buffer (64KiB on Linux, 16KiB on macOS);
+    a larger payload would fill the pipe and deadlock against a child that is blocked writing
+    output nobody is draining yet. Without it the child gets an empty stdin (``DEVNULL``), which
+    is what a process with nothing to read should see.
 
     ``name`` is an optional log-safe label for the command (see ``RunningProcess.name``); it is
     carried onto the returned ``FinishedProcess`` and any error raised so secret argument values
@@ -301,12 +310,17 @@ def run_local_command_modern_version(
                 command,
                 cwd=cwd,
                 bufsize=0,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env if env is not None else os.environ.copy(),
                 pass_fds=tuple(pass_fds),
             )
+            if stdin_bytes is not None:
+                # ``process.stdin`` is a pipe exactly when we asked for one above.
+                assert process.stdin is not None
+                with process.stdin as child_stdin:
+                    child_stdin.write(stdin_bytes)
         except (OSError, ValueError) as e:
             raise ProcessSetupError(
                 command=tuple(command),

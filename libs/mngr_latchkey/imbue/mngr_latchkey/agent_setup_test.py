@@ -549,11 +549,11 @@ def test_register_agent_for_host_creates_baseline_when_file_absent(tmp_path: Pat
 
 
 def test_register_agent_for_host_is_idempotent(tmp_path: Path) -> None:
-    """Re-registering an already-registered agent is a no-op."""
+    """Re-registering an already-registered agent is a no-op, and says so."""
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    register_agent_for_host(tmp_path, host_id, agent_id)
-    register_agent_for_host(tmp_path, host_id, agent_id)
+    assert register_agent_for_host(tmp_path, host_id, agent_id) is True
+    assert register_agent_for_host(tmp_path, host_id, agent_id) is False
     any_of = _allowed_anyof_for_host(tmp_path, host_id)
     assert len(any_of) == 1
 
@@ -777,7 +777,9 @@ def test_register_backfills_the_baseline_for_an_already_registered_agent(tmp_pat
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(stale.model_dump_json())
 
-    register_agent_for_host(tmp_path, host_id, agent_id)
+    # The allowlist is unchanged, but the file still moved: a caller with a
+    # machine to push to must be told so the new baseline reaches its gateway.
+    assert register_agent_for_host(tmp_path, host_id, agent_id) is True
 
     written = json.loads(path.read_text())
     gateway_self = next(rule for rule in written["rules"] if "latchkey-self" in rule)["latchkey-self"]

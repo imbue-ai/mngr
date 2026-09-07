@@ -2,6 +2,9 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
+from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.sentry import ForwardSentryConsent
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
@@ -10,10 +13,33 @@ from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR
+from imbue.mngr_latchkey.sentry import _FORWARD_LOG_ATTACHMENT_GROUPS
 from imbue.mngr_latchkey.sentry import read_forward_sentry_consent
 from imbue.mngr_latchkey.sentry import resolve_forward_sentry_config
+from imbue.mngr_latchkey.store import plugin_data_dir
 
 _FAKE_DSN = "https://public@example.com/1"
+
+
+def test_log_attachment_globs_never_reach_into_a_machine_store(tmp_path: Path) -> None:
+    """The plugin data dir is the attachment root, and now holds credential stores below it.
+
+    Every group globs the plugin data dir itself, so a machine store two levels
+    down is out of reach -- but only for as long as no glob becomes recursive.
+    The decoy files below carry names each group *does* match, so a group that
+    grew a ``**`` would sweep the very directory that holds the credentials and
+    upload it with the next bug report.
+    """
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    data_dir = plugin_data_dir(latchkey_directory)
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, HostId.generate())
+    write_machine_credentials(store_dir, b"encrypted-9174", "2")
+    for decoy_name in ("events.jsonl", "events.jsonl.20260824172552142020", "gateway.log"):
+        (store_dir / decoy_name).write_text("decoy\n")
+
+    for group in _FORWARD_LOG_ATTACHMENT_GROUPS:
+        assert [path for path in data_dir.glob(group.glob) if store_dir in path.parents] == []
 
 
 def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:

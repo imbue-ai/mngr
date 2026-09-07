@@ -56,7 +56,7 @@ describe("SettingsPage", () => {
         const page = openPage();
         page.oninit();
         await settle();
-        expect(shownModel(page).activeSection).toBe("connectors");
+        expect(shownModel(page).activeSection).toBe("notifications");
 
         section.mockReturnValue("updates");
         page.onbeforeupdate();
@@ -101,7 +101,7 @@ describe("SettingsPage", () => {
         expect(shownModel(page).isLoadFailed).toBe(true);
         expect(shownModel(page).activeSection).toBe("updates");
 
-        section.mockReturnValue("connectors");
+        section.mockReturnValue("notifications");
         page.onbeforeupdate();
 
         expect(() => shownModel(page)).toThrow("not showing its sections");
@@ -120,7 +120,7 @@ describe("SettingsPage", () => {
         page.oninit();
         await settle();
 
-        expect(shownModel(page).activeSection).toBe("connectors");
+        expect(shownModel(page).activeSection).toBe("notifications");
       });
     });
   });

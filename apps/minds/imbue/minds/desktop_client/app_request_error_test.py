@@ -50,7 +50,7 @@ def test_document_navigation_to_post_only_route_renders_the_friendly_405_page(tm
     # must not strand the user on werkzeug's bare Method Not Allowed page.
     client = _client(tmp_path)
 
-    response = client.get("/settings/permissions/revoke", headers={"Sec-Fetch-Dest": "document"})
+    response = client.get("/settings/ai-keys/mint", headers={"Sec-Fetch-Dest": "document"})
 
     assert response.status_code == 405
     body = response.get_data(as_text=True)

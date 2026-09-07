@@ -24,10 +24,14 @@ from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_WORK
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
+from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
+from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.request_handler import UiWorkspacePermissionDetail
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_workspace_permission_request
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
 
@@ -71,13 +75,16 @@ def _build_gateway_client(handler: _HttpxHandler) -> LatchkeyGatewayClient:
 def _make_handler(
     tmp_path: Path,
     gateway_handler: _HttpxHandler,
+    push_permissions_to_machine: Callable[[str], None] = leave_permissions_on_this_computer,
 ) -> tuple[WorkspacePermissionGrantHandler, _RecordingMessageSender]:
     sender = _RecordingMessageSender(sent_messages=[])
     return (
         WorkspacePermissionGrantHandler(
             data_dir=tmp_path,
+            latchkey=make_full_fake_latchkey(tmp_path),
             gateway_client=_build_gateway_client(gateway_handler),
             mngr_message_sender=sender,
+            push_permissions_to_machine=push_permissions_to_machine,
         ),
         sender,
     )
@@ -328,3 +335,35 @@ def test_build_request_detail_payload_without_target_disables_target_choice(tmp_
         pytest.fail(f"expected a workspace detail payload, got {payload!r}")
     assert payload.target_workspace_id is None
     assert payload.show_target_choice is False
+
+
+def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: Path) -> None:
+    """The gateway splices the grant into this computer's copy; the machine enforces its own."""
+    carried: list[str] = []
+    handler, _sender = _make_handler(
+        tmp_path,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        push_permissions_to_machine=carried.append,
+    )
+    requester = AgentId()
+    host_id = HostId()
+    event = create_workspace_permission_request(
+        agent_id=str(requester),
+        rationale="destroy sibling",
+        permissions=(PERM_WORKSPACES_DESTROY,),
+        target_workspace_id=None,
+    )
+    client = _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=(event,)),
+        FixedHostBackendResolver(url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(requester,)),
+    )
+
+    response = client.post(
+        f"/requests/{event.request_id}/grant",
+        data={"permissions": PERM_WORKSPACES_DESTROY, "target_scope": "all"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert carried == [str(requester)]

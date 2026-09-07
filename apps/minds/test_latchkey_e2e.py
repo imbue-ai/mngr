@@ -18,7 +18,7 @@ credentials at all:
 3. ``mngr latchkey forward`` (the supervisor minds spawns) discovers the
    agent, provisions the VPS-resident gateway on the workspace's one fixed
    gateway URL, tunnels the desktop gateway onto the VPS for extension
-   forwarding, and starts the remote-state watcher.
+   forwarding, and seeds the machine's own permissions file.
 
 Asserted end-to-end, from *inside* the workspace via ``mngr exec``:
 
@@ -28,12 +28,14 @@ a. ``GET /permissions/self`` succeeds on ``$LATCHKEY_GATEWAY`` with the
 b. A native ``/gateway/...`` request is served by that same VPS gateway and
    its listen password is wired to the desktop-derived value. Nothing listens
    on the retired port 1990.
-c. Updating the workspace's local ``latchkey_permissions.json`` (granting the
-   ``slack-api`` scope, with slack credentials pre-seeded in the local store)
-   makes the remote-state watcher push both the permissions
-   (``/root/.latchkey/permissions.json``) *and* the filtered credential
-   bundle (``/root/.latchkey/credentials.json.enc``) onto the VPS outer host
-   automatically.
+c. Pushing the workspace's state to its machine the way the desktop app does
+   -- open the workspace's outer host through its provider and hand the
+   machine a grant (the ``slack-api`` scope granted in the local canonical
+   file, riding the slack credentials seeded into the host's machine store) --
+   lands both on the VPS synchronously: the permissions at
+   ``/root/.latchkey/permissions.json`` and the credentials at
+   ``/root/.latchkey/credentials.json.enc``. Reading the machine back then
+   answers with what it now holds.
 
 Gating: this test is deliberately invasive on the machine that runs it (it
 needs passwordless ``sudo`` to run a root sshd, apt-installs ``supervisor``
@@ -66,7 +68,12 @@ from typing import Final
 import pytest
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.config.loader import load_config
+from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.ssh import quote_ssh_option_value
 from imbue.mngr.utils.testing import build_test_known_hosts_file
@@ -77,8 +84,12 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
-from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
+from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
+from imbue.mngr_latchkey.remote.credentials import MachineCredentials
+from imbue.mngr_latchkey.remote.credentials import stored_machine_encryption_key
+from imbue.mngr_latchkey.remote.provisioning import LATCHKEY_VERSION
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import load_permissions
@@ -113,7 +124,7 @@ pytestmark = [
 _VPS_SSH_HOST: Final[str] = "127.0.0.1"
 
 # Paths the remote-gateway provisioning writes on the "VPS" (= this machine,
-# as root). Mirrors mngr_latchkey.remote_gateway's remote layout: the remote
+# as root). Mirrors mngr_latchkey.remote.provisioning's remote layout: the remote
 # LATCHKEY_DIRECTORY is ``$HOME/.latchkey`` for the root ssh user.
 _VPS_LATCHKEY_DIR: Final[str] = "/root/.latchkey"
 _VPS_PERMISSIONS_PATH: Final[str] = f"{_VPS_LATCHKEY_DIR}/permissions.json"
@@ -135,7 +146,7 @@ _CREATE_TIMEOUT_SECONDS: Final[int] = 900
 _QUICK_MNGR_TIMEOUT_SECONDS: Final[int] = 120
 _DESKTOP_GATEWAY_REACHABLE_TIMEOUT_SECONDS: Final[float] = 300.0
 _VPS_GATEWAY_REACHABLE_TIMEOUT_SECONDS: Final[float] = 480.0
-_SYNC_CONVERGENCE_TIMEOUT_SECONDS: Final[float] = 180.0
+_PERMISSIONS_SEED_TIMEOUT_SECONDS: Final[float] = 180.0
 _POLL_INTERVAL_SECONDS: Final[float] = 3.0
 
 # Marker prefixing the HTTP status code in the secondary-gateway probes, so
@@ -446,18 +457,20 @@ def _parse_created_event(create_stdout: str) -> tuple[str, str]:
     pytest.fail(f"no 'created' event found in mngr create output:\n{create_stdout}")
 
 
-def _seed_local_slack_credentials(latchkey_binary: Path, latchkey_directory: Path) -> None:
-    """Store fake slack credentials in the *local* latchkey credential store.
+def _seed_machine_store_slack_credentials(latchkey_binary: Path, latchkey_directory: Path, host_id: str) -> None:
+    """Store fake slack credentials in the *machine store* of ``host_id``.
 
-    Uses ``latchkey auth set`` with an explicit ``LATCHKEY_ENCRYPTION_KEY``
-    (read from the per-directory key file, the same way minds' packaged e2e
-    harness seeds credentials) so the store is encrypted with the key the
-    remote sync later re-encrypts from.
+    This is where a sign-in for a remote workspace lands in production (the
+    machine store is the desktop's cache of that machine's own credentials),
+    and what a queued connect update hands over to the machine. Uses ``latchkey
+    auth set`` with an explicit ``LATCHKEY_ENCRYPTION_KEY`` -- the desktop's
+    per-directory key, which the machine store shares by symlink.
     """
     key_file = encryption_key_path(latchkey_directory)
     assert key_file.is_file(), f"latchkey encryption key missing at {key_file} (create-agent-env should create it)"
+    store_dir = materialize_machine_store(latchkey_directory, plugin_data_dir(latchkey_directory), HostId(host_id))
     env = dict(os.environ)
-    env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
+    env["LATCHKEY_DIRECTORY"] = str(store_dir)
     env["LATCHKEY_ENCRYPTION_KEY"] = key_file.read_text().strip()
     result = subprocess.run(
         [
@@ -479,12 +492,12 @@ def _seed_local_slack_credentials(latchkey_binary: Path, latchkey_directory: Pat
 def _grant_scope_in_host_permissions(latchkey_directory: Path, host_id: str) -> Path:
     """Append an ``{_GRANTED_SCOPE}: [any]`` rule to the host's canonical permissions file.
 
-    Uses the plugin's own load/save helpers so the write is atomic
-    (tmp + rename), exactly like the desktop client's permission-grant flow --
-    which is also the write shape the remote-state watcher listens for.
-    Returns the canonical permissions path.
+    Uses the plugin's own load/save helpers, the way every desktop-side edit
+    does. Pushing it to the machine is the caller's next step. Returns the
+    canonical permissions path.
     """
-    permissions_path = permissions_path_for_host(plugin_data_dir(latchkey_directory), HostId(host_id))
+    data_dir = plugin_data_dir(latchkey_directory)
+    permissions_path = permissions_path_for_host(data_dir, HostId(host_id))
     assert permissions_path.is_file(), (
         f"canonical host permissions file missing at {permissions_path}; link-permissions should have created it"
     )
@@ -494,7 +507,45 @@ def _grant_scope_in_host_permissions(latchkey_directory: Path, host_id: str) -> 
         schemas=config.schemas,
     )
     save_permissions(permissions_path, updated)
+    assert stored_machine_encryption_key(data_dir, HostId(host_id)) is not None, (
+        "the host's machine encryption key has not been recorded yet, so nothing can be pushed to its machine"
+    )
     return permissions_path
+
+
+@contextmanager
+def _machine_of(
+    env: dict[str, str], latchkey_directory: Path, latchkey_binary: Path, host_id: str
+) -> Iterator[MachineCredentials]:
+    """Open the workspace's machine exactly as the desktop app does, under this test's mngr config.
+
+    The app loads mngr's settings in-process and opens the workspace's outer
+    host through its provider; here that config lives in ``env``, so it is
+    applied to this process for the duration.
+    """
+    with _environment(env):
+        mngr_ctx = load_config(get_or_create_plugin_manager(), ConcurrencyGroup(name="latchkey-e2e-providers"))
+        provider = get_provider_instance(ProviderInstanceName("docker"), mngr_ctx)
+        with provider.outer_host_for(HostId(host_id)) as outer:
+            assert outer is not None and not outer.is_local, "the fake VPS did not resolve as a remote outer host"
+            yield MachineCredentials(
+                host=outer,
+                latchkey=Latchkey(latchkey_directory=latchkey_directory, latchkey_binary=str(latchkey_binary)),
+                host_id=HostId(host_id),
+            )
+
+
+@contextmanager
+def _environment(env: dict[str, str]) -> Iterator[None]:
+    """Run the block with ``env`` as this process's environment, then restore it."""
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 def _forward_diagnostics(latchkey_directory: Path, forward_log_path: Path) -> str:
@@ -620,10 +671,6 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert latchkey_env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
             assert "LATCHKEY_GATEWAY_SECONDARY" not in latchkey_env
             assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in latchkey_env
-
-            # Seed slack credentials into the local store *before* any grant,
-            # so step (c)'s permission change is what ships them to the VPS.
-            _seed_local_slack_credentials(latchkey_binary, latchkey_directory)
 
             # -- Step 2: create the remote workspace with the latchkey env --
             host_name = f"lk-e2e-{uuid.uuid4().hex}"
@@ -768,43 +815,49 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             )
             assert retired_port_probe.returncode != 0, "the retired secondary gateway port 1990 is still listening"
 
-            # -- (c) local permissions.json edits auto-sync files onto the VPS outer host --
-            # Precondition: initial provisioning synced the deny-all baseline
-            # permissions and (nothing granted yet) no credential bundle.
+            # -- (c) the desktop's synchronous pushes and read of the machine --
+            # Precondition: provisioning seeded the deny-all baseline
+            # permissions and (nothing connected yet) no credential bundle.
             initial_sync_ok = poll_until(
                 lambda: _run_on_vps(ssh_config_path, f"test -f {_VPS_PERMISSIONS_PATH}").returncode == 0,
-                timeout=_SYNC_CONVERGENCE_TIMEOUT_SECONDS,
+                timeout=_PERMISSIONS_SEED_TIMEOUT_SECONDS,
                 poll_interval=_POLL_INTERVAL_SECONDS,
             )
-            assert initial_sync_ok, f"initial permissions sync never wrote {_VPS_PERMISSIONS_PATH} on the VPS"
+            assert initial_sync_ok, f"provisioning never seeded {_VPS_PERMISSIONS_PATH} on the VPS"
             initial_permissions = _run_on_vps(ssh_config_path, f"cat {_VPS_PERMISSIONS_PATH}")
             assert _GRANTED_SCOPE not in initial_permissions.stdout, (
                 f"VPS permissions already contain {_GRANTED_SCOPE} before the grant:\n{initial_permissions.stdout}"
             )
             assert _run_on_vps(ssh_config_path, f"test -f {_VPS_CREDENTIALS_PATH}").returncode != 0, (
-                "VPS credential bundle exists before any service was granted"
+                "VPS credential store exists before any service was connected"
             )
 
+            # Grant slack the way the desktop client's permission dialog does:
+            # the rule is written into the canonical file, the sign-in lands in
+            # the host's machine store, and the two are pushed to the machine as
+            # one blocking change.
             _grant_scope_in_host_permissions(latchkey_directory, host_id)
+            _seed_machine_store_slack_credentials(latchkey_binary, latchkey_directory, host_id)
+            granted_policy = permissions_path_for_host(
+                plugin_data_dir(latchkey_directory), HostId(host_id)
+            ).read_text()
+            with _machine_of(env, latchkey_directory, latchkey_binary, host_id) as machine:
+                machine.connect_service_with_permissions(_GRANTED_SERVICE, "", granted_policy)
+                fetched = machine.refresh()
 
-            permissions_synced = poll_until(
-                lambda: _GRANTED_SCOPE in _run_on_vps(ssh_config_path, f"cat {_VPS_PERMISSIONS_PATH}").stdout,
-                timeout=_SYNC_CONVERGENCE_TIMEOUT_SECONDS,
-                poll_interval=_POLL_INTERVAL_SECONDS,
+            vps_permissions = _run_on_vps(ssh_config_path, f"cat {_VPS_PERMISSIONS_PATH}").stdout
+            assert _GRANTED_SCOPE in vps_permissions, (
+                f"the pushed grant never reached {_VPS_PERMISSIONS_PATH} on the VPS; last content:\n"
+                f"{vps_permissions}\n{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
-            assert permissions_synced, (
-                f"granting {_GRANTED_SCOPE} locally never propagated to {_VPS_PERMISSIONS_PATH} on the VPS; "
-                f"last content:\n{_run_on_vps(ssh_config_path, f'cat {_VPS_PERMISSIONS_PATH}').stdout}\n"
+            assert _run_on_vps(ssh_config_path, f"test -f {_VPS_CREDENTIALS_PATH}").returncode == 0, (
+                f"the pushed {_GRANTED_SERVICE} credentials never reached {_VPS_CREDENTIALS_PATH} on the VPS\n"
                 f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
-            credentials_synced = poll_until(
-                lambda: _run_on_vps(ssh_config_path, f"test -f {_VPS_CREDENTIALS_PATH}").returncode == 0,
-                timeout=_SYNC_CONVERGENCE_TIMEOUT_SECONDS,
-                poll_interval=_POLL_INTERVAL_SECONDS,
-            )
-            assert credentials_synced, (
-                f"granting {_GRANTED_SCOPE} locally never shipped the credential bundle to "
-                f"{_VPS_CREDENTIALS_PATH} on the VPS\n{_forward_diagnostics(latchkey_directory, forward_log_path)}"
+            # And the read-back sees what the machine now holds, in one command.
+            assert fetched.credentials is not None, "reading the machine back reported no credential store"
+            assert fetched.permissions_json is not None and _GRANTED_SCOPE in fetched.permissions_json, (
+                f"reading the machine back did not report the pushed policy: {fetched.permissions_json!r}"
             )
         finally:
             # Best-effort teardown, most-dependent first: workspace, forward

@@ -7,12 +7,7 @@ import {
   resetNotificationPrefsForTests,
   type NotificationPrefs,
 } from "./notificationsUi";
-import {
-  SettingsModel,
-  addAccountBlockedReason,
-  type ServicePermissionOverview,
-  type SettingsOverview,
-} from "./settings";
+import { SettingsModel, type SettingsOverview } from "./settings";
 
 const BASE_OVERVIEW: SettingsOverview = settingsOverview();
 
@@ -131,79 +126,6 @@ describe("SettingsModel", () => {
     await model.setReportUnexpectedErrors(false);
     expect(model.errorReportingError).toBe("");
     expect(model.overview?.report_unexpected_errors).toBe(false);
-  });
-
-  it("rebases on a 412 conflict by reloading instead of clobbering", async () => {
-    let overviewValue = settingsOverview();
-    const model = new SettingsModel(
-      async (input) => {
-        const url = String(input);
-        if (url.endsWith("/error-reporting"))
-          return jsonResponse({ error: "stale" }, 412);
-        return jsonResponse(overviewValue);
-      },
-      () => {},
-    );
-    await model.load();
-    // Another window flipped the flag; the server now serves the newer state.
-    overviewValue = settingsOverview({ report_unexpected_errors: false, version: "v-newer" });
-
-    await model.setReportUnexpectedErrors(false);
-
-    expect(model.overview?.version).toBe("v-newer");
-    expect(model.overview?.report_unexpected_errors).toBe(false);
-  });
-
-  it("keeps the revoke dialog open with an error message when the revoke fails", async () => {
-    const model = new SettingsModel(
-      async (input) => {
-        const url = String(input);
-        if (url === "/settings/permissions/revoke")
-          return new Response("boom", { status: 502 });
-        return jsonResponse(settingsOverview());
-      },
-      () => {},
-    );
-    await model.load();
-    model.openRevoke({
-      title: "Revoke?",
-      body: "b",
-      confirmLabel: "Revoke",
-      url: "/settings/permissions/revoke",
-      payload: {},
-    });
-
-    await model.confirmRevoke();
-
-    expect(model.pendingRevoke).not.toBeNull();
-    expect(model.revokeError).toContain("502");
-  });
-
-  it("closes the dialog and reloads after a successful revoke", async () => {
-    let loadCount = 0;
-    const model = new SettingsModel(
-      async (input) => {
-        const url = String(input);
-        if (url === "/settings/permissions/revoke")
-          return jsonResponse({ status: "ok" });
-        loadCount += 1;
-        return jsonResponse(settingsOverview());
-      },
-      () => {},
-    );
-    await model.load();
-    model.openRevoke({
-      title: "Revoke?",
-      body: "b",
-      confirmLabel: "Revoke",
-      url: "/settings/permissions/revoke",
-      payload: {},
-    });
-
-    await model.confirmRevoke();
-
-    expect(model.pendingRevoke).toBeNull();
-    expect(loadCount).toBe(2);
   });
 
   it("reads notification prefs as the defaults while the backend omits the field", async () => {
@@ -734,29 +656,5 @@ describe("SettingsModel release channels", () => {
     await withMindsNative(nativeStub(RUNNING, PEEKED).surface, async () => {
       expect(new SettingsModel(undefined, () => {}).visibleSections.map((s) => s.name)).toContain("updates");
     });
-  });
-});
-
-describe("addAccountBlockedReason", () => {
-  const SERVICE: ServicePermissionOverview = {
-    service_name: "aws",
-    display_name: "AWS",
-    accounts: [],
-    is_browser_sign_in_supported: false,
-  };
-
-  it("blocks the action, with a reason, for a service that has no browser sign-in", () => {
-    expect(addAccountBlockedReason(SERVICE)).toBe(
-      "AWS does not support signing in through a browser.",
-    );
-  });
-
-  it("allows the action for a service that signs in through a browser", () => {
-    expect(
-      addAccountBlockedReason({
-        ...SERVICE,
-        is_browser_sign_in_supported: true,
-      }),
-    ).toBeNull();
   });
 });

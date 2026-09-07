@@ -636,6 +636,12 @@ class UiWorkspacePermissions(FrozenModel):
         description="Pending permission requests from this workspace, oldest first"
     )
     permissions_unavailable: bool = Field(description="True when the permissions could not be loaded at all")
+    is_credential_store_shared: bool = Field(
+        description=(
+            "True when this machine's credentials are this computer's, shared by every local machine, "
+            "so a sign-out here reaches all of them; false when the machine holds its own"
+        )
+    )
 
 
 class UiConnectorToggleRequest(FrozenModel):
@@ -664,18 +670,23 @@ class UiConnectorRevokeAllRequest(FrozenModel):
 class UiConnectorDisconnectRequest(FrozenModel):
     """Body of POST /ui/api/workspaces/<agent_id>/permissions/connector-disconnect.
 
-    Names the connection being disconnected, not the workspace it was
-    disconnected from: clearing the credential is global, so the same body is
-    sent whichever workspace's pane the button was pressed in, and the
-    ``<agent_id>`` in the path only decides which workspace's refreshed view
+    Names the connection being disconnected, not the store it is cleared from:
+    that follows from the ``<agent_id>`` in the path, which decides both which
+    machine's credentials are cleared and which workspace's refreshed view
     comes back. Deliberately NOT :class:`UiConnectorRevokeAllRequest` despite
     the identical fields -- that one drops this machine's grants and leaves the
     account connected, and the generated TypeScript name is what the call site
     reads.
     """
 
-    service_name: str = Field(description="Catalog service the account is disconnected from, on every machine")
+    service_name: str = Field(description="Catalog service the account is disconnected from")
     account: str = Field(description="Latchkey account key ('' for the unnamed default)")
+
+
+class UiConnectBrowserRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/connect-browser."""
+
+    service_name: str = Field(description="Catalog service to sign in to, for this workspace's machine")
 
 
 class UiConnectCredentialsRequest(FrozenModel):

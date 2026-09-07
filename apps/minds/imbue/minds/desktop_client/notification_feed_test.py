@@ -4,36 +4,22 @@ from datetime import datetime
 from datetime import timezone
 
 import pytest
-from pydantic import PrivateAttr
 from pydantic import ValidationError
 
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.notification_feed import PendingNotificationCard
+from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
 from imbue.minds.desktop_client.ui_models import NotificationOutcome
 from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 
 
-class _RecordingDispatcher(NotificationDispatcher):
-    """Dispatcher double that records dispatch calls instead of hitting any OS channel."""
-
-    _dispatched: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
-
-    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
-        self._dispatched.append((request, agent_display_name))
-
-    @property
-    def dispatched(self) -> list[tuple[NotificationRequest, str]]:
-        return self._dispatched
-
-
-def _make_recording_dispatcher(is_electron: bool = True) -> _RecordingDispatcher:
+def _make_recording_dispatcher(is_electron: bool = True) -> RecordingNotificationDispatcher:
     # Electron by default: the feed only OS-dispatches on the Electron channel
     # (in browser mode the renderer owns OS delivery).
-    return _RecordingDispatcher(is_electron=is_electron, is_macos=False)
+    return RecordingNotificationDispatcher(is_electron=is_electron, is_macos=False)
 
 
 def _at(minute: int) -> datetime:

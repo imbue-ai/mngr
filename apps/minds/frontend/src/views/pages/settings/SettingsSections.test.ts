@@ -463,13 +463,11 @@ describe("SettingsSections layout", () => {
     });
   });
 
-  it("keeps the group headings and every section in the nav", async () => {
+  it("keeps the group heading and every section in the nav", async () => {
     await withMindsNative({}, async () => {
       const [nav] = columns();
       const navText = collectText(nav).join(" ");
-      for (const heading of ["Permissions", "Other"]) {
-        expect(navText, heading).toContain(heading);
-      }
+      expect(navText).toContain("Other");
       for (const section of SETTINGS_SECTIONS) {
         expect(navText, section.label).toContain(section.label);
       }
@@ -483,16 +481,6 @@ describe("SettingsSections layout", () => {
       const navText = collectText(columns()[0]).join(" ");
       expect(navText).toContain("Updates");
       expect(navText).toContain("Error reporting");
-    });
-  });
-
-  it("keeps the revoke dialog beside the pane, not inside it as a third column", async () => {
-    // The pane's contract is two columns; a fixed-position dialog parked in the
-    // row would be a real bug the moment it stopped being fixed-position.
-    await withMindsNative({}, async () => {
-      const [, ...siblings] = renderSections();
-      expect(siblings).toHaveLength(1);
-      expect(columns()).toHaveLength(2);
     });
   });
 

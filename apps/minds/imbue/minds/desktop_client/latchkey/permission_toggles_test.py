@@ -7,7 +7,6 @@ from pydantic import Field
 from pydantic import JsonValue
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
@@ -23,6 +22,7 @@ from imbue.minds.desktop_client.latchkey.permission_toggles import compute_self_
 from imbue.minds.desktop_client.latchkey.permission_toggles import connect_service_with_credentials
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.latchkey.testing import build_permissions_test_catalog
 from imbue.minds.desktop_client.latchkey.testing import seed_connector_grant
@@ -41,21 +41,6 @@ from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 _ACCOUNT = "alice@example.com"
-
-
-class _HostResolver(StaticBackendResolver):
-    """Static resolver mapping every known agent to one fixed host."""
-
-    fixed_host_id: HostId = Field(description="Host id reported for every known agent.")
-    known_agent_ids: tuple[AgentId, ...] = Field(default=())
-
-    def list_known_agent_ids(self) -> tuple[AgentId, ...]:
-        return self.known_agent_ids
-
-    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
-        if agent_id not in self.known_agent_ids:
-            return None
-        return AgentDisplayInfo(agent_name=str(agent_id), host_id=str(self.fixed_host_id))
 
 
 def _slack_info() -> ServicePermissionInfo:
@@ -239,13 +224,14 @@ def test_build_workspace_permissions_view_marks_granted_toggles(tmp_path: Path) 
         accounts_by_service={"slack": [_ACCOUNT]},
     )
     seed_connector_grant(latchkey.plugin_data_dir, host, "slack-api", _ACCOUNT, ("slack-chat-read",))
-    resolver = _HostResolver(url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,))
+    resolver = FixedHostBackendResolver(url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,))
 
     view = build_workspace_permissions_view(
         backend_resolver=resolver,
         gateway_client=build_fake_gateway_client(),
         services_catalog=build_permissions_test_catalog(),
         latchkey=latchkey,
+        machine_latchkey=latchkey,
         workspace_agent_id=str(agent_id),
     )
 
@@ -271,13 +257,14 @@ def test_build_workspace_permissions_view_lists_granted_but_disconnected_account
     agent_id, host = AgentId(), HostId()
     latchkey = FakeAccountsLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
     seed_connector_grant(latchkey.plugin_data_dir, host, "slack-api", _ACCOUNT, ("slack-read-all",))
-    resolver = _HostResolver(url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,))
+    resolver = FixedHostBackendResolver(url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,))
 
     view = build_workspace_permissions_view(
         backend_resolver=resolver,
         gateway_client=build_fake_gateway_client(),
         services_catalog=build_permissions_test_catalog(),
         latchkey=latchkey,
+        machine_latchkey=latchkey,
         workspace_agent_id=str(agent_id),
     )
 
@@ -340,14 +327,32 @@ def test_build_workspace_permissions_view_leads_a_service_with_its_connected_acc
     assert [connection.account for connection in view.connections] == ["zoe@x", "alice@x", DEFAULT_ACCOUNT]
 
 
-def _build_view(latchkey: FakeAccountsLatchkey, agent_id: AgentId, host: HostId) -> WorkspacePermissionsView:
+def _build_view(
+    latchkey: FakeAccountsLatchkey,
+    agent_id: AgentId,
+    host: HostId,
+    machine_latchkey: FakeAccountsLatchkey | None = None,
+) -> WorkspacePermissionsView:
     return build_workspace_permissions_view(
-        backend_resolver=_HostResolver(url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,)),
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,)
+        ),
         gateway_client=build_fake_gateway_client(),
         services_catalog=build_permissions_test_catalog(),
         latchkey=latchkey,
+        machine_latchkey=machine_latchkey if machine_latchkey is not None else latchkey,
         workspace_agent_id=str(agent_id),
     )
+
+
+def test_build_workspace_permissions_view_reports_whose_store_the_machine_reads(tmp_path: Path) -> None:
+    """What the pane's Disconnect copy turns on: who else loses the sign-in."""
+    agent_id, host = AgentId(), HostId()
+    latchkey = FakeAccountsLatchkey(latchkey_directory=tmp_path / "desktop", latchkey_binary="/nonexistent")
+    machine_latchkey = FakeAccountsLatchkey(latchkey_directory=tmp_path / "machine", latchkey_binary="/nonexistent")
+
+    assert _build_view(latchkey, agent_id, host).is_credential_store_shared is True
+    assert _build_view(latchkey, agent_id, host, machine_latchkey=machine_latchkey).is_credential_store_shared is False
 
 
 def test_build_workspace_permissions_view_carries_how_each_service_is_connected(tmp_path: Path) -> None:
@@ -410,6 +415,7 @@ def test_build_workspace_permissions_view_rejects_unknown_workspaces(tmp_path: P
             gateway_client=build_fake_gateway_client(),
             services_catalog=build_permissions_test_catalog(),
             latchkey=latchkey,
+            machine_latchkey=latchkey,
             workspace_agent_id=str(AgentId()),
         )
 
@@ -420,12 +426,16 @@ def test_build_workspace_permissions_view_rejects_unknown_workspaces(tmp_path: P
 class _ToggleHarness(FrozenModel):
     """The typed dependency bundle the apply_* functions take, plus the host file path."""
 
-    backend_resolver: _HostResolver = Field(description="Resolver mapping the test agent to its host.")
+    backend_resolver: FixedHostBackendResolver = Field(description="Resolver mapping the test agent to its host.")
     gateway_client: FakeLatchkeyGatewayClient = Field(description="Fake gateway writing a real on-disk file.")
     services_catalog: ServicesCatalog = Field(description="Catalog built from the test payload.")
     latchkey: FakeAccountsLatchkey = Field(description="Latchkey double reporting the signed-in account.")
     workspace_agent_id: str = Field(description="The test workspace's agent id.")
     permissions_path: Path = Field(description="The host permissions file the toggles edit.")
+    carried_to_machines: list[str] = Field(
+        default_factory=list,
+        description="The workspace agent id of every edit pushed to a machine, in order.",
+    )
 
     def apply_connector(self, scope: str, account: str, permission: str, enabled: bool) -> None:
         apply_connector_toggle(
@@ -438,6 +448,7 @@ class _ToggleHarness(FrozenModel):
             account=account,
             permission=permission,
             enabled=enabled,
+            push_permissions_to_machine=self.carried_to_machines.append,
         )
 
     def apply_self(self, permission: str, enabled: bool) -> None:
@@ -448,6 +459,7 @@ class _ToggleHarness(FrozenModel):
             workspace_agent_id=self.workspace_agent_id,
             permission=permission,
             enabled=enabled,
+            push_permissions_to_machine=self.carried_to_machines.append,
         )
 
 
@@ -458,7 +470,9 @@ def _toggle_harness(tmp_path: Path, agent_id: AgentId, host: HostId) -> _ToggleH
         accounts_by_service={"slack": [_ACCOUNT]},
     )
     return _ToggleHarness(
-        backend_resolver=_HostResolver(url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,)),
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,)
+        ),
         gateway_client=build_fake_gateway_client(),
         services_catalog=build_permissions_test_catalog(),
         latchkey=latchkey,
@@ -516,6 +530,34 @@ def test_apply_connector_toggle_writes_the_full_set_and_deletes_when_empty(tmp_p
     assert config.rules == ()
 
 
+def test_a_toggle_that_changed_the_file_hands_it_on_to_the_workspaces_machine(tmp_path: Path) -> None:
+    """The machine's copy is what its gateway enforces, so every real edit has to travel."""
+    harness = _toggle_harness(tmp_path, AgentId(), HostId())
+    save_permissions(
+        harness.permissions_path,
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: [_BASELINE_PERMISSION, _SHARED_PATH_PERMISSION]},),
+            schemas={_SHARED_PATH_PERMISSION: {"type": "object"}},
+        ),
+    )
+
+    harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-chat-read", enabled=True)
+    harness.apply_self(permission=_SHARED_PATH_PERMISSION, enabled=False)
+
+    assert harness.carried_to_machines == [harness.workspace_agent_id, harness.workspace_agent_id]
+
+
+def test_a_toggle_that_changed_nothing_hands_on_nothing(tmp_path: Path) -> None:
+    """Re-enabling what is already on writes no file, so there is no new policy to carry."""
+    harness = _toggle_harness(tmp_path, AgentId(), HostId())
+    harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-chat-read", enabled=True)
+    carried_so_far = len(harness.carried_to_machines)
+
+    harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-chat-read", enabled=True)
+
+    assert len(harness.carried_to_machines) == carried_so_far
+
+
 def test_apply_connector_toggle_rejects_unknown_scope(tmp_path: Path) -> None:
     harness = _toggle_harness(tmp_path, AgentId(), HostId())
     with pytest.raises(PermissionToggleError):
@@ -548,8 +590,8 @@ def _connect_aws(
     latchkey: FakeAccountsLatchkey,
     value_by_parameter_name: dict[str, str] | None = None,
     account_name: str = "",
-) -> None:
-    connect_service_with_credentials(
+) -> str:
+    return connect_service_with_credentials(
         latchkey=latchkey,
         services_catalog=build_permissions_test_catalog(),
         service_name="aws",
@@ -566,13 +608,15 @@ def test_connect_service_with_credentials_runs_the_service_own_command(tmp_path:
     """The values fill the service's own example, pinned to the account they create."""
     latchkey = FakeAccountsLatchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent")
 
-    _connect_aws(latchkey)
+    stored_account = _connect_aws(latchkey)
 
     assert latchkey.auth_set_calls == [
         ("aws", ("--account", "", "auth", "set-nocurl", "aws", "AKIAEXAMPLE", "s3cret")),
     ]
     # The stored credentials are the service's first account, so it now connects.
     assert latchkey.accounts_by_service == {"aws": [""]}
+    # The first account is latchkey's unnamed default, and that is what is reported.
+    assert stored_account == ""
 
 
 def test_connect_service_with_credentials_names_a_further_account(tmp_path: Path) -> None:
@@ -582,9 +626,11 @@ def test_connect_service_with_credentials_names_a_further_account(tmp_path: Path
         accounts_by_service={"aws": [""]},
     )
 
-    _connect_aws(latchkey, account_name="  work  ")
+    stored_account = _connect_aws(latchkey, account_name="  work  ")
 
     assert latchkey.auth_set_calls[0][1][:2] == ("--account", "work")
+    # Reported back so the caller can hand exactly this account to the machine.
+    assert stored_account == "work"
 
 
 def test_connect_service_with_credentials_requires_a_name_for_a_further_account(tmp_path: Path) -> None:

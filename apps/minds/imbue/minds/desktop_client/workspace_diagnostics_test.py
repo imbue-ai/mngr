@@ -40,9 +40,9 @@ from imbue.minds.desktop_client.workspace_diagnostics import build_latchkey_logs
 from imbue.minds.desktop_client.workspace_diagnostics import collect_workspace_diagnostics
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
-from imbue.mngr_latchkey.remote_gateway import REMOTE_GATEWAY_LOG_FILENAME
-from imbue.mngr_latchkey.remote_gateway import REMOTE_LATCHKEY_DIR_NAME
-from imbue.mngr_latchkey.remote_gateway import REMOTE_TUNNEL_LOG_FILENAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_GATEWAY_LOG_FILENAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_LATCHKEY_DIR_NAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_TUNNEL_LOG_FILENAME
 
 _WORKSPACE_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "3")
 

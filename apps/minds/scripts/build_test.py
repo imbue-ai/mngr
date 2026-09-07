@@ -36,7 +36,7 @@ from typing import Final
 
 import pytest
 
-from imbue.mngr_latchkey.remote_gateway import DATALIB_CURL_VERSION as GATEWAY_DATALIB_CURL_VERSION
+from imbue.mngr_latchkey.remote.provisioning import DATALIB_CURL_VERSION as GATEWAY_DATALIB_CURL_VERSION
 
 # The full set of workspace packages bundled into the standalone app. This
 # same set is hand-maintained in three other places:
@@ -850,7 +850,7 @@ def test_datalib_curl_pin_agrees_with_the_latchkey_gateway() -> None:
 
     The dispatch curl is fetched from two independent places -- minds bundles
     it for the desktop app (``download-binaries.js``) and the latchkey gateway
-    installs it on the VPS (``mngr_latchkey.remote_gateway``) -- and the pin is
+    installs it on the VPS (``mngr_latchkey.remote.provisioning``) -- and the pin is
     duplicated because the mngr wheel must not read files outside the ``imbue``
     package, so a shared manifest is not available across the two projects.
     Bumping one and not the other would leave a desktop client impersonating
@@ -861,7 +861,7 @@ def test_datalib_curl_pin_agrees_with_the_latchkey_gateway() -> None:
     assert match is not None, "Could not find DATALIB_CURL_VERSION in download-binaries.js"
     assert match.group(1) == GATEWAY_DATALIB_CURL_VERSION, (
         f"download-binaries.js pins datalib curl {match.group(1)} but "
-        f"mngr_latchkey.remote_gateway pins {GATEWAY_DATALIB_CURL_VERSION}; "
+        f"mngr_latchkey.remote.provisioning pins {GATEWAY_DATALIB_CURL_VERSION}; "
         "bump both together."
     )
 

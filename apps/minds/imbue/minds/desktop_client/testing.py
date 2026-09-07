@@ -58,6 +58,8 @@ from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestP
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestResponseEvent
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import set_state
@@ -695,6 +697,19 @@ def write_blocking_stub_mngr(tmp_path: Path, name: str, release_path: Path) -> s
 # a regression fails on the assertion that says what went wrong rather than on
 # pytest's opaque timeout.
 SUPPRESSION_WAIT_SECONDS: Final[float] = 5.0
+
+
+class RecordingNotificationDispatcher(NotificationDispatcher):
+    """Dispatcher double that records dispatch calls instead of hitting any OS channel."""
+
+    _dispatched: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
+
+    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
+        self._dispatched.append((request, agent_display_name))
+
+    @property
+    def dispatched(self) -> list[tuple[NotificationRequest, str]]:
+        return self._dispatched
 
 
 class SuppressionAnnouncingTracker(SystemInterfaceHealthTracker):

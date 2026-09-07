@@ -30,6 +30,7 @@ the gateway forgets the pending entry.
 """
 
 import json
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -50,6 +51,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_host_permissions
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -188,6 +190,13 @@ class FileSharingGrantHandler(RequestEventHandler):
     latchkey: Latchkey = Field(
         description="Latchkey wrapper used to repair a host's missing canonical permissions file at grant time.",
     )
+    push_permissions_to_machine: Callable[[str], None] = Field(
+        description=(
+            "Pushes the freshly-spliced policy to the workspace's own machine, blocking until it lands "
+            "there, and raising MachineOperationError when it does not. A no-op for a workspace whose "
+            "agents run on this computer."
+        ),
+    )
     share_roots: tuple[Path, ...] = Field(
         default_factory=get_file_sharing_roots,
         frozen=True,
@@ -295,6 +304,19 @@ class FileSharingGrantHandler(RequestEventHandler):
                 f"Could not approve file-sharing request through the latchkey gateway: {e}",
                 status_code=502,
             )
+        # A remote workspace's machine enforces its own copy of the policy the
+        # gateway just spliced the grant into, so the edit is pushed to it
+        # before the grant is called done. A machine that will not take it
+        # leaves the request unresolved: the reader is told what happened, and
+        # the agent is left to ask again rather than being told it may read a
+        # file its gateway will not let it read.
+        try:
+            self.push_permissions_to_machine(permission_request.agent_id)
+        except MachineOperationError as e:
+            logger.warning(
+                "Could not apply the file-sharing grant on the machine of {}: {}", permission_request.agent_id, e
+            )
+            return make_json_error_response(str(e), status_code=502)
 
         message = _format_granted_message(effective_path, str(payload.access))
         resolve_request(

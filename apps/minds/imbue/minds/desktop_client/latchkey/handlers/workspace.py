@@ -28,6 +28,7 @@ broad schema. Denial drops the pending record via
 """
 
 import json
+from collections.abc import Callable
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -46,6 +47,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -56,6 +58,7 @@ from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.mngr.primitives import AgentId
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 # Label shown on the inbox list card (lower-case, short).
@@ -111,6 +114,9 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
     """
 
     data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
+    latchkey: Latchkey = Field(
+        description="Latchkey wrapper, used to reach the plugin data dir a grant's permissions file lives under."
+    )
     gateway_client: LatchkeyGatewayClient = Field(
         description=(
             "HTTP client used to ``POST /permission-requests/approve/<id>`` (grant) and "
@@ -119,6 +125,13 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
     )
     mngr_message_sender: MngrMessageSender = Field(
         description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
+    )
+    push_permissions_to_machine: Callable[[str], None] = Field(
+        description=(
+            "Pushes the freshly-spliced policy to the workspace's own machine, blocking until it lands "
+            "there, and raising MachineOperationError when it does not. A no-op for a workspace whose "
+            "agents run on this computer."
+        ),
     )
 
     # -- RequestEventHandler interface ---------------------------------------
@@ -217,6 +230,17 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
                 f"Could not approve the cross-workspace request through the latchkey gateway: {e}",
                 status_code=502,
             )
+        # A remote workspace's machine enforces its own copy of the policy the
+        # gateway just spliced the grant into, so the edit is pushed to it
+        # before the grant is called done. A machine that will not take it
+        # leaves the request unresolved: the reader is told what happened, and
+        # the agent is left to ask again rather than being told it may do
+        # something it may not.
+        try:
+            self.push_permissions_to_machine(str(parsed_agent_id))
+        except MachineOperationError as e:
+            logger.warning("Could not apply the cross-workspace grant on the machine of {}: {}", parsed_agent_id, e)
+            return make_json_error_response(str(e), status_code=502)
 
         target_label = (
             _resolve_target_name(backend_resolver, payload.target_workspace_id) or "the selected machine"

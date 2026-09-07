@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { settle } from "../testing";
-import { forgetWarmedPermissionsOverview, warmPermissionsOverview } from "./permissionsPrefetch";
+import {
+  forgetWarmedPermissionsOverview,
+  readWarmedPermissionsOverview,
+  warmPermissionsOverview,
+} from "./permissionsPrefetch";
 import {
   BROWSER_SIGN_IN,
   awsAvailable,
@@ -194,6 +198,54 @@ describe("PermissionsModel writes", () => {
     expect(model.errorMessage).toBe("");
   });
 
+  it("drops a warm the flip has just invalidated, so the next open reads for itself", async () => {
+    // The warm holds the state the flip then changed. A close and reopen inside
+    // its lifetime would otherwise adopt it -- and, because a live warm is
+    // never re-read, keep adopting it -- putting the toggles back as they were.
+    const before = permissionsView({ connections: [slackConnection({ granted_count: 1 })] });
+    const flipped = permissionsView({ connections: [slackConnection({ granted_count: 2 })] });
+    const { model } = makeModel(() => okWith(flipped));
+    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: before }));
+
+    await model.toggleConnector("slack-api", "", "slack-chat-read", true);
+
+    const reopened = makeModel(() => okWith(flipped));
+    await reopened.model.load();
+    expect(reopened.requests).toEqual([{ url: PERMISSIONS_URL, method: "GET", body: null }]);
+    expect(reopened.model.data).toEqual(flipped);
+  });
+
+  it("drops the warm as soon as a flip starts, not only when it lands", async () => {
+    // A sign-in blocks for as long as the service takes, and the panel can be
+    // closed and reopened meanwhile; the warm is stale from the click.
+    const { model } = makeModel(() => new Promise<StubResponse>(() => undefined));
+    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: permissionsView() }));
+
+    void model.toggleConnector("slack-api", "", "slack-chat-read", true);
+
+    expect(readWarmedPermissionsOverview(AGENT_ID)).toBeNull();
+  });
+
+  it("drops a warm started while a flip is still in flight", async () => {
+    // Started after the click but answered before the write landed, so it holds
+    // the pre-flip state just as surely as one taken before it.
+    let respondToFlip: (response: StubResponse) => void = () => undefined;
+    const { model } = makeModel(
+      () =>
+        new Promise<StubResponse>((resolve) => {
+          respondToFlip = resolve;
+        }),
+    );
+    const flip = model.toggleConnector("slack-api", "", "slack-chat-read", true);
+    await settle();
+    warmPermissionsOverview(AGENT_ID, async () => ({ ok: true, status: 200, body: permissionsView() }));
+
+    respondToFlip(okWith(permissionsView()));
+    await flip;
+
+    expect(readWarmedPermissionsOverview(AGENT_ID)).toBeNull();
+  });
+
   it("posts a self toggle without any connector fields", async () => {
     const { model, requests } = makeModel(() => okWith(permissionsView()));
     await model.load();
@@ -368,6 +420,28 @@ describe("PermissionsModel write serialization", () => {
     expect(model.isRowBusy(selfToggleRowKey("first"))).toBe(true);
     expect(model.isRowBusy(selfToggleRowKey("second"))).toBe(false);
   });
+
+  it("reports the whole pane as writing while any change is in flight", async () => {
+    // A write is not done until the workspace's own machine has taken it, and
+    // its response replaces the whole view, so the pane locks around it.
+    const releases: (() => void)[] = [];
+    const { model } = makeModel((url) => {
+      if (!url.endsWith("/self-toggle")) return okWith(permissionsView());
+      return new Promise<StubResponse>((resolve) => {
+        releases.push(() => resolve(okWith(permissionsView())));
+      });
+    });
+    await model.load();
+    expect(model.isWriting()).toBe(false);
+
+    const flip = model.toggleSelf("shared-path-1", true);
+    await settle();
+    expect(model.isWriting()).toBe(true);
+
+    releases[0]();
+    await flip;
+    expect(model.isWriting()).toBe(false);
+  });
 });
 
 describe("PermissionsModel.forgetWaitingRequest", () => {
@@ -508,7 +582,7 @@ describe("PermissionsModel connect", () => {
     const withNotion = permissionsView({ connections: [slackConnection(), slackConnection({ service_name: "notion" })] });
     let isSignedIn = false;
     const { model, requests } = makeModel((url) => {
-      if (url === "/settings/connectors/add-account") {
+      if (url === `${PERMISSIONS_URL}/connect-browser`) {
         isSignedIn = true;
         return okWith({});
       }
@@ -519,7 +593,7 @@ describe("PermissionsModel connect", () => {
     await model.connectService("notion");
 
     expect(requests[1]).toEqual({
-      url: "/settings/connectors/add-account",
+      url: `${PERMISSIONS_URL}/connect-browser`,
       method: "POST",
       body: { service_name: "notion" },
     });
@@ -533,7 +607,7 @@ describe("PermissionsModel connect", () => {
     const second = slackConnection({ account: "second@example.com", show_account_label: true });
     let isSignedIn = false;
     const { model } = makeModel((url) => {
-      if (url === "/settings/connectors/add-account") {
+      if (url === `${PERMISSIONS_URL}/connect-browser`) {
         isSignedIn = true;
         return okWith({});
       }
@@ -551,7 +625,7 @@ describe("PermissionsModel connect", () => {
     // an un-chained re-read could answer with the view from before the flip.
     const releases: (() => void)[] = [];
     const { model } = makeModel((url) => {
-      if (url === "/settings/connectors/add-account")
+      if (url === `${PERMISSIONS_URL}/connect-browser`)
         return new Promise<StubResponse>((resolve) => {
           releases.push(() => resolve(okWith({})));
         });
@@ -573,7 +647,7 @@ describe("PermissionsModel connect", () => {
 
   it("resolves to nothing when the reload carries no new connection for the service", async () => {
     const { model } = makeModel((url) =>
-      url === "/settings/connectors/add-account" ? okWith({}) : okWith(permissionsView()),
+      url === `${PERMISSIONS_URL}/connect-browser` ? okWith({}) : okWith(permissionsView()),
     );
     await model.load();
 
@@ -585,7 +659,7 @@ describe("PermissionsModel connect", () => {
   it("reports a refused sign-in without re-reading", async () => {
     const loaded = permissionsView();
     const { model, requests } = makeModel((url) =>
-      url === "/settings/connectors/add-account"
+      url === `${PERMISSIONS_URL}/connect-browser`
         ? { ok: false, status: 400, body: { error: "sign-in was cancelled" } }
         : okWith(loaded),
     );

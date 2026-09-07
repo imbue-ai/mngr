@@ -445,6 +445,10 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         # reader thread's name (recorded in JSONL logs) or any raised error message.
         name: str | None = None,
         is_output_accumulated: bool = True,
+        # Bytes handed to the child on stdin (which is then closed) -- the way to pass a value
+        # that must not appear in ``argv``, such as a secret. Must be small; see
+        # ``run_local_command_modern_version``.
+        stdin_bytes: bytes | None = None,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -475,6 +479,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 process_class_kwargs={"on_line_callback": on_output},
                 name=name,
                 is_output_accumulated=is_output_accumulated,
+                stdin_bytes=stdin_bytes,
             )
 
         return self.start_background_process_from_factory(process_factory)
@@ -490,6 +495,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         shutdown_event: ReadOnlyEvent | None = None,
         # Optional log-safe label for the process (see ``run_process_in_background``).
         name: str | None = None,
+        # Bytes handed to the child on stdin (see ``run_process_in_background``).
+        stdin_bytes: bytes | None = None,
     ) -> FinishedProcess:
         """
         Run a process to completion, blocking until it finishes.
@@ -506,6 +513,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             on_output=on_output,
             is_checked_by_group=False,
             name=name,
+            stdin_bytes=stdin_bytes,
         )
         process.wait()
         if is_checked_after:

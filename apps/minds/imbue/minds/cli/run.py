@@ -71,6 +71,8 @@ from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharin
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.workspace import WorkspacePermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import GatewayPendingRequests
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
@@ -437,28 +439,47 @@ def run(
     mngr_caller = get_default_mngr_caller()
     mngr_caller.initialize(root_concurrency_group)
     mngr_message_sender = MngrMessageSender(mngr_caller=mngr_caller, concurrency_group=root_concurrency_group)
+    machine_operator = MachineOperator(
+        access=MachineAccess(
+            latchkey=latchkey,
+            concurrency_group=root_concurrency_group,
+            # Resolved per call: the state the resolver lives in does not exist yet.
+            get_backend_resolver=lambda: get_state().backend_resolver,
+        )
+    )
+    # Loading the provider set imports every installed provider plugin, which is
+    # seconds of work; started here so the first Permissions tab open finds it
+    # done rather than paying for it under a spinner.
+    machine_operator.access.warm()
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
         services_catalog=ServicesCatalog(),
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
+        carry_grant_to_machine=machine_operator.connect_service_with_permissions,
     )
+    push_permissions_to_machine = machine_operator.push_permissions
     file_sharing_handler = FileSharingGrantHandler(
         data_dir=data_directory,
         gateway_client=gateway_client,
         latchkey=latchkey,
         mngr_message_sender=mngr_message_sender,
+        push_permissions_to_machine=push_permissions_to_machine,
     )
     workspace_permission_handler = WorkspacePermissionGrantHandler(
         data_dir=data_directory,
+        latchkey=latchkey,
         gateway_client=gateway_client,
         mngr_message_sender=mngr_message_sender,
+        push_permissions_to_machine=push_permissions_to_machine,
     )
     accounts_permission_handler = AccountsPermissionGrantHandler(
         data_dir=data_directory,
+        latchkey=latchkey,
         gateway_client=gateway_client,
         mngr_message_sender=mngr_message_sender,
+        push_permissions_to_machine=push_permissions_to_machine,
     )
     imbue_cloud_cli = ImbueCloudCli(
         mngr_caller=mngr_caller,
@@ -699,8 +720,13 @@ def run(
 
     # Every newly-discovered agent on a minds-managed host gets
     # its id appended to the host's ``latchkey_permissions.json``
-    # allowed-agent list.
-    LatchkeyAutoRegister(backend_resolver=backend_resolver, latchkey=latchkey).start()
+    # allowed-agent list, and a remote host's machine is handed the result.
+    LatchkeyAutoRegister(
+        backend_resolver=backend_resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=push_permissions_to_machine,
+        concurrency_group=root_concurrency_group,
+    ).start()
 
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
@@ -752,6 +778,7 @@ def run(
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
+        machine_operator=machine_operator,
         discovery_health_watchdog=discovery_health_watchdog,
         mngr_caller=mngr_caller,
         connectivity_detector=connectivity_detector,

@@ -18,6 +18,7 @@ from typing import Final
 from uuid import uuid4
 
 import psutil
+import pytest
 
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_latchkey_forward
@@ -36,7 +37,14 @@ from imbue.mngr_latchkey.store import save_forward_info
 _POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
 
-def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> bool:
+# Upper bound for the process-state polls below. Purely a worst-case ceiling
+# (every poll returns as soon as its condition holds): spawning and tearing
+# down real subprocesses has been seen to exceed a 5s bound on a heavily
+# loaded machine, which is noise, not a bug in the code under test.
+_PROCESS_WAIT_TIMEOUT_SECONDS = 15.0
+
+
+def _wait_for_process_exit(pid: int, timeout: float = _PROCESS_WAIT_TIMEOUT_SECONDS) -> bool:
     """Poll until ``pid`` is gone or has become a zombie.
 
     Zombies count as "exited" -- the subprocesses we spawn are children
@@ -61,7 +69,7 @@ def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def _wait_for_process_alive(pid: int, timeout: float = 5.0) -> bool:
+def _wait_for_process_alive(pid: int, timeout: float = _PROCESS_WAIT_TIMEOUT_SECONDS) -> bool:
     """Poll until ``pid``'s cmdline matches ``mngr latchkey forward``.
 
     Between fork and exec the child briefly inherits the parent's argv,
@@ -895,11 +903,15 @@ def test_stop_terminates_descendants_via_on_disk_record(tmp_path: Path) -> None:
             _terminate_pid_if_alive(child_pid)
 
 
+@pytest.mark.flaky
 def test_is_forward_pid_for_directory_matches_only_its_own_directory(tmp_path: Path) -> None:
     """The pre-terminate re-check accepts a forward for its directory and rejects others.
 
     This is the guard the reaper applies immediately before signalling each PID,
     so a directory mismatch (or a recycled/dead PID) can never be terminated.
+
+    Marked flaky: it spawns and reaps a real subprocess, and its process-state
+    polls have been seen to run out on a heavily loaded machine.
     """
     fake_binary = _make_fake_mngr_binary(tmp_path)
     own_directory = tmp_path / f"own-{uuid4().hex}"

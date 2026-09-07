@@ -1,14 +1,15 @@
 // Warms a machine's permissions overview before its pane is opened.
 //
 // The pane reads on its first mount, so the read started when the panel
-// opened and "Loading permissions..." was however long that read took. The
-// read itself is quick; it was simply started late. Pointing at the key that
-// opens the pane starts it instead, so the click usually lands on an answer
-// that is already here.
+// opened and "Loading permissions..." was however long that read took.
+// Pointing at the key that opens the pane starts it instead, so the click
+// usually lands on an answer that is already here. For a remote machine the
+// read is a round trip to that machine (it is answered by asking the machine
+// itself what it holds), so the head start is worth more than it used to be.
 //
-// Deliberately NOT warmed on entering a machine: the overview is answered by
-// asking that machine's latchkey gateway what it holds, and a machine is
-// entered far more often than its permissions are read.
+// Deliberately NOT warmed on entering a machine, for the same reason: a
+// machine is entered far more often than its permissions are read, and every
+// read costs that machine a command.
 
 import type { UiWorkspacePermissions } from "../generated/ui";
 

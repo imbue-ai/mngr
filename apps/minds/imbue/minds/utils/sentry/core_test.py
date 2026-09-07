@@ -20,6 +20,9 @@ from imbue.minds.utils.sentry.core import resolve_latchkey_forward_sentry_env
 from imbue.minds.utils.sentry.core import resolve_sentry_environment
 from imbue.minds.utils.sentry.core import sentry_deploy_environment_from_minds_env_name
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
+from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_DSN_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_ENVIRONMENT_ENV_VAR
@@ -27,6 +30,7 @@ from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR
 from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR
 from imbue.mngr_latchkey.sentry import read_forward_sentry_consent
 from imbue.mngr_latchkey.sentry import resolve_forward_sentry_config
+from imbue.mngr_latchkey.store import plugin_data_dir
 
 
 def test_sentry_environment_from_minds_env_name_maps_production_and_staging() -> None:
@@ -191,6 +195,38 @@ def test_error_event_sweeps_never_pick_up_staged_bug_report_files(tmp_path: Path
     assert set(groups) == {"", "live_logs"}, sorted(groups)
     # one callback per upload: traceback + the one live log file.
     assert len(callbacks) == 2
+
+
+def test_collect_external_attachments_never_reaches_into_a_machine_store(tmp_path: Path) -> None:
+    """A bug report sweeps the latchkey plugin dir, which now holds credential stores below it.
+
+    Each remote workspace's machine store lives at ``<plugin dir>/hosts/<host
+    id>/`` and holds that machine's credentials. The external groups glob the
+    plugin dir itself, so nothing there is reachable -- and the decoys below,
+    named exactly what each group matches, are what would be swept (alongside
+    the credential store beside them) if a glob ever became recursive.
+    """
+    logs_folder = tmp_path / "logs"
+    logs_folder.mkdir()
+    (logs_folder / "minds-events.jsonl").write_text("live\n")
+    latchkey_directory = tmp_path / "latchkey"
+    data_dir = plugin_data_dir(latchkey_directory)
+    store_dir = materialize_machine_store(latchkey_directory, data_dir, HostId.generate())
+    write_machine_credentials(store_dir, b"encrypted-2277", "2")
+    for decoy_name in ("events.jsonl", "events.jsonl.20260824172552142020", "gateway.log"):
+        (store_dir / decoy_name).write_text("decoy\n")
+
+    uploader = ErrorAttachmentsS3Uploader(
+        log_attachment_groups=_MINDS_LOG_ATTACHMENT_GROUPS
+        + _external_log_attachment_groups(data_dir, tmp_path / "no-discovery", tmp_path / "no-mngr-cli")
+    )
+    try:
+        raise ValueError("boom")
+    except ValueError as exception:
+        groups, _callbacks = uploader.collect_external_attachments(exception=exception, logs_folder=logs_folder)
+
+    swept = [path for paths in groups.values() for path in paths]
+    assert [path for path in swept if str(store_dir) in str(path)] == []
 
 
 def test_collect_external_attachments_sweeps_latchkey_and_discovery_dirs(tmp_path: Path) -> None:

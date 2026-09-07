@@ -68,6 +68,17 @@ const catalogFallbackMark = (): m.Children => m(Icon16, { name: "box", extra: "s
 const SELF_TOGGLE_BLOCKED_TITLE =
   "This grant can't be re-enabled; ask the agent to request it again.";
 const CONNECTOR_TOGGLE_BLOCKED_TITLE = "Connect this account before granting permissions.";
+/** Why every other control is inert while one change is being applied. */
+const PANE_BUSY_TITLE = "Waiting for the last change to reach this machine.";
+
+/** Whether a control must sit out because a DIFFERENT write is still running.
+ *
+ * A write is not finished until the workspace's own machine has taken it, and
+ * its response replaces the whole pane, so exactly one may be in flight. The
+ * acting control shows its own spinner instead (see `renderSwitch`). */
+function isLockedByAnotherWrite(model: PermissionsModel, rowKey: string): boolean {
+  return model.isWriting() && !model.isRowBusy(rowKey);
+}
 
 /** Why a service offers no action at all: latchkey cannot sign in to it and
  * told us nothing about the credentials it takes, so there is nothing to ask
@@ -358,7 +369,7 @@ function renderSelectedPanel(
   if (selected === ADD_CONNECTION_SECTION) return renderAddConnectionPanel(model, selectSection);
   const connection = connections.find((entry) => connectionSectionId(entry) === selected);
   if (connection === undefined) return null;
-  return renderConnectionPanel(model, local, connection, machineName, selectSection);
+  return renderConnectionPanel(model, local, connection, machineName, data.is_credential_store_shared, selectSection);
 }
 
 function renderConnectionPanel(
@@ -366,10 +377,13 @@ function renderConnectionPanel(
   local: PermissionsTabLocalState,
   connection: UiPermissionConnection,
   machineName: string,
+  isCredentialStoreShared: boolean,
   selectSection: (section: string) => void,
 ): m.Children {
   const machineLabel = machineLabelFor(machineName);
-  const isDisconnectBusy = model.isRowBusy(disconnectRowKey(connection.service_name, connection.account));
+  const disconnectKey = disconnectRowKey(connection.service_name, connection.account);
+  const isDisconnectBusy = model.isRowBusy(disconnectKey);
+  const isDisconnectLocked = isLockedByAnotherWrite(model, disconnectKey);
   return m("section", { "data-perm-panel": connectionSectionId(connection) }, [
     m("div", { class: "flex items-center justify-between gap-3 mb-1" }, [
       m("h2", { class: "type-heading text-primary flex items-center gap-2 min-w-0" }, [
@@ -416,6 +430,7 @@ function renderConnectionPanel(
               renderSwitch({
                 isGranted: toggle.is_granted,
                 isBusy: model.isRowBusy(rowKey),
+                isLocked: isLockedByAnotherWrite(model, rowKey),
                 // A grant can always be turned OFF, even on a disconnected
                 // account -- only turning one ON needs a live connection.
                 isBlocked: !toggle.is_granted && !connection.is_connected,
@@ -432,16 +447,19 @@ function renderConnectionPanel(
     ]),
     // Disconnect sits at the FOOT of the panel, apart from the toggles and from
     // the heading's Revoke all: that one drops this machine's grants, this one
-    // takes the account away from every machine. Only a connected account has a
-    // stored sign-in to forget -- a leftover-grants row is Revoke all's job.
+    // forgets the sign-in behind them. Only a connected account has one to
+    // forget -- a leftover-grants row is Revoke all's job.
     connection.is_connected
       ? [
           m(SectionHeader, { divider: true }, "Disconnect"),
           m("p", { class: "type-body text-secondary mb-3" }, [
             "Disconnect from ",
             m("span", { class: "font-semibold" }, `${connection.display_name} · ${connection.account_label}`),
-            `. Disconnecting is not limited to ${machineLabel} — every machine will lose this access. `,
-            "Use Revoke all above to disconnect just this machine.",
+            isCredentialStoreShared
+              ? `. ${machineLabel} shares one sign-in with every other machine on this computer, so all ` +
+                `of them lose this access. `
+              : `. Only ${machineLabel} loses this access — every other machine keeps its own sign-in. `,
+            "Use Revoke all above to drop just this machine's grants and keep it connected.",
           ]),
           m(
             Button,
@@ -449,7 +467,7 @@ function renderConnectionPanel(
               variant: "danger",
               size: "md",
               "data-perm-disconnect": connection.service_name,
-              disabled: isDisconnectBusy,
+              disabled: isDisconnectBusy || isDisconnectLocked,
               onclick: () => {
                 model.clearErrorMessage();
                 disarmRevoke(local);
@@ -458,7 +476,7 @@ function renderConnectionPanel(
             },
             isDisconnectBusy ? "Disconnecting..." : "Disconnect",
           ),
-          renderDisconnectDialog(model, local, connection, machineLabel, selectSection),
+          renderDisconnectDialog(model, local, connection, machineLabel, isCredentialStoreShared, selectSection),
         ]
       : null,
   ]);
@@ -474,10 +492,13 @@ function renderDisconnectDialog(
   local: PermissionsTabLocalState,
   connection: UiPermissionConnection,
   machineLabel: string,
+  isCredentialStoreShared: boolean,
   selectSection: (section: string) => void,
 ): m.Children {
   const isOpen = local.disconnectSectionId === connectionSectionId(connection);
-  const isBusy = model.isRowBusy(disconnectRowKey(connection.service_name, connection.account));
+  const rowKey = disconnectRowKey(connection.service_name, connection.account);
+  const isBusy = model.isRowBusy(rowKey);
+  const isLocked = isLockedByAnotherWrite(model, rowKey);
   const close = (): void => {
     local.disconnectSectionId = null;
   };
@@ -492,13 +513,18 @@ function renderDisconnectDialog(
           m(
             "h2",
             { class: "type-heading-lg text-primary mb-3" },
-            `Disconnect ${connection.display_name} · ${connection.account_label} from Minds?`,
+            isCredentialStoreShared
+              ? `Disconnect ${connection.display_name} · ${connection.account_label} from this computer?`
+              : `Disconnect ${connection.display_name} · ${connection.account_label} from ${machineLabel}?`,
           ),
           m("p", { class: "type-body text-primary mb-4" }, [
             "This will disconnect ",
             m("strong", `${connection.display_name} · ${connection.account_label}`),
-            ` from all of your machines in Minds, not just ${machineLabel}. Agents won't be able `,
-            "to use it anywhere until you connect it again from scratch.",
+            isCredentialStoreShared
+              ? ` from every machine on this computer, including ${machineLabel}. Their agents won't be able ` +
+                "to use it until you connect it again."
+              : ` from ${machineLabel}, whose agents won't be able to use it until you connect it again. ` +
+                "Every other machine keeps its own sign-in.",
           ]),
           model.errorMessage ? m(Notice, { variant: "error", role: "alert" }, model.errorMessage) : null,
           m("div", { class: "flex justify-end gap-3" }, [
@@ -516,7 +542,7 @@ function renderDisconnectDialog(
               {
                 variant: "danger",
                 "data-perm-disconnect-confirm": connection.service_name,
-                disabled: isBusy,
+                disabled: isBusy || isLocked,
                 onclick: () => {
                   void model.disconnect(connection).then((section) => {
                     // Refused: the dialog stays up holding the reason.
@@ -551,7 +577,7 @@ function renderRevokeAllButton(
       size: "md",
       extra: "shrink-0",
       "data-perm-revoke-all": connection.service_name,
-      disabled: isBusy,
+      disabled: isBusy || isLockedByAnotherWrite(model, rowKey),
       onclick: () => {
         model.clearErrorMessage();
         if (!isArmed) {
@@ -705,14 +731,15 @@ function renderCatalogAction(
   actionLabel: string,
   selectSection: (section: string) => void,
 ): m.Children {
-  const isBusy = model.isRowBusy(connectServiceRowKey(service.service_name));
+  const rowKey = connectServiceRowKey(service.service_name);
+  const isBusy = model.isRowBusy(rowKey);
   const action = connectActionFor(service.sign_in);
   const attrs = {
     variant: "secondary" as const,
     size: "md" as const,
     extra: "shrink-0",
     "data-perm-connect": service.service_name,
-    disabled: isBusy || action === "unconnectable",
+    disabled: isBusy || isLockedByAnotherWrite(model, rowKey) || action === "unconnectable",
     ...(action === "unconnectable" ? { title: unconnectableTitle(service.display_name) } : {}),
   };
   if (action === "credential_form") {
@@ -760,7 +787,9 @@ function renderCredentialForm(
   selectSection: (section: string) => void,
 ): m.Children {
   const signIn = service.sign_in;
-  const isBusy = model.isRowBusy(connectServiceRowKey(service.service_name));
+  const rowKey = connectServiceRowKey(service.service_name);
+  const isBusy = model.isRowBusy(rowKey);
+  const isLocked = isLockedByAnotherWrite(model, rowKey);
   const isComplete = isCredentialFormComplete(signIn, model.credentialValues, model.credentialAccountName);
   return m(
     "div",
@@ -814,7 +843,7 @@ function renderCredentialForm(
             variant: "primary",
             size: "md",
             "data-perm-credential-submit": service.service_name,
-            disabled: isBusy || !isComplete,
+            disabled: isBusy || isLocked || !isComplete,
             onclick: () => {
               void model.connectWithCredentials(service.service_name).then((section) => {
                 if (section !== null) selectSection(section);
@@ -904,9 +933,11 @@ function renderSelfSwitch(
   toggle: UiSelfPermissionToggle,
   ariaLabel: string,
 ): m.Children {
+  const rowKey = selfToggleRowKey(toggle.permission);
   return renderSwitch({
     isGranted: toggle.is_granted,
-    isBusy: model.isRowBusy(selfToggleRowKey(toggle.permission)),
+    isBusy: model.isRowBusy(rowKey),
+    isLocked: isLockedByAnotherWrite(model, rowKey),
     // A grant whose schema is gone can still be turned off; turning it back on
     // has to come from the agent asking again.
     isBlocked: !toggle.is_granted && !toggle.can_enable,
@@ -920,6 +951,7 @@ function renderSelfSwitch(
 interface SwitchOptions {
   isGranted: boolean;
   isBusy: boolean;
+  isLocked: boolean;
   isBlocked: boolean;
   blockedTitle: string;
   label: string;
@@ -927,21 +959,30 @@ interface SwitchOptions {
   onFlip: (enabled: boolean) => void;
 }
 
+/** A permission switch, spinning while its own write runs and inert while any
+ * other one does.
+ *
+ * The write is not done until the workspace's own machine has taken it, so the
+ * spinner is the honest state: the switch has not moved yet. Every other
+ * control is locked meanwhile, because the response to a write is the whole
+ * view -- two in flight would fight over what is on screen. */
 function renderSwitch(options: SwitchOptions): m.Children {
-  const { isGranted, isBusy, isBlocked, blockedTitle, label, permission, onFlip } = options;
-  return m("button", {
-    type: "button",
-    role: "switch",
-    "aria-checked": isGranted ? "true" : "false",
-    "aria-label": label,
-    "data-perm-permission": permission,
-    // Busy stays clickable-looking but is ignored by the model: a second click
-    // while the write runs should read as "wait", not "broken".
-    class: isBusy ? "perm-switch shrink-0 is-busy" : "perm-switch shrink-0",
-    disabled: isBlocked,
-    ...(isBlocked ? { title: blockedTitle } : {}),
-    onclick: () => onFlip(!isGranted),
-  });
+  const { isGranted, isBusy, isLocked, isBlocked, blockedTitle, label, permission, onFlip } = options;
+  const title = isBlocked ? blockedTitle : isLocked ? PANE_BUSY_TITLE : null;
+  return m("span", { class: "flex shrink-0 items-center gap-2" }, [
+    isBusy ? m(Spinner, { size: "sm" }) : null,
+    m("button", {
+      type: "button",
+      role: "switch",
+      "aria-checked": isGranted ? "true" : "false",
+      "aria-label": label,
+      "data-perm-permission": permission,
+      class: isBusy ? "perm-switch shrink-0 is-busy" : "perm-switch shrink-0",
+      disabled: isBlocked || isBusy || isLocked,
+      ...(title === null ? {} : { title }),
+      onclick: () => onFlip(!isGranted),
+    }),
+  ]);
 }
 
 

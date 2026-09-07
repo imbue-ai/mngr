@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.latchkey.testing import build_permissions_test_catalog
+from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
 from imbue.minds.desktop_client.latchkey.testing import seed_connector_grant
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_accounts_permission_request
@@ -100,6 +101,7 @@ def _build_handler(
             concurrency_group=ConcurrencyGroup(name="ui-api-permissions-test-unused"),
         ),
         gateway_client=gateway_client if gateway_client is not None else build_fake_gateway_client(),
+        carry_grant_to_machine=leave_grant_on_this_computer,
     )
 
 
@@ -513,8 +515,13 @@ def test_connector_disconnect_clears_the_credential_and_drops_the_connection(tmp
     assert load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id)).rules == ()
 
 
-def test_connector_disconnect_strips_grants_on_every_workspace(tmp_path: Path) -> None:
-    """Disconnecting is not machine-scoped: every workspace holding the account loses its grants."""
+def test_connector_disconnect_leaves_other_machines_grants_alone(tmp_path: Path) -> None:
+    """Disconnecting is machine-scoped, because the credential it clears is.
+
+    Every machine keeps its own credentials, so signing an account out here says
+    nothing about the same account on another machine -- and stripping that
+    machine's grants would revoke access that still has a credential behind it.
+    """
     agent_id, other_agent_id = AgentId(), AgentId()
     host_id, other_host_id = HostId(), HostId()
     latchkey = _latchkey(tmp_path)
@@ -534,10 +541,11 @@ def test_connector_disconnect_strips_grants_on_every_workspace(tmp_path: Path) -
     )
 
     assert response.status_code == 200
-    # Both files are empty by the time the response lands: no polling, because
-    # the strip is part of the request rather than a background thread.
+    # This machine's file is empty by the time the response lands: no polling,
+    # because the strip is part of the request rather than a background thread.
     assert load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id)).rules == ()
-    assert load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, other_host_id)).rules == ()
+    other_rules = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, other_host_id)).rules
+    assert [permission for rule in other_rules for permission in rule.values()] == [["slack-chat-write"]]
 
 
 def test_connector_disconnect_keeps_the_services_other_accounts(tmp_path: Path) -> None:
@@ -938,3 +946,49 @@ def test_workspace_permissions_rejects_a_malformed_workspace_id(tmp_path: Path) 
     response = client.get("/ui/api/workspaces/not-an-agent-id/permissions")
 
     assert response.status_code == 404
+
+
+def test_connect_browser_signs_in_and_answers_with_the_refreshed_pane(tmp_path: Path) -> None:
+    """Add connection's sign-in belongs to the machine whose pane asked for it."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path, accounts_by_service={})
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connect-browser",
+        json={"service_name": "slack"},
+    )
+
+    assert response.status_code == 200
+    assert latchkey.added_account_calls == ["slack"]
+    payload = json.loads(response.data)
+    assert [entry["service_name"] for entry in payload["connections"]] == ["slack"]
+
+
+def test_connect_browser_reports_a_sign_in_that_did_not_complete(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path, accounts_by_service={})
+    latchkey.add_account_result = (False, "the browser was closed")
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connect-browser",
+        json={"service_name": "slack"},
+    )
+
+    assert response.status_code == 502
+    assert "the browser was closed" in json.loads(response.data)["error"]
+
+
+def test_connect_browser_rejects_an_unknown_service(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connect-browser",
+        json={"service_name": "not-a-service"},
+    )
+
+    assert response.status_code == 400
+    assert latchkey.added_account_calls == []

@@ -56,7 +56,6 @@ from imbue.mngr_latchkey.additional_services import additional_service_registrat
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
-from imbue.mngr_latchkey.migrations.runner import run_data_format_migrations
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
@@ -83,7 +82,7 @@ _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
 # Maximum request body size the gateway accepts, passed as ``--max-body-size``
-# to every gateway spawn (here and in :mod:`imbue.mngr_latchkey.remote_gateway`).
+# to every gateway spawn (here and in :mod:`imbue.mngr_latchkey.remote.provisioning`).
 # The upstream default is 10 MiB, which is fine for API calls but not for git:
 # the gateway natively proxies GitHub's git smart-HTTP endpoints
 # (``/gateway/https://github.com/...``, ``github-git`` scope), and a push's
@@ -115,13 +114,31 @@ _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # Filename of the stamp the *upstream* latchkey CLI keeps at the root of the
 # latchkey directory to record its credential-store data format version.
-# Distinct from this plugin's own ``data-format-version`` stamp, which lives
-# under ``plugin_data_dir`` (see :mod:`imbue.mngr_latchkey.migrations.runner`).
 UPSTREAM_DATA_FORMAT_VERSION_FILENAME: Final[str] = "data-format-version"
 
 # Filename of the upstream CLI's encrypted credential store, directly under
 # the latchkey directory.
 CREDENTIALS_STORE_FILENAME: Final[str] = "credentials.json.enc"
+
+# Filename of the upstream CLI's encrypted browser session state, directly
+# under the latchkey directory. Encrypted with the *same* per-directory key as
+# the credential store, so it can only be shared between two latchkey
+# directories that also share their encryption key (see
+# :mod:`imbue.mngr_latchkey.remote._mirror`).
+BROWSER_STATE_FILENAME: Final[str] = "browser_state.json.enc"
+
+# Filename of the stamp the upstream CLI keeps directly under the latchkey
+# directory to rate-limit its usage ping: an ISO timestamp, rewritten (and the
+# ping fired) whenever the CLI starts and finds it missing or older than a day.
+# Shared between the desktop and every machine store, which is a latchkey
+# directory of its own (see :mod:`imbue.mngr_latchkey.remote._mirror`).
+DAILY_COUNT_STAMP_FILENAME: Final[str] = "last-daily-count"
+
+# Filename the upstream CLI reads a latchkey directory's permissions policy
+# from when no override JWT names another path. This plugin keeps the
+# canonical per-host file under its own name (``latchkey_permissions.json``)
+# and links this one at it.
+PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 
 # Minimum version of the upstream ``latchkey`` CLI this package will operate
 # against. :meth:`Latchkey._check_minimum_version` enforces it against the
@@ -129,13 +146,13 @@ CREDENTIALS_STORE_FILENAME: Final[str] = "credentials.json.enc"
 # a CLI-only user's own install -- so the floor must never exceed the version
 # in ``apps/minds/package.json``, or the app rejects the very binary it ships.
 # Move it in lockstep with the versions we install
-# (:data:`imbue.mngr_latchkey.remote_gateway.LATCHKEY_VERSION` and the
+# (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
 # in-workspace pin in default-workspace-template) rather than to track what the
 # code strictly needs: the newest release with a hard dependency here is 3.2.0,
 # the first to report the account whose credentials it injects to detent as
 # ``customMetadata.account`` -- what the per-account permission grants
 # (:mod:`imbue.mngr_latchkey.account_scopes`) read.
-LATCHKEY_MIN_VERSION: Final[str] = "3.10.0"
+LATCHKEY_MIN_VERSION: Final[str] = "3.10.1"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -239,21 +256,15 @@ _CREDENTIAL_STATUS_BY_LATCHKEY_VALUE: Final[dict[str, CredentialStatus]] = {
 LATCHKEY_AUTH_OPTION_BROWSER: Final[str] = "browser"
 LATCHKEY_AUTH_OPTION_SET: Final[str] = "set"
 
-# Values latchkey reports as an account's ``credentialType``
-# (upstream's stored ``objectType``) for the two credential kinds it can renew:
-# those whose access token expires *and* whose service implements
-# ``refreshCredentials``. Everything else is a static token that never has to be
-# renewed. ``oauth`` covers the refresh-token services (Google, Dropbox, Notion
-# MCP, Ramp); Zoom's server-to-server credential carries no refresh token and
-# instead mints a fresh access token from the app's client id and secret, but
-# expires and is renewed the same way. A future latchkey credential kind that
-# gains ``refreshCredentials`` has to be added here, or it will never be renewed
-# for remote hosts.
+# Values latchkey reports as an account's ``credentialType`` (upstream's stored
+# ``objectType``) for the two credential kinds whose access token expires and is
+# renewed: ``oauth`` covers the refresh-token services (Google, Dropbox, Notion
+# MCP, Ramp), while Zoom's server-to-server credential carries no refresh token
+# and mints a fresh access token from the app's client id and secret instead.
+# Renewal is the business of the machine that holds the credential, so these
+# name the kinds rather than gate anything here.
 LATCHKEY_CREDENTIAL_TYPE_OAUTH: Final[str] = "oauth"
 LATCHKEY_CREDENTIAL_TYPE_ZOOM_SERVER_TO_SERVER: Final[str] = "zoomServerToServer"
-LATCHKEY_RENEWABLE_CREDENTIAL_TYPES: Final[frozenset[str]] = frozenset(
-    {LATCHKEY_CREDENTIAL_TYPE_OAUTH, LATCHKEY_CREDENTIAL_TYPE_ZOOM_SERVER_TO_SERVER}
-)
 
 # Env var the upstream ``latchkey`` CLI (>= 3.0.0) reads to run browser auth
 # flows without persisting or reusing any saved browser session state. We set
@@ -890,14 +901,6 @@ class Latchkey(MutableModel):
         immediately, before any agent has had a chance to be told to
         use the gateway.
 
-        Also reconciles the plugin's on-disk data format: any
-        outstanding :class:`DataFormatMigration` steps between the
-        version recorded under :attr:`plugin_data_dir` and the version
-        the installed code targets are applied here (cheap in the
-        steady state -- one small file read when already current). A
-        migration that needs to inspect the credential store gets the
-        latchkey directory and binary to do so.
-
         Also writes this plugin's state into latchkey's own ``config.json`` -- the hidden
         built-in services and the registrations of minds' additional (custom)
         services (see :func:`merge_minds_latchkey_config`), so the gateway can
@@ -923,7 +926,6 @@ class Latchkey(MutableModel):
                 (non-zero exit, unparseable output, spawn error).
         """
         self._check_minimum_version()
-        run_data_format_migrations(self.plugin_data_dir, self.latchkey_directory, self.latchkey_binary)
         _ensure_minds_latchkey_config(self.latchkey_directory)
         with self._lock:
             self._is_initialized = True
@@ -1139,19 +1141,33 @@ class Latchkey(MutableModel):
 
     # -- Credential export ---------------------------------------------------
 
-    def export_credentials_subset(self, destination: Path, service_names: Collection[str]) -> None:
+    def export_credentials_subset(
+        self,
+        destination: Path,
+        service_names: Collection[str],
+        *,
+        destination_key: SecretStr | None = None,
+        account: str | None = None,
+    ) -> None:
         """Write a re-encrypted copy of the credential store, filtered to ``service_names``.
 
         Shells out to ``latchkey auth re-encrypt <destination> --services <service> ...``.
+        ``account`` narrows the copy further, to one account of the selected
+        services (``--account``): the export fails when no selected service
+        stores that account, so a bundle can never quietly be empty.
         ``destination`` is an output *directory* (which must already exist): the
         source store (this :class:`Latchkey`'s ``LATCHKEY_DIRECTORY``) is
         decrypted with the current per-directory encryption key and a
         re-encrypted copy containing *only* the listed services' credentials is
-        written into it as ``credentials.json.enc``. The new key is read
-        from the child's stdin; we pass an empty stdin (``DEVNULL``) so
-        ``re-encrypt`` reuses the same encryption key, keeping the copy
-        readable by the same gateway -- and the same derived password /
-        permissions-override JWTs -- as the canonical store.
+        written into it as ``credentials.json.enc``.
+
+        ``destination_key`` is the key the copy is encrypted with, handed to the
+        child on stdin so it never appears in ``argv``. This is what moves
+        credentials across a key boundary -- to a machine that keeps its own
+        encryption key, or back from one. Omitting it passes an empty stdin, which
+        makes ``re-encrypt`` reuse the source key, keeping the copy readable by the
+        same gateway -- and the same derived password / permissions-override JWTs
+        -- as the canonical store.
 
         ``service_names`` must be non-empty: ``--services`` requires at
         least one service, and an empty bundle is meaningless. The caller
@@ -1172,6 +1188,11 @@ class Latchkey(MutableModel):
         # Sorted for a deterministic command line (stable logs / tests);
         # the set of services is order-independent.
         command = [self.latchkey_binary, "auth", "re-encrypt", str(destination), "--services", *sorted(service_names)]
+        if account is not None:
+            command.extend(["--account", account])
+        # An empty stdin is not the same as no stdin here: ``re-encrypt`` blocks
+        # reading it, so the child must always see EOF.
+        stdin_bytes = b"" if destination_key is None else destination_key.get_secret_value().encode("utf-8")
         cg = ConcurrencyGroup(name="latchkey-reencrypt")
         try:
             with cg:
@@ -1180,6 +1201,7 @@ class Latchkey(MutableModel):
                     timeout=_REENCRYPT_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,
+                    stdin_bytes=stdin_bytes,
                 )
         except ConcurrencyExceptionGroup as group:
             if not group.only_exception_is_instance_of(ProcessSetupError):

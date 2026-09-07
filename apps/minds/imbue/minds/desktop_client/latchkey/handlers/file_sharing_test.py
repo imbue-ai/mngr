@@ -26,10 +26,13 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
+from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
+from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.request_handler import UiFileSharingPermissionDetail
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_file_sharing_permission_request
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
@@ -67,6 +70,7 @@ def _make_file_sharing_handler(
     gateway_handler: _HttpxHandler,
     share_roots: tuple[Path, ...] = _DEFAULT_TEST_SHARE_ROOTS,
     home_dir: Path = Path("/home/example"),
+    push_permissions_to_machine: Callable[[str], None] = leave_permissions_on_this_computer,
 ) -> tuple[FileSharingGrantHandler, _RecordingMessageSender]:
     sender = _RecordingMessageSender(sent_messages=[])
     return (
@@ -75,6 +79,7 @@ def _make_file_sharing_handler(
             gateway_client=_build_gateway_client(gateway_handler),
             latchkey=make_full_fake_latchkey(tmp_path),
             mngr_message_sender=sender,
+            push_permissions_to_machine=push_permissions_to_machine,
             share_roots=share_roots,
             home_dir=home_dir,
         ),
@@ -97,14 +102,16 @@ def _build_authenticated_client(
     handler: FileSharingGrantHandler,
     inbox: StaticPendingRequests,
     known_agent: AgentId | None = None,
+    backend_resolver: BackendResolverInterface | None = None,
 ) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    backend_resolver: BackendResolverInterface
-    if known_agent is not None:
-        backend_resolver = _NamedWorkspaceResolver(url_by_agent_and_service={str(known_agent): {}})
-    else:
-        backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    if backend_resolver is None:
+        backend_resolver = (
+            _NamedWorkspaceResolver(url_by_agent_and_service={str(known_agent): {}})
+            if known_agent is not None
+            else StaticBackendResolver(url_by_agent_and_service={})
+        )
     paths = InstallationPaths(data_dir=tmp_path)
     app = create_desktop_client(
         auth_store=auth_store,
@@ -566,3 +573,34 @@ def test_build_request_detail_payload_labels_write_access_distinctly(tmp_path: P
         pytest.fail(f"expected a file_sharing detail payload, got {payload!r}")
     assert payload.access == "WRITE"
     assert payload.access_human_label == "read & write"
+
+
+def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: Path) -> None:
+    """The gateway splices the grant into this computer's copy; the machine enforces its own."""
+    carried: list[str] = []
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        push_permissions_to_machine=carried.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = create_file_sharing_permission_request(
+        agent_id=str(agent_id),
+        path="/home/user/data.txt",
+        access="WRITE",
+        rationale="need data",
+    )
+    client = _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=(event,)),
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)
+        ),
+    )
+
+    response = client.post(f"/requests/{event.request_id}/grant")
+
+    assert response.status_code == 200, response.text
+    assert carried == [str(agent_id)]

@@ -349,22 +349,6 @@ def opaque_permissions_dir(data_dir: Path) -> Path:
     return data_dir / _OPAQUE_PERMISSIONS_DIR_NAME
 
 
-def opaque_handles_for_host(data_dir: Path, host_id: HostId) -> list[Path]:
-    """Return opaque permission handles that point at ``host_id``'s canonical file.
-
-    TEMPORARY -- legacy remote workspaces only. Exists solely so
-    ``remote_gateway._materialize_legacy_override_targets`` can find the paths a
-    pre-existing workspace's baked-in permissions-override JWT still names. New
-    VPS-gateway workspaces carry no override, so this can be deleted together
-    with that shim once no workspace predates the one-gateway rollout.
-    """
-    root = opaque_permissions_dir(data_dir)
-    if not root.is_dir():
-        return []
-    canonical_path = permissions_path_for_host(data_dir, host_id).resolve()
-    return sorted(path for path in root.glob("*.json") if path.is_symlink() and path.resolve() == canonical_path)
-
-
 _OPAQUE_PERMISSIONS_PATH_MAX_ATTEMPTS: Final[int] = 16
 
 
@@ -489,6 +473,23 @@ def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
 
 
+def load_permissions_from_text(raw: str) -> LatchkeyPermissionsConfig:
+    """Parse a permissions config that is not (yet) a file on this machine.
+
+    What :func:`load_permissions` does once the bytes are in hand, exposed on
+    its own so a config arriving from somewhere else -- a machine handing over
+    the policy it is enforcing -- can be checked before it is stored.
+
+    Raises:
+        LatchkeyStoreError: when the text is not valid JSON, or does not match
+            the documented schema.
+    """
+    try:
+        return LatchkeyPermissionsConfig.model_validate_json(raw)
+    except ValidationError as e:
+        raise LatchkeyStoreError(f"Permissions config is malformed: {e}") from e
+
+
 def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
     """Read a permissions config from disk.
 
@@ -511,6 +512,6 @@ def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
     except OSError as e:
         raise LatchkeyStoreError(f"Failed to read permissions file {path}: {e}") from e
     try:
-        return LatchkeyPermissionsConfig.model_validate_json(raw)
-    except ValidationError as e:
+        return load_permissions_from_text(raw)
+    except LatchkeyStoreError as e:
         raise LatchkeyStoreError(f"Permissions file {path} is malformed: {e}") from e

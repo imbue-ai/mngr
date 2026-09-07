@@ -36,6 +36,7 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCreden
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import UiManualCredentialsPrompt
@@ -227,6 +228,8 @@ def _make_recording_handler(
             concurrency_group=ConcurrencyGroup(name="permission-routes-test-unused"),
         ),
         gateway_client=gateway_client,
+        # ``_RecordingHandler`` overrides grant, so no handover is ever attempted.
+        carry_grant_to_machine=leave_grant_on_this_computer,
         grant_outcome=grant_outcome,
         grant_message=grant_message,
         grant_manual_credentials=grant_manual_credentials,

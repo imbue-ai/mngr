@@ -223,7 +223,9 @@ def register_agent_for_host(
     plugin_data_dir: Path,
     host_id: HostId,
     agent_id: AgentId,
-) -> None:
+    # whether the canonical file was (re)written -- the caller's cue to push it to a
+    # host whose gateway enforces its own copy
+) -> bool:
     """Register ``agent_id`` for the given host, granting it access to the Minds API proxy.
 
     Reads the host's ``latchkey_permissions.json`` (writing a fresh
@@ -240,6 +242,11 @@ def register_agent_for_host(
     register-agent --host-id ID --agent-id ID``; the desktop client and
     any other Python caller goes through this function directly.
 
+    Only this computer's canonical copy is written here. A remote host's
+    gateway enforces its own ``permissions.json``, and the baseline this brings
+    up to date (``latchkey-self`` grants, additional-service schemas) is checked
+    *there*, so a caller that has a way to reach the machine pushes the file
+    over when this returns ``True``.
     """
     path = permissions_path_for_host(plugin_data_dir, host_id)
     if path.is_file():
@@ -296,7 +303,7 @@ def register_agent_for_host(
         # persisted: this is the common path for a host that already exists.
         if is_baseline_changed:
             save_permissions(path, config)
-        return
+        return is_baseline_changed
     new_any_of: list[JsonValue] = list(any_of) + [_build_allowed_agent_anyof_entry(str(agent_id))]
 
     schemas[SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED] = {
@@ -316,6 +323,7 @@ def register_agent_for_host(
     # rebuilding by hand silently drops every other field.
     new_config = config.model_copy_update(to_update(config.field_ref().schemas, schemas))
     save_permissions(path, new_config)
+    return True
 
 
 class AgentLatchkeySetup(FrozenModel):
@@ -477,6 +485,15 @@ def finalize_host_permissions(
     UI-driven permission grants will not take effect because the UI
     writes to the canonical host-keyed path that this function would
     have linked.
+
+    Deliberately does **not** push the result to the host's machine,
+    unlike every other writer of the canonical file (see
+    :func:`~imbue.mngr_latchkey.remote.credentials.read_host_permissions`).
+    What it promotes is a deny-all baseline, never a grant, so pushing it
+    would overwrite whatever policy the machine is already enforcing --
+    including grants another of the user's computers made. Seeding a
+    machine that has no policy of its own is provisioning's job
+    (:func:`~imbue.mngr_latchkey.remote.provisioning.sync_permissions`).
     """
     if opaque_permissions_path is None:
         return

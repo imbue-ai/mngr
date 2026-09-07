@@ -113,6 +113,33 @@ def test_run_process_to_completion_name_keeps_secret_out_of_failure() -> None:
     assert "--token=***" in str(exc_info.value)
 
 
+def test_run_process_to_completion_hands_stdin_bytes_to_the_child() -> None:
+    """``stdin_bytes`` is how a value reaches a command without appearing in its argv."""
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_to_completion(["cat"], stdin_bytes=b"secret-7741\n")
+
+    assert process.returncode == 0
+    assert process.stdout == "secret-7741\n"
+
+
+def test_run_process_to_completion_closes_stdin_so_a_reader_terminates() -> None:
+    """The child must see EOF; otherwise a command that reads stdin would hang to its timeout."""
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_to_completion(["cat"], timeout=30, stdin_bytes=b"")
+
+    assert process.returncode == 0
+    assert process.stdout == ""
+    assert process.is_timed_out is False
+
+
+def test_run_process_to_completion_leaves_stdin_empty_by_default() -> None:
+    with ConcurrencyGroup(name="outer") as cg:
+        process = cg.run_process_to_completion(["cat"], timeout=30)
+
+    assert process.returncode == 0
+    assert process.stdout == ""
+
+
 def test_concurrency_group_supports_running_processes_with_on_output_callbacks() -> None:
     calls: list[tuple[str, bool]] = []
 

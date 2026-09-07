@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -23,10 +24,12 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
 from imbue.minds.desktop_client.latchkey.handlers.predefined import _build_account_choices
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
 from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
 from imbue.minds.desktop_client.request_handler import UiUnknownScopeDetail
 from imbue.minds.desktop_client.testing import StaticPendingRequests
@@ -261,6 +264,7 @@ def _build_handler(
     auth_set_exit: int = 0,
     auth_set_stderr: str = "",
     connected_credential_status: str = "valid",
+    carry_grant_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
 ) -> LatchkeyPermissionGrantHandler:
     latchkey = _make_latchkey_with_status(
         tmp_path,
@@ -282,6 +286,7 @@ def _build_handler(
         services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
+        carry_grant_to_machine=carry_grant_to_machine,
     )
 
 
@@ -939,6 +944,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
+        carry_grant_to_machine=leave_grant_on_this_computer,
     )
     agent_id = AgentId()
     host_id = HostId()
@@ -1018,6 +1024,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
         services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
+        carry_grant_to_machine=leave_grant_on_this_computer,
     )
     host_id = HostId()
 
@@ -1053,6 +1060,7 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
         services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
+        carry_grant_to_machine=leave_grant_on_this_computer,
     )
 
     handler.deny(
@@ -1114,6 +1122,7 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
         services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=handler.mngr_message_sender,
         gateway_client=fake_client,
+        carry_grant_to_machine=leave_grant_on_this_computer,
     )
     agent_id = AgentId()
     event = create_predefined_permission_request(
@@ -1160,6 +1169,7 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
         services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
+        carry_grant_to_machine=leave_grant_on_this_computer,
     )
     host_id = HostId()
     host_path = permissions_path_for_host(tmp_path / "mngr_latchkey", host_id)
@@ -1246,13 +1256,18 @@ def _make_multi_account_latchkey(
     return Latchkey(latchkey_binary=str(binary), latchkey_directory=tmp_path)
 
 
-def _build_handler_for_latchkey(tmp_path: Path, latchkey: Latchkey) -> LatchkeyPermissionGrantHandler:
+def _build_handler_for_latchkey(
+    tmp_path: Path,
+    latchkey: Latchkey,
+    carry_grant_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
+) -> LatchkeyPermissionGrantHandler:
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
+        carry_grant_to_machine=carry_grant_to_machine,
     )
 
 
@@ -1768,3 +1783,96 @@ def test_build_request_detail_payload_reports_unknown_scopes(tmp_path: Path) -> 
     if not isinstance(payload, UiUnknownScopeDetail):
         pytest.fail(f"expected a unknown_scope detail payload, got {payload!r}")
     assert payload.scope == "not-a-real-scope"
+
+
+def test_grant_hands_the_machine_both_halves_in_one_carry(tmp_path: Path) -> None:
+    """The credential and the rule travel to the machine as one change, and the rule is already written.
+
+    One carry rather than two back to back: the push snapshots the canonical
+    permissions file, so by the time it runs the file must already hold the
+    freshly-granted rule.
+    """
+    carried: list[tuple[str, str, str]] = []
+    policy_when_carried: list[str] = []
+    agent_id = AgentId()
+    host_id = HostId()
+
+    def record_carry(workspace_agent_id: str, service: str, account: str) -> None:
+        carried.append((workspace_agent_id, service, account))
+        policy_when_carried.append(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
+
+    handler = _build_handler(tmp_path, credential_status="valid", carry_grant_to_machine=record_carry)
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice="",
+        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert carried == [(str(agent_id), "slack", "")]
+    assert len(policy_when_carried) == 1
+    assert "slack-read-all" in policy_when_carried[0]
+
+
+def test_grant_hands_the_machine_exactly_the_account_it_resolved(tmp_path: Path) -> None:
+    """A second account's handover is scoped to it, not to the whole service."""
+    carried: list[tuple[str, str, str]] = []
+    latchkey = _make_multi_account_latchkey(tmp_path, {"first@x": "valid"}, signed_in_account="second@x")
+    handler = _build_handler_for_latchkey(
+        tmp_path,
+        latchkey,
+        carry_grant_to_machine=lambda workspace_agent_id, service, account: carried.append(
+            (workspace_agent_id, service, account)
+        ),
+    )
+    agent_id = AgentId()
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=agent_id,
+        host_id=HostId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice=NEW_ACCOUNT_FORM_VALUE,
+        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert carried == [(str(agent_id), "slack", "second@x")]
+
+
+def test_grant_is_not_recorded_when_the_machine_would_not_take_it(tmp_path: Path) -> None:
+    """A grant the machine refused stays pending, exactly as a failed sign-in does.
+
+    It is only a grant once the machine's gateway can act on it, so reporting
+    GRANTED would be reporting something the agent's next request would still
+    be denied. The next read of the pane brings the machine back in line with
+    the local file the rule was written into.
+    """
+
+    def refuse(workspace_agent_id: str, service_name: str, account: str) -> None:
+        del workspace_agent_id, service_name, account
+        raise MachineOperationError("that workspace is unreachable")
+
+    handler = _build_handler(tmp_path, credential_status="valid", carry_grant_to_machine=refuse)
+    host_id = HostId()
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=host_id,
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+        account_choice="",
+        manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+    )
+
+    assert result.outcome == GrantOutcome.FAILED
+    assert "unreachable" in result.message
+    # No verdict was recorded, so the request stays pending for the user to retry.
+    assert load_response_events(tmp_path) == []

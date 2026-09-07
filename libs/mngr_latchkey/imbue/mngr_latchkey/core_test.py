@@ -14,8 +14,6 @@ import pytest
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
-from watchdog.events import FileModifiedEvent
-from watchdog.observers import Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
@@ -56,16 +54,11 @@ from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import _GatewayRoute
-from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
-from imbue.mngr_latchkey.remote_gateway import DESKTOP_GATEWAY_VPS_PORT
-from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
-from imbue.mngr_latchkey.remote_gateway import local_credentials_path
+from imbue.mngr_latchkey.remote.provisioning import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
-from imbue.mngr_latchkey.store import permissions_path_for_host
-from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _POLL_INTERVAL_SECONDS = 0.05
 
@@ -310,9 +303,13 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "    import json as _json, os as _os\n"
         "    destination = sys.argv[3]\n"
         "    rest = sys.argv[4:]\n"
+        "    account = None\n"
+        "    if '--account' in rest:\n"
+        "        account = rest[rest.index('--account') + 1]\n"
+        "        rest = rest[: rest.index('--account')]\n"
         "    services = rest[1:] if rest[:1] == ['--services'] else []\n"
         "    stdin_key = sys.stdin.read()\n"
-        "    payload = {'services': services, 'reused_key': stdin_key == ''}\n"
+        "    payload = {'services': services, 'account': account, 'reused_key': stdin_key == ''}\n"
         "    out = _os.path.join(destination, 'credentials.json.enc')\n"
         "    open(out, 'w').write(_json.dumps(payload))\n"
         "    sys.exit(0)\n"
@@ -917,8 +914,25 @@ def test_export_credentials_subset_passes_sorted_services_and_reuses_key(tmp_pat
     payload = json.loads((destination / "credentials.json.enc").read_text())
     # Sorted for a deterministic command line.
     assert payload["services"] == ["discord", "github", "slack"]
+    # No account filter unless one is asked for.
+    assert payload["account"] is None
     # Empty stdin (DEVNULL) means the same encryption key is reused.
     assert payload["reused_key"] is True
+
+
+def test_export_credentials_subset_narrows_to_one_account_when_asked(tmp_path: Path) -> None:
+    """``account`` scopes the bundle to one account of the selected services (``--account``)."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    destination = tmp_path / "subset"
+    destination.mkdir()
+
+    manager.export_credentials_subset(destination, {"slack"}, account="me@example.com")
+
+    payload = json.loads((destination / "credentials.json.enc").read_text())
+    assert payload["services"] == ["slack"]
+    assert payload["account"] == "me@example.com"
 
 
 def test_export_credentials_subset_rejects_empty_service_set(tmp_path: Path) -> None:
@@ -1814,116 +1828,6 @@ def test_provisioning_skips_host_already_provisioned_this_session(tmp_path: Path
         assert handler._provisioned == []
         with handler._remote_hosts_lock:
             assert handler._provisioning_hosts == set()
-
-
-class _SyncRecordingHandler(LatchkeyDiscoveryHandler):
-    """Handler stub that records ``_sync_state_to_host`` calls instead of opening VPS connections."""
-
-    _synced: list[tuple[str, bool, bool]] = PrivateAttr(default_factory=list)
-
-    def _sync_state_to_host(
-        self,
-        host_id_str: str,
-        provider_name: str,
-        *,
-        do_permissions: bool,
-        do_credentials: bool,
-    ) -> None:
-        self._synced.append((host_id_str, do_permissions, do_credentials))
-
-
-def _make_sync_recording_handler(
-    tmp_path: Path, temp_mngr_ctx: MngrContext, cg: ConcurrencyGroup
-) -> _SyncRecordingHandler:
-    return _SyncRecordingHandler(
-        latchkey=FakeLatchkey(latchkey_directory=tmp_path),
-        tunnel_manager=SSHTunnelManager(),
-        concurrency_group=cg,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-
-def test_remote_state_sync_initial_pass_does_permissions_then_credentials_for_known_hosts(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    host_id_str = str(HostId())
-    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
-        with handler._remote_hosts_lock:
-            handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
-        handler._sync_all_known_hosts()
-        # Full initial sync requests both permissions and credentials for the host.
-        assert handler._synced == [(host_id_str, True, True)]
-
-
-def test_remote_state_watch_handler_routes_credential_and_permission_changes(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    host_id = HostId()
-    host_id_str = str(host_id)
-    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
-        with handler._remote_hosts_lock:
-            handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
-
-        credentials_path = local_credentials_path(tmp_path)
-        permissions_path = permissions_path_for_host(handler.latchkey.plugin_data_dir, host_id)
-        event_handler = _LatchkeyStateChangeHandler(
-            credentials_path=credentials_path,
-            plugin_data_dir=handler.latchkey.plugin_data_dir,
-            known_remote_host_ids=handler._known_remote_host_ids,
-            on_credentials_changed=handler._sync_credentials_to_all_known_hosts,
-            on_host_permissions_changed=handler._sync_full_state_to_host,
-        )
-
-        # A change to the credentials file pushes credentials (only) to all hosts.
-        event_handler.dispatch(FileModifiedEvent(str(credentials_path)))
-        assert handler._synced == [(host_id_str, False, True)]
-
-        # A change to a host's permissions file pushes the full state
-        # (permissions, then credentials) to that host: the permissions
-        # determine which services' credentials ship, so a grant/revocation
-        # must also refresh the VPS credential store.
-        handler._synced.clear()
-        event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
-        assert handler._synced == [(host_id_str, True, True)]
-
-        # An unrelated path (e.g. the forward supervisor record) is ignored.
-        handler._synced.clear()
-        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_forward.json")))
-        assert handler._synced == []
-
-        # A permissions file for an unknown host is ignored.
-        handler._synced.clear()
-        unknown_permissions = permissions_path_for_host(handler.latchkey.plugin_data_dir, HostId())
-        event_handler.dispatch(FileModifiedEvent(str(unknown_permissions)))
-        assert handler._synced == []
-
-        # Regression: the watchdog observer stores handlers in a set, so the
-        # handler must be hashable and schedulable (a MutableModel would raise
-        # ``TypeError: unhashable type`` here).
-        assert hash(event_handler) is not None
-        Observer().schedule(event_handler, str(tmp_path), recursive=False)
-
-
-def test_remote_state_watch_sentinel_fails_loudly_when_observer_dies(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
-        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
-        # A stopped observer that did NOT stop because of shutdown is a watcher
-        # failure -- the sentinel must raise loudly.
-        observer = Observer()
-        observer.start()
-        observer.stop()
-        observer.join()
-        shutdown_event = threading.Event()
-        with pytest.raises(RemoteGatewayError, match="stopped unexpectedly"):
-            handler._fail_loudly_if_observer_dies(observer, shutdown_event)
-
-        # When the observer stops *because* of shutdown, that is expected -- no raise.
-        shutdown_event.set()
-        handler._fail_loudly_if_observer_dies(observer, shutdown_event)
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:

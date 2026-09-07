@@ -14,7 +14,7 @@ from click_option_group import GroupedOption
 from click_option_group import OptionGroup
 from click_option_group import optgroup
 
-import imbue.mngr.main
+import imbue.mngr.cli.plugin_manager
 from imbue.mngr import hookimpl
 from imbue.mngr.cli.common_opts import TCommand
 from imbue.mngr.cli.common_opts import _apply_plugin_option_overrides
@@ -38,13 +38,13 @@ def _plugin_manager_with_plugins(
     for plugin in plugins:
         pm.register(plugin)
 
-    old_pm = imbue.mngr.main._plugin_manager_container["pm"]
-    imbue.mngr.main._plugin_manager_container["pm"] = pm
+    old_pm = imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"]
+    imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = pm
 
     try:
         yield pm
     finally:
-        imbue.mngr.main._plugin_manager_container["pm"] = old_pm
+        imbue.mngr.cli.plugin_manager._plugin_manager_container["pm"] = old_pm
 
 
 @contextmanager

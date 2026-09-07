@@ -33,14 +33,7 @@ from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.backup_trim import BackupTrimStatus
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.permission_overview import ServicePermissionOverview
-from imbue.minds.desktop_client.latchkey.permission_overview import WorkspaceDelegationGrant
-from imbue.minds.desktop_client.latchkey.permission_overview import WorkspaceFileSharingGrant
-from imbue.minds.desktop_client.latchkey.permission_overview import build_file_sharing_overview
-from imbue.minds.desktop_client.latchkey.permission_overview import build_permission_overview
-from imbue.minds.desktop_client.latchkey.permission_overview import build_workspace_overview
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -72,14 +65,15 @@ class UiNotificationPrefsWrite(FrozenModel):
 
 
 class UiSettingsOverview(FrozenModel):
-    """Everything the SPA settings page renders, in one response."""
+    """Everything the SPA settings page renders, in one response.
 
-    services_overview: tuple[ServicePermissionOverview, ...] = Field(description="Connector grants per service")
-    file_sharing_grants: tuple[WorkspaceFileSharingGrant, ...] = Field(description="File-sharing grants per workspace")
-    workspace_delegation_grants: tuple[WorkspaceDelegationGrant, ...] = Field(
-        description="Cross-workspace delegation grants"
-    )
-    permissions_unavailable: bool = Field(description="True when the latchkey gateway could not be reached")
+    Deliberately carries no permissions. Credentials and grants belong to one
+    machine each, so they are shown and managed on that machine's Permissions
+    tab; an app-level view of them would have to speak for every machine at
+    once, which stopped being a true thing to say when each machine started
+    keeping its own.
+    """
+
     is_master_password_set: bool = Field(description="Whether any signed-in account has a master password")
     report_unexpected_errors: bool = Field(description="The per-machine error-reporting opt-out state")
     version: str = Field(description="If-Match version for the error-reporting write")
@@ -240,46 +234,10 @@ def _handle_settings_overview() -> Response:
     """GET /ui/api/settings: the app-level settings page's full data payload."""
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
-    services_overview: tuple[ServicePermissionOverview, ...] = ()
-    file_sharing_grants: tuple[WorkspaceFileSharingGrant, ...] = ()
-    workspace_delegation_grants: tuple[WorkspaceDelegationGrant, ...] = ()
-    permissions_unavailable = False
-    handler = _find_permission_grant_handler()
-    if handler is not None:
-        try:
-            services_overview = tuple(
-                build_permission_overview(
-                    backend_resolver=get_state().backend_resolver,
-                    gateway_client=handler.gateway_client,
-                    services_catalog=handler.services_catalog,
-                    latchkey=handler.latchkey,
-                )
-            )
-            file_sharing_grants = tuple(
-                build_file_sharing_overview(
-                    backend_resolver=get_state().backend_resolver,
-                    gateway_client=handler.gateway_client,
-                    latchkey=handler.latchkey,
-                )
-            )
-            workspace_delegation_grants = tuple(
-                build_workspace_overview(
-                    backend_resolver=get_state().backend_resolver,
-                    gateway_client=handler.gateway_client,
-                    latchkey=handler.latchkey,
-                )
-            )
-        except LatchkeyGatewayClientError as e:
-            logger.warning("Could not build the permission overview for the settings payload: {}", e)
-            permissions_unavailable = True
     minds_config = get_state().minds_config
     report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else True
     update_window = minds_config.get_update_window() if minds_config is not None else DEFAULT_UPDATE_WINDOW
     overview = UiSettingsOverview(
-        services_overview=services_overview,
-        file_sharing_grants=file_sharing_grants,
-        workspace_delegation_grants=workspace_delegation_grants,
-        permissions_unavailable=permissions_unavailable,
         is_master_password_set=_is_any_account_master_password_set(),
         report_unexpected_errors=report_unexpected_errors,
         version=compute_error_reporting_version(report_unexpected_errors),

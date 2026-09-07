@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -189,6 +190,16 @@ class DesktopClientState(MutableModel):
     )
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = Field(
         default=None, frozen=True, description="Detached mngr latchkey forward supervisor handle"
+    )
+    machine_operator: MachineOperator | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Reads and edits a remote workspace's own machine -- its credentials and the policy its "
+            "gateway enforces -- synchronously, blocking the caller until the machine answers. None in "
+            "minimal setups, which can reach no machine at all and so leave the local edit as the whole "
+            "change."
+        ),
     )
     permission_requests_consumer: PermissionRequestsConsumer | None = Field(
         default=None, description="Streaming permission-requests consumer (wired post-construction)"

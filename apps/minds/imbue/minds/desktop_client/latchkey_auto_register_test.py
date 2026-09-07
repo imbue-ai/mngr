@@ -1,19 +1,28 @@
 """Unit tests for :mod:`imbue.minds.desktop_client.latchkey_auto_register`."""
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
+from pydantic import Field
+from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_this_computer
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
@@ -46,12 +55,50 @@ def _read_allowed_anyof(plugin_data_dir: Path, host_id: HostId) -> list[dict[str
     return config["schemas"]["minds-api-proxy-per-agent-unauthorized"]["properties"]["path"]["not"]["anyOf"]
 
 
+def _build_auto_register(
+    resolver: MngrCliBackendResolver, latchkey: Latchkey, concurrency_group: ConcurrencyGroup
+) -> LatchkeyAutoRegister:
+    """An auto-register whose hosts have no machine of their own, for tests about the local edit."""
+    return LatchkeyAutoRegister(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=leave_permissions_on_this_computer,
+        concurrency_group=concurrency_group,
+    )
+
+
+class _PushRecorder(MutableModel):
+    """Records every workspace whose policy the auto-register asked to have pushed, in order."""
+
+    pushed_workspace_agent_ids: list[str] = Field(default_factory=list)
+    failing_workspace_agent_ids: frozenset[str] = Field(default_factory=frozenset)
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+
+    def push(self, workspace_agent_id: str) -> None:
+        with self._lock:
+            self.pushed_workspace_agent_ids.append(workspace_agent_id)
+        if workspace_agent_id in self.failing_workspace_agent_ids:
+            raise MachineOperationError(f"machine of {workspace_agent_id} refused the snapshot")
+
+    def pushed_count(self) -> int:
+        with self._lock:
+            return len(self.pushed_workspace_agent_ids)
+
+
+def _wait_for_pushes(recorder: _PushRecorder, expected_count: int) -> None:
+    assert poll_until(lambda: recorder.pushed_count() >= expected_count, timeout=5.0, poll_interval=0.01), (
+        f"expected {expected_count} push(es), saw {recorder.pushed_workspace_agent_ids}"
+    )
+
+
 @pytest.fixture
 def resolver() -> MngrCliBackendResolver:
     return MngrCliBackendResolver()
 
 
-def test_registers_existing_agents_on_start(tmp_path: Path, resolver: MngrCliBackendResolver) -> None:
+def test_registers_existing_agents_on_start(
+    tmp_path: Path, resolver: MngrCliBackendResolver, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """``start()`` registers every agent already in the resolver on minds-managed hosts."""
     host_id = HostId.generate()
     seed_agent = AgentId.generate()
@@ -63,7 +110,7 @@ def test_registers_existing_agents_on_start(tmp_path: Path, resolver: MngrCliBac
     register_agent_for_host(latchkey.plugin_data_dir, host_id, seed_agent)
     _push_agents(resolver, _make_discovered(host_id, new_agent))
 
-    LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey).start()
+    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
 
     any_of = _read_allowed_anyof(latchkey.plugin_data_dir, host_id)
     registered = {entry["pattern"] for entry in any_of}
@@ -74,6 +121,7 @@ def test_registers_existing_agents_on_start(tmp_path: Path, resolver: MngrCliBac
 def test_registers_newly_discovered_agents_on_change(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Agents that appear in later discovery ticks get registered without a restart."""
     host_id = HostId.generate()
@@ -81,7 +129,7 @@ def test_registers_newly_discovered_agents_on_change(
     latchkey = make_full_fake_latchkey(tmp_path)
     register_agent_for_host(latchkey.plugin_data_dir, host_id, seed_agent)
 
-    LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey).start()
+    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
 
     later_agent = AgentId.generate()
     _push_agents(
@@ -98,6 +146,7 @@ def test_registers_newly_discovered_agents_on_change(
 def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Hosts that have no existing permissions file do not get one created.
 
@@ -110,7 +159,7 @@ def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
     latchkey = make_full_fake_latchkey(tmp_path)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey).start()
+    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
 
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
 
@@ -118,6 +167,7 @@ def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
 def test_registers_an_agent_whose_host_file_lands_after_discovery(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """A permissions file that appears *after* the agent was discovered still registers it.
 
@@ -133,7 +183,7 @@ def test_registers_an_agent_whose_host_file_lands_after_discovery(
     latchkey = make_full_fake_latchkey(tmp_path)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey).start()
+    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
     # Nothing to register against yet -- the deferral must not have written a file.
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
 
@@ -151,6 +201,7 @@ def test_registers_an_agent_whose_host_file_lands_after_discovery(
 def test_idempotent_across_repeated_discovery_ticks(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Re-firing the same discovery snapshot does not duplicate ``anyOf`` entries.
 
@@ -165,7 +216,7 @@ def test_idempotent_across_repeated_discovery_ticks(
     register_agent_for_host(latchkey.plugin_data_dir, host_id, other_seed)
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    auto = LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey)
+    auto = _build_auto_register(resolver, latchkey, root_concurrency_group)
     auto.start()
     # Fire two more identical discovery ticks.
     _push_agents(resolver, _make_discovered(host_id, agent_id))
@@ -180,6 +231,7 @@ def test_idempotent_across_repeated_discovery_ticks(
 def test_handles_multiple_hosts_independently(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """Each host's permissions file is updated independently of others."""
     host_a = HostId.generate()
@@ -197,7 +249,7 @@ def test_handles_multiple_hosts_independently(
         _make_discovered(host_b, agent_b),
     )
 
-    LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey).start()
+    _build_auto_register(resolver, latchkey, root_concurrency_group).start()
 
     a_patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_a)}
     b_patterns = {e["pattern"] for e in _read_allowed_anyof(latchkey.plugin_data_dir, host_b)}
@@ -210,6 +262,7 @@ def test_handles_multiple_hosts_independently(
 def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """A LatchkeyStoreError is swallowed, and the pair is marked processed.
 
@@ -232,7 +285,7 @@ def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
 
     _push_agents(resolver, _make_discovered(host_id, agent_id))
 
-    auto = LatchkeyAutoRegister(backend_resolver=resolver, latchkey=latchkey)
+    auto = _build_auto_register(resolver, latchkey, root_concurrency_group)
     # ``start()`` must not raise even though ``register_agent_for_host``
     # raises ``LatchkeyStoreError`` against the corrupted file.
     auto.start()
@@ -242,3 +295,97 @@ def test_corrupted_permissions_file_logs_but_does_not_retry_forever(
     # should be unchanged from the corrupted state.
     _push_agents(resolver, _make_discovered(host_id, agent_id))
     assert json.loads(perms_path.read_text()) == config
+
+
+def test_pushes_the_host_policy_to_its_machine_after_a_registration_changes_it(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A registration that changes the host file is carried to the host's machine.
+
+    A remote workspace's gateway enforces its own copy of the policy, so the
+    local edit alone would leave that copy behind. The push is addressed by the
+    agent just registered, which is how the machine operator finds the
+    workspace's machine.
+    """
+    host_id = HostId.generate()
+    new_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _push_agents(resolver, _make_discovered(host_id, new_agent))
+    recorder = _PushRecorder()
+
+    LatchkeyAutoRegister(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=recorder.push,
+        concurrency_group=root_concurrency_group,
+    ).start()
+
+    _wait_for_pushes(recorder, 1)
+    assert recorder.pushed_workspace_agent_ids == [str(new_agent)]
+
+
+def test_does_not_push_when_the_registration_changed_nothing(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """An agent already in the allowlist costs no round trip to the machine.
+
+    Every discovered agent is re-registered on app startup; pushing on each of
+    those would open every remote workspace's machine for nothing.
+    """
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+    recorder = _PushRecorder()
+
+    auto = LatchkeyAutoRegister(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=recorder.push,
+        concurrency_group=root_concurrency_group,
+    )
+    auto.start()
+    _push_agents(resolver, _make_discovered(host_id, agent_id))
+
+    # The registration is a synchronous no-op, so no push thread was ever
+    # started: nothing to wait for, and the recorder must still be empty.
+    assert recorder.pushed_workspace_agent_ids == []
+
+
+def test_a_refused_push_is_logged_and_does_not_stop_later_pushes_for_the_host(
+    tmp_path: Path,
+    resolver: MngrCliBackendResolver,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A machine that refuses a snapshot leaves the host eligible for the next push.
+
+    The refusal is not retried here (the next read of the machine brings it up
+    to date), but it must release the per-host worker so a later registration
+    on the same host is pushed rather than silently dropped.
+    """
+    host_id = HostId.generate()
+    first_agent = AgentId.generate()
+    second_agent = AgentId.generate()
+    latchkey = make_full_fake_latchkey(tmp_path)
+    register_agent_for_host(latchkey.plugin_data_dir, host_id, AgentId.generate())
+    _push_agents(resolver, _make_discovered(host_id, first_agent))
+    recorder = _PushRecorder(failing_workspace_agent_ids=frozenset({str(first_agent)}))
+
+    LatchkeyAutoRegister(
+        backend_resolver=resolver,
+        latchkey=latchkey,
+        push_permissions_to_machine=recorder.push,
+        concurrency_group=root_concurrency_group,
+    ).start()
+    _wait_for_pushes(recorder, 1)
+
+    _push_agents(resolver, _make_discovered(host_id, first_agent), _make_discovered(host_id, second_agent))
+
+    _wait_for_pushes(recorder, 2)
+    assert recorder.pushed_workspace_agent_ids == [str(first_agent), str(second_agent)]

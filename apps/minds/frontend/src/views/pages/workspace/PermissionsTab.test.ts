@@ -16,6 +16,7 @@ import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
 import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
+import { Spinner } from "../../components/Spinner";
 import type { AnyVnode } from "../../../testing";
 import { allText, attrsOf, classesOf, collectVnodes, withAttr } from "../../../testing";
 
@@ -41,6 +42,13 @@ function switches(node: unknown): AnyVnode[] {
 
 function hasClass(vnode: AnyVnode, name: string): boolean {
   return classesOf(vnode).split(/\s+/).includes(name);
+}
+
+/** The Spinner component vnodes in the tree. Matched on the component itself
+ * rather than its class, since a closure component's markup only exists once
+ * mithril has drawn it. */
+function spinners(node: unknown): AnyVnode[] {
+  return collectVnodes(node).filter((vnode) => vnode.tag === Spinner);
 }
 
 /** The mark wrappers only -- matched on the exact class token, since the
@@ -89,7 +97,7 @@ async function render(
      * the user away does. */
     signInRefusal?: string;
     /** What the disconnect write answers with -- the connection is gone from
-     * it, since the server strips the account everywhere. */
+     * it, since the credential behind it has been cleared. */
     viewAfterDisconnect?: UiWorkspacePermissions;
     /** Answer a request yourself, for a test about how the pane behaves while
      * a write is in flight or after one is refused. Return null to fall
@@ -107,7 +115,7 @@ async function render(
       if (options.isReadRefused === true) {
         return Promise.resolve({ ok: false, status: 503, body: { error: "gateway is down" } });
       }
-      if (url === "/settings/connectors/add-account") {
+      if (url === `/ui/api/workspaces/${AGENT_ID}/permissions/connect-browser`) {
         if (options.signInRefusal !== undefined) {
           return Promise.resolve({ ok: false, status: 400, body: { error: options.signInRefusal } });
         }
@@ -359,7 +367,9 @@ describe("PermissionsTab connection panel", () => {
     expect(attrsOf(granted).disabled).toBe(false);
   });
 
-  it("marks a row whose write is in flight as busy", async () => {
+  it("spins the row whose write is in flight and locks every other action", async () => {
+    // The write does not answer until the workspace's own machine has taken
+    // it, so the pane has to say so and refuse to be raced meanwhile.
     const { root, rerender } = await render(permissionsView(), {
       // Never resolves: the flip stays in flight for the whole test.
       respond: (url) => (url.endsWith("/connector-toggle") ? new Promise(() => undefined) : null),
@@ -371,6 +381,14 @@ describe("PermissionsTab connection panel", () => {
 
     expect(classesOf(switches(after)[0])).toContain("is-busy");
     expect(classesOf(switches(after)[1])).not.toContain("is-busy");
+    // The acting row spins; every other switch and the panel's other actions
+    // are inert until the machine has answered.
+    expect(spinners(after)).toHaveLength(1);
+    expect(attrsOf(switches(after)[0]).disabled).toBe(true);
+    expect(attrsOf(switches(after)[1]).disabled).toBe(true);
+    expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this machine.");
+    expect(attrsOf(withAttr(after, "data-perm-revoke-all")[0]).disabled).toBe(true);
+    expect(attrsOf(withAttr(after, "data-perm-disconnect")[0]).disabled).toBe(true);
   });
 
   it("hides Revoke all until something is granted, and confirms before firing", async () => {
@@ -406,12 +424,13 @@ describe("PermissionsTab connection panel", () => {
     expect(withAttr(asked, "data-perm-disconnect-confirm")).toHaveLength(1);
     const dialogText = disconnectDialogText(asked);
     // The account and the service are named, and the consequence that must not
-    // be blurred -- this is not scoped to the machine on screen -- is spelled out.
-    expect(dialogText).toContain("Disconnect Slack · Default account from Minds?");
-    expect(dialogText).toContain("not just alpha");
-    expect(dialogText).toContain("from all of your machines in Minds");
-    expect(dialogText).toContain("connect it again from scratch");
+    // be blurred -- which machines lose the sign-in -- is spelled out. This one
+    // reads this computer's shared store, so all of its machines do.
+    expect(dialogText).toContain("Disconnect Slack · Default account from this computer?");
+    expect(dialogText).toContain("from every machine on this computer, including alpha");
+    expect(dialogText).toContain("connect it again");
     expect(dialogText).toContain("Yes, disconnect");
+    expect(allText(asked)).toContain("alpha shares one sign-in with every other machine on this computer");
 
     (attrsOf(withAttr(asked, "data-perm-disconnect-cancel")[0]).onclick as () => void)();
     await settle();
@@ -420,6 +439,18 @@ describe("PermissionsTab connection panel", () => {
     expect(withAttr(declined, "data-perm-disconnect-confirm")).toHaveLength(0);
     // Only the initial read: declining posts nothing at all.
     expect(requests).toHaveLength(1);
+  });
+
+  it("scopes the disconnect copy to this machine when it holds its own credentials", async () => {
+    const { root, rerender } = await render(permissionsView({ is_credential_store_shared: false }));
+
+    expect(allText(root)).toContain("Only alpha loses this access");
+    (attrsOf(withAttr(root, "data-perm-disconnect")[0]).onclick as () => void)();
+    const dialogText = disconnectDialogText(rerender());
+
+    expect(dialogText).toContain("Disconnect Slack · Default account from alpha?");
+    expect(dialogText).toContain("Every other machine keeps its own sign-in.");
+    expect(dialogText).not.toContain("every machine on this computer");
   });
 
   it("disconnects the account from latchkey once the confirm is accepted", async () => {
@@ -490,7 +521,7 @@ describe("PermissionsTab add connection and self panels", () => {
     expect(allText(connect)).toContain("Connect");
     (attrsOf(connect).onclick as () => void)();
     await settle();
-    expect(requests[1]).toEqual({ url: "/settings/connectors/add-account", body: { service_name: "notion" } });
+    expect(requests[1]).toEqual({ url: `/ui/api/workspaces/${AGENT_ID}/permissions/connect-browser`, body: { service_name: "notion" } });
   });
 
   it("offers a connected service a second account, once, above the unconnected ones", async () => {
@@ -508,7 +539,7 @@ describe("PermissionsTab add connection and self panels", () => {
 
     (attrsOf(rows[0]).onclick as () => void)();
     await settle();
-    expect(requests[1]).toEqual({ url: "/settings/connectors/add-account", body: { service_name: "slack" } });
+    expect(requests[1]).toEqual({ url: `/ui/api/workspaces/${AGENT_ID}/permissions/connect-browser`, body: { service_name: "slack" } });
   });
 
   it("moves to the connection a completed sign-in added", async () => {

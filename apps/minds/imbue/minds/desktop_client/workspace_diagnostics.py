@@ -57,9 +57,9 @@ from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
-from imbue.mngr_latchkey.remote_gateway import REMOTE_GATEWAY_LOG_FILENAME
-from imbue.mngr_latchkey.remote_gateway import REMOTE_LATCHKEY_DIR_NAME
-from imbue.mngr_latchkey.remote_gateway import REMOTE_TUNNEL_LOG_FILENAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_GATEWAY_LOG_FILENAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_LATCHKEY_DIR_NAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_TUNNEL_LOG_FILENAME
 
 # Where the workspace template installs the resident collector. The contract
 # with default-workspace-template's ``system/scripts/collect_bug_report_diagnostics.py``
