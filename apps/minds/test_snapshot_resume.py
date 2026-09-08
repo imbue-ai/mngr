@@ -22,11 +22,13 @@ import hashlib
 import json
 import os
 import pwd
+import shlex
 import shutil
 import subprocess
 import zipfile
 from collections.abc import Iterable
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -1134,6 +1136,78 @@ def _restic_env_prefix() -> str:
     return "set -a; . /home/user/workspace/data/.secrets/restic.env; set +a; "
 
 
+def _host_backup_state(container_name: str) -> str:
+    """The supervisord state token for the workspace's ``host-backup`` program (e.g. ``RUNNING``/``STOPPED``)."""
+    # `supervisorctl status <name>` prints "<name> <STATE> <detail>"; its exit
+    # code is non-zero for any non-RUNNING state, so only the token matters.
+    status = _exec_in_container(container_name, "supervisorctl status host-backup", timeout=30)
+    parts = status.stdout.split()
+    return parts[1] if len(parts) >= 2 else ""
+
+
+class _QuiescedWorkspaceRepo(FrozenModel):
+    """Exclusive in-container restic access: the workspace's ``host-backup``
+    service is stopped for this scope, so a lock-taking restic step cannot race
+    a live backup tick.
+
+    Reachable only through ``_LiveWorkspaceRepo.quiesced``, so the operations
+    that take the repository lock live here and nowhere else -- the type makes
+    "run a locking restic command while the service might hold the lock"
+    unrepresentable (the race behind MIND-197).
+    """
+
+    container_name: str
+
+    def backup(self, source_path: str, *, tag: str, excludes: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        """Take a tagged ``restic backup`` of ``source_path`` (a lock-holding write)."""
+        exclude_flags = "".join(f" --exclude {shlex.quote(pattern)}" for pattern in excludes)
+        return _exec_in_container(
+            self.container_name,
+            _restic_env_prefix() + f"restic backup {shlex.quote(source_path)} --tag {shlex.quote(tag)}{exclude_flags}",
+            timeout=600,
+        )
+
+
+class _LiveWorkspaceRepo(FrozenModel):
+    """In-container restic access while the ``host-backup`` service may be
+    ticking against the same repository.
+
+    Only lock-free reads are race-safe in this state; anything that takes the
+    repository lock is reached through :meth:`quiesced`.
+    """
+
+    container_name: str
+
+    def snapshots_no_lock(self) -> subprocess.CompletedProcess[str]:
+        """List snapshots with ``--no-lock`` (a read that never blocks on a live tick's lock)."""
+        # Safe without the lock: a live tick only appends snapshots, never
+        # removing the ones under assertion.
+        return _exec_in_container(
+            self.container_name, _restic_env_prefix() + "restic snapshots --no-lock --json", timeout=120
+        )
+
+    @contextmanager
+    def quiesced(self) -> Iterator[_QuiescedWorkspaceRepo]:
+        """Stop ``host-backup`` for the scope so the repository has no other restic actor.
+
+        The restore under test restarts the service itself (``supervisorctl
+        restart all``), so production service recovery is still exercised.
+        """
+        _exec_in_container(self.container_name, "supervisorctl stop host-backup", timeout=60)
+        # The service is a separate process the type cannot see, so verify the
+        # stop took and fail closed rather than trust the type alone.
+        state = _host_backup_state(self.container_name)
+        assert state != "RUNNING", f"host-backup did not stop (state {state!r}); the repository is not quiesced"
+        # Stopping mid-tick can kill a restic holding the lock, leaving it stale;
+        # clear it so the exclusive scope starts clean (the service is down, so
+        # `unlock` only removes dead-holder locks).
+        _exec_in_container(self.container_name, _restic_env_prefix() + "restic unlock", timeout=60)
+        try:
+            yield _QuiescedWorkspaceRepo(container_name=self.container_name)
+        finally:
+            _exec_in_container(self.container_name, "supervisorctl start host-backup", timeout=60)
+
+
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(900)
@@ -1170,6 +1244,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
 
     container_name = running_workspace.container_name
     agent_id = AgentId(running_workspace.services_agent_id)
+    workspace_repo = _LiveWorkspaceRepo(container_name=container_name)
     data_dir = tmp_path / "minds-data"
     data_dir.mkdir()
     paths = InstallationPaths(data_dir=data_dir)
@@ -1200,13 +1275,15 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     sentinel = "/home/user/workspace/restore-e2e-sentinel.txt"
     written = _exec_in_container(container_name, f"printf 'version-one\\n' > {sentinel}", timeout=30)
     assert written.returncode == 0, written.stderr
-    source_backup = _exec_in_container(
-        container_name,
-        _restic_env_prefix()
-        + "restic backup /home/user --tag e2e-source --exclude '**/.venv' --exclude '**/node_modules' "
-        "--exclude '**/__pycache__' --exclude '**/.cache'",
-        timeout=600,
-    )
+    # Take the source snapshot with the repository to ourselves: host-backup
+    # ticks against this same repo, and a live tick's lock would fail this
+    # backup (MIND-197). The restore under test restarts host-backup afterwards.
+    with workspace_repo.quiesced() as exclusive_repo:
+        source_backup = exclusive_repo.backup(
+            "/home/user",
+            tag="e2e-source",
+            excludes=("**/.venv", "**/node_modules", "**/__pycache__", "**/.cache"),
+        )
     assert source_backup.returncode == 0, (source_backup.stdout, source_backup.stderr)
 
     # Work done after the snapshot: the restore must undo both of these.
@@ -1282,7 +1359,9 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # The repository timeline tells the story: the source snapshot, the
     # pre-restore safety snapshot, and the restored state tagged with its
     # lineage.
-    timeline = _exec_in_container(container_name, _restic_env_prefix() + "restic snapshots --json", timeout=120)
+    # host-backup is running again (the restore restarted it), so read the
+    # timeline lock-free rather than racing a live tick's lock (MIND-197).
+    timeline = workspace_repo.snapshots_no_lock()
     assert timeline.returncode == 0, (timeline.stdout, timeline.stderr)
     entries = json.loads(timeline.stdout)
     tags_by_snapshot = [tuple(entry.get("tags") or ()) for entry in entries]
