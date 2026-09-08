@@ -373,3 +373,9 @@ apps/minds/package-lock.json
 
 # tmr (task-runner) orchestration scratch report
 **/tmr-report/
+
+# Nightly flake sweep scratch: the skill writes its run summary (and the job
+# tees Claude's log) into the repo root, where CI reads them for the job summary
+# and the Slack post.
+**/flake-sweep-summary.md
+**/flake-sweep-claude.log

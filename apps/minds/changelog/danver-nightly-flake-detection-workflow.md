@@ -1,0 +1,3 @@
+`test_latchkey_version_alignment.py` now guards a second latchkey pin. Alongside the existing check that the CLI bundled with the Electron app is new enough for `LATCHKEY_MIN_VERSION`, it asserts that the nightly flake-sweep CI job (`.github/workflows/flake-sweep-scheduled.yml`) installs exactly the `LATCHKEY_VERSION` that remote hosts get.
+
+That job reaches Linear through `latchkey curl`, and its pin is only a literal in a workflow file, so a bump that missed it would have surfaced days later as a failed nightly sweep rather than at review time. The module docstring is retitled accordingly: the file is now about keeping the repo's latchkey pins aligned with each other, not solely about the bundled app binary.
