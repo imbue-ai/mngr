@@ -195,6 +195,9 @@ NEW_CHAT_TILE_SELECTOR = '.new-tab-launcher-tile[data-launch="chat:new"]'
 NEW_TAB_ADD_BUTTON_SELECTOR = "button.dockview-add-tab-button"
 NEW_CHAT_FRAME_TIMEOUT = 60
 CHAT_PAGE_URL_RE = re.compile(r"/agent-[a-f0-9]+/?$")
+# The in-chat permission card's opener. Matched by label, not by class: the card's classes
+# are DEFAULT_WORKSPACE_TEMPLATE styling internals, its label is what the user is shown.
+PERMISSION_REVIEW_BUTTON_LABEL = "Review & respond"
 DRIVE_SLACK_TIMEOUT = 360
 LAUNCH_BACKEND_TIMEOUT = 120
 
@@ -853,23 +856,57 @@ def find_chat_window(ctx: BrowserContext, host: str | None = None) -> Frame | No
     return None
 
 
-def find_chat_frame(workspace: Frame) -> Frame | None:
-    """The chat page's frame inside the workspace frame, or None while none is docked."""
-    return next(
-        (f for f in workspace.child_frames if CHAT_PAGE_URL_RE.search(live_url(f).split("?", 1)[0])),
-        None,
-    )
+def _iframe_srcs(frame: Frame) -> list[str]:
+    """The ``src`` of every iframe in ``frame``'s own DOM.
+
+    Read alongside the frames Playwright enumerates: an iframe the shell mounted
+    but Playwright never surfaced separates a docking failure from a lookup one.
+    """
+    try:
+        return frame.evaluate("() => [...document.querySelectorAll('iframe')].map((f) => f.src)")
+    except PlaywrightError as exc:
+        return [f"<unreadable: {exc}>"]
 
 
-def wait_for_chat_frame(workspace: Frame, *, label: str, timeout: float = NEW_CHAT_FRAME_TIMEOUT) -> Frame:
+def find_chat_frame(workspace: Frame, host: str | None = None) -> Frame | None:
+    """The chat page's frame inside the workspace frame, or None while none is docked.
+
+    Pass ``host`` (e.g. ``agent-1f90…``) to pin the match to one workspace. The frame
+    list lags a navigation, so the workspace being left behind is still listed here --
+    and briefly still usable, which no liveness check can tell from the one arriving.
+    """
+    for frame in workspace.child_frames:
+        if frame.is_detached():
+            continue
+        url = live_url(frame)
+        if not CHAT_PAGE_URL_RE.search(url.split("?", 1)[0]):
+            continue
+        if host is not None and f"{host}.localhost" not in url:
+            continue
+        return frame
+    return None
+
+
+def wait_for_chat_frame(
+    workspace: Frame, *, label: str, timeout: float = NEW_CHAT_FRAME_TIMEOUT, host: str | None = None
+) -> Frame:
     """Return the chat page's frame once the shell has docked one inside ``workspace``."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        chat = find_chat_frame(workspace)
+        chat = find_chat_frame(workspace, host)
         if chat is not None:
             return chat
+        # Playwright, attached to Electron over CDP, surfaces a nested cross-origin
+        # target only once something reaches into its parent: ``child_frames`` alone
+        # stays stale for the whole wait while the chat is already docked and running.
+        _iframe_srcs(workspace)
         _sleep(0.5)
-    raise E2EFailure(f"[{label}] no chat frame opened inside the workspace within {timeout}s")
+    raise E2EFailure(
+        f"[{label}] no chat frame opened inside the workspace within {timeout}s; "
+        f"workspace={live_url(workspace)!r}; "
+        f"child frames: {[live_url(f) for f in workspace.child_frames]}; "
+        f"iframes in the workspace DOM: {_iframe_srcs(workspace)}"
+    )
 
 
 def find_docked_chat(ctx: BrowserContext, host: str | None = None) -> Frame | None:
@@ -1306,8 +1343,21 @@ def _send_followup_and_verify(
     logger.info("[{}] navigating back to {}", label, chat_url)
     workspace.goto(chat_url)
     # The workspace's layout holds the chat, so the shell docks its frame again on load.
-    chat = wait_for_chat_frame(workspace, label=label)
-    inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=30_000)
+    # Pinned to the workspace being hopped to, because the chat left behind matches
+    # CHAT_PAGE_URL_RE just as well and outlives the navigation in the frame list: an
+    # unpinned match sends this follow-up to the previous workspace, whose agent answers
+    # with the token being waited on, and the hop passes without ever being made.
+    host = _workspace_coordinate(chat_url, label=label)
+    inp = None
+    deadline = time.time() + NEW_CHAT_FRAME_TIMEOUT
+    while inp is None and time.time() < deadline:
+        chat = wait_for_chat_frame(workspace, label=label, timeout=max(deadline - time.time(), 0.0), host=host)
+        with contextlib.suppress(PlaywrightError):
+            inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=5_000)
+    if inp is None:
+        raise E2EFailure(
+            f"[{label}] the chat docked at {host} never showed a composer within {NEW_CHAT_FRAME_TIMEOUT}s"
+        )
     inp.fill(prompt)
     inp.press("Enter")
     with contextlib.suppress(Exception):
@@ -1620,7 +1670,9 @@ def run_e2e() -> int:
                 else:
                     snap_page(chat_frame, "99-TIMEOUT-no-deny-click")
                     raise E2EFailure(
-                        f"[deny-phase] Deny click did not land after {DRIVE_SLACK_TIMEOUT}s (stage={deny_stage})"
+                        f"[deny-phase] Deny click did not land after {DRIVE_SLACK_TIMEOUT}s "
+                        f"(stage={deny_stage}); buttons in the chat frame: "
+                        f"{_visible_button_labels(chat_frame)}"
                     )
 
                 # === Iter 10 Phase B: snapshot latchkey pending requests state ===
@@ -1777,7 +1829,9 @@ def run_e2e() -> int:
                             preview = (p.evaluate("document.body.innerText"))[:200].replace("\n", " ")
                             logger.error("  page url={} body=...{!r}", live_url(p), preview)
                     raise E2EFailure(
-                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s (approval_stage={approval_stage})"
+                        f"canned body not in chat after {DRIVE_SLACK_TIMEOUT}s "
+                        f"(approval_stage={approval_stage}); buttons in the chat frame: "
+                        f"{_visible_button_labels(chat_frame)}"
                     )
             finally:
                 logger.info("=== slack teardown ===")
@@ -2275,6 +2329,20 @@ def _list_permission_request_files() -> list[Path]:
     return sorted(p for p in PERMISSION_REQUESTS_DIR.iterdir() if p.suffix == ".json")
 
 
+def _visible_button_labels(frame: Frame) -> list[str]:
+    """The labels of every visible button in ``frame``."""
+    # checkVisibility, not offsetParent: the review popup floats, and offsetParent is
+    # null for everything inside a fixed subtree however plainly it is painted.
+    try:
+        return frame.evaluate(
+            "() => [...document.querySelectorAll('button')]"
+            ".filter((b) => b.checkVisibility())"
+            ".map((b) => b.innerText.trim())"
+        )
+    except PlaywrightError as exc:
+        return [f"<unreadable: {exc}>"]
+
+
 def _advance_approval(
     ctx: BrowserContext,
     chat: Frame,
@@ -2319,7 +2387,7 @@ def _advance_approval(
         # request renders as a one-line receipt). Clicking it posts
         # OPEN_REQUEST_MODAL to the embedder, which floats /inbox.
         try:
-            trigger = chat.locator("button.permission-request-button")
+            trigger = chat.get_by_role("button", name=PERMISSION_REVIEW_BUTTON_LABEL)
             if trigger.count() > 0 and trigger.first.is_visible():
                 logger.info("clicking the in-chat 'Review & respond' button")
                 snap_page(chat, snap_stage0)

@@ -84,20 +84,24 @@ const test = base.test.extend({
 
     await use({ app, mainWindow, pickContentWindow });
 
-    // Save minds.log snapshot on failure for postmortem. Be defensive --
+    // Save log snapshots on failure for postmortem: minds.log carries the
+    // backend's output, electron.log the main process's startup milestones and
+    // its unhandled rejections, which reach no other stream. Be defensive --
     // the outputDir may not exist if the test failed before any Playwright
     // assertion fired (e.g. fixture-level setup error).
     if (testInfo.status !== 'passed') {
-      try {
-        const mainLog = path.join(process.env.HOME, '.minds', 'logs', 'minds.log');
-        if (fs.existsSync(mainLog)) {
-          fs.mkdirSync(testInfo.outputDir, { recursive: true });
-          const content = fs.readFileSync(mainLog, 'utf-8');
-          const tail = content.split('\n').slice(-500).join('\n');
-          fs.writeFileSync(path.join(testInfo.outputDir, 'minds.log.tail'), tail);
+      for (const name of ['minds.log', 'electron.log']) {
+        try {
+          const logPath = path.join(process.env.HOME, '.minds', 'logs', name);
+          if (fs.existsSync(logPath)) {
+            fs.mkdirSync(testInfo.outputDir, { recursive: true });
+            const content = fs.readFileSync(logPath, 'utf-8');
+            const tail = content.split('\n').slice(-500).join('\n');
+            fs.writeFileSync(path.join(testInfo.outputDir, `${name}.tail`), tail);
+          }
+        } catch (e) {
+          console.error(`[fixture] failed to capture ${name}:`, e.message);
         }
-      } catch (e) {
-        console.error('[fixture] failed to capture minds.log:', e.message);
       }
     }
 

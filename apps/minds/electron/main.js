@@ -1657,8 +1657,14 @@ function installDevDockIcon() {
 async function runStartupSequence(bundle) {
   console.log('[startup] Loading shell.html...');
   bundle.isLoadingState = true;
-  await bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'));
-  console.log('[startup] shell.html loaded');
+  try {
+    await bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'));
+    console.log('[startup] shell.html loaded');
+  } catch (err) {
+    // Closing the window mid-load rejects the load. This sequence owns the
+    // backend start and the one-time code, so it runs on without a window.
+    console.warn('[startup] shell.html load did not finish:', err.message);
+  }
 
   try {
     await runEnvSetup((status) => broadcastStatusToLoadingWindows(status));
