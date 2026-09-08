@@ -132,6 +132,29 @@ describe("the update modal's Update now", () => {
     );
   });
 
+  it("quotes the machine's own verdict under the refusal", async () => {
+    // The reason a wedged machine gives is the only thing that tells the
+    // reader retrying will not help, so it has to survive all the way here.
+    const { draw } = harness(() =>
+      Promise.resolve(
+        jsonResponse(
+          {
+            error: "Couldn't start the update agent in this machine.",
+            detail:
+              "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+          },
+          502,
+        ),
+      ),
+    );
+    press(draw(), "Update now");
+    await settleDispatch();
+
+    expect(allText(draw())).toContain(
+      "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+    );
+  });
+
   it("offers scheduling as the primary action", () => {
     const schedule = pressableWithLabel(
       harness(() => Promise.resolve(jsonResponse({}))).draw(),

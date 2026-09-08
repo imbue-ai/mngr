@@ -508,3 +508,10 @@ def test_a_workspace_reporting_no_run_and_no_agent_is_unlocked(
     _begin_run(store, agent_id)
 
     assert manager.probe_run(agent_id).is_run_alive is False
+
+
+def test_the_probes_listing_survives_config_the_workspaces_mngr_cannot_parse() -> None:
+    """A strict listing would answer AGENTS_FAILED forever, which reads as "still running"."""
+    script = build_update_run_probe_args(AgentId.generate())[3]
+
+    assert "MNGR_ALLOW_UNKNOWN_CONFIG=1 mngr list " in script

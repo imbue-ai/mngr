@@ -16,6 +16,7 @@ import {
 import type { UpdateActionResult } from "../../models/updates";
 import { Button } from "./Button";
 import { Modal, DialogCloseButton } from "./Modal";
+import { machineVerdict } from "./MachineVerdict";
 import { Notice } from "./Notice";
 import { Spinner } from "./Spinner";
 
@@ -31,6 +32,8 @@ interface UpdateModalState {
   /** The action in flight, so its button can say so and the rest can't be pressed. */
   pendingAction: "now" | "schedule" | "cancel" | "dismiss" | null;
   error: string;
+  /** The refusing machine's own words, shown under `error` when it had any. */
+  errorDetail: string;
   /** Which press is held for the go-ahead-without-backups confirmation. */
   noBackupConfirm: "now" | "schedule" | null;
 }
@@ -128,6 +131,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
   const state: UpdateModalState = {
     pendingAction: null,
     error: "",
+    errorDetail: "",
     noBackupConfirm: null,
   };
 
@@ -138,12 +142,14 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
   ): void {
     state.pendingAction = action;
     state.error = "";
+    state.errorDetail = "";
     void call().then((result) => {
       state.pendingAction = null;
       if (result.isOk) {
         onOk();
       } else {
         state.error = result.error;
+        state.errorDetail = result.detail;
       }
       m.redraw();
     });
@@ -342,7 +348,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         );
       }
 
-      if (state.error) body.push(m(Notice, { variant: "error" }, state.error));
+      if (state.error) body.push(m(Notice, { variant: "error" }, [state.error, machineVerdict(state.errorDetail)]));
 
       const actions: m.Children[] = [];
       if (isRecreationRequired(update)) {

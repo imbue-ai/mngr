@@ -121,6 +121,20 @@ def _run(argv, timeout=60, cwd=None, env=None):
         return completed
 
 
+def _run_mngr(args, timeout=60):
+    """Run `uv run mngr <args>` in this workspace, tolerating config it cannot parse.
+
+    The workspace's .mngr/settings.toml is versioned with its template while the
+    mngr that parses it is installed separately, so it can name config a plugin
+    this mngr does not have yet. Strict parsing (mngr's default) would then fail
+    every command here before it did anything -- including the chat gate that
+    decides whether the very update carrying the missing plugin may run.
+    """
+    env = dict(_os.environ)
+    env["MNGR_ALLOW_UNKNOWN_CONFIG"] = "1"
+    return _run(["uv", "run", "mngr"] + list(args), timeout=timeout, env=env)
+
+
 def _arg_value(flag, default=""):
     argv = _sys.argv[1:]
     for idx, token in enumerate(argv):
@@ -330,7 +344,7 @@ def _read_restic_env():
 
 def _list_running_chats():
     """Return (chats, error). Chats = RUNNING agents in this work_dir, excluding type=main."""
-    listed = _run(["uv", "run", "mngr", "list", "--format", "json", "--provider", "local"], timeout=180)
+    listed = _run_mngr(["list", "--format", "json", "--provider", "local"], timeout=180)
     if listed.returncode != 0:
         return None, "mngr list failed: %s" % (listed.stderr or listed.stdout).strip()[-500:]
     payload = None
@@ -432,7 +446,7 @@ def _gate_chats_and_wait_for_tick(agent_id, is_stop_chats, is_chat_gate_skipped=
             return "failed", {}, "cannot determine running chats: %s" % gate_error
         if chats and is_stop_chats:
             for chat_name in chats:
-                stopped = _run(["uv", "run", "mngr", "stop", chat_name], timeout=180)
+                stopped = _run_mngr(["stop", chat_name], timeout=180)
                 if stopped.returncode != 0:
                     detail = "could not stop chat %s: %s" % (
                         chat_name,

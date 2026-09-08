@@ -429,7 +429,7 @@ def test_a_spawn_reported_as_failed_does_not_unlock_a_run_that_has_started(
         tmp_path, root_concurrency_group, host_state=HostState.RUNNING, caller=caller, store=store
     )
 
-    outcome = service.dispatch_update(agent_id)
+    dispatch = service.dispatch_update(agent_id)
 
-    assert outcome is UpdateDispatchOutcome.SPAWN_FAILED
+    assert dispatch.outcome is UpdateDispatchOutcome.SPAWN_FAILED
     assert store.get(agent_id).activity is UpdateActivity.RUNNING

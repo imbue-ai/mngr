@@ -688,18 +688,19 @@ def _handle_help_assist() -> Response:
     # Wait for the create to finish before responding so the get-help modal keeps its
     # "starting..." state until the chat exists, rather than dismissing into a blank gap
     # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
-    started = spawn_skill_chat(
+    spawn = spawn_skill_chat(
         mngr_caller,
         workspace_agent_id,
         chat_name=generate_chat_name(ASSIST_SKILL_NAME),
         message=build_assist_chat_message(description),
     )
-    if not started:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": "Could not start an agent in this machine. Please try again."}),
-            media_type="application/json",
-        )
+    if not spawn.is_started:
+        # The same wall that stops an /assist chat stops every other agent
+        # here, so the machine's own refusal rides along when there was one.
+        body: dict[str, object] = {"error": "Couldn't start an agent in this machine."}
+        if spawn.failure_detail:
+            body["detail"] = spawn.failure_detail
+        return make_response(status_code=502, content=json.dumps(body), media_type="application/json")
     return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
 
 

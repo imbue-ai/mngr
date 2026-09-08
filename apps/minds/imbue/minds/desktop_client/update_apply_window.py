@@ -27,6 +27,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -126,7 +127,7 @@ def build_update_run_probe_args(workspace_agent_id: AgentId) -> list[str]:
     One exec for both facts because this runs on the stuck-edge callback thread. The
     listing is unfiltered and matched app-side so a chat name never lands in a CEL filter.
     """
-    inner_list = shlex.join(["mngr", "list", "--format", "{name}\t{state}"])
+    inner_list = build_in_workspace_mngr_command(["list", "--format", "{name}\t{state}"])
     # The bare `echo` keeps the end sentinel on its own line when the record has no trailing newline.
     script = (
         f"echo {RUN_BEGIN_SENTINEL}; cat {shlex.quote(RUN_STATUS_PATH)} 2>/dev/null; echo; echo {RUN_END_SENTINEL}; "

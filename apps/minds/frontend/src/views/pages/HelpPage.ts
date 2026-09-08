@@ -8,6 +8,7 @@ import m from "mithril";
 import { HelpModel, setPendingHelpLaunch } from "../../models/help";
 import { Button } from "../components/Button";
 import { Icon16 } from "../components/Icon";
+import { machineVerdict } from "../components/MachineVerdict";
 import { Spinner } from "../components/Spinner";
 
 function closeHelpSurface(): void {
@@ -280,6 +281,15 @@ function agentErrorPhase(model: HelpModel): m.Children {
       "Couldn't start an agent",
     ),
     m("p", { class: "type-body text-secondary mb-4" }, model.agentErrorMessage),
+    // Left-aligned inside this centred phase: the verdict is quoted output,
+    // and centring a wrapped command line makes it unreadable.
+    model.agentErrorDetail
+      ? m(
+          "div",
+          { class: "text-left mb-4" },
+          machineVerdict(model.agentErrorDetail),
+        )
+      : null,
     m(
       Button,
       {

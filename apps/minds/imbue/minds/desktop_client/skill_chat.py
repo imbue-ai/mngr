@@ -20,8 +20,12 @@ from enum import auto
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
+from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
 
@@ -32,10 +36,6 @@ _PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 # The inner create spawns a fresh chat agent (tmux window, claude process) on an
 # existing host: no provisioning or git transfer, but slower than a plain message.
 _SPAWN_TIMEOUT_SECONDS: Final[float] = 120.0
-
-# Bare ``mngr`` resolves on the container's PATH (set up by ``mngr exec``'s
-# source-env prefix); the desktop app's outer binary path does not exist there.
-_CONTAINER_MNGR_BINARY: Final[str] = "mngr"
 
 # Both labels make the system interface auto-open the chat's tab: shipped
 # interfaces key on ``assist``, newer ones on the purpose-neutral ``auto_open``.
@@ -105,7 +105,7 @@ def build_skill_chat_mngr_args(workspace_agent_id: AgentId, *, chat_name: str, m
     string. The chat is grouped with its workspace by living in the same
     container, so no grouping label is needed.
     """
-    inner_parts = [_CONTAINER_MNGR_BINARY, "create", chat_name, "--template", "chat", "--transfer", "none"]
+    inner_parts = ["create", chat_name, "--template", "chat", "--transfer", "none"]
     inner_parts.append("--no-connect")
     for label in AUTO_OPEN_CHAT_LABELS:
         inner_parts += ["--label", f"{label}=true"]
@@ -113,15 +113,40 @@ def build_skill_chat_mngr_args(workspace_agent_id: AgentId, *, chat_name: str, m
     # --no-start: the create is only reachable after the support probe succeeded
     # (host running), so this guards the stop race; a chat create must never
     # cold-boot a host either.
-    return ["exec", "--agent", str(workspace_agent_id), shlex.join(inner_parts), "--no-start"]
+    return [
+        "exec",
+        "--agent",
+        str(workspace_agent_id),
+        build_in_workspace_mngr_command(inner_parts),
+        "--no-start",
+    ]
 
 
-def spawn_skill_chat(mngr_caller: MngrCaller, workspace_agent_id: AgentId, *, chat_name: str, message: str) -> bool:
-    """Spawn the chat and wait for ``mngr create`` to finish; return whether it succeeded.
+class SkillChatSpawn(FrozenModel):
+    """Whether the inner ``mngr create`` landed, and what the workspace said when it did not."""
+
+    is_started: bool = Field(description="Whether the chat now exists in the workspace")
+    failure_detail: str = Field(
+        default="",
+        description=(
+            "The workspace's own verdict on a failed spawn, for the caller to show; '' on success and "
+            "when the workspace gave none. "
+            "Bounded and stripped of the outer mngr's chatter, so it can be rendered as-is"
+        ),
+    )
+
+
+def spawn_skill_chat(
+    mngr_caller: MngrCaller, workspace_agent_id: AgentId, *, chat_name: str, message: str
+) -> SkillChatSpawn:
+    """Spawn the chat and wait for ``mngr create`` to finish; report how it went.
 
     Synchronous on purpose: the caller holds its "starting..." state until the
     chat actually exists rather than dismissing into a blank gap before the tab
-    appears. A non-zero exit is logged and reported as ``False``.
+    appears.
+
+    A failure carries the workspace's verdict rather than only logging it: the
+    refusals that stick are the ones retrying cannot fix.
     """
     args = build_skill_chat_mngr_args(workspace_agent_id, chat_name=chat_name, message=message)
     result = mngr_caller.call(args, timeout=_SPAWN_TIMEOUT_SECONDS)
@@ -133,5 +158,9 @@ def spawn_skill_chat(mngr_caller: MngrCaller, workspace_agent_id: AgentId, *, ch
             result.returncode,
             result.stderr.strip(),
         )
-        return False
-    return True
+        # When no result came back, the stderr is MngrCaller's own account of
+        # that -- a timeout's quotes the whole argv, the seed message with it --
+        # and is not something the workspace said, so there is no verdict to carry.
+        detail = in_workspace_failure_detail(result.stderr) if result.is_mngr_output else ""
+        return SkillChatSpawn(is_started=False, failure_detail=detail)
+    return SkillChatSpawn(is_started=True)

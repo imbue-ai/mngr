@@ -98,9 +98,37 @@ describe("HelpModel", () => {
 
     expect(model.phase).toBe("agent_error");
     expect(model.agentErrorMessage).toBe("no assist skill");
+    expect(model.agentErrorDetail).toBe("");
     model.backToReportFromError();
     expect(model.phase).toBe("form");
     expect(model.mode).toBe("report");
+  });
+
+  it("keeps the refusing machine's own verdict", async () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+    });
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      fetcher: () =>
+        Promise.resolve(
+          jsonResponse(
+            {
+              error: "Couldn't start an agent in this machine.",
+              detail: "Error: Unknown fields in agent_types.opencode",
+            },
+            502,
+          ),
+        ),
+    });
+    model.description = "help me";
+
+    await model.submit();
+
+    expect(model.agentErrorDetail).toBe(
+      "Error: Unknown fields in agent_types.opencode",
+    );
   });
 
   it("closes on a successful assist spawn", async () => {

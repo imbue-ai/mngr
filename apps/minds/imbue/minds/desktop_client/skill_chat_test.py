@@ -1,5 +1,7 @@
 import shlex
 
+import pytest
+
 from imbue.minds.desktop_client.skill_chat import AUTO_OPEN_CHAT_LABELS
 from imbue.minds.desktop_client.skill_chat import SkillSupport
 from imbue.minds.desktop_client.skill_chat import build_skill_chat_mngr_args
@@ -57,7 +59,10 @@ def test_the_spawn_runs_a_chat_create_inside_the_workspace_with_the_seed_message
     assert "--no-start" in args
     assert len(args) == 5
     inner = shlex.split(args[3])
-    assert inner[0:3] == ["mngr", "create", "assist-abc123"]
+    # The env assignment leads: the workspace's own settings.toml must not be
+    # able to fail the create at config parse (see in_workspace_mngr).
+    assert inner[0] == "MNGR_ALLOW_UNKNOWN_CONFIG=1"
+    assert inner[1:4] == ["mngr", "create", "assist-abc123"]
     assert inner[inner.index("--template") + 1] == "chat"
     assert inner[inner.index("--transfer") + 1] == "none"
     assert "--no-connect" in inner
@@ -86,12 +91,52 @@ def test_generated_chat_names_carry_the_skill_and_do_not_repeat() -> None:
 def test_a_successful_spawn_makes_exactly_the_built_call() -> None:
     caller = RecordingMngrCaller()
     agent_id = AgentId.generate()
-    assert spawn_skill_chat(caller, agent_id, chat_name="assist-abc123", message="/assist it broke") is True
+    spawn = spawn_skill_chat(caller, agent_id, chat_name="assist-abc123", message="/assist it broke")
+    assert spawn.is_started is True
+    assert spawn.failure_detail == ""
     assert caller.calls == [
         build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke")
     ]
 
 
-def test_a_failed_spawn_is_reported_rather_than_swallowed() -> None:
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="boom"))
-    assert spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke") is False
+def test_a_failed_spawn_carries_the_machines_own_refusal() -> None:
+    """The caller renders this; without it the user is told only to try again."""
+    stderr = (
+        "WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n"
+        "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\n"
+        "ERROR: Command failed on agent system-services\n"
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr=stderr, is_mngr_output=True))
+
+    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke")
+
+    assert spawn.is_started is False
+    assert spawn.failure_detail.startswith("Error: Unknown fields in agent_types.opencode")
+    # The unrelated host is the first thing mngr prints and the last thing to blame.
+    assert "outer SSH unreachable" not in spawn.failure_detail
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        # The timeout line quotes the whole argv, the seed message with it.
+        MngrCallResult(
+            returncode=-1,
+            is_timed_out=True,
+            stderr="mngr exec --agent a1 MNGR_ALLOW_UNKNOWN_CONFIG=1 mngr create x --message '/assist my laptop'"
+            " timed out after 120s",
+        ),
+        # A warm process that died before answering. It carries no verdict
+        # marker, so the whole line would be quoted as the machine's words.
+        MngrCallResult(returncode=1, stderr="mngr warm process exited without returning a result"),
+    ),
+    ids=("timed_out", "warm_process_died"),
+)
+def test_a_spawn_the_workspace_never_answered_quotes_nothing_at_the_user(result: MngrCallResult) -> None:
+    """These stderrs are minds' own lines, so showing them as the machine's verdict misattributes our own fault."""
+    caller = RecordingMngrCaller(result=result)
+
+    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist my laptop")
+
+    assert spawn.is_started is False
+    assert spawn.failure_detail == ""

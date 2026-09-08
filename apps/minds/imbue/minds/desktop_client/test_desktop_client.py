@@ -68,6 +68,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import RefusingSpawnMngrCaller
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
@@ -1371,6 +1372,28 @@ def test_help_assist_spawns_when_the_skill_is_present(tmp_path: Path) -> None:
     assert caller.calls[0][0] == "exec"
     assert caller.calls[1][:2] == ["exec", "--agent"]
     assert "mngr create" in caller.calls[1][3]
+
+
+def test_help_assist_tells_the_user_what_a_refusing_machine_said(tmp_path: Path) -> None:
+    """A machine that will not start any agent is one retrying cannot fix, so its own words have to reach the user."""
+    caller = RefusingSpawnMngrCaller(
+        result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_PRESENT\n"),
+        refusal_stderr=(
+            "WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n"
+            "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\n"
+            "ERROR: Command failed on agent system-services\n"
+        ),
+    )
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["error"] == "Couldn't start an agent in this machine."
+    assert body["detail"].startswith("Error: Unknown fields in agent_types.opencode")
+    # The unrelated unreachable host is the first thing mngr prints and the last thing to blame.
+    assert "outer SSH unreachable" not in body["detail"]
 
 
 def test_help_report_requires_description(tmp_path: Path) -> None:

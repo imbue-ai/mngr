@@ -111,6 +111,13 @@ class MngrCallResult(MutableModel):
     is_timed_out: bool = Field(
         default=False, description="True if the call exceeded its timeout and the warm process was terminated."
     )
+    is_mngr_output: bool = Field(
+        default=False,
+        description=(
+            "True when stdout/stderr are the mngr CLI's own output. False when the CLI returned none and stderr is "
+            "this caller's account of why, which is not mngr's verdict and must not be shown to a user as one."
+        ),
+    )
 
 
 def _coerce_exit_code(code: object) -> int:
@@ -427,6 +434,10 @@ class MngrCaller(MutableModel):
         minds backend's cwd). On timeout the warm process is terminated and a
         result with ``is_timed_out=True`` and a non-zero ``returncode`` is
         returned.
+
+        Only the branch below that hands back what the CLI printed sets
+        ``is_mngr_output``; the ones that write their own stderr because no
+        result came back leave it false, and so must any added later.
         """
         resolved_timeout = self.default_timeout_seconds if timeout is None else timeout
         warm_process = self._claim_warm_process()
@@ -441,7 +452,7 @@ class MngrCaller(MutableModel):
             if connection.poll(resolved_timeout):
                 try:
                     returncode, stdout, stderr = connection.recv()
-                    return MngrCallResult(returncode=returncode, stdout=stdout, stderr=stderr)
+                    return MngrCallResult(returncode=returncode, stdout=stdout, stderr=stderr, is_mngr_output=True)
                 except EOFError:
                     return MngrCallResult(
                         returncode=1,

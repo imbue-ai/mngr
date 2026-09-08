@@ -50,6 +50,29 @@ def format_output_tail(stdout: str, stderr: str) -> str | None:
     return "\n".join(parts)
 
 
+def mngr_verdict_block(stderr: str, *, is_first_verdict: bool, max_chars: int) -> str:
+    """The verdict block in a failed ``mngr`` run's stderr, bounded to ``max_chars``.
+
+    Everything from the chosen marker onward rather than the marker's line alone,
+    because a verdict spans lines: mngr appends its bracketed help text, and a
+    provider's own reason can itself be multi-line.
+
+    ``is_first_verdict`` picks which marker starts the block when stderr holds
+    several. Whose verdict a caller wants depends on whether the command was
+    nested; :func:`mngr_failure_verdict` and
+    ``in_workspace_mngr.in_workspace_failure_detail`` each explain their choice.
+
+    Stderr with no marker at all (an unhandled traceback) falls back to its
+    bounded tail, which is then the only diagnosis there is.
+    """
+    lines = stderr.strip().splitlines()
+    indices = range(len(lines)) if is_first_verdict else reversed(range(len(lines)))
+    for index in indices:
+        if lines[index].startswith(_MNGR_VERDICT_PREFIXES):
+            return "\n".join(lines[index:])[:max_chars]
+    return stderr.strip()[-max_chars:]
+
+
 def mngr_failure_verdict(stderr: str) -> str:
     """Just the fatal-error block from a failed ``mngr`` run's stderr, bounded.
 
@@ -65,18 +88,11 @@ def mngr_failure_verdict(stderr: str) -> str:
     that died of something unrelated would be reported as this machine's backend
     going down. The full output is still kept, on ``MngrCommandError.output_tail``.
 
-    Everything from the marker onward is kept rather than the marker's line
-    alone, because a verdict spans lines: mngr appends its bracketed help text,
-    and a provider's own reason can itself be multi-line.
-
-    A run that produced no verdict at all (an unhandled traceback) falls back to
-    the bounded stderr tail, which is then the only diagnosis there is.
+    The *last* marker starts the block, because these commands are un-nested:
+    whatever mngr logged before it is the timeline it walked getting there, and
+    the verdict it died on lands at the end.
     """
-    lines = stderr.strip().splitlines()
-    for index in reversed(range(len(lines))):
-        if lines[index].startswith(_MNGR_VERDICT_PREFIXES):
-            return "\n".join(lines[index:])[:OUTPUT_TAIL_MAX_CHARS]
-    return stderr.strip()[-OUTPUT_TAIL_MAX_CHARS:]
+    return mngr_verdict_block(stderr, is_first_verdict=False, max_chars=OUTPUT_TAIL_MAX_CHARS)
 
 
 def run_mngr_capturing(

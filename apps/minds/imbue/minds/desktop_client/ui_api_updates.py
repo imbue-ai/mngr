@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
+from imbue.minds.desktop_client.update_service import UpdateDispatch
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.errors import MindError
@@ -48,7 +49,9 @@ _DISPATCH_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
         "or create a new machine and migrate your work."
     ),
     UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this machine to start the update.",
-    UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this machine. Please try again.",
+    # Whatever the machine said travels alongside this, as ``detail``; a spawn
+    # that timed out rather than being refused has nothing to add.
+    UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this machine.",
 }
 
 
@@ -102,8 +105,12 @@ def _json_response(payload: dict[str, object], status_code: int = 200) -> Respon
     return make_response(status_code=status_code, content=json.dumps(payload), media_type="application/json")
 
 
-def _error_response(message: str, status_code: int) -> Response:
-    return _json_response({"error": message}, status_code)
+def _error_response(message: str, status_code: int, detail: str = "") -> Response:
+    """An error body; ``detail`` is verbatim machine output the SPA renders apart from the message."""
+    payload: dict[str, object] = {"error": message}
+    if detail:
+        payload["detail"] = detail
+    return _json_response(payload, status_code)
 
 
 def _resolve_service() -> WorkspaceUpdateService | None:
@@ -117,11 +124,11 @@ def _parse_agent_id(agent_id: str) -> AgentId | None:
         return None
 
 
-def _dispatch_response(outcome: UpdateDispatchOutcome) -> Response:
-    status = _DISPATCH_STATUS_BY_OUTCOME[outcome]
+def _dispatch_response(dispatch: UpdateDispatch) -> Response:
+    status = _DISPATCH_STATUS_BY_OUTCOME[dispatch.outcome]
     if status == 200:
         return _json_response({"ok": True})
-    return _error_response(_DISPATCH_MESSAGE_BY_OUTCOME[outcome], status)
+    return _error_response(_DISPATCH_MESSAGE_BY_OUTCOME[dispatch.outcome], status, dispatch.failure_detail)
 
 
 def _armed_target_ref(service: WorkspaceUpdateService, agent_id: AgentId) -> str:
@@ -287,8 +294,8 @@ def _dispatch_one_bulk(service: WorkspaceUpdateService, scheduler: UpdateSchedul
     """Run one machine's bulk-now attempt, logging what became of it."""
     if scheduler is None:
         # No scheduler means no gate to apply; dispatch directly rather than do nothing.
-        outcome = service.dispatch_update(agent_id)
-        logger.info("Bulk update dispatch for {}: {}", agent_id, outcome.value)
+        dispatch = service.dispatch_update(agent_id)
+        logger.info("Bulk update dispatch for {}: {}", agent_id, dispatch.log_description)
         return
     skip_reason = scheduler.run_now(agent_id)
     if skip_reason is None:

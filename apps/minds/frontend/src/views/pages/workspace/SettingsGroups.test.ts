@@ -206,6 +206,29 @@ describe("the Updates settings group's no-backup question", () => {
     expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain("An update is already running");
     expect(allText(updatesGroup(draw(BACKED)))).toContain("An update is already running");
   });
+
+  it("quotes the machine's own verdict under the refusal", async () => {
+    // The reason a wedged machine gives is the only thing that tells the reader
+    // retrying will not help, so it has to survive all the way onto the pane.
+    const { draw } = harness(() =>
+      Promise.resolve(
+        jsonResponse(
+          {
+            error: "Couldn't start the update agent in this machine.",
+            detail: "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+          },
+          502,
+        ),
+      ),
+    );
+
+    press(updatesGroup(draw(BACKED)), "Update now");
+    await settleDispatch();
+
+    const refused = allText(updatesGroup(draw(BACKED)));
+    expect(refused).toContain("Couldn't start the update agent in this machine.");
+    expect(refused).toContain("Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']");
+  });
 });
 
 describe("the Updates settings group's scheduled update", () => {

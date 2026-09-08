@@ -415,6 +415,10 @@ export class UpdatesStore {
 export interface UpdateActionResult {
   isOk: boolean;
   error: string;
+  /** Verbatim output from the machine that refused, when it had something to say
+   * (a config its own mngr will not parse, say). Rendered apart from `error`,
+   * which stays a sentence: this is a machine's words, not ours. */
+  detail: string;
 }
 
 async function postUpdateAction(url: string, body: Record<string, unknown>): Promise<UpdateActionResult> {
@@ -427,12 +431,13 @@ async function postUpdateAction(url: string, body: Record<string, unknown>): Pro
       body: JSON.stringify(body),
     });
   } catch {
-    return { isOk: false, error: "The request failed (network error)." };
+    return { isOk: false, error: "The request failed (network error).", detail: "" };
   }
-  if (response.ok) return { isOk: true, error: "" };
-  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  if (response.ok) return { isOk: true, error: "", detail: "" };
+  const payload = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
   return {
     isOk: false,
     error: payload?.error ?? `HTTP ${response.status}`,
+    detail: payload?.detail ?? "",
   };
 }

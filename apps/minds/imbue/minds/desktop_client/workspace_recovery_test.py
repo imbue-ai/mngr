@@ -386,6 +386,27 @@ def test_run_mngr_narrows_a_nonzero_exit_error_to_mngrs_verdict(tmp_path: Path) 
     assert "DEBUG step 499" in (caught.output_tail or "")
 
 
+def test_run_mngr_reports_the_verdict_a_command_died_on_not_one_it_walked_past(tmp_path: Path) -> None:
+    """The mirror of the nested case: for an un-nested command the LAST marker is the verdict.
+
+    A step mngr logged at ERROR and then carried on past is not why the command
+    died, and letting it stand as the message would both tell the user the wrong
+    thing and hand the wrong text to the substring consumers -- reporting a
+    command that died of something else as this machine's backend going down.
+    ``in_workspace_mngr`` reads the same stderr from the other end, so nothing
+    but the argument separates the two, and this pins the un-nested end.
+    """
+    with ConcurrencyGroup(name="test-verdict-direction") as cg:
+        caught = _run_failing_mngr_stub(
+            cg,
+            tmp_path / "failing_mngr_two_markers",
+            "echo 'ERROR: could not reach provider imbue_cloud_someone; skipping it' >&2\n"
+            "echo 'Error: Agent agent-x not found' >&2\n",
+        )
+
+    assert str(caught) == "exited 1: Error: Agent agent-x not found"
+
+
 def test_run_mngr_keeps_a_tolerated_provider_skip_out_of_the_verdict(tmp_path: Path) -> None:
     """A provider mngr skipped and carried on past is not read as this machine's backend outage.
 

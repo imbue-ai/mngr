@@ -81,6 +81,30 @@ describe("UpdatesStore", () => {
 
     expect(result.isOk).toBe(false);
     expect(store.isUpdating("agent-a")).toBe(false);
+    // A refusal with nothing to quote reports no detail rather than undefined,
+    // so nothing renders an empty block under it.
+    expect(result.detail).toBe("");
+  });
+
+  it("carries the refusing machine's own words back to the caller", async () => {
+    const store = new UpdatesStore();
+    store.applyUpdatesMessage(message({ "agent-a": OUT_OF_DATE }));
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: "Couldn't start the update agent in this machine.",
+            detail: "Error: Unknown fields in agent_types.opencode",
+          }),
+          { status: 502 },
+        ),
+      ),
+    );
+
+    const result = await store.updateNow("agent-a");
+
+    expect(result.isOk).toBe(false);
+    expect(result.detail).toBe("Error: Unknown fields in agent_types.opencode");
   });
 
   it("hands the optimistic lock over to the pushed state once a run is really in flight", async () => {

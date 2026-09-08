@@ -75,6 +75,12 @@ _ALLOWED_HOST_LIFECYCLE_FILES = (
     # Quit-time bulk stop: one mngr call over many agents, which the per-workspace
     # action cannot express. It marks each agent itself.
     "desktop_control.py",
+    # Not host lifecycle at all: this module is python3 script text that runs
+    # *inside* an already-running container, and its `mngr stop` stops a chat
+    # agent there. There is no host to override the state of and no recovery
+    # mark to keep in step, and the module holds no desktop-side code that
+    # could ever acquire one.
+    "backup_workspace_scripts.py",
 )
 
 # Both shapes a host lifecycle call takes: a subprocess argv led by the resolved binary,

@@ -126,6 +126,7 @@ def test_call_runs_mngr_version_in_warm_process(mngr_caller: MngrCaller) -> None
     result = mngr_caller.call(["--version"], timeout=120.0)
     assert result.returncode == 0
     assert result.is_timed_out is False
+    assert result.is_mngr_output is True
     assert "mngr" in result.stdout
 
 
@@ -161,6 +162,9 @@ def test_call_times_out_and_reports_timed_out(mngr_caller: MngrCaller) -> None:
     result = mngr_caller.call(["--version"], timeout=0.0)
     assert result.is_timed_out is True
     assert result.returncode != 0
+    # The stderr here is this caller's own line about the timeout, so callers
+    # that quote a failure at the user must be able to tell it from mngr's.
+    assert result.is_mngr_output is False
 
 
 def _make_gated_command(started: threading.Event, release: threading.Event) -> click.Command:

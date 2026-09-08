@@ -71,6 +71,8 @@ export class HelpModel {
   statusMessage: string | null = null;
   isStatusError = false;
   agentErrorMessage = "";
+  /** The refusing machine's own words, shown under `agentErrorMessage`. */
+  agentErrorDetail = "";
   sentEventId: string | null = null;
   isReportIdCopied = false;
   private copyFlashTimer: ReturnType<typeof setTimeout> | null = null;
@@ -207,6 +209,7 @@ export class HelpModel {
       });
       const data = (await response.json().catch(() => ({}))) as {
         error?: string;
+        detail?: string;
       };
       if (response.ok) {
         // The chat exists and its tab already auto-opened in the workspace.
@@ -214,10 +217,12 @@ export class HelpModel {
       } else {
         this.phase = "agent_error";
         this.agentErrorMessage = data.error ?? "Could not start an agent.";
+        this.agentErrorDetail = data.detail ?? "";
       }
     } catch {
       this.phase = "agent_error";
       this.agentErrorMessage = "Network error starting the agent.";
+      this.agentErrorDetail = "";
     } finally {
       this.isSubmitBusy = false;
       this.redraw();

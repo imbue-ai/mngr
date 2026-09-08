@@ -21,6 +21,7 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import RefusingSpawnMngrCaller
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
@@ -29,6 +30,7 @@ from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_me
 from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_api_updates import run_bulk_dispatch
 from imbue.minds.desktop_client.update_chat import build_update_chat_message
+from imbue.minds.desktop_client.update_service import UpdateDispatch
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_status import UpdateActivity
@@ -767,7 +769,7 @@ def test_a_second_dispatch_loses_while_the_first_is_still_starting_the_machine(
     )
     _mark_out_of_date(app, agent_id)
     service = _service(app)
-    outcomes: list[UpdateDispatchOutcome] = []
+    outcomes: list[UpdateDispatch] = []
 
     first = threading.Thread(
         target=lambda: outcomes.append(service.dispatch_update(agent_id)),
@@ -783,8 +785,8 @@ def test_a_second_dispatch_loses_while_the_first_is_still_starting_the_machine(
         release_path.touch()
         first.join(timeout=10.0)
 
-    assert second is UpdateDispatchOutcome.ALREADY_RUNNING
-    assert outcomes == [UpdateDispatchOutcome.DISPATCHED]
+    assert second.outcome is UpdateDispatchOutcome.ALREADY_RUNNING
+    assert [dispatch.outcome for dispatch in outcomes] == [UpdateDispatchOutcome.DISPATCHED]
     assert _host_actions(tmp_path) == [f"start {agent_id} --quiet"]
     assert len([call for call in caller.calls if any("mngr create" in arg for arg in call)]) == 1
 
@@ -938,3 +940,48 @@ def test_dismissing_the_updated_note_leaves_a_failure_verdict_standing(
     assert _post(client, f"/ui/api/updates/{agent_id}/dismiss").status_code == 200
 
     assert state_store.get(agent_id).verdict is None
+
+
+def test_a_refused_spawn_tells_the_user_what_the_machine_said(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """A refusal the user cannot see the reason for is one they can only retry."""
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_caller=RefusingSpawnMngrCaller(
+            result=MngrCallResult(returncode=0, stdout=_SKILL_PRESENT_STDOUT),
+            refusal_stderr=(
+                "WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n"
+                "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\n"
+                "ERROR: Command failed on agent system-services\n"
+            ),
+        ),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["error"] == "Couldn't start the update agent in this machine."
+    assert body["detail"].startswith("Error: Unknown fields in agent_types.opencode")
+    # The unrelated unreachable host is what the user would otherwise blame.
+    assert "outer SSH unreachable" not in body["detail"]
+
+
+def test_an_outcome_with_nothing_to_add_carries_no_detail(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """An empty detail key would render as an empty block under every ordinary refusal."""
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=MngrCallResult(returncode=0, stdout="MNGR_UPDATE_SELF_SKILL_ABSENT\n"),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 409
+    assert "detail" not in response.get_json()
