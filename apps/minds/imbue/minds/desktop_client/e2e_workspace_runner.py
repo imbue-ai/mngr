@@ -110,12 +110,12 @@ _ELECTRON_LAUNCH_ATTEMPTS: Final[int] = 3
 _PICK_ROUND_SECONDS: Final[int] = 20
 # Budget for the whole create flow after submitting the form, which includes a
 # full docker build of the workspace image inside the CI sandbox -- legitimately
-# ~8-10.5 minutes there (the build-minds-snapshot job measured a healthy run
-# overshooting the old 600s budget at 625s, and the job failed on roughly
-# alternating main runs from exactly this deadline). The build's duration is
-# network-bound (apt/pip mirrors), so headroom -- not a tighter deadline -- is
-# what keeps this signal meaningful.
-_CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 900
+# ~8-10.5 minutes there. The build's duration is network-bound (apt/pip
+# mirrors, the pi extension npm installs), so headroom -- not a tighter
+# deadline -- is what keeps this signal meaningful. The snapshot script gives
+# `docker build` itself 900 seconds (MNGR__PROVIDERS__DOCKER__BUILD_TIMEOUT_SECONDS);
+# this budget sits above that so the container boot after the build still fits.
+_CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 1200
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
@@ -972,6 +972,21 @@ def create_workspace_via_electron(
 
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
 _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
+# A chat renders inside its own frame at the chat app's origin: the page's URL path is the
+# chat's agent id, which is how the frame is found among the workspace frame's children.
+_CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/agent-[0-9a-f]+/?$")
+_CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
+# A fresh workspace lands on the New Tab page with no chat. The dockview add button opens a
+# New Tab page and is shown only in a group without one; each of the page's tiles runs one
+# app's ``new`` action. The shell opens the first New Tab page once its app list has arrived
+# and renders the tiles from that list, so both the page and a tile can still be on their way
+# when the dockview is first visible.
+_NEW_TAB_ADD_BUTTON_SELECTOR: Final[str] = "button.dockview-add-tab-button"
+_NEW_CHAT_TILE_SELECTOR: Final[str] = '.new-tab-launcher-tile[data-launch="chat:new"]'
+_NEW_TERMINAL_TILE_SELECTOR: Final[str] = '.new-tab-launcher-tile[data-launch="terminal:new"]'
+_NEW_TAB_TILE_TIMEOUT_SECONDS: Final[int] = 60
+# How long the shell gets to dock the new chat's frame after the tile is pressed.
+_NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
 # Terminal panels are cross-origin iframes at the terminal service's own
 # origin (service-per-origin): the terminal's origin label is ``terminal-<rand>``
 # (a random per-service suffix), so the origin is
@@ -979,8 +994,8 @@ _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
-# The workspace boots with no chat: signing in from the first-run provider
-# chooser starts the workspace's first chat, and creating that agent runs
+# The workspace boots with no chat: the New Tab page's tile mints one, signing in
+# through its provider chooser launches it, and creating that agent runs
 # asynchronously, so the chat input can take a while to appear on a fresh
 # first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
@@ -1127,20 +1142,70 @@ def _agent_id_for_coordinate(content_page: Page, backend_origin: str, coordinate
     raise WorkspaceFlowError(f"No workspace with host id {coordinate!r} in /api/v1/workspaces")
 
 
+def _find_chat_frame(workspace: Page | Frame) -> Frame | None:
+    """The first chat page's frame currently inside the workspace, or None while it has opened none."""
+    candidates = workspace.frames if isinstance(workspace, Page) else workspace.child_frames
+    return next((frame for frame in candidates if _CHAT_PAGE_URL_PATTERN.search(frame.url.split("?", 1)[0])), None)
+
+
+def _chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
+    """The first chat page's frame inside the workspace, once the workspace has opened one.
+
+    Raises WorkspaceFlowError when no chat frame appears within ``timeout_seconds``.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    chat = _find_chat_frame(workspace)
+    while chat is None and time.monotonic() < deadline:
+        workspace.wait_for_timeout(_CHAT_FRAME_POLL_INTERVAL_MS)
+        chat = _find_chat_frame(workspace)
+    if chat is None:
+        raise WorkspaceFlowError(f"No chat frame opened inside the workspace within {timeout_seconds:.0f}s")
+    return chat
+
+
+def start_new_chat_from_new_tab(
+    workspace: Page | Frame, timeout_seconds: float = _NEW_CHAT_FRAME_TIMEOUT_SECONDS
+) -> Frame:
+    """Run the chat app's ``new`` from the New Tab page and return the frame of the chat it docked.
+
+    A fresh workspace boots with no chat: the chat app mints one from the tile (a chat that waits
+    for an account when nothing is signed in, whose page shows the provider chooser), and the
+    shell docks its page as a frame at the chat app's origin.
+    """
+    _press_new_tab_tile(workspace, _NEW_CHAT_TILE_SELECTOR)
+    logger.info("Started a new chat from the New Tab page; waiting up to {:.0f}s for its frame", timeout_seconds)
+    return _chat_frame(workspace, timeout_seconds)
+
+
+def _start_new_chat_and_send_message(page: Page | Frame, token: str) -> None:
+    """Start the workspace's first chat from the New Tab page, then message it and wait for the reply.
+
+    The full flow signs nothing in (its workspace runs on synced account credentials), so the
+    tile-minted chat launches at once and the transcript is the next thing to wait for.
+    """
+    start_new_chat_from_new_tab(page)
+    _send_message_and_await_reply(page, token)
+
+
 def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     """Type a unique-token prompt into the dockview chat and wait for the reply to echo it."""
-    logger.info("Waiting up to {}s for the first chat's input", _CHAT_INPUT_TIMEOUT_SECONDS)
-    page.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
+    logger.info("Waiting up to {}s for the first chat's frame and its input", _CHAT_INPUT_TIMEOUT_SECONDS)
+    input_deadline = time.monotonic() + _CHAT_INPUT_TIMEOUT_SECONDS
+    chat = _chat_frame(page, _CHAT_INPUT_TIMEOUT_SECONDS)
+    # Playwright reads a zero timeout as "wait forever", so the remainder is floored.
+    input_wait_seconds = max(input_deadline - time.monotonic(), 1.0)
+    logger.info("Chat frame at {}; waiting up to {:.0f}s for its input", chat.url, input_wait_seconds)
+    chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=input_wait_seconds * 1000)
     prompt = f"Reply with exactly this token and nothing else: {token}"
-    page.fill(_CHAT_INPUT_SELECTOR, prompt)
-    page.press(_CHAT_INPUT_SELECTOR, "Enter")
+    chat.fill(_CHAT_INPUT_SELECTOR, prompt)
+    chat.press(_CHAT_INPUT_SELECTOR, "Enter")
     logger.info("Sent chat message with token {}", token)
     # The user turn should render (optimistic pending bubble or a committed user
     # message) almost immediately -- proves the chat round-trips through the proxy.
-    page.wait_for_selector(".pending-message, .message.message-user", state="attached", timeout=30_000)
+    chat.wait_for_selector(".pending-message, .message.message-user", state="attached", timeout=30_000)
     _flow_screenshot(page, "03-message-sent")
     logger.info("Waiting up to {}s for the agent reply to echo the token", _CHAT_REPLY_TIMEOUT_SECONDS)
-    page.wait_for_function(
+    chat.wait_for_function(
         """(token) => {
             const list = document.querySelector('.message-list');
             if (!list) return false;
@@ -1155,19 +1220,27 @@ def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     _flow_screenshot(page, "04-reply-received")
 
 
-def _open_terminal(page: Page | Frame) -> None:
-    """Open a New terminal tab in the dockview and confirm the ttyd iframe renders."""
-    add_button = "button.dockview-add-tab-button"
-    empty_action = "button.dockview-empty-state-action"
-    if page.query_selector(add_button) is not None:
-        page.click(add_button)
-    else:
-        page.wait_for_selector(empty_action, state="visible", timeout=10_000)
-        page.click(empty_action)
-    page.wait_for_selector("div.dockview-add-tab-dropdown-item", state="visible", timeout=10_000)
-    page.get_by_text("New terminal", exact=True).click()
-    page.wait_for_selector(_TERMINAL_IFRAME_SELECTOR, state="attached", timeout=60_000)
+def _press_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> None:
+    """Run an app action from the New Tab page's tile, opening the page first when none is showing."""
+    # A visible add button means its group has no New Tab page; in every other state (a dock
+    # the shell has not filled yet, a page whose tiles have not rendered) the tile grows in on
+    # its own, and the add button is hidden the moment the page is there.
+    if workspace.query_selector(f"{_NEW_TAB_ADD_BUTTON_SELECTOR}:visible") is not None:
+        workspace.click(_NEW_TAB_ADD_BUTTON_SELECTOR)
+    workspace.wait_for_selector(tile_selector, state="visible", timeout=_NEW_TAB_TILE_TIMEOUT_SECONDS * 1000)
+    workspace.click(tile_selector)
+
+
+def open_terminal_from_new_tab(workspace: Page | Frame) -> None:
+    """Run the terminal app's ``new`` from the New Tab page and wait for the terminal's frame to dock."""
+    _press_new_tab_tile(workspace, _NEW_TERMINAL_TILE_SELECTOR)
+    workspace.wait_for_selector(_TERMINAL_IFRAME_SELECTOR, state="attached", timeout=60_000)
     logger.info("Terminal iframe present")
+
+
+def _open_terminal(page: Page | Frame) -> None:
+    """The full flow's terminal step: open a terminal from the New Tab page and record the screenshot."""
+    open_terminal_from_new_tab(page)
     _flow_screenshot(page, "05-terminal-open")
 
 
@@ -1350,7 +1423,7 @@ def run_full_workspace_flow(
                     results,
                     "STEP 2 message",
                     workspace_page,
-                    lambda: _send_message_and_await_reply(workspace_page, token),
+                    lambda: _start_new_chat_and_send_message(workspace_page, token),
                 )
                 _run_flow_step(results, "STEP 3 terminal", workspace_page, lambda: _open_terminal(workspace_page))
                 _run_flow_step(

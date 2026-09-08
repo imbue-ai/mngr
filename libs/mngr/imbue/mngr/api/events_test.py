@@ -17,7 +17,9 @@ from imbue.mngr.api.events import EventSourceInfo
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import FOLLOW_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.events import ONLINE_CHECK_INTERVAL_SECONDS
+from imbue.mngr.api.events import READ_FAILURE_REPROBE_INTERVAL_SECONDS
 from imbue.mngr.api.events import SOURCE_SCAN_INTERVAL_SECONDS
+from imbue.mngr.api.events import TAIL_READ_FAILURES_BEFORE_REPROBE
 from imbue.mngr.api.events import _AllEventsStreamState
 from imbue.mngr.api.events import _build_event_sources_from_grouped_files
 from imbue.mngr.api.events import _build_event_sources_from_listing
@@ -80,6 +82,24 @@ def _make_local_host_target(
     host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, OnlineHostInterface)
     return EventsTarget(host=host, events_path=events_dir, display_name=display_name)
+
+
+def _make_refreshable_local_host_target(local_provider) -> EventsTarget:
+    """Build an online local-host EventsTarget that ``refresh_events_target`` can re-resolve.
+
+    Carries the provider / host_id / events_subpath the probe needs; the events
+    path is a placeholder, since the probe never reads it.
+    """
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, OnlineHostInterface)
+    return EventsTarget(
+        host=host,
+        events_path=Path("/nowhere"),
+        display_name="test",
+        provider=local_provider,
+        host_id=host.id,
+        events_subpath=Path("agents") / "does-not-matter" / "events",
+    )
 
 
 @pytest.fixture
@@ -1178,10 +1198,70 @@ class _RunningTailSourceThread(FrozenModel):
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    events_file: Path
     event_queue: queue_mod.Queue[EventRecord]
     stop_event: threading.Event
+    read_failure_event: threading.Event
+    watch_group: DirectoryWatchGroup
     thread: threading.Thread
+    events_file: Path | None
+
+    def wait_for_event(self, timeout: float = 15.0) -> EventRecord | None:
+        """The next event the thread enqueues within ``timeout`` seconds, or None."""
+        try:
+            return self.event_queue.get(timeout=timeout)
+        except queue_mod.Empty:
+            return None
+
+
+@contextmanager
+def _running_tail_source_thread(
+    target_holder: list[EventsTarget],
+    offset_dir: Path,
+    online_event: threading.Event,
+    events_file: Path | None = None,
+) -> Iterator[_RunningTailSourceThread]:
+    """Run ``_tail_source_thread`` over source "src" of ``target_holder[0]`` for the block.
+
+    Owns the queue, stop event, failure flag, and watch group the thread is
+    given, and stops, wakes, and joins the thread on exit.
+    """
+    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
+    stop_event = threading.Event()
+    read_failure_event = threading.Event()
+    watch_group = DirectoryWatchGroup()
+    thread = threading.Thread(
+        target=_tail_source_thread,
+        kwargs=dict(
+            source_path="src",
+            target_holder=target_holder,
+            event_queue=event_queue,
+            cel_include_filters=[],
+            cel_exclude_filters=[],
+            stop_event=stop_event,
+            online_event=online_event,
+            read_failure_event=read_failure_event,
+            offset_dir_path=offset_dir,
+            initial_byte_offset=0,
+            watch_group=watch_group,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield _RunningTailSourceThread(
+            event_queue=event_queue,
+            stop_event=stop_event,
+            read_failure_event=read_failure_event,
+            watch_group=watch_group,
+            thread=thread,
+            events_file=events_file,
+        )
+    finally:
+        stop_event.set()
+        online_event.set()
+        watch_group.wake_all()
+        thread.join(timeout=5.0)
+        watch_group.stop()
 
 
 @contextmanager
@@ -1199,54 +1279,30 @@ def _running_local_tail_source_thread(tmp_path: Path, local_provider) -> Iterato
 
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
-    stop_event = threading.Event()
     online_event = threading.Event()
     online_event.set()
     target_holder = [_make_local_host_target(local_provider, events_dir)]
-    watch_group = DirectoryWatchGroup()
 
-    thread = threading.Thread(
-        target=_tail_source_thread,
-        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0, watch_group),
-        daemon=True,
-    )
-    thread.start()
-
-    try:
+    with _running_tail_source_thread(target_holder, offset_dir, online_event, events_file=events_file) as tail:
         offset_file = offset_dir / "src.offset"
         poll_for_value(
             producer=lambda: True if offset_file.exists() else None,
             timeout=5.0,
             poll_interval=0.2,
         )
-        yield _RunningTailSourceThread(
-            events_file=events_file,
-            event_queue=event_queue,
-            stop_event=stop_event,
-            thread=thread,
-        )
-    finally:
-        stop_event.set()
-        online_event.set()
-        watch_group.wake_all()
-        thread.join(timeout=5.0)
-        watch_group.stop()
+        yield tail
 
 
 @pytest.mark.timeout(30)
 def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path, local_provider) -> None:
     """The persistent tail thread detects new content appended to a local events.jsonl (pygtail path)."""
     with _running_local_tail_source_thread(tmp_path, local_provider) as tail:
+        assert tail.events_file is not None
         with tail.events_file.open("a") as f:
             f.write('{"timestamp":"2026-01-01T00:00:00Z","event_id":"t1","source":"src"}\n')
             f.flush()
 
-        result, _, _ = poll_for_value(
-            producer=lambda: tail.event_queue.get_nowait() if not tail.event_queue.empty() else None,
-            timeout=15.0,
-            poll_interval=0.5,
-        )
+        result = tail.wait_for_event()
         assert result is not None
         assert result.event_id == "t1"
 
@@ -1302,6 +1358,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
         cel_exclude_filters=[],
         stop_event=stop_event,
         online_event=online_event,
+        read_failure_event=threading.Event(),
         offset_dir_path=offset_dir,
         initial_byte_offset=len(events_file.read_bytes()),
         watch_group=watch_group,
@@ -1429,8 +1486,23 @@ def test_seconds_until_next_housekeeping_online_uses_earlier_of_both_deadlines()
         last_source_scan_time=100.0,
         last_online_check_time=100.0,
         is_online=True,
+        is_read_failing=False,
     )
     assert timeout == min(SOURCE_SCAN_INTERVAL_SECONDS, ONLINE_CHECK_INTERVAL_SECONDS)
+
+
+def test_seconds_until_next_housekeeping_probes_sooner_while_reads_fail() -> None:
+    # A tail that cannot read through its handle should not wait out the whole online interval
+    # for the re-resolution that fixes it.
+    timeout = _seconds_until_next_housekeeping(
+        now=100.0,
+        last_source_scan_time=100.0,
+        last_online_check_time=100.0,
+        is_online=True,
+        is_read_failing=True,
+    )
+    assert timeout == READ_FAILURE_REPROBE_INTERVAL_SECONDS
+    assert timeout < ONLINE_CHECK_INTERVAL_SECONDS
 
 
 def test_seconds_until_next_housekeeping_offline_ignores_source_scan_deadline() -> None:
@@ -1440,6 +1512,7 @@ def test_seconds_until_next_housekeeping_offline_ignores_source_scan_deadline() 
         last_source_scan_time=0.0,
         last_online_check_time=100.0,
         is_online=False,
+        is_read_failing=False,
     )
     assert timeout == ONLINE_CHECK_INTERVAL_SECONDS
 
@@ -1450,6 +1523,7 @@ def test_seconds_until_next_housekeeping_overdue_deadline_clamps_to_zero() -> No
         last_source_scan_time=0.0,
         last_online_check_time=0.0,
         is_online=True,
+        is_read_failing=False,
     )
     assert timeout == 0.0
 
@@ -1483,7 +1557,7 @@ def test_handle_online_offline_transition_comes_online_sets_gate(
     online_event = threading.Event()
 
     is_transitioned = _handle_online_offline_transition(
-        target_holder=target_holder, state=state, online_event=online_event
+        target_holder=target_holder, state=state, online_event=online_event, is_read_failing=False
     )
 
     # The local host resolves as online, so the transition should fire (and
@@ -1506,7 +1580,7 @@ def test_handle_online_offline_transition_no_change_when_same_state() -> None:
     online_event = threading.Event()
 
     is_transitioned = _handle_online_offline_transition(
-        target_holder=target_holder, state=state, online_event=online_event
+        target_holder=target_holder, state=state, online_event=online_event, is_read_failing=False
     )
 
     # No transition should have occurred (no provider to refresh).
@@ -1545,13 +1619,58 @@ def test_handle_online_offline_transition_clears_gate_when_going_offline(
     online_event.set()
 
     is_transitioned = _handle_online_offline_transition(
-        target_holder=target_holder, state=state, online_event=online_event
+        target_holder=target_holder, state=state, online_event=online_event, is_read_failing=False
     )
 
     # Transitioned online -> offline: the gate is cleared so tailing pauses.
     assert is_transitioned is True
     assert state.is_online is False
     assert not online_event.is_set()
+
+
+def test_handle_online_offline_transition_re_resolves_an_online_target_whose_reads_fail(
+    local_provider,
+) -> None:
+    """A host that restarted between two probes is online before and after, so no state flip
+    ever arrives -- yet the handle the tails hold is dead (Docker re-maps the SSH port). Failing
+    reads must make the probe adopt a freshly resolved handle even though the state is the same,
+    and leave the gate open so the tails try it at once."""
+    stale = _make_refreshable_local_host_target(local_provider)
+    state = _AllEventsStreamState(is_online=True)
+    target_holder = [stale]
+    online_event = threading.Event()
+    online_event.set()
+
+    is_transitioned = _handle_online_offline_transition(
+        target_holder=target_holder, state=state, online_event=online_event, is_read_failing=True
+    )
+
+    assert is_transitioned is True
+    assert state.is_online is True
+    assert target_holder[0] is not stale
+    assert target_holder[0].host is not stale.host
+    assert isinstance(target_holder[0].host, OnlineHostInterface)
+    assert online_event.is_set()
+
+
+def test_handle_online_offline_transition_keeps_an_online_target_whose_reads_succeed(
+    local_provider,
+) -> None:
+    """Without failing reads a same-state probe changes nothing: the tails keep the handle and
+    the connection they have, rather than being handed a new one every probe."""
+    healthy = _make_refreshable_local_host_target(local_provider)
+    state = _AllEventsStreamState(is_online=True)
+    target_holder = [healthy]
+    online_event = threading.Event()
+    online_event.set()
+
+    is_transitioned = _handle_online_offline_transition(
+        target_holder=target_holder, state=state, online_event=online_event, is_read_failing=False
+    )
+
+    assert is_transitioned is False
+    assert target_holder[0] is healthy
+    assert online_event.is_set()
 
 
 # =============================================================================
@@ -1583,39 +1702,19 @@ def test_tail_source_thread_does_no_io_while_gate_closed_then_resumes(
     target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
-    stop_event = threading.Event()
     # Clear: gate closed (offline).
     online_event = threading.Event()
-    target_holder = [target]
-    watch_group = DirectoryWatchGroup()
 
-    thread = threading.Thread(
-        target=_tail_source_thread,
-        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0, watch_group),
-        daemon=True,
-    )
-    thread.start()
-    try:
+    with _running_tail_source_thread([target], offset_dir, online_event) as tail:
         # Give the thread well over a poll interval to (not) act while gated off.
         threading.Event().wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS * 2)
-        assert event_queue.empty()
+        assert tail.event_queue.empty()
 
         # Open the gate: the thread now reads the offline volume and delivers e1.
         online_event.set()
-        result, _, _ = poll_for_value(
-            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
-            timeout=15.0,
-            poll_interval=0.5,
-        )
+        result = tail.wait_for_event()
         assert result is not None
         assert result.event_id == "e1"
-    finally:
-        stop_event.set()
-        online_event.set()
-        watch_group.wake_all()
-        thread.join(timeout=5.0)
-        watch_group.stop()
 
 
 @pytest.mark.timeout(30)
@@ -1643,26 +1742,13 @@ def test_tail_source_thread_follows_target_swap_without_recreation(
 
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
-    stop_event = threading.Event()
     online_event = threading.Event()
     online_event.set()
     target_holder = [_make_local_host_target(local_provider, dir_a)]
-    watch_group = DirectoryWatchGroup()
 
-    thread = threading.Thread(
-        target=_tail_source_thread,
-        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0, watch_group),
-        daemon=True,
-    )
-    thread.start()
-    try:
+    with _running_tail_source_thread(target_holder, offset_dir, online_event) as tail:
         # The thread first reads source A.
-        first, _, _ = poll_for_value(
-            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
-            timeout=15.0,
-            poll_interval=0.5,
-        )
+        first = tail.wait_for_event()
         assert first is not None
         assert first.event_id == "a1"
 
@@ -1671,21 +1757,43 @@ def test_tail_source_thread_follows_target_swap_without_recreation(
         # tail explicitly -- exactly what the consume loop does on the
         # online/offline transition that accompanies every production swap.
         target_holder[0] = _make_local_host_target(local_provider, dir_b)
-        watch_group.wake_all()
+        tail.watch_group.wake_all()
 
-        second, _, _ = poll_for_value(
-            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
-            timeout=15.0,
-            poll_interval=0.5,
-        )
+        second = tail.wait_for_event()
         assert second is not None
         assert second.event_id == "b1"
-    finally:
-        stop_event.set()
-        online_event.set()
-        watch_group.wake_all()
-        thread.join(timeout=5.0)
-        watch_group.stop()
+
+
+@pytest.mark.timeout(30)
+def test_tail_source_thread_flags_reads_that_keep_failing(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+) -> None:
+    """A remote-mechanism tail whose every read fails must say so through the failure event
+    once the failures stop looking transient, so the follow loop re-resolves the host instead of
+    retrying a dead handle forever in silence."""
+    # A volume-backed host reads by whole-file poll (the remote mechanism); pointing it at a
+    # directory with no events file makes every poll fail.
+    host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
+    events_dir = tmp_path / "events"
+    (events_dir / "src").mkdir(parents=True)
+    target_holder = [EventsTarget(host=host, events_path=events_dir, display_name="test")]
+    offset_dir = tmp_path / "offsets"
+    offset_dir.mkdir()
+    online_event = threading.Event()
+    online_event.set()
+
+    with _running_tail_source_thread(target_holder, offset_dir, online_event) as tail:
+        # One poll per FOLLOW_POLL_INTERVAL_SECONDS; the flag rises after
+        # TAIL_READ_FAILURES_BEFORE_REPROBE failures.
+        is_flagged, _, _ = poll_for_value(
+            producer=lambda: True if tail.read_failure_event.is_set() else None,
+            timeout=FOLLOW_POLL_INTERVAL_SECONDS * (TAIL_READ_FAILURES_BEFORE_REPROBE + 10),
+            poll_interval=0.2,
+        )
+        assert is_flagged is True
+        assert tail.event_queue.empty()
 
 
 # =============================================================================

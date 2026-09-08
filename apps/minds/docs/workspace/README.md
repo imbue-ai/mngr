@@ -12,7 +12,7 @@ The template repository (e.g. [default-workspace-template](https://github.com/im
 - `CLAUDE.md` -- instructions for the Claude agent
 - `.agents/skills/` -- skills available to the agent
 - `system/scripts/` -- utility scripts (forward_port.py, layout.py, etc.)
-- `system/apps/` -- everything tab-openable (system_interface, terminal, browser, and user-built apps); `system/services/` -- tab-less background services (app_watcher, share_gateway, host_backup, ...); `system/libs/` -- support libraries (bootstrap, ...)
+- `system/apps/` -- everything tab-openable (system_interface, chat, terminal, browser, and user-built apps); `system/services/` -- tab-less background services (app_watcher, share_gateway, host_backup, ...); `system/libs/` -- support libraries (bootstrap, ...)
 - `data/` -- gitignored workspace data (documents, uploads, memories, per-app data, machine state, secrets)
 
 ## Key files
@@ -25,13 +25,19 @@ first-boot setup and then execs `supervisord -n -c system/supervisord.conf`:
 
 ```ini
 [program:system_interface]
-command=bash -c "python3 system/scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
+command=bash -c "python3 system/scripts/forward_port.py --manifest system/apps/system_interface/app.toml --url http://localhost:8000 && system-interface"
+directory=/home/user/workspace
+autostart=true
+autorestart=true
+
+[program:chat]
+command=chat-app
 directory=/home/user/workspace
 autostart=true
 autorestart=true
 
 [program:terminal]
-command=bash system/apps/terminal/run_ttyd.sh
+command=terminal-app
 directory=/home/user/workspace
 autostart=true
 autorestart=true
@@ -81,11 +87,14 @@ fleet changes never require re-injecting materials.
 
 ## How apps register ports
 
-Apps call `system/scripts/forward_port.py` on startup to register their ports:
+Apps call `system/scripts/forward_port.py` on startup to register their ports. An app with
+an `app.toml` manifest registers through `--manifest` and takes its name from the manifest;
+`--name` names a row that has no manifest of its own (an extra origin-label row of a
+multi-port app, or a hand-written block):
 
 ```bash
-python3 system/scripts/forward_port.py --url http://localhost:8000 --name web
-python3 system/scripts/forward_port.py --url http://localhost:7681 --name terminal
+python3 system/scripts/forward_port.py --manifest system/apps/web/app.toml --url http://localhost:8000
+python3 system/scripts/forward_port.py --url http://localhost:8001 --name web-admin
 python3 system/scripts/forward_port.py --remove --name old-app
 ```
 

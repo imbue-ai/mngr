@@ -57,6 +57,15 @@ from imbue.mngr.utils.jsonl_warn import split_complete_lines
 FOLLOW_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 SOURCE_SCAN_INTERVAL_SECONDS: Final[float] = 10.0
 ONLINE_CHECK_INTERVAL_SECONDS: Final[float] = 30.0
+# Interval between the follow loop's host probes while a tail reports that its reads are failing,
+# in place of the regular online-check interval; each probe re-resolves the host handle.
+READ_FAILURE_REPROBE_INTERVAL_SECONDS: Final[float] = 5.0
+# Consecutive failed polls before a tail thread asks the follow loop to re-resolve the host; the
+# first failure or two is often a transient the SSH layer's own retry already covers.
+TAIL_READ_FAILURES_BEFORE_REPROBE: Final[int] = 3
+# Consecutive failed polls after which a tail thread says so at warning level, once, so a follow
+# that has quietly stopped delivering is visible in the log.
+_TAIL_READ_FAILURES_BEFORE_WARNING: Final[int] = 30
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
 
 
@@ -718,6 +727,7 @@ def _start_tail_threads_for_sources(
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
     online_event: threading.Event,
+    read_failure_event: threading.Event,
     offset_dir_path: Path,
     watch_group: DirectoryWatchGroup,
 ) -> list[threading.Thread]:
@@ -738,6 +748,7 @@ def _start_tail_threads_for_sources(
                 cel_exclude_filters=cel_exclude_filters,
                 stop_event=stop_event,
                 online_event=online_event,
+                read_failure_event=read_failure_event,
                 offset_dir_path=offset_dir_path,
                 initial_byte_offset=initial_byte_offsets.get(source.source_path, 0),
                 watch_group=watch_group,
@@ -791,6 +802,9 @@ def stream_all_events(
     online_event = threading.Event()
     if state.is_online:
         online_event.set()
+    # Set by a tail thread whose reads keep failing, so the consume loop re-resolves the host
+    # handle ahead of its regular probe (see _handle_online_offline_transition).
+    read_failure_event = threading.Event()
     # Shared, swappable handle to the current target. The consume loop swaps
     # target_holder[0] on an online/offline transition; the tail threads read
     # it each poll, so they follow the new target without being recreated.
@@ -823,6 +837,7 @@ def stream_all_events(
                 cel_exclude_filters,
                 stop_event,
                 online_event,
+                read_failure_event,
                 Path(offset_dir.name),
                 watch_group,
             )
@@ -851,6 +866,7 @@ def stream_all_events(
             cel_exclude_filters=cel_exclude_filters,
             stop_event=stop_event,
             online_event=online_event,
+            read_failure_event=read_failure_event,
             tail_threads=tail_threads,
             offset_dir_path=Path(offset_dir.name) if offset_dir is not None else None,
             source_filters=source_filters,
@@ -935,6 +951,7 @@ def _start_tail_thread(
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
     online_event: threading.Event,
+    read_failure_event: threading.Event,
     offset_dir_path: Path,
     initial_byte_offset: int,
     watch_group: DirectoryWatchGroup,
@@ -962,6 +979,7 @@ def _start_tail_thread(
             cel_exclude_filters,
             stop_event,
             online_event,
+            read_failure_event,
             offset_dir_path,
             initial_byte_offset,
             watch_group,
@@ -1098,6 +1116,7 @@ def _tail_source_thread(
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
     online_event: threading.Event,
+    read_failure_event: threading.Event,
     offset_dir_path: Path,
     initial_byte_offset: int,
     watch_group: DirectoryWatchGroup,
@@ -1120,9 +1139,15 @@ def _tail_source_thread(
     their delivery latency. Setting ``stop_event`` wakes and stops the loop
     immediately in every branch (a parked forwarder thread bridges it to the
     wake event, as in the discovery tail).
+
+    A read that keeps failing is reported through ``read_failure_event`` rather
+    than retried in silence: the handle this thread reads through can go dead
+    while the host stays online (a Docker restart re-maps the SSH port), and only
+    the consume loop can swap in a re-resolved one.
     """
     warner = MalformedJsonLineWarner(source_description=f"event source '{source_path}'")
     byte_offset = initial_byte_offset
+    consecutive_read_failures = 0
     wake_event = threading.Event()
     start_event_forwarder(stop_event, wake_event, name=f"events-tail-stop-forwarder-{source_path}")
     watched_dir: Path | None = None
@@ -1164,6 +1189,7 @@ def _tail_source_thread(
             else:
                 watched_dir = None
 
+        is_read_ok = False
         try:
             if is_local:
                 _read_local_source_once(
@@ -1186,8 +1212,28 @@ def _tail_source_thread(
                     cel_include_filters,
                     cel_exclude_filters,
                 )
+            is_read_ok = True
         except (MngrError, OSError, IOError) as e:
-            logger.trace("Tail read error for source '{}': {}", source_path, e)
+            consecutive_read_failures += 1
+            if consecutive_read_failures == 1:
+                logger.debug("Tail read failed for source '{}': {}", source_path, e)
+            elif consecutive_read_failures == _TAIL_READ_FAILURES_BEFORE_WARNING:
+                logger.warning(
+                    "Tail reads for source '{}' have failed {} times in a row (last: {}); "
+                    "re-resolving the host until a read succeeds",
+                    source_path,
+                    consecutive_read_failures,
+                    e,
+                )
+            else:
+                logger.trace("Tail read error for source '{}': {}", source_path, e)
+            if consecutive_read_failures >= TAIL_READ_FAILURES_BEFORE_REPROBE:
+                read_failure_event.set()
+        if is_read_ok and consecutive_read_failures > 0:
+            logger.debug(
+                "Tail reads for source '{}' recovered after {} failure(s)", source_path, consecutive_read_failures
+            )
+            consecutive_read_failures = 0
 
         if watched_dir is not None:
             # A change landing between the clear below and the next read sets
@@ -1199,11 +1245,18 @@ def _tail_source_thread(
 
 
 @pure
+def _online_check_interval(is_read_failing: bool) -> float:
+    """How long the consume loop waits between host probes: short while a tail cannot read."""
+    return READ_FAILURE_REPROBE_INTERVAL_SECONDS if is_read_failing else ONLINE_CHECK_INTERVAL_SECONDS
+
+
+@pure
 def _seconds_until_next_housekeeping(
     now: float,
     last_source_scan_time: float,
     last_online_check_time: float,
     is_online: bool,
+    is_read_failing: bool,
 ) -> float:
     """How long the consume loop may block on the queue before a periodic duty is due.
 
@@ -1212,7 +1265,7 @@ def _seconds_until_next_housekeeping(
     online/offline probe -- never event delivery latency. Clamped at zero so an
     overdue duty makes the get non-blocking rather than raising.
     """
-    deadlines = [last_online_check_time + ONLINE_CHECK_INTERVAL_SECONDS]
+    deadlines = [last_online_check_time + _online_check_interval(is_read_failing)]
     if is_online:
         deadlines.append(last_source_scan_time + SOURCE_SCAN_INTERVAL_SECONDS)
     return max(0.0, min(deadlines) - now)
@@ -1227,6 +1280,7 @@ def _consume_event_queue(
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
     online_event: threading.Event,
+    read_failure_event: threading.Event,
     tail_threads: list[threading.Thread],
     offset_dir_path: Path | None,
     watch_group: DirectoryWatchGroup,
@@ -1236,13 +1290,19 @@ def _consume_event_queue(
 
     The queue get blocks until an event arrives or the next housekeeping
     deadline passes, so an idle stream wakes only for housekeeping (every
-    SOURCE_SCAN_INTERVAL_SECONDS / ONLINE_CHECK_INTERVAL_SECONDS) rather than
-    on a short fixed poll. Housekeeping runs whenever its deadline has passed
-    -- also under a continuous event stream, which a queue-empty-gated design
-    would starve.
+    SOURCE_SCAN_INTERVAL_SECONDS / ONLINE_CHECK_INTERVAL_SECONDS, the latter
+    shortened to READ_FAILURE_REPROBE_INTERVAL_SECONDS while a tail reports
+    failing reads) rather than on a short fixed poll. Housekeeping runs
+    whenever its deadline has passed -- also under a continuous event stream,
+    which a queue-empty-gated design would starve.
     """
     state.last_source_scan_time = time.monotonic()
     last_online_check_time = time.monotonic()
+    # Holds the shortened probe interval from a probe that answered failing reads until one that
+    # did not: the flag is cleared at each probe and a still-failing tail only raises it again on
+    # its next poll, so the flag alone would let the wait right after a probe fall back to the
+    # regular interval.
+    is_last_probe_for_failing_reads = False
 
     while not stop_event.is_set():
         timeout = _seconds_until_next_housekeeping(
@@ -1250,6 +1310,7 @@ def _consume_event_queue(
             last_source_scan_time=state.last_source_scan_time,
             last_online_check_time=last_online_check_time,
             is_online=state.is_online,
+            is_read_failing=read_failure_event.is_set() or is_last_probe_for_failing_reads,
         )
         event: EventRecord | None
         try:
@@ -1279,6 +1340,7 @@ def _consume_event_queue(
                 cel_exclude_filters=cel_exclude_filters,
                 stop_event=stop_event,
                 online_event=online_event,
+                read_failure_event=read_failure_event,
                 tail_threads=tail_threads,
                 offset_dir_path=offset_dir_path,
                 source_filters=source_filters,
@@ -1286,18 +1348,27 @@ def _consume_event_queue(
             )
             state.last_source_scan_time = now
 
-        # Check for online/offline transitions when due
-        if now - last_online_check_time > ONLINE_CHECK_INTERVAL_SECONDS:
+        # Check for online/offline transitions when due -- sooner while a tail reports failing
+        # reads, since the handle it holds may be dead under a host that is still online.
+        if now - last_online_check_time > _online_check_interval(
+            read_failure_event.is_set() or is_last_probe_for_failing_reads
+        ):
+            is_read_failing = read_failure_event.is_set()
+            # Cleared before the probe: a failure landing after this point is a fresh signal for
+            # the next probe, so a swap that did not help is retried rather than forgotten.
+            read_failure_event.clear()
             is_transitioned = _handle_online_offline_transition(
                 target_holder=target_holder,
                 state=state,
                 online_event=online_event,
+                is_read_failing=is_read_failing,
             )
             if is_transitioned:
                 # Wake watched tails so they re-resolve the swapped target now
                 # instead of at their fallback interval.
                 watch_group.wake_all()
             last_online_check_time = now
+            is_last_probe_for_failing_reads = is_read_failing
 
 
 def _rescan_and_start_new_tail_threads(
@@ -1308,6 +1379,7 @@ def _rescan_and_start_new_tail_threads(
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
     online_event: threading.Event,
+    read_failure_event: threading.Event,
     tail_threads: list[threading.Thread],
     offset_dir_path: Path | None,
     watch_group: DirectoryWatchGroup,
@@ -1346,6 +1418,7 @@ def _rescan_and_start_new_tail_threads(
                 cel_exclude_filters=cel_exclude_filters,
                 stop_event=stop_event,
                 online_event=online_event,
+                read_failure_event=read_failure_event,
                 offset_dir_path=offset_dir_path,
                 initial_byte_offset=byte_offsets.get(source.source_path, 0),
                 watch_group=watch_group,
@@ -1385,6 +1458,7 @@ def _handle_online_offline_transition(
     target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
     online_event: threading.Event,
+    is_read_failing: bool,
 ) -> bool:
     """Detect an online/offline transition and update shared state accordingly.
 
@@ -1397,6 +1471,14 @@ def _handle_online_offline_transition(
     its teardown races, is gone. Event deduplication via ``emitted_event_ids``
     ensures no events are emitted twice when tailing resumes (a thread re-reads
     its source from the start after the switch).
+
+    ``is_read_failing`` covers the restart no state flip announces: a host that
+    went down and came back between two probes (a Docker restart, which also
+    re-maps the SSH port) is online before and after, yet the handle the tails
+    hold is dead. When the tails report failing reads, the refreshed target is
+    adopted whenever its handle is not the one the tails hold, even though the
+    state did not change. The tails keep their offsets, since the file itself
+    did not move.
     """
     target = target_holder[0]
     try:
@@ -1409,6 +1491,10 @@ def _handle_online_offline_transition(
     is_now_online = isinstance(new_target.host, OnlineHostInterface)
 
     if was_online == is_now_online:
+        if is_now_online and is_read_failing and new_target.host is not target.host:
+            logger.debug("Target {} re-resolved after failing reads", target.display_name)
+            target_holder[0] = new_target
+            return True
         return False
 
     logger.debug(

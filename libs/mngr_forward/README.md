@@ -10,7 +10,8 @@ origins from older persisted URLs are redirected to it).
 the matching backend. The bare `agent-<hex>.localhost` origin maps to the
 configured backend (`--service NAME`, the default workflow, or a fixed remote
 port via `--forward-port REMOTE_PORT`); `<service>.agent-<hex>.localhost`
-origins map to that agent-registered service, and deeper labels
+origins map to that agent-registered service (a minds workspace's chat is
+one: a registered app served at its own `chat` origin), and deeper labels
 (`sub.<service>.agent-<hex>.localhost`) route to the same service -- they are
 the service's own sub-origin space. Remote agents are reached via a per-host
 SSH tunnel.

@@ -8,7 +8,8 @@ created from the default-workspace-template:
      selected (compute/backup association; the create flow injects no AI
      credentials, so the chat step relies on the operator's synced Claude
      subscription credentials keeping the workspace authenticated),
-  2. send a chat message and wait for the agent's reply,
+  2. start a chat from the workspace's New Tab page, send it a message and
+     wait for the agent's reply,
   3. open a terminal panel in the dockview,
   4. navigate back to the home/landing screen (via the chrome Home button),
   5. open that workspace's settings and destroy it (the versioned
