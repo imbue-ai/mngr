@@ -19,9 +19,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
 
-# Common binary file extensions that should be excluded from ratchet scans that
-# read file contents as text. .read_text() raises UnicodeDecodeError on these.
-# Used by both the project-local ratchets and the repo-wide test_meta_ratchets.py.
+# Binary file extensions kept out of every ratchet scan that reads file contents as text. This is
+# the cheap layer of a pair applied in `_get_all_text_files_with_extension`: excluding by name means
+# these files are never opened, while `_is_text_file` sniffs the content of whatever is left.
+# Neither replaces the other -- without this list every icon and font is read only to be
+# rejected, and without the sniff one unanticipated format takes the whole scan down.
 BINARY_FILE_EXCLUSION: Final[tuple[str, ...]] = (
     "*.png",
     "*.ico",
@@ -32,6 +34,10 @@ BINARY_FILE_EXCLUSION: Final[tuple[str, ...]] = (
     "*.pdf",
     "*.zip",
     "*.gz",
+    "*.ttf",
+    "*.otf",
+    "*.woff",
+    "*.woff2",
 )
 
 
@@ -121,22 +127,41 @@ class FileReadError(RatchetsError):
     """Raised when a file cannot be read."""
 
 
+def _is_text_file(file_path: Path) -> bool:
+    """Whether a file can be scanned as source text.
+
+    A scan with no extension filter reaches every non-ignored file in the tree, which for a
+    project carrying a vendored frontend includes fonts and icons. A NUL byte in the first block
+    is the conventional signal that a file is not text, and a file that is not text cannot
+    contain a text pattern, so excluding it costs no coverage. This backs up
+    `BINARY_FILE_EXCLUSION`, which is what keeps the known binary formats from being opened at
+    all: a name-based list cannot cover a format nobody anticipated, and one such file reaching a
+    scan is enough to take it down.
+    """
+    try:
+        with file_path.open("rb") as handle:
+            return b"\x00" not in handle.read(8192)
+    except OSError as e:
+        raise FileReadError(f"Cannot read file: {file_path}") from e
+
+
 @lru_cache(maxsize=None)
-def _get_all_files_with_extension(
+def _get_all_text_files_with_extension(
     folder_path: Path,
     extension: FileExtension | None,
 ) -> tuple[Path, ...]:
-    """Get all non-gitignored files that exist on disk in a folder (cached).
+    """Get the non-gitignored text files that exist on disk in a folder (cached).
 
     If extension is provided, only files matching that extension are returned.
-    If extension is None, all non-ignored files are returned.
+    If extension is None, every non-ignored text file is returned.
 
     Uses git ls-files with --cached and --others to include both tracked
     and untracked files while respecting .gitignore rules. Filters the
     result to regular files on disk (following symlinks), so deleted files
     that are still in the git index are excluded -- as are symlinks that
     resolve to a directory (e.g. a tracked symlink into a skills tree),
-    which git lists as a blob but which cannot be read as a file.
+    which git lists as a blob but which cannot be read as a file, and
+    binary files, which cannot be read as text at all.
     """
     glob_pattern = f"*{extension}" if extension is not None else "*"
     try:
@@ -151,24 +176,28 @@ def _get_all_files_with_extension(
         raise GitCommandError(f"Failed to list files in {folder_path}") from e
 
     file_paths = [folder_path / line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return tuple(f for f in file_paths if f.is_file())
+    # Name first, then content. The extension list turns away the known binary formats without
+    # opening them; the sniff only has to read what is left, and is what catches a format the
+    # list does not name.
+    named_text = (f for f in file_paths if not any(f.match(pattern) for pattern in BINARY_FILE_EXCLUSION))
+    return tuple(f for f in named_text if f.is_file() and _is_text_file(f))
 
 
-def _get_non_ignored_files_with_extension(
+def _get_non_ignored_text_files_with_extension(
     folder_path: Path,
     extension: FileExtension | None,
     excluded_path_patterns: tuple[str, ...] = (),
 ) -> tuple[Path, ...]:
-    """Get non-gitignored files on disk in a folder, with optional path exclusions.
+    """Get non-gitignored text files on disk in a folder, with optional path exclusions.
 
     If extension is provided, only files matching that extension are returned.
-    If extension is None, all non-ignored files are returned.
+    If extension is None, every non-ignored text file is returned.
 
     Each pattern in excluded_path_patterns is matched against file paths using Path.match(),
     which matches from the right for relative patterns (e.g., "test_*.py" matches any file
     whose name starts with "test_" regardless of directory depth).
     """
-    file_paths = _get_all_files_with_extension(folder_path, extension)
+    file_paths = _get_all_text_files_with_extension(folder_path, extension)
 
     if excluded_path_patterns:
         file_paths = tuple(fp for fp in file_paths if not any(fp.match(pattern) for pattern in excluded_path_patterns))
@@ -178,9 +207,15 @@ def _get_non_ignored_files_with_extension(
 
 @lru_cache(maxsize=None)
 def _read_file_contents(file_path: Path) -> str:
-    """Read and cache file contents."""
+    """Read and cache file contents.
+
+    Undecodable bytes become the replacement character rather than raising. `_is_text_file`
+    already turns away anything holding a NUL, so what reaches here and still fails to decode is
+    text in some other encoding; a byte that decodes to U+FFFD cannot match a ratchet pattern, so
+    substituting it loses nothing a scan would have found.
+    """
     try:
-        return file_path.read_text()
+        return file_path.read_text(errors="replace")
     except OSError as e:
         raise FileReadError(f"Cannot read file: {file_path}") from e
 
@@ -316,7 +351,7 @@ def get_ratchet_failures(
     Blame dates are not computed here; they are resolved on demand via _resolve_blame_dates()
     when a failure message needs to be formatted.
     """
-    file_paths = _get_non_ignored_files_with_extension(folder_path, extension, excluded_path_patterns)
+    file_paths = _get_non_ignored_text_files_with_extension(folder_path, extension, excluded_path_patterns)
 
     chunks: list[RatchetMatchChunk] = []
 

@@ -16,7 +16,7 @@ from imbue.imbue_common.pure import pure
 from imbue.imbue_common.ratchet_testing.core import FileExtension
 from imbue.imbue_common.ratchet_testing.core import LineNumber
 from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
-from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_files_with_extension
+from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_text_files_with_extension
 from imbue.imbue_common.ratchet_testing.core import get_ast_nodes_of_type
 
 TEST_FILE_PATTERNS: Final[tuple[str, ...]] = ("*_test.py", "test_*.py", "conftest.py", "testing.py")
@@ -27,7 +27,7 @@ def find_if_elif_without_else(
     excluded_path_patterns: tuple[str, ...] = (),
 ) -> tuple[RatchetMatchChunk, ...]:
     """Find all if/elif chains without else clauses using AST analysis."""
-    file_paths = _get_non_ignored_files_with_extension(source_dir, FileExtension(".py"), excluded_path_patterns)
+    file_paths = _get_non_ignored_text_files_with_extension(source_dir, FileExtension(".py"), excluded_path_patterns)
     chunks: list[RatchetMatchChunk] = []
 
     for file_path in file_paths:
@@ -154,7 +154,7 @@ def find_init_methods_in_non_exception_classes(
     Most classes should use Pydantic models which don't need __init__ methods.
     Only Exception/Error classes should define __init__ since they can't use Pydantic.
     """
-    file_paths = _get_non_ignored_files_with_extension(
+    file_paths = _get_non_ignored_text_files_with_extension(
         source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
     )
     chunks: list[RatchetMatchChunk] = []
@@ -231,7 +231,7 @@ def find_inline_functions(
     Excludes decorator wrapper functions that use @functools.wraps, as these are
     a standard pattern for implementing decorators.
     """
-    file_paths = _get_non_ignored_files_with_extension(
+    file_paths = _get_non_ignored_text_files_with_extension(
         source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
     )
     chunks: list[RatchetMatchChunk] = []
@@ -272,7 +272,7 @@ def find_underscore_imports(
     excluded_path_patterns: tuple[str, ...] = (),
 ) -> tuple[RatchetMatchChunk, ...]:
     """Find imports of underscore-prefixed names using AST analysis, excluding test files."""
-    file_paths = _get_non_ignored_files_with_extension(
+    file_paths = _get_non_ignored_text_files_with_extension(
         source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
     )
     chunks: list[RatchetMatchChunk] = []
@@ -339,7 +339,7 @@ def find_per_file_host_uploads_in_loops(
     protocol banner" failures. Transfer many files with a single bulk copy
     (``host.copy_directory``, i.e. rsync) instead.
     """
-    file_paths = _get_non_ignored_files_with_extension(
+    file_paths = _get_non_ignored_text_files_with_extension(
         source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
     )
     chunks: list[RatchetMatchChunk] = []
@@ -388,7 +388,7 @@ def find_cast_usages(
     cast() usage should be avoided in favor of type: ignore comments when there's
     no other way to satisfy the type checker.
     """
-    file_paths = _get_non_ignored_files_with_extension(
+    file_paths = _get_non_ignored_text_files_with_extension(
         source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
     )
     chunks: list[RatchetMatchChunk] = []
@@ -440,7 +440,7 @@ def find_assert_isinstance_usages(
     match constructs that exhaustively handle all cases using
     'case _ as unreachable: assert_never(unreachable)'.
     """
-    file_paths = _get_non_ignored_files_with_extension(
+    file_paths = _get_non_ignored_text_files_with_extension(
         source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
     )
     chunks: list[RatchetMatchChunk] = []
@@ -706,7 +706,7 @@ def find_silent_decode_error_catches(
     `logger.opt(...).error(...)`) do not count. Test files are excluded so tests can simulate
     bad input without tripping the ratchet.
     """
-    file_paths = _get_non_ignored_files_with_extension(
+    file_paths = _get_non_ignored_text_files_with_extension(
         source_dir, FileExtension(".py"), TEST_FILE_PATTERNS + excluded_path_patterns
     )
     chunks: list[RatchetMatchChunk] = []
@@ -748,7 +748,7 @@ def find_code_in_init_files(
     other ignored dirs under source_dir are not scanned.
     """
     root_init = source_dir / "__init__.py"
-    py_files = _get_non_ignored_files_with_extension(source_dir, FileExtension(".py"))
+    py_files = _get_non_ignored_text_files_with_extension(source_dir, FileExtension(".py"))
     init_files = [f for f in py_files if f.name == "__init__.py"]
 
     violations: list[str] = []

@@ -10,8 +10,8 @@ from imbue.imbue_common.ratchet_testing.core import GitCommandError
 from imbue.imbue_common.ratchet_testing.core import LineNumber
 from imbue.imbue_common.ratchet_testing.core import RatchetMatchChunk
 from imbue.imbue_common.ratchet_testing.core import RegexPattern
-from imbue.imbue_common.ratchet_testing.core import _get_all_files_with_extension
-from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_files_with_extension
+from imbue.imbue_common.ratchet_testing.core import _get_all_text_files_with_extension
+from imbue.imbue_common.ratchet_testing.core import _get_non_ignored_text_files_with_extension
 from imbue.imbue_common.ratchet_testing.core import _read_file_contents
 from imbue.imbue_common.ratchet_testing.core import format_ratchet_failure_message
 from imbue.imbue_common.ratchet_testing.core import get_ratchet_failures
@@ -104,7 +104,7 @@ def test_get_non_ignored_files_returns_matching_files(git_repo: Path) -> None:
     )
 
     # Call the function
-    result = _get_non_ignored_files_with_extension(git_repo, FileExtension(".py"))
+    result = _get_non_ignored_text_files_with_extension(git_repo, FileExtension(".py"))
 
     assert len(result) == 2
     assert all(path.suffix == ".py" for path in result)
@@ -127,11 +127,11 @@ def test_get_non_ignored_files_excludes_by_pattern(git_repo: Path) -> None:
     )
 
     # Call without exclusion - should get both files
-    result_without_exclusion = _get_non_ignored_files_with_extension(git_repo, FileExtension(".py"))
+    result_without_exclusion = _get_non_ignored_text_files_with_extension(git_repo, FileExtension(".py"))
     assert len(result_without_exclusion) == 2
 
     # Call with exclusion pattern - should get only one file
-    result_with_exclusion = _get_non_ignored_files_with_extension(git_repo, FileExtension(".py"), ("file1.py",))
+    result_with_exclusion = _get_non_ignored_text_files_with_extension(git_repo, FileExtension(".py"), ("file1.py",))
     assert len(result_with_exclusion) == 1
     assert result_with_exclusion[0].resolve() == file2.resolve()
 
@@ -152,7 +152,7 @@ def test_get_non_ignored_files_excludes_by_glob_pattern(git_repo: Path) -> None:
     )
 
     # Exclude test files using patterns
-    result = _get_non_ignored_files_with_extension(git_repo, FileExtension(".py"), ("*_test.py", "test_*.py"))
+    result = _get_non_ignored_text_files_with_extension(git_repo, FileExtension(".py"), ("*_test.py", "test_*.py"))
     assert len(result) == 1
     assert result[0].name == "main.py"
 
@@ -173,7 +173,7 @@ def test_get_all_files_excludes_deleted_but_tracked_files(git_repo: Path) -> Non
     # Delete the file from disk but don't stage the deletion
     tracked_file.unlink()
 
-    result = _get_all_files_with_extension(git_repo, FileExtension(".py"))
+    result = _get_all_text_files_with_extension(git_repo, FileExtension(".py"))
     result_names = [p.name for p in result]
     assert "tracked.py" not in result_names
 
@@ -195,7 +195,7 @@ def test_get_all_files_includes_untracked_non_ignored_files(git_repo: Path) -> N
     untracked_file = git_repo / "untracked.py"
     untracked_file.write_text("print('untracked')")
 
-    result = _get_all_files_with_extension(git_repo, FileExtension(".py"))
+    result = _get_all_text_files_with_extension(git_repo, FileExtension(".py"))
     result_names = [p.name for p in result]
     assert "committed.py" in result_names
     assert "untracked.py" in result_names
@@ -223,7 +223,7 @@ def test_get_all_files_excludes_symlink_to_directory(git_repo: Path) -> None:
         capture_output=True,
     )
 
-    result = _get_all_files_with_extension(git_repo, None)
+    result = _get_all_text_files_with_extension(git_repo, None)
     result_names = [p.name for p in result]
     assert "link_to_dir" not in result_names
     assert "real.py" in result_names
@@ -245,6 +245,35 @@ def test_read_file_contents_caches_results(tmp_path: Path) -> None:
 
     assert content1 == "original content"
     assert content1 is content2
+
+
+def test_get_all_files_excludes_binary_files(git_repo: Path) -> None:
+    """A tracked binary file must be excluded from an unfiltered scan.
+
+    A scan with no extension filter reaches every non-ignored file, and a project that vendors a
+    frontend tracks fonts and icons alongside its source. Those cannot be decoded as text, so
+    without this filter the whole scan dies on a UnicodeDecodeError rather than reporting
+    violations.
+    """
+    (git_repo / "real.py").write_text("print('real')")
+    # A TrueType header: NUL bytes up front, which is the usual signal that a file is not text.
+    (git_repo / "font.ttf").write_bytes(b"\x00\x01\x00\x00\x00\x13GDEF\xbc9\xeb\x0f")
+
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "Add a binary file"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+    )
+
+    result_names = [p.name for p in _get_all_text_files_with_extension(git_repo, None)]
+    assert "font.ttf" not in result_names
+    assert "real.py" in result_names
+
+    # The full scan must not raise while decoding the binary file.
+    chunks = get_ratchet_failures(git_repo, None, RegexPattern(r"print"))
+    assert len(chunks) == 1
 
 
 def test_get_ratchet_failures_finds_matches_in_git_repo(git_repo: Path) -> None:
