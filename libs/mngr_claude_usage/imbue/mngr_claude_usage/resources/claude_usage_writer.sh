@@ -51,11 +51,24 @@ if [ -z "$events_path" ]; then
   events_path="$MNGR_AGENT_STATE_DIR/events/claude/usage/events.jsonl"
 fi
 
+# jq is a hard dependency (used in the should-emit gate below and in the event
+# construction). If it is missing, fail loudly rather than letting the gate's
+# `|| echo "no"` silently treat every render as a no-op -- that would disable
+# usage tracking host-wide with no diagnostic anywhere. The shim invokes us with
+# `|| true`, so this stderr message + non-zero exit surfaces the breakage
+# without disturbing the user's statusline.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "claude_usage_writer: jq not found (required to emit usage events)" >&2
+  exit 64
+fi
+
 input=$(cat)
 
 # Skip emission when the payload has neither rate_limits nor cost. jq's `try`
 # returns null for non-object input; `|| echo "no"` keeps the writer a no-op
-# (rather than a hard error under `set -euo pipefail`) when stdin isn't JSON.
+# (rather than a hard error under `set -euo pipefail`) when stdin isn't valid
+# JSON. jq-absence is already handled loudly above, so this fallback now only
+# masks genuine parse failures, not a missing interpreter.
 should_emit=$(printf '%s' "$input" | jq -r '
   if ((try .rate_limits // null) != null) or ((try .cost // null) != null)
   then "yes" else "no" end
@@ -100,8 +113,8 @@ event=$(printf '%s' "$input" | jq -c \
     type: "cost_snapshot",
     event_id: $event_id,
     timestamp: $timestamp,
-    session_id: (try .session_id // null),
-    cost: (try .cost // null),
+    session_id: (.session_id // null),
+    cost: (.cost // null),
     rate_limits: (
       (try .rate_limits // null) as $rl |
       if $rl == null then null
