@@ -1,12 +1,12 @@
 from imbue.imbue_common.pure import pure
 
 
-def test_pure_decorator_returns_same_function() -> None:
-    @pure
+def test_pure_decorator_returns_the_same_function_object() -> None:
     def add(a: int, b: int) -> int:
         return a + b
 
-    assert add(1, 2) == 3
+    # pure is an advisory no-op decorator: it must return the original function unchanged.
+    assert pure(add) is add
 
 
 def test_pure_decorator_preserves_function_name() -> None:
