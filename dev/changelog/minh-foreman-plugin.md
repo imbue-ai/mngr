@@ -1,0 +1,1 @@
+- Registered the new `mngr_foreman` package in the uv workspace (uv.lock updated); it is picked up automatically via `libs/*`.

@@ -1,0 +1,258 @@
+"""Detect whether an agent's claude TUI is blocking on a dialog, plus mngr's
+busy/idle signal -- the two inputs to the chat page's composer + working dot.
+
+The composer sends a message by pasting into the agent's tmux input box. While
+claude shows a blocking dialog (trust, permission, plan approval, AskUserQuestion,
+/login, the model picker, ...) that paste can't be delivered, so the chat page
+greys the composer and points at the terminal.
+
+**One catch-all pane detector.** Every Claude Code dialog renders the same shape:
+a numbered option list with the highlighted choice under a ``❯`` selection cursor,
+e.g. ``❯ 1. Yes``. So rather than enumerate each dialog (trust/theme/cost/... each
+with its own marker string), we key on that single shape -- the cursor on a
+numbered option (``❯ <n>.``) *plus* at least one sibling numbered option
+(``  <m>.``) in the bottom of the pane. The ready input row is ``❯`` (empty) or
+``❯ <typed text>`` -- never ``❯ <digit>.`` -- and a slash command like ``❯ /login``
+has no digit, so neither trips it. Requiring a sibling option guards against a
+stray ``❯ 1.`` echoed in transcript content: a real menu always has >=2 options,
+and the cursor line is anchored at line start so mid-line text can't match.
+
+**Free pane-less signal.** mngr's own field generator publishes
+``plugin.claude.waiting_reason == PERMISSIONS`` when claude is blocked on a
+tool-approval dialog (``_waiting_reason`` in ``mngr_claude/plugin.py``). We read it
+straight off the ``AgentDetails`` we already hold (``is_permissions_blocked``) and
+OR it with the pane rule, so a permission prompt greys the composer even without a
+tmux capture.
+
+Detection is a single ``tmux capture-pane`` over the agent's host per poll; the
+page polls it at a steady rate while the agent is running (over the warm pool, so
+each probe is cheap).
+"""
+
+from __future__ import annotations
+
+import re
+import shlex
+import threading
+import time
+from collections.abc import Callable
+
+from loguru import logger
+
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
+from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr_foreman.connection_pool import ConnectionPool
+
+
+def is_busy_state(state: str | None) -> bool:
+    """True when mngr reports claude actively working (its turn in progress).
+
+    mngr promotes an agent to ``RUNNING`` only while the ``active`` marker file
+    exists and the claude process is alive -- the marker is created by claude's
+    UserPromptSubmit hook when a turn starts and removed by the Stop / idle-prompt
+    hooks when it ends (see ``mngr_claude/claude_config.py``). Every other state is
+    *not generating*: ``WAITING`` is idle at the prompt (END_OF_TURN) or blocked on
+    a dialog (PERMISSIONS), and STOPPED / DONE / REPLACED / UNKNOWN are all
+    non-running. So a single ``== RUNNING`` test is the authoritative busy/idle
+    signal that drives the chat page's working dot off (the transcript heuristic
+    turns it on instantly; this turns it off reliably).
+
+    ``RUNNING_UNKNOWN_AGENT_TYPE`` cannot arise for a claude agent (its type is
+    known), so it is deliberately *not* treated as busy here.
+    """
+    return (state or "").upper() == "RUNNING"
+
+
+def waiting_reason_of(agent: AgentDetails) -> str | None:
+    """Read the agent's ``waiting_reason`` off the AgentDetails plugin fields, if present.
+
+    Each agent plugin's field generator publishes it under its own key --
+    ``plugin.claude.waiting_reason``, ``plugin.codex.waiting_reason``,
+    ``plugin.opencode.waiting_reason`` -- as a ``WaitingReason`` (PERMISSIONS /
+    END_OF_TURN), populated on the online listing/observe path and absent (None)
+    when the host wasn't probed online. The publishing key matches ``agent.type``,
+    so read that key. The stored value may be the enum or its serialized string,
+    so normalize to an upper-case string. A type with no such field simply has no
+    matching block -> None.
+    """
+    plugin = agent.plugin if isinstance(agent.plugin, dict) else {}
+    plugin_fields = plugin.get(agent.type)
+    if not isinstance(plugin_fields, dict):
+        return None
+    raw = plugin_fields.get("waiting_reason")
+    return None if raw is None else str(getattr(raw, "value", raw)).upper()
+
+
+def is_permissions_blocked(agent: AgentDetails) -> bool:
+    """True if mngr's ``waiting_reason`` field reports a permission dialog.
+
+    The free, pane-less signal described in the module docstring. For claude it
+    is OR'd with the pane ``❯`` rule; for codex and opencode, which drive no other
+    blocking dialog, it is the sole needs-input signal.
+    """
+    reason = waiting_reason_of(agent)
+    return reason is not None and "PERMISSIONS" in reason
+
+
+# The highlighted numbered option under the selection cursor: "❯ 1. Yes". Anchored
+# at line start (after optional indent) so echoed transcript text mid-line can't
+# trip it. Every claude choice dialog renders its active option this way.
+_CHOICE_CURSOR_RE = re.compile(r"^\s*❯\s*\d+\.\s", re.MULTILINE)
+# Any *non-cursor* numbered option: "  2. No". A real menu always has >=2 options,
+# so requiring one of these alongside the cursor rejects a stray "❯ 1.".
+_MENU_OPTION_RE = re.compile(r"^\s*\d+\.\s", re.MULTILINE)
+# How many lines from the bottom of the pane to inspect (a dialog always occupies
+# the bottom); scanning only the tail avoids matching old output still on screen.
+_TAIL_LINES = 25
+
+# Bound the capture-pane probe so an unresponsive host can't wedge the poll.
+_HOST_COMMAND_TIMEOUT_SECONDS = 10.0
+# Lock-wait bound for the ~1s input-state poll: short so a busy host makes it skip the
+# tick (client keeps its last state) rather than queue a blocked thread. Just above one
+# command timeout so a probe still lands when the host is merely finishing a command.
+_POLL_LOCK_TIMEOUT_SECONDS = 12.0
+# The one generic label -- the UI shows a single "interactive prompt" state
+# regardless of which dialog it is.
+_GENERIC_DIALOG_REASON = "interactive prompt"
+
+
+def classify_blocking_pane(content: str) -> str | None:
+    """Return a reason if the pane's tail shows a numbered-choice dialog, else None.
+
+    Pure function over a tmux pane capture -- unit-tested against fixtures. The
+    reason is only a label (the UI shows one generic state); ``None`` means the
+    composer is usable.
+    """
+    if not content:
+        return None
+    tail = "\n".join(content.splitlines()[-_TAIL_LINES:])
+    if _CHOICE_CURSOR_RE.search(tail) and _MENU_OPTION_RE.search(tail):
+        return _GENERIC_DIALOG_REASON
+    return None
+
+
+def is_working_title(title: str) -> bool | None:
+    """True if the tmux pane title's leading glyph is Claude's animated spinner.
+
+    Claude renders its terminal title as ``<spinner-glyph> <what it's doing>``,
+    animating braille dots (U+2800-U+28FF) while generating and switching to a
+    static glyph (e.g. ✳) once idle. Because the title is metadata (not screen
+    content) it is immune to the user scrolling the pane, and it reflects the real
+    generating/idle state -- unlike mngr's turn-boundary marker, which goes stale
+    on an interrupt. Returns ``None`` for an empty title (indeterminate).
+    """
+    stripped = title.strip()
+    if not stripped:
+        return None
+    return 0x2800 <= ord(stripped[0]) <= 0x28FF
+
+
+_PANE_PROBE_SEP = "@@MNGR_PANE_SEP@@"
+
+
+def probe_pane_state(pool: ConnectionPool, agent_name: str) -> tuple[bool | None, str | None]:
+    """One warm-pool round-trip returning ``(is_working, blocking_dialog_reason)``.
+
+    Reads the tmux pane **title** (the spinner glyph -> working/idle) AND the pane
+    **content** (the ``❯`` blocking-dialog classifier) in a single command, so the
+    three UI states -- WORKING, NEEDS INPUT, READY -- are all derived from the live
+    pane, fresh every poll. Any failure returns ``(None, None)``: an indeterminate
+    probe must neither claim a state nor grey the composer.
+    """
+    window = pool.mngr_ctx.config.tmux.primary_window_name
+
+    def _probe(agent: AgentInterface, host: OnlineHostInterface) -> tuple[bool | None, str | None]:
+        tgt = TmuxWindowTarget(session_name=agent.session_name, window=window).as_shell_arg()
+        # `tmux -u` forces UTF-8 output. Without it, when the probe runs over a pooled
+        # connection whose client env doesn't advertise UTF-8 (common for remote docker
+        # agents), tmux substitutes EVERY non-ASCII glyph with `_` -- so the spinner
+        # braille, the idle ✳, and the ❯ dialog marker all read as `_` and the state is
+        # always misread as READY. Local reads happened to preserve UTF-8, hiding this.
+        command = (
+            f"tmux -u display-message -p -t {tgt} '#{{pane_title}}'; "
+            f"printf '%s\\n' {shlex.quote(_PANE_PROBE_SEP)}; "
+            f"tmux -u capture-pane -p -t {tgt}"
+        )
+        result = host.execute_stateful_command(command, timeout_seconds=_HOST_COMMAND_TIMEOUT_SECONDS)
+        if not result.success:
+            logger.trace("input-state pane probe for {} failed: {}", agent_name, result.stderr or result.stdout)
+            return None, None
+        title, sep, pane = result.stdout.partition(_PANE_PROBE_SEP + "\n")
+        if not sep:  # separator missing -> partial/garbled output; indeterminate
+            return None, None
+        return is_working_title(title), classify_blocking_pane(pane)
+
+    try:
+        return pool.run_on_host(agent_name, _probe, lock_timeout=_POLL_LOCK_TIMEOUT_SECONDS)
+    except Exception as e:  # noqa: BLE001 - a failed/busy probe is "unknown", not a state
+        logger.trace("input-state pane probe for {} failed: {}", agent_name, e)
+        return None, None
+
+
+# Serve concurrent pollers from one probe for this long. The client polls each agent
+# ~1s, so a single tab still gets a fresh read every second; this only collapses the
+# OVERLAP -- many tabs/devices probing the same agent in the same window.
+_PANE_CACHE_TTL_SECONDS = 0.75
+# Above this many cached agents, drop entries not refreshed in _PANE_CACHE_STALE_AFTER
+# (that agent stopped being polled -- destroyed or every viewer left). Keeps the maps
+# bounded by the live-and-watched agent count over a year, not by every name ever seen.
+_PANE_CACHE_PRUNE_THRESHOLD = 256
+_PANE_CACHE_STALE_AFTER_SECONDS = 60.0
+
+
+class PaneStateCache:
+    """Collapse the many input-state pollers into <=1 SSH pane probe per agent per TTL.
+
+    The home page polls ``/input-state`` for every visible card every ~1s, and every
+    open chat tab polls its agent every ~1s. At 50 agents x several devices that is
+    hundreds of ``tmux capture-pane``-over-SSH per second -- each a werkzeug thread
+    taking the host lock and contending with transcript reads. That polling
+    amplification, not the per-probe cost, is the 50-agent scaling wall.
+
+    This serves all callers within a short window from one probe, and a per-agent
+    single-flight lock means only ONE probe is ever in flight per agent -- so SSH load
+    scales with the number of AGENTS, not agents x tabs.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = _PANE_CACHE_TTL_SECONDS,
+        probe_fn: Callable[[ConnectionPool, str], tuple[bool | None, str | None]] = probe_pane_state,
+    ) -> None:
+        self._ttl = ttl_seconds
+        self._probe_fn = probe_fn  # injectable so a test drives it without monkeypatch
+        self._lock = threading.Lock()  # guards the maps only (never held across a probe)
+        self._values: dict[str, tuple[float, tuple[bool | None, str | None]]] = {}
+        self._flights: dict[str, threading.Lock] = {}
+
+    def probe(self, pool: ConnectionPool, agent_name: str) -> tuple[bool | None, str | None]:
+        now = time.monotonic()
+        with self._lock:
+            hit = self._values.get(agent_name)
+            if hit is not None and hit[0] > now:
+                return hit[1]
+            flight = self._flights.setdefault(agent_name, threading.Lock())
+        # Single-flight: only one probe per agent runs at a time. Concurrent callers
+        # wait on `flight`, then read the value the winner cached -- no extra SSH hit.
+        with flight:
+            now = time.monotonic()
+            with self._lock:
+                hit = self._values.get(agent_name)
+                if hit is not None and hit[0] > now:
+                    return hit[1]
+            value = self._probe_fn(pool, agent_name)  # the one real SSH round-trip
+            with self._lock:
+                self._values[agent_name] = (now + self._ttl, value)
+                self._prune(now)
+            return value
+
+    def _prune(self, now: float) -> None:
+        if len(self._values) <= _PANE_CACHE_PRUNE_THRESHOLD:
+            return
+        # Stale = not refreshed in a minute, so no probe is in flight for it -> safe to
+        # drop its flight lock too. Bounds both maps by the watched-agent count.
+        for n in [n for n, (exp, _) in self._values.items() if exp < now - _PANE_CACHE_STALE_AFTER_SECONDS]:
+            self._values.pop(n, None)
+            self._flights.pop(n, None)

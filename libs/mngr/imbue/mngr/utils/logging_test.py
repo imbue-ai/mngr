@@ -324,7 +324,7 @@ def test_format_user_message_adds_plain_warning_when_not_tty(monkeypatch: pytest
 
     def check() -> None:
         result = _format_user_message(_make_record("WARNING"))
-        assert result == "WARNING: {message}\n"
+        assert result == "WARNING: {message}\n{exception}"
         assert WARNING_COLOR not in result
 
     _with_pipe_stderr(check, monkeypatch)
@@ -334,7 +334,7 @@ def test_format_user_message_returns_plain_message_for_info() -> None:
     """_format_user_message should return plain message for INFO level regardless of TTY."""
     result = _format_user_message(_make_record("INFO"))
 
-    assert result == "{message}\n"
+    assert result == "{message}\n{exception}"
     assert "WARNING" not in result
     assert WARNING_COLOR not in result
 
@@ -356,7 +356,7 @@ def test_format_user_message_returns_plain_debug_when_not_tty(monkeypatch: pytes
 
     def check() -> None:
         result = _format_user_message(_make_record("DEBUG"))
-        assert result == "{message}\n"
+        assert result == "{message}\n{exception}"
         assert DEBUG_COLOR not in result
 
     _with_pipe_stderr(check, monkeypatch)
@@ -379,7 +379,7 @@ def test_format_user_message_returns_plain_build_when_not_tty(monkeypatch: pytes
 
     def check() -> None:
         result = _format_user_message(_make_record("BUILD"))
-        assert result == "{message}\n"
+        assert result == "{message}\n{exception}"
         assert BUILD_COLOR not in result
 
     _with_pipe_stderr(check, monkeypatch)
@@ -403,7 +403,7 @@ def test_format_user_message_adds_plain_error_when_not_tty(monkeypatch: pytest.M
 
     def check() -> None:
         result = _format_user_message(_make_record("ERROR"))
-        assert result == "ERROR: {message}\n"
+        assert result == "ERROR: {message}\n{exception}"
         assert ERROR_COLOR not in result
 
     _with_pipe_stderr(check, monkeypatch)

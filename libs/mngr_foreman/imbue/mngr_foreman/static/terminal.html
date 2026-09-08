@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>foreman · terminal</title>
+  <link rel="stylesheet" href="/static/vendor/xterm.min.css" />
+  <link rel="stylesheet" href="/static/foreman.css" />
+</head>
+<body class="term-body">
+  <div class="topbar">
+    <a href="#" class="brand" id="back">‹ back</a>
+    <span class="meta" id="agent-name"></span>
+    <span class="spacer"></span>
+    <span class="meta" id="conn">connecting…</span>
+  </div>
+  <div class="ctrlbar" id="ctrlbar">
+    <button data-seq="up">↑</button>
+    <button data-seq="down">↓</button>
+    <button data-seq="left">←</button>
+    <button data-seq="right">→</button>
+    <button data-seq="enter">Enter</button>
+    <button data-seq="esc">Esc</button>
+    <button data-seq="tab">Tab</button>
+    <button data-seq="shifttab">⇧Tab</button>
+    <button data-seq="pgup">PgUp</button>
+    <button data-seq="pgdn">PgDn</button>
+    <button data-seq="paste" class="paste">Paste</button>
+    <button data-seq="selmode" class="selmode" title="Toggle select mode: drag to select text even while the app has mouse control. On desktop, hold Shift (Option on Mac) and drag instead.">Select</button>
+    <span class="ctrl-hint">Shift+drag to select (⌥+drag on Mac)</span>
+  </div>
+  <div id="term"></div>
+  <div class="paste-popover" id="paste-popover" hidden>
+    <div class="pp-inner">
+      <div class="pp-title">Paste text (clipboard blocked on this connection)</div>
+      <textarea id="pp-text" rows="3" placeholder="paste here…" autocomplete="off"></textarea>
+      <div class="pp-actions">
+        <button id="pp-cancel">cancel</button>
+        <button id="pp-send">send</button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/vendor/xterm.min.js"></script>
+  <script src="/static/vendor/xterm-addon-fit.min.js"></script>
+  <script src="/static/app.js"></script>
+  <script>foreman.initTerminal();</script>
+</body>
+</html>
