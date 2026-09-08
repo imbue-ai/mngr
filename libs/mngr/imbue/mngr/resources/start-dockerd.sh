@@ -7,6 +7,27 @@
 set -euo pipefail
 set -x
 
+DOCKERD_STARTUP_TIMEOUT_SECONDS="${DOCKERD_STARTUP_TIMEOUT_SECONDS:-60}"
+
+# Watching the pid is what tells a crashed daemon apart from a merely slow one.
+wait_for_dockerd() {
+    local dockerd_pid="$1"
+    local timeout_seconds="$2"
+    local deadline
+    deadline=$(( $(date +%s) + timeout_seconds ))
+    until /usr/local/bin/docker info >/dev/null 2>&1; do
+        if ! kill -0 "$dockerd_pid" 2>/dev/null; then
+            echo "Error: dockerd (PID $dockerd_pid) exited before becoming ready." >&2
+            return 1
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "Error: dockerd (PID $dockerd_pid) did not accept API calls within ${timeout_seconds}s." >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
+
 # Guard: skip if dockerd is already running
 if /usr/local/bin/docker info >/dev/null 2>&1; then
     echo "Docker daemon is already running."
@@ -16,8 +37,9 @@ fi
 # Guard: skip if another start-dockerd.sh is in progress (PID file exists
 # but daemon hasn't finished starting yet)
 if [ -f /var/run/docker.pid ] && kill -0 "$(cat /var/run/docker.pid)" 2>/dev/null; then
-    echo "Docker daemon process exists (PID $(cat /var/run/docker.pid)), waiting for it..."
-    timeout 60 sh -c 'until /usr/local/bin/docker info >/dev/null 2>&1; do sleep 1; done'
+    existing_pid="$(cat /var/run/docker.pid)"
+    echo "Docker daemon process exists (PID $existing_pid), waiting for it..."
+    wait_for_dockerd "$existing_pid" "$DOCKERD_STARTUP_TIMEOUT_SECONDS"
     echo "Docker daemon is ready."
     exit 0
 fi
@@ -94,7 +116,5 @@ EOF
 # Use explicit public DNS (1.1.1.1, 8.8.8.8) for containers too -- the
 # Docker bridge's default DNS forwarder cannot resolve upstream.
 dockerd --iptables=false --ip6tables=false --ipv6=false --dns=1.1.1.1 --dns=8.8.8.8 &
-
-# Wait for Docker daemon to be ready
-timeout 60 sh -c 'until /usr/local/bin/docker info >/dev/null 2>&1; do sleep 1; done'
+wait_for_dockerd "$!" "$DOCKERD_STARTUP_TIMEOUT_SECONDS"
 echo "Docker daemon is ready."
