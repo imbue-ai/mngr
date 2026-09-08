@@ -152,7 +152,7 @@ Templates differ from command defaults in that they must be explicitly selected 
 
 ### Work Directory Extra Paths
 
-When creating agents with `--worktree` or `--copy-source`, certain files outside of git (e.g., local config, virtual environments, build caches) are not included by default. The `work_dir_extra_paths` setting lets you declare which additional paths should be available in new work directories and how they should be transferred.
+When `mngr create` builds a new work directory from your project (the default `--transfer=git-worktree` for git repos, or `--transfer=rsync` for non-git projects), certain files outside of git tracking (e.g., local config, virtual environments, build caches) are not included by default. The `work_dir_extra_paths` setting lets you declare which additional paths should be available in new work directories and how they should be transferred.
 
 ```toml
 # .mngr/settings.toml
