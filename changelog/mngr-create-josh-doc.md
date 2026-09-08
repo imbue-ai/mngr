@@ -1,0 +1,1 @@
+- Added `josh_taste.md` at the repo root: a prompt/document that captures Josh Albrecht's engineering taste and heuristics (tooling preferences, simplicity, fail-fast, type safety, testing, observability, etc.) for use by agents that need to emulate his technical decisions.
