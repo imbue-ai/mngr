@@ -1,0 +1,11 @@
+Added `docs/reports/`, a dated home at the repo root for point-in-time analyses (with a README stating the convention: date-prefixed snapshots, living docs stay in project `docs/` directories), seeded with two reports researched on 2026-07-06:
+
+- `2026-07-06-minds-build-sign-ship.md`: how the minds desktop app is built, signed, tested, and released — the design intent the team has committed to in writing (thin Electron shell, ToDesktop-outsourced signing and notarization, the immutable `minds-v*` triple, verification by reproduction, CI as a surface rather than a gate), the pipeline as actually built, a divergence table of where documentation disagrees with reality, and the manual/automated boundary including bus-factor notes.
+
+- `2026-07-06-design-intent-landscape.md`: an inventory of where design intent lives across the repo (CLAUDE.md, style guide, docs, skills, hooks, CI gates, ratchets) arranged as an enforcement ladder, the finding that documentation truthfulness correlates with enforcement level, the catalog of stale or contradictory intent artifacts, and an enshrined META rule (discoverability, navigability, simplicity) with prioritized, small follow-up recommendations.
+
+Also gitignored `**/docs/reports/*.pdf`: PDFs rendered from these reports via a local pandoc/xelatex pipeline are generated artifacts and stay untracked.
+
+The build/sign/ship report now embeds a graphviz `dot` schematic of the ship-path (developer machine, release pinning, ToDesktop, CI verification, user's Mac), rendered into the PDF by the pipeline's graphviz filter; `**/graphviz-images/` (that filter's render cache) is gitignored as well.
+
+Follow-ups from architecture review: the root README now points to `docs/reports/`; the META principles (discoverability, navigability, simplicity) are enshrined durably in `docs/reports/README.md`; and the build/sign/ship report carries an erratum for the upstream `forever-claude-template` to `default-workspace-template` rename (2026-07-10) that merged into this branch after the research date — its embedded schematic now uses the current name.
