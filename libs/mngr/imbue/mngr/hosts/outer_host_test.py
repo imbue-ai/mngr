@@ -18,7 +18,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
-from imbue.mngr.hosts.outer_host import _connect_pyinfra_host_retrying_banner_read_failures
+from imbue.mngr.hosts.outer_host import _connect_pyinfra_host_retrying_transient_handshake_failures
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
@@ -709,6 +709,30 @@ def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: Mn
     assert fake.connect_call_count == 2
 
 
+def test_ensure_connected_retries_no_existing_session_connect_failures(temp_mngr_ctx: MngrContext) -> None:
+    """A "No existing session" ConnectError is ridden out just like a banner-read failure.
+
+    Regression test for the MIND-209 Modal bring-up flake: a tunnel blip during the
+    connect's key exchange makes paramiko raise "No existing session" even on a sandbox
+    whose sshd is already answering, and treating that first failed connect as fatal
+    aborted ``mngr create``/``start_host`` on fresh sandboxes.
+    """
+    fake = _FakePyinfraHostRecoveringOnConnect(
+        failure_count=1,
+        message="SSH error (No existing session)",
+    )
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    outer._ensure_connected()
+
+    assert fake.connected is True
+    assert fake.connect_call_count == 2
+
+
 def test_banner_read_retry_recovers_after_more_than_three_consecutive_failures() -> None:
     """The connect retry rides out more than three consecutive banner-read failures.
 
@@ -722,7 +746,7 @@ def test_banner_read_retry_recovers_after_more_than_three_consecutive_failures()
         message="SSH error (Error reading SSH protocol banner)",
     )
 
-    _connect_pyinfra_host_retrying_banner_read_failures(
+    _connect_pyinfra_host_retrying_transient_handshake_failures(
         cast(PyinfraHost, fake),
         deadline_seconds=5.0,
         backoff_seconds=0.0,
@@ -745,7 +769,7 @@ def test_banner_read_retry_gives_up_after_the_deadline_elapses() -> None:
     )
 
     with pytest.raises(ConnectError):
-        _connect_pyinfra_host_retrying_banner_read_failures(
+        _connect_pyinfra_host_retrying_transient_handshake_failures(
             cast(PyinfraHost, fake),
             deadline_seconds=0.2,
             backoff_seconds=0.01,
@@ -777,19 +801,28 @@ def test_ensure_connected_does_not_retry_non_transient_connect_failures(temp_mng
     ("exception", "expected"),
     [
         (ConnectError("SSH error (Error reading SSH protocol banner)"), True),
+        (ConnectError("SSH error (No existing session)"), True),
         (ConnectError("Could not connect (Connection refused)"), False),
         (ConnectError("Authentication error (username=alice): bad password"), False),
         (SSHException("Error reading SSH protocol banner"), False),
+        (SSHException("No existing session"), False),
     ],
-    ids=["banner-read", "refused", "auth", "raw-ssh-exception"],
+    ids=[
+        "banner-read",
+        "no-existing-session",
+        "refused",
+        "auth",
+        "raw-banner-ssh-exception",
+        "raw-no-session-ssh-exception",
+    ],
 )
-def test_is_transient_ssh_connect_error_matches_only_banner_read_connect_errors(
+def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_errors(
     exception: BaseException, expected: bool
 ) -> None:
-    """Only pyinfra ``ConnectError``s wrapping paramiko's banner-read failure are transient.
+    """Only pyinfra ``ConnectError``s wrapping a transient SSH handshake failure are transient.
 
-    The raw ``SSHException`` case must stay False: at connect time pyinfra
-    always wraps it in ``ConnectError``, and mid-command banner problems are
+    The raw ``SSHException`` cases must stay False: at connect time pyinfra always
+    wraps such errors in ``ConnectError``, and mid-command handshake problems are
     handled by the separate ``is_transient_ssh_error`` classifier.
     """
     assert _is_transient_ssh_connect_error(exception) is expected

@@ -287,36 +287,51 @@ retry_on_transient_ssh_error = retry(
 )
 
 
+# The transient SSH *handshake* failures a freshly provisioned or tunnel-fronted sshd
+# (a new Modal sandbox, a new VPS) exhibits, each of which clears on its own within
+# seconds. paramiko raises a distinct message per shape, and pyinfra wraps every one as
+# ``ConnectError("SSH error (<paramiko message>)")``, so they are recognized by substring:
+#   - "error reading ssh protocol banner": the endpoint accepted the TCP connection but
+#     had not answered the SSH banner yet, or a fronting tunnel accepted then reset the
+#     connection before the backend sshd was up.
+#   - "no existing session": the transport was torn down mid-handshake, so paramiko's
+#     ``get_remote_server_key`` finds no active session -- a tunnel blip during key
+#     exchange, which can strike even after a readiness probe has already succeeded.
+# Refused/unreachable/auth/host-key failures are deliberately excluded (they carry other
+# messages) so a genuinely-down host still fails fast.
+_TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES: Final[tuple[str, ...]] = (
+    "error reading ssh protocol banner",
+    "no existing session",
+)
+
+
 def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connect failure worth retrying.
+    """Whether ``exception`` is a transient SSH handshake failure worth retrying.
 
-    Matches only pyinfra ``ConnectError``s wrapping paramiko's "Error reading
-    SSH protocol banner": the TCP connection was accepted but sshd did not
-    answer the SSH handshake in time, which happens transiently while a freshly
-    booted host's sshd is still coming up (e.g. a new Modal sandbox or VPS) or
-    while it is briefly overloaded. Refused/unreachable/auth/host-key failures
-    are deliberately not matched so genuinely-down hosts still fail fast.
+    True only for pyinfra ``ConnectError``s whose message names one of
+    ``_TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES`` (defined above).
     """
-    return isinstance(exception, ConnectError) and "error reading ssh protocol banner" in str(exception).lower()
+    if not isinstance(exception, ConnectError):
+        return False
+    message = str(exception).lower()
+    return any(known in message for known in _TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES)
 
 
-# A freshly provisioned host (a new Modal sandbox, a new VPS) transiently accepts TCP
-# before its sshd answers the SSH banner. paramiko surfaces that banner-read failure
-# either immediately (the tunnel accepts the connection then resets it before the backend
-# sshd is up) or only after the full banner timeout (a stalled tunnel) -- so a fixed count
-# of zero-wait retries can burn every attempt in milliseconds before sshd is ready. Ride
-# the race out over a wall-clock deadline with a fixed pause between attempts instead, so
-# the ride-out window does not depend on how each individual attempt happens to fail.
-SSH_CONNECT_BANNER_RETRY_DEADLINE_SECONDS: Final[float] = 30.0
-SSH_CONNECT_BANNER_RETRY_BACKOFF_SECONDS: Final[float] = 0.5
+# A transient handshake failure surfaces either immediately or only after paramiko's full
+# banner timeout, so a fixed count of zero-wait retries can burn every attempt in
+# milliseconds before sshd is ready. Ride the race out over a wall-clock deadline with a
+# fixed pause between attempts instead, so the ride-out window does not depend on how each
+# individual attempt happens to fail.
+SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS: Final[float] = 30.0
+SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS: Final[float] = 0.5
 
 
-def _connect_pyinfra_host_retrying_banner_read_failures(
+def _connect_pyinfra_host_retrying_transient_handshake_failures(
     pyinfra_host: PyinfraHost,
     deadline_seconds: float,
     backoff_seconds: float,
 ) -> None:
-    """Connect a pyinfra host, retrying banner-read failures until it answers or the deadline passes."""
+    """Connect a pyinfra host, retrying transient handshake failures until it answers or the deadline passes."""
     retrying = Retrying(
         retry=retry_if_exception(_is_transient_ssh_connect_error),
         stop=stop_after_delay(deadline_seconds),
@@ -518,10 +533,10 @@ class OuterHost(OuterHostInterface):
         if self.connector.host.connected:
             return
         try:
-            _connect_pyinfra_host_retrying_banner_read_failures(
+            _connect_pyinfra_host_retrying_transient_handshake_failures(
                 self.connector.host,
-                SSH_CONNECT_BANNER_RETRY_DEADLINE_SECONDS,
-                SSH_CONNECT_BANNER_RETRY_BACKOFF_SECONDS,
+                SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS,
+                SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS,
             )
         except ConnectError as e:
             message = str(e).lower()
