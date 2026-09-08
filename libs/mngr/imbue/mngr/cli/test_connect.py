@@ -84,7 +84,13 @@ def test_connect_cli_invokes_tmux_attach_for_named_agent(
     assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
 
 
+# Real tmux agent create plus a connect that starts the host: ~2s locally, but it has
+# been observed exceeding the global 10s pytest-timeout on a slow CI sandbox. Same
+# remedy as test_connect_start_restarts_stopped_agent above: per-test timeout room
+# when slow, offload retry via @pytest.mark.flaky beyond it.
 @pytest.mark.tmux
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_connect_cli_runs_custom_connect_command(
     cli_runner: CliRunner,
     create_test_agent,

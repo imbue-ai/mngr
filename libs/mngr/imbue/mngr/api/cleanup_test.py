@@ -6,9 +6,12 @@ from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from threading import Barrier
+from threading import BrokenBarrierError
 from typing import Any
 
 import pytest
+from pydantic import ConfigDict
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
@@ -43,6 +46,12 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import make_test_agent_details
+
+# How long a host destroy waits for its peers before deciding they are not running
+# concurrently. Only reached when the destroys are sequential, i.e. on failure, so it
+# has to stay well under the 10s per-test timeout in libs/mngr/pyproject.toml -- the
+# test must fail with its own message, not as a harness timeout.
+_CONCURRENT_DESTROY_TIMEOUT_SECONDS = 3.0
 
 
 @contextmanager
@@ -106,6 +115,25 @@ class _OfflineHostSuccessProvider(_OfflineHostProvider):
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
         return None
+
+
+class _ConcurrentDestroyProvider(_OfflineHostProvider):
+    """Provider whose destroy_host returns only once every host is inside destroy_host at the same time.
+
+    The barrier is how a test observes concurrency without measuring time: destroying
+    the hosts one after another can never get them all in at once, so the barrier
+    breaks and the destroy fails instead of hanging forever.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    destroy_barrier: Barrier
+
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        try:
+            self.destroy_barrier.wait(timeout=_CONCURRENT_DESTROY_TIMEOUT_SECONDS)
+        except BrokenBarrierError as e:
+            raise MngrError("Hosts were destroyed one at a time") from e
 
 
 class _StopFailingHost(Host):
@@ -697,6 +725,78 @@ def test_execute_cleanup_destroy_offline_host_success(
         assert result.errors == []
         assert AgentName("offline-success-agent-one") in result.destroyed_agents
         assert AgentName("offline-success-agent-two") in result.destroyed_agents
+
+
+def test_execute_cleanup_destroy_works_on_hosts_concurrently(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Several hosts are destroyed at the same time, and merged into the result in the order given."""
+    host_count = 4
+    provider_name = ProviderInstanceName("concurrent-destroy-provider")
+    concurrent_provider = _ConcurrentDestroyProvider(
+        name=provider_name,
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        destroy_barrier=Barrier(host_count),
+    )
+
+    with _injected_provider(provider_name, temp_mngr_ctx, concurrent_provider):
+        agents = [
+            make_test_agent_details(
+                name=f"concurrent-destroy-agent-{index}",
+                host_id=HostId.generate(),
+                provider_name=provider_name,
+            )
+            for index in range(host_count)
+        ]
+
+        result = execute_cleanup(
+            mngr_ctx=temp_mngr_ctx,
+            agents=agents,
+            action=CleanupAction.DESTROY,
+            is_dry_run=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+
+        assert result.errors == []
+        assert result.destroyed_agents == [agent.name for agent in agents]
+
+
+@pytest.mark.allow_warnings(match=r"^Error destroying offline host")
+def test_execute_cleanup_destroy_reports_every_failing_host(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With ErrorBehavior.CONTINUE every host's failure is reported, in the order the hosts were given."""
+    provider_name = ProviderInstanceName("offline-continue-provider")
+    offline_provider = _OfflineHostProvider(
+        name=provider_name,
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with _injected_provider(provider_name, temp_mngr_ctx, offline_provider):
+        agents = [
+            make_test_agent_details(
+                name=f"continue-failure-agent-{index}",
+                host_id=HostId.generate(),
+                provider_name=provider_name,
+            )
+            for index in range(3)
+        ]
+
+        result = execute_cleanup(
+            mngr_ctx=temp_mngr_ctx,
+            agents=agents,
+            action=CleanupAction.DESTROY,
+            is_dry_run=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+
+        assert result.destroyed_agents == []
+        assert [failure.host_id for failure in result.failures] == [agent.host.id for agent in agents]
+        assert all(failure.category == CleanupFailureCategory.PROVIDER_INACCESSIBLE for failure in result.failures)
 
 
 @pytest.mark.allow_warnings(match=r"^Cannot stop \d+ agent\(s\) on offline host")

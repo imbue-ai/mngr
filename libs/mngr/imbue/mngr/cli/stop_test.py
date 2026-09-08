@@ -577,7 +577,13 @@ def test_stop_dry_run_does_not_stop_agent(
     assert "Stopped agent: dry-run-agent" in real_result.output
 
 
+# Real tmux agent create plus a stop that rewrites the agent's labels: ~2s locally, but
+# it has been observed exceeding the global 10s pytest-timeout on a slow CI sandbox.
+# Same remedy as the sibling tmux CLI tests: per-test timeout room when slow, offload
+# retry via @pytest.mark.flaky beyond it.
 @pytest.mark.tmux
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_stop_archive_sets_archived_at_label(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
