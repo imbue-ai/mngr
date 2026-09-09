@@ -14,7 +14,9 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import account_binding_probe_stdout
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
@@ -414,6 +416,8 @@ class _SpawnTimesOutAfterCreatingTheChatCaller(MngrCaller):
             return MngrCallResult(returncode=0)
         if any("MNGR_UPDATE_SELF_SKILL_PRESENT" in arg for arg in argv):
             return MngrCallResult(returncode=0, stdout="MNGR_UPDATE_SELF_SKILL_PRESENT\n")
+        if any(ACCOUNT_ARGS_BEGIN_SENTINEL in arg for arg in argv):
+            return MngrCallResult(returncode=0, stdout=account_binding_probe_stdout())
         self.store.set_activity(self.agent_id, UpdateActivity.RUNNING)
         return MngrCallResult(returncode=-1, is_timed_out=True)
 

@@ -25,9 +25,11 @@ from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROB
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
+from imbue.minds.desktop_client.skill_chat import AccountBindingState
 from imbue.minds.desktop_client.skill_chat import SkillSupport
 from imbue.minds.desktop_client.skill_chat import check_skill_support
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
+from imbue.minds.desktop_client.skill_chat import resolve_account_binding
 from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
@@ -79,6 +81,8 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
     """The workspace predates the update-self skill; there is nothing to run."""
     UNREACHABLE = auto()
     """The workspace could not be probed or started."""
+    NO_ACCOUNT = auto()
+    """The workspace named no signed-in account the update agent could run on."""
     SPAWN_FAILED = auto()
     """The workspace was reachable, but the create did not land; its verdict says why when it gave one."""
 
@@ -195,9 +199,19 @@ class WorkspaceUpdateService(MutableModel):
                 return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
             case SkillSupport.SUPPORTED:
                 pass
+        # An unbound chat reaches a config dir holding no credential, so it can never take a turn.
+        binding = resolve_account_binding(self.mngr_caller, agent_id)
+        match binding.state:
+            case AccountBindingState.UNREACHABLE:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
+            case AccountBindingState.UNAVAILABLE:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.NO_ACCOUNT)
+            case AccountBindingState.BOUND | AccountBindingState.NOT_REQUIRED:
+                pass
         spawn = spawn_skill_chat(
             self.mngr_caller,
             agent_id,
+            account_args=binding.create_args,
             chat_name=chat_name,
             # Read here rather than carried from the press: a schedule armed days ago is not
             # evidence about the backups this run is actually about to go without.

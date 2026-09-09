@@ -91,9 +91,11 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
+from imbue.minds.desktop_client.skill_chat import AccountBindingState
 from imbue.minds.desktop_client.skill_chat import SkillSupport
 from imbue.minds.desktop_client.skill_chat import check_skill_support
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
+from imbue.minds.desktop_client.skill_chat import resolve_account_binding
 from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -621,14 +623,21 @@ def _handle_help_report() -> Response:
     )
 
 
+# Every pre-spawn probe a machine does not answer reads the same to the user.
+_MACHINE_UNREACHABLE_ERROR: Final[str] = (
+    "Couldn't reach this machine to start an agent. It may be starting up or unavailable."
+)
+
+
 def _handle_help_assist() -> Response:
     """Spawn an in-workspace ``/assist`` chat to help with a problem (POST /help/assist).
 
     Only valid when the help flow was opened from a loaded workspace: the body carries that
     workspace's agent id and the user's description. Before spawning, we probe the workspace for the
     ``/assist`` skill and return 409 if it lacks it (an older default workspace template) or 502 if the workspace is
-    unreachable -- so we never spawn a chat that could only hang. Otherwise the desktop app runs
-    ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
+    unreachable -- so we never spawn a chat that could only hang. Then we ask it which signed-in account the chat
+    should run on, and return 409 if it names none or 502 if that probe could not run either. Otherwise the
+    desktop app runs ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
     with ``/assist <description>``; the system interface auto-opens its tab. The call blocks until
     ``mngr create`` finishes so the get-help modal can hold its "starting..." state until the chat
     exists, then returns 200 on success or 502 if the spawn failed.
@@ -679,8 +688,28 @@ def _handle_help_assist() -> Response:
     if support is SkillSupport.UNREACHABLE:
         return make_response(
             status_code=502,
+            content=json.dumps({"error": _MACHINE_UNREACHABLE_ERROR}),
+            media_type="application/json",
+        )
+
+    # An unbound chat reaches a config dir holding no credential, so it can never take a turn.
+    binding = resolve_account_binding(mngr_caller, workspace_agent_id)
+    if binding.state is AccountBindingState.UNREACHABLE:
+        return make_response(
+            status_code=502,
+            content=json.dumps({"error": _MACHINE_UNREACHABLE_ERROR}),
+            media_type="application/json",
+        )
+    if binding.state is AccountBindingState.UNAVAILABLE:
+        return make_response(
+            status_code=409,
             content=json.dumps(
-                {"error": "Couldn't reach this machine to start an agent. It may be starting up or unavailable."}
+                {
+                    "error": (
+                        "This machine has no signed-in Anthropic account for an agent to run on. "
+                        "Sign in inside the machine and try again."
+                    )
+                }
             ),
             media_type="application/json",
         )
@@ -693,6 +722,7 @@ def _handle_help_assist() -> Response:
         workspace_agent_id,
         chat_name=generate_chat_name(ASSIST_SKILL_NAME),
         message=build_assist_chat_message(description),
+        account_args=binding.create_args,
     )
     if not spawn.is_started:
         # The same wall that stops an /assist chat stops every other agent

@@ -62,6 +62,10 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
+from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
+from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_END_SENTINEL
+from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_EXIT_SENTINEL
+from imbue.minds.desktop_client.skill_chat import NO_ACCOUNT_STORE_SENTINEL
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -877,6 +881,34 @@ def landed_verdict(
         in_place_compatible_ref=in_place_compatible_ref,
         verdict_at=datetime.now(timezone.utc),
     )
+
+
+SIGNED_IN_ACCOUNT_DIR: Final[str] = "/home/user/.minds/accounts/account-1"
+
+
+def account_binding_probe_stdout(*, account_dir: str | None = SIGNED_IN_ACCOUNT_DIR, exit_code: int = 0) -> str:
+    """One workspace's answer to the account probe: the resolver's fenced arguments and its status.
+
+    ``account_dir=""`` renders a workspace that keeps accounts but resolved none;
+    ``account_dir=None`` renders one whose template predates the account store;
+    a non-zero ``exit_code`` renders a resolver that broke rather than declined.
+    """
+    if account_dir is None:
+        return f"{NO_ACCOUNT_STORE_SENTINEL}\n"
+    body = f"--env\nCLAUDE_CONFIG_DIR={account_dir}\n" if account_dir else ""
+    return (
+        f"{ACCOUNT_ARGS_BEGIN_SENTINEL}\n{body}{ACCOUNT_ARGS_END_SENTINEL}\n{ACCOUNT_ARGS_EXIT_SENTINEL}{exit_code}\n"
+    )
+
+
+def ready_machine_probe_stdout(skill_probe_stdout: str, *, account_dir: str | None = SIGNED_IN_ACCOUNT_DIR) -> str:
+    """The one answer a machine ready to host a skill chat gives, whichever pre-spawn probe asks.
+
+    ``RecordingMngrCaller`` answers every call alike, so this carries the skill sentinel and
+    the account probe's fenced binding together. ``account_dir`` keeps
+    ``account_binding_probe_stdout``'s three-way contract.
+    """
+    return skill_probe_stdout + account_binding_probe_stdout(account_dir=account_dir)
 
 
 def update_run_probe_stdout(*, run: str = "", agents: str | None = "") -> str:
