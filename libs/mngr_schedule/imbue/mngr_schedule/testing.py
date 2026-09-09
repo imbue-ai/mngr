@@ -14,6 +14,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from imbue.mngr.utils.modal_cli import parse_modal_app_listings
 from imbue.mngr.utils.testing import generate_test_environment_name
 
 # Read the real home directory at import time, BEFORE any autouse fixture
@@ -151,21 +152,19 @@ def cleanup_modal_app(
             cwd=cwd,
         )
         if list_result.returncode == 0:
-            apps = json.loads(list_result.stdout)
+            apps = parse_modal_app_listings(json.loads(list_result.stdout))
             for app in apps:
-                if app.get("Description", "") == app_name:
-                    app_id = app.get("App ID", "")
-                    if app_id:
-                        subprocess.run(
-                            # --yes: newer Modal CLIs prompt to confirm `app
-                            # stop` and abort when run non-interactively (as in
-                            # CI), which would otherwise leak the test app.
-                            ["uv", "run", "modal", "app", "stop", app_id, "--env", modal_environment, "--yes"],
-                            capture_output=True,
-                            timeout=30,
-                            env=env,
-                            cwd=cwd,
-                        )
+                if app.description == app_name:
+                    subprocess.run(
+                        # --yes: newer Modal CLIs prompt to confirm `app
+                        # stop` and abort when run non-interactively (as in
+                        # CI), which would otherwise leak the test app.
+                        ["uv", "run", "modal", "app", "stop", app.app_id, "--env", modal_environment, "--yes"],
+                        capture_output=True,
+                        timeout=30,
+                        env=env,
+                        cwd=cwd,
+                    )
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as exc:
         logger.warning("Failed to clean up Modal app '{}': {}", app_name, exc)
 

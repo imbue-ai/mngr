@@ -71,6 +71,8 @@ from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
+from imbue.mngr.utils.modal_cli import parse_modal_app_listings
+from imbue.mngr.utils.modal_cli import parse_modal_volume_listings
 from imbue.mngr.utils.polling import wait_for
 
 # =============================================================================
@@ -1299,32 +1301,29 @@ def delete_modal_apps_in_environment(environment_name: str) -> None:
             logger.warning("Failed to list apps in environment {}: {}", environment_name, result.stderr)
             return
 
-        apps = json.loads(result.stdout)
+        apps = parse_modal_app_listings(json.loads(result.stdout))
         for app in apps:
-            app_id = app.get("App ID", "")
-            app_name = app.get("Description", "")
-            if app_id:
-                try:
-                    stop_result = subprocess.run(
-                        # --yes: skip the interactive confirmation, which otherwise aborts the
-                        # stop in non-interactive runs (CI / release tests) so the app is never
-                        # stopped and only the environment deletion reaps it.
-                        ["uv", "run", "modal", "app", "stop", app_id, "--yes"],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
+            try:
+                stop_result = subprocess.run(
+                    # --yes: skip the interactive confirmation, which otherwise aborts the
+                    # stop in non-interactive runs (CI / release tests) so the app is never
+                    # stopped and only the environment deletion reaps it.
+                    ["uv", "run", "modal", "app", "stop", app.app_id, "--yes"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if stop_result.returncode != 0:
+                    logger.warning(
+                        "Modal app stop returned non-zero for {} ({}): {}",
+                        app.description,
+                        app.app_id,
+                        stop_result.stderr or stop_result.stdout,
                     )
-                    if stop_result.returncode != 0:
-                        logger.warning(
-                            "Modal app stop returned non-zero for {} ({}): {}",
-                            app_name,
-                            app_id,
-                            stop_result.stderr or stop_result.stdout,
-                        )
-                    else:
-                        logger.debug("Stopped Modal app {} ({})", app_name, app_id)
-                except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
-                    logger.warning("Failed to stop Modal app {} ({}): {}", app_name, app_id, e)
+                else:
+                    logger.debug("Stopped Modal app {} ({})", app.description, app.app_id)
+            except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
+                logger.warning("Failed to stop Modal app {} ({}): {}", app.description, app.app_id, e)
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError) as e:
         logger.warning("Failed to list/delete Modal apps in environment {}: {}", environment_name, e)
 
@@ -1346,30 +1345,28 @@ def delete_modal_volumes_in_environment(environment_name: str) -> None:
             logger.warning("Failed to list volumes in environment {}: {}", environment_name, result.stderr)
             return
 
-        volumes = json.loads(result.stdout)
+        volumes = parse_modal_volume_listings(json.loads(result.stdout))
         for volume in volumes:
-            volume_name = volume.get("Name", "")
-            if volume_name:
-                try:
-                    del_result = subprocess.run(
-                        ["uv", "run", "modal", "volume", "delete", volume_name, "--env", environment_name, "--yes"],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    if del_result.returncode != 0:
-                        logger.warning(
-                            "Modal volume delete returned non-zero for {} in env {}: {}",
-                            volume_name,
-                            environment_name,
-                            del_result.stderr or del_result.stdout,
-                        )
-                    else:
-                        logger.debug("Deleted Modal volume {} in environment {}", volume_name, environment_name)
-                except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
+            try:
+                del_result = subprocess.run(
+                    ["uv", "run", "modal", "volume", "delete", volume.name, "--env", environment_name, "--yes"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if del_result.returncode != 0:
                     logger.warning(
-                        "Failed to delete Modal volume {} in environment {}: {}", volume_name, environment_name, e
+                        "Modal volume delete returned non-zero for {} in env {}: {}",
+                        volume.name,
+                        environment_name,
+                        del_result.stderr or del_result.stdout,
                     )
+                else:
+                    logger.debug("Deleted Modal volume {} in environment {}", volume.name, environment_name)
+            except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError) as e:
+                logger.warning(
+                    "Failed to delete Modal volume {} in environment {}: {}", volume.name, environment_name, e
+                )
     except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError) as e:
         logger.warning("Failed to list/delete Modal volumes in environment {}: {}", environment_name, e)
 

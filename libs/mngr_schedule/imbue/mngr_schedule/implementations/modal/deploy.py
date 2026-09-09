@@ -36,6 +36,7 @@ from imbue.mngr.providers.deploy_utils import MngrInstallMode
 from imbue.mngr.providers.deploy_utils import collect_deploy_files
 from imbue.mngr.providers.deploy_utils import detect_mngr_install_mode as _shared_detect_mngr_install_mode
 from imbue.mngr.providers.deploy_utils import resolve_mngr_install_mode as _shared_resolve_mngr_install_mode
+from imbue.mngr.utils.modal_cli import parse_modal_app_listings
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_schedule.data_types import ModalScheduleCreationRecord
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
@@ -718,14 +719,10 @@ def remove_modal_schedule(
         # guard that would have to decide whether to treat it as "list
         # failed" or "no apps" (see the reverted commits 51151b405 and
         # 4212dadde for why that branching is not obviously correct).
-        apps = json.loads(list_result.stdout)
-        app_id: str | None = None
-        for app in apps:
-            if app.get("Description", "") == app_name:
-                app_id = app.get("App ID", "")
-                break
+        apps = parse_modal_app_listings(json.loads(list_result.stdout))
+        app_id = next((app.app_id for app in apps if app.description == app_name), None)
 
-        if app_id:
+        if app_id is not None:
             with ConcurrencyGroup(name=f"modal-app-stop-{trigger_name}") as cg:
                 stop_result = cg.run_process_to_completion(
                     # --yes: newer Modal CLIs prompt to confirm `app stop` and

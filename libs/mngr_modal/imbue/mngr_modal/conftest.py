@@ -22,10 +22,13 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ModalCliOutputError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
+from imbue.mngr.utils.modal_cli import parse_modal_app_listings
+from imbue.mngr.utils.modal_cli import parse_modal_volume_listings
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import ModalCleanupOutcome
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
@@ -580,11 +583,11 @@ def _get_leaked_modal_apps() -> list[tuple[str, str]]:
         )
         if result.returncode != 0:
             return []
-        apps = json.loads(result.stdout)
+        apps = parse_modal_app_listings(json.loads(result.stdout))
         return [
-            (app.get("App ID", ""), app.get("Description", ""))
+            (app.app_id, app.description)
             for app in apps
-            if app.get("Description", "") in worker_modal_app_names and app.get("State", "") != "stopped"
+            if app.description in worker_modal_app_names and app.state != "stopped"
         ]
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
         logger.warning("Failed to list leaked modal apps: {}", e)
@@ -611,8 +614,8 @@ def _get_leaked_modal_volumes() -> list[str]:
         )
         if result.returncode != 0:
             return []
-        volumes = json.loads(result.stdout)
-        return [v.get("Name", "") for v in volumes if v.get("Name", "") in worker_modal_volume_names]
+        volumes = parse_modal_volume_listings(json.loads(result.stdout))
+        return [volume.name for volume in volumes if volume.name in worker_modal_volume_names]
     except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
         logger.warning("Failed to list leaked modal volumes: {}", e)
         return []
@@ -686,14 +689,24 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     # exitstatus is unused; del to satisfy ruff ARG001.
     del exitstatus
     errors: list[str] = []
-    leaked_apps = _get_leaked_modal_apps()
+    leaked_apps: list[tuple[str, str]] = []
+    leaked_volumes: list[str] = []
+    # A shape mismatch means we cannot tell a clean session from a leaking one,
+    # so report it rather than let it read as "nothing leaked".
+    try:
+        leaked_apps = _get_leaked_modal_apps()
+    except ModalCliOutputError as e:
+        errors.append(f"Could not check for leaked Modal apps: {e}")
     if leaked_apps:
         errors.append(
             "Leftover Modal apps found!\n"
             "Tests should destroy their Modal hosts before completing.\n"
             + "\n".join(f"  {aid} ({aname})" for aid, aname in leaked_apps)
         )
-    leaked_volumes = _get_leaked_modal_volumes()
+    try:
+        leaked_volumes = _get_leaked_modal_volumes()
+    except ModalCliOutputError as e:
+        errors.append(f"Could not check for leaked Modal volumes: {e}")
     if leaked_volumes:
         errors.append(
             "Leftover Modal volumes found!\n"
