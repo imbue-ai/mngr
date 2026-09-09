@@ -186,12 +186,20 @@ def check_setattr(source_dir: Path, max_count: int) -> None:
 # --- Banned libraries and patterns ---
 
 
-def check_asyncio_import(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_ASYNCIO_IMPORT, source_dir, max_count)
+def check_asyncio_import(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    assert_ratchet(PREVENT_ASYNCIO_IMPORT, source_dir, max_count, excluded_patterns)
 
 
-def check_async_await(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_ASYNC_AWAIT, source_dir, max_count)
+def check_async_await(
+    source_dir: Path,
+    max_count: int,
+    excluded_patterns: tuple[str, ...] = (),
+) -> None:
+    assert_ratchet(PREVENT_ASYNC_AWAIT, source_dir, max_count, excluded_patterns)
 
 
 def check_pandas_import(source_dir: Path, max_count: int) -> None:
