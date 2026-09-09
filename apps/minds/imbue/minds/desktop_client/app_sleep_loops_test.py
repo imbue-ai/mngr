@@ -24,8 +24,7 @@ from imbue.minds.desktop_client.testing import make_sleep_tracker
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
 
-# Short enough that a probe-failure run reaches it inside a test, long enough
-# that the restarted run does not reach it again before the assertions run.
+# Short enough that a probe-failure run reaches it inside a test.
 _FAST_THRESHOLD: float = 0.05
 
 
@@ -118,12 +117,11 @@ def test_the_probe_loop_establishes_the_wake_before_it_convicts_anything() -> No
         ), "the probe loop never reported a failure for the enrolled agent"
         concurrency_group.shutdown()
 
-    # The onset, not the health: the restarted run is only _FAST_THRESHOLD long,
-    # so the loop's next pass convicts it quite correctly, and asserting HEALTHY
-    # would be asserting that this test finished inside one probe interval. A
-    # conviction of the *pre-sleep* run is what must not have happened, and that
-    # one leaves the onset exactly where it was -- the conviction path does not
-    # move it.
+    # The onset, not the health: the restarted run opens at the wake, so what
+    # holds it back is the tracker's post-wake grace rather than anything this
+    # test establishes. A conviction of the *pre-sleep* run is what must not have
+    # happened, and that one leaves the onset exactly where it was -- the
+    # conviction path does not move it.
     assert tracker.get_failure_run_started_wall_at(agent_id) != run_onset_before, (
         "the run that spans the sleep must be restarted at the wake, not convicted on it"
     )

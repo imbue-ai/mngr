@@ -28,7 +28,8 @@ The state machine:
 - STUCK -> RECOVERING: the recovery dispatch marks the tracker so the recovery
   card can render a different label. The background loop stands off a
   RECOVERING agent (see ``snapshot_probe_targets``); the recovery worker's own
-  readiness probe is what decides whether the machine came back.
+  readiness probe is what decides whether the machine came back, unless a sleep
+  lands mid-recovery on a START (see ``invalidate_recovery_progress_after_wake``).
 - RECOVERING -> RECOVERY_FAILED: a recovery failed to bring the workspace back
   within its window, or its ``mngr`` commands errored. The recovery card
   renders the failure reason and the restart affordance.
@@ -58,7 +59,12 @@ that sleeps mid-run stops the probe loop along with everything else, so the
 seconds it slept were backed by no probe at all; a run that straddles a sleep
 is restarted from the first failure observed after it (see ``sleep_tracker``),
 and the threshold is reached only once it has accumulated entirely while the
-process was running.
+process was running. A run that opens behind a wake is timing this device's own
+tunnel rebuild, and is held to ``post_wake_grace_seconds`` instead. How late it
+may open and still be read that way is ``post_wake_shadow_seconds``, a separate
+and much larger span: a run opens when the first traffic after the wake reaches
+the forward and fails, which is a question about when the app next asks for
+something, not about how long the rebuild takes.
 """
 
 import threading
@@ -84,6 +90,25 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 _DEFAULT_STUCK_THRESHOLD_SECONDS: Final[float] = 5.0
+
+# How long a probe-failure run that opens behind a wake must keep failing before
+# it convicts: a sleep kills the forward's SSH transports, and the rebuild takes a
+# couple of probe intervals.
+_DEFAULT_POST_WAKE_GRACE_SECONDS: Final[float] = 20.0
+
+# How late after a wake a run may open and still be read as measuring that
+# rebuild. Deliberately far wider than the grace, because it bounds a different
+# quantity: the run opens on the first traffic after the wake that the forward
+# reports a failure for, and what decides when that happens is whichever of the
+# forward's budgets that request is waiting on -- the channel-open bound, the SSE
+# read timeout, the stall notice, all of them 30s -- rather than the rebuild,
+# which measured under a second on every wake. In the two incidents this fence
+# was built from, the run opened 30s and 24s after the wake. Sized to clear that
+# 30s class with room, since a window narrower than it leaves the fence inert
+# against exactly the incidents it exists for. Outside this window the normal
+# threshold applies unchanged, so the cost of the extra width is bounded: a real
+# outage that starts within a minute of a wake is named in 20s rather than 5s.
+_DEFAULT_POST_WAKE_SHADOW_SECONDS: Final[float] = 60.0
 
 
 class ProbeGracePurpose(UpperCaseStrEnum):
@@ -310,6 +335,14 @@ class _AgentRecord(MutableModel):
             "timestamps. None whenever ``failure_run_started_at`` is None."
         ),
     )
+    is_wake_shadow_hold_logged: bool = Field(
+        default=False,
+        description=(
+            "Whether this run has already logged that the post-wake shadow is holding a "
+            "conviction the stuck threshold would have made. Written once per run rather than "
+            "once per probe, and reset whenever the run starts."
+        ),
+    )
     outage_started_wall_at: datetime | None = Field(
         default=None,
         description=(
@@ -356,6 +389,14 @@ class _AgentRecord(MutableModel):
             "and cleared with the record on recovery."
         ),
     )
+    is_recovery_progress_unverified: bool = Field(
+        default=False,
+        description=(
+            "Whether a wake has landed while this agent's recovery was in flight, leaving the "
+            "recovery's own progress unestablished. Cleared with the record on recovery, and by "
+            "the next recovery attempt."
+        ),
+    )
     recovery_kind: HostRecoveryKind | None = Field(
         default=None,
         description=(
@@ -383,6 +424,22 @@ class SystemInterfaceHealthTracker(MutableModel):
     stuck_threshold_seconds: float = Field(
         default=_DEFAULT_STUCK_THRESHOLD_SECONDS,
         description="Seconds of continuous probe failures before HEALTHY -> STUCK fires.",
+    )
+    post_wake_grace_seconds: float = Field(
+        default=_DEFAULT_POST_WAKE_GRACE_SECONDS,
+        description=(
+            "Seconds a probe-failure run that opened inside post_wake_shadow_seconds must last, "
+            "rather than stuck_threshold_seconds, to convict. Inert without a sleep_tracker, "
+            "which is what knows a wake happened."
+        ),
+    )
+    post_wake_shadow_seconds: float = Field(
+        default=_DEFAULT_POST_WAKE_SHADOW_SECONDS,
+        description=(
+            "Seconds after a wake within which a probe-failure run must open to be held to "
+            "post_wake_grace_seconds. A run that opens later is timing the workspace rather than "
+            "this device's reconnection, and convicts on the normal threshold."
+        ),
     )
     sleep_tracker: SleepTracker | None = Field(
         default=None,
@@ -423,6 +480,10 @@ class SystemInterfaceHealthTracker(MutableModel):
     # is still answering, so a probe success is the stop in progress rather than
     # the machine back, and must not drop the mark above.
     _in_flight_intentional_stop_agents: set[str] = PrivateAttr(default_factory=set)
+    # Agents a probe found answering while their recovery was still in flight, so
+    # the recovery's later failure is declined (see mark_recovery_failed). Outside
+    # ``_records`` because the probe success that adds an agent drops its record.
+    _probe_recovered_during_recovery_agents: set[str] = PrivateAttr(default_factory=set)
     # agent_id_str -> the connection-failure cause last logged for it, and when.
     # Deliberately outside ``_records``: it has to survive the probe success that
     # drops the episode, which is the only thing standing between a repeating
@@ -539,6 +600,33 @@ class SystemInterfaceHealthTracker(MutableModel):
         if self.sleep_tracker is None or record.failure_run_started_wall_at is None:
             return False
         return self.sleep_tracker.was_asleep_since(record.failure_run_started_wall_at)
+
+    def _get_post_wake_shadow_onset_delay_locked(self, record: _AgentRecord) -> float | None:
+        """Seconds from the last wake to this run's onset, or None if it opened clear of the shadow.
+
+        Must hold ``self._lock``.
+
+        Complements :meth:`_is_run_interrupted_by_sleep_locked`: the run the
+        rebuild produces opens *after* the wake, since the forward notices a dead
+        transport only when traffic next hits it. Wall-clock, because that is the
+        only clock the wake is recorded on.
+
+        How long *after* the wake that run opens is not the rebuild's duration and
+        is not bounded by it -- it is bounded by whatever the forward makes the
+        first post-wake request wait before reporting a failure -- so the shadow
+        this is measured against is sized separately from the grace it earns.
+        Returns the delay rather than a verdict so the line reporting a held
+        conviction can name it.
+        """
+        if self.sleep_tracker is None or record.failure_run_started_wall_at is None:
+            return None
+        last_wake_at = self.sleep_tracker.get_last_wake_at()
+        if last_wake_at is None:
+            return None
+        onset_delay_seconds = (record.failure_run_started_wall_at - last_wake_at).total_seconds()
+        if not 0.0 <= onset_delay_seconds < self.post_wake_shadow_seconds:
+            return None
+        return onset_delay_seconds
 
     # -- Intentional stops ------------------------------------------------
 
@@ -756,11 +844,17 @@ class SystemInterfaceHealthTracker(MutableModel):
         (``outage_started_wall_at``) is left alone, since the machine really did
         stop answering when it did, and the discovery-freshness gate that reads
         it is only made stricter by an older mark.
+
+        A run that opened within ``post_wake_shadow_seconds`` of a wake is held to
+        ``post_wake_grace_seconds`` instead: every probe fails until the forward
+        has rebuilt its transport, and the run can open at any point in the shadow
+        because it opens with the first post-wake traffic rather than with the wake.
         """
         aid_str = str(agent_id)
         fire_health: AgentHealth | None = None
         stuck_after_seconds: float | None = None
         is_run_restarted_at_wake = False
+        held_onset_delay_seconds: float | None = None
         with self._lock:
             # An expected outage suppresses failure accounting entirely; once
             # every grace expires the normal stuck-threshold run applies from scratch.
@@ -779,6 +873,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.failure_run_started_at is None or is_run_restarted_at_wake:
                 record.failure_run_started_at = now
                 record.failure_run_started_wall_at = now_wall
+                record.is_wake_shadow_hold_logged = False
             # Opens the episode too, if this is the failure that started it. A
             # later run within the same episode cannot reach here (that needs
             # HEALTHY), so the earliest failure keeps the mark -- and a run
@@ -786,10 +881,25 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.outage_started_wall_at is None:
                 record.outage_started_wall_at = now_wall
             elapsed = now - record.failure_run_started_at
-            if elapsed + 1e-6 >= self.stuck_threshold_seconds:
+            onset_delay_seconds = self._get_post_wake_shadow_onset_delay_locked(record)
+            required_seconds = (
+                self.post_wake_grace_seconds if onset_delay_seconds is not None else self.stuck_threshold_seconds
+            )
+            is_convicted = elapsed + 1e-6 >= required_seconds
+            if is_convicted:
                 record.health = AgentHealth.STUCK
                 fire_health = AgentHealth.STUCK
                 stuck_after_seconds = elapsed
+            # A conviction the shadow is holding: the run has outlasted the
+            # threshold that would have made it, and the grace has not run out.
+            if (
+                not is_convicted
+                and onset_delay_seconds is not None
+                and elapsed + 1e-6 >= self.stuck_threshold_seconds
+                and not record.is_wake_shadow_hold_logged
+            ):
+                record.is_wake_shadow_hold_logged = True
+                held_onset_delay_seconds = onset_delay_seconds
         # A restarted run is the sleep signal actually changing an outcome, and
         # the only trace of a conviction that did not happen.
         if is_run_restarted_at_wake:
@@ -797,6 +907,22 @@ class SystemInterfaceHealthTracker(MutableModel):
                 "Probe-failure run for {} restarted: it began before a recorded sleep interval, "
                 "so the stuck threshold re-accumulates from now",
                 agent_id,
+            )
+        # The other conviction the wake signal withheld. It names the onset delay
+        # that earned the hold, but only for runs the shadow covered, so it is not
+        # the monitor for whether the shadow is still wide enough: a run that
+        # opened past it convicts silently. That question is answered where it was
+        # answered the first time -- the STUCK line's run length subtracted from
+        # its own timestamp, against the sleep interval the tracker logged.
+        if held_onset_delay_seconds is not None:
+            logger.info(
+                "Probe-failure run for {} opened {:.1f}s after a wake, inside the {:.0f}s post-wake "
+                "shadow, so it must outlast the {:.0f}s grace rather than the {:.0f}s stuck threshold",
+                agent_id,
+                held_onset_delay_seconds,
+                self.post_wake_shadow_seconds,
+                self.post_wake_grace_seconds,
+                self.stuck_threshold_seconds,
             )
         # The STUCK edge is the key diagnostic; the elapsed time tells us exactly
         # how long the workspace was continuously failing before it tripped.
@@ -840,6 +966,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             if record.health != AgentHealth.HEALTHY:
                 prior_health = record.health
                 fire_health = AgentHealth.HEALTHY
+            if prior_health == AgentHealth.RECOVERING:
+                self._probe_recovered_during_recovery_agents.add(aid_str)
         if fire_health is not None:
             logger.info(
                 "System-interface health for {}: {} -> HEALTHY (probe succeeded)",
@@ -893,6 +1021,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             # any prior attempt's account of whether it booted anything.
             record.last_recovery_error = None
             record.is_recovery_a_no_op = False
+            record.is_recovery_progress_unverified = False
+            self._probe_recovered_during_recovery_agents.discard(aid_str)
             if record.health != AgentHealth.RECOVERING:
                 record.health = AgentHealth.RECOVERING
                 record.recovery_kind = kind
@@ -901,24 +1031,40 @@ class SystemInterfaceHealthTracker(MutableModel):
             self._fire_on_change(agent_id, fire_health)
         return fire_health is not None
 
-    def mark_recovery_failed(self, agent_id: AgentId, error: str) -> None:
+    def mark_recovery_failed(self, agent_id: AgentId, error: str) -> bool:
         """Mark ``agent_id`` as RECOVERY_FAILED, carrying ``error`` as the reason.
 
         Called when a recovery fails to bring the workspace back within its
         window, or its ``mngr`` commands error out. The reason is surfaced to
         the recovery page so it can render an escalate / try-again affordance
         instead of an indefinite wait.
+
+        Declined (returning False) for an agent a probe found answering while
+        this recovery was still running: a ``mngr start`` blocked across a sleep
+        can return its error long after the machine came back (see
+        :meth:`invalidate_recovery_progress_after_wake`), and the probe's 200 is
+        the newer and more direct claim about the machine.
         """
         aid_str = str(agent_id)
         with self._lock:
-            record = self._records.setdefault(aid_str, _AgentRecord())
-            record.failure_run_started_at = None
-            record.failure_run_started_wall_at = None
-            record.last_recovery_error = error
-            # Always re-fire: a second failure with a new reason must reach
-            # the recovery page even if the state is already RECOVERY_FAILED.
-            record.health = AgentHealth.RECOVERY_FAILED
+            is_outranked_by_a_probe = aid_str in self._probe_recovered_during_recovery_agents
+            if not is_outranked_by_a_probe:
+                record = self._records.setdefault(aid_str, _AgentRecord())
+                record.failure_run_started_at = None
+                record.failure_run_started_wall_at = None
+                record.last_recovery_error = error
+                # Always re-fire: a second failure with a new reason must reach
+                # the recovery page even if the state is already RECOVERY_FAILED.
+                record.health = AgentHealth.RECOVERY_FAILED
+        if is_outranked_by_a_probe:
+            logger.info(
+                "Recovery failure for {} not shown ({}): a probe found the machine answering while it was still running",
+                agent_id,
+                error,
+            )
+            return False
         self._fire_on_change(agent_id, AgentHealth.RECOVERY_FAILED)
+        return True
 
     def get_health(self, agent_id: AgentId) -> AgentHealth:
         """Return the current health for ``agent_id`` (HEALTHY by default)."""
@@ -1063,8 +1209,8 @@ class SystemInterfaceHealthTracker(MutableModel):
         non-suspect agents are omitted; probing every workspace unconditionally
         would scale probe traffic with workspace count for no benefit.
 
-        RECOVERING agents are deliberately excluded, whichever recovery is
-        running: the worker owns that decision via its own
+        A RECOVERING agent is excluded for as long as its recovery's own
+        progress stands: the worker owns that decision via its own
         ``_await_system_interface_ready`` probe, which runs once the commands
         return, so a background probe alongside it is a second opinion on a
         question already being answered.
@@ -1076,6 +1222,11 @@ class SystemInterfaceHealthTracker(MutableModel):
         flip the agent back to HEALTHY (via ``record_probe_success``), causing
         the recovery page to 302 the user back into a workspace that is about
         to disappear.
+
+        The exception is a START that a wake landed in the middle of: there is
+        no ``mngr stop`` for a doomed 200 to come from, and the worker's own
+        probe runs only after a ``mngr start`` the sleep may have left blocked
+        indefinitely.
         """
         with self._lock:
             return frozenset(
@@ -1083,6 +1234,28 @@ class SystemInterfaceHealthTracker(MutableModel):
                 for aid, record in self._records.items()
                 if (record.is_suspect and record.health == AgentHealth.HEALTHY)
                 or record.health in (AgentHealth.STUCK, AgentHealth.RECOVERY_FAILED)
+                or (record.health == AgentHealth.RECOVERING and record.is_recovery_progress_unverified)
+            )
+
+    def invalidate_recovery_progress_after_wake(self, wake_at: datetime) -> None:
+        """Hand an in-flight START back to the probe loop. Fires on every wake.
+
+        Every bound on the recovery is measured on a clock a sleep does not
+        advance, so a ``mngr start`` blocked across the sleep can hold the agent
+        RECOVERING indefinitely. Only STARTs are marked, for the reason
+        :meth:`snapshot_probe_targets` gives. ``wake_at`` matches the callback
+        signature and is not read.
+        """
+        marked: list[str] = []
+        with self._lock:
+            for aid_str, record in self._records.items():
+                if record.health == AgentHealth.RECOVERING and record.recovery_kind is HostRecoveryKind.START:
+                    record.is_recovery_progress_unverified = True
+                    marked.append(aid_str)
+        for aid_str in marked:
+            logger.info(
+                "Recovery of {} was in flight across a sleep; probing it again rather than waiting on it",
+                aid_str,
             )
 
     # -- Internals --------------------------------------------------------

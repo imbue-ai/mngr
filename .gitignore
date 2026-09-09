@@ -379,3 +379,7 @@ apps/minds/package-lock.json
 # and the Slack post.
 **/flake-sweep-summary.md
 **/flake-sweep-claude.log
+
+# Timelines written by the sleep/wake scripts, whose --log-dir defaults to the cwd
+**/sleep_wake_probe_*.jsonl
+**/sleep_wake_drill_*.jsonl

@@ -7,6 +7,7 @@ from datetime import timezone
 
 import pytest
 
+from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
@@ -21,6 +22,19 @@ from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 
 # Short STUCK threshold so the probe-failure-run tests don't have to sleep 5s.
 _FAST_THRESHOLD: float = 0.05
+
+# Post-wake grace, scaled the same way. Several multiples of _FAST_THRESHOLD, so
+# a run held to it is distinguishable from one held to the normal threshold.
+_FAST_POST_WAKE_GRACE: float = 0.30
+
+# Post-wake shadow, three times the grace as the app's 60s is three times its 20s:
+# how late a run may open and still be held to the grace.
+_FAST_POST_WAKE_SHADOW: float = 0.90
+
+# Where the failure runs of the two incidents behind this fence actually opened:
+# 30.2s and 24.4s after the wake, both past the 20s grace and inside the 60s
+# shadow. Scaled to the larger of the two, at 1.5x the grace.
+_FAST_INCIDENT_ONSET_DELAY: float = 0.45
 
 
 @pytest.mark.parametrize(
@@ -69,6 +83,16 @@ def test_should_enroll_suspect_for_backend_failure(
 
 def _sleep(seconds: float) -> None:
     threading.Event().wait(timeout=seconds)
+
+
+def _make_wake_fenced_tracker(sleep_tracker: SleepTracker) -> SystemInterfaceHealthTracker:
+    """A tracker whose stuck threshold and both post-wake spans are scaled down to test speed."""
+    return SystemInterfaceHealthTracker(
+        stuck_threshold_seconds=_FAST_THRESHOLD,
+        post_wake_grace_seconds=_FAST_POST_WAKE_GRACE,
+        post_wake_shadow_seconds=_FAST_POST_WAKE_SHADOW,
+        sleep_tracker=sleep_tracker,
+    )
 
 
 def _drive_to_stuck(tracker: SystemInterfaceHealthTracker, aid: AgentId) -> None:
@@ -811,7 +835,8 @@ def test_failure_run_that_straddles_a_sleep_re_accumulates_from_the_wake() -> No
     slept were backed by no probe at all and cannot convict the workspace.
     """
     sleep_tracker, clock = make_sleep_tracker()
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    # The restarted run opens at the wake, so it is held to the grace, not the threshold.
+    tracker = _make_wake_fenced_tracker(sleep_tracker)
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
@@ -834,7 +859,7 @@ def test_failure_run_that_straddles_a_sleep_re_accumulates_from_the_wake() -> No
     assert tracker.get_outage_started_wall_at(aid) == outage_onset
 
     # The re-accumulated run convicts on its own, with no further sleep behind it.
-    _sleep(_FAST_THRESHOLD + 0.02)
+    _sleep(_FAST_POST_WAKE_GRACE + 0.02)
     tracker.record_probe_failure(aid)
 
     assert tracker.get_health(aid) == AgentHealth.STUCK
@@ -844,7 +869,7 @@ def test_failure_run_that_straddles_a_sleep_re_accumulates_from_the_wake() -> No
 def test_each_sleep_inside_one_outage_restarts_the_run_again() -> None:
     """Several naps during one outage each disqualify the run they interrupted."""
     sleep_tracker, clock = make_sleep_tracker()
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    tracker = _make_wake_fenced_tracker(sleep_tracker)
     aid = AgentId.generate()
 
     tracker.record_failure(aid)
@@ -855,22 +880,198 @@ def test_each_sleep_inside_one_outage_restarts_the_run_again() -> None:
         tracker.record_probe_failure(aid)
         assert tracker.get_health(aid) == AgentHealth.HEALTHY
 
-    _sleep(_FAST_THRESHOLD + 0.02)
+    _sleep(_FAST_POST_WAKE_GRACE + 0.02)
     tracker.record_probe_failure(aid)
 
     assert tracker.get_health(aid) == AgentHealth.STUCK
 
 
-def test_failure_run_after_a_sleep_convicts_unchanged() -> None:
-    """A recorded interval that the run does not overlap suppresses nothing."""
+def test_failure_run_clear_of_the_wake_shadow_convicts_unchanged() -> None:
+    """A recorded interval the run neither overlaps nor trails suppresses nothing."""
     sleep_tracker, clock = make_sleep_tracker()
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    tracker = _make_wake_fenced_tracker(sleep_tracker)
     aid = AgentId.generate()
 
     record_sleep_of(sleep_tracker, clock, seconds=900.0)
+    _sleep(_FAST_POST_WAKE_SHADOW + 0.02)
     _drive_to_stuck(tracker, aid)
 
     assert tracker.get_health(aid) == AgentHealth.STUCK
+
+
+@pytest.mark.witnesses("no-verdict-on-unobserved-time", partial="witnesses only the post-wake window clause")
+@pytest.mark.parametrize(
+    "onset_delay_seconds",
+    [0.0, _FAST_INCIDENT_ONSET_DELAY],
+    ids=["at-the-wake", "at-the-incident-onset-delay"],
+)
+def test_failure_run_opened_behind_a_wake_outlasts_the_rebuild_before_convicting(
+    onset_delay_seconds: float,
+) -> None:
+    """A run that opens behind a wake is timing the forward's tunnel rebuild, not the workspace.
+
+    Anywhere in the shadow, because a run opens with the first post-wake traffic
+    rather than with the wake: both incidents this fence was built from opened
+    30.2s and 24.4s behind theirs, past the grace, because the forward makes that
+    first request wait out one of its 30s budgets on the transport the sleep
+    killed. A window sized to the rebuild instead of to that wait fences neither.
+    """
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = _make_wake_fenced_tracker(sleep_tracker)
+    aid = AgentId.generate()
+    seen: list[AgentHealth] = []
+    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+
+    record_sleep_of(sleep_tracker, clock, seconds=183.0)
+    _sleep(onset_delay_seconds)
+    # Opens after the wake, so the interrupted-run fence cannot reach it.
+    tracker.record_failure(aid)
+    tracker.record_probe_failure(aid)
+
+    _sleep(_FAST_THRESHOLD + 0.02)
+    tracker.record_probe_failure(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert seen == []
+
+    _sleep(_FAST_POST_WAKE_GRACE)
+    tracker.record_probe_failure(aid)
+
+    assert tracker.get_health(aid) == AgentHealth.STUCK
+    assert seen == [AgentHealth.STUCK]
+
+
+def test_a_conviction_the_shadow_holds_is_named_once_per_run() -> None:
+    """The held conviction is the only thing the shadow does that leaves no other trace.
+
+    A run the grace holds is indistinguishable from a healthy machine in every
+    state the tracker exposes, so this line is what says the fence acted. Once
+    per run in both directions: repeating it every probe for the whole grace
+    would bury it, and not re-arming it would lose it for the second run of an
+    episode -- which on battery is the ordinary shape, each dark wake restarting
+    the run that the previous one's line described.
+    """
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = _make_wake_fenced_tracker(sleep_tracker)
+    aid = AgentId.generate()
+
+    with capture_loguru(level="INFO") as log_output:
+        record_sleep_of(sleep_tracker, clock, seconds=222.0)
+        tracker.record_failure(aid)
+        tracker.record_probe_failure(aid)
+        # Past the threshold that would have convicted, inside the grace that
+        # holds it; the further probes land in the same window.
+        _sleep(_FAST_THRESHOLD + 0.02)
+        for _ in range(3):
+            tracker.record_probe_failure(aid)
+        assert tracker.get_health(aid) == AgentHealth.HEALTHY
+        assert log_output.getvalue().count("after a wake, inside the") == 1
+
+        # A second sleep restarts the run, so the next hold is a new fact.
+        record_sleep_of(sleep_tracker, clock, seconds=222.0)
+        tracker.record_probe_failure(aid)
+        _sleep(_FAST_THRESHOLD + 0.02)
+        tracker.record_probe_failure(aid)
+
+        assert tracker.get_health(aid) == AgentHealth.HEALTHY
+        assert log_output.getvalue().count("after a wake, inside the") == 2
+
+
+def test_a_wake_returns_an_in_flight_start_to_the_probe_loop() -> None:
+    """A ``mngr start`` blocked across a sleep has only monotonic bounds, so it can hold RECOVERING indefinitely."""
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    sleep_tracker.add_on_wake_callback(tracker.invalidate_recovery_progress_after_wake)
+    aid = AgentId.generate()
+
+    _drive_to_stuck(tracker, aid)
+    assert tracker.mark_recovering(aid, HostRecoveryKind.START)
+    assert tracker.snapshot_probe_targets() == frozenset()
+
+    record_sleep_of(sleep_tracker, clock, seconds=731.0)
+
+    assert tracker.snapshot_probe_targets() == frozenset({aid})
+    tracker.record_probe_success(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+
+
+def test_a_wake_leaves_an_in_flight_restart_standing_off() -> None:
+    """A bounce's own stop is still tearing the backend down; its 200 is the doomed one."""
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    sleep_tracker.add_on_wake_callback(tracker.invalidate_recovery_progress_after_wake)
+    aid = AgentId.generate()
+
+    _drive_to_stuck(tracker, aid)
+    assert tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+
+    record_sleep_of(sleep_tracker, clock, seconds=731.0)
+
+    assert tracker.snapshot_probe_targets() == frozenset()
+    assert tracker.get_health(aid) == AgentHealth.RECOVERING
+
+
+def test_a_fresh_recovery_attempt_trusts_its_own_progress_again() -> None:
+    """The mark belongs to the attempt a wake interrupted, not to the agent."""
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    sleep_tracker.add_on_wake_callback(tracker.invalidate_recovery_progress_after_wake)
+    aid = AgentId.generate()
+
+    _drive_to_stuck(tracker, aid)
+    tracker.mark_recovering(aid, HostRecoveryKind.START)
+    record_sleep_of(sleep_tracker, clock, seconds=731.0)
+    assert tracker.snapshot_probe_targets() == frozenset({aid})
+
+    tracker.mark_recovery_failed(aid, "start failed")
+    tracker.mark_recovering(aid, HostRecoveryKind.START)
+
+    assert tracker.snapshot_probe_targets() == frozenset()
+
+
+@pytest.mark.witnesses(
+    "no-blame-past-an-unmeasured-device", partial="witnesses only the probe outranking a recovery's failure"
+)
+def test_a_probe_that_recovered_a_machine_mid_recovery_outranks_the_recovery_failure() -> None:
+    """A ``mngr start`` that errors after the wake re-probe found the machine answering must not re-condemn it."""
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    sleep_tracker.add_on_wake_callback(tracker.invalidate_recovery_progress_after_wake)
+    aid = AgentId.generate()
+    seen: list[AgentHealth] = []
+
+    _drive_to_stuck(tracker, aid)
+    tracker.mark_recovering(aid, HostRecoveryKind.START)
+    record_sleep_of(sleep_tracker, clock, seconds=731.0)
+    tracker.record_probe_success(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+
+    tracker.add_on_change_callback(lambda _a, h: seen.append(h))
+
+    assert not tracker.mark_recovery_failed(aid, "mngr start exited 1")
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert tracker.get_last_recovery_error(aid) is None
+    assert seen == []
+
+
+def test_the_next_recovery_attempt_can_fail_normally_again() -> None:
+    """The probe's word covers the attempt it overtook, not every later one."""
+    sleep_tracker, clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    sleep_tracker.add_on_wake_callback(tracker.invalidate_recovery_progress_after_wake)
+    aid = AgentId.generate()
+
+    _drive_to_stuck(tracker, aid)
+    tracker.mark_recovering(aid, HostRecoveryKind.START)
+    record_sleep_of(sleep_tracker, clock, seconds=731.0)
+    tracker.record_probe_success(aid)
+    tracker.mark_recovery_failed(aid, "mngr start exited 1")
+
+    tracker.mark_recovering(aid, HostRecoveryKind.START)
+
+    assert tracker.mark_recovery_failed(aid, "mngr start exited 1 again")
+    assert tracker.get_health(aid) == AgentHealth.RECOVERY_FAILED
+    assert tracker.get_last_recovery_error(aid) == "mngr start exited 1 again"
 
 
 def test_a_sleep_never_reopens_a_forced_stuck() -> None:

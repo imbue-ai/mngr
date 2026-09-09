@@ -584,6 +584,25 @@ def _in_band_provider_outage_reason(exc: MngrCommandError, provider_name: str | 
     return parse_provider_unavailable_reason(str(exc), provider_name)
 
 
+def _record_recovery_failure(
+    tracker: SystemInterfaceHealthTracker,
+    registry: WorkspaceOperationRegistryInterface,
+    workspace_agent_id: AgentId,
+    message: str,
+) -> None:
+    """Fail the recovery in both the tracker and the operation registry, or in neither.
+
+    The recovery card reads the tracker and the operations endpoint reads the
+    registry, so a failure the tracker declines (a probe found the machine
+    answering mid-recovery) ends the operation as a success with ``message`` as
+    its caveat rather than standing as a failure in one store only.
+    """
+    if tracker.mark_recovery_failed(workspace_agent_id, message):
+        registry.fail(workspace_agent_id, message)
+        return
+    registry.complete_with_warning(workspace_agent_id, message)
+
+
 def _report_recovery_step_failure(
     step_label: str,
     exc: MngrCommandError,
@@ -651,8 +670,7 @@ def _report_recovery_step_failure(
         exc,
         "" if exc.output_tail is None else f"\nsubprocess output:\n{exc.output_tail}",
     )
-    tracker.mark_recovery_failed(workspace_agent_id, message)
-    registry.fail(workspace_agent_id, message)
+    _record_recovery_failure(tracker, registry, workspace_agent_id, message)
 
 
 def read_environment_block(
@@ -861,8 +879,7 @@ class RecoveryWorkerFailureHandler(MutableModel):
 
     def __call__(self, exc: BaseException) -> None:
         message = f"The recovery worker failed unexpectedly: {exc}"
-        self.tracker.mark_recovery_failed(self.workspace_agent_id, message)
-        self.registry.fail(self.workspace_agent_id, message)
+        _record_recovery_failure(self.tracker, self.registry, self.workspace_agent_id, message)
 
 
 class RecoveryDispatchOutcome(UpperCaseStrEnum):
@@ -900,8 +917,9 @@ def dispatch_host_recovery(
     the workspace's single operation slot decides: a caller that loses it to
     another recovery gets ``ALREADY_RUNNING`` and must not spawn a second worker
     racing the first's commands, and one that loses it to a backup update /
-    configure / restore gets ``OPERATION_CONFLICT``. A spawn failure leaves the
-    tracker in RECOVERY_FAILED and the operation FAILED, so nothing polls forever.
+    configure / restore gets ``OPERATION_CONFLICT``. A spawn failure ends the
+    recovery in the tracker and the operation registry alike (see
+    :func:`_record_recovery_failure`), so nothing polls forever.
 
     One atomic claim rather than a read followed by an unconditional
     ``registry.start``, which would *replace* whatever record won the race --
@@ -927,11 +945,12 @@ def dispatch_host_recovery(
 
     tracker.mark_recovering(workspace_agent_id, kind)
 
-    # is_checked=False + on_failure: a crash of the one-shot worker transitions
-    # the tracker to RECOVERY_FAILED and the registry to FAILED (so neither the
-    # recovery surface nor the operation poller hangs). The spawn itself can
+    # is_checked=False + on_failure: a crash of the one-shot worker ends the
+    # recovery in both stores (see _record_recovery_failure, which decides
+    # whether that is a failure or a completion carrying the error), so neither
+    # the recovery surface nor the operation poller hangs. The spawn itself can
     # also raise when the group is shutting down; since RECOVERING is already
-    # claimed, roll both into the failed state.
+    # claimed, end it the same way.
     try:
         concurrency_group.start_new_thread(
             target=run_host_recovery_sequence,
@@ -966,8 +985,7 @@ def dispatch_host_recovery(
         # quiet, so a recovery that never even spawned must report itself.
         logger.opt(exception=exc).error("Failed to spawn recovery worker for {}: {}", workspace_agent_id, exc)
         message = f"Could not start the recovery worker: {exc}"
-        tracker.mark_recovery_failed(workspace_agent_id, message)
-        registry.fail(workspace_agent_id, message)
+        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
         return RecoveryDispatchOutcome.SPAWN_FAILED
     return RecoveryDispatchOutcome.DISPATCHED
 
@@ -1310,8 +1328,7 @@ def run_host_recovery_sequence(
     if services_agent_id is None:
         message = "Could not locate the system-services agent for this machine."
         logger.error("Host recovery of {} failed: {}", workspace_agent_id, message)
-        tracker.mark_recovery_failed(workspace_agent_id, message)
-        registry.fail(workspace_agent_id, message)
+        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
         return
 
     # Read before the stop step, so both commands address the same machine. The
@@ -1417,8 +1434,7 @@ def run_host_recovery_sequence(
     if display_info is None:
         message = "The workspace is unknown to discovery after the start, so its recovery cannot be confirmed."
         logger.error("Host recovery of {} failed: {}", workspace_agent_id, message)
-        tracker.mark_recovery_failed(workspace_agent_id, message)
-        registry.fail(workspace_agent_id, message)
+        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
         return
 
     registry.append_log(workspace_agent_id, "Waiting for the system interface to respond.")
@@ -1459,8 +1475,7 @@ def run_host_recovery_sequence(
             workspace_agent_id,
             message,
         )
-        tracker.mark_recovery_failed(workspace_agent_id, message)
-        registry.fail(workspace_agent_id, message)
+        _record_recovery_failure(tracker, registry, workspace_agent_id, message)
 
 
 def _provider_error_message_for_workspace(

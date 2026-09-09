@@ -206,6 +206,13 @@ actually run), but these tests do **not** require an imbue_cloud login.
   (`restic_backup_a_file`); `utils/testing.py` (`RecordingMngrCaller`);
   `latchkey/testing.py` (`FakeLatchkeyGatewayClient`, `build_fake_gateway_client`).
 
+### 1.8 Sleep/wake handling (manual, real laptop)
+
+What the app does in the minutes after a laptop wakes cannot be checked in CI.
+`scripts/sleep_wake_drill.py` stages the incident against running apps on a
+spare Mac and reports what each did; see `sleep-wake-drill.md` (in this
+folder).
+
 ## Part 2 -- End-to-end tests worth adding
 
 Legend for where each test best fits:
