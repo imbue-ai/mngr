@@ -1,4 +1,5 @@
 import bdb
+import shlex
 import sys
 from typing import Any
 
@@ -167,7 +168,8 @@ def cli(ctx: click.Context) -> None:
     """
     Initial entry point for mngr CLI commands.
     """
-    setproctitle.setproctitle(" ".join(["mngr"] + sys.argv[1:]))
+    # Quoted so an argument containing a space stays one argument in ``ps``.
+    setproctitle.setproctitle(shlex.join(["mngr"] + sys.argv[1:]))
 
     # expose the plugin manager in the command context so that all commands have access to it
     # This uses the singleton that was already created during command registration

@@ -25,8 +25,6 @@ import os
 import signal
 import threading
 from collections.abc import Callable
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -54,6 +52,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey._pre_lock_migration import pre_lock_forward_pid
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -65,18 +64,17 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
-from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.sentry import setup_forward_sentry
-from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import delete_forward_info
-from imbue.mngr_latchkey.store import load_forward_info
-from imbue.mngr_latchkey.store import save_forward_info
-from imbue.mngr_latchkey.store import update_forward_info_gateway_port
+from imbue.mngr_latchkey.store import load_forward_owner
+from imbue.mngr_latchkey.store import probe_forward_lock
+from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
 
 # Env-var overrides for the two resolved settings; documented in the
 # CLI help and in the spec.
@@ -647,25 +645,31 @@ def _run_forward_supervisor(
     Extracted from :func:`_forward_command` so the latter can wrap it in a single error-logging +
     Sentry-flush boundary; see that function for why an unhandled error is logged through loguru.
     """
-    # Refuse to start if another forward is already alive for this
-    # latchkey directory; two forwards would fight over the same
-    # reverse tunnels and produce a confusing stream of failures.
-    existing = load_forward_info(latchkey.plugin_data_dir)
-    if existing is not None and is_forward_info_alive(existing):
+    # CLEANUP: a forward predating the ownership lock holds none, so the lock
+    # below would be taken uncontended beside it, and its record is the only
+    # thing that can announce it. A record surviving the refusal names no live
+    # forward, so it goes. Remove the whole block with ``_pre_lock_migration``.
+    pre_lock_pid = pre_lock_forward_pid(latchkey.plugin_data_dir)
+    if pre_lock_pid is not None:
         raise click.ClickException(
-            f"Another ``mngr latchkey forward`` is already running for this latchkey directory "
-            f"(pid={existing.pid}); refusing to start a second supervisor.",
+            f"A ``mngr latchkey forward`` from an earlier build is still running for this latchkey "
+            f"directory (pid={pre_lock_pid}); stop it before starting a new one.",
         )
-    if existing is not None:
-        logger.info(
-            "Discarding stale forward record (pid={}); the previous supervisor is no longer running.",
-            existing.pid,
-        )
+    delete_forward_info(latchkey.plugin_data_dir)
 
-    save_forward_info(
-        latchkey.plugin_data_dir,
-        LatchkeyForwardInfo(pid=os.getpid(), started_at=datetime.now(timezone.utc)),
-    )
+    # Exclusive ownership of this directory, held until the shutdown ``finally``
+    # releases it -- or, on a path that never reaches it, until this process exits.
+    try:
+        forward_lock = acquire_forward_lock(latchkey.plugin_data_dir)
+    except LatchkeyStoreError as e:
+        raise click.ClickException(f"Failed to claim this latchkey directory: {e}") from e
+    if forward_lock is None:
+        owner = load_forward_owner(latchkey.plugin_data_dir)
+        owner_description = "" if owner is None else f" (pid={owner.pid})"
+        raise click.ClickException(
+            f"Another ``mngr latchkey forward`` already owns this latchkey directory"
+            f"{owner_description}; refusing to start a second supervisor.",
+        )
 
     # Eagerly ensure the gateway is up so users see startup failures
     # immediately, not on the first agent discovery. The discovery
@@ -683,7 +687,7 @@ def _run_forward_supervisor(
     )
 
     try:
-        update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
+        update_forward_owner_gateway_port(latchkey.plugin_data_dir, gateway_port)
     except LatchkeyStoreError as e:
         raise click.ClickException(f"Failed to publish gateway port: {e}") from e
 
@@ -749,7 +753,9 @@ def _run_forward_supervisor(
             latchkey.stop_gateway()
         except LatchkeyError as e:
             logger.opt(exception=e).error("Failed to stop shared Latchkey gateway during shutdown.")
-        delete_forward_info(latchkey.plugin_data_dir)
+        # Released last, so the directory stays claimed until everything this
+        # forward owns is torn down and a replacement cannot overlap it.
+        forward_lock.release()
 
 
 class _ShutdownSignalHandler(FrozenModel):
@@ -875,7 +881,7 @@ def _run_gateway_health_check_loop(
             continue
         logger.info("Respawned shared Latchkey gateway at http://{}:{}", latchkey.listen_host, gateway_port)
         try:
-            update_forward_info_gateway_port(latchkey.plugin_data_dir, gateway_port)
+            update_forward_owner_gateway_port(latchkey.plugin_data_dir, gateway_port)
         except LatchkeyStoreError as e:
             logger.opt(exception=e).error("Failed to publish respawned gateway port.")
 
@@ -1051,13 +1057,13 @@ def _gateway_info_command(ctx: click.Context, **kwargs: Any) -> None:
 
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
-    info = load_forward_info(latchkey.plugin_data_dir)
-    if info is None or not is_forward_info_alive(info):
+    owner = probe_forward_lock(latchkey.plugin_data_dir)
+    if owner is None:
         raise click.ClickException(
             "No ``mngr latchkey forward`` supervisor is running for this latchkey directory; "
             "start one with ``mngr latchkey forward`` before asking for its gateway info.",
         )
-    if info.gateway_port is None:
+    if owner.gateway_port is None:
         raise click.ClickException(
             "The supervisor is running but has not finished binding its gateway port yet; retry in a moment.",
         )
@@ -1069,7 +1075,7 @@ def _gateway_info_command(ctx: click.Context, **kwargs: Any) -> None:
 
     write_json_line(
         {
-            "url": f"http://{latchkey.listen_host}:{info.gateway_port}",
+            "url": f"http://{latchkey.listen_host}:{owner.gateway_port}",
             "password": password,
         },
     )

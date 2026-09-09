@@ -5,13 +5,18 @@ Everything the plugin writes lives under ``<latchkey_directory>/mngr_latchkey/``
 segregated from upstream latchkey's own ``LATCHKEY_DIRECTORY`` files
 while sharing a single root path the user has to remember.
 
-Two kinds of state live there:
+Three kinds of state live there:
 
-* ``LatchkeyForwardInfo`` -- metadata identifying the detached
-  ``mngr latchkey forward`` supervisor (pid, started_at). Used by
-  :class:`LatchkeyForwardSupervisor` so the next caller can adopt or
-  drop the existing supervisor. Stored at
+* ``LatchkeyForwardOwner`` -- the identity of the process that currently
+  owns the directory's forward: the pid holding the exclusive lock at
+  ``{plugin_data_dir}/latchkey_forward.lock``, plus the gateway port it
+  has bound. Stored beside that lock at
+  ``{plugin_data_dir}/latchkey_forward.owner``.
+* ``LatchkeyForwardInfo`` -- the record a ``mngr latchkey forward`` from
+  before the ownership lock wrote to announce itself (pid, started_at).
+  Read only by :mod:`imbue.mngr_latchkey._pre_lock_migration`. Stored at
   ``{plugin_data_dir}/latchkey_forward.json``.
+  CLEANUP: remove with ``_pre_lock_migration``.
 * ``LatchkeyPermissionsConfig`` -- the contents of latchkey's permissions
   config, in detent's rule format. Stored on disk per-host as
   ``{plugin_data_dir}/hosts/{host_id}/latchkey_permissions.json``
@@ -33,8 +38,10 @@ JWT before the host id is known (no flaky post-create ``mngr
 provision`` step) while keeping the canonical permissions file at the
 host-id path that ``LatchkeyPermissionGrantHandler`` already writes to.
 
-Both share the same atomic-write pattern (write to ``.tmp``, chmod,
-rename) where applicable.
+The owner record and the permissions files are written atomically (write
+to ``.tmp``, chmod, rename). The lock file is written by nobody here: it
+is a SQLite database belonging to ``filelock``, and this module does no
+more than hand its path to :class:`filelock.ReadWriteLock`.
 
 For every helper here the parameter name ``plugin_data_dir`` refers to
 the ``mngr_latchkey/`` subdir under the user's latchkey directory; it
@@ -42,11 +49,14 @@ is what :attr:`Latchkey.plugin_data_dir` returns.
 """
 
 import os
+import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Final
 
+from filelock import ReadWriteLock
+from filelock import Timeout
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -57,6 +67,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.polling import poll_for_value
 
 # Sub-directory under the user's ``latchkey_directory`` that holds every
 # file written by this plugin (gateway record, default permissions,
@@ -67,6 +78,15 @@ PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
+# Exclusive-ownership lock for the directory's ``mngr latchkey forward``, held
+# for that process's whole life. Never deleted, so the next holder locks the
+# same database rather than one of its own.
+_FORWARD_LOCK_FILENAME: Final[str] = "latchkey_forward.lock"
+# The lock file itself belongs to ``filelock``; who holds it lives beside it.
+_FORWARD_OWNER_FILENAME: Final[str] = "latchkey_forward.owner"
+_LOCK_ACQUIRE_TIMEOUT_SECONDS: Final[float] = 0.5
+_OWNER_PUBLISH_TIMEOUT_SECONDS: Final[float] = 0.5
+_OWNER_PUBLISH_POLL_SECONDS: Final[float] = 0.01
 # The forward supervisor's structured log must be named exactly ``events.jsonl``
 # so the standard mngr JSONL sink prunes its rotated copies
 # (``events.jsonl.<rotation_timestamp>``), whose cleanup pattern is hard-coded to
@@ -88,18 +108,17 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
     return latchkey_directory / PLUGIN_DATA_SUBDIR_NAME
 
 
-# -- Forward supervisor info ---------------------------------------------------
+class LatchkeyStoreError(Exception):
+    """Base exception for this package's on-disk persistence failures."""
+
+
+# -- Pre-lock forward record ---------------------------------------------------
 
 
 class LatchkeyForwardInfo(FrozenModel):
-    """Metadata identifying a running detached ``mngr latchkey forward`` supervisor.
+    """The record a ``mngr latchkey forward`` from before the ownership lock wrote.
 
-    ``gateway_port`` is initially ``None`` (the embedder writes the
-    record before the supervisor has finished starting up) and gets
-    populated by the supervisor itself once it has spawned and
-    port-bound the shared ``latchkey gateway`` subprocess. Consumers
-    that want to talk to the gateway must poll for a non-``None``
-    value.
+    CLEANUP: remove with ``_pre_lock_migration``, the only reader left.
     """
 
     pid: int = Field(description="PID of the ``mngr latchkey forward`` process")
@@ -107,17 +126,15 @@ class LatchkeyForwardInfo(FrozenModel):
     gateway_port: int | None = Field(
         default=None,
         description=(
-            "TCP port the shared ``latchkey gateway`` subprocess is listening on, or ``None`` "
-            "while the gateway is still coming up. Pair with ``listen_host`` (always 127.0.0.1 "
-            "today) to form the gateway URL. Consumers also need the password, which is "
-            "deterministically derived from the user's latchkey encryption key via "
-            ":meth:`Latchkey.derive_gateway_password` -- it is intentionally NOT stored on disk."
+            "TCP port the shared ``latchkey gateway`` subprocess had bound, if any. Read by "
+            "nothing; present because every record on disk carries the key and this model "
+            "forbids extra ones, so dropping the field would make those records unparseable."
         ),
     )
 
 
 def forward_info_path(data_dir: Path) -> Path:
-    """Return the path to the forward supervisor info record."""
+    """Return the path to the pre-lock forward record."""
     return data_dir / _FORWARD_RECORD_FILENAME
 
 
@@ -127,27 +144,6 @@ def save_forward_info(data_dir: Path, info: LatchkeyForwardInfo) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(info.model_dump_json(indent=2))
     logger.debug("Saved mngr latchkey forward info at {}", path)
-
-
-def update_forward_info_gateway_port(data_dir: Path, gateway_port: int) -> None:
-    """Stamp the bound gateway port onto the existing forward record.
-
-    Called by the ``mngr latchkey forward`` subcommand immediately
-    after its child :class:`Latchkey` reports a successfully-bound
-    gateway port. The record is preserved verbatim except for the
-    ``gateway_port`` field so the embedder's view of the supervisor
-    PID / started_at is not silently overwritten.
-    """
-    existing = load_forward_info(data_dir)
-    if existing is None:
-        raise LatchkeyStoreError(
-            f"No forward info record at {forward_info_path(data_dir)} to stamp gateway_port={gateway_port} onto; "
-            "refusing to silently leave the gateway invisible to consumers.",
-        )
-    save_forward_info(
-        data_dir,
-        existing.model_copy_update(to_update(existing.field_ref().gateway_port, gateway_port)),
-    )
 
 
 def load_forward_info(data_dir: Path) -> LatchkeyForwardInfo | None:
@@ -176,6 +172,183 @@ def delete_forward_info(data_dir: Path) -> None:
             logger.debug("Deleted mngr latchkey forward info at {}", path)
         except OSError as e:
             logger.warning("Failed to delete mngr latchkey forward info at {}: {}", path, e)
+
+
+# -- Forward ownership lock ----------------------------------------------------
+
+
+class LatchkeyForwardOwner(FrozenModel):
+    """Identity of the process that currently owns a latchkey directory's forward.
+
+    Only meaningful while that process still holds the lock; the lock, not this
+    record, is what says whether an owner is live.
+    """
+
+    pid: int = Field(description="PID of the ``mngr latchkey forward`` that holds the lock")
+    gateway_port: int | None = Field(
+        default=None,
+        description=(
+            "TCP port the shared ``latchkey gateway`` subprocess is listening on, or ``None`` "
+            "while the gateway is still coming up. Pair with ``listen_host`` (always 127.0.0.1 "
+            "today) to form the gateway URL. Consumers also need the password, which is "
+            "deterministically derived from the user's latchkey encryption key via "
+            ":meth:`Latchkey.derive_gateway_password` -- it is intentionally NOT stored on disk."
+        ),
+    )
+
+
+def forward_lock_path(data_dir: Path) -> Path:
+    """Return the path to the forward's exclusive-ownership lock."""
+    return data_dir / _FORWARD_LOCK_FILENAME
+
+
+def forward_owner_path(data_dir: Path) -> Path:
+    """Return the path to the record naming the forward that holds the lock."""
+    return data_dir / _FORWARD_OWNER_FILENAME
+
+
+def acquire_forward_lock(data_dir: Path) -> ReadWriteLock | None:
+    """Take exclusive ownership of this directory's forward, recording who took it.
+
+    Returns the lock. **The caller must keep a reference to it** for as long as
+    it wants to own the forward: the lock is released when the object is
+    collected, as well as by the kernel when the holder exits, however it exits.
+    Returns ``None`` when another live forward already owns this directory.
+
+    ``is_singleton=False`` so that two locks on one path contend within a
+    process exactly as they would across two, which is what makes a second
+    forward impossible rather than merely unlikely.
+
+    Contention is retried until ``_LOCK_ACQUIRE_TIMEOUT_SECONDS``, because
+    :func:`probe_forward_lock` holds the lock for an instant to test it and a
+    forward starting at that instant would otherwise refuse to run at all.
+    """
+    lock_path = forward_lock_path(data_dir)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to create the mngr latchkey data dir at {lock_path.parent}: {e}") from e
+    try:
+        # Constructing it already opens the backing database, so a directory
+        # that cannot hold one fails here rather than at acquire.
+        lock = ReadWriteLock(str(lock_path), is_singleton=False)
+        lock.acquire_write(timeout=_LOCK_ACQUIRE_TIMEOUT_SECONDS)
+    except Timeout:
+        logger.debug("Another process already holds the mngr latchkey forward lock at {}", lock_path)
+        return None
+    except (OSError, sqlite3.Error) as e:
+        raise LatchkeyStoreError(f"Failed to take the mngr latchkey forward lock at {lock_path}: {e}") from e
+    owner_path = forward_owner_path(data_dir)
+    try:
+        # The departed owner's record outlives it, so clear it before stamping:
+        # a probe landing in between reads no owner rather than a dead one.
+        owner_path.unlink(missing_ok=True)
+        atomic_write(owner_path, LatchkeyForwardOwner(pid=os.getpid()).model_dump_json())
+    except OSError as e:
+        lock.release()
+        raise LatchkeyStoreError(f"Failed to record the mngr latchkey forward owner at {owner_path}: {e}") from e
+    logger.debug("Took the mngr latchkey forward lock at {} (pid={})", lock_path, os.getpid())
+    return lock
+
+
+def update_forward_owner_gateway_port(data_dir: Path, gateway_port: int) -> None:
+    """Stamp the bound gateway port onto the owner record.
+
+    Called by the forward once its :class:`Latchkey` reports a successfully-bound
+    gateway port. Only the process holding the lock writes this, and it writes
+    the whole record atomically, so a reader sees the port either present or
+    absent and never a half-updated owner.
+    """
+    owner = load_forward_owner(data_dir)
+    if owner is None:
+        raise LatchkeyStoreError(
+            f"No forward owner recorded at {forward_owner_path(data_dir)} to stamp "
+            f"gateway_port={gateway_port} onto; refusing to leave the gateway invisible to consumers.",
+        )
+    atomic_write(
+        forward_owner_path(data_dir),
+        owner.model_copy_update(to_update(owner.field_ref().gateway_port, gateway_port)).model_dump_json(),
+    )
+
+
+def _await_owner_record(data_dir: Path) -> LatchkeyForwardOwner | None:
+    """Read the record of a holder that is publishing it, waiting for it to land.
+
+    A holder clears the record and rewrites it in the instant after taking the
+    lock, so a probe arriving in that gap finds a held lock and no record.
+    Reading once would call that directory unowned and start a second forward
+    that the holder then refuses, failing a caller whose forward is healthy.
+
+    Returns ``None`` once ``_OWNER_PUBLISH_TIMEOUT_SECONDS`` passes with nothing
+    published, which is a holder that died between taking the lock and stamping
+    it.
+    """
+    owner, _poll_count, _elapsed = poll_for_value(
+        lambda: load_forward_owner(data_dir),
+        timeout=_OWNER_PUBLISH_TIMEOUT_SECONDS,
+        poll_interval=_OWNER_PUBLISH_POLL_SECONDS,
+    )
+    return owner
+
+
+def probe_forward_lock(data_dir: Path) -> LatchkeyForwardOwner | None:
+    """Return the owner of this directory's forward lock, or ``None`` if free.
+
+    Liveness comes from the lock itself: it is released when its holder exits,
+    however it exits, so a lock that cannot be taken has a live owner behind it
+    and one that can be taken has none. No clock decides that, so a system clock
+    step cannot make a live owner read as absent. The one time budget here is how
+    long a held lock waits for its owner's record, which :func:`poll_for_value`
+    measures against the wall clock, so a step can cut that wait short.
+
+    The instant is taken *shared*, which is refused by exactly the exclusive
+    holder this asks about and by no other probe.
+    """
+    lock_path = forward_lock_path(data_dir)
+    if not lock_path.is_file():
+        # Nothing has ever claimed this directory, and the lock is a database
+        # this must not create just to ask.
+        return None
+    try:
+        lock = ReadWriteLock(str(lock_path), is_singleton=False)
+        lock.acquire_read(blocking=False)
+    except Timeout:
+        return _await_owner_record(data_dir)
+    except (OSError, sqlite3.Error) as e:
+        logger.warning("Failed to probe the mngr latchkey forward lock at {}: {}", lock_path, e)
+        return None
+    lock.release()
+    return None
+
+
+def load_forward_owner(data_dir: Path) -> LatchkeyForwardOwner | None:
+    """Read the recorded forward owner, or ``None`` if absent or unreadable.
+
+    Reads the file only. Whether that owner is live is :func:`probe_forward_lock`'s
+    question, so use that unless you specifically want the recorded value.
+
+    The record is replaced by an atomic rename, so a reader racing a new owner's
+    stamp sees either the departed previous owner's record or nothing. Anything
+    else on disk reads as ``None`` rather than raising.
+    """
+    path = forward_owner_path(data_dir)
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        logger.warning("Failed to read the mngr latchkey forward owner at {}: {}", path, e)
+        return None
+    if not raw.strip():
+        return None
+    try:
+        return LatchkeyForwardOwner.model_validate_json(raw)
+    except ValueError as e:
+        logger.warning("Malformed mngr latchkey forward owner at {}: {}", path, e)
+        return None
+
+
+# -- Forward logs --------------------------------------------------------------
 
 
 def forward_log_path(data_dir: Path) -> Path:
@@ -225,10 +398,6 @@ def ensure_browser_log_path(data_dir: Path) -> Path:
 
 
 # -- Permissions config (latchkey_permissions.json) ---------------------------
-
-
-class LatchkeyStoreError(Exception):
-    """Base exception for permissions-config persistence failures."""
 
 
 class LatchkeyPermissionsConfig(FrozenModel):

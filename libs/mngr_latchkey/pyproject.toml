@@ -17,6 +17,9 @@ dependencies = [
     "paramiko>=3.0",
     "pluggy>=1.0",
     "psutil>=5.9",
+    # Cross-process read/write file lock; its read side is what lets a probe ask
+    # who owns a latchkey directory without contending with another probe.
+    "filelock>=3.31",
     "pydantic>=2.0",
 ]
 

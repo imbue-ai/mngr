@@ -2138,6 +2138,7 @@ source = { editable = "libs/mngr_latchkey" }
 dependencies = [
     { name = "click" },
     { name = "concurrency-group" },
+    { name = "filelock" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-forward" },
@@ -2152,6 +2153,7 @@ dependencies = [
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "filelock", specifier = ">=3.31" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
     { name = "imbue-mngr-forward", editable = "libs/mngr_forward" },

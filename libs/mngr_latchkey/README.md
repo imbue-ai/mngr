@@ -118,6 +118,25 @@ CLI flag > env var > settings.toml > built-in default.
   only the newest rotation. Without that the file is append-only for the life
   of the install, and is gzipped and re-uploaded with every bug report.
 
+## Troubleshooting
+
+### Two forwards for one latchkey directory
+
+The forward is supervisor-managed, and exactly one should be running per
+latchkey directory: each holds an exclusive lock on its own directory for its
+whole life, so a second one for the same directory refuses to start. Forwards
+for *different* directories are expected, so tell them apart by the
+`--latchkey-directory` in each title:
+
+```sh
+ps -eo pid,args | grep '[m]ngr latchkey forward'
+kill <stray-pid>
+```
+
+`SIGTERM` runs the supervisor's teardown, which stops its `mngr observe` child,
+its reverse tunnels and the shared gateway subprocess, so killing the
+supervisor leaves nothing behind to clean up by hand.
+
 ## Error reporting (Sentry)
 
 `mngr latchkey forward` can report errors to Sentry. It is **off by default** and

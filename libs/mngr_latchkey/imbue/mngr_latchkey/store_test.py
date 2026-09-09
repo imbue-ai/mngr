@@ -1,38 +1,41 @@
 import json
 import os
-from datetime import datetime
-from datetime import timezone
+import time
 from pathlib import Path
 
 import pytest
+from filelock import ReadWriteLock
 
 from imbue.mngr.primitives import HostId
-from imbue.mngr_latchkey.store import LatchkeyForwardInfo
+from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import _LOCK_ACQUIRE_TIMEOUT_SECONDS
+from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import forward_info_path
+from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_log_path
+from imbue.mngr_latchkey.store import forward_owner_path
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import point_opaque_handle_at_host
-from imbue.mngr_latchkey.store import save_forward_info
+from imbue.mngr_latchkey.store import probe_forward_lock
 from imbue.mngr_latchkey.store import save_permissions
-from imbue.mngr_latchkey.store import update_forward_info_gateway_port
+from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
 
-# Gateway-record save/load/delete tests went away when the on-disk
-# gateway record did. The supervisor's bound gateway port is now
-# stamped onto the existing ``LatchkeyForwardInfo`` record via
-# ``update_forward_info_gateway_port``; the password is never
-# persisted (callers derive it via ``Latchkey.derive_gateway_password``).
-# Forward-supervisor record helpers are tested in
-# ``forward_supervisor_test.py`` and below.
+# The gateway's bound port is stamped onto the owner record beside the
+# ownership lock; the password is never persisted (callers derive it via
+# ``Latchkey.derive_gateway_password``). The supervisor's use of these helpers
+# is covered in ``forward_supervisor_test.py``.
 
 
 def test_forward_log_paths_are_distinct(tmp_path: Path) -> None:
@@ -274,47 +277,170 @@ def test_ensure_admin_permissions_file_is_idempotent(tmp_path: Path) -> None:
     assert path.read_text() == custom
 
 
-# -- Forward-info gateway-port stamping ----------------------------------------
+# -- Pre-lock forward record ---------------------------------------------------
 
 
-def _make_forward_info(pid: int = 4242, gateway_port: int | None = None) -> LatchkeyForwardInfo:
-    return LatchkeyForwardInfo(
-        pid=pid,
-        started_at=datetime.now(timezone.utc),
-        gateway_port=gateway_port,
-    )
+def test_a_pre_lock_record_on_disk_still_parses(tmp_path: Path) -> None:
+    """Every record a pre-lock build wrote carries a gateway port, and must still be read.
 
+    CLEANUP: delete with ``_pre_lock_migration``.
 
-def test_forward_info_defaults_gateway_port_to_none() -> None:
-    """Records written before the gateway binds carry an absent port."""
-    info = LatchkeyForwardInfo(pid=1, started_at=datetime.now(timezone.utc))
-    assert info.gateway_port is None
-
-
-def test_update_forward_info_gateway_port_stamps_existing_record(tmp_path: Path) -> None:
-    """Stamping the bound port preserves pid/started_at on the existing record."""
-    original = _make_forward_info(pid=4242)
-    save_forward_info(tmp_path, original)
-    update_forward_info_gateway_port(tmp_path, gateway_port=32867)
-    updated = load_forward_info(tmp_path)
-    assert updated is not None
-    assert updated.pid == 4242
-    assert updated.started_at == original.started_at
-    assert updated.gateway_port == 32867
-
-
-def test_update_forward_info_gateway_port_raises_when_record_absent(tmp_path: Path) -> None:
-    """Missing record => :class:`LatchkeyStoreError`; never silently drops the stamp.
-
-    Silently moving on would leave the gateway running but invisible
-    to anything polling for ``gateway_port`` (notably the minds
-    desktop client during startup), which is a worse failure mode
-    than crashing the supervisor.
+    The model forbids extra keys, so dropping ``gateway_port`` as unread would
+    make this record unparseable, and the migration would stop seeing the
+    forward that wrote it.
     """
-    with pytest.raises(LatchkeyStoreError) as exc_info:
-        update_forward_info_gateway_port(tmp_path, gateway_port=32867)
-    assert "32867" in str(exc_info.value)
-    assert load_forward_info(tmp_path) is None
+    forward_info_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    forward_info_path(tmp_path).write_text(
+        json.dumps({"pid": 4242, "started_at": "2026-01-01T00:00:00Z", "gateway_port": 32867})
+    )
+    info = load_forward_info(tmp_path)
+    assert info is not None
+    assert info.pid == 4242
+
+
+# -- Forward ownership lock ----------------------------------------------------
+
+
+def test_forward_lock_path_lives_under_data_dir(tmp_path: Path) -> None:
+    assert forward_lock_path(tmp_path) == tmp_path / "latchkey_forward.lock"
+
+
+def test_acquire_forward_lock_stamps_the_owner_and_refuses_a_second_holder(tmp_path: Path) -> None:
+    """The holder is identifiable from the directory, and no one else can take the lock.
+
+    ``is_singleton=False`` gives the second acquire its own connection to the
+    lock database rather than the first one back, so it contends exactly as a
+    second ``mngr latchkey forward`` process would.
+    """
+    lock = acquire_forward_lock(tmp_path)
+    assert lock is not None
+    try:
+        owner = load_forward_owner(tmp_path)
+        assert owner is not None
+        assert owner.pid == os.getpid()
+        assert acquire_forward_lock(tmp_path) is None
+    finally:
+        lock.release()
+
+
+def test_acquire_forward_lock_raises_when_the_lock_file_cannot_be_opened(tmp_path: Path) -> None:
+    """A lock that cannot be taken at all is a store failure, never contention.
+
+    ``None`` means "another forward owns this directory", so returning it here
+    would name a process that does not exist. A directory standing where the
+    lock file belongs is refused by the kernel whatever the caller's privileges
+    are, unlike an unreadable file, which root would open anyway.
+    """
+    forward_lock_path(tmp_path).mkdir(parents=True)
+    with pytest.raises(LatchkeyStoreError):
+        acquire_forward_lock(tmp_path)
+
+
+def test_probe_forward_lock_reports_the_holder_and_nothing_once_released(tmp_path: Path) -> None:
+    """Ownership is the kernel's answer, so it follows the lock rather than the file.
+
+    The file is left behind untouched by the release, which is exactly the state
+    a departed owner leaves; it must still read as unowned.
+    """
+    lock = acquire_forward_lock(tmp_path)
+    assert lock is not None
+    held = probe_forward_lock(tmp_path)
+    assert held is not None and held.pid == os.getpid()
+    lock.release()
+    assert forward_lock_path(tmp_path).is_file()
+    assert probe_forward_lock(tmp_path) is None
+
+
+def test_probe_forward_lock_does_not_keep_the_lock_it_tested(tmp_path: Path) -> None:
+    """Probing must leave the lock takeable, or it would lock out the next forward."""
+    lock = acquire_forward_lock(tmp_path)
+    assert lock is not None
+    lock.release()
+    assert probe_forward_lock(tmp_path) is None
+    second_lock = acquire_forward_lock(tmp_path)
+    assert second_lock is not None
+    second_lock.release()
+
+
+def test_acquire_forward_lock_retries_contention_rather_than_refusing_at_once(tmp_path: Path) -> None:
+    """Contention is retried for the full timeout, not answered on the first attempt.
+
+    :func:`probe_forward_lock` takes the lock for an instant to test it, so a
+    forward starting at that instant meets contention that clears immediately.
+    An acquire that gave its answer on the first attempt would refuse to run at
+    all. Elapsed time is what distinguishes the two: against a lock that is
+    never released, retrying spends the whole timeout and not retrying returns
+    at once.
+    """
+    held_lock = acquire_forward_lock(tmp_path)
+    assert held_lock is not None
+    try:
+        started_at = time.monotonic()
+        assert acquire_forward_lock(tmp_path) is None
+        assert time.monotonic() - started_at >= _LOCK_ACQUIRE_TIMEOUT_SECONDS / 2, (
+            "the acquire answered on its first attempt instead of retrying contention"
+        )
+    finally:
+        held_lock.release()
+
+
+def test_probe_forward_lock_is_not_blocked_by_another_probe(tmp_path: Path) -> None:
+    """A probe in flight elsewhere must not read as an owner.
+
+    A probe answers "is anyone holding this exclusively" by taking the lock for
+    an instant. Taking that instant *exclusively* would make two probes of a
+    free directory contend, and the loser would report the departed pid still
+    recorded on disk as live -- which the reaper would then signal. The shared
+    lock held here is what an in-flight probe holds.
+    """
+    forward_owner_path(tmp_path).write_text(LatchkeyForwardOwner(pid=os.getpid()).model_dump_json())
+    in_flight_probe = ReadWriteLock(str(forward_lock_path(tmp_path)), is_singleton=False)
+    in_flight_probe.acquire_read(blocking=False)
+    try:
+        assert probe_forward_lock(tmp_path) is None
+    finally:
+        in_flight_probe.release()
+
+
+def test_the_gateway_port_is_read_back_from_where_it_is_written(tmp_path: Path) -> None:
+    """The port's writer and its readers must agree on which file carries it.
+
+    The forward stamps the port after binding, and ``gateway-info`` plus the
+    desktop client read it. If those drift apart the port is written somewhere
+    nobody looks and the gateway is invisible, with no error anywhere.
+    """
+    lock = acquire_forward_lock(tmp_path)
+    assert lock is not None
+    try:
+        before = load_forward_owner(tmp_path)
+        assert before is not None and before.gateway_port is None
+        update_forward_owner_gateway_port(tmp_path, 32867)
+        owner = load_forward_owner(tmp_path)
+        assert owner is not None
+        assert owner.gateway_port == 32867
+        assert owner.pid == os.getpid(), "stamping the port must not disturb the recorded owner"
+    finally:
+        lock.release()
+
+
+def test_stamping_a_port_with_no_owner_is_refused(tmp_path: Path) -> None:
+    """Better to fail than to invent an owner record the lock does not back."""
+    with pytest.raises(LatchkeyStoreError, match="No forward owner recorded"):
+        update_forward_owner_gateway_port(tmp_path, 32867)
+
+
+def test_load_forward_owner_reads_none_from_an_absent_empty_or_malformed_record(tmp_path: Path) -> None:
+    """Every unusable owner record reads as "nobody owns this", never as a bogus owner.
+
+    A reader is one probe among several on a file it does not lock, so whatever
+    it finds there must not raise or invent a pid.
+    """
+    assert load_forward_owner(tmp_path) is None
+    path = forward_owner_path(tmp_path)
+    path.write_text("")
+    assert load_forward_owner(tmp_path) is None
+    path.write_text('{"pid": 4242')
+    assert load_forward_owner(tmp_path) is None
 
 
 # -- schemas block -------------------------------------------------------------

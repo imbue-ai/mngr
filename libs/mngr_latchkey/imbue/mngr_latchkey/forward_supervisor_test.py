@@ -1,18 +1,17 @@
 """Unit tests for :mod:`imbue.mngr_latchkey.forward_supervisor`.
 
-Exercises the adopt / discard-stale / spawn-fresh state machine of
-:class:`LatchkeyForwardSupervisor` end-to-end against a small fake
-``mngr`` binary that imitates the actual ``mngr latchkey forward``
-argv shape (so the cmdline-based liveness probe accepts it).
+Exercises the adopt / spawn-fresh / reap state machine of
+:class:`LatchkeyForwardSupervisor` end-to-end against a small fake ``mngr``
+binary that takes the same ownership lock the real ``mngr latchkey forward``
+takes, so it is bound by the same one-forward-per-directory invariant.
 """
 
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
@@ -20,19 +19,20 @@ from uuid import uuid4
 import psutil
 import pytest
 
+from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
-from imbue.mngr_latchkey.forward_supervisor import _cmdline_looks_like_mngr_latchkey_forward
 from imbue.mngr_latchkey.forward_supervisor import _descendant_processes
-from imbue.mngr_latchkey.forward_supervisor import _forward_latchkey_directory
-from imbue.mngr_latchkey.forward_supervisor import _is_forward_pid_for_directory
-from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
-from imbue.mngr_latchkey.store import LatchkeyForwardInfo
-from imbue.mngr_latchkey.store import delete_forward_info
+from imbue.mngr_latchkey.forward_supervisor import is_forward_owned_by
+from imbue.mngr_latchkey.forward_supervisor import owning_forward_process
+from imbue.mngr_latchkey.store import LatchkeyForwardOwner
+from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import forward_info_path
+from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_log_path
-from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import forward_owner_path
+from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import plugin_data_dir
-from imbue.mngr_latchkey.store import save_forward_info
+from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
@@ -70,25 +70,15 @@ def _wait_for_process_exit(pid: int, timeout: float = _PROCESS_WAIT_TIMEOUT_SECO
 
 
 def _wait_for_process_alive(pid: int, timeout: float = _PROCESS_WAIT_TIMEOUT_SECONDS) -> bool:
-    """Poll until ``pid``'s cmdline matches ``mngr latchkey forward``.
-
-    Between fork and exec the child briefly inherits the parent's argv,
-    which makes ``is_forward_info_alive``'s cmdline check transiently
-    fail. Waiting for the *specific* cmdline pattern (rather than just
-    ``cmdline != []``) closes that window so adoption tests do not race
-    with the kernel's exec syscall.
-    """
+    """Poll until ``pid`` is a running process."""
     poll_event = threading.Event()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            process = psutil.Process(pid)
-            cmdline = process.cmdline()
+            if psutil.Process(pid).status() != psutil.STATUS_ZOMBIE:
+                return True
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
-            continue
-        if _cmdline_looks_like_mngr_latchkey_forward(cmdline):
-            return True
+            pass
         poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
     return False
 
@@ -99,19 +89,19 @@ def _make_fake_mngr_binary(tmp_path: Path) -> Path:
     Recognised invocations:
 
     * ``mngr latchkey forward --latchkey-directory <dir> [...]`` -- mirrors
-      the real :func:`_forward_command` to the extent the supervisor's
-      tests care about: writes a ``LatchkeyForwardInfo`` record to
-      ``<dir>/mngr_latchkey/latchkey_forward.json`` (with the script's
-      own PID), deletes it on SIGTERM, sleeps in between.
+      the real :func:`_forward_command` to the extent the supervisor's tests
+      care about: takes the directory's ownership lock (exiting 97 when
+      another already holds it), which records it as the directory's owner,
+      then idles until SIGTERM.
     * Anything else -- exits 99. Lets tests assert that the supervisor
       only ever spawns the supported subcommand.
     """
     script = tmp_path / "mngr"
     script.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, signal, sys, threading\n"
-        "from datetime import datetime, timezone\n"
+        f"#!{sys.executable}\n"
+        "import os, signal, sys, threading\n"
         "from pathlib import Path\n"
+        "from imbue.mngr_latchkey.store import acquire_forward_lock\n"
         'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
         "    sys.exit(99)\n"
         "args = sys.argv[3:]\n"
@@ -122,34 +112,26 @@ def _make_fake_mngr_binary(tmp_path: Path) -> Path:
         "        break\n"
         "if latchkey_directory is None:\n"
         "    sys.exit(98)\n"
-        'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
-        "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        'plugin_dir = latchkey_directory / "mngr_latchkey"\n'
+        "plugin_dir.mkdir(parents=True, exist_ok=True)\n"
+        # Take the same ownership lock the real forward takes, so the fake is
+        # bound by the real one-forward-per-directory invariant.
+        "_forward_lock = acquire_forward_lock(plugin_dir)\n"
+        "if _forward_lock is None:\n"
+        "    sys.exit(97)\n"
         # Record the working directory the supervisor launched us in so a test
         # can assert the `cwd` field is threaded through to the spawn.
-        '(record_path.parent / "observed_cwd.txt").write_text(os.getcwd())\n'
-        "record_path.write_text(json.dumps({\n"
-        '    "pid": os.getpid(),\n'
-        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
-        '    "gateway_port": None,\n'
-        "}))\n"
-        # Drop a per-pid sentinel *after* publishing the record. Unlike the
-        # shared record (which a racing sibling overwrites), this file is never
-        # clobbered, so a test can wait for *each* fake to have finished its
-        # single record write before pinning the shared record.
-        '(record_path.parent / f"ready_{os.getpid()}.txt").write_text("ready")\n'
-        "def _on_term(*_):\n"
-        "    try:\n"
-        "        record_path.unlink()\n"
-        "    except OSError:\n"
-        "        pass\n"
-        "    sys.exit(0)\n"
-        "signal.signal(signal.SIGTERM, _on_term)\n"
+        '(plugin_dir / "observed_cwd.txt").write_text(os.getcwd())\n'
+        # Written last, so a test that waits for it knows this fake has finished
+        # claiming the directory and stamping itself as its owner.
+        '(plugin_dir / f"ready_{os.getpid()}.txt").write_text("ready")\n'
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
         # Mirror the real forward's SIGHUP observe-bounce handler with a
         # delivery sentinel, so bounce tests can assert whether the signal was
         # actually delivered (inherited dispositions make death-on-SIGHUP an
         # unreliable delivery signal across test environments).
         "def _on_hup(*_):\n"
-        '    (record_path.parent / f"sighup_received_{os.getpid()}.txt").write_text("1")\n'
+        '    (plugin_dir / f"sighup_received_{os.getpid()}.txt").write_text("1")\n'
         "signal.signal(signal.SIGHUP, _on_hup)\n"
         # Block forever (handlers still run) rather than ``signal.pause()``,
         # which would fall through and exit after the first handled SIGHUP.
@@ -163,12 +145,26 @@ _FORWARD_RECORD_POLL_TIMEOUT: Final[float] = 5.0
 _FORWARD_RECORD_POLL_INTERVAL: Final[float] = 0.05
 
 
-def _wait_for_forward_record(plugin_dir: Path) -> LatchkeyForwardInfo:
-    """Block until the forward child publishes its record. Fails the test on timeout."""
+def _wait_for_legacy_forward_record(plugin_dir: Path) -> None:
+    """Block until a pre-lock fake publishes its ``latchkey_forward.json``.
+
+    CLEANUP: delete with ``_pre_lock_migration``.
+    """
     deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
     waiter = threading.Event()
     while time.monotonic() < deadline:
-        record = load_forward_info(plugin_dir)
+        if forward_info_path(plugin_dir).is_file():
+            return
+        waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
+    raise AssertionError(f"legacy forward record never appeared at {plugin_dir}")
+
+
+def _wait_for_forward_record(plugin_dir: Path) -> LatchkeyForwardOwner:
+    """Block until the forward child owns its directory. Fails the test on timeout."""
+    deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
+    waiter = threading.Event()
+    while time.monotonic() < deadline:
+        record = load_forward_owner(plugin_dir)
         if record is not None:
             return record
         waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
@@ -178,11 +174,10 @@ def _wait_for_forward_record(plugin_dir: Path) -> LatchkeyForwardInfo:
 def _wait_for_forward_ready(plugin_dir: Path, pid: int) -> None:
     """Block until the fake forward ``pid`` has dropped its per-pid ready sentinel.
 
-    The sentinel (``ready_<pid>.txt``) is written *after* the shared record and
-    is never overwritten by a racing sibling, so it proves that *this* specific
-    fake has finished its single record write. Waiting on it for every spawned
-    fake guarantees no late record write can clobber a subsequent pin. Fails the
-    test on timeout.
+    The sentinel (``ready_<pid>.txt``) is the fake's last write, so its presence
+    proves that fake has claimed the directory and stamped itself as the owner.
+    A test that stamps a gateway port onto that record has to wait for it, or it
+    stamps a record that is not yet there. Fails the test on timeout.
     """
     sentinel = plugin_dir / f"ready_{pid}.txt"
     deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
@@ -192,42 +187,6 @@ def _wait_for_forward_ready(plugin_dir: Path, pid: int) -> None:
             return
         waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
     raise AssertionError(f"forward pid {pid} never wrote {sentinel} within {_FORWARD_RECORD_POLL_TIMEOUT}s")
-
-
-# -- cmdline matcher ---------------------------------------------------------
-
-
-def test_cmdline_matcher_accepts_plausible_mngr_latchkey_forward() -> None:
-    assert _cmdline_looks_like_mngr_latchkey_forward(["mngr", "latchkey", "forward", "--latchkey-directory", "/tmp/d"])
-    assert _cmdline_looks_like_mngr_latchkey_forward(["/usr/local/bin/mngr", "latchkey", "forward"])
-
-
-def test_cmdline_matcher_handles_proctitle_overwrite() -> None:
-    """``uv tool``-style wrappers fuse argv into argv[0] and zero out the rest.
-
-    psutil surfaces this as ``["mngr latchkey forward ...", "", "", ...]``;
-    the matcher must still recognise it as ours, or the supervisor will
-    discard its own record and spawn a duplicate every time minds starts.
-    """
-    fused = (
-        "mngr latchkey forward --latchkey-directory /home/user/.minds/latchkey "
-        "--latchkey-binary /opt/latchkey/bin/latchkey --mngr-binary mngr"
-    )
-    cmdline = [fused] + [""] * 85
-    assert _cmdline_looks_like_mngr_latchkey_forward(cmdline)
-
-
-def test_cmdline_matcher_rejects_unrelated_processes() -> None:
-    assert not _cmdline_looks_like_mngr_latchkey_forward([])
-    # ``manager`` is not ``mngr``.
-    assert not _cmdline_looks_like_mngr_latchkey_forward(["manager", "latchkey", "forward"])
-    # ``mngr`` token present but no ``latchkey forward`` follow-up.
-    assert not _cmdline_looks_like_mngr_latchkey_forward(["mngr", "forward"])
-    # ``forward`` present but ``latchkey`` is missing.
-    assert not _cmdline_looks_like_mngr_latchkey_forward(["mngr", "create", "forward"])
-
-
-# -- ensure_running ----------------------------------------------------------
 
 
 def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
@@ -241,10 +200,7 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
     info = supervisor.ensure_running()
     try:
         assert info.pid > 0
-        assert isinstance(info.started_at, datetime)
         assert _wait_for_process_alive(info.pid)
-        # The forward child publishes the record asynchronously after
-        # the spawn returns; poll until it appears.
         persisted = _wait_for_forward_record(supervisor.plugin_data_dir)
         assert persisted.pid == info.pid
         assert forward_log_path(supervisor.plugin_data_dir).is_file()
@@ -272,7 +228,9 @@ def test_ensure_running_spawns_forward_in_configured_cwd(tmp_path: Path) -> None
 
     info = supervisor.ensure_running()
     try:
-        _wait_for_forward_record(supervisor.plugin_data_dir)
+        # The fake writes its cwd after claiming the directory, so waiting for
+        # the claim alone would race the write this reads.
+        _wait_for_forward_ready(supervisor.plugin_data_dir, info.pid)
         observed_cwd = (supervisor.plugin_data_dir / "observed_cwd.txt").read_text()
         # Resolve both sides: macOS routes tmp through a /private symlink, so the
         # child's getcwd() can differ textually from the path we passed.
@@ -301,72 +259,8 @@ def test_bounce_starts_supervisor_when_none_running(tmp_path: Path) -> None:
         supervisor.stop()
 
 
-# A no-double-spawn / adoption-against-live-subprocess test used to live
-# here but proved flaky under xdist (the fork->exec window between
-# ``subprocess.Popen`` returning and the child running its own argv
-# briefly leaves the cmdline as the parent's, racing with the
-# cmdline-based liveness probe). The same logic is covered by the
-# direct ``is_forward_info_alive`` tests below plus the
-# ``_cmdline_looks_like_mngr_latchkey_forward`` matcher tests above
-# without an end-to-end subprocess race.
-
-
-def test_ensure_running_discards_stale_record_and_spawns_fresh(tmp_path: Path) -> None:
-    """A record whose PID is dead is discarded; a fresh supervisor is spawned."""
-    fake_binary = _make_fake_mngr_binary(tmp_path)
-    supervisor = LatchkeyForwardSupervisor(
-        mngr_binary=str(fake_binary),
-        latchkey_binary="/usr/bin/latchkey-unused",
-        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
-    )
-
-    plugin_dir = supervisor.plugin_data_dir
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    # PID 1 (init) is alive but its cmdline is not ours, so the
-    # cmdline check rejects it -- exactly the PID-reuse case.
-    save_forward_info(
-        plugin_dir,
-        LatchkeyForwardInfo(pid=1, started_at=datetime.now(timezone.utc)),
-    )
-
-    info = supervisor.ensure_running()
-    try:
-        assert info.pid != 1
-        assert _wait_for_process_alive(info.pid)
-    finally:
-        supervisor.stop()
-        assert _wait_for_process_exit(info.pid)
-
-
-def test_ensure_running_discards_record_for_dead_pid(tmp_path: Path) -> None:
-    """A record whose PID has been reaped is treated as stale."""
-    fake_binary = _make_fake_mngr_binary(tmp_path)
-    supervisor = LatchkeyForwardSupervisor(
-        mngr_binary=str(fake_binary),
-        latchkey_binary="/usr/bin/latchkey-unused",
-        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
-    )
-
-    plugin_dir = supervisor.plugin_data_dir
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    # Pick an almost-certainly-dead PID. The supervisor must tolerate
-    # ``psutil.NoSuchProcess`` and treat the record as stale.
-    dead_pid = 2**31 - 1
-    save_forward_info(
-        plugin_dir,
-        LatchkeyForwardInfo(pid=dead_pid, started_at=datetime.now(timezone.utc)),
-    )
-
-    info = supervisor.ensure_running()
-    try:
-        assert info.pid != dead_pid
-        assert _wait_for_process_alive(info.pid)
-    finally:
-        supervisor.stop()
-        assert _wait_for_process_exit(info.pid)
-
-
-def test_stop_terminates_running_supervisor_and_deletes_record(tmp_path: Path) -> None:
+def test_stop_terminates_running_supervisor_and_leaves_the_directory_unowned(tmp_path: Path) -> None:
+    """What ``stop()`` has to leave behind is a directory the next spawn can claim."""
     fake_binary = _make_fake_mngr_binary(tmp_path)
     supervisor = LatchkeyForwardSupervisor(
         mngr_binary=str(fake_binary),
@@ -380,7 +274,7 @@ def test_stop_terminates_running_supervisor_and_deletes_record(tmp_path: Path) -
 
     supervisor.stop()
     assert _wait_for_process_exit(info.pid)
-    assert not forward_info_path(supervisor.plugin_data_dir).is_file()
+    assert owning_forward_process(supervisor.plugin_data_dir) is None
 
 
 def test_stop_is_no_op_when_nothing_running(tmp_path: Path) -> None:
@@ -394,17 +288,40 @@ def test_stop_is_no_op_when_nothing_running(tmp_path: Path) -> None:
     supervisor.stop()
 
 
-def test_stop_immediately_after_ensure_running_terminates_child(tmp_path: Path) -> None:
-    """``stop()`` called within the fork-exec window still terminates the freshly-spawned child.
+def test_stop_waits_for_a_concurrent_ensure_running(tmp_path: Path) -> None:
+    """``stop()`` must not reap the forward another thread's ``ensure_running`` is waiting on.
 
-    Regression: an earlier version of ``stop()`` ran an
-    :func:`is_forward_info_alive` check on the cached PID before
-    sending SIGTERM. The child's cmdline is briefly empty between
-    the kernel's ``fork`` and ``execve``, so the check would fail
-    and ``stop()`` would skip the SIGTERM, leaking the child. The
-    current ``stop()`` trusts ``_last_known_pid`` without a cmdline
-    check; this test pins that behaviour by NOT waiting for the
-    child to fully exec before calling ``stop()``.
+    ``ensure_running`` holds the supervisor lock across its spawn *and* the wait
+    for that child to claim the directory, so a ``stop()`` that ignored the lock
+    would find the child, kill it, and leave the spawning thread to fail after
+    its whole ownership timeout. Holding the lock here stands in for that wait.
+    """
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary="/nonexistent-binary",
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    stopped = threading.Event()
+
+    def _stop_then_signal() -> None:
+        supervisor.stop()
+        stopped.set()
+
+    stopper = threading.Thread(target=_stop_then_signal, daemon=True)
+    with supervisor._lock:
+        stopper.start()
+        assert not stopped.wait(timeout=0.5), "stop() ran while another caller held the supervisor lock"
+    assert stopped.wait(timeout=10.0), "stop() never ran after the supervisor lock was released"
+    stopper.join(timeout=10.0)
+
+
+def test_stop_terminates_a_forward_that_has_only_just_claimed_the_directory(tmp_path: Path) -> None:
+    """A forward that owns the directory but has not finished starting is still stoppable.
+
+    ``ensure_running`` returns the moment the child takes the lock, which is well
+    before the forward installs its SIGTERM handler -- the real one does that
+    after the gateway is up. The other stop tests wait for the forward to settle
+    first, so this is the only one that signals into that window.
     """
     fake_binary = _make_fake_mngr_binary(tmp_path)
     supervisor = LatchkeyForwardSupervisor(
@@ -415,29 +332,6 @@ def test_stop_immediately_after_ensure_running_terminates_child(tmp_path: Path) 
     info = supervisor.ensure_running()
     supervisor.stop()
     assert _wait_for_process_exit(info.pid)
-
-
-def test_stop_skips_termination_for_stale_pid(tmp_path: Path) -> None:
-    """A record whose PID is alive but not a ``mngr latchkey forward`` is not signaled.
-
-    Guards against PID reuse: between a previous supervisor exiting
-    and ``stop()`` being called, the OS may have recycled its PID
-    for an unrelated process. The cmdline-verified termination in
-    ``stop()`` skips the SIGTERM in that case.
-    """
-    supervisor = LatchkeyForwardSupervisor(
-        mngr_binary="/usr/bin/mngr-unused",
-        latchkey_binary="/usr/bin/latchkey-unused",
-        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
-    )
-    plugin_dir = supervisor.plugin_data_dir
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-    # PID 1 is alive on every POSIX system, but its cmdline is not ours.
-    save_forward_info(plugin_dir, LatchkeyForwardInfo(pid=1, started_at=datetime.now(timezone.utc)))
-    supervisor.stop()
-    # PID 1 must still be running -- ``stop()`` recognized the cmdline
-    # mismatch and skipped the SIGTERM.
-    assert psutil.pid_exists(1)
 
 
 def test_restart_terminates_existing_and_spawns_fresh(tmp_path: Path) -> None:
@@ -492,36 +386,23 @@ def test_restart_is_a_clean_spawn_when_no_previous_supervisor(tmp_path: Path) ->
         assert _wait_for_process_exit(info.pid)
 
 
-def test_get_forward_info_returns_none_when_unstarted(tmp_path: Path) -> None:
+def test_get_forward_owner_returns_none_when_unstarted(tmp_path: Path) -> None:
     supervisor = LatchkeyForwardSupervisor(
         mngr_binary="/nonexistent-binary",
         latchkey_binary="/nonexistent-binary",
         latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
     )
-    assert supervisor.get_forward_info() is None
+    assert supervisor.get_forward_owner() is None
 
 
-# -- liveness probe (direct) -------------------------------------------------
+def test_a_malformed_pre_lock_record_does_not_block_the_spawn(tmp_path: Path) -> None:
+    """A pre-lock record too damaged to name a forward is cleared, not left to be re-read.
 
+    CLEANUP: delete with ``_pre_lock_migration``.
 
-def testis_forward_info_alive_rejects_unrelated_pid() -> None:
-    """A real PID whose cmdline doesn't match is rejected."""
-    info = LatchkeyForwardInfo(pid=os.getpid(), started_at=datetime.now(timezone.utc))
-    # The test process itself is pytest, not ``mngr latchkey forward``.
-    assert not is_forward_info_alive(info)
-
-
-def testis_forward_info_alive_rejects_dead_pid() -> None:
-    dead_pid = 2**31 - 1
-    info = LatchkeyForwardInfo(pid=dead_pid, started_at=datetime.now(timezone.utc))
-    assert not is_forward_info_alive(info)
-
-
-# -- malformed-record handling ----------------------------------------------
-
-
-def test_ensure_running_replaces_malformed_record(tmp_path: Path) -> None:
-    """A truncated / unreadable record is treated as 'no record'."""
+    Left behind it would be parsed and warned about on every launch, and the
+    migration would never become the no-op that lets the module go.
+    """
     fake_binary = _make_fake_mngr_binary(tmp_path)
     supervisor = LatchkeyForwardSupervisor(
         mngr_binary=str(fake_binary),
@@ -535,6 +416,7 @@ def test_ensure_running_replaces_malformed_record(tmp_path: Path) -> None:
     info = supervisor.ensure_running()
     try:
         assert _wait_for_process_alive(info.pid)
+        assert not forward_info_path(plugin_dir).is_file()
     finally:
         supervisor.stop()
         assert _wait_for_process_exit(info.pid)
@@ -546,9 +428,9 @@ def test_ensure_running_replaces_malformed_record(tmp_path: Path) -> None:
 def _make_env_dumping_mngr_binary(tmp_path: Path) -> Path:
     """Build a fake ``mngr`` that records selected env vars before idling.
 
-    Behaves like :func:`_make_fake_mngr_binary` (publishes a forward
-    record, idles until SIGTERM) and additionally dumps every env var
-    whose name starts with ``MINDS_API_PROXY_TEST_`` plus the
+    Behaves like :func:`_make_fake_mngr_binary` (takes the ownership lock,
+    idles until SIGTERM) and additionally dumps every env var whose name
+    starts with ``MINDS_API_PROXY_TEST_`` plus the
     ``LATCHKEY_EXTENSION_MINDS_API_URL`` value to a JSON file at the
     path given in ``MINDS_API_PROXY_TEST_REPORT``. Used by
     :func:`test_extra_env_reaches_spawned_forward_subprocess` to
@@ -557,10 +439,10 @@ def _make_env_dumping_mngr_binary(tmp_path: Path) -> Path:
     """
     script = tmp_path / "mngr"
     script.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json, os, signal, sys\n"
-        "from datetime import datetime, timezone\n"
         "from pathlib import Path\n"
+        "from imbue.mngr_latchkey.store import acquire_forward_lock\n"
         'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
         "    sys.exit(99)\n"
         "args = sys.argv[3:]\n"
@@ -576,20 +458,12 @@ def _make_env_dumping_mngr_binary(tmp_path: Path) -> Path:
         "    report_payload = {k: v for k, v in os.environ.items() "
         'if k.startswith("MINDS_API_PROXY_TEST_") or k == "LATCHKEY_EXTENSION_MINDS_API_URL"}\n'
         "    Path(report_path_str).write_text(json.dumps(report_payload))\n"
-        'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
-        "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
-        "record_path.write_text(json.dumps({\n"
-        '    "pid": os.getpid(),\n'
-        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
-        '    "gateway_port": None,\n'
-        "}))\n"
-        "def _on_term(*_):\n"
-        "    try:\n"
-        "        record_path.unlink()\n"
-        "    except OSError:\n"
-        "        pass\n"
-        "    sys.exit(0)\n"
-        "signal.signal(signal.SIGTERM, _on_term)\n"
+        'plugin_dir = latchkey_directory / "mngr_latchkey"\n'
+        "plugin_dir.mkdir(parents=True, exist_ok=True)\n"
+        "_forward_lock = acquire_forward_lock(plugin_dir)\n"
+        "if _forward_lock is None:\n"
+        "    sys.exit(97)\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
         "signal.pause()\n"
     )
     script.chmod(0o755)
@@ -655,26 +529,7 @@ def test_extra_env_defaults_to_empty_mapping(tmp_path: Path) -> None:
     assert dict(supervisor.extra_env) == {}
 
 
-# -- cmdline parsing for duplicate reaping ----------------------------------
-
-
-def test_forward_latchkey_directory_parses_every_argv_shape() -> None:
-    """``--latchkey-directory`` is recovered from each cmdline shape; absent -> None."""
-    assert _forward_latchkey_directory(["mngr", "latchkey", "forward", "--latchkey-directory", "/tmp/d"]) == Path(
-        "/tmp/d"
-    )
-    # ``=``-joined form.
-    assert _forward_latchkey_directory(["mngr", "latchkey", "forward", "--latchkey-directory=/tmp/d"]) == Path(
-        "/tmp/d"
-    )
-    # proctitle-overwrite shape (whole cmdline fused into argv[0], rest zeroed).
-    fused = ["mngr latchkey forward --latchkey-directory /home/u/.minds/latchkey --mngr-binary mngr", "", ""]
-    assert _forward_latchkey_directory(fused) == Path("/home/u/.minds/latchkey")
-    # No flag present.
-    assert _forward_latchkey_directory(["mngr", "latchkey", "forward"]) is None
-
-
-# -- duplicate-forward reaping ----------------------------------------------
+# forward ownership and reaping
 
 
 def _spawn_orphan_fake_forward(fake_binary: Path, latchkey_directory: Path) -> subprocess.Popen:
@@ -688,8 +543,20 @@ def _spawn_orphan_fake_forward(fake_binary: Path, latchkey_directory: Path) -> s
         [str(fake_binary), "latchkey", "forward", "--latchkey-directory", str(latchkey_directory)],
         start_new_session=True,
     )
-    assert _wait_for_process_alive(process.pid), "orphan forward never reached the expected cmdline"
+    assert _wait_for_process_alive(process.pid), "orphan forward never started"
+    assert _wait_for_forward_owner(latchkey_directory, process.pid), "orphan forward never took the ownership lock"
     return process
+
+
+def _wait_for_forward_owner(latchkey_directory: Path, pid: int, timeout: float = 5.0) -> bool:
+    """Poll until ``pid`` is the recorded owner of ``latchkey_directory``'s forward."""
+    poll_event = threading.Event()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_forward_owned_by(plugin_data_dir(latchkey_directory), pid):
+            return True
+        poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+    return False
 
 
 def _terminate_orphan(process: subprocess.Popen) -> None:
@@ -731,9 +598,11 @@ def test_descendant_processes_returns_all_children_not_just_observe(tmp_path: Pa
     try:
         deadline = time.monotonic() + 5.0
         waiter = threading.Event()
-        while time.monotonic() < deadline and child.pid not in {p.pid for p in _descendant_processes(os.getpid())}:
+        while time.monotonic() < deadline and child.pid not in {
+            p.pid for p in _descendant_processes(psutil.Process())
+        }:
             waiter.wait(timeout=_POLL_INTERVAL_SECONDS)
-        assert child.pid in {p.pid for p in _descendant_processes(os.getpid())}
+        assert child.pid in {p.pid for p in _descendant_processes(psutil.Process())}
     finally:
         child.terminate()
         child.wait(timeout=5.0)
@@ -747,6 +616,25 @@ def _terminate_pid_if_alive(pid: int) -> None:
         pass
 
 
+def _wait_for_child_pid(data_dir: Path) -> int:
+    """Block until the fake forward has recorded the child it spawned.
+
+    The fake takes the ownership lock before spawning that child, and
+    ``ensure_running`` returns as soon as the directory is owned -- so the file
+    does not exist yet at that point. Fails the test on timeout.
+    """
+    path = data_dir / "child_pid.txt"
+    deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
+    waiter = threading.Event()
+    while time.monotonic() < deadline:
+        if path.is_file():
+            recorded = path.read_text().strip()
+            if recorded:
+                return int(recorded)
+        waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
+    raise AssertionError(f"fake forward never recorded its child at {path}")
+
+
 def _make_fake_forward_spawning_child_binary(tmp_path: Path) -> Path:
     """A fake ``mngr`` whose ``latchkey forward`` spawns a long-lived child and records its PID.
 
@@ -758,10 +646,10 @@ def _make_fake_forward_spawning_child_binary(tmp_path: Path) -> Path:
     """
     script = tmp_path / "mngr"
     script.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, signal, subprocess, sys\n"
-        "from datetime import datetime, timezone\n"
+        f"#!{sys.executable}\n"
+        "import signal, subprocess, sys\n"
         "from pathlib import Path\n"
+        "from imbue.mngr_latchkey.store import acquire_forward_lock\n"
         'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
         "    sys.exit(99)\n"
         "latchkey_directory = None\n"
@@ -774,13 +662,12 @@ def _make_fake_forward_spawning_child_binary(tmp_path: Path) -> Path:
         "    sys.exit(98)\n"
         'plugin = latchkey_directory / "mngr_latchkey"\n'
         "plugin.mkdir(parents=True, exist_ok=True)\n"
+        # Own the directory the way the real forward does, so the reaper can find it.
+        "_forward_lock = acquire_forward_lock(plugin)\n"
+        "if _forward_lock is None:\n"
+        "    sys.exit(97)\n"
         'child = subprocess.Popen(["sleep", "600"])\n'
         '(plugin / "child_pid.txt").write_text(str(child.pid))\n'
-        '(plugin / "latchkey_forward.json").write_text(json.dumps({\n'
-        '    "pid": os.getpid(),\n'
-        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
-        '    "gateway_port": None,\n'
-        "}))\n"
         # Exit on SIGTERM WITHOUT tearing down the child, so only the reaper's
         # explicit descendant-termination can kill it.
         "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
@@ -790,8 +677,8 @@ def _make_fake_forward_spawning_child_binary(tmp_path: Path) -> Path:
     return script
 
 
-def test_ensure_running_reaps_orphan_forwards_children_too(tmp_path: Path) -> None:
-    """Reaping a duplicate forward also terminates its descendant subprocesses.
+def test_restart_reaps_orphan_forwards_children_too(tmp_path: Path) -> None:
+    """Reaping an orphan forward also terminates its descendant subprocesses.
 
     The orphan fake spawns a long-lived child and exits on SIGTERM without killing
     it, so the child survives only if the reaper terminates it directly -- mirroring
@@ -802,22 +689,21 @@ def test_ensure_running_reaps_orphan_forwards_children_too(tmp_path: Path) -> No
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
     orphan = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
     supervisor: LatchkeyForwardSupervisor | None = None
-    info: LatchkeyForwardInfo | None = None
+    info: LatchkeyForwardOwner | None = None
     child_pid: int | None = None
     try:
         data_dir = plugin_data_dir(latchkey_directory)
         _wait_for_forward_record(data_dir)
-        child_pid = int((data_dir / "child_pid.txt").read_text())
+        child_pid = _wait_for_child_pid(data_dir)
         assert psutil.pid_exists(child_pid)
-        # Recreate the missing-record case so ensure_running reaps the orphan.
-        delete_forward_info(data_dir)
         supervisor = LatchkeyForwardSupervisor(
             mngr_binary=str(fake_binary),
             latchkey_binary="/usr/bin/latchkey-unused",
             latchkey_directory=latchkey_directory,
         )
-        info = supervisor.ensure_running()
-        assert _wait_for_process_exit(orphan.pid), "duplicate forward was not reaped"
+        # ``restart`` is the verb that replaces a live owner; ``ensure_running`` adopts one.
+        info = supervisor.restart()
+        assert _wait_for_process_exit(orphan.pid), "the orphan forward was not reaped"
         assert _wait_for_process_exit(child_pid), "the orphan forward's child was not reaped"
     finally:
         if supervisor is not None and info is not None:
@@ -836,7 +722,7 @@ def test_stop_terminates_descendants_of_wedged_supervisor(tmp_path: Path) -> Non
     wedged one that has to be SIGKILLed (or, as here, one that exits without
     running its teardown) never does, and the detached gateway then outlives
     every session. ``stop()`` must capture the descendants before signalling
-    and terminate them after, the same way ``_reap_duplicate_forwards`` does.
+    and terminate them after.
     """
     fake_binary = _make_fake_forward_spawning_child_binary(tmp_path)
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
@@ -846,12 +732,12 @@ def test_stop_terminates_descendants_of_wedged_supervisor(tmp_path: Path) -> Non
         latchkey_directory=latchkey_directory,
     )
     child_pid: int | None = None
-    info: LatchkeyForwardInfo | None = None
+    info: LatchkeyForwardOwner | None = None
     try:
         info = supervisor.ensure_running()
         data_dir = plugin_data_dir(latchkey_directory)
         _wait_for_forward_record(data_dir)
-        child_pid = int((data_dir / "child_pid.txt").read_text())
+        child_pid = _wait_for_child_pid(data_dir)
         assert psutil.pid_exists(child_pid)
 
         supervisor.stop()
@@ -865,11 +751,10 @@ def test_stop_terminates_descendants_of_wedged_supervisor(tmp_path: Path) -> Non
 
 
 def test_stop_terminates_descendants_via_on_disk_record(tmp_path: Path) -> None:
-    """``stop()`` reaps descendants for the on-disk-record path too (fresh supervisor object).
+    """``stop()`` reaps descendants from a supervisor object that never spawned it.
 
-    A new minds session stops the previous session's supervisor through the
-    persisted record (no cached ``_last_known_pid``); an orphaned gateway must
-    not survive that path either.
+    A new minds session stops the previous session's forward, having no cached
+    pid of its own; an orphaned gateway must not survive that path either.
     """
     fake_binary = _make_fake_forward_spawning_child_binary(tmp_path)
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
@@ -879,12 +764,12 @@ def test_stop_terminates_descendants_via_on_disk_record(tmp_path: Path) -> None:
         latchkey_directory=latchkey_directory,
     )
     child_pid: int | None = None
-    info: LatchkeyForwardInfo | None = None
+    info: LatchkeyForwardOwner | None = None
     try:
         info = old_supervisor.ensure_running()
         data_dir = plugin_data_dir(latchkey_directory)
         _wait_for_forward_record(data_dir)
-        child_pid = int((data_dir / "child_pid.txt").read_text())
+        child_pid = _wait_for_child_pid(data_dir)
         assert psutil.pid_exists(child_pid)
 
         # A fresh supervisor object (a new minds session) only has the record.
@@ -904,11 +789,11 @@ def test_stop_terminates_descendants_via_on_disk_record(tmp_path: Path) -> None:
 
 
 @pytest.mark.flaky
-def test_is_forward_pid_for_directory_matches_only_its_own_directory(tmp_path: Path) -> None:
-    """The pre-terminate re-check accepts a forward for its directory and rejects others.
+def test_owning_forward_process_names_the_forward_holding_the_directory(tmp_path: Path) -> None:
+    """Ownership is answered from the directory alone, and is scoped to that directory.
 
-    This is the guard the reaper applies immediately before signalling each PID,
-    so a directory mismatch (or a recycled/dead PID) can never be terminated.
+    This is the check the reaper applies before signalling anything, so a
+    directory mismatch or a dead pid must never come back as an owner.
 
     Marked flaky: it spawns and reaps a real subprocess, and its process-state
     polls have been seen to run out on a heavily loaded machine.
@@ -918,81 +803,357 @@ def test_is_forward_pid_for_directory_matches_only_its_own_directory(tmp_path: P
     other_directory = tmp_path / f"other-{uuid4().hex}"
     forward = _spawn_orphan_fake_forward(fake_binary, own_directory)
     try:
-        assert _is_forward_pid_for_directory(forward.pid, own_directory.resolve())
-        # Same live PID, but a different directory must not match.
-        assert not _is_forward_pid_for_directory(forward.pid, other_directory.resolve())
+        assert is_forward_owned_by(plugin_data_dir(own_directory), forward.pid)
+        assert owning_forward_process(plugin_data_dir(other_directory)) is None
     finally:
         _terminate_orphan(forward)
-    # A dead/exited PID never matches.
+    # The kernel drops the lock when the owner dies, so the recorded owner --
+    # still on disk -- must read as gone rather than as live.
     assert _wait_for_process_exit(forward.pid)
-    assert not _is_forward_pid_for_directory(forward.pid, own_directory.resolve())
+    assert owning_forward_process(plugin_data_dir(own_directory)) is None
 
 
-def test_ensure_running_reaps_unrecorded_duplicate_on_same_directory(tmp_path: Path) -> None:
-    """An orphan forward with no live record is reaped, then a fresh one spawned.
+def _make_pre_lock_fake_mngr_binary(tmp_path: Path) -> Path:
+    """Build a fake ``mngr`` that behaves the way one from before the lock did.
 
-    The production failure mode: a prior app instance left a forward (and its
-    ``mngr observe`` discovery child) running against ``.minds`` while the
-    on-disk record went missing, so the next instance's ``ensure_running`` saw
-    'no record' and spawned a *second* producer onto the shared events file.
+    CLEANUP: delete with ``_pre_lock_migration``.
+
+    It publishes a forward record and idles, and takes no ownership lock,
+    because the build it stands in for had none to take.
     """
-    fake_binary = _make_fake_mngr_binary(tmp_path)
+    binary_dir = tmp_path / f"pre-lock-{uuid4().hex}"
+    binary_dir.mkdir()
+    script = binary_dir / "mngr"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, signal, sys\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
+        'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
+        "    sys.exit(99)\n"
+        "args = sys.argv[3:]\n"
+        "latchkey_directory = None\n"
+        "for i, arg in enumerate(args):\n"
+        '    if arg == "--latchkey-directory" and i + 1 < len(args):\n'
+        "        latchkey_directory = Path(args[i + 1])\n"
+        "        break\n"
+        'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
+        "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record_path.write_text(json.dumps({\n"
+        '    "pid": os.getpid(),\n'
+        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
+        '    "gateway_port": None,\n'
+        "}))\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_restart_replaces_a_forward_that_predates_the_ownership_lock(tmp_path: Path) -> None:
+    """The upgrade path: the first launch after an update replaces the old forward.
+
+    CLEANUP: delete with ``_pre_lock_migration``.
+
+    A forward from a build without the lock holds none, so nothing about the
+    lock can see it -- only the record it wrote. If that record stopped being
+    enough, the replacement would take the free lock and run *beside* the old
+    forward, putting two discovery producers on one events file.
+    """
+    pre_lock_binary = _make_pre_lock_fake_mngr_binary(tmp_path)
+    current_binary = _make_fake_mngr_binary(tmp_path)
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
-    orphan = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
+    data_dir = plugin_data_dir(latchkey_directory)
+
+    pre_lock = subprocess.Popen(
+        [str(pre_lock_binary), "latchkey", "forward", "--latchkey-directory", str(latchkey_directory)],
+        start_new_session=True,
+    )
     supervisor: LatchkeyForwardSupervisor | None = None
-    info: LatchkeyForwardInfo | None = None
+    info: LatchkeyForwardOwner | None = None
     try:
-        data_dir = plugin_data_dir(latchkey_directory)
-        _wait_for_forward_record(data_dir)
-        # Recreate the missing-record case that takes the spawn-fresh path.
-        delete_forward_info(data_dir)
+        _wait_for_legacy_forward_record(data_dir)
+        # It holds no lock, exactly as a pre-lock forward does not.
+        assert owning_forward_process(data_dir) is None
+
         supervisor = LatchkeyForwardSupervisor(
-            mngr_binary=str(fake_binary),
+            mngr_binary=str(current_binary),
             latchkey_binary="/usr/bin/latchkey-unused",
             latchkey_directory=latchkey_directory,
         )
-        info = supervisor.ensure_running()
-        assert info.pid != orphan.pid
-        assert _wait_for_process_exit(orphan.pid), "duplicate forward was not reaped"
-        assert _wait_for_process_alive(info.pid)
+        info = supervisor.restart()
+
+        assert _wait_for_process_exit(pre_lock.pid), "the pre-lock forward outlived the update"
+        assert info.pid != pre_lock.pid
+        assert _wait_for_forward_owner(latchkey_directory, info.pid), "the replacement never took the lock"
     finally:
         if supervisor is not None and info is not None:
             supervisor.stop()
             _wait_for_process_exit(info.pid)
-        _terminate_orphan(orphan)
+        _terminate_orphan(pre_lock)
 
 
-def test_ensure_running_adopts_recorded_forward_and_reaps_the_duplicate(tmp_path: Path) -> None:
-    """When the record points at a live forward, it is adopted and the other reaped."""
+def test_ensure_running_refuses_a_child_that_never_took_the_directory(tmp_path: Path) -> None:
+    """A spawn that does not end in ownership is terminated, and raises.
+
+    Leaving it would orphan a process nothing else knows about: it never
+    recorded itself, so no later call can find it.
+    """
+    # An idle binary starts and never claims the directory.
+    fake_binary = _make_idle_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+        spawn_ownership_timeout_seconds=2.0,
+    )
+    before = {p.pid for p in psutil.Process().children(recursive=True)}
+    with pytest.raises(LatchkeyError, match="did not take ownership"):
+        supervisor.ensure_running()
+    leaked = {p.pid for p in psutil.Process().children(recursive=True) if p.is_running()} - before
+    assert not leaked, f"a child that never claimed the directory was left running: {leaked}"
+
+
+def _make_racing_fake_mngr_binary(tmp_path: Path) -> Path:
+    """A fake ``mngr`` whose ``latchkey forward`` loses the directory to another process.
+
+    It hands the claim to a detached process and exits refusing the directory,
+    which is what a real forward does when another one owns it -- leaving the
+    directory owned by a pid that is not the one the spawn returned.
+    """
+    binary_dir = tmp_path / f"racing-{uuid4().hex}"
+    binary_dir.mkdir()
+    script = binary_dir / "mngr"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import signal, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "from imbue.mngr_latchkey.store import acquire_forward_lock\n"
+        "args = sys.argv[1:]\n"
+        'if args[:1] == ["__own__"]:\n'
+        '    plugin_dir = Path(args[1]) / "mngr_latchkey"\n'
+        "    plugin_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    _forward_lock = acquire_forward_lock(plugin_dir)\n"
+        "    if _forward_lock is None:\n"
+        "        sys.exit(97)\n"
+        "    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "    signal.pause()\n"
+        'if args[:2] != ["latchkey", "forward"]:\n'
+        "    sys.exit(99)\n"
+        "latchkey_directory = None\n"
+        "for i, arg in enumerate(args):\n"
+        '    if arg == "--latchkey-directory" and i + 1 < len(args):\n'
+        "        latchkey_directory = args[i + 1]\n"
+        "        break\n"
+        "if latchkey_directory is None:\n"
+        "    sys.exit(98)\n"
+        'subprocess.Popen([sys.executable, __file__, "__own__", latchkey_directory], start_new_session=True)\n'
+        "sys.exit(97)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_ensure_running_adopts_the_forward_that_won_a_spawn_race(tmp_path: Path) -> None:
+    """A child that loses the directory to another forward is dropped for the winner.
+
+    The adopt check and the spawn are not atomic across processes, so the child
+    can find the directory already taken and refuse it within a second. Waiting
+    for *this* child would then spend the whole ownership timeout and fail a
+    caller whose latchkey directory has a healthy forward on it.
+    """
+    fake_binary = _make_racing_fake_mngr_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=latchkey_directory,
+        spawn_ownership_timeout_seconds=10.0,
+    )
+    started_at = time.monotonic()
+    try:
+        info = supervisor.ensure_running()
+        assert time.monotonic() - started_at < supervisor.spawn_ownership_timeout_seconds, (
+            "the spawn race was waited out rather than resolved"
+        )
+        assert is_forward_owned_by(plugin_data_dir(latchkey_directory), info.pid)
+    finally:
+        # The winner is detached and in its own session, so only ``stop`` -- which
+        # finds it through the lock rather than through the returned record --
+        # reaches it when ``ensure_running`` raised instead of naming it.
+        supervisor.stop()
+    assert _wait_for_process_exit(info.pid)
+
+
+def test_owning_forward_process_reads_no_owner_when_the_stamp_never_lands(tmp_path: Path) -> None:
+    """A holder that dies before publishing reads as no owner.
+
+    A departed owner's record outlives it. If the gap before the stamp exposed
+    the old pid, a probe could hand the reaper a process that is dead -- or a
+    stranger that recycled its pid. Taking the lock clears the record, so the
+    gap shows nothing instead of something wrong.
+    """
+    data_dir = plugin_data_dir(tmp_path)
+    data_dir.mkdir(parents=True)
+    owner_path = forward_owner_path(data_dir)
+    # A departed owner's record, left exactly as its death leaves it.
+    owner_path.write_text(LatchkeyForwardOwner(pid=os.getpid()).model_dump_json())
+    lock = acquire_forward_lock(data_dir)
+    assert lock is not None
+    try:
+        # Reproduce a holder that took the lock and then never stamped it.
+        owner_path.unlink()
+        assert owning_forward_process(data_dir) is None
+    finally:
+        lock.release()
+
+
+def test_owning_forward_process_waits_for_a_holder_still_publishing(tmp_path: Path) -> None:
+    """A held lock whose record has not landed yet waits for it, rather than reporting no owner.
+
+    Reading once would call the directory unowned while a healthy forward holds
+    it, and the caller would spawn a second forward that this one then refuses
+    -- failing the caller outright instead of adopting the forward it has.
+    """
+    data_dir = plugin_data_dir(tmp_path)
+    data_dir.mkdir(parents=True)
+    owner_path = forward_owner_path(data_dir)
+    lock = acquire_forward_lock(data_dir)
+    assert lock is not None
+    published = LatchkeyForwardOwner(pid=os.getpid()).model_dump_json()
+    owner_path.unlink()
+    publish_delay = 0.2
+    publisher = threading.Timer(publish_delay, lambda: owner_path.write_text(published))
+    publisher.start()
+    try:
+        started_at = time.monotonic()
+        forward_process = owning_forward_process(data_dir)
+        waited = time.monotonic() - started_at
+        assert forward_process is not None, "a holder mid-publish must not read as an unowned directory"
+        assert forward_process.pid == os.getpid()
+        # Reading the record once would have returned before the stamp landed.
+        assert waited >= publish_delay, f"probe returned after {waited:.3f}s without waiting for the stamp"
+    finally:
+        publisher.cancel()
+        lock.release()
+
+
+def test_owning_forward_process_ignores_an_owner_record_nobody_backs(tmp_path: Path) -> None:
+    """A record left behind by a departed owner reads as unowned.
+
+    Liveness is whether the lock is held, never a value stored in the record.
+    The planted pid is a live forward, so nothing but the lock can still answer
+    "nobody" -- and that forward owns a *different* directory, so a probe that
+    trusted the record would hand the reaper a sibling profile's supervisor to
+    signal.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    owned_directory = tmp_path / f"owned-{uuid4().hex}"
+    forward = _spawn_orphan_fake_forward(fake_binary, owned_directory)
+    try:
+        unowned_data_dir = plugin_data_dir(tmp_path / f"unowned-{uuid4().hex}")
+        # Leave the directory exactly as a departed owner does: a real lock file
+        # nobody holds, and the record that owner wrote still beside it.
+        released_lock = acquire_forward_lock(unowned_data_dir)
+        assert released_lock is not None
+        released_lock.release()
+        forward_owner_path(unowned_data_dir).write_text(LatchkeyForwardOwner(pid=forward.pid).model_dump_json())
+        assert forward_lock_path(unowned_data_dir).is_file()
+        assert owning_forward_process(unowned_data_dir) is None
+    finally:
+        _terminate_orphan(forward)
+
+
+def test_owning_forward_process_survives_a_directory_containing_a_space(tmp_path: Path) -> None:
+    """A latchkey directory with a space is recognised as its forward's own.
+
+    An embedder may place one under ``~/Library/Application Support/<App>/``, and
+    a home directory such as ``/Users/Jane Doe`` produces one unprompted.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    spaced_directory = tmp_path / "Application Support" / f"Example App {uuid4().hex}" / "latchkey"
+    forward = _spawn_orphan_fake_forward(fake_binary, spaced_directory)
+    try:
+        assert is_forward_owned_by(plugin_data_dir(spaced_directory), forward.pid)
+    finally:
+        _terminate_orphan(forward)
+
+
+def test_a_second_forward_cannot_start_for_the_same_directory(tmp_path: Path) -> None:
+    """The ownership lock makes a duplicate forward impossible, not merely reapable.
+
+    Two forwards would put two ``mngr observe`` producers on the shared events
+    file.
+    """
     fake_binary = _make_fake_mngr_binary(tmp_path)
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
-    data_dir = plugin_data_dir(latchkey_directory)
-    kept = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
-    duplicate = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
+    first = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
     try:
-        # Wait for both fakes to finish their single record write (via their
-        # per-pid sentinels) before pinning, so the pin below is the final,
-        # deterministic write -- no late clobber can follow and flip the
-        # adoption to ``duplicate``.
-        _wait_for_forward_ready(data_dir, kept.pid)
-        _wait_for_forward_ready(data_dir, duplicate.pid)
-        # Pin the shared record to ``kept``.
-        save_forward_info(
-            data_dir,
-            LatchkeyForwardInfo(pid=kept.pid, started_at=datetime.now(timezone.utc), gateway_port=None),
+        second = subprocess.run(
+            [str(fake_binary), "latchkey", "forward", "--latchkey-directory", str(latchkey_directory)],
+            capture_output=True,
+            timeout=10.0,
         )
+        assert second.returncode == 97, f"second forward should have refused to start: {second!r}"
+        assert is_forward_owned_by(plugin_data_dir(latchkey_directory), first.pid)
+    finally:
+        _terminate_orphan(first)
+
+
+@pytest.mark.parametrize(
+    "directory_template",
+    (
+        pytest.param("latchkey-{}", id="plain"),
+        pytest.param("Application Support/Example App {}/latchkey", id="spaced"),
+    ),
+)
+def test_ensure_running_adopts_a_forward_that_already_owns_the_directory(
+    tmp_path: Path, directory_template: str
+) -> None:
+    """A live owner is adopted, never duplicated.
+
+    Two forwards on one directory would put two ``mngr observe`` producers on
+    the shared events file, which is the failure the ownership lock exists to
+    make impossible. Parameterised over a directory containing a space, which
+    is what the whole ownership change exists to keep working.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    latchkey_directory = tmp_path / directory_template.format(uuid4().hex)
+    orphan = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
+    try:
         supervisor = LatchkeyForwardSupervisor(
             mngr_binary=str(fake_binary),
             latchkey_binary="/usr/bin/latchkey-unused",
             latchkey_directory=latchkey_directory,
         )
         info = supervisor.ensure_running()
-        assert info.pid == kept.pid, "the recorded forward should be adopted, not respawned"
-        assert _wait_for_process_exit(duplicate.pid), "the unrecorded duplicate was not reaped"
-        assert psutil.pid_exists(kept.pid), "the adopted forward must stay alive"
+        assert info.pid == orphan.pid, "the forward already owning the directory should be adopted"
+        assert psutil.pid_exists(orphan.pid), "adoption must leave the owner running"
     finally:
-        _terminate_orphan(kept)
-        _terminate_orphan(duplicate)
+        _terminate_orphan(orphan)
+
+
+def test_ensure_running_adopts_the_recorded_owner(tmp_path: Path) -> None:
+    """When the record points at the forward that owns the directory, it is adopted."""
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    data_dir = plugin_data_dir(latchkey_directory)
+    owner = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
+    try:
+        _wait_for_forward_ready(data_dir, owner.pid)
+        supervisor = LatchkeyForwardSupervisor(
+            mngr_binary=str(fake_binary),
+            latchkey_binary="/usr/bin/latchkey-unused",
+            latchkey_directory=latchkey_directory,
+        )
+        info = supervisor.ensure_running()
+        assert info.pid == owner.pid, "the recorded owner should be adopted, not respawned"
+        assert psutil.pid_exists(owner.pid), "the adopted forward must stay alive"
+        assert is_forward_owned_by(data_dir, owner.pid), "adoption must not disturb ownership"
+    finally:
+        _terminate_orphan(owner)
 
 
 def test_ensure_running_does_not_reap_forward_for_a_different_directory(tmp_path: Path) -> None:
@@ -1006,7 +1167,7 @@ def test_ensure_running_does_not_reap_forward_for_a_different_directory(tmp_path
     own_directory = tmp_path / f"own-{uuid4().hex}"
     other = _spawn_orphan_fake_forward(fake_binary, other_directory)
     supervisor: LatchkeyForwardSupervisor | None = None
-    info: LatchkeyForwardInfo | None = None
+    info: LatchkeyForwardOwner | None = None
     try:
         supervisor = LatchkeyForwardSupervisor(
             mngr_binary=str(fake_binary),
@@ -1066,9 +1227,7 @@ def test_bounce_skips_sighup_while_forward_is_still_starting(tmp_path: Path) -> 
             "a still-starting forward must not be signalled"
         )
         assert psutil.pid_exists(fake.pid), "a still-starting forward must stay alive"
-        persisted = load_forward_info(data_dir)
-        assert persisted is not None
-        assert persisted.pid == fake.pid, "bounce must not replace a still-starting forward"
+        assert is_forward_owned_by(data_dir, fake.pid), "bounce must not replace a still-starting forward"
     finally:
         _terminate_orphan(fake)
 
@@ -1087,10 +1246,7 @@ def test_bounce_sighups_forward_once_gateway_port_is_stamped(tmp_path: Path) -> 
     try:
         _wait_for_forward_ready(data_dir, fake.pid)
         assert _wait_for_process_alive(fake.pid)
-        save_forward_info(
-            data_dir,
-            LatchkeyForwardInfo(pid=fake.pid, started_at=datetime.now(timezone.utc), gateway_port=45999),
-        )
+        update_forward_owner_gateway_port(data_dir, 45999)
         supervisor = LatchkeyForwardSupervisor(
             mngr_binary=str(fake_binary),
             latchkey_binary="/usr/bin/latchkey-unused",

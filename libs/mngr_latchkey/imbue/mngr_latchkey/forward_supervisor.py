@@ -1,6 +1,6 @@
 """Detached supervisor for the ``mngr latchkey forward`` subprocess.
 
-Owns the on-disk record + adoption logic for a single, long-running
+Holds the adoption logic for a single, long-running
 ``mngr latchkey forward`` process. The supervisor itself is *not* the
 forward subprocess -- it's a tiny in-process helper that callers (the
 minds desktop client, future GUI clients) use to make sure exactly one
@@ -17,12 +17,9 @@ embedder restarts. The detachment + adoption mechanics mirror what
 side-by-side is intentional.
 """
 
-import os
 import signal
 import threading
 from collections.abc import Mapping
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Final
 
@@ -33,14 +30,16 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr_latchkey._pre_lock_migration import migrate_pre_lock_forward
 from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.store import LatchkeyForwardInfo
-from imbue.mngr_latchkey.store import delete_forward_info
+from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import forward_log_path
-from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
+from imbue.mngr_latchkey.store import probe_forward_lock
 
 # Bare-name default for the ``mngr`` CLI; callers that bundle their own
 # copy (e.g. the minds desktop client) pass the absolute path explicitly.
@@ -52,107 +51,66 @@ MNGR_BINARY: Final[str] = "mngr"
 _TERMINATE_GRACE_SECONDS: Final[float] = 10.0
 
 
-def _mngr_argv_remainder(cmdline: list[str]) -> list[str] | None:
-    """Return the literal tokens that follow the ``mngr`` argv, or ``None``.
+# A freshly spawned forward has to start python, import, and claim the
+# directory before it owns anything.
+_SPAWN_OWNERSHIP_TIMEOUT_SECONDS: Final[float] = 30.0
+_SPAWN_OWNERSHIP_POLL_SECONDS: Final[float] = 0.05
 
-    ``" ".join(cmdline).split()`` normalises both the one-clean-token-per-arg
-    shape and the ``setproctitle``-style argv[0] overwrite that ``uv tool``'s
-    entry-point wrappers do (which puts the entire joined cmdline in argv[0] and
-    zeros out argv[1:], surfacing as ``["mngr latchkey forward ...", "", "", ...]``
-    via :meth:`psutil.Process.cmdline`) to the same list of literal tokens. This
-    also tolerates shebang rewrites (``/usr/bin/env python mngr``) and
-    absolute-path invocations (``/usr/local/bin/mngr``).
 
-    ``mngr`` is a short token, so it is matched as a whole path component
-    (``mngr`` or ``*/mngr``) -- never as a substring like ``manager`` or
-    ``mngr-foo``. Returns ``None`` when no ``mngr``-like token is present.
+def _owning_forward(plugin_data_dir: Path) -> tuple[psutil.Process, LatchkeyForwardOwner] | None:
+    """Return the live forward owning this directory, paired with the record it published.
+
+    One read of the directory answers both, so a caller that needs the gateway
+    port as well as the process never asks twice and never has to reconcile two
+    answers. See :func:`owning_forward_process` for what makes the answer sound.
     """
-    tokens = " ".join(cmdline).split()
-    for idx, arg in enumerate(tokens):
-        if arg == "mngr" or arg.endswith("/mngr"):
-            return tokens[idx + 1 :]
-    return None
-
-
-def _cmdline_looks_like_mngr_latchkey_forward(cmdline: list[str]) -> bool:
-    """Check whether a process's ``cmdline`` looks like our ``mngr latchkey forward``.
-
-    Guards against PID reuse: requires the literal tokens ``latchkey`` and
-    ``forward`` to appear after a ``mngr``-like argument anywhere in the argv.
-    See :func:`_mngr_argv_remainder` for the cmdline-shape normalization.
-    """
-    remainder = _mngr_argv_remainder(cmdline)
-    if remainder is None:
-        return False
-    return "latchkey" in remainder and "forward" in remainder
-
-
-def _forward_latchkey_directory(cmdline: list[str]) -> Path | None:
-    """Extract the ``--latchkey-directory`` value from a forward's ``cmdline``.
-
-    Returns the path the forward was launched against, or ``None`` when the flag
-    is absent. Used to scope duplicate-reaping to a single latchkey directory so
-    a supervisor for one profile never signals a forward for another (e.g.
-    ``.minds`` vs ``.minds-staging``). Token normalization matches
-    :func:`_cmdline_looks_like_mngr_latchkey_forward`, so it does not survive a
-    latchkey directory containing whitespace -- an accepted limitation shared by
-    that matcher (real latchkey directories never contain spaces).
-    """
-    tokens = " ".join(cmdline).split()
-    for idx, tok in enumerate(tokens):
-        if tok == "--latchkey-directory":
-            if idx + 1 < len(tokens):
-                return Path(tokens[idx + 1])
-            return None
-        if tok.startswith("--latchkey-directory="):
-            return Path(tok.split("=", 1)[1])
-    return None
-
-
-def _resolve_or_none(path: Path) -> Path | None:
-    """Resolve ``path`` for comparison, returning ``None`` if it cannot be resolved."""
+    owner = probe_forward_lock(plugin_data_dir)
+    if owner is None:
+        return None
     try:
-        return path.resolve()
-    except OSError:
+        return psutil.Process(owner.pid), owner
+    except (psutil.NoSuchProcess, psutil.ZombieProcess) as e:
+        logger.debug("Forward lock at {} names pid {}, which is gone: {}", plugin_data_dir, owner.pid, e)
         return None
 
 
-def _is_forward_pid_for_directory(pid: int, latchkey_directory_resolved: Path) -> bool:
-    """Whether ``pid`` is a live ``mngr latchkey forward`` bound to the given resolved directory.
+def owning_forward_process(plugin_data_dir: Path) -> psutil.Process | None:
+    """Return the live ``mngr latchkey forward`` that owns this directory.
 
-    Re-reads the process's cmdline, so callers can re-confirm a PID immediately
-    before signalling it -- the process-table scan and the terminate are not
-    atomic, and a PID can be recycled in between. Mirrors the cmdline
-    re-verification :meth:`LatchkeyForwardSupervisor.stop` does before terminating
-    its recorded PID, so reaping never signals a recycled, unrelated process.
+    A forward holds an exclusive lock on its own directory for its whole life
+    and writes its pid into it, so ownership is answered from the directory
+    alone -- the lock file's location is the directory scoping, and a sibling
+    profile's forward is never mistaken for this one. Whether an owner is *live*
+    comes from the kernel holding that lock, never from a stored timestamp, so
+    no clock adjustment can make a running forward read as absent.
+
+    The kernel releases a lock only when its holder exits, so a held lock has a
+    live owner behind it. Which pid that is comes from the record beside the
+    lock, which the holder clears and rewrites just after taking it: a probe
+    landing between those two waits for the new stamp rather than reporting no
+    owner, and one landing before the clear still reads the departed owner's
+    pid.
+
+    A handle is returned rather than a pid so the ``(pid, create_time)`` identity
+    psutil captures here travels to whatever the caller does with it: signalling
+    the handle cannot reach a process that recycled the pid in between. The start
+    time in that identity is one the kernel records once and never revises, so it
+    keeps matching across a system clock step.
+
+    Returns ``None`` when nothing owns the directory.
     """
-    try:
-        cmdline = psutil.Process(pid).cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-        return False
-    if not _cmdline_looks_like_mngr_latchkey_forward(cmdline):
-        return False
-    cmd_dir = _forward_latchkey_directory(cmdline)
-    return cmd_dir is not None and _resolve_or_none(cmd_dir) == latchkey_directory_resolved
+    owned = _owning_forward(plugin_data_dir)
+    return None if owned is None else owned[0]
 
 
-def _iter_matching_forward_pids(latchkey_directory: Path) -> list[int]:
-    """Return PIDs of every live ``mngr latchkey forward`` bound to ``latchkey_directory``.
-
-    Scans the process table for processes whose cmdline both looks like our
-    forward and carries a ``--latchkey-directory`` that resolves to the same
-    path. The resolved-path equality is the safety boundary: only forwards for
-    *this* latchkey directory are ever returned, so reaping cannot reach a
-    sibling profile's supervisor.
-    """
-    target = _resolve_or_none(latchkey_directory)
-    if target is None:
-        return []
-    return [proc.pid for proc in psutil.process_iter() if _is_forward_pid_for_directory(proc.pid, target)]
+def is_forward_owned_by(plugin_data_dir: Path, pid: int) -> bool:
+    """Return whether the live forward owning this directory is ``pid``."""
+    forward_process = owning_forward_process(plugin_data_dir)
+    return forward_process is not None and forward_process.pid == pid
 
 
-def _descendant_processes(forward_pid: int) -> list[psutil.Process]:
-    """Return a :class:`psutil.Process` for every descendant under ``forward_pid``.
+def _descendant_processes(forward_process: psutil.Process) -> list[psutil.Process]:
+    """Return a :class:`psutil.Process` for every descendant under ``forward_process``.
 
     A ``mngr latchkey forward`` owns several subprocesses -- its ``mngr observe``
     discovery producer, the shared ``latchkey gateway``, and per-agent reverse
@@ -173,40 +131,18 @@ def _descendant_processes(forward_pid: int) -> list[psutil.Process]:
     common case, since a healthy forward tears its own descendants down first.
     """
     try:
-        children = psutil.Process(forward_pid).children(recursive=True)
+        return forward_process.children(recursive=True)
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         return []
-    return children
-
-
-def is_forward_info_alive(info: LatchkeyForwardInfo) -> bool:
-    """Verify that an info still corresponds to a running supervisor.
-
-    Two checks, both must pass:
-
-    1. A process with the recorded PID exists.
-    2. That process's cmdline looks like ``mngr latchkey forward``
-       (defends against PID reuse).
-    """
-    try:
-        process = psutil.Process(info.pid)
-        cmdline = process.cmdline()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
-        logger.info("mngr latchkey forward record is stale (pid={}): {}", info.pid, e)
-        return False
-    if not _cmdline_looks_like_mngr_latchkey_forward(cmdline):
-        logger.warning(
-            "mngr latchkey forward record points at pid {} whose cmdline does not match "
-            "our pattern (expected ``mngr ... latchkey ... forward``): {!r}",
-            info.pid,
-            cmdline,
-        )
-        return False
-    return True
 
 
 def _terminate_process(process: psutil.Process) -> None:
     """SIGTERM a :class:`psutil.Process`, falling back to SIGKILL after a grace period.
+
+    Waits for the target to actually go, so the forward
+    :meth:`LatchkeyForwardSupervisor.ensure_running` spawns after a reap finds the
+    ownership lock free. ``kill()`` only queues the signal, so the SIGKILL path
+    waits too.
 
     Silently tolerates already-dead / inaccessible / not-ours processes. Because
     ``process`` carries the ``(pid, create_time)`` identity captured when it was
@@ -224,76 +160,70 @@ def _terminate_process(process: psutil.Process) -> None:
             "mngr latchkey forward pid {} did not exit within grace period; sending SIGKILL",
             pid,
         )
-        try:
-            process.kill()
-        except psutil.NoSuchProcess:
-            return
+        _kill_and_wait(process)
     except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
         logger.debug("Could not terminate pid {}: {}", pid, e)
 
 
-def _terminate_pid(pid: int) -> None:
-    """SIGTERM a PID, falling back to SIGKILL after a grace period.
-
-    Silently tolerates already-dead / inaccessible / not-ours processes.
-    Mirrors :func:`imbue.mngr_latchkey.core._terminate_pid` -- duplicated
-    here so this module does not have to import a private helper from
-    ``core.py``. Constructs the :class:`psutil.Process` at call time, so callers
-    must only pass a PID they have just verified is still the intended process
-    (otherwise a recycled PID is signalled); to terminate a handle captured
-    earlier, use :func:`_terminate_process`.
-    """
+def _kill_and_wait(process: psutil.Process) -> None:
+    """SIGKILL a :class:`psutil.Process` and wait for it to actually go away."""
     try:
-        process = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
-    _terminate_process(process)
+        process.kill()
+        process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+    except psutil.TimeoutExpired:
+        logger.warning(
+            "mngr latchkey forward pid {} survived SIGKILL; anything it holds stays held",
+            process.pid,
+        )
+    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+        logger.debug("Could not kill pid {}: {}", process.pid, e)
 
 
-def _terminate_pid_and_descendants(pid: int) -> None:
+def _terminate_process_and_descendants(forward_process: psutil.Process) -> None:
     """Terminate a forward supervisor and every descendant it owns.
 
     The descendants (the ``mngr observe`` discovery child, the detached
     ``latchkey gateway``, reverse ``ssh`` tunnels) are meant to die in the
     supervisor's own SIGTERM teardown -- but a wedged supervisor that has to be
     SIGKILLed after the grace period never runs it, and the gateway (spawned
-    with ``start_new_session=True``) then outlives every session. Capture the
-    descendant handles before signalling and terminate them after, the same
-    arrangement :meth:`LatchkeyForwardSupervisor._reap_duplicate_forwards`
-    uses; the PID-reuse guard in :func:`_terminate_process` keeps a descendant
-    the supervisor already tore down from being confused with a recycled PID.
-
-    Descendants are only captured when ``pid``'s cmdline still looks like our
-    forward. The :meth:`LatchkeyForwardSupervisor.stop` cached-pid path passes
-    a PID it deliberately does not cmdline-verify (the freshly-forked child may
-    not have exec'd its argv yet), and without this gate a PID recycled onto an
-    unrelated process would have its whole live subprocess tree reaped rather
-    than receiving just the single tolerated spurious signal. The gate loses
-    nothing: a not-yet-exec'd child has no descendants, and a real forward --
-    healthy or wedged -- keeps its matching argv.
+    with ``start_new_session=True``) then outlives every session. The descendant
+    handles are captured before signalling and terminated after, so the PID-reuse
+    guard in :func:`_terminate_process` keeps a descendant the supervisor already
+    tore down from being confused with a recycled PID.
     """
-    looks_like_forward = False
-    try:
-        looks_like_forward = _cmdline_looks_like_mngr_latchkey_forward(psutil.Process(pid).cmdline())
-    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
-        logger.debug("Could not read cmdline of pid {} before descendant capture: {}", pid, e)
-    descendant_processes = _descendant_processes(pid) if looks_like_forward else []
-    _terminate_pid(pid)
+    descendant_processes = _descendant_processes(forward_process)
+    _terminate_process(forward_process)
     for descendant_process in descendant_processes:
         _terminate_process(descendant_process)
+
+
+def _terminate_pid_and_descendants(pid: int) -> None:
+    """Terminate the forward at ``pid`` and every descendant it owns.
+
+    CLEANUP: remove with ``_pre_lock_migration``, whose migration is its only caller.
+
+    Resolves the pid to a process here, so callers must have just established
+    that it is the intended one; a caller already holding a handle keeps its
+    captured identity by calling :func:`_terminate_process_and_descendants`.
+    """
+    try:
+        forward_process = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    _terminate_process_and_descendants(forward_process)
 
 
 class LatchkeyForwardSupervisor(MutableModel):
     """Ensure exactly one detached ``mngr latchkey forward`` is running.
 
     The supervisor itself is stateless across restarts of the embedder
-    -- everything it needs to reconcile lives in the
-    :class:`LatchkeyForwardInfo` record under
-    ``<latchkey_directory>/mngr_latchkey/``. Calling
+    -- everything it needs to reconcile is the ownership lock under
+    ``<latchkey_directory>/mngr_latchkey/`` and the
+    :class:`LatchkeyForwardOwner` recorded beside it. Calling
     :meth:`ensure_running` is idempotent and safe to invoke from every
-    embedder startup; concurrent calls within a single process are
-    serialized via ``_lock`` so two threads cannot both decide to
-    spawn.
+    embedder startup; it and :meth:`stop` are serialized within a single
+    process via ``_lock``, so two threads can neither both decide to spawn
+    nor have one reap the forward the other is waiting on.
     """
 
     mngr_binary: str = Field(
@@ -315,7 +245,7 @@ class LatchkeyForwardSupervisor(MutableModel):
         description=(
             "Root directory for ``LATCHKEY_DIRECTORY`` + the plugin's ``mngr_latchkey/`` "
             "metadata subtree. Passed to the supervisor as ``--latchkey-directory``. "
-            "Also used as the location of this supervisor's own on-disk record."
+            "Holds the forward's ownership lock and the owner record beside it."
         ),
     )
     cwd: Path | None = Field(
@@ -343,87 +273,67 @@ class LatchkeyForwardSupervisor(MutableModel):
         ),
     )
 
+    spawn_ownership_timeout_seconds: float = Field(
+        default=_SPAWN_OWNERSHIP_TIMEOUT_SECONDS,
+        frozen=True,
+        description=(
+            "How long :meth:`ensure_running` waits for a freshly spawned forward to take "
+            "ownership of the latchkey directory before giving up on it."
+        ),
+    )
+
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # PID of the forward child we most recently spawned (or adopted) so
-    # ``stop()`` can find it even if the child has not yet published
-    # its on-disk record.
-    _last_known_pid: int | None = PrivateAttr(default=None)
 
     @property
     def plugin_data_dir(self) -> Path:
         """Return the directory the plugin owns under :attr:`latchkey_directory`."""
         return _plugin_data_dir(self.latchkey_directory)
 
-    def get_forward_info(self) -> LatchkeyForwardInfo | None:
-        """Return the persisted supervisor record, if any."""
-        return load_forward_info(self.plugin_data_dir)
+    def get_forward_owner(self) -> LatchkeyForwardOwner | None:
+        """Return the persisted owner record, if any; it outlives the forward it names."""
+        return load_forward_owner(self.plugin_data_dir)
 
-    def ensure_running(self) -> LatchkeyForwardInfo:
-        """Spawn (or adopt) a detached ``mngr latchkey forward`` and return its info.
+    def ensure_running(self) -> LatchkeyForwardOwner:
+        """Spawn (or adopt) a detached ``mngr latchkey forward`` and return its owner record.
 
         Behaviour:
 
-        * If a record exists and its PID still belongs to a process whose
-          cmdline matches ``mngr latchkey forward``, the existing
-          supervisor is adopted -- no new subprocess is spawned.
-        * If a record exists but its PID is dead or a stranger, the
-          record is deleted and a fresh supervisor is spawned.
-        * If no record exists, a fresh supervisor is spawned.
+        * If a forward owns this directory, it is adopted -- no new subprocess
+          is spawned. Ownership and the record are one fact, so this cannot
+          distinguish a forward it spawned from any other; an embedder that
+          needs the *current* binary running calls :meth:`restart`, which stops
+          the owner first.
+        * Otherwise a fresh supervisor is spawned, and the record it publishes
+          when it claims the directory is what comes back.
 
-        In every case, exactly one forward is left running for this
-        latchkey directory: any *other* ``mngr latchkey forward`` bound to
-        the same directory (a duplicate left by a prior or concurrent
-        embedder instance -- the cause of multiple discovery producers
-        racing on the shared events file) is reaped, along with its
-        ``mngr observe`` child. Only a forward matching the live on-disk
-        record is ever adopted; an unrecorded orphan is replaced rather
-        than adopted, since it may be running stale code or config.
+        In every case, exactly one forward is left running for this latchkey
+        directory. Which process owns it comes from
+        :func:`owning_forward_process`, which reads the identity stamped into the
+        exclusive lock the forward holds for its whole life. A live owner is
+        never reaped here; a forward predating that lock is the one exception,
+        since it holds none and would otherwise run beside the spawn below,
+        putting a second ``mngr observe`` producer on the shared events file.
 
-        The on-disk record is written by the spawned forward process
-        itself (in :func:`_forward_command`), not by this method. The
-        returned :class:`LatchkeyForwardInfo` is therefore an
-        in-memory view of the spawn -- callers that need to read
-        from disk should poll :func:`load_forward_info` until the
-        forward child has published its record.
+        The adopt check and the spawn are not atomic across processes, so the
+        child can find the directory taken and refuse it. What is waited for is
+        therefore an owner rather than this child specifically, and an owner that
+        turns out to be someone else's forward is adopted like any other.
 
-        ``LatchkeyError`` is raised when ``Popen`` itself fails (e.g.
-        the ``mngr`` binary is missing).
+        ``LatchkeyError`` is raised when ``Popen`` itself fails (e.g. the ``mngr``
+        binary is missing), and when nothing owns the directory within
+        :attr:`spawn_ownership_timeout_seconds` of the spawn.
         """
         plugin_dir = self.plugin_data_dir
-        record_path = plugin_dir / "latchkey_forward.json"
         with self._lock:
-            existing = load_forward_info(plugin_dir)
-            if existing is not None and is_forward_info_alive(existing):
-                # Keep the recorded supervisor; reap any other forward bound
-                # to this latchkey directory (duplicates left by prior
-                # instances) so a single discovery observer survives.
-                self._reap_duplicate_forwards(keep_pid=existing.pid)
-                logger.info(
-                    "Adopted existing mngr latchkey forward supervisor (pid={}, record={})",
-                    existing.pid,
-                    record_path,
-                )
-                self._last_known_pid = existing.pid
-                return existing
-            if existing is None:
-                logger.info(
-                    "No existing mngr latchkey forward record at {}; spawning a fresh supervisor",
-                    record_path,
-                )
-            else:
-                logger.info(
-                    "Discarding stale mngr latchkey forward record (pid={}, record={}); spawning fresh",
-                    existing.pid,
-                    record_path,
-                )
-                delete_forward_info(plugin_dir)
-
-            # Reap every forward bound to this latchkey directory before
-            # spawning. We have no live record to adopt, so any forward still
-            # running here is an unrecorded orphan that may carry stale code or
-            # config (the duplicate-producer root cause); replace it with a
-            # fresh child running the current binary rather than adopting it.
-            self._reap_duplicate_forwards(keep_pid=None)
+            # CLEANUP: remove this call with ``_pre_lock_migration``. A forward
+            # predating the lock holds none, so it cannot be adopted and would
+            # run beside the one spawned below.
+            migrate_pre_lock_forward(plugin_dir, _terminate_pid_and_descendants)
+            owned = _owning_forward(plugin_dir)
+            if owned is not None:
+                _, owner = owned
+                logger.info("Adopted the mngr latchkey forward owning {} (pid={})", plugin_dir, owner.pid)
+                return owner
 
             log_path = forward_log_path(plugin_dir)
             with log_span(
@@ -441,87 +351,68 @@ class LatchkeyForwardSupervisor(MutableModel):
                     )
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e
+                # Captured while the child is still known to be the one just
+                # spawned: the ownership wait below runs for up to
+                # ``spawn_ownership_timeout_seconds``.
+                try:
+                    spawned_process: psutil.Process | None = psutil.Process(pid)
+                except psutil.NoSuchProcess:
+                    spawned_process = None
 
-            self._last_known_pid = pid
-            return LatchkeyForwardInfo(pid=pid, started_at=datetime.now(timezone.utc))
-
-    def _reap_duplicate_forwards(self, keep_pid: int | None) -> None:
-        """Terminate every ``mngr latchkey forward`` for this directory except ``keep_pid``.
-
-        Enforces the one-forward-per-latchkey-directory invariant the discovery
-        pipeline depends on (``mngr latchkey forward``'s ``mngr observe`` is the
-        single producer for the shared events file). Each duplicate's descendant
-        processes (its ``mngr observe`` child, the ``latchkey gateway``, and
-        reverse ``ssh`` tunnels) are captured before the forward is signalled and
-        terminated after, so a wedged forward that must be SIGKILLed cannot leave
-        any of them orphaned. Scoped by resolved ``--latchkey-directory``
-        equality, so a sibling profile's supervisor is never touched.
-        Best-effort: a duplicate that dies or is inaccessible mid-reap is simply
-        skipped.
-        """
-        target = _resolve_or_none(self.latchkey_directory)
-        if target is None:
-            return
-        for pid in _iter_matching_forward_pids(self.latchkey_directory):
-            if pid == keep_pid or pid == os.getpid():
-                continue
-            # The scan and the kill are not atomic; re-confirm the PID is still a
-            # forward for this directory right before signalling it, so a PID
-            # recycled since the scan is never terminated (mirrors stop()).
-            if not _is_forward_pid_for_directory(pid, target):
-                continue
-            descendant_processes = _descendant_processes(pid)
-            logger.info(
-                "Reaping duplicate mngr latchkey forward (pid={}) bound to {}",
-                pid,
-                self.latchkey_directory,
+            # A spawn that returns is not yet a forward: the child can refuse
+            # the directory, or die before it claims one.
+            owned, _polls, _elapsed = poll_for_value(
+                lambda: _owning_forward(plugin_dir),
+                timeout=self.spawn_ownership_timeout_seconds,
+                poll_interval=_SPAWN_OWNERSHIP_POLL_SECONDS,
             )
-            _terminate_pid(pid)
-            for descendant_process in descendant_processes:
-                _terminate_process(descendant_process)
+            if owned is None:
+                # Nothing owns the directory, and nothing else knows about the
+                # child: leaving it would orphan a process holding this
+                # supervisor's log and possibly its own children.
+                if spawned_process is not None:
+                    _terminate_process_and_descendants(spawned_process)
+                raise LatchkeyError(
+                    f"Spawned 'mngr latchkey forward' (pid={pid}) did not take ownership of "
+                    f"{self.latchkey_directory} within {self.spawn_ownership_timeout_seconds}s; see {log_path}",
+                )
+            _, owner = owned
+            if owner.pid != pid:
+                logger.info(
+                    "Another mngr latchkey forward (pid={}) claimed {} first; adopting it and dropping our child "
+                    "(pid={}), which refuses a directory it does not own",
+                    owner.pid,
+                    plugin_dir,
+                    pid,
+                )
+                if spawned_process is not None:
+                    _terminate_process_and_descendants(spawned_process)
+            return owner
 
     def stop(self) -> None:
-        """Terminate the supervisor and delete its record.
+        """Terminate the forward owning this latchkey directory.
 
-        SIGTERM-ing the supervisor cascades into the supervisor's own
-        coupled-lifetime shutdown path: it stops the shared
-        ``latchkey gateway`` subprocess, cancels every reverse tunnel,
-        and exits. Embedders that want the gateway to *survive* their
+        SIGTERM-ing it cascades into its own coupled-lifetime shutdown path: it
+        stops the shared ``latchkey gateway`` subprocess, cancels every reverse
+        tunnel, and exits. Embedders that want the gateway to *survive* their
         own shutdown should simply not call this method.
 
-        Source-of-truth precedence:
+        The signalled process comes from the ownership lock, so it is the one
+        holding this directory at the moment it is read -- never one that merely
+        held it once. Its identity is carried in the handle, so a pid recycled
+        between that read and the signal is rejected rather than killed.
 
-        * :attr:`_last_known_pid` (set by :meth:`ensure_running`) --
-          our own freshly-spawned PID. Terminated without a cmdline
-          check because the freshly-forked child may not have exec'd
-          its real argv yet, and any cmdline check would race the
-          kernel.
-        * On-disk record -- could be arbitrarily old, so the PID is
-          verified via :func:`is_forward_info_alive` (PID alive +
-          cmdline matches) before terminating. A record that points
-          at a recycled PID never causes us to signal an unrelated
-          process.
+        Held under ``_lock`` for the terminate as well as the read, so a forward
+        another thread's :meth:`ensure_running` is still waiting on cannot be
+        reaped out from under it.
         """
-        plugin_dir = self.plugin_data_dir
         with self._lock:
-            cached_pid = self._last_known_pid
-            self._last_known_pid = None
-            info = load_forward_info(plugin_dir)
-            delete_forward_info(plugin_dir)
-        if cached_pid is not None:
-            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", cached_pid)
-            _terminate_pid_and_descendants(cached_pid)
-            return
-        if info is None:
-            return
-        if not is_forward_info_alive(info):
-            logger.debug(
-                "Skipping terminate: pid {} on disk is no longer a live mngr latchkey forward process",
-                info.pid,
-            )
-            return
-        logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", info.pid)
-        _terminate_pid_and_descendants(info.pid)
+            forward_process = owning_forward_process(self.plugin_data_dir)
+            if forward_process is None:
+                logger.debug("No mngr latchkey forward owns {}; nothing to stop", self.latchkey_directory)
+                return
+            logger.info("Stopping detached mngr latchkey forward supervisor (pid={})", forward_process.pid)
+            _terminate_process_and_descendants(forward_process)
 
     def bounce(self) -> None:
         """Refresh the supervisor's provider set without dropping the gateway.
@@ -529,12 +420,12 @@ class LatchkeyForwardSupervisor(MutableModel):
         If a live, fully-started ``mngr latchkey forward`` is running, send it
         SIGHUP so it bounces only its ``mngr observe`` child (the shared gateway
         and every reverse tunnel stay up) and reloads the current provider set.
-        If no live supervisor is found -- no record, a dead PID, or a stale
-        record pointing at a stranger -- fall back to :meth:`ensure_running` so
-        the bounce also brings the supervisor up (start-if-down). A live
-        supervisor that is still starting (its record has no gateway port yet)
-        is left alone entirely: its observe child does not exist to be bounced,
-        and startup reads the current provider state anyway.
+        If nothing owns this latchkey directory, fall back to
+        :meth:`ensure_running` so the bounce also brings the supervisor up
+        (start-if-down). A live supervisor that is still starting (its record
+        has no gateway port yet) is left alone entirely: its observe child does
+        not exist to be bounced, and startup reads the current provider state
+        anyway.
 
         Used by the minds desktop client on every mid-session change to its
         provider set (provider enable/disable, imbue_cloud account add/remove),
@@ -542,42 +433,43 @@ class LatchkeyForwardSupervisor(MutableModel):
         """
         plugin_dir = self.plugin_data_dir
         with self._lock:
-            info = load_forward_info(plugin_dir)
-            live_info = info if (info is not None and is_forward_info_alive(info)) else None
-        if live_info is None:
+            owned = _owning_forward(plugin_dir)
+        if owned is None:
             logger.info("No live mngr latchkey forward to bounce; ensuring one is running")
             self.ensure_running()
             return
-        if live_info.gateway_port is None:
+        forward_process, owner = owned
+        if owner.gateway_port is None:
             # The record's gateway port is stamped only once startup completes,
             # and until then a SIGHUP can land before the forward has installed
             # its bounce handler -- the default disposition would kill it.
             logger.info(
                 "mngr latchkey forward (pid={}) is still starting; skipping the observe bounce",
-                live_info.pid,
+                owner.pid,
             )
             return
-        logger.info("Bouncing mngr latchkey forward observe via SIGHUP (pid={})", live_info.pid)
+        logger.info("Bouncing mngr latchkey forward observe via SIGHUP (pid={})", owner.pid)
         try:
-            os.kill(live_info.pid, signal.SIGHUP)
-        except OSError as e:
+            # SIGHUP's default disposition is to terminate, so a pid recycled
+            # since the ownership read would be killed rather than bounced.
+            forward_process.send_signal(signal.SIGHUP)
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
             # The supervisor died between the liveness check and the signal.
             # Bring a fresh one up rather than leaving the provider set stale.
-            logger.warning(
-                "Failed to SIGHUP mngr latchkey forward pid {}: {}; ensuring one is running", live_info.pid, e
-            )
+            logger.warning("Failed to SIGHUP mngr latchkey forward pid {}: {}; ensuring one is running", owner.pid, e)
             self.ensure_running()
 
-    def restart(self) -> LatchkeyForwardInfo:
+    def restart(self) -> LatchkeyForwardOwner:
         """Terminate any existing live supervisor and spawn a fresh one.
 
-        Use this on embedder startup when you want to guarantee the
-        supervisor was launched from the current binary's code -- i.e.
-        after a package update -- rather than adopting a stale
-        supervisor running an older version. The cmdline-verified
+        Use this on embedder startup to replace a supervisor left running by an
+        earlier build. The forward it stops is the one owning the directory, and
+        the spawn that follows adopts whichever forward claims it first, so
+        another embedder racing for the same directory can still win it. The verified
         termination in :meth:`stop` makes this safe to call
-        unconditionally; a missing or stale record yields a no-op
-        stop followed by a normal spawn.
+        unconditionally; an unowned directory yields a stop that signals
+        nothing, followed by a normal spawn. ``stop`` waits for the owner to
+        exit, so the spawn that follows finds the directory unowned.
         """
         self.stop()
         return self.ensure_running()

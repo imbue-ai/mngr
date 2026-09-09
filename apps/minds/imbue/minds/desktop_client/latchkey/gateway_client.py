@@ -50,10 +50,10 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey.core import Latchkey
-from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
-from imbue.mngr_latchkey.store import LatchkeyForwardInfo
+from imbue.mngr_latchkey.forward_supervisor import is_forward_owned_by
+from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import load_forward_info
+from imbue.mngr_latchkey.store import load_forward_owner
 
 # Header names baked into the upstream gateway's wire contract.
 _HEADER_PASSWORD: Final[str] = "X-Latchkey-Gateway-Password"
@@ -320,16 +320,16 @@ class LatchkeyGatewayClient(MutableModel):
                 raise LatchkeyGatewayClientNotInitializedError(
                     "LatchkeyGatewayClient was constructed without a Latchkey instance; cannot initialize.",
                 )
-            forward_info = self._wait_for_gateway_port()
-            self._base_url = f"http://{self._latchkey.listen_host}:{forward_info.gateway_port}"
+            owner = self._wait_for_gateway_port()
+            self._base_url = f"http://{self._latchkey.listen_host}:{owner.gateway_port}"
             self._admin_jwt = self._latchkey.create_admin_permissions_jwt()
             self._password = self._latchkey.derive_gateway_password()
 
     def invalidate_initialization(self) -> None:
         """Drop cached gateway URL + auth credentials so the next call re-resolves from disk.
 
-        The cached ``_base_url`` is built once from the supervisor's
-        on-disk ``LatchkeyForwardInfo`` record. If the supervisor
+        The cached ``_base_url`` is built once from the record naming the
+        forward that owns the latchkey directory. If the supervisor
         restarts mid-session -- or if minds startup raced the
         supervisor restart and cached the previous gateway's port --
         every subsequent connection attempt will fail with a
@@ -372,16 +372,15 @@ class LatchkeyGatewayClient(MutableModel):
             raise LatchkeyGatewayClientNotInitializedError("LatchkeyGatewayClient is not initialized yet.")
         return self._base_url
 
-    def _wait_for_gateway_port(self) -> LatchkeyForwardInfo:
+    def _wait_for_gateway_port(self) -> LatchkeyForwardOwner:
         """Block until the supervised ``mngr latchkey forward`` stamps its bound gateway port.
 
-        The supervisor writes its ``LatchkeyForwardInfo`` record with
-        ``gateway_port=None`` at spawn time and updates the record in place
-        once it has bound the shared ``latchkey gateway`` subprocess to a
-        free TCP port. We poll the record until the port becomes non-None
-        (or the timeout expires) so subsequent minds startup steps can
-        build the gateway URL deterministically without racing the
-        supervisor's own startup.
+        The supervisor records itself as the directory's owner when it claims
+        the ownership lock, carrying no port yet, and rewrites that record once
+        it has bound the shared ``latchkey gateway`` subprocess to a free TCP
+        port. We poll until the port becomes non-None (or the timeout expires)
+        so subsequent minds startup steps can build the gateway URL
+        deterministically without racing the supervisor's own startup.
         """
         if self._latchkey is None:
             raise LatchkeyGatewayInitializationError(
@@ -394,16 +393,18 @@ class LatchkeyGatewayClient(MutableModel):
         timer.start()
         try:
             while not deadline.is_set():
-                info = load_forward_info(plugin_dir)
-                if info is not None and not is_forward_info_alive(info):
-                    # Supervisor died between spawn and port-bind; bail out
-                    # instead of polling a stale record forever.
+                owner = load_forward_owner(plugin_dir)
+                if owner is not None and not is_forward_owned_by(plugin_dir, owner.pid):
+                    # The forward this is waiting on no longer owns the
+                    # directory: it died before binding, or the discovery
+                    # watchdog restarted it. Either way the pid being waited on
+                    # is gone, so fail rather than poll it out to the timeout.
                     raise LatchkeyGatewayInitializationError(
                         "The ``mngr latchkey forward`` supervisor we spawned has died before binding its "
                         f"gateway port; check {plugin_dir}/latchkey_forward.log for details.",
                     )
-                if info is not None and info.gateway_port is not None:
-                    return info
+                if owner is not None and owner.gateway_port is not None:
+                    return owner
                 # Use the same event as the deadline so we wake up promptly
                 # when the timer fires; the wait returns True iff the
                 # deadline was reached during the sleep.
