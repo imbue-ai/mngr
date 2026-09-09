@@ -11,13 +11,24 @@ from pathlib import Path
 
 import click
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.cli.command_names import KNOWN_CONFIG_COMMAND_NAMES
+from imbue.mngr.cli.command_names import build_default_subcommand_choices
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
+from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import CreateTemplate
+from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import PluginConfig
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.main import cli
+from imbue.mngr.primitives import PluginName
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 
 
 def _read_cache(cache_dir: Path) -> CompletionCacheData:
@@ -277,3 +288,176 @@ def test_every_option_is_classified(completion_cache_dir: Path) -> None:
     assert not missing, "The following CLI options are not in options_by_command in the cache:\n" + "\n".join(
         f"  {m}" for m in missing
     )
+
+
+def _schema_cache(completion_cache_dir: Path, mngr_ctx: MngrContext) -> CompletionCacheData:
+    """Write and read the cache for ``mngr_ctx`` with the full command-name registry.
+
+    The registry is what lets ``commands.*`` / ``pre_command_scripts.*`` keys be
+    offered for command buckets that are not yet configured, so pass it just as
+    the ``list`` command does.
+    """
+    write_cli_completions_cache(
+        cli_group=cli,
+        mngr_ctx=mngr_ctx,
+        registered_agent_types=list_registered_agent_types(),
+        config_command_names=sorted(KNOWN_CONFIG_COMMAND_NAMES),
+        default_subcommand_choices=build_default_subcommand_choices(cli),
+    )
+    return _read_cache(completion_cache_dir)
+
+
+def test_command_defaults_keys_are_schema_discoverable(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """``commands.<cmd>.<param>`` keys are offered before anything is configured.
+
+    Options complete from the command's click params (not from a flattened config
+    instance), so a param under an unconfigured command is discoverable, and a
+    boolean option completes ``true``/``false``. Group subcommands are namespaced
+    ``<group>_<sub>`` to match their ``command_name`` bucket.
+    """
+    assert "destroy" not in temp_mngr_ctx.config.commands
+    cache = _schema_cache(completion_cache_dir, temp_mngr_ctx)
+
+    # A top-level command's option is discoverable pre-config, and a boolean
+    # option (``--headless``, on every command) completes its value.
+    assert "commands.destroy.headless" in cache.config_keys
+    assert cache.config_value_choices.get("commands.destroy.headless") == ["true", "false"]
+
+    # A group subcommand uses the ``<group>_<sub>`` bucket name.
+    assert "commands.snapshot_create.headless" in cache.config_keys
+
+    # The group itself owns no per-command param bucket (only its subcommands do),
+    # so no ``commands.snapshot.<param>`` param keys are fabricated.
+    assert not any(
+        key.startswith("commands.snapshot.") and not key.endswith(".default_subcommand") for key in cache.config_keys
+    )
+    # And the group-level ``config`` / ``plugin`` buckets, whose derived
+    # ``<group>_<sub>`` names are absent from the registry, contribute no params.
+    assert "commands.config_set.headless" not in cache.config_keys
+
+
+def test_default_subcommand_keys_come_from_group_config_keys(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Each ``DefaultCommandGroup`` offers ``commands.<config_key>.default_subcommand``.
+
+    The value choices are the group's canonical subcommand names (aliases are
+    excluded, since a default is best chosen by canonical name).
+    """
+    cache = _schema_cache(completion_cache_dir, temp_mngr_ctx)
+
+    assert "commands.snapshot.default_subcommand" in cache.config_keys
+    assert cache.config_value_choices.get("commands.snapshot.default_subcommand") == ["create", "destroy", "list"]
+
+    # The top-level group's default subcommand completes to canonical command
+    # names; alias entries (e.g. ``ls`` for ``list``) are filtered out.
+    mngr_choices = cache.config_value_choices.get("commands.mngr.default_subcommand")
+    assert mngr_choices is not None
+    assert "create" in mngr_choices
+    assert "list" in mngr_choices
+    assert "ls" not in mngr_choices
+
+
+def test_pre_command_scripts_keys_cover_registry(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Every ``command_name`` bucket is offered as a ``pre_command_scripts.<name>`` key.
+
+    These are complete leaf keys (the value is a free-form list of scripts), so
+    the whole set is discoverable before anything is configured, including the
+    ``<group>_<sub>`` subcommand buckets.
+    """
+    cache = _schema_cache(completion_cache_dir, temp_mngr_ctx)
+
+    expected = {f"pre_command_scripts.{name}" for name in KNOWN_CONFIG_COMMAND_NAMES}
+    assert expected <= set(cache.config_keys)
+    # Spot-check the namespaced subcommand buckets specifically.
+    assert "pre_command_scripts.snapshot_create" in cache.config_keys
+    assert "pre_command_scripts.git_pull" in cache.config_keys
+
+
+def test_provider_instance_keys_come_from_schema(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A configured provider exposes all settable fields, not just the ones it set.
+
+    Provider instance names are user-chosen, so only configured providers appear
+    -- but each is walked from ``ProviderInstanceConfig``'s schema, so an unset
+    field is still offered and ``backend`` completes to the known backend names.
+    """
+    config = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().providers,
+            {ProviderInstanceName("myprov"): ProviderInstanceConfig(backend=ProviderBackendName("local"))},
+        )
+    )
+    mngr_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, config))
+    cache = _schema_cache(completion_cache_dir, mngr_ctx)
+
+    # An unset field of the configured provider is discoverable from the schema.
+    assert "providers.myprov.discovery_poll_interval_seconds" in cache.config_keys
+    # backend (a ProviderBackendName field) completes to the registered backends
+    # (only builtin backends are registered in the test env; plugin backends like
+    # docker are not loaded).
+    backend_choices = cache.config_value_choices.get("providers.myprov.backend")
+    assert backend_choices is not None
+    assert "local" in backend_choices
+
+
+def test_plugin_keys_come_from_schema(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A configured plugin's fields complete from the ``PluginConfig`` schema."""
+    config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().plugins, {PluginName("claude"): PluginConfig(enabled=True)})
+    )
+    mngr_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, config))
+    cache = _schema_cache(completion_cache_dir, mngr_ctx)
+
+    assert "plugins.claude.enabled" in cache.config_keys
+    assert cache.config_value_choices.get("plugins.claude.enabled") == ["true", "false"]
+
+
+def test_configured_command_and_template_params_use_unwrapped_keys(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Configured ``commands`` / ``create_templates`` params use the user-facing key shape.
+
+    Users set ``commands.<cmd>.<param>`` and ``create_templates.<name>.<param>``;
+    the internal ``defaults`` / ``options`` wrappers must never leak into the
+    completion keys (those don't round-trip through ``config set``). Templates
+    additionally expose all ``CreateCliOptions`` fields, so an unset one is
+    discoverable once the template exists.
+    """
+    config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().commands, {"create": CommandDefaults(defaults={"branch": "main"})}),
+        to_update(
+            temp_mngr_ctx.config.field_ref().create_templates,
+            {CreateTemplateName("dev"): CreateTemplate(options={"new_host": True})},
+        ),
+    )
+    mngr_ctx = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, config))
+    cache = _schema_cache(completion_cache_dir, mngr_ctx)
+
+    assert "commands.create.branch" in cache.config_keys
+    assert "create_templates.dev.new_host" in cache.config_keys
+    # An unset template option is still discoverable from CreateCliOptions.
+    assert "create_templates.dev.target_path" in cache.config_keys
+
+    # A template option completes to the same values as the create command's
+    # option: ``type`` -> agent type names (a builtin like ``command``).
+    type_choices = cache.config_value_choices.get("create_templates.dev.type")
+    assert type_choices is not None
+    assert "command" in type_choices
+
+    # The internal wrapper segments must never appear.
+    assert not any(".defaults." in key for key in cache.config_keys)
+    assert not any(".options." in key for key in cache.config_keys)
