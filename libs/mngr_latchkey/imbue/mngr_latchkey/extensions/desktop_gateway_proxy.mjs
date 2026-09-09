@@ -1,9 +1,22 @@
+import { readFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 
 const DESKTOP_GATEWAY_URL_ENV_VAR = 'LATCHKEY_EXTENSION_DESKTOP_GATEWAY_URL';
-const DESKTOP_PERMISSIONS_OVERRIDE_ENV_VAR =
-  'LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE';
+// The desktop's two secrets are named by *file path* rather than carried by
+// value, and are read again for every proxied request. Both belong to whichever
+// of the user's computers is currently connected -- the password is that
+// gateway's own listen password, and the override JWT is signed by that
+// computer's encryption key and names a path on its disk -- so both change when
+// the user moves to another computer, while this gateway (and the workspace it
+// serves) keeps running. Provisioning from the new computer rewrites the files;
+// reading them per request is what makes the new values take effect without a
+// gateway restart, and what keeps a proxied request from ever presenting the
+// secrets of a computer that is no longer on the other end of the tunnel.
+const DESKTOP_PASSWORD_FILE_ENV_VAR = 'LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE';
+const DESKTOP_PERMISSIONS_OVERRIDE_FILE_ENV_VAR =
+  'LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE';
+const GATEWAY_PASSWORD_HEADER = 'X-Latchkey-Gateway-Password';
 const PERMISSIONS_OVERRIDE_HEADER = 'X-Latchkey-Gateway-Permissions-Override';
 // Prefix that asks for a third-party request to leave from the user's own
 // machine rather than from this VPS (e.g. because the destination blocks
@@ -78,14 +91,38 @@ function resolveDesktopGatewayBase() {
   return parsed;
 }
 
-function resolveDesktopPermissionsOverride() {
-  const value = process.env[DESKTOP_PERMISSIONS_OVERRIDE_ENV_VAR];
-  if (value === undefined || value.length === 0) {
-    throw new DesktopGatewayNotConfiguredError(
-      `environment variable ${DESKTOP_PERMISSIONS_OVERRIDE_ENV_VAR} is not set`,
-    );
+async function readSecretFile(envVarName) {
+  const path = process.env[envVarName];
+  if (path === undefined || path.length === 0) {
+    throw new DesktopGatewayNotConfiguredError(`environment variable ${envVarName} is not set`);
+  }
+  let content;
+  try {
+    content = await readFile(path, 'utf-8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new DesktopGatewayNotConfiguredError(`${envVarName}=${path} cannot be read: ${message}`);
+  }
+  const value = content.trim();
+  if (value.length === 0) {
+    throw new DesktopGatewayNotConfiguredError(`${envVarName}=${path} is empty`);
   }
   return value;
+}
+
+/**
+ * Read the secrets that authenticate this hop to the desktop gateway.
+ *
+ * Read together (and afresh) so a request never mixes one computer's password
+ * with another's override JWT: provisioning writes both, so a half-updated pair
+ * is only ever momentary.
+ */
+async function resolveDesktopCredentials() {
+  const [password, permissionsOverride] = await Promise.all([
+    readSecretFile(DESKTOP_PASSWORD_FILE_ENV_VAR),
+    readSecretFile(DESKTOP_PERMISSIONS_OVERRIDE_FILE_ENV_VAR),
+  ]);
+  return { password, permissionsOverride };
 }
 
 function isProxyRoute(pathOnly) {
@@ -125,7 +162,15 @@ function buildUpstreamPath(rawUrl, pathOnly) {
   return `${GATEWAY_PATH_PREFIX}${target}`;
 }
 
-function buildUpstreamHeaders(request, upstreamBase, desktopPermissionsOverride) {
+/**
+ * Copy the inbound headers, minus the two the desktop hop authenticates itself with.
+ *
+ * The caller's password authenticates it to *this* gateway and is a different
+ * secret from the desktop gateway's own listen password, so it is dropped here
+ * rather than forwarded; likewise the caller's permissions override, which
+ * would otherwise let it pick the policy the desktop evaluates it against.
+ */
+function buildUpstreamHeaders(request, upstreamBase, desktopCredentials) {
   const headers = {};
   const rawHeaders = request.rawHeaders ?? [];
   for (let index = 0; index < rawHeaders.length; index += 2) {
@@ -135,6 +180,7 @@ function buildUpstreamHeaders(request, upstreamBase, desktopPermissionsOverride)
     if (
       HOP_BY_HOP_HEADERS.has(lowerName) ||
       lowerName === 'host' ||
+      lowerName === GATEWAY_PASSWORD_HEADER.toLowerCase() ||
       lowerName === PERMISSIONS_OVERRIDE_HEADER.toLowerCase()
     )
       continue;
@@ -148,7 +194,8 @@ function buildUpstreamHeaders(request, upstreamBase, desktopPermissionsOverride)
     }
   }
   headers.host = upstreamBase.host;
-  headers[PERMISSIONS_OVERRIDE_HEADER] = desktopPermissionsOverride;
+  headers[GATEWAY_PASSWORD_HEADER] = desktopCredentials.password;
+  headers[PERMISSIONS_OVERRIDE_HEADER] = desktopCredentials.permissionsOverride;
   return headers;
 }
 
@@ -181,7 +228,7 @@ function pickRequestImpl(upstreamBase) {
   return upstreamBase.protocol === 'https:' ? httpsRequest : httpRequest;
 }
 
-function proxyRequest(request, response, upstreamBase, desktopPermissionsOverride, upstreamPath) {
+function proxyRequest(request, response, upstreamBase, desktopCredentials, upstreamPath) {
   return new Promise((resolve) => {
     const upstreamRequest = pickRequestImpl(upstreamBase)({
       protocol: upstreamBase.protocol,
@@ -189,7 +236,7 @@ function proxyRequest(request, response, upstreamBase, desktopPermissionsOverrid
       port: upstreamBase.port.length > 0 ? upstreamBase.port : undefined,
       method: (request.method ?? 'GET').toUpperCase(),
       path: upstreamPath,
-      headers: buildUpstreamHeaders(request, upstreamBase, desktopPermissionsOverride),
+      headers: buildUpstreamHeaders(request, upstreamBase, desktopCredentials),
     });
 
     let settled = false;
@@ -230,11 +277,11 @@ export default async function desktopGatewayProxyExtension(request, response) {
   if (!isProxyRoute(pathOnly)) return false;
 
   let upstreamBase;
-  let desktopPermissionsOverride;
+  let desktopCredentials;
   let upstreamPath;
   try {
     upstreamBase = resolveDesktopGatewayBase();
-    desktopPermissionsOverride = resolveDesktopPermissionsOverride();
+    desktopCredentials = await resolveDesktopCredentials();
     upstreamPath = buildUpstreamPath(request.url ?? '/', pathOnly);
   } catch (error) {
     if (error instanceof DesktopGatewayProxyError) {
@@ -247,7 +294,7 @@ export default async function desktopGatewayProxyExtension(request, response) {
   }
 
   try {
-    await proxyRequest(request, response, upstreamBase, desktopPermissionsOverride, upstreamPath);
+    await proxyRequest(request, response, upstreamBase, desktopCredentials, upstreamPath);
   } catch (error) {
     if (!response.headersSent) {
       const message = error instanceof Error ? error.message : String(error);

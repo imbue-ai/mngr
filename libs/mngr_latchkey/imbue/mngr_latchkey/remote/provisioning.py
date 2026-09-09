@@ -13,7 +13,8 @@ carries keepalive flags so a connection wedged by a paused-then-resumed VM is
 detected and torn down, letting ``supervisord`` restart it.
 
 Crash recovery deliberately stops short of surviving a full *reboot*: the
-gateway's secrets (the encryption key and the derived listen password) are
+gateway's secrets (the machine's own encryption key and listen password, plus
+the pair its forwarding extension presents to the desktop) are
 kept in a tmpfs directory under ``/run``, which is RAM-backed and so survives
 process crashes -- letting ``supervisord`` restart the gateway without a
 desktop round-trip -- but is wiped by a reboot. This is a deliberate choice to
@@ -31,8 +32,10 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -50,7 +53,10 @@ from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.owner_exec_vm import provision_owner_exec_vm
+from imbue.mngr_latchkey.remote._machine import DESKTOP_GATEWAY_PASSWORD_FILENAME
+from imbue.mngr_latchkey.remote._machine import DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_TIMEOUT_SECONDS
 from imbue.mngr_latchkey.remote._machine import REMOTE_FILE_MODE
 
@@ -59,6 +65,7 @@ from imbue.mngr_latchkey.remote._machine import REMOTE_FILE_MODE
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME as REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_TIMEOUT_SECONDS
 from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR
+from imbue.mngr_latchkey.remote._machine import read_machine_gateway_password_from_secrets_dir
 from imbue.mngr_latchkey.remote._machine import read_machine_key_from_secrets_dir
 
 # Re-exported (the redundant alias marks it as such): callers about to run a
@@ -67,7 +74,9 @@ from imbue.mngr_latchkey.remote._machine import resolve_remote_latchkey_director
 from imbue.mngr_latchkey.remote._machine import run_remote_command
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
+from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -180,8 +189,6 @@ _GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
 # Filesystem types (as reported by ``stat -f -c %T``) we accept as RAM-backed
 # for the secrets directory. Anything else means the key would land on disk.
 _RAM_BACKED_FILESYSTEM_TYPES: Final[frozenset[str]] = frozenset({"tmpfs", "ramfs"})
-_GATEWAY_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
-_DESKTOP_PERMISSIONS_OVERRIDE_FILENAME: Final[str] = "desktop_permissions_override"
 
 # supervisord drop-in program directory (the distro ``supervisor`` package's
 # ``supervisord.conf`` includes ``conf.d/*.conf``) and the program names /
@@ -239,6 +246,29 @@ _CONTAINER_TUNNEL_KEY_FILENAME: Final[str] = "container_tunnel_key"
 # each container (kept as a literal here to avoid a dependency on those
 # provider packages).
 _CONTAINER_HOST_ID_LABEL: Final[str] = "com.imbue.mngr.host-id"
+
+
+class DesktopGatewaySecrets(FrozenModel):
+    """What the machine's forwarding extension presents to the desktop gateway it proxies to.
+
+    Both belong to the computer that is currently connected, not to the machine:
+    the password is that computer's own gateway listen password, and the JWT is
+    signed by its encryption key and names a path on its disk. So a provisioning
+    pass overwrites both -- which is how a workspace created from one of the
+    user's computers keeps reaching the desktop-owned endpoint families after
+    the user moves to another -- while the machine's own key and listen password
+    are adopted rather than replaced.
+
+    They are handed to the extension as files it reads per request (see
+    :func:`_build_gateway_run_script`), so overwriting them is enough: the
+    gateway does not have to be restarted for the new computer's values to take
+    effect.
+    """
+
+    gateway_password: str = Field(description="The desktop gateway's own listen password.")
+    permissions_override: str = Field(
+        description="A JWT targeting the host's permissions file on the desktop that minted it."
+    )
 
 
 def _build_ensure_installed_script(
@@ -681,20 +711,21 @@ def _build_gateway_run_script(
     outer_port: int,
     key_file_path: Path,
     password_file_path: Path,
+    desktop_password_file_path: Path,
     desktop_permissions_override_file_path: Path,
     desktop_gateway_url: str,
 ) -> str:
     """Build the wrapper script supervisord runs to launch ``latchkey gateway``.
 
-    supervisord invokes this as ``/bin/sh <script>``. It reads the encryption
-    key, gateway listen password, and desktop-target permissions override from
-    0600 tmpfs files into their respective environment variables and
-    ``exec``s the gateway (so supervisord tracks the gateway PID directly, not a
-    wrapping shell). Reading the secrets from files -- rather than baking them
-    into the supervisord ``command=`` line -- keeps them out of the config file
-    and out of any process listing (``/proc/<pid>/cmdline``). The gateway binds
-    ``outer_port`` on the VPS loopback only; it is reached from the container via
-    the reverse tunnel, never exposed off-host.
+    supervisord invokes this as ``/bin/sh <script>``. It reads the encryption key
+    and the gateway listen password from 0600 tmpfs files into their respective
+    environment variables and ``exec``s the gateway (so supervisord tracks the
+    gateway PID directly, not a wrapping shell). Reading the secrets from files
+    -- rather than baking them into the supervisord ``command=`` line -- keeps
+    them out of the config file and out of any process listing
+    (``/proc/<pid>/cmdline``). The gateway binds ``outer_port`` on the VPS
+    loopback only; it is reached from the container via the reverse tunnel, never
+    exposed off-host.
 
     The secret files live in tmpfs (see :data:`TMPFS_SECRETS_DIR`), so a reboot
     wipes them. The script therefore refuses to launch a gateway with missing
@@ -703,11 +734,17 @@ def _build_gateway_run_script(
     re-writes the secrets) rather than running a broken, keyless gateway.
 
     ``LATCHKEY_ENCRYPTION_KEY`` is this machine's own key, which is what its
-    ``credentials.json.enc`` is encrypted with.
-    ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` is the desktop-derived shared password
-    (the value :meth:`Latchkey.derive_gateway_password` produces -- a pure
-    function of the shared encryption key) the agents already present as
-    ``LATCHKEY_GATEWAY_PASSWORD``.
+    ``credentials.json.enc`` is encrypted with, and
+    ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` is the machine's own listen password,
+    which the agents on it present as ``LATCHKEY_GATEWAY_PASSWORD``.
+
+    The desktop-owned pair is handed over as *paths*, not values: the forwarding
+    extension reads them on every request it proxies, so a provisioning pass
+    from another of the user's computers takes effect without this gateway (and
+    the workspace it is serving) having to be restarted. Their absence is
+    therefore not a launch failure either -- the extension answers the
+    desktop-owned routes with a 503 that says so, while third-party calls, which
+    need neither, keep working.
 
     The gateway refreshes its own OAuth credentials, because the store here is
     this machine's own rather than a copy of anyone else's: nothing else holds
@@ -718,7 +755,6 @@ def _build_gateway_run_script(
     """
     key_q = shlex.quote(str(key_file_path))
     password_q = shlex.quote(str(password_file_path))
-    desktop_permissions_override_q = shlex.quote(str(desktop_permissions_override_file_path))
     return "\n".join(
         (
             "#!/bin/sh",
@@ -730,7 +766,7 @@ def _build_gateway_run_script(
             # Refuse to start with missing secrets (tmpfs wiped by a reboot):
             # exit non-zero so supervisord records a failed start instead of
             # launching a keyless gateway.
-            f"if [ ! -s {key_q} ] || [ ! -s {password_q} ] || [ ! -s {desktop_permissions_override_q} ]; then",
+            f"if [ ! -s {key_q} ] || [ ! -s {password_q} ]; then",
             '  echo "latchkey gateway secrets are missing (tmpfs cleared by a reboot?); awaiting re-provision" >&2',
             "  exit 1",
             "fi",
@@ -738,10 +774,13 @@ def _build_gateway_run_script(
             # the file paths (not the secrets) ever appear in this script.
             f'LATCHKEY_ENCRYPTION_KEY="$(cat {key_q})"',
             f'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(cat {password_q})"',
-            f'LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE="$(cat {desktop_permissions_override_q})"',
             "export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD",
-            "export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE",
-            f"export LATCHKEY_GATEWAY_PORT={outer_port}",
+            f"export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE={shlex.quote(str(desktop_password_file_path))}",
+            "export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE="
+            f"{shlex.quote(str(desktop_permissions_override_file_path))}",
+            # ``LATCHKEY_GATEWAY_LISTEN_PORT`` is the name upstream reads; a
+            # gateway handed any other one silently binds latchkey's default.
+            f"export LATCHKEY_GATEWAY_LISTEN_PORT={outer_port}",
             "export LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1",
             "export LATCHKEY_DISABLE_COUNTING=1",
             f"export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_URL={shlex.quote(desktop_gateway_url)}",
@@ -759,21 +798,22 @@ def _build_gateway_run_script(
 def _ensure_latchkey_gateway_running(
     host: OuterHostInterface,
     machine_encryption_key: SecretStr,
-    gateway_password: str,
-    desktop_permissions_override: str,
+    machine_gateway_password: str,
+    desktop_secrets: DesktopGatewaySecrets,
 ) -> None:
     """Register (and start) the ``latchkey gateway`` as a supervisord program on the VPS.
 
     Writes a supervisord drop-in that launches ``latchkey gateway`` bound to the
     VPS loopback on ``OUTER_PORT`` and applies it via ``reread``/``update``, so
     supervisord keeps the gateway running and restarts it if it crashes. This
-    machine's own encryption key (see
-    :func:`_resolve_machine_encryption_key`) plus ``gateway_password`` and
-    ``desktop_permissions_override`` are written
-    to 0600 files in a tmpfs directory (:data:`TMPFS_SECRETS_DIR`); a
-    wrapper script (on the normal disk) reads them into the gateway's
-    environment at launch, so the secrets never appear in the supervisord config
-    or a process listing.
+    machine's own encryption key and listen password (see
+    :func:`_resolve_machine_encryption_key` and
+    :func:`_resolve_machine_gateway_password`) plus ``desktop_secrets`` are
+    written to 0600 files in a tmpfs directory (:data:`TMPFS_SECRETS_DIR`); a
+    wrapper script (on the normal disk) reads the machine's own two into the
+    gateway's environment at launch and hands the desktop-owned pair over as
+    paths, so no secret ever appears in the supervisord config or a process
+    listing.
 
     The secrets go in tmpfs (RAM), not on the disk beside the encrypted
     ``credentials.json.enc``: this deliberately keeps the encryption key off the
@@ -790,8 +830,9 @@ def _ensure_latchkey_gateway_running(
     remote_dir = resolve_remote_latchkey_directory(host)
     # Secrets go in tmpfs (RAM); the wrapper + log stay on the normal disk.
     key_file_path = TMPFS_SECRETS_DIR / GATEWAY_ENCRYPTION_KEY_FILENAME
-    password_file_path = TMPFS_SECRETS_DIR / _GATEWAY_PASSWORD_FILENAME
-    desktop_permissions_override_file_path = TMPFS_SECRETS_DIR / _DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
+    password_file_path = TMPFS_SECRETS_DIR / GATEWAY_LISTEN_PASSWORD_FILENAME
+    desktop_password_file_path = TMPFS_SECRETS_DIR / DESKTOP_GATEWAY_PASSWORD_FILENAME
+    desktop_permissions_override_file_path = TMPFS_SECRETS_DIR / DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
     run_script_path = remote_dir / _GATEWAY_RUN_SCRIPT_FILENAME
     log_path = remote_dir / REMOTE_GATEWAY_LOG_FILENAME
     conf_path = _SUPERVISOR_CONFD_DIR / _GATEWAY_CONF_FILENAME
@@ -807,12 +848,20 @@ def _ensure_latchkey_gateway_running(
     # inject the credentials the credential sync ships for them.
     _ensure_remote_latchkey_config(host, remote_dir)
 
-    # Write the secrets (0600) into tmpfs and the wrapper that reads them.
+    # Write the secrets (0600) into tmpfs and the wrapper that reads them. The
+    # machine's own two are rewritten with what it already runs under; the
+    # desktop-owned pair is this computer's, and replaces whichever computer's
+    # was there before.
     host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=REMOTE_FILE_MODE)
-    host.write_file(password_file_path, gateway_password.encode("utf-8"), mode=REMOTE_FILE_MODE)
+    host.write_file(password_file_path, machine_gateway_password.encode("utf-8"), mode=REMOTE_FILE_MODE)
+    host.write_file(
+        desktop_password_file_path,
+        desktop_secrets.gateway_password.encode("utf-8"),
+        mode=REMOTE_FILE_MODE,
+    )
     host.write_file(
         desktop_permissions_override_file_path,
-        desktop_permissions_override.encode("utf-8"),
+        desktop_secrets.permissions_override.encode("utf-8"),
         mode=REMOTE_FILE_MODE,
     )
     _ensure_remote_gateway_extension(host, remote_dir)
@@ -821,6 +870,7 @@ def _ensure_latchkey_gateway_running(
         OUTER_PORT,
         key_file_path,
         password_file_path,
+        desktop_password_file_path,
         desktop_permissions_override_file_path,
         desktop_gateway_url,
     )
@@ -1070,8 +1120,8 @@ def _build_legacy_migration_script(forward_spec: str) -> str:
             # double-quoted inline -- ``shlex.quote`` would single-quote and thus
             # stop ``$HOME`` from expanding.
             f'rm -f "$HOME/.latchkey/{GATEWAY_ENCRYPTION_KEY_FILENAME}" '
-            f'"$HOME/.latchkey/{_GATEWAY_PASSWORD_FILENAME}" '
-            f'"$HOME/.latchkey/{_DESKTOP_PERMISSIONS_OVERRIDE_FILENAME}"',
+            f'"$HOME/.latchkey/{GATEWAY_LISTEN_PASSWORD_FILENAME}" '
+            f'"$HOME/.latchkey/{DESKTOP_PERMISSIONS_OVERRIDE_FILENAME}"',
         )
     )
 
@@ -1161,6 +1211,62 @@ def _resolve_machine_encryption_key(host: OuterHostInterface, latchkey_directory
     except (LatchkeyStoreError, LatchkeyEncryptionKeyPermissionError) as e:
         raise RemoteGatewayError(f"Failed to resolve the encryption key for host {host_id}: {e}") from e
     return key
+
+
+def _resolve_machine_gateway_password(
+    host: OuterHostInterface,
+    latchkey_directory: Path,
+    host_id: HostId,
+    desktop_gateway_password: str,
+) -> str:
+    """Return the listen password this machine's gateway holds its callers to.
+
+    Adopted, never decided, for a blunter reason than the encryption key is
+    (:func:`_resolve_machine_encryption_key`): the workspaces on this machine
+    present the password from a host env file written once, at ``mngr create``,
+    and nothing rewrites that file for the life of the workspace. Whichever of
+    the user's computers created them therefore fixed the value, and a second
+    computer that wrote its own here would answer every one of their requests
+    with a 401.
+
+    So the machine's running copy wins, this computer's record of it is the
+    fallback for a machine whose tmpfs a reboot wiped, and only a machine that
+    neither is running one nor has one recorded gets ``desktop_gateway_password``
+    -- the value this computer bakes into the workspaces it creates, and hence
+    the right one for a machine it is about to provision for the first time.
+
+    One combination cannot be served, and is why the record is worth writing on
+    every pass: a machine whose password no computer has recorded yet, which
+    rebooted (wiping its own copy) before this computer -- not the one that
+    created its workspaces -- provisioned it. It is seeded with a password those
+    workspaces do not hold, and every later pass then adopts that, since nothing
+    anywhere still knows the value they were given. Their latchkey calls stay
+    unauthorized; a build that records the password while the machine is still
+    running closes the window for good.
+
+    Raises:
+        RemoteGatewayError: when the password cannot be read or recorded.
+    """
+    data_dir = plugin_data_dir(latchkey_directory)
+    try:
+        running_password = read_machine_gateway_password_from_secrets_dir(host)
+        recorded_password = stored_machine_gateway_password(data_dir, host_id)
+        if running_password is not None:
+            if running_password != recorded_password:
+                store_machine_gateway_password(data_dir, host_id, running_password)
+                logger.info(
+                    "Adopted the gateway listen password the machine of host {} is already running under", host_id
+                )
+            return running_password
+        if recorded_password is not None:
+            # The machine rebooted (or has never run a gateway); hand it back
+            # the password its workspaces were created with.
+            return recorded_password
+        store_machine_gateway_password(data_dir, host_id, desktop_gateway_password)
+    except LatchkeyStoreError as e:
+        raise RemoteGatewayError(f"Failed to resolve the gateway listen password for host {host_id}: {e}") from e
+    logger.info("Host {} will hold its callers to this computer's gateway listen password", host_id)
+    return desktop_gateway_password
 
 
 def _decide_key_for_machine_with_no_known_key(
@@ -1271,18 +1377,17 @@ def provision_remote_gateway(
     container_ssh_user: str,
     container_ssh_port: int,
     latchkey_directory: Path,
-    gateway_password: str,
-    desktop_permissions_override: str,
+    desktop_secrets: DesktopGatewaySecrets,
 ) -> None:
     """Stand up a VPS-resident latchkey gateway and tunnel it into the agent's container.
 
     Runs the full remote-gateway sequence on the agent's outer host (the VPS):
     install the latchkey CLI and supervisord, register the gateway as a
     supervisord program bound to the VPS loopback (with this machine's own
-    encryption key so it can decrypt the credentials it is given, and
-    ``gateway_password`` -- the desktop-derived shared password -- so it accepts
-    the same agent traffic the local gateway does, plus a desktop-target
-    permissions JWT for the forwarding extension), mint an ad-hoc
+    encryption key so it can decrypt the credentials it is given, and its own
+    listen password so it accepts the traffic of the workspaces on it, plus
+    ``desktop_secrets`` for the forwarding extension's hop to this computer),
+    mint an ad-hoc
     VPS->container keypair, and register the VPS->container reverse tunnel as a
     second supervisord program so the agent's
     ``LATCHKEY_GATEWAY=http://127.0.0.1:AGENT_SIDE_LATCHKEY_PORT`` reaches it. supervisord
@@ -1321,8 +1426,8 @@ def provision_remote_gateway(
     _ensure_latchkey_gateway_running(
         host,
         _resolve_machine_encryption_key(host, latchkey_directory, host_id),
-        gateway_password,
-        desktop_permissions_override,
+        _resolve_machine_gateway_password(host, latchkey_directory, host_id, desktop_secrets.gateway_password),
+        desktop_secrets,
     )
     container_name = _resolve_container_name_for_host(host, host_id)
     container_ssh_key_path = _ensure_container_tunnel_keypair(

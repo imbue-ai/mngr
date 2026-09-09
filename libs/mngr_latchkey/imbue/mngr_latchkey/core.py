@@ -1018,7 +1018,7 @@ class Latchkey(MutableModel):
     # -- Password / JWT derivation ------------------------------------------
 
     def derive_gateway_password(self) -> str:
-        """Return a stable password for the shared gateway.
+        """Return a stable password for this computer's own shared gateway.
 
         Derived by minting a permissions-override JWT for a hard-coded
         sentinel path (which is never validated, never reached, and
@@ -1031,6 +1031,16 @@ class Latchkey(MutableModel):
         The same value is set as ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` on
         the spawned gateway and as ``LATCHKEY_GATEWAY_PASSWORD`` on every
         agent so the gateway accepts agent traffic.
+
+        A remote workspace's gateway runs on its own machine and has a listen
+        password of its own, which this value only *seeds*: it is what the
+        workspaces this computer creates are given, so a machine being
+        provisioned for the first time takes it, and every later pass -- from
+        here or from another of the user's computers -- adopts whatever the
+        machine ended up with (see
+        :func:`~imbue.mngr_latchkey.remote.provisioning._resolve_machine_gateway_password`).
+        This value is still what such a machine's forwarding extension presents
+        on the hop back to this computer's gateway.
 
         Cached after the first successful invocation. Raises
         ``LatchkeyJwtMintError`` if ``latchkey gateway create-jwt``

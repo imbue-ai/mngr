@@ -16,6 +16,7 @@ The machine store is the per-host directory this plugin already owns::
         data-format-version           the mirror's own format stamp  (owned)
         latchkey_permissions.json     canonical per-host policy      (owned)
         machine_encryption_key        the machine's own key          (owned)
+        machine_gateway_password      the machine's own password     (owned)
         permissions.json           -> latchkey_permissions.json
         config.json                -> the desktop's config.json
         browser_state.json.enc     -> the desktop's browser state
@@ -100,6 +101,14 @@ _MACHINE_STORE_DIR_MODE: Final[int] = stat.S_IRWXU
 # worthless without the other.
 _MACHINE_KEY_FILENAME: Final[str] = "machine_encryption_key"
 
+# Holds the listen password the *remote machine's* gateway holds its callers to,
+# durable for the same reason as the key above: the machine keeps its own copy
+# only in RAM. It cannot be re-derived here, because it is not this computer's
+# to decide -- the workspaces on that machine present it from a host env file
+# written once at ``mngr create``, so whichever of the user's computers created
+# them fixed the value for the machine's whole life.
+_MACHINE_GATEWAY_PASSWORD_FILENAME: Final[str] = "machine_gateway_password"
+
 # Same 32 random bytes, URL-safe base64, that ``load_or_create_encryption_key``
 # mints for the desktop.
 _MACHINE_KEY_BYTES: Final[int] = 32
@@ -126,6 +135,11 @@ def machine_key_path(data_dir: Path, host_id: HostId) -> Path:
     return machine_store_dir(data_dir, host_id) / _MACHINE_KEY_FILENAME
 
 
+def machine_gateway_password_path(data_dir: Path, host_id: HostId) -> Path:
+    """Return the path to the desktop's copy of ``host_id``'s own gateway listen password."""
+    return machine_store_dir(data_dir, host_id) / _MACHINE_GATEWAY_PASSWORD_FILENAME
+
+
 def stored_machine_encryption_key(data_dir: Path, host_id: HostId) -> SecretStr | None:
     """Return the key ``host_id``'s machine keeps its own store under, or ``None`` if unknown.
 
@@ -137,13 +151,20 @@ def stored_machine_encryption_key(data_dir: Path, host_id: HostId) -> SecretStr 
     Raises:
         LatchkeyStoreError: when the key file exists but cannot be read.
     """
-    key_path = machine_key_path(data_dir, host_id)
-    if not key_path.is_file():
-        return None
-    try:
-        return SecretStr(key_path.read_text(encoding="utf-8").strip())
-    except OSError as e:
-        raise LatchkeyStoreError(f"Failed to read the machine encryption key at {key_path}: {e}") from e
+    key = _read_machine_secret(machine_key_path(data_dir, host_id), "machine encryption key")
+    return SecretStr(key) if key is not None else None
+
+
+def stored_machine_gateway_password(data_dir: Path, host_id: HostId) -> str | None:
+    """Return the listen password ``host_id``'s machine holds its callers to, or ``None`` if unknown.
+
+    ``None`` means no provisioning pass from this desktop has ever seen the
+    machine's password -- not that it has none.
+
+    Raises:
+        LatchkeyStoreError: when the password file exists but cannot be read.
+    """
+    return _read_machine_secret(machine_gateway_password_path(data_dir, host_id), "machine gateway listen password")
 
 
 def generate_machine_encryption_key() -> SecretStr:
@@ -163,13 +184,49 @@ def store_machine_encryption_key(data_dir: Path, host_id: HostId, key: SecretStr
     Raises:
         LatchkeyStoreError: when the key cannot be written.
     """
-    key_path = machine_key_path(data_dir, host_id)
+    _write_machine_secret(machine_key_path(data_dir, host_id), key.get_secret_value(), "machine encryption key")
+
+
+def store_machine_gateway_password(data_dir: Path, host_id: HostId, password: str) -> None:
+    """Record the listen password ``host_id``'s machine holds its callers to.
+
+    Durable for the same reason as the key, and follows the machine the same
+    way: it is what a rebooted machine (whose RAM copy is gone) is handed back,
+    so that the workspaces on it keep authenticating with the password they were
+    created with even when the computer that created them is not the one
+    re-provisioning.
+
+    Raises:
+        LatchkeyStoreError: when the password cannot be written.
+    """
+    _write_machine_secret(
+        machine_gateway_password_path(data_dir, host_id), password, "machine gateway listen password"
+    )
+
+
+def _read_machine_secret(path: Path, description: str) -> str | None:
+    """Return the stripped content of one recorded machine secret, or ``None`` when it is not recorded.
+
+    An empty file reads as not recorded: a truncated record is no more usable
+    than an absent one, and answering with an empty secret would hand it to a
+    gateway (or encrypt a transfer under it) as though it were real.
+    """
+    if not path.is_file():
+        return None
     try:
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(key_path, key.get_secret_value())
-        key_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        return path.read_text(encoding="utf-8").strip() or None
     except OSError as e:
-        raise LatchkeyStoreError(f"Failed to store the machine encryption key at {key_path}: {e}") from e
+        raise LatchkeyStoreError(f"Failed to read the {description} at {path}: {e}") from e
+
+
+def _write_machine_secret(path: Path, value: str, description: str) -> None:
+    """Record one machine secret, owner-readable only."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, value)
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to store the {description} at {path}: {e}") from e
 
 
 def materialize_machine_store(latchkey_directory: Path, data_dir: Path, host_id: HostId) -> Path:

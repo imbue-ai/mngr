@@ -216,6 +216,7 @@ what it says is about to be shown or acted on, never trusted between times:
     data-format-version           the mirror's own format stamp   (owned)
     latchkey_permissions.json     the machine's policy, cached    (owned)
     machine_encryption_key        the machine's own key           (owned)
+    machine_gateway_password      the machine's own password      (owned)
     permissions.json           -> latchkey_permissions.json
     config.json                -> the desktop's config.json
     browser_state.json.enc     -> the desktop's browser state
@@ -255,6 +256,22 @@ knowing:
   and otherwise -- a store written under a key held only by a computer that is
   gone -- the store is abandoned and a fresh key minted, because signing in
   again is possible and waiting for a computer that may never return is not.
+
+- **A machine's gateway listen password is recorded the same way, and is
+  adopted for a blunter reason.** It is the password the workspaces on that
+  machine present (`LATCHKEY_GATEWAY_PASSWORD`), and their host env file is
+  written once, at `mngr create`, with nothing to rewrite it afterwards. So the
+  value the creating computer chose is fixed for the machine's whole life: a
+  second computer that wrote its own here would answer every request those
+  workspaces make with a 401. Provisioning therefore adopts what the machine is
+  running under, falls back to the record here for a machine whose tmpfs a
+  reboot wiped, and only seeds its own value (`Latchkey.derive_gateway_password`,
+  which is also what it bakes into the workspaces it creates) into a machine
+  neither is true of. The password the *desktop* gateway listens on is a
+  separate secret, and the one place the two used to be the same is described
+  under [Remote desktop-gateway proxy
+  extension](#remote-desktop-gateway-proxy-extension).
+
 - **A machine store is not a plugin root.** `Latchkey.plugin_data_dir` would
   resolve to a nested `mngr_latchkey/` underneath it, and `initialize()` would
   rewrite the shared `config.json` through its link, so only the
@@ -508,11 +525,36 @@ loads one dedicated `desktop_gateway_proxy.mjs` extension for the endpoint
 families whose state remains on the user's computer: `/permissions`,
 `/permission-requests`, and `/minds-api-proxy` (including all subpaths). It
 forwards those requests to the desktop gateway over a desktop-to-VPS reverse
-tunnel, preserving the gateway password and replacing any caller-supplied
-permissions override with a dedicated desktop-target JWT held by the proxy.
+tunnel, authenticating that hop with the desktop's own gateway password and a
+dedicated desktop-target permissions JWT -- both of which *replace* whatever the
+caller sent, since the caller's password authenticates it to the VPS gateway and
+its override would let it choose the policy the desktop evaluates it against.
 Native VPS requests carry no override and are authorized by the machine's own
 `~/.latchkey/permissions.json` (seeded at provisioning, then rewritten by the
 full permission snapshot the desktop pushes on every edit).
+
+Those two desktop-owned secrets are handed to the extension as *paths* into the
+machine's tmpfs secrets directory (`LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE`,
+`LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE`), and it reads
+both afresh on every request it proxies. Both belong to whichever of the user's
+computers is currently on the other end of the tunnel -- the password is that
+gateway's own, and the JWT is signed by that computer's encryption key and names
+a path on its disk -- so both change when the user moves to another computer,
+while the machine (and the workspace it serves) keeps running. Every
+provisioning pass overwrites the files, and the per-request read is what makes
+the new computer's values take effect without restarting the VPS gateway. It
+also means the machine's *own* listen password is a distinct secret that
+provisioning adopts rather than rewrites, so a new computer never locks the
+workspaces out of their own gateway (see [Machine stores](#machine-stores)).
+When neither file is there -- a rebooted machine awaiting its next provisioning
+pass -- the desktop-owned routes answer HTTP 503 saying so, while third-party
+calls, which need neither secret, keep working.
+
+One computer at a time is assumed. Two of the user's computers running at once
+contend for both the desktop-to-VPS tunnel (whose VPS port only one can bind)
+and these files (which the last provisioning pass wins), so the desktop-owned
+routes can end up presenting one computer's secrets to the other's gateway and
+failing with 401 until the computer holding the tunnel provisions again.
 
 The same extension serves `/via-desktop/<absolute-target-url>`, which asks for a
 *third-party* request to leave from the user's machine rather than from the VPS

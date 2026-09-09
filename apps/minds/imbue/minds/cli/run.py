@@ -443,8 +443,10 @@ def run(
         access=MachineAccess(
             latchkey=latchkey,
             concurrency_group=root_concurrency_group,
-            # Resolved per call: the state the resolver lives in does not exist yet.
-            get_backend_resolver=lambda: get_state().backend_resolver,
+            # The resolver itself, not a lookup through the app state: machine
+            # operations also run on background threads (an auto-registration
+            # push), where ``get_state()``'s ``current_app`` is unbound.
+            backend_resolver=backend_resolver,
         )
     )
     # Loading the provider set imports every installed provider plugin, which is

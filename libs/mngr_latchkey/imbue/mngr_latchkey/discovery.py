@@ -59,6 +59,7 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.remote.credentials import RemoteLatchkeyDirectory
 from imbue.mngr_latchkey.remote.provisioning import DESKTOP_GATEWAY_VPS_PORT
+from imbue.mngr_latchkey.remote.provisioning import DesktopGatewaySecrets
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
 from imbue.mngr_latchkey.remote.provisioning import sync_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -670,8 +671,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # loopback port here; otherwise the two coincide and we fall back.
                 loopback_ssh_port = provider.get_container_loopback_ssh_port(host_id)
                 container_ssh_port = loopback_ssh_port if loopback_ssh_port is not None else ssh_info.port
-                desktop_permissions_override = self.latchkey.create_permissions_override_jwt(
-                    permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+                # This computer's own gateway secrets: the machine's forwarding
+                # extension presents them on the hop back here, replacing
+                # whatever the computer that provisioned it last left behind.
+                desktop_secrets = DesktopGatewaySecrets(
+                    gateway_password=self.latchkey.derive_gateway_password(),
+                    permissions_override=self.latchkey.create_permissions_override_jwt(
+                        permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+                    ),
                 )
                 provision_remote_gateway(
                     outer,
@@ -679,8 +686,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     container_ssh_user=ssh_info.user,
                     container_ssh_port=container_ssh_port,
                     latchkey_directory=self.latchkey.latchkey_directory,
-                    gateway_password=self.latchkey.derive_gateway_password(),
-                    desktop_permissions_override=desktop_permissions_override,
+                    desktop_secrets=desktop_secrets,
                 )
                 # Seed (or adopt) the machine's policy while its outer host is
                 # still open. A gateway with no permissions file at all is an

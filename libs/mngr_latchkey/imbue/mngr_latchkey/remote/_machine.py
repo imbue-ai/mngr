@@ -46,8 +46,9 @@ REMOTE_LATCHKEY_TIMEOUT_SECONDS: Final[float] = 60.0
 # 0600 matches the local ``save_permissions`` chmod and keeps secrets private.
 REMOTE_FILE_MODE: Final[str] = "0600"
 
-# tmpfs (RAM-backed) directory holding the gateway's two secrets: the encryption
-# key and the derived listen password. ``/run`` is the FHS location for runtime
+# tmpfs (RAM-backed) directory holding the gateway's secrets: the machine's own
+# encryption key and listen password, plus the pair the forwarding extension
+# presents to the desktop it proxies to. ``/run`` is the FHS location for runtime
 # state, is root-owned, and is a tmpfs under systemd (which we already require
 # for the supervisor service), so it is wiped on reboot -- the key is never
 # persisted to the VPS disk beside the encrypted credential store (which would
@@ -65,7 +66,24 @@ REMOTE_FILE_MODE: Final[str] = "0600"
 # also world-writable (1777), exposing the classic hostile-symlink attack that a
 # root-owned ``/run`` avoids.
 TMPFS_SECRETS_DIR: Final[Path] = Path("/run/mngr-latchkey")
+
+# The machine's own two secrets: the key its credential store is encrypted with,
+# and the listen password its gateway holds every caller to. The password
+# belongs to the machine rather than to any one of the user's computers: it is
+# what the workspaces on it were created with (their host env file is written
+# once, at ``mngr create``), so it can never be replaced -- see
+# :func:`~imbue.mngr_latchkey.remote.provisioning._resolve_machine_gateway_password`.
 GATEWAY_ENCRYPTION_KEY_FILENAME: Final[str] = "gateway_encryption_key"
+GATEWAY_LISTEN_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
+
+# The desktop-owned pair, read afresh by the forwarding extension on every
+# request it proxies to the desktop gateway: that gateway's own listen password,
+# and a JWT (signed by that computer's key, naming a path on its disk) targeting
+# the host's desktop-side permissions file. Both belong to whichever of the
+# user's computers is currently connected, so every provisioning pass overwrites
+# them -- unlike the machine's own secrets above, which are adopted.
+DESKTOP_GATEWAY_PASSWORD_FILENAME: Final[str] = "desktop_gateway_password"
+DESKTOP_PERMISSIONS_OVERRIDE_FILENAME: Final[str] = "desktop_permissions_override"
 
 # Why an operation against a machine is refused when the key its gateway runs
 # under is not the one this computer recorded.
@@ -119,6 +137,22 @@ class RemoteLatchkeyDirectory(MutableModel):
         return self.resolved_path
 
 
+def _read_secrets_dir_file(host: OuterHostInterface, filename: str, description: str) -> str | None:
+    """Return the stripped content of one of the machine's tmpfs secrets, or ``None`` when it holds none.
+
+    Raises:
+        RemoteGatewayError: when the file exists but cannot be read.
+    """
+    path = TMPFS_SECRETS_DIR / filename
+    if not host.path_exists(path):
+        return None
+    try:
+        content = host.read_text_file(path)
+    except (OSError, MngrError) as e:
+        raise RemoteGatewayError(f"Failed to read {description} on VPS {host.get_name()}: {e}") from e
+    return content.strip() or None
+
+
 def read_machine_key_from_secrets_dir(host: OuterHostInterface) -> SecretStr | None:
     """Return the key the machine's gateway is running under, or ``None`` when its tmpfs holds none.
 
@@ -131,15 +165,22 @@ def read_machine_key_from_secrets_dir(host: OuterHostInterface) -> SecretStr | N
     Raises:
         RemoteGatewayError: when the key file exists but cannot be read.
     """
-    key_path = TMPFS_SECRETS_DIR / GATEWAY_ENCRYPTION_KEY_FILENAME
-    if not host.path_exists(key_path):
-        return None
-    try:
-        content = host.read_text_file(key_path)
-    except (OSError, MngrError) as e:
-        raise RemoteGatewayError(f"Failed to read the machine encryption key on VPS {host.get_name()}: {e}") from e
-    stripped_key = content.strip()
-    return SecretStr(stripped_key) if stripped_key else None
+    key = _read_secrets_dir_file(host, GATEWAY_ENCRYPTION_KEY_FILENAME, "the machine encryption key")
+    return SecretStr(key) if key is not None else None
+
+
+def read_machine_gateway_password_from_secrets_dir(host: OuterHostInterface) -> str | None:
+    """Return the listen password the machine's gateway is running under, or ``None`` when its tmpfs holds none.
+
+    Read for the same reason the key is: it is the machine's own, and the
+    machine is the only place a second computer can learn it from -- the
+    workspaces it serves present it from an env file written once at creation,
+    so a computer that decided a password of its own here would lock them out.
+
+    Raises:
+        RemoteGatewayError: when the password file exists but cannot be read.
+    """
+    return _read_secrets_dir_file(host, GATEWAY_LISTEN_PASSWORD_FILENAME, "the machine gateway listen password")
 
 
 def write_machine_key_to_secrets_dir(host: OuterHostInterface, machine_key: SecretStr) -> None:

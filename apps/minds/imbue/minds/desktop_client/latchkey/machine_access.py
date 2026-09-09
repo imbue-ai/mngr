@@ -24,7 +24,6 @@ its caller can leave the local edit as the whole change.
 """
 
 import threading
-from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Final
@@ -83,12 +82,9 @@ class MachineAccess(MutableModel):
             "its own here); the app's root group, so they live exactly as long as the app does."
         ),
     )
-    get_backend_resolver: Callable[[], BackendResolverInterface] = Field(
+    backend_resolver: BackendResolverInterface = Field(
         frozen=True,
-        description=(
-            "Looks up the resolver that maps a workspace to its host and provider. Resolved per call "
-            "rather than held, because this is built at startup, before the app state it lives in exists."
-        ),
+        description="Discovery state that maps a workspace to its host and provider.",
     )
 
     _mngr_ctx: MngrContext | None = PrivateAttr(default=None)
@@ -120,7 +116,7 @@ class MachineAccess(MutableModel):
             MachineUnreachableError: when the machine store cannot be read, so
                 it is unknown whether there is anything to carry.
         """
-        host_id = resolve_workspace_host_id(self.get_backend_resolver(), workspace_agent_id)
+        host_id = resolve_workspace_host_id(self.backend_resolver, workspace_agent_id)
         if host_id is None:
             return None
         try:
@@ -195,7 +191,7 @@ class MachineAccess(MutableModel):
             parsed = AgentId(workspace_agent_id)
         except ValueError as e:
             raise MachineUnreachableError(f"'{workspace_agent_id}' is not a workspace this app knows.") from e
-        info = self.get_backend_resolver().get_agent_display_info(parsed)
+        info = self.backend_resolver.get_agent_display_info(parsed)
         if info is None or not info.provider_name:
             raise MachineUnreachableError(
                 f"Minds does not know which provider workspace {workspace_agent_id} runs on yet, so it cannot "

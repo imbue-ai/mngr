@@ -111,7 +111,7 @@ def _operator(
     access = _RecordedAccess(
         latchkey=latchkey,
         concurrency_group=ConcurrencyGroup(name="machine-operations-test"),
-        get_backend_resolver=lambda: FixedHostBackendResolver(
+        backend_resolver=FixedHostBackendResolver(
             url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)
         ),
         machine=machine,

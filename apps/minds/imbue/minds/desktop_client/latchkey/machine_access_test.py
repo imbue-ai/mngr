@@ -82,7 +82,7 @@ def _access(tmp_path: Path, provider: _StubProvider) -> tuple[MachineAccess, Hos
     access = _PinnedAccess(
         latchkey=latchkey,
         concurrency_group=ConcurrencyGroup(name="machine-access-test"),
-        get_backend_resolver=lambda: FixedHostBackendResolver(
+        backend_resolver=FixedHostBackendResolver(
             url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,)
         ),
     )
