@@ -563,6 +563,23 @@ def _write_offline_dockerfile(tmp_path: Path) -> Path:
     return dockerfile
 
 
+# Addressed literally, over plain HTTP, so that neither DNS nor TLS can affect the
+# verdict: a CIDR allowlist governs which IPs a packet may reach, so resolving a name or
+# validating a certificate only adds ways to fail for reasons unrelated to the allowlist.
+_IN_RANGE_PROBE_IP: Final[str] = "1.1.1.1"
+_OUT_OF_RANGE_PROBE_IP: Final[str] = "8.8.8.8"
+
+
+def _curl_probe_command(ip: str, max_time_seconds: int) -> str:
+    """Build a probe whose exit status reports whether traffic to ``ip`` was allowed.
+
+    Modal blackholes traffic outside the allowlist rather than refusing it, so a blocked
+    connection and a merely slow one both end as http_code 000. ``-S`` keeps curl's own
+    account of which one happened on stderr, where a failing assertion prints it.
+    """
+    return f"curl -sS --max-time {max_time_seconds} -o /dev/null -w 'code=%{{http_code}}\\n' http://{ip}"
+
+
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
@@ -591,23 +608,30 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
-def test_cidr_allowlist_allows_traffic_within_range(real_modal_provider: ModalProviderInstance) -> None:
-    """A sandbox created with --cidr-allowlist=0.0.0.0/0 should allow all traffic.
+def test_cidr_allowlist_allows_traffic_within_range(
+    real_modal_provider: ModalProviderInstance, tmp_path: Path
+) -> None:
+    """A sandbox should reach an IP inside its --cidr-allowlist, and only that IP.
 
-    This is the complement of test_cidr_allowlist_restricts_network_access: it verifies
-    that when the target IP is within the allowed CIDR range, traffic is not blocked.
+    The complement of test_cidr_allowlist_restricts_network_access: the allowlist is
+    pinned to a single address and the same sandbox probes both that address and one
+    outside the range. Probing both is what gives the allowed case its meaning -- if the
+    allowlist were not enforced at all, the out-of-range probe would connect too.
+
+    Uses a pre-built image because the sandbox cannot apt-get install packages when
+    outbound network is restricted.
     """
+    dockerfile = _write_offline_dockerfile(tmp_path)
     with created_host(
         real_modal_provider,
         HostName("test-cidr-allow"),
-        build_args=["--cidr-allowlist=0.0.0.0/0"],
+        build_args=[f"--file={dockerfile}", f"--cidr-allowlist={_IN_RANGE_PROBE_IP}/32"],
     ) as host:
-        # curl to a public IP should succeed because 0.0.0.0/0 allows everything
-        result = host.execute_idempotent_command(
-            "curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://example.com"
-        )
-        assert result.success
-        assert "200" in result.stdout
+        in_range = host.execute_idempotent_command(_curl_probe_command(_IN_RANGE_PROBE_IP, 10))
+        assert in_range.success, in_range
+
+        out_of_range = host.execute_idempotent_command(_curl_probe_command(_OUT_OF_RANGE_PROBE_IP, 5))
+        assert "code=000" in out_of_range.stdout, out_of_range
 
 
 @pytest.mark.flaky
