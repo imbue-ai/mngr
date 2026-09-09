@@ -1,0 +1,70 @@
+[project]
+name = "imbue-mngr-donate"
+version = "0.1.0"
+description = "mngr donate: spend spare Claude capacity on a donation skill (e.g. scientific document review)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "imbue-mngr==0.2.17",
+    "imbue-mngr-usage==0.1.6",
+    "click>=8.0",
+    "pydantic>=2.0",
+]
+
+[project.entry-points.mngr]
+donate = "imbue.mngr_donate.plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["imbue"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+
+[tool.uv.sources]
+imbue-mngr = { workspace = true }
+imbue-mngr-usage = { workspace = true }
+
+[tool.pytest.ini_options]
+timeout_func_only = true
+junit_family = "xunit1"
+testpaths = ["."]
+addopts = [
+  "--cov=imbue.mngr_donate",
+  "--cov-report=term-missing",
+  "--cov-report=xml",
+  "--durations=20",
+  "--timeout=10",
+  "--timeout-method=signal",
+  "--slow-tests-to-file",
+  "--coverage-to-file",
+]
+
+[tool.coverage.run]
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+omit = [
+  "*_test.py",
+  "test_*.py",
+  "*/tests/*",
+  "*/conftest.py",
+  "*/utils/testing.py",
+]
+
+[tool.inline-snapshot]
+default-flags=["report"]
+default-flags-tui=["report"]
+default-flags-ide=["report"]
+format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
+
+[tool.pyright]
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.12"
+strict = ["**/*.py"]
+
+[tool.coverage.report]
+# donate is glue-heavy (launchd/subprocess/git IO that's verified end-to-end, not unit-tested);
+# the pure decision logic + builders are fully covered. Raise this as IO gets more test seams.
+fail_under = 25
