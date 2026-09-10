@@ -1,3 +1,4 @@
+import os
 import shlex
 import subprocess
 
@@ -16,12 +17,40 @@ ERROR: Command failed on agent system-services
 """
 
 
+# What a workspace answers when the shell resolved a stale second copy of mngr:
+# the inner command dies at import, with no verdict of its own.
+_STALE_MNGR_IMPORT_STDERR = """WARNING: imbue_cloud[gabriel] outer SSH unreachable for host host-abc: Host not found: host-abc
+Traceback (most recent call last):
+  File "/home/user/.local/bin/mngr", line 4, in <module>
+  File "/mngr-vol/home/workspace/system/vendor/mngr/libs/mngr/imbue/mngr/utils/file_watch.py", line 18, in <module>
+ModuleNotFoundError: No module named 'watchdog'
+ERROR: Command failed on agent system-services
+"""
+
+
 def test_the_built_command_runs_mngr_with_unknown_config_tolerated() -> None:
     command = build_in_workspace_mngr_command(["list", "--format", "{name}"])
-    # A shell env-assignment prefix: read before any config parse, unlike a
+    # Shell env-assignment prefixes: read before any config parse, unlike a
     # --setting, which is itself config.
-    assert command.startswith("MNGR_ALLOW_UNKNOWN_CONFIG=1 mngr list ")
-    assert shlex.split(command) == ["MNGR_ALLOW_UNKNOWN_CONFIG=1", "mngr", "list", "--format", "{name}"]
+    assert command.startswith("PATH=/root/.local/bin:$PATH MNGR_ALLOW_UNKNOWN_CONFIG=1 mngr list ")
+    assert shlex.split(command) == [
+        "PATH=/root/.local/bin:$PATH",
+        "MNGR_ALLOW_UNKNOWN_CONFIG=1",
+        "mngr",
+        "list",
+        "--format",
+        "{name}",
+    ]
+
+
+def test_the_image_tool_dir_leads_the_path_the_process_actually_sees() -> None:
+    """A login shell that prepended a stale ``$HOME/.local/bin`` must still resolve the image's copy first."""
+    command = build_in_workspace_mngr_command(["printenv", "PATH"])
+    script = command.replace("mngr printenv", "env printenv", 1)
+    shadowing_path = f"/home/user/.local/bin:{os.environ['PATH']}"
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env={"PATH": shadowing_path})
+
+    assert result.stdout.strip() == f"/root/.local/bin:{shadowing_path}"
 
 
 def test_the_tolerance_reaches_the_process_the_shell_actually_runs() -> None:
@@ -58,6 +87,13 @@ def test_the_detail_drops_the_outer_chatter_that_reads_as_the_cause() -> None:
 
     assert "outer SSH unreachable" not in detail
     assert "Duplicate host name" not in detail
+
+
+def test_a_verdictless_inner_death_is_diagnosed_by_its_last_line() -> None:
+    """The wrapper's "Command failed on agent" is the only marker, and it names no cause."""
+    detail = in_workspace_failure_detail(_STALE_MNGR_IMPORT_STDERR)
+
+    assert detail == "ModuleNotFoundError: No module named 'watchdog'"
 
 
 def test_an_unmarked_failure_still_yields_the_tail_it_has() -> None:

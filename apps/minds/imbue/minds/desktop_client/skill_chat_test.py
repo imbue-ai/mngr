@@ -66,10 +66,11 @@ def test_the_spawn_runs_a_chat_create_inside_the_workspace_with_the_seed_message
     assert "--no-start" in args
     assert len(args) == 5
     inner = shlex.split(args[3])
-    # The env assignment leads: the workspace's own settings.toml must not be
-    # able to fail the create at config parse (see in_workspace_mngr).
-    assert inner[0] == "MNGR_ALLOW_UNKNOWN_CONFIG=1"
-    assert inner[1:4] == ["mngr", "create", "assist-abc123"]
+    # The env assignments lead: the image's mngr must win over a stale shell
+    # PATH, and the workspace's own settings.toml must not be able to fail the
+    # create at config parse (see in_workspace_mngr).
+    assert inner[:2] == ["PATH=/root/.local/bin:$PATH", "MNGR_ALLOW_UNKNOWN_CONFIG=1"]
+    assert inner[2:5] == ["mngr", "create", "assist-abc123"]
     assert inner[inner.index("--template") + 1] == "chat"
     assert inner[inner.index("--transfer") + 1] == "none"
     assert "--no-connect" in inner

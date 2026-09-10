@@ -29,6 +29,15 @@ from imbue.minds.desktop_client.mngr_command import mngr_verdict_block
 # source-env prefix); the desktop app's outer binary path does not exist there.
 _CONTAINER_MNGR_BINARY: Final[str] = "mngr"
 
+# The image's tool bin dir, ahead of whatever the login shell prepended: a
+# workspace can carry a second, stale mngr under ``$HOME/.local/bin`` that no
+# update refreshes, while every update refreshes the copy under /root.
+_IMAGE_TOOL_BIN_DIR: Final[str] = "/root/.local/bin"
+_PREFER_IMAGE_TOOLS: Final[str] = f"PATH={_IMAGE_TOOL_BIN_DIR}:$PATH"
+
+# The outer ``mngr exec``'s own closing line, which names the agent and nothing else.
+_OUTER_EXEC_VERDICT_PREFIX: Final[str] = "ERROR: Command failed on agent"
+
 # An env-assignment prefix rather than a ``--setting``: it is read before any
 # config is parsed, which is the failure being tolerated.
 _TOLERATE_UNKNOWN_CONFIG: Final[str] = "MNGR_ALLOW_UNKNOWN_CONFIG=1"
@@ -46,7 +55,7 @@ def build_in_workspace_mngr_command(argv: Sequence[str]) -> str:
     Shell-quoted, so a seed message or a format string cannot break out of its
     own argument.
     """
-    return f"{_TOLERATE_UNKNOWN_CONFIG} {shlex.join([_CONTAINER_MNGR_BINARY, *argv])}"
+    return f"{_PREFER_IMAGE_TOOLS} {_TOLERATE_UNKNOWN_CONFIG} {shlex.join([_CONTAINER_MNGR_BINARY, *argv])}"
 
 
 def in_workspace_failure_detail(stderr: str) -> str:
@@ -57,5 +66,15 @@ def in_workspace_failure_detail(stderr: str) -> str:
     exec``'s own ``Command failed on agent ...``. What comes before the first is
     the outer mngr's discovery chatter -- an unreachable host it skipped, a
     duplicate host name -- which reads as the cause but is not.
+
+    When the wrapper's line is the only marker, the inner command gave no
+    verdict at all, and the last thing it wrote before dying (a traceback's
+    final line) is the diagnosis instead.
     """
-    return mngr_verdict_block(stderr, is_first_verdict=True, max_chars=FAILURE_DETAIL_MAX_CHARS)
+    detail = mngr_verdict_block(stderr, is_first_verdict=True, max_chars=FAILURE_DETAIL_MAX_CHARS)
+    if not detail.startswith(_OUTER_EXEC_VERDICT_PREFIX):
+        return detail
+    lines = stderr.strip().splitlines()
+    wrapper_index = next(index for index, line in enumerate(lines) if line.startswith(_OUTER_EXEC_VERDICT_PREFIX))
+    inner_lines = [line.strip() for line in lines[:wrapper_index] if line.strip() and not line.startswith("WARNING:")]
+    return inner_lines[-1][:FAILURE_DETAIL_MAX_CHARS] if inner_lines else detail
