@@ -18,12 +18,16 @@ import pytest
 from pydantic import JsonValue
 
 from imbue.mngr_latchkey.account_scopes import ACCOUNT_SCOPE_SEPARATOR
+from imbue.mngr_latchkey.account_scopes import LatchkeyAccountScopeError
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.account_scopes import build_account_scope_schema
 from imbue.mngr_latchkey.account_scopes import list_account_grants
 from imbue.mngr_latchkey.account_scopes import resolve_account_scope
 from imbue.mngr_latchkey.account_scopes import resolved_schema_names
+from imbue.mngr_latchkey.custom_services import CustomServiceError
+from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schema
+from imbue.mngr_latchkey.custom_services import validate_domain
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
@@ -288,3 +292,85 @@ def test_extension_copy_of_the_grant_builders_matches(tmp_path: Path) -> None:
     assert from_node == [
         [account_scope_key(scope, account), build_account_scope_schema(scope, account)] for scope, account in cases
     ]
+
+
+def test_grant_for_a_custom_scope_defines_the_scope_it_refers_to() -> None:
+    # A custom scope is not a detent builtin, so a grant naming one has to
+    # carry its definition: a rule whose $ref does not resolve fails the
+    # entire permission check for that host, not just the rule.
+    base = build_custom_service_scope_schema("example.com", "https")
+    rule_key, _permissions, schemas = build_account_grant("custom_example_com", "", ("any",), base)
+    # The account gate refers to the scope through ``#/$defs/``; its definition
+    # travels alongside, so the reference resolves in whatever file this lands in.
+    assert schemas[rule_key] == build_account_scope_schema("custom_example_com", "")
+    assert schemas["custom_example_com"] == base
+
+
+def test_grant_for_a_custom_scope_without_its_schema_is_refused() -> None:
+    with pytest.raises(LatchkeyAccountScopeError):
+        build_account_grant("custom_example_com", "", ("any",))
+
+
+def test_grant_for_a_shipped_scope_defines_only_the_account_gate() -> None:
+    # Detent ships the base, so emitting one here would shadow it.
+    rule_key, _permissions, schemas = build_account_grant("slack-api", "", ("any",))
+    assert set(schemas) == {rule_key}
+
+
+@pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not available on PATH")
+def test_extension_copy_of_the_domain_validation_matches(tmp_path: Path) -> None:
+    """The gateway and Python accept the same domains and spell them the same way.
+
+    Both lean on the WHATWG URL parser -- ``new URL()`` there, pydantic here --
+    so a host is canonicalized identically on both sides, and the ``const`` the
+    desktop writes into a scope is the ``hostname`` the gateway's detent will
+    compute from a request. Refusals are compared too: a domain one side takes
+    and the other refuses would be a request that is created but can never be
+    approved, or approved for a scope nothing can match.
+    """
+    source = (_EXTENSIONS_DIR / "permission_requests.mjs").read_text()
+    exported = "function validateCustomServiceDomain(rawDomain) {"
+    assert exported in source
+    source = source.replace(exported, f"export {exported}")
+    for data_file in _EXTENSIONS_DIR.glob("*.json"):
+        (tmp_path / data_file.name).write_text(data_file.read_text())
+    patched_path = tmp_path / "permission_requests.mjs"
+    patched_path.write_text(source)
+
+    corpus = (
+        "Example.COM",
+        " intranet ",
+        "svc.internal",
+        "foo.localhost",
+        "10.0.0.5",
+        "0x7f.1",
+        "\u4f8b\u3048.com",
+        "example.com:443",
+        "-x.com",
+        "",
+        "https://example.com",
+        "example.com/v1",
+        "example.com:8443",
+        "user@example.com",
+        "example.com?q=1",
+        "*.example.com",
+        "a_b.com",
+        "[::1]",
+        "latchkey-self.invalid",
+    )
+    script = (
+        f"import {{ validateCustomServiceDomain }} from {json.dumps(patched_path.as_uri())};\n"
+        f"const corpus = {json.dumps(list(corpus))};\n"
+        "process.stdout.write(JSON.stringify(corpus.map((raw) => {\n"
+        "  try { return validateCustomServiceDomain(raw); } catch { return null; }\n"
+        "})));\n"
+    )
+    from_node = json.loads(_run_node(script))
+
+    def from_python(raw: str) -> str | None:
+        try:
+            return validate_domain(raw)
+        except CustomServiceError:
+            return None
+
+    assert from_node == [from_python(raw) for raw in corpus]

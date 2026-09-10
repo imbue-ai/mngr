@@ -61,9 +61,15 @@ const CATALOG_HEADING_CLASS = "type-section text-tertiary mt-6 mb-1";
 
 /** Stand-ins for a service with no mark on disk: the nav and the catalog
  * still need a glyph in the slot, while a connection heading simply drops
- * it. Built per call -- one vnode cannot appear twice in a tree. */
-const navFallbackMark = (): m.Children => m(Icon16, { name: "box", extra: "shrink-0" });
-const catalogFallbackMark = (): m.Children => m(Icon16, { name: "box", extra: "shrink-0 text-tertiary" });
+ * it. A globe rather than a box for two reasons: what usually lands here is a
+ * custom service, which is a connection to a domain and has no vendor artwork
+ * to publish; and "Local files" lower down this same nav already draws a box,
+ * so a service sharing that glyph read as the same kind of thing.
+ * A shipped service whose mark 404s lands here too, and a globe suits it no
+ * worse.
+ * Built per call -- one vnode cannot appear twice in a tree. */
+const navFallbackMark = (): m.Children => m(Icon16, { name: "globe", extra: "shrink-0" });
+const catalogFallbackMark = (): m.Children => m(Icon16, { name: "globe", extra: "shrink-0 text-tertiary" });
 
 const SELF_TOGGLE_BLOCKED_TITLE =
   "This grant can't be re-enabled; ask the agent to request it again.";

@@ -28,11 +28,13 @@ stays down until the next provisioning pass re-writes the secrets.
 
 import shlex
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -48,6 +50,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
+from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
@@ -642,16 +645,20 @@ def _ensure_ram_backed_secrets_dir(host: OuterHostInterface, host_name: str) -> 
         )
 
 
-def _ensure_remote_latchkey_config(host: OuterHostInterface, remote_dir: Path) -> None:
+def _ensure_remote_latchkey_config(
+    host: OuterHostInterface, remote_dir: Path, custom_service_entries: Mapping[str, JsonValue]
+) -> None:
     """Write minds' hidden services and custom-service registrations into the VPS config.
 
     Read-merges minds' state into ``~/.latchkey/config.json`` on the VPS via
     :func:`~imbue.mngr_latchkey.core.merge_minds_latchkey_config` (the same merge
     the desktop applies to its own config), so an agent talking to the
     VPS-resident gateway sees the same hidden built-in services as one talking to
-    the desktop gateway, and the VPS gateway knows minds' additional (custom)
-    services. The registration is what makes a custom service's credentials
-    usable: the credential sync ships them here, but a gateway with no
+    the desktop gateway, and the VPS gateway knows both the bundled additional
+    services and the user-created ones in ``custom_service_entries`` (which the
+    caller reads from the *desktop's* config, since the VPS config holds none).
+    The registration is what makes a custom service's credentials usable: the
+    credential sync ships them here, but a gateway with no
     matching registration cannot resolve a request to that service at all, so it
     would never inject them. Any other config latchkey wrote on the VPS is
     preserved. Idempotent. Raises :class:`RemoteGatewayError` if the existing
@@ -660,7 +667,7 @@ def _ensure_remote_latchkey_config(host: OuterHostInterface, remote_dir: Path) -
     config_path = remote_dir / CONFIG_FILENAME
     existing = host.read_text_file(config_path) if host.path_exists(config_path) else None
     try:
-        content = merge_minds_latchkey_config(existing)
+        content = merge_minds_latchkey_config(existing, custom_service_entries)
     except LatchkeyError as e:
         raise RemoteGatewayError(
             f"Failed to update latchkey config at {config_path} on VPS {host.get_name()}: {e}"
@@ -797,6 +804,7 @@ def _build_gateway_run_script(
 
 def _ensure_latchkey_gateway_running(
     host: OuterHostInterface,
+    latchkey_directory: Path,
     machine_encryption_key: SecretStr,
     machine_gateway_password: str,
     desktop_secrets: DesktopGatewaySecrets,
@@ -842,11 +850,12 @@ def _ensure_latchkey_gateway_running(
     # never persist it to a disk filesystem if tmpfs is unexpectedly absent.
     _ensure_ram_backed_secrets_dir(host, host_name)
 
-    # Write minds' config.json state before the gateway starts (it reads the
-    # file once, at startup): the confusing built-in services (e.g. ``notion``)
-    # stay hidden, and minds' custom services are registered so this gateway can
-    # inject the credentials the credential sync ships for them.
-    _ensure_remote_latchkey_config(host, remote_dir)
+    # Write this package's config.json state before the gateway starts: the
+    # confusing built-in services (e.g. ``notion``) stay hidden, and the custom
+    # services are registered so this gateway can inject the credentials the credential
+    # sync ships for them. Services created later reach this file as the config
+    # snapshot every connect installs (see ``MachineCredentials._config_for``).
+    _ensure_remote_latchkey_config(host, remote_dir, custom_service_registration_entries(latchkey_directory))
 
     # Write the secrets (0600) into tmpfs and the wrapper that reads them. The
     # machine's own two are rewritten with what it already runs under; the
@@ -1425,6 +1434,7 @@ def provision_remote_gateway(
     _migrate_legacy_remote_gateway_state(host)
     _ensure_latchkey_gateway_running(
         host,
+        latchkey_directory,
         _resolve_machine_encryption_key(host, latchkey_directory, host_id),
         _resolve_machine_gateway_password(host, latchkey_directory, host_id, desktop_secrets.gateway_password),
         desktop_secrets,

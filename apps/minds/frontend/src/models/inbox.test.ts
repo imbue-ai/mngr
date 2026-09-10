@@ -925,3 +925,106 @@ describe("InboxModel", () => {
     expect(listCalls).toBe(1);
   });
 });
+
+describe("InboxModel custom-service requests", () => {
+  const CUSTOM_SERVICE_DETAIL = {
+    kind: "custom_service" as const,
+    request_id: "evt-a",
+    agent_id: "agent-1",
+    ws_name: "alpha",
+    domain: "api.example.com",
+    is_already_registered: false,
+    domain_warning: null,
+    base_api_url: "https://api.example.com/",
+    login_url: "https://api.example.com/login",
+    rationale: "needs the widget API",
+  };
+
+  let calls: { url: string; init?: RequestInit }[] = [];
+
+  function makeModel(responses: Record<string, () => Response>): InboxModel {
+    calls = [];
+    return new InboxModel({
+      fetcher: (url, init) => {
+        calls.push({ url, init });
+        const key = `${init?.method ?? "GET"} ${url.split("?")[0]}`;
+        const producer = responses[key];
+        if (!producer) throw new Error(`Unexpected fetch: ${key}`);
+        return Promise.resolve(producer());
+      },
+    });
+  }
+
+  async function openCustomService(
+    responses: Record<string, () => Response> = {},
+  ): Promise<InboxModel> {
+    forgetWarmedRequestDetails();
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: CUSTOM_SERVICE_DETAIL }),
+      ...responses,
+    });
+    await model.select("evt-a");
+    return model;
+  }
+
+  it("allows Approve, which is the only thing that can create the connection", async () => {
+    // There is nothing to pick and nothing to fill in, so a disabled Approve
+    // would leave the dialog able to deny and nothing else -- the feature would
+    // render correctly and be unreachable.
+    const model = await openCustomService();
+    expect(model.detail?.kind).toBe("custom_service");
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("shows no credential form until the server asks for one", async () => {
+    // The service does not exist until Approve registers it, so there is no
+    // credential command to build inputs from on the first render.
+    const model = await openCustomService();
+    expect(model.manualCredentialsPrompt()).toBeNull();
+  });
+
+  it("renders the credential form the server asks for, and blocks Approve until it is filled", async () => {
+    const prompt: ManualCredentialsPrompt = {
+      parameters: [{ name: "token", label: "Token" }],
+      message: "api.example.com has no browser sign-in, so Minds needs its credentials.",
+    };
+    const model = await openCustomService({
+      "POST /requests/evt-a/grant": () =>
+        jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", message: prompt.message, manual_credentials: prompt }),
+    });
+
+    await model.approve();
+
+    // Still pending, now asking: not an error, and not a denial.
+    expect(model.manualCredentialsPrompt()).toEqual(prompt);
+    expect(model.errorMessage).toBeNull();
+    expect(model.isApproveAllowed()).toBe(false);
+
+    model.manualCredentialValues.token = "secret-token";
+    expect(model.isApproveAllowed()).toBe(true);
+  });
+
+  it("sends the typed credentials on the second approve", async () => {
+    const prompt: ManualCredentialsPrompt = {
+      parameters: [{ name: "token", label: "Token" }],
+      message: "needs credentials",
+    };
+    let isFirstGrant = true;
+    const model = await openCustomService({
+      "POST /requests/evt-a/grant": () => {
+        if (isFirstGrant) {
+          isFirstGrant = false;
+          return jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", manual_credentials: prompt });
+        }
+        return jsonResponse({ outcome: "GRANTED", message: "granted" });
+      },
+    });
+
+    await model.approve();
+    model.manualCredentialValues.token = "secret-token";
+    await model.approve();
+
+    const body = calls[calls.length - 1].init?.body as FormData;
+    expect(JSON.parse(String(body.get("manual_credentials")))).toEqual({ token: "secret-token" });
+  });
+});

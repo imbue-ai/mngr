@@ -35,6 +35,29 @@
  *       contain any ``..`` segments (rejected as a path-traversal
  *       attempt). ``~user`` notation for another user's home is
  *       rejected.
+ *       For ``type=="custom-service"`` the payload is
+ *         ``{domain: <hostname>, scheme: "https"|"http", login: {url, flow, flow_params}|null}``,
+ *       a request to reach an origin the asking workspace's latchkey has no
+ *       service for: the desktop creates the service unless it already has
+ *       it, and grants this workspace access to it, in one decision.
+ *       ``domain`` must be a bare ASCII hostname -- dot-separated labels of
+ *       letters, digits and hyphens; no scheme, port, path, underscore or
+ *       wildcard -- and not the gateway's own address. ``scheme`` is
+ *       required; the grant pins it along with the domain. ``login`` is
+ *       optional: present, its ``url``, ``flow`` (``cookie-capture`` or
+ *       ``token-capture``) and ``flow_params`` are ``latchkey services
+ *       register``'s ``--login-url``, ``--login-flow`` and
+ *       ``--login-flow-params`` (that flow's parameters, keyed as latchkey
+ *       keys them; unknown keys are refused, and every URL among them must
+ *       be on the domain or a subdomain of it, either scheme); absent, the
+ *       service is registered with a base URL alone and the user supplies a
+ *       token through the dialog's credential form. A service the desktop already
+ *       has keeps its own registration, login included. There is
+ *       deliberately **no** display-name field -- a custom service is
+ *       labelled by its origin, which is the one string that cannot
+ *       misdescribe what it reaches. The effect is always empty: the desktop
+ *       writes the grant through ``/permissions/rules`` once the sign-in has
+ *       produced an account, and ``/approve`` only drops the record.
  *       For ``type=="workspace"`` the payload is
  *         ``{permissions: [<verb>, ...], target_workspace_id: <id>|null}``;
  *       each verb must be one of the ``minds-workspaces`` verb schema
@@ -170,12 +193,39 @@ const REQUEST_TYPE_WORKSPACE = 'workspace';
 // rather than per-file. It is deliberately NOT in the agent baseline, so it must
 // be granted on request.
 const REQUEST_TYPE_ACCOUNTS = 'accounts';
+// ``custom-service`` asks for a third-party service the asking workspace's
+// latchkey has no entry for: the agent names an origin, and approving registers
+// the service on the desktop (unless it already has it) and grants this
+// workspace access to it. This extension only carries the request: the grant
+// is written by the desktop once the sign-in has produced an account, so the
+// effect is always empty.
+const REQUEST_TYPE_CUSTOM_SERVICE = 'custom-service';
 const VALID_REQUEST_TYPES = new Set([
   REQUEST_TYPE_PREDEFINED,
   REQUEST_TYPE_FILE_SHARING,
   REQUEST_TYPE_WORKSPACE,
   REQUEST_TYPE_ACCOUNTS,
+  REQUEST_TYPE_CUSTOM_SERVICE,
 ]);
+
+// The validation rules below mirror ``imbue/mngr_latchkey/custom_services.py``,
+// which owns them on the Python side. The gateway loads extensions with no
+// Python in the request path, so they are duplicated here and pinned against
+// drift by ``account_scopes_test.py``.
+// The schemes a custom service may be reached over; the request has to name
+// one, and the desktop makes an http and an https service on one domain two
+// services. Mirrors ``SCHEMES`` in custom_services.py.
+const CUSTOM_SERVICE_SCHEMES = new Set(['https', 'http']);
+// What a domain may look like: dot-separated labels of ASCII letters, digits
+// and hyphens -- the alphabet a service name can carry once ``.`` becomes
+// ``_``, which is one-to-one only because ``_`` is excluded. Nothing about
+// public DNS is assumed beyond that. Mirrors DOMAIN_PATTERN in
+// custom_services.py.
+const CUSTOM_SERVICE_DOMAIN_PATTERN = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*$/;
+const CUSTOM_SERVICE_MAX_DOMAIN_LENGTH = 253;
+// The gateway's own address, which a custom service must never be: it would
+// have credentials injected into requests to this extension itself.
+const GATEWAY_SELF_HOST = 'latchkey-self.invalid';
 
 // The ``minds-workspaces`` verb catalog is a *shared* definition file read by
 // both this gateway extension and the Python desktop side
@@ -673,6 +723,33 @@ function validateAbsoluteFileSharingPath(rawPath) {
 }
 
 /**
+ * Read and parse the bundled services catalog, returning the raw object keyed by
+ * service name, shape-checked as far as the top level.
+ */
+function readServicesCatalog() {
+  let raw;
+  try {
+    raw = readFileSync(SERVICES_CATALOG_PATH, 'utf-8');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ServicesCatalogUnavailableError(`cannot read file: ${message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ServicesCatalogUnavailableError(`not valid JSON: ${message}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new ServicesCatalogUnavailableError(
+      'top-level value is not a JSON object keyed by service name.',
+    );
+  }
+  return parsed;
+}
+
+/**
  * Read and validate the bundled ``services.json`` catalog, returning a
  * map from Detent scope schema name to the set of permission-schema
  * names that may be granted under that scope.
@@ -694,25 +771,7 @@ function validateAbsoluteFileSharingPath(rawPath) {
  * permissions for one of the contributing entries.
  */
 function loadValidPermissionsByScope() {
-  let raw;
-  try {
-    raw = readFileSync(SERVICES_CATALOG_PATH, 'utf-8');
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new ServicesCatalogUnavailableError(`cannot read file: ${message}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new ServicesCatalogUnavailableError(`not valid JSON: ${message}`);
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new ServicesCatalogUnavailableError(
-      'top-level value is not a JSON object keyed by service name.',
-    );
-  }
+  const parsed = readServicesCatalog();
   const permissionsByScope = new Map();
   for (const [serviceName, entries] of Object.entries(parsed)) {
     if (!Array.isArray(entries)) {
@@ -835,6 +894,197 @@ function validatePredefinedPayload(payload) {
     permissions: [...payload.permissions],
     account: validateOptionalAccount(payload.account, 'payload.'),
   };
+}
+
+/**
+ * Normalize and validate a ``custom-service`` domain, mirroring
+ * ``custom_services.validate_domain``.
+ *
+ * Deliberately narrow. The name derived below substitutes ``_`` for ``.``,
+ * which is one-to-one only while the domain itself can contain no ``_`` -- so
+ * rejecting one is what keeps two domains from colliding on a single service,
+ * not incidental strictness. The rest of the grammar is RFC 1123's: ASCII
+ * labels of letters, digits and hyphens, no leading or trailing hyphen.
+ */
+function validateCustomServiceDomain(rawDomain) {
+  if (typeof rawDomain !== 'string' || rawDomain.length === 0) {
+    throw new InvalidRequestBodyError("payload.'domain' is required and must be a non-empty string.");
+  }
+  // Lower-casing is the one repair; stray whitespace is refused, not removed.
+  const domain = rawDomain.toLowerCase();
+  if (domain.length > CUSTOM_SERVICE_MAX_DOMAIN_LENGTH) {
+    throw new InvalidRequestBodyError(
+      `payload.'domain' is longer than ${CUSTOM_SERVICE_MAX_DOMAIN_LENGTH} characters: ${rawDomain}.`,
+    );
+  }
+  if (!CUSTOM_SERVICE_DOMAIN_PATTERN.test(domain)) {
+    throw new InvalidRequestBodyError(
+      `payload.'domain' is not a bare hostname: expected dot-separated labels of ASCII letters, digits and hyphens `
+      + `(no scheme, port, path, underscore or wildcard; non-ASCII names in punycode): ${rawDomain}.`,
+    );
+  }
+  if (domain === GATEWAY_SELF_HOST) {
+    throw new InvalidRequestBodyError(`payload.'domain' is the latchkey gateway's own address: ${rawDomain}.`);
+  }
+  return domain;
+}
+
+/**
+ * Whether ``host`` is ``domain`` itself or a subdomain of it.
+ *
+ * Deliberately strict, and worth knowing the tradeoff. Latchkey's cookie flow
+ * anticipates a sign-in that *starts* on another host, so a looser rule would be
+ * usable -- but the browser destination is then a domain the dialog never named,
+ * and a user who clicks Approve expecting a login page is exactly who should not
+ * be sent somewhere unexpected. Restricting it to the approved subtree makes
+ * what the dialog says and where the browser goes provably the same.
+ *
+ * The cost is that a service at ``api.example.com`` whose login lives at
+ * ``accounts.example.com`` cannot use the browser flow: the agent must either
+ * request ``example.com`` (a broader grant) or request no login at all and let
+ * the user paste a token, which still works. Widening this correctly needs a
+ * public-suffix list -- "the registrable parent" cannot be had by counting
+ * labels, since that would read ``co.uk`` as a parent domain -- so it is left
+ * strict rather than approximated.
+ */
+function isWithinDomain(host, domain) {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+/**
+ * Validate the required ``scheme`` of a ``custom-service`` payload. Returns it
+ * lower-cased.
+ */
+function validateCustomServiceScheme(rawScheme) {
+  if (typeof rawScheme !== 'string' || !CUSTOM_SERVICE_SCHEMES.has(rawScheme.toLowerCase())) {
+    throw new InvalidRequestBodyError(
+      `payload.'scheme' is required and must be one of ${[...CUSTOM_SERVICE_SCHEMES].sort().join(', ')}. Got ${JSON.stringify(rawScheme)}.`,
+    );
+  }
+  return rawScheme.toLowerCase();
+}
+
+/**
+ * Require ``rawUrl`` to be an http or https URL on ``domain`` or a subdomain of
+ * it. ``field`` names it in messages (``url``, ``flow_params.cookieUrl``). The scheme is the user's business -- the
+ * dialog names where the browser will go -- so either is accepted; the domain
+ * check is what keeps a sign-in, and the credentials it captures, on the
+ * service being approved.
+ */
+function validateCustomServiceUrl(rawUrl, field, domain) {
+  if (typeof rawUrl !== 'string' || rawUrl.length === 0) {
+    throw new InvalidRequestBodyError(`payload.login.'${field}' is required and must be a non-empty string.`);
+  }
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new InvalidRequestBodyError(`payload.login.'${field}' is not a valid URL: ${rawUrl}.`);
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new InvalidRequestBodyError(`payload.login.'${field}' must be an http or https URL. Got ${rawUrl}.`);
+  }
+  if (!isWithinDomain(parsed.hostname.toLowerCase(), domain)) {
+    throw new InvalidRequestBodyError(
+      `payload.login.'${field}' must be on ${domain} or a subdomain of it. Got ${rawUrl}.`,
+    );
+  }
+  return rawUrl;
+}
+
+// The parameters of each generic login flow, as ``latchkey services register
+// --login-flow-params`` takes them (keys included). Each validator checks the
+// object against that schema -- an unknown key would be carried silently by
+// latchkey -- and keeps every URL in it on the requested domain. Mirrors
+// ``validate_login_flow`` in custom_services.py.
+function validateCookieCaptureParams(params, domain) {
+  ensureNoExtraneousFields('payload.login.flow_params ', ['cookieKeys', 'cookieUrl'], params);
+  ensureStringArray('payload.login.flow_params.', 'cookieKeys', params.cookieKeys);
+  if (params.cookieKeys.length === 0 || params.cookieKeys.some((key) => key.length === 0)) {
+    throw new InvalidRequestBodyError(
+      "payload.login.'flow_params.cookieKeys' must name at least one cookie, none empty.",
+    );
+  }
+  if (params.cookieUrl !== undefined) {
+    validateCustomServiceUrl(params.cookieUrl, 'flow_params.cookieUrl', domain);
+  }
+}
+
+function validateTokenCaptureParams(params, domain) {
+  ensureNoExtraneousFields('payload.login.flow_params ', ['tokenUrl', 'tokenField', 'header'], params);
+  validateCustomServiceUrl(params.tokenUrl, 'flow_params.tokenUrl', domain);
+  ensureNonEmptyString('payload.login.flow_params.', 'tokenField', params.tokenField);
+  if (params.header !== undefined) {
+    ensureNonEmptyString('payload.login.flow_params.', 'header', params.header);
+    // Latchkey's own rule: a header name, a colon, and the placeholder after it.
+    if (!params.header.includes('{token}') || !/^[^:\s]+:/.test(params.header)) {
+      throw new InvalidRequestBodyError(
+        "payload.login.'flow_params.header' must be a header line containing '{token}', "
+        + "such as 'Authorization: Bearer {token}'.",
+      );
+    }
+  }
+}
+
+const CUSTOM_SERVICE_LOGIN_FLOWS = new Map([
+  ['cookie-capture', validateCookieCaptureParams],
+  ['token-capture', validateTokenCaptureParams],
+]);
+
+/**
+ * Validate the optional ``login`` object of a ``custom-service`` payload:
+ * ``{url, flow, flow_params}``, which are ``latchkey services register``'s
+ * ``--login-url``, ``--login-flow`` and ``--login-flow-params``. Returns it in
+ * canonical shape, or ``null`` when the service has no browser sign-in.
+ *
+ * Absent is not the same as needing no credentials: latchkey refuses a request
+ * to a registered service with nothing stored, so the user then supplies a
+ * token through the dialog's credential form. Present, all three fields are
+ * required -- a flow needs a URL and parameters -- and what passes here is
+ * registered exactly as sent.
+ */
+function validateCustomServiceLogin(login, domain) {
+  if (login === undefined || login === null) {
+    return null;
+  }
+  if (typeof login !== 'object' || Array.isArray(login)) {
+    throw new InvalidRequestBodyError("payload.'login' must be a JSON object, null, or omitted.");
+  }
+  ensureNoExtraneousFields('payload.login ', ['url', 'flow', 'flow_params'], login);
+  if (typeof login.flow !== 'string' || !CUSTOM_SERVICE_LOGIN_FLOWS.has(login.flow)) {
+    throw new InvalidRequestBodyError(
+      `payload.login.'flow' is required and must be one of ${[...CUSTOM_SERVICE_LOGIN_FLOWS.keys()].join(', ')}. `
+      + `Got ${JSON.stringify(login.flow)}.`,
+    );
+  }
+  validateCustomServiceUrl(login.url, 'url', domain);
+  if (typeof login.flow_params !== 'object' || login.flow_params === null || Array.isArray(login.flow_params)) {
+    throw new InvalidRequestBodyError(
+      `payload.login.'flow_params' is required for the ${login.flow} login flow and must be a JSON object.`,
+    );
+  }
+  CUSTOM_SERVICE_LOGIN_FLOWS.get(login.flow)(login.flow_params, domain);
+  return { url: login.url, flow: login.flow, flow_params: { ...login.flow_params } };
+}
+
+/**
+ * Validate the payload object for a ``custom-service`` permission request.
+ * Returns the canonical payload shape (``{domain, scheme, login}``).
+ *
+ * There is deliberately no display-name field. A custom service is labelled by
+ * its origin, because that is the one string that cannot misdescribe what the
+ * connection reaches -- an agent that could name it could present
+ * ``evil-tracker.example`` as "Google Drive". ``ensureNoExtraneousFields``
+ * rejects a smuggled one rather than ignoring it.
+ */
+function validateCustomServicePayload(payload) {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'custom-service'.");
+  }
+  ensureNoExtraneousFields('payload ', ['domain', 'scheme', 'login'], payload);
+  const domain = validateCustomServiceDomain(payload.domain);
+  const scheme = validateCustomServiceScheme(payload.scheme);
+  return { domain, scheme, login: validateCustomServiceLogin(payload.login, domain) };
 }
 
 /**
@@ -1001,6 +1251,9 @@ async function parsePermissionRequestBody(request) {
     case REQUEST_TYPE_ACCOUNTS:
       payload = validateAccountsPayload(parsed.payload);
       break;
+    case REQUEST_TYPE_CUSTOM_SERVICE:
+      payload = validateCustomServicePayload(parsed.payload);
+      break;
     default:
       // Unreachable because VALID_REQUEST_TYPES has already gated the
       // value; the default branch satisfies linting.
@@ -1041,6 +1294,12 @@ function computeEffect(type, payload) {
       return computeWorkspaceEffect(payload.permissions, payload.target_workspace_id);
     case REQUEST_TYPE_ACCOUNTS:
       return computeAccountsEffect();
+    case REQUEST_TYPE_CUSTOM_SERVICE:
+      // Nothing is ever applied through this extension: the account to gate
+      // the rule on does not exist until the desktop's sign-in produces it,
+      // and the desktop then writes the grant through ``/permissions/rules``.
+      // The empty effect means a bare approve only drops the record.
+      return {};
     default:
       // Already validated by parsePermissionRequestBody; this branch
       // exists only to satisfy the type system / linters.
@@ -1929,10 +2188,17 @@ function resolveEffectForApproval(requestRecord, override) {
       );
       return computeWorkspaceEffect(permissions, target_workspace_id);
     }
+    case REQUEST_TYPE_CUSTOM_SERVICE: {
+      // The desktop writes this grant itself (see ``computeEffect``), so there
+      // is nothing an approve body could add.
+      ensureNoExtraneousFields('approve body ', [], override);
+      return requestRecord.effect;
+    }
     default:
       throw new InvalidRequestBodyError(
         `a body override is only valid for '${REQUEST_TYPE_PREDEFINED}', `
-        + `'${REQUEST_TYPE_FILE_SHARING}' or '${REQUEST_TYPE_WORKSPACE}' requests; request `
+        + `'${REQUEST_TYPE_FILE_SHARING}', '${REQUEST_TYPE_WORKSPACE}' or `
+        + `'${REQUEST_TYPE_CUSTOM_SERVICE}' requests; request `
         + `${requestRecord.request_id} is '${requestRecord.request_type}'.`,
       );
   }

@@ -69,11 +69,13 @@ _DESKTOP_SECRETS = DesktopGatewaySecrets(
 
 def _ensure_latchkey_gateway_running(
     outer: OuterHostInterface,
+    latchkey_directory: Path,
     machine_encryption_key: str,
     machine_gateway_password: str,
 ) -> None:
     _ensure_latchkey_gateway_running_real(
         outer,
+        latchkey_directory,
         SecretStr(machine_encryption_key),
         machine_gateway_password,
         _DESKTOP_SECRETS,
@@ -326,7 +328,7 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
     tmp_path: Path,
 ) -> None:
     outer = stub_outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+    _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
     run_script = _gateway_run_script(outer)
     conf = _gateway_conf(outer)
     # The wrapper exports the gateway config and execs the gateway. Gateway
@@ -401,7 +403,7 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_outer_
 
 def test_ensure_latchkey_gateway_running_writes_secrets_to_0600_tmpfs_files(tmp_path: Path) -> None:
     outer = stub_outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+    _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
     # Secrets go in a RAM-backed dir under /run, never on the persistent disk
     # beside the encrypted credential store; the wrapper stays on the normal disk.
     key_file = _written_by_path(outer, "/run/mngr-latchkey/gateway_encryption_key")
@@ -429,10 +431,10 @@ def test_ensure_latchkey_gateway_running_writes_secrets_to_0600_tmpfs_files(tmp_
     assert desktop_permissions_file.path in run_script
 
 
-def test_ensure_latchkey_gateway_running_injects_the_machines_own_encryption_key() -> None:
+def test_ensure_latchkey_gateway_running_injects_the_machines_own_encryption_key(tmp_path: Path) -> None:
     outer = stub_outer(CommandResult(stdout="", stderr="", success=True))
 
-    _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+    _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
 
     key_file = _written_by_path(outer, "/run/mngr-latchkey/gateway_encryption_key")
     assert key_file.content == MACHINE_KEY.encode("utf-8")
@@ -442,7 +444,7 @@ def test_ensure_latchkey_gateway_running_injects_the_machines_own_encryption_key
 
 def test_ensure_latchkey_gateway_running_verifies_secrets_dir_is_ram_backed(tmp_path: Path) -> None:
     outer = stub_outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+    _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
     # Before writing the key, provisioning creates the /run secrets dir (0700)
     # and asserts its filesystem is RAM-backed (tmpfs/ramfs), refusing to
     # persist the key to disk otherwise.
@@ -464,7 +466,7 @@ def test_ensure_latchkey_gateway_running_raises_when_secrets_dir_not_ram_backed(
     # /run is not a tmpfs) must abort before the key is ever written.
     outer = stub_outer(CommandResult(stdout="", stderr="is on a ext4 filesystem", success=False))
     with pytest.raises(RemoteGatewayError, match="RAM-backed secrets directory"):
-        _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+        _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
     # Crucially, no secret file was written when the guard failed.
     assert as_stub(outer).written == []
 
@@ -476,7 +478,7 @@ def _remote_config_text(outer: OuterHostInterface) -> str:
 
 def test_ensure_latchkey_gateway_running_hides_builtin_services_in_config(tmp_path: Path) -> None:
     outer = stub_outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+    _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
     # The VPS gateway's config.json hides the same confusing built-in services
     # as the desktop gateway, so an agent sees the same set either way.
     config = json.loads(_remote_config_text(outer))
@@ -486,12 +488,12 @@ def test_ensure_latchkey_gateway_running_hides_builtin_services_in_config(tmp_pa
 def test_ensure_latchkey_gateway_running_registers_custom_services_in_config(tmp_path: Path) -> None:
     """The VPS gateway is given minds' custom-service registrations.
 
-    ``sync_credentials`` ships a granted custom service's credentials here, but a
+    The credential sync ships a granted custom service's credentials here, but a
     gateway that does not know the service cannot resolve a request to it, so it
     would never inject them.
     """
     outer = stub_outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+    _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
     config = json.loads(_remote_config_text(outer))
     assert config["registeredServices"] == additional_service_registration_entries()
     # Pinned concretely too: comparing the two projections alone would still pass
@@ -503,7 +505,7 @@ def test_ensure_latchkey_gateway_running_registers_custom_services_in_config(tmp
 def test_ensure_latchkey_gateway_running_preserves_existing_remote_config(tmp_path: Path) -> None:
     existing = json.dumps({"settings": {"theme": "dark"}, "accounts": {"slack": {}}})
     outer = cast(OuterHostInterface, StubOuter(config_json=existing))
-    _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+    _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
     config = json.loads(_remote_config_text(outer))
     # Pre-existing remote config content survives the read-merge-write.
     assert config["settings"]["theme"] == "dark"
@@ -514,7 +516,7 @@ def test_ensure_latchkey_gateway_running_preserves_existing_remote_config(tmp_pa
 def test_ensure_latchkey_gateway_running_raises_on_invalid_remote_config(tmp_path: Path) -> None:
     outer = cast(OuterHostInterface, StubOuter(config_json="{not json"))
     with pytest.raises(RemoteGatewayError, match=CONFIG_FILENAME):
-        _ensure_latchkey_gateway_running(outer, MACHINE_KEY, "machine-password")
+        _ensure_latchkey_gateway_running(outer, tmp_path, MACHINE_KEY, "machine-password")
 
 
 def _tunnel_conf(outer: OuterHostInterface) -> str:

@@ -38,6 +38,9 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import custom_service_registration_entries
+from imbue.mngr_latchkey.core import merge_minds_latchkey_config
+from imbue.mngr_latchkey.custom_services import is_custom_service_name
 
 # Re-exported (the redundant alias marks it as such): provisioning's own passes
 # share one lazily-resolved machine directory across their steps.
@@ -149,6 +152,7 @@ class MachineCredentials(FrozenModel):
             service_name,
             account,
             self._machine_key(),
+            config_json=self._config_for(service_name),
         )
 
     def connect_service_with_permissions(self, service_name: str, account: str, permissions_json: str) -> None:
@@ -168,6 +172,7 @@ class MachineCredentials(FrozenModel):
             account,
             self._machine_key(),
             permissions_json,
+            config_json=self._config_for(service_name),
         )
 
     def set_permissions(self, permissions_json: str) -> None:
@@ -189,6 +194,35 @@ class MachineCredentials(FrozenModel):
         from showing an account the machine no longer has.
         """
         clear_remote_credentials(self.host, self.host_id, service_name, account, self._machine_key())
+
+    def _config_for(self, service_name: str) -> str:
+        """This package's half of the machine's ``config.json``, as the connect of ``service_name`` should leave it.
+
+        A machine's config is its own file, seeded from this computer's when the
+        machine is provisioned and never read back -- and on a machine nothing
+        else writes it: upstream latchkey touches the file only from ``services
+        register`` and from browser discovery, neither of which runs on a VPS.
+        So it travels the way the policy does, as a whole snapshot taken now and
+        installed ahead of the credential, and applying the newest one is always
+        right: a service registered here since the machine was provisioned
+        appears, and one deregistered here disappears. What travels is the
+        projection this package owns -- the hidden built-in services and every
+        registered service, bundled and custom -- never this computer's file
+        itself, whose browser and keyring configuration belong here.
+
+        Raises:
+            MachineCredentialsError: when ``service_name`` is a custom service
+                this computer has no registration for: a gateway cannot route a
+                request to a service its config does not name, so a credential
+                the machine could never use is refused rather than pushed.
+        """
+        entries = custom_service_registration_entries(self.latchkey.latchkey_directory)
+        if is_custom_service_name(service_name) and service_name not in entries:
+            raise MachineCredentialsError(
+                f"Cannot connect {service_name} on host {self.host_id}: this computer's latchkey config has no "
+                "registration for it, so the machine's gateway could not use the credentials"
+            )
+        return merge_minds_latchkey_config(None, entries)
 
     def _machine_key(self) -> SecretStr:
         return _recorded_machine_key(self.latchkey, self.host_id)

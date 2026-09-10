@@ -46,11 +46,14 @@ from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceLogin
+from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_ACCOUNTS
+from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_CUSTOM_SERVICE
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_PREDEFINED
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_WORKSPACE
@@ -107,6 +110,7 @@ from imbue.mngr_forward.testing import make_in_memory_test_ca
 from imbue.mngr_forward.tls import build_server_ssl_context
 from imbue.mngr_forward.tls import generate_server_credentials
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.custom_services import Scheme
 
 
 def device_id_for_test(name: str) -> DeviceId:
@@ -1003,7 +1007,13 @@ def _streamed_request(
     agent_id: str,
     rationale: str,
     request_type: str,
-    payload: PredefinedRequestPayload | FileSharingRequestPayload | WorkspaceRequestPayload | AccountsRequestPayload,
+    payload: (
+        PredefinedRequestPayload
+        | FileSharingRequestPayload
+        | WorkspaceRequestPayload
+        | AccountsRequestPayload
+        | CustomServiceRequestPayload
+    ),
     target: str,
 ) -> StreamedPermissionRequest:
     """Assemble one gateway permission request with a fresh request id."""
@@ -1079,6 +1089,27 @@ def create_accounts_permission_request(
         rationale=rationale,
         request_type=REQUEST_TYPE_ACCOUNTS,
         payload=AccountsRequestPayload(),
+        target="/tmp/permissions.json",
+    )
+
+
+def create_custom_service_permission_request(
+    agent_id: str,
+    domain: str,
+    rationale: str,
+    scheme: Scheme = Scheme.HTTPS,
+    login: CustomServiceLogin | None = None,
+) -> StreamedPermissionRequest:
+    """Build a custom-service permission request as the gateway would stream it.
+
+    ``login`` is the browser sign-in when the service has one; ``None`` is the
+    other real case, where the user supplies a token instead.
+    """
+    return _streamed_request(
+        agent_id=agent_id,
+        rationale=rationale,
+        request_type=REQUEST_TYPE_CUSTOM_SERVICE,
+        payload=CustomServiceRequestPayload(domain=domain, scheme=scheme, login=login),
         target="/tmp/permissions.json",
     )
 

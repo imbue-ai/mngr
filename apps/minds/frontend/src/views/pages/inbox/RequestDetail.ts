@@ -10,6 +10,7 @@ import type { InboxDetail } from "../../../models/inbox";
 import { InboxModel } from "../../../models/inbox";
 import { Notice } from "../../components/Notice";
 import { AccountsPermissionDetailView } from "./AccountsPermissionDetail";
+import { CustomServicePermissionDetailView } from "./CustomServicePermissionDetail";
 import { FileSharingPermissionDetailView } from "./FileSharingPermissionDetail";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import { WorkspacePermissionDetailView } from "./WorkspacePermissionDetail";
@@ -25,6 +26,8 @@ export function requestDetailView(model: InboxModel, detail: InboxDetail): m.Chi
       return m(WorkspacePermissionDetailView, { model, detail });
     case "accounts":
       return m(AccountsPermissionDetailView, { model, detail });
+    case "custom_service":
+      return m(CustomServicePermissionDetailView, { model, detail });
     case "unknown_scope":
       return m("div", { class: "flex flex-col gap-3" }, [
         m(

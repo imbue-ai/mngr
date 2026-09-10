@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
+from imbue.mngr_latchkey.custom_services import DomainWarning
 
 
 class UiManualCredentialsPrompt(FrozenModel):
@@ -140,6 +141,46 @@ class UiAccountsPermissionDetail(FrozenModel):
     rationale: str = Field(description="Agent's stated reason for the request")
 
 
+class UiCustomServicePermissionDetail(FrozenModel):
+    """Inbox detail payload for a custom-service request (create a connection, then grant it).
+
+    The simplest of the dialogs: no account picker, because a service being
+    created has no accounts to choose between, and no permission editor, because
+    the grant is a single catch-all permission on a scope already pinned to one
+    domain. Every string here is the domain, a URL derived from it, or the
+    agent's rationale -- there is nothing the agent can name.
+    """
+
+    kind: Literal["custom_service"] = "custom_service"
+    request_id: str = Field(description="Request event id")
+    agent_id: str = Field(description="Requesting agent id")
+    ws_name: str = Field(description="Workspace display name")
+    domain: str = Field(description="Hostname the connection will cover")
+    is_already_registered: bool = Field(
+        description=(
+            "Whether this computer already has the service, in which case approving connects the asking "
+            "workspace to it as it is -- the sign-in shown is the existing registration's, not the request's."
+        ),
+    )
+    domain_warning: DomainWarning | None = Field(
+        description=(
+            "Why the domain deserves a second look before approving -- a reserved name, a local or private "
+            "one, an IP address, a punycode look-alike -- or None for an ordinary public name. Advisory only."
+        ),
+    )
+    base_api_url: str = Field(
+        description=(
+            "The origin the connection will cover -- scheme and hostname -- which is what the dialog shows, "
+            "since the scheme is the difference between credentials sent encrypted and in the clear"
+        ),
+    )
+    login_url: str | None = Field(
+        default=None,
+        description="Page the browser will open to sign in, shown so the destination is never a surprise",
+    )
+    rationale: str = Field(description="Agent's stated reason for the request")
+
+
 class UiUnknownScopeDetail(FrozenModel):
     """Deny-only detail for a predefined request whose scope is not in the catalog."""
 
@@ -162,6 +203,7 @@ RequestDetailPayload = (
     | UiFileSharingPermissionDetail
     | UiWorkspacePermissionDetail
     | UiAccountsPermissionDetail
+    | UiCustomServicePermissionDetail
     | UiUnknownScopeDetail
     | UiUnsupportedDetail
 )

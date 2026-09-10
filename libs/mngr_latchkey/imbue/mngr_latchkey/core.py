@@ -37,6 +37,7 @@ from loguru import logger
 from packaging.version import InvalidVersion
 from packaging.version import Version
 from pydantic import Field
+from pydantic import JsonValue
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 from pydantic import computed_field
@@ -53,6 +54,7 @@ from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogError
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
+from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -185,21 +187,26 @@ _GATEWAY_EXTENSIONS_SUBDIR: Final[str] = "extensions"
 # The desktop and VPS gateways intentionally load disjoint extension sets. The
 # desktop owns all stateful Minds endpoints; the VPS loads only the transparent
 # forwarder that sends those endpoint families back to the desktop gateway.
+# The catalog the gateway extensions validate against. Named because it is the
+# one bundled file that is not shipped verbatim: custom services are overlaid
+# onto it at materialization time (see ``overlaid_services_catalog_content``).
+SERVICES_CATALOG_FILENAME: Final[str] = "services.json"
+
+# Upstream latchkey's own JSON config file, directly under ``LATCHKEY_DIRECTORY``.
+# Latchkey (>= 3.1.0) reads its ``settings`` block -- including
+# ``hideBuiltinServices`` -- from here, and its ``registeredServices`` block,
+# which is how any gateway learns about a custom (non-builtin) service.
+# :func:`merge_minds_latchkey_config` writes this package's half of both;
+# :func:`read_registered_services` reads the latter back.
+CONFIG_FILENAME: Final[str] = "config.json"
 DESKTOP_GATEWAY_EXTENSION_FILENAMES: Final[tuple[str, ...]] = (
     "minds_api_proxy.mjs",
     "permission_requests.mjs",
     "permissions.mjs",
-    "services.json",
+    SERVICES_CATALOG_FILENAME,
     "workspace_permissions.json",
 )
 REMOTE_GATEWAY_EXTENSION_FILENAME: Final[str] = "desktop_gateway_proxy.mjs"
-
-# Filename of the upstream latchkey CLI's JSON config file, directly under
-# ``LATCHKEY_DIRECTORY``. Latchkey (>= 3.1.0) reads its ``settings`` block --
-# including ``hideBuiltinServices`` -- from here, and its ``registeredServices``
-# block, which is how any gateway learns about a custom (non-builtin) service.
-# :func:`merge_minds_latchkey_config` owns minds' half of both.
-CONFIG_FILENAME: Final[str] = "config.json"
 
 # Built-in latchkey services hidden from agents via
 # ``settings.hideBuiltinServices``. ``notion`` is hidden because agents get
@@ -656,8 +663,79 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
     (extensions_dir / REMOTE_GATEWAY_EXTENSION_FILENAME).unlink(missing_ok=True)
     for filename in DESKTOP_GATEWAY_EXTENSION_FILENAMES:
         destination = extensions_dir / filename
-        destination.write_text(bundled_gateway_extension_content(filename), encoding="utf-8")
+        if filename == SERVICES_CATALOG_FILENAME:
+            content = overlaid_services_catalog_content(latchkey_directory)
+        else:
+            content = bundled_gateway_extension_content(filename)
+        destination.write_text(content, encoding="utf-8")
     return extensions_dir
+
+
+def read_registered_services(latchkey_directory: Path) -> dict[str, JsonValue]:
+    """Return the ``registeredServices`` block of latchkey's ``config.json``.
+
+    Returns an empty mapping when the file is absent, unreadable, not JSON, or
+    structurally surprising. This is read on the path that renders the
+    permission dialog and the Connectors page, and it shares a file with
+    upstream latchkey (which rewrites it when it discovers a browser), so a
+    transient or hand-inflicted problem here must degrade to "no custom
+    services" rather than taking those surfaces down. A custom service that
+    silently fails to appear is recoverable by the agent asking again; a
+    permissions page that will not load is not.
+    """
+    config_path = latchkey_directory / CONFIG_FILENAME
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.debug("No latchkey config to read custom services from at {}: {}", config_path, e)
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning("Latchkey config at {} is not valid JSON, so no custom services: {}", config_path, e)
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning("Latchkey config at {} is not a JSON object, so no custom services", config_path)
+        return {}
+    registered = parsed.get("registeredServices")
+    if not isinstance(registered, dict):
+        return {}
+    return registered
+
+
+def overlaid_services_catalog_content(latchkey_directory: Path) -> str:
+    """Return ``services.json`` with this install's custom services overlaid on the shipped catalog.
+
+    The extensions validate a permission request against this file, and the
+    desktop renders its dialogs from the same catalog via
+    :class:`~imbue.mngr_latchkey.services_catalog.ServicesCatalog`, so the two
+    must agree about which services exist. They do it by construction rather
+    than by convention: this is the one place the overlay is applied for the
+    gateway, and the catalog applies the same projection for Python. Neither
+    gateway extension knows custom services exist -- they keep reading one file
+    in one shape.
+
+    A materialized file therefore differs from the package resource of the same
+    name whenever the install has custom services. That is the point, but it is
+    worth knowing when comparing the two by hand.
+    """
+    shipped = json.loads(bundled_gateway_extension_content(SERVICES_CATALOG_FILENAME))
+    overlay = custom_service_catalog_payload(read_registered_services(latchkey_directory), frozenset(shipped))
+    shipped.update(overlay)
+    return json.dumps(shipped, indent=2) + "\n"
+
+
+def custom_service_registration_entries(latchkey_directory: Path) -> dict[str, JsonValue]:
+    """Return this install's custom services as a ``registeredServices`` block.
+
+    Only the entries :mod:`imbue.mngr_latchkey.custom_services` recognizes --
+    ``custom_``-prefixed, with a readable ``baseApiUrl`` -- so an unusable entry
+    is not propagated onward to a VPS. Used by the remote path, which merges the
+    *desktop's* custom services into a VPS config that holds none of them.
+    """
+    registered = read_registered_services(latchkey_directory)
+    readable = custom_service_catalog_payload(registered)
+    return {name: registered[name] for name in readable}
 
 
 # Maximum length of a condensed latchkey failure detail. Long enough for a real
@@ -704,7 +782,10 @@ def summarize_latchkey_failure(raw_output: str, fallback: str) -> str:
     return summary
 
 
-def merge_minds_latchkey_config(existing_config_json: str | None) -> str:
+def merge_minds_latchkey_config(
+    existing_config_json: str | None,
+    custom_service_entries: Mapping[str, JsonValue] | None = None,
+) -> str:
     """Merge minds' own state into a latchkey ``config.json``.
 
     Two things minds owns live in the upstream CLI's config file, and both must
@@ -719,10 +800,21 @@ def merge_minds_latchkey_config(existing_config_json: str | None) -> str:
       its credentials. A gateway that holds the credentials but not the
       registration cannot use them at all, so the registration travels with them.
 
+    ``custom_service_entries`` are the user-created services (see
+    :mod:`imbue.mngr_latchkey.custom_services`) to merge in as well. The desktop
+    passes nothing: its custom services already live in the very file being
+    merged, and are preserved by the read-merge below. A VPS config is a
+    *different* file that holds none of them, so the remote path passes the
+    desktop's set explicitly -- a gateway holding a custom service's credentials
+    but not its registration cannot resolve a request to it at all.
+
     Returns the serialized config text, preserving any other content the input
     config holds: the ``settings`` and ``registeredServices`` blocks are
     read-merged, not clobbered, and unrelated top-level keys (e.g. latchkey's
-    discovered ``browser``) are kept verbatim. ``existing_config_json`` is the
+    discovered ``browser``) are kept verbatim. **Preserving `registeredServices`
+    entries this package does not own is load-bearing, not incidental**: a custom
+    service lives only there, so clobbering the block instead of updating it
+    would delete every one of them on the next gateway spawn. ``existing_config_json`` is the
     current config text, or ``None`` when there is no config yet (a fresh config
     starts from an empty object). Existing hidden entries are kept in order and
     only the missing ones are appended, so the result is stable across repeated
@@ -760,6 +852,8 @@ def merge_minds_latchkey_config(existing_config_json: str | None) -> str:
         registered.update(additional_service_registration_entries())
     except AdditionalServicesCatalogError as e:
         raise LatchkeyError(f"Could not read the bundled additional services: {e}") from e
+    if custom_service_entries:
+        registered.update(custom_service_entries)
     config["registeredServices"] = registered
     return json.dumps(config, indent=2)
 
@@ -929,6 +1023,32 @@ class Latchkey(MutableModel):
         _ensure_minds_latchkey_config(self.latchkey_directory)
         with self._lock:
             self._is_initialized = True
+
+    def register_custom_service(self, service_name: str, registration: Mapping[str, JsonValue]) -> None:
+        """Register a user-created custom service in latchkey's ``config.json``.
+
+        The registration *is* the service: everything else about a custom one --
+        its label, its Detent scope, the domain that scope pins -- is derived
+        from this entry, so there is no second place to write (see
+        :mod:`imbue.mngr_latchkey.custom_services`).
+
+        Read-merge-write, so latchkey's own settings and every other
+        registration survive, and idempotent, so a retry after a failed sign-in
+        re-registers harmlessly. The gateway's extension catalog is
+        re-materialized afterwards so its view of which services exist matches
+        the desktop's immediately, rather than at the next gateway spawn.
+
+        Raises :class:`LatchkeyError` if the config cannot be read or written.
+        """
+        config_path = self.latchkey_directory / CONFIG_FILENAME
+        existing = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+        try:
+            content = merge_minds_latchkey_config(existing, {service_name: dict(registration)})
+        except LatchkeyError as e:
+            raise LatchkeyError(f"Failed to register {service_name} in {config_path}: {e}") from e
+        atomic_write(config_path, content)
+        logger.info("Registered custom latchkey service {}", service_name)
+        _materialize_bundled_extensions(self.latchkey_directory)
 
     def start_gateway(self, concurrency_group: ConcurrencyGroup) -> int:
         """Start the shared gateway and return its bound listen port.

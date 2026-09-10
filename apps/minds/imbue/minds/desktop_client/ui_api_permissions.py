@@ -48,6 +48,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
@@ -137,6 +138,11 @@ def _waiting_request_title_and_service(
         return "Other machines", req.rationale, ""
     if isinstance(payload, AccountsRequestPayload):
         return "Device accounts", req.rationale, ""
+    if isinstance(payload, CustomServiceRequestPayload):
+        # The domain, like everywhere else a custom service is named. There is
+        # no brand mark for one -- it is a connection to a domain, not a vendor
+        # -- so the row falls back to the category glyph.
+        return payload.domain, req.rationale, ""
     assert_never(payload)
 
 

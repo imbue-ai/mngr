@@ -116,6 +116,17 @@ function getLatchkeyCurlDispatchPath() {
  */
 function getLatchkeyPath() {
   if (isDev()) {
+    // Dev only: run the app against a latchkey checkout instead of the
+    // installed dependency, for testing an unreleased latchkey. The backend
+    // already publishes this path to the Python side as MINDS_LATCHKEY_BINARY
+    // and `minds run` already honors it, so an export here reaches the
+    // gateway and every `latchkey` subprocess minds spawns. A packaged build
+    // ignores it, mirroring getMindsRootName: a stale export from a parent
+    // shell must not be able to redirect a shipped binary.
+    const fromEnv = process.env.MINDS_LATCHKEY_BINARY;
+    if (fromEnv) {
+      return fromEnv;
+    }
     return path.join(__dirname, '..', 'node_modules', '.bin', 'latchkey');
   }
   return path.join(getResourcesDir(), 'latchkey', 'bin', 'latchkey');

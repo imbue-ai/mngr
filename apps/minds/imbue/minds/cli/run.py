@@ -67,6 +67,7 @@ from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.accounts import AccountsPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.handlers.custom_service import CustomServiceGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
@@ -308,15 +309,14 @@ def run(
     except DockerCleanupError as exc:
         logger.warning("Could not start the Docker state container at launch: {}", exc)
 
-    # Spawn (or adopt) a detached ``mngr latchkey forward`` supervisor.
-    # The supervisor owns the shared latchkey gateway + per-agent reverse
-    # tunnels; running it as a detached subprocess (rather than the inline
-    # ``LatchkeyDiscoveryHandler``/``SSHTunnelManager`` wiring that used to
-    # live here) means a minds restart adopts the existing instance instead
-    # of tearing every tunnel down and re-establishing it. We do *not*
-    # terminate it on minds shutdown -- mirroring how minds already leaves
-    # the gateway running detached so agents in containers/VMs keep working
-    # across desktop-client restarts.
+    # Spawn a detached ``mngr latchkey forward`` supervisor. It owns the
+    # shared latchkey gateway + per-agent reverse tunnels. On every minds
+    # start it is terminated and respawned (see
+    # ``_restart_mngr_latchkey_forward_supervisor``) so it always runs the
+    # current code with the current env; the reverse tunnels are
+    # re-established as discovery re-fires. We do *not* terminate it on
+    # minds shutdown -- it keeps running detached so agents in
+    # containers/VMs keep working across desktop-client restarts.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
     # Build the supervisor once and keep the handle: the startup restart runs on
@@ -456,7 +456,7 @@ def run(
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
-        services_catalog=ServicesCatalog(),
+        services_catalog=ServicesCatalog(latchkey_directory=latchkey.latchkey_directory),
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
         carry_grant_to_machine=machine_operator.connect_service_with_permissions,
@@ -482,6 +482,13 @@ def run(
         gateway_client=gateway_client,
         mngr_message_sender=mngr_message_sender,
         push_permissions_to_machine=push_permissions_to_machine,
+    )
+    custom_service_handler = CustomServiceGrantHandler(
+        data_dir=data_directory,
+        latchkey=latchkey,
+        gateway_client=gateway_client,
+        mngr_message_sender=mngr_message_sender,
+        carry_grant_to_machine=machine_operator.connect_service_with_permissions,
     )
     imbue_cloud_cli = ImbueCloudCli(
         mngr_caller=mngr_caller,
@@ -769,6 +776,7 @@ def run(
             file_sharing_handler,
             workspace_permission_handler,
             accounts_permission_handler,
+            custom_service_handler,
         ),
         server_port=port,
         mngr_forward_port=mngr_forward_port,

@@ -17,6 +17,7 @@ assert the binary is present (a missing Node fails loudly rather than
 skipping), mirroring the minds-api-proxy test module.
 """
 
+import contextlib
 import json
 import re
 import shutil
@@ -206,6 +207,56 @@ def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, No
         base_url = f"http://127.0.0.1:{port}"
         assert _wait_for_port("127.0.0.1", port)
         yield base_url, latchkey_directory, permissions_config_path
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+
+
+@contextlib.contextmanager
+def _staged_extension(tmp_path: Path, extra_services: dict[str, object]) -> Generator[str, None, None]:
+    """Run the extension against a copy of its data files, with the catalog doctored.
+
+    Mirrors what ``core._materialize_bundled_extensions`` does in production --
+    the extension resolves ``services.json`` next to itself, so overlaying a
+    custom service means giving it a different directory to sit in.
+    """
+    assert _NODE_BINARY is not None
+    staged = tmp_path / "extensions"
+    staged.mkdir()
+    (staged / _EXTENSION_PATH.name).write_text(_EXTENSION_PATH.read_text(), encoding="utf-8")
+    package_dir = _EXTENSION_PATH.parent
+    (staged / "workspace_permissions.json").write_text(
+        (package_dir / "workspace_permissions.json").read_text(), encoding="utf-8"
+    )
+    catalog = json.loads((package_dir / "services.json").read_text())
+    catalog.update(extra_services)
+    (staged / "services.json").write_text(json.dumps(catalog), encoding="utf-8")
+
+    script = _NODE_DRIVER_SCRIPT_TEMPLATE.format(
+        EXTENSION_PATH_LITERAL=json.dumps((staged / _EXTENSION_PATH.name).as_uri())
+    )
+    process = subprocess.Popen(
+        [_NODE_BINARY, "--input-type=module", "-e", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            "LATCHKEY_DIRECTORY": str(tmp_path / "latchkey"),
+            "TEST_PERMISSIONS_CONFIG_PATH": str(tmp_path / "permissions.json"),
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/home/example",
+            "TMPDIR": "/tmp",
+        },
+        text=True,
+    )
+    try:
+        port = _wait_for_node_port(process)
+        assert _wait_for_port("127.0.0.1", port)
+        yield f"http://127.0.0.1:{port}"
     finally:
         process.terminate()
         try:
@@ -1801,3 +1852,384 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
     assert status == 204
     pending_dir = latchkey_directory / "permission_requests" / "v3"
     assert list(pending_dir.iterdir()) == []
+
+
+# -- POST /permission-requests: custom-service --
+
+
+def _custom_service_body(payload: object, rationale: str = "needs the widget API") -> dict[str, object]:
+    # A well-formed payload names a scheme; tests about the rest of the payload
+    # get https unless they say otherwise.
+    if isinstance(payload, dict) and "scheme" not in payload:
+        payload = {"scheme": "https", **payload}
+    return {
+        "agent_id": _VALID_AGENT_ID,
+        "rationale": rationale,
+        "type": "custom-service",
+        "payload": payload,
+    }
+
+
+def test_post_creates_custom_service_request_with_empty_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, latchkey_directory, permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "api.example.com",
+                "login": {
+                    "url": "https://api.example.com/login",
+                    "flow": "cookie-capture",
+                    "flow_params": {"cookieKeys": ["session"], "cookieUrl": "https://api.example.com/"},
+                },
+            }
+        ),
+    )
+    assert status == 201
+    parsed = json.loads(body)
+    assert parsed["request_type"] == "custom-service"
+    # The login fields are stored as sent: they are latchkey's own flags, and
+    # the desktop registers them verbatim.
+    assert parsed["payload"] == {
+        "domain": "api.example.com",
+        "scheme": "https",
+        "login": {
+            "url": "https://api.example.com/login",
+            "flow": "cookie-capture",
+            "flow_params": {"cookieKeys": ["session"], "cookieUrl": "https://api.example.com/"},
+        },
+    }
+    assert parsed["target"] == str(permissions_config_path)
+    # A service being created has no accounts to pick from, so there is nothing
+    # to grant until the approval names one: a bare ``/approve`` must be a no-op
+    # rather than silently granting every account.
+    assert parsed["effect"] == {}
+    stored = next((latchkey_directory / "permission_requests" / "v3").iterdir())
+    assert json.loads(stored.read_text()) == parsed
+
+
+def test_post_creates_custom_service_request_without_login(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    # No cookie flow does not mean no credentials: the user supplies a token
+    # through the dialog's existing credential form instead.
+    base_url, _, _ = node_extension
+    status, body = _post_json(f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com"}))
+    assert status == 201
+    assert json.loads(body)["payload"] == {
+        "domain": "example.com",
+        "scheme": "https",
+        "login": None,
+    }
+
+
+@pytest.mark.parametrize(
+    # In order: empty, the shapes a URL carries that a bare hostname must not
+    # (scheme, path, port, userinfo, query), what the derived service name
+    # cannot represent (a wildcard, an underscore -- load-bearing, since the
+    # name swaps ``_`` for ``.`` -- and an IPv6 literal), and the gateway's own
+    # address.
+    "domain",
+    [
+        "",
+        " example.com ",
+        "https://example.com",
+        "example.com/v1",
+        "example.com:8443",
+        "user@example.com",
+        "example.com?q=1",
+        "*.example.com",
+        "a_b.com",
+        "[::1]",
+        "latchkey-self.invalid",
+    ],
+)
+def test_post_rejects_bad_custom_service_domain(node_extension: tuple[str, Path, Path], domain: str) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(f"{base_url}/permission-requests", _custom_service_body({"domain": domain}))
+    assert status == 400, body
+    assert b"domain" in body
+
+
+def test_post_accepts_a_custom_service_that_already_exists(tmp_path: Path) -> None:
+    """A second workspace asking for an origin someone already connected.
+
+    Its own gateway has no service for the origin, so this is the only request
+    it can make, and refusing it would leave that workspace no way in. Whether
+    the desktop already has the service is the desktop's question, answered at
+    approve time by connecting the workspace to the service as it is.
+
+    Staged against a *materialized* catalog, because that is the only place a
+    ``custom_`` entry ever appears: the shipped catalog has none by
+    construction.
+    """
+    with _staged_extension(
+        tmp_path,
+        extra_services={
+            "custom_https_widgets_example_com": [
+                {"scope": "custom_https_widgets_example_com", "display_name": "widgets.example.com", "permissions": []}
+            ]
+        },
+    ) as base_url:
+        status, body = _post_json(
+            f"{base_url}/permission-requests", _custom_service_body({"domain": "widgets.example.com"})
+        )
+        assert status == 201, body
+        assert json.loads(body)["effect"] == {}
+
+
+def test_post_rejects_agent_supplied_display_text(node_extension: tuple[str, Path, Path]) -> None:
+    # A custom service is labelled by its domain, which cannot misdescribe what
+    # it reaches. An agent that could name it could present a tracker as Drive,
+    # so a smuggled label is refused rather than quietly ignored.
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body({"domain": "example.com", "display_name": "Google Drive"}),
+    )
+    assert status == 400
+    assert b"display_name" in body
+
+
+@pytest.mark.parametrize(
+    "login,expected_fragment",
+    [
+        # The object is one sign-in: a flow needs a URL and parameters.
+        ({"url": "https://example.com/l"}, b"'flow' is required"),
+        ({"flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}}, b"'url' is required"),
+        ({"url": "https://example.com/l", "flow": "cookie-capture"}, b"'flow_params' is required"),
+        ({"url": "https://example.com/l", "flow": "magic", "flow_params": {}}, b"cookie-capture, token-capture"),
+        # Every URL stays on the domain, whichever scheme it uses.
+        (
+            {"url": "https://evil.test/l", "flow": "cookie-capture", "flow_params": {"cookieKeys": ["s"]}},
+            b"'url' must be on example.com",
+        ),
+        (
+            {
+                "url": "https://example.com/l",
+                "flow": "cookie-capture",
+                "flow_params": {"cookieKeys": ["s"], "cookieUrl": "https://evil.test/"},
+            },
+            b"'flow_params.cookieUrl' must be on example.com",
+        ),
+        (
+            {
+                "url": "https://example.com/l",
+                "flow": "token-capture",
+                "flow_params": {"tokenUrl": "https://evil.test/session", "tokenField": "t"},
+            },
+            b"'flow_params.tokenUrl' must be on example.com",
+        ),
+        # The parameters are latchkey's schema for the flow, no more and no less.
+        (
+            {"url": "https://example.com/l", "flow": "cookie-capture", "flow_params": {"cookieKeys": []}},
+            b"at least one cookie",
+        ),
+        (
+            {
+                "url": "https://example.com/l",
+                "flow": "cookie-capture",
+                "flow_params": {"cookieUrl": "https://example.com/"},
+            },
+            b"cookieKeys",
+        ),
+        (
+            {
+                "url": "https://example.com/l",
+                "flow": "cookie-capture",
+                "flow_params": {"cookieKeys": ["s"], "cookie_keys": ["s"]},
+            },
+            b"cookie_keys",
+        ),
+        (
+            {
+                "url": "https://example.com/l",
+                "flow": "token-capture",
+                "flow_params": {"tokenUrl": "https://example.com/s"},
+            },
+            b"tokenField",
+        ),
+        (
+            {
+                "url": "https://example.com/l",
+                "flow": "token-capture",
+                "flow_params": {"tokenUrl": "https://example.com/s", "tokenField": "t", "header": "X-Token: nope"},
+            },
+            b"{token}",
+        ),
+        (
+            {
+                "url": "https://example.com/l",
+                "flow": "token-capture",
+                "flow_params": {"tokenUrl": "https://example.com/s", "tokenField": "t", "header": "Bearer {token}"},
+            },
+            b"header line",
+        ),
+        # The old field names are refused, not silently ignored.
+        (
+            {"login_url": "https://example.com/l", "cookie_url": "https://example.com/", "cookie_keys": ["s"]},
+            b"login_url",
+        ),
+    ],
+)
+def test_post_rejects_bad_custom_service_login(
+    node_extension: tuple[str, Path, Path], login: dict[str, object], expected_fragment: bytes
+) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com", "login": login})
+    )
+    assert status == 400, body
+    assert expected_fragment in body
+
+
+def test_post_rejects_flat_login_fields(node_extension: tuple[str, Path, Path]) -> None:
+    # The same three things outside the ``login`` object are unknown payload
+    # fields, refused rather than picked up.
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {"domain": "example.com", "login_url": "https://example.com/l", "login_flow": "cookie-capture"}
+        ),
+    )
+    assert status == 400, body
+    assert b"login_url" in body
+
+
+def test_post_accepts_a_token_capture_login(node_extension: tuple[str, Path, Path]) -> None:
+    # The second generic flow, with its optional header: accepted and stored as
+    # sent, so latchkey reads back exactly the parameters its own CLI takes.
+    base_url, _, _ = node_extension
+    params = {
+        "tokenUrl": "https://app.example.com/api/auth/session",
+        "tokenField": "data.accessToken",
+        "header": "X-Token: {token}",
+    }
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "example.com",
+                "login": {"url": "https://app.example.com/auth/login", "flow": "token-capture", "flow_params": params},
+            }
+        ),
+    )
+    assert status == 201, body
+    assert json.loads(body)["payload"]["login"]["flow_params"] == params
+
+
+def test_approve_custom_service_applies_nothing_and_drops_the_record(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """The grant is the desktop's to write, through ``/permissions/rules``.
+
+    The account to gate the rule on does not exist until the desktop's sign-in
+    produces it, so the record's effect is empty and approving it as-is only
+    removes the record -- it must never grant the service to every account.
+    """
+    base_url, latchkey_directory, permissions_config_path = node_extension
+    status, body = _post_json(f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com"}))
+    assert status == 201
+    request_id = json.loads(body)["request_id"]
+
+    status, _ = _post_json(f"{base_url}/permission-requests/approve/{request_id}", None)
+    assert status == 200
+    assert json.loads(permissions_config_path.read_text())["rules"] == []
+    assert list((latchkey_directory / "permission_requests" / "v3").iterdir()) == []
+
+
+def test_approve_custom_service_takes_no_override(node_extension: tuple[str, Path, Path]) -> None:
+    # Nothing in an approve body could change what the desktop writes, so an
+    # account named here is refused rather than silently ignored.
+    base_url, _, _ = node_extension
+    status, body = _post_json(f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com"}))
+    request_id = json.loads(body)["request_id"]
+    status, body = _post_json(f"{base_url}/permission-requests/approve/{request_id}", {"account": "me@example.com"})
+    assert status == 400
+    assert b"account" in body
+
+
+def test_post_custom_service_requires_a_scheme(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, _, _ = node_extension
+    body_without_scheme = {**_custom_service_body({"domain": "example.com"}), "payload": {"domain": "example.com"}}
+    status, body = _post_json(f"{base_url}/permission-requests", body_without_scheme)
+    assert status == 400, body
+    assert b"payload.'scheme' is required" in body
+
+
+def test_post_custom_service_accepts_http_and_an_http_login_for_it(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "intranet.acme-widgets.com",
+                "scheme": "http",
+                "login": {
+                    "url": "http://intranet.acme-widgets.com/login",
+                    "flow": "cookie-capture",
+                    "flow_params": {"cookieKeys": ["session"], "cookieUrl": "http://intranet.acme-widgets.com/"},
+                },
+            }
+        ),
+    )
+    assert status == 201, body
+    assert json.loads(body)["payload"]["scheme"] == "http"
+
+
+def test_post_custom_service_accepts_an_http_login_for_an_https_service(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    # The sign-in page's scheme is the user's business; the domain check is
+    # what keeps the sign-in on the service.
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "example.com",
+                "login": {
+                    "url": "http://example.com/login",
+                    "flow": "cookie-capture",
+                    "flow_params": {"cookieKeys": ["session"]},
+                },
+            }
+        ),
+    )
+    assert status == 201, body
+    assert json.loads(body)["payload"]["login"]["url"] == "http://example.com/login"
+
+
+@pytest.mark.parametrize("scheme", ["ftp", "", 7, "HTTPS://"])
+def test_post_rejects_a_custom_service_scheme_that_is_not_http_or_https(
+    node_extension: tuple[str, Path, Path], scheme: object
+) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com", "scheme": scheme})
+    )
+    assert status == 400, body
+    assert b"payload.'scheme'" in body
+
+
+@pytest.mark.parametrize(
+    "domain,expected",
+    # What a private network calls its services: a single label, a private
+    # suffix, an address -- taken as the platform URL parser spells them.
+    [
+        ("intranet", "intranet"),
+        ("Vault.INTERNAL", "vault.internal"),
+        ("foo.localhost", "foo.localhost"),
+        ("10.0.0.5", "10.0.0.5"),
+    ],
+)
+def test_post_accepts_the_hostnames_a_private_network_uses(
+    node_extension: tuple[str, Path, Path], domain: str, expected: str
+) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(f"{base_url}/permission-requests", _custom_service_body({"domain": domain}))
+    assert status == 201, body
+    assert json.loads(body)["payload"]["domain"] == expected

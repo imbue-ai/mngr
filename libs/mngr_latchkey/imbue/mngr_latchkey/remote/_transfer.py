@@ -51,6 +51,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -169,12 +170,21 @@ class _CredentialClear(_CredentialChange):
 class _MachineScriptInputs(FrozenModel):
     """Everything a single-round-trip machine script carries to the machine.
 
-    Both halves are optional and a script does whichever it was given, in this
-    order: a permission grant is a credential change *and* a policy, and the
-    credential goes first, because a rule the machine cannot yet exercise would
-    send the agent back to a request it had already answered.
+    Every part is optional and a script does whichever it was given, in this
+    order: the config first, because a gateway with no entry for a service
+    cannot route a request to it, so nothing that refers to the service means
+    anything until the machine's config names it; then the credential; then the
+    policy, because a rule the machine cannot yet exercise would send the agent
+    back to a request it had already answered.
     """
 
+    config_json: str | None = Field(
+        default=None,
+        description=(
+            "This package's half of the machine's config.json -- the hidden built-in services and every "
+            "registered service -- to install as a whole snapshot, or ``None`` to leave the machine's config alone."
+        ),
+    )
     credential_change: _CredentialMerge | _CredentialClear | None = Field(
         description="What to do to the machine's credential store, or ``None`` for a script that only sets a policy."
     )
@@ -362,6 +372,7 @@ def push_credentials(
     service_name: str,
     account: str,
     machine_key: SecretStr,
+    config_json: str | None = None,
 ) -> None:
     """Add one service's credentials -- one account of it, when named -- to the machine's own store, in one round trip.
 
@@ -395,6 +406,7 @@ def push_credentials(
             host,
             host_id,
             _MachineScriptInputs(
+                config_json=config_json,
                 credential_change=_merge_of(machine_latchkey, host_id, service_name, account, machine_key),
                 permissions_json=None,
             ),
@@ -411,6 +423,7 @@ def push_credentials_with_permissions(
     account: str,
     machine_key: SecretStr,
     permissions_json: str,
+    config_json: str | None = None,
 ) -> None:
     """Add one account to the machine's store and make ``permissions_json`` its policy, in one round trip.
 
@@ -434,6 +447,7 @@ def push_credentials_with_permissions(
             host,
             host_id,
             _MachineScriptInputs(
+                config_json=config_json,
                 credential_change=_merge_of(machine_latchkey, host_id, service_name, account, machine_key),
                 permissions_json=permissions_json,
             ),
@@ -527,6 +541,10 @@ def build_machine_script(inputs: _MachineScriptInputs) -> str:
     ]
     body: list[str] = []
     scratch_variable_names: list[str] = []
+    if inputs.config_json is not None:
+        prologue.append(f'_lk_config_tmp="$_lk_remote_dir/.{CONFIG_FILENAME}.$$.tmp"')
+        scratch_variable_names.append("_lk_config_tmp")
+        body.extend(_config_lines(inputs.config_json))
     match inputs.credential_change:
         case _CredentialMerge() as merge:
             prologue.extend(_scratch_dir_lines())
@@ -629,6 +647,16 @@ def _clear_lines(clear: _CredentialClear) -> tuple[str, ...]:
         f"_lk_service={shlex.quote(clear.service_name)}",
         f"_lk_account={shlex.quote(clear.account)}",
         'LATCHKEY_DIRECTORY="$_lk_remote_dir" latchkey auth clear -y "$_lk_service" --account "$_lk_account"',
+    )
+
+
+@pure
+def _config_lines(config_json: str) -> tuple[str, ...]:
+    """Lines that install this package's half of the machine's config atomically, so the gateway never reads a half-written file."""
+    return (
+        f"_lk_config_b64={base64.b64encode(config_json.encode('utf-8')).decode('ascii')}",
+        'printf \'%s\' "$_lk_config_b64" | base64 -d > "$_lk_config_tmp"',
+        f'mv -f "$_lk_config_tmp" "$_lk_remote_dir/{CONFIG_FILENAME}"',
     )
 
 

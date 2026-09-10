@@ -695,7 +695,7 @@ def apply_connector_toggle(
     updated = compute_connector_permissions(info, current, permission, enabled)
     if tuple(updated) == current:
         return
-    rule_key, granted_permissions, schemas = build_account_grant(scope, account, updated)
+    rule_key, granted_permissions, schemas = build_account_grant(scope, account, updated, info.scope_schema)
     if not updated:
         gateway_client.delete_permission_rule(path, current_rule_key or rule_key)
     else:

@@ -64,6 +64,7 @@ from pydantic import JsonValue
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr_latchkey.custom_services import is_custom_service_name
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 # Separator between the base detent scope and the account in a generated rule
@@ -85,6 +86,15 @@ _SCHEMA_REFERENCE_PREFIX: Final[str] = "#/$defs/"
 # generated shape is one level deep; the bound only guards a hand-edited file
 # with a pathological chain (cycles are already handled by the visited set).
 _MAX_SCHEMA_REFERENCE_DEPTH: Final[int] = 16
+
+
+class LatchkeyAccountScopeError(ValueError):
+    """Raised when a grant cannot be assembled into a resolvable shape.
+
+    A ``ValueError`` subclass rather than a ``LatchkeyError`` for the same
+    reason :class:`~imbue.mngr_latchkey.custom_services.CustomServiceError` is
+    one: this module is read by the catalog, which must not depend on ``core``.
+    """
 
 
 class AccountScopeGrant(FrozenModel):
@@ -164,6 +174,7 @@ def build_account_grant(
     scope: str,
     account: str,
     permissions: Sequence[str],
+    base_scope_schema: Mapping[str, JsonValue] | None = None,
 ) -> tuple[str, tuple[str, ...], dict[str, JsonValue]]:
     """Assemble everything needed to write one per-account grant.
 
@@ -172,9 +183,27 @@ def build_account_grant(
     in the file's ``schemas`` object for that key to resolve. Callers hand the
     triple straight to the gateway's ``permissions`` extension, which only
     merges what it is given -- this module is the sole author of the shape.
+
+    ``base_scope_schema`` defines ``scope`` itself. Detent ships a definition
+    for every scope this package used to grant, so the default of ``None``
+    leaves the ``$ref`` to resolve as a builtin. A custom service's scope is
+    not a builtin and exists only where some grant wrote it, so one is
+    required for those: without it the returned schemas reference a ``$def``
+    that the target file may not contain, and an unresolvable reference fails
+    the *entire* permission check for that host, not just this rule. Read it
+    off the catalog entry (:attr:`ServicePermissionInfo.scope_schema`).
     """
+    if base_scope_schema is None and is_custom_service_name(scope):
+        raise LatchkeyAccountScopeError(
+            f"Refusing to build a grant for custom scope {scope!r} without its scope schema: the rule would "
+            "reference a definition the target file need not contain, which fails every permission check on "
+            "that host. Pass the catalog entry's scope_schema.",
+        )
     rule_key = account_scope_key(scope, account)
-    return rule_key, tuple(permissions), {rule_key: build_account_scope_schema(scope, account)}
+    schemas: dict[str, JsonValue] = {rule_key: build_account_scope_schema(scope, account)}
+    if base_scope_schema is not None:
+        schemas[scope] = dict(base_scope_schema)
+    return rule_key, tuple(permissions), schemas
 
 
 def _as_object(value: JsonValue | None) -> Mapping[str, JsonValue] | None:

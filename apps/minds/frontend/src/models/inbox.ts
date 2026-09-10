@@ -115,6 +115,25 @@ export interface AccountsPermissionDetail {
   rationale: string;
 }
 
+export interface CustomServicePermissionDetail {
+  kind: "custom_service";
+  request_id: string;
+  agent_id: string;
+  ws_name: string;
+  domain: string;
+  /** Whether this computer already has the service. Approving then connects
+   * the workspace to it as it is, and `login_url` is the existing sign-in. */
+  is_already_registered: boolean;
+  /** Why the domain deserves a second look, or null for an ordinary public
+   * name. Advisory: the dialog adds a line, and nothing is blocked. */
+  domain_warning: "unreachable" | "local_name" | "ip_address" | "lookalike" | null;
+  /** The origin the connection covers, scheme included: what the dialog shows,
+   * since the scheme decides whether credentials travel encrypted. */
+  base_api_url: string;
+  login_url: string | null;
+  rationale: string;
+}
+
 export interface UnknownScopeDetail {
   kind: "unknown_scope";
   request_id: string;
@@ -136,6 +155,7 @@ export type InboxDetail =
   | FileSharingPermissionDetail
   | WorkspacePermissionDetail
   | AccountsPermissionDetail
+  | CustomServicePermissionDetail
   | UnknownScopeDetail
   | UnsupportedDetail
   | UnavailableDetail;
@@ -478,7 +498,16 @@ export class InboxModel {
    * part of the detail, so it shows up front rather than after a first Approve. */
   manualCredentialsPrompt(): ManualCredentialsPrompt | null {
     const detail = this.detail;
-    if (detail === null || detail.kind !== "predefined" || detail.manual_credentials === null) return null;
+    if (detail === null) return null;
+    if (detail.kind === "custom_service") {
+      // A custom service has no account picker to gate on, and its form cannot
+      // be part of the first render: the service does not exist until Approve
+      // registers it, so it has no credential command to build inputs from
+      // until then. The server asks on the first Approve, and the answer
+      // arrives as feedback.
+      return this.manualCredentialsFeedback;
+    }
+    if (detail.kind !== "predefined" || detail.manual_credentials === null) return null;
     const choice = this.selectedAccountChoice();
     if (choice === null || !choice.is_credential_setup_needed) return null;
     return this.manualCredentialsFeedback ?? detail.manual_credentials;
@@ -534,6 +563,10 @@ export class InboxModel {
       );
     }
     if (detail.kind === "accounts") return true;
+    // A custom service has nothing to choose: one fixed permission on a scope
+    // pinned to one domain. The credential form, when the server has asked for
+    // one, is already covered by the incompleteness check above.
+    if (detail.kind === "custom_service") return true;
     return false;
   }
 
@@ -594,6 +627,11 @@ export class InboxModel {
         "file_path",
         expandSharePathHome(this.filePathValue.trim(), detail.home_dir),
       );
+    } else if (detail.kind === "custom_service") {
+      // The domain is fixed at request time, so the only thing a custom-service
+      // approval can carry is the credentials the server asked for (a service
+      // with no browser sign-in); the first Approve sends none.
+      this.appendManualCredentialFields(form);
     } else {
       // Accounts grants carry no parameters (all-or-nothing approve).
     }

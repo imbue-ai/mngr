@@ -42,23 +42,24 @@ missing or malformed file is a packaging bug; it surfaces as
 :class:`ServiceCatalogError` rather than being silently tolerated.
 """
 
-import threading
 from collections.abc import Mapping
 from functools import cache
 from importlib import resources
+from pathlib import Path
 from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import PrivateAttr
+from pydantic import JsonValue
 from pydantic import TypeAdapter
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey.account_scopes import list_account_grants
 from imbue.mngr_latchkey.account_scopes import resolved_schema_names
+from imbue.mngr_latchkey.core import read_registered_services
+from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 # Package and filename of the bundled catalog. Kept in sync with the copy
@@ -120,6 +121,14 @@ class _ServiceScopeEntry(FrozenModel):
     permissions: tuple[_AvailablePermission, ...] = Field(
         default=(), description="Permissions the user can grant for this scope, each with its summary."
     )
+    scope_schema: Mapping[str, JsonValue] | None = Field(
+        default=None,
+        description=(
+            "Definition of the scope itself, for scopes detent does not ship. Shipped scopes leave "
+            "this unset and resolve as builtins; a custom service carries its domain-pinned schema "
+            "here so a grant naming the scope can define what it refers to."
+        ),
+    )
 
 
 class ServicePermissionInfo(FrozenModel):
@@ -151,6 +160,14 @@ class ServicePermissionInfo(FrozenModel):
         description=(
             "Plain-English summary per permission schema name (Detent's ``$comment``). "
             "Permissions without a summary are omitted; the injected ``any`` never has one."
+        ),
+    )
+    scope_schema: Mapping[str, JsonValue] | None = Field(
+        default=None,
+        description=(
+            "Definition of the scope, for scopes detent does not ship (custom services). "
+            "Pass it to :func:`imbue.mngr_latchkey.account_scopes.build_account_grant` so the "
+            "written grant defines the scope its rule refers to; ``None`` for shipped scopes."
         ),
     )
 
@@ -204,6 +221,7 @@ def _service_info_from_entry(name: str, entry: _ServiceScopeEntry) -> ServicePer
         description=entry.description,
         permission_schemas=permission_schemas,
         description_by_permission_name=description_by_permission_name,
+        scope_schema=entry.scope_schema,
     )
 
 
@@ -247,19 +265,25 @@ def _load_bundled_catalog() -> Mapping[str, tuple[ServicePermissionInfo, ...]]:
     return catalog
 
 
-class ServicesCatalog(MutableModel):
-    """In-memory snapshot of the service catalog, the single access point for the data.
+class ServicesCatalog(FrozenModel):
+    """The single access point for the service catalog: what this install can reach, right now.
 
     Both consumers go through this class: the desktop permission dialog
     (:meth:`get` / :meth:`get_by_scope` / :meth:`as_mapping`) and the
     credential-sync path (:meth:`services_for_permissions` /
     :meth:`all_service_names`).
 
-    Production constructs ``ServicesCatalog()`` and the bundled
-    ``services.json`` is read lazily on first access (and memoized across
-    instances via the module-level cache). Tests pass an explicit
-    ``catalog_override`` -- typically via :meth:`from_catalog_payload` --
-    to avoid depending on the shipped file.
+    It holds no catalog of its own -- every accessor calls :meth:`_load`, which
+    answers from the file as it stands at that moment. The object is therefore
+    a *question*, not a snapshot, and it is frozen because there is nothing
+    left to mutate. That is what lets minds hold one of these for the life of
+    the process while the user keeps creating services: there is no remembered
+    answer that could disagree with the file, and so nothing to invalidate.
+
+    Production constructs ``ServicesCatalog()``; the shipped half is read and
+    validated once per process by :func:`_load_bundled_catalog`. Tests pass an
+    explicit ``catalog_override`` -- typically via :meth:`from_catalog_payload`
+    -- to avoid depending on the shipped file.
 
     Unlike the previous gateway-backed implementation, there is no fetch
     that can fail at runtime: the catalog is local package data, so a
@@ -269,23 +293,60 @@ class ServicesCatalog(MutableModel):
 
     catalog_override: Mapping[str, tuple[ServicePermissionInfo, ...]] | None = Field(
         default=None,
-        description="Explicit catalog for tests; when None, the bundled services.json is read lazily.",
+        description="Explicit catalog for tests; when None, the bundled services.json is used.",
+    )
+    latchkey_directory: Path | None = Field(
+        default=None,
+        description=(
+            "Latchkey directory whose ``config.json`` carries the user-created custom services to "
+            "overlay on the shipped catalog. When None the catalog is the shipped file alone -- which "
+            "is what a surface wants when it means 'the services this build ships' (the onboarding "
+            "carousel) rather than 'the services this install can reach'."
+        ),
     )
 
-    _by_service_name: dict[str, tuple[ServicePermissionInfo, ...]] | None = PrivateAttr(default=None)
-    _by_scope: dict[str, ServicePermissionInfo] | None = PrivateAttr(default=None)
-    _load_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    def _load(self) -> dict[str, tuple[ServicePermissionInfo, ...]]:
+        """Return the catalog keyed by service name, as it is *right now*.
 
-    def _ensure_loaded(self) -> None:
-        """Populate the in-memory indexes once. Thread-safe."""
-        if self._by_service_name is not None:
-            return
-        with self._load_lock:
-            if self._by_service_name is not None:
-                return
-            catalog = dict(self.catalog_override if self.catalog_override is not None else _load_bundled_catalog())
-            self._by_service_name = catalog
-            self._by_scope = {info.scope: info for infos in catalog.values() for info in infos}
+        Nothing is stored on the instance, so there is no cached view to go
+        stale and nothing to invalidate. That matters because this object
+        outlives the thing it describes: minds builds one catalog when it
+        starts and keeps it for the life of the process, while the user's
+        approvals keep rewriting the file the custom half comes from. A
+        remembered answer would leave a just-approved service invisible on
+        every surface until a restart.
+
+        The expensive half is remembered where it is actually constant:
+        :func:`_load_bundled_catalog` reads and validates the shipped file once
+        per process. What this does per call is copy that mapping, read one
+        small JSON file, and project however many custom services it holds --
+        usually none.
+        """
+        catalog = dict(self.catalog_override if self.catalog_override is not None else _load_bundled_catalog())
+        if self.latchkey_directory is None:
+            return catalog
+        registered = read_registered_services(self.latchkey_directory)
+        catalog.update(self._custom_service_catalog(registered, frozenset(catalog)))
+        return catalog
+
+    def _load_by_scope(self) -> dict[str, ServicePermissionInfo]:
+        """Return the same catalog indexed by Detent scope rather than service name."""
+        return {info.scope: info for infos in self._load().values() for info in infos}
+
+    def _custom_service_catalog(
+        self, registered_services: Mapping[str, JsonValue], shipped_service_names: frozenset[str]
+    ) -> Mapping[str, tuple[ServicePermissionInfo, ...]]:
+        """Project a ``registeredServices`` block into the services to overlay.
+
+        The overlay only ever *adds* names. A custom service cannot shadow a
+        shipped one, because its name carries a prefix no shipped service uses
+        and the request that creates it is refused when any catalog scope
+        already pins its domain.
+        """
+        payload = custom_service_catalog_payload(registered_services, shipped_service_names)
+        if not payload:
+            return {}
+        return service_infos_from_catalog_payload(payload)
 
     def get(self, service_name: str) -> tuple[ServicePermissionInfo, ...]:
         """Return the catalog entries for the raw service name (empty tuple if unknown).
@@ -293,9 +354,7 @@ class ServicesCatalog(MutableModel):
         A service may expose more than one Detent scope, so this returns
         one :class:`ServicePermissionInfo` per scope.
         """
-        self._ensure_loaded()
-        assert self._by_service_name is not None
-        return self._by_service_name.get(service_name, ())
+        return self._load().get(service_name, ())
 
     def get_by_scope(self, scope: str) -> ServicePermissionInfo | None:
         """Return the catalog entry whose ``scope`` schema matches, or ``None``.
@@ -304,9 +363,7 @@ class ServicesCatalog(MutableModel):
         ``slack-api``), not the service name, so dialog rendering looks up
         the matching entry by scope.
         """
-        self._ensure_loaded()
-        assert self._by_scope is not None
-        return self._by_scope.get(scope)
+        return self._load_by_scope().get(scope)
 
     def list_service_account_grants(self, config: LatchkeyPermissionsConfig) -> tuple[ServiceAccountGrant, ...]:
         """Return every per-account service grant in ``config``, in file order.
@@ -321,11 +378,10 @@ class ServicesCatalog(MutableModel):
         account Y, these permissions"; callers filter or group the result rather
         than looking at rule keys themselves.
         """
-        self._ensure_loaded()
-        assert self._by_scope is not None
+        by_scope = self._load_by_scope()
         grants: list[ServiceAccountGrant] = []
         for grant in list_account_grants(config):
-            info = self._by_scope.get(grant.scope)
+            info = by_scope.get(grant.scope)
             if info is None:
                 logger.debug("Ignoring grant for non-catalog scope {} in permissions file", grant.scope)
                 continue
@@ -342,15 +398,11 @@ class ServicesCatalog(MutableModel):
 
     def as_mapping(self) -> Mapping[str, tuple[ServicePermissionInfo, ...]]:
         """Return the catalog as a read-only mapping keyed by service name."""
-        self._ensure_loaded()
-        assert self._by_service_name is not None
-        return self._by_service_name
+        return self._load()
 
     def all_service_names(self) -> frozenset[str]:
         """Return every canonical service name present in the catalog."""
-        self._ensure_loaded()
-        assert self._by_service_name is not None
-        return frozenset(self._by_service_name.keys())
+        return frozenset(self._load())
 
     def services_for_permissions(self, config: LatchkeyPermissionsConfig) -> frozenset[str]:
         """Resolve the canonical service names a permissions config grants access to.
@@ -374,15 +426,14 @@ class ServicesCatalog(MutableModel):
         Returns an empty set for a deny-all config (no rules), which is the
         safe default: a host with no grants has no credentials shipped to it.
         """
-        self._ensure_loaded()
-        assert self._by_scope is not None
+        by_scope = self._load_by_scope()
         rule_keys = [next(iter(rule)) for rule in config.rules if len(rule) == 1]
         schema_names = frozenset(
             name for rule_key in rule_keys for name in resolved_schema_names(rule_key, config.schemas)
         )
         if _WILDCARD_SCOPE in schema_names:
             return self.all_service_names()
-        return frozenset(self._by_scope[name].name for name in schema_names if name in self._by_scope)
+        return frozenset(by_scope[name].name for name in schema_names if name in by_scope)
 
     @classmethod
     def from_catalog_payload(cls, payload: Mapping[str, object]) -> "ServicesCatalog":

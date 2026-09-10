@@ -191,7 +191,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
     available_path_schema = schemas["latchkey-self-read-available-permissions"]["properties"]["path"]
     assert available_path_schema == {
         "type": "string",
-        "pattern": r"^/permissions/available/[a-z0-9][a-z0-9-]*$",
+        "pattern": r"^/permissions/available/[a-z0-9][a-z0-9_-]*$",
     }
     # Every agent may read the (non-agent-scoped) API schema document by default:
     # a GET pinned to the proxy's inbound /api/schema path. It rides the

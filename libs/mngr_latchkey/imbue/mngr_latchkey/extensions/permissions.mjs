@@ -93,9 +93,13 @@ const AVAILABLE_SERVICES_PATH = resolve(
   AVAILABLE_SERVICES_FILE,
 );
 // Service names in services.json are URL-path segments; constrain them
-// to lowercase letters, digits, and ``-`` so a caller cannot smuggle
-// path-traversal segments or other surprises into the lookup key.
-const VALID_SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+// to lowercase letters, digits, ``-`` and ``_`` so a caller cannot smuggle
+// path-traversal segments or other surprises into the lookup key. This is
+// latchkey's own service-name grammar: ``_`` is what a custom service's
+// derived name carries (``custom_https_api_example_com``), and excluding it made
+// this endpoint unable to describe exactly the services an agent has to ask
+// about by scope.
+const VALID_SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 
 // Detent's catch-all *permission* schema. It matches every request, so a
 // rule like ``{"linear-api": ["any"]}`` grants all access under that
@@ -184,7 +188,7 @@ class InvalidServiceNameError extends PermissionsExtensionError {
   constructor(rawValue) {
     super(
       400,
-      `Invalid service name '${rawValue}': must match /^[a-z0-9][a-z0-9-]*$/.`,
+      `Invalid service name '${rawValue}': must match /^[a-z0-9][a-z0-9_-]*$/.`,
     );
     this.name = 'InvalidServiceNameError';
   }

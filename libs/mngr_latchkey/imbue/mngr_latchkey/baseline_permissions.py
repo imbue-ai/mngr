@@ -27,21 +27,21 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 # every agent inherits. Defined inline (in the agent's permissions file)
 # rather than relying on detent's built-in catalog so the names are
 # self-contained and the grant is exactly the endpoints we want.
-_GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
+GATEWAY_SELF_HOST: Final[str] = "latchkey-self.invalid"
 SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 _PERM_CREATE_PERMISSION_REQUEST: Final[str] = "latchkey-self-create-permission-request"
 _PERM_READ_SELF_PERMISSIONS: Final[str] = "latchkey-self-read-self-permissions"
 _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-permissions"
 
 # Regex matching ``/permissions/available/<service_name>`` where the
-# service name segment is one or more lowercase letters, digits, and
-# hyphens (starting with a letter or digit). Mirrors the gateway
+# service name segment is one or more lowercase letters, digits, hyphens
+# and underscores (starting with a letter or digit). Mirrors the gateway
 # ``permissions.mjs`` extension's own ``VALID_SERVICE_NAME_PATTERN`` so
 # the agent baseline cannot reach paths the extension itself would
 # refuse to serve. The trailing ``$`` rules out the collection endpoint
 # at ``/permissions/available`` (no segment): the baseline only opens
 # up the per-service catalog endpoint.
-_AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9-]*$"
+_AVAILABLE_PERMISSIONS_PATH_PATTERN: Final[str] = r"^/permissions/available/[a-z0-9][a-z0-9_-]*$"
 
 # Paths under this prefix are only allowed if the agent ID in the path is in the allow list (expressed via anyOf below).
 MINDS_API_PROXY_PER_AGENT_PATH_PREFIX: Final[str] = "/minds-api-proxy/api/v1/agents/"
@@ -167,7 +167,7 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
     schemas={
         _SCOPE_MINDS_API_PROXY_REPORT: {
             "properties": {
-                "domain": {"const": _GATEWAY_SELF_HOST},
+                "domain": {"const": GATEWAY_SELF_HOST},
                 "method": {"const": "POST"},
                 "path": {
                     "type": "string",
@@ -188,7 +188,7 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
         },
         SCOPE_MINDS_API_PROXY_PER_AGENT_UNAUTHORIZED: {
             "properties": {
-                "domain": {"const": _GATEWAY_SELF_HOST},
+                "domain": {"const": GATEWAY_SELF_HOST},
                 "path": {
                     "type": "string",
                     "pattern": _MINDS_API_PROXY_PER_AGENT_PATH_PATTERN,
@@ -210,7 +210,7 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
             "required": ["path"],
         },
         SCOPE_LATCHKEY_SELF: {
-            "properties": {"domain": {"const": _GATEWAY_SELF_HOST}},
+            "properties": {"domain": {"const": GATEWAY_SELF_HOST}},
             "required": ["domain"],
         },
         _PERM_CREATE_PERMISSION_REQUEST: {

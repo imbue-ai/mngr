@@ -150,6 +150,130 @@ second gateway URL or a different agent skill.
    response event log via `/ui/api/inbox/resolutions`. Once the
    transcript's own classified resolution lands, it takes over.
 
+## Creating a connection an agent asks for
+
+Most third-party services come from Minds' shipped catalog. When an agent needs
+a domain that catalog has no entry for, it can ask for the connection to be
+*created*: it submits a `custom-service` permission request naming the domain
+and, optionally, how the service signs in through a browser. One Approve both creates
+the connection and grants the asking machine access to it.
+
+The dialog is the simplest of the kinds, and deliberately so:
+
+* It is headed by a globe and "Storing credentials for **the origin**" -- there is no display-name field
+  on the request, here or on the wire. A custom service is labelled by its
+  domain everywhere it is named, because that is the one string that cannot
+  misdescribe what the connection reaches. The agent's rationale is the only
+  agent-authored text on screen, and it appears under **Reason** as the agent's
+  claim rather than as the app's description of the service.
+* There is **no account picker**: the workspace's machine has no account for
+  the service yet, whether the service is being created or this computer
+  already has it, and the sign-in (or the typed credentials) establishes the
+  one the grant rides on.
+* There is **no permission editor and no "Adjust" link**: the grant is
+  all-or-nothing on a scope already pinned to a single domain, so there is
+  nothing to narrow.
+* When the request carries a browser sign-in, the dialog names the URL the
+  browser will open, and Approve reads "Sign in & approve".
+* When it does not, credentials still have to be established -- "no sign-in
+  flow" does not mean "no credentials", since Latchkey refuses a request to a
+  registered service with nothing stored, so a domain with genuinely no
+  authentication is not reachable this way. Unlike a catalog service, the form
+  cannot be part of the first render: the service does not exist yet, so it has
+  no credential command to build inputs from. The first Approve therefore
+  registers it and comes back asking, and the second supplies the values -- the
+  same two-step a catalog service falls into when its credentials turn out to
+  need typing (see [Manual credential entry](#manual-credential-entry)). A
+  rejected value re-shows the form with the reason, rather than failing the
+  request.
+
+Approving registers the service in Latchkey's own `config.json` unless this
+computer already has it, connects an account on the workspace's machine, and
+then writes the grant -- the account-scoped rule plus the scope's own
+definition, since a custom scope is not a Detent builtin -- into the agent's
+per-host permissions file through `POST /permissions/rules`, the same write a
+predefined grant makes, and drops the gateway's pending record. The gateway's
+`permission-requests` extension decides nothing about a custom service beyond
+the shape of the request. A failure at any step leaves the request
+**pending** with no response event, exactly as a failed predefined approval
+does, so the user can fix the problem and click Approve again and the agent is
+never told it was denied. Denying registers nothing and leaves no trace of the
+proposed service.
+
+A second workspace asking for an origin some earlier one connected is the
+common case, not an error: its own gateway has no service for the origin, so
+`custom-service` is the only request it can make. The dialog then says the
+connection already exists on this computer and names the sign-in of the
+registration this computer has -- the request's `login` counts only for a
+service being created -- and approving connects that workspace to the service
+as it is.
+
+What the request may name is deliberately wide: a private network may call
+its services whatever it likes, and the dialog shows exactly which origin is
+being approved. The domain is a bare ASCII hostname -- dot-separated labels of
+letters, digits and hyphens, so a single label, a private suffix or an IPv4
+address are all fine, and a non-ASCII name arrives as its punycode -- with
+three refusals: anything beyond a bare host (a scheme, port, path, underscore
+or wildcard), a name longer than DNS allows, and the gateway's own address. The
+request names the scheme, `https` or `http` -- the latter for a service on
+a private network with no certificate; the dialog shows the resulting origin rather than the bare domain,
+and says outright when it is plain http, since that is the difference between
+credentials sent encrypted and in the clear. The grant pins both the domain and
+the scheme, so it covers exactly the origin the dialog showed.
+
+A browser sign-in is a `login` object described the way `latchkey services
+register` takes it: `url`, `flow` (`cookie-capture` or `token-capture`) and
+`flow_params`, the flow's own parameters keyed as latchkey keys them
+(`cookieKeys`/`cookieUrl`, `tokenUrl`/`tokenField`/`header`); all three are
+required inside it, and the object is omitted for a service with no browser
+sign-in. It is not passed through blind: the gateway and the
+desktop both deserialize the parameters against the flow's schema and refuse
+an unknown key, and every URL among them -- the login page, `cookieUrl`,
+`tokenUrl` -- may use either scheme but must be on the approved domain or a
+subdomain of it, so where the browser goes and where the captured credentials
+apply is always what the dialog named. What passes is registered exactly as
+the agent sent it.
+
+Some valid names still get a warning line in the dialog, in place of the old
+hard refusals: a reserved name nothing answers to (`.invalid`, `.test`,
+`.example`, `example.com` and its siblings, `.onion`), a name the workspace
+machine's own network resolves (`localhost`, a single label, `.local`,
+`.internal`, `.lan`, `.corp`, `.home`, `.home.arpa`), any IP address, and a
+punycode label that could look like another site. The classification lives in
+`custom_services.domain_warning` and is advisory: nothing is blocked, and the
+line is worded as "make sure you know what this is", since a private network
+calls its services what it likes.
+
+An agent is not supposed to ask for a domain some *other* service already
+covers, and does not need Minds to stop it: Latchkey answers that question
+first. A request to a domain no service covers fails with `No service matches
+URL`, and that is the only error the workspace's latchkey skill treats as
+grounds for asking to create a connection; an error naming a service sends it
+to an ordinary permission request instead. Were one to slip through anyway, the
+duplicate is inert rather than dangerous -- Detent takes the first rule whose
+scope matches, so the second never applies.
+
+Once created, a custom service is an ordinary connection: it appears in the
+Permissions tab and on the Connectors page with its account, and its access can
+be revoked there. Latchkey re-reads its registrations on every request, so the
+new service is usable immediately, with no gateway restart.
+
+A remote workspace's machine keeps its own `config.json`, seeded from this
+computer's when the machine was provisioned and never read back -- so a service
+created afterwards exists only here until something carries it over. Every
+connect does, the way the policy travels: the single script that merges the
+credential into the machine's store first installs this computer's projection of
+that file -- the hidden built-in services and every registered service, bundled
+and custom -- as a whole snapshot, ahead of the credential, because a gateway
+with no entry for a service cannot route a request to it. Nothing else on a
+machine writes that file (upstream latchkey touches it only from `services
+register` and from browser discovery, neither of which runs on a VPS), so the
+newest snapshot is always right, and a service deregistered here disappears from
+the machine on its next connect. The snapshot never includes this computer's own
+browser or keyring settings. A custom service this computer has no registration
+for is refused rather than pushed, since the machine could never use its
+credentials.
+
 ## Manual credential entry
 
 A service latchkey cannot sign in to through a browser advertises an
@@ -686,7 +810,9 @@ Agents are expected to:
 * Detect the three blocked outcomes from the gateway response.
 * POST a permission request to the gateway's `permission-requests`
   extension (`POST /permission-requests` with `scope`, `permissions`,
-  and `rationale`).
+  and `rationale`) -- or, for a domain the catalog has no service for, a
+  `custom-service` request naming the domain (see [Creating a connection an
+  agent asks for](#creating-a-connection-an-agent-asks-for)).
 * Stop the turn and wait. The agent will receive an `mngr message` from
   the desktop with the decision and can decide whether to retry.
 

@@ -374,9 +374,10 @@ def seed_connector_grant(
     scope: str,
     account: str,
     permissions: tuple[str, ...],
+    base_scope_schema: Mapping[str, JsonValue] | None = None,
 ) -> None:
     """Write the per-host permissions file production writes for a connector grant."""
-    rule_key, granted, schemas = build_account_grant(scope, account, permissions)
+    rule_key, granted, schemas = build_account_grant(scope, account, permissions, base_scope_schema)
     save_permissions(
         permissions_path_for_host(plugin_data_dir, host_id),
         LatchkeyPermissionsConfig(rules=({rule_key: list(granted)},), schemas=schemas),

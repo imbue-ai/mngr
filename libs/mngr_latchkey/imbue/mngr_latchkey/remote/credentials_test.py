@@ -1,3 +1,4 @@
+import json
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -7,7 +8,9 @@ from pydantic import SecretStr
 
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
@@ -466,3 +469,56 @@ def test_a_grant_to_a_machine_this_computer_never_provisioned_is_refused(tmp_pat
         credentials.connect_service_with_permissions("slack", "a@example.com", SLACK_GRANTED)
 
     assert as_stub(outer).recorded == []
+
+
+def _desktop_config(credentials: MachineCredentials, registered_services: dict[str, object]) -> None:
+    (credentials.latchkey.latchkey_directory / CONFIG_FILENAME).write_text(
+        json.dumps(
+            {
+                # What a desktop's file also carries, and a machine must not:
+                # the browser this computer signs in with.
+                "browser": {"executablePath": "/Applications/Chromium.app", "source": "system"},
+                "settings": {"keyringServiceName": "minds-desktop"},
+                "registeredServices": registered_services,
+            }
+        )
+    )
+
+
+def test_connecting_carries_this_computers_half_of_the_config_ahead_of_the_credential(tmp_path: Path) -> None:
+    """A machine's config is seeded at provisioning and never read back, so every connect carries it fresh.
+
+    A whole snapshot, like the policy: the hidden built-in services and every
+    registered service, bundled and custom -- but nothing of this computer's
+    own file beyond that, whose browser and keyring settings belong here.
+    """
+    host_id = HostId.generate()
+    outer = stub_machine({})
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+    _desktop_config(credentials, {"custom_example_com": build_custom_service_registration("example.com", "https")})
+
+    credentials.connect_service("slack", "a@example.com")
+
+    machine_config = json.loads(as_stub(outer).config_json or "")
+    assert set(machine_config) == {"settings", "registeredServices"}
+    assert "notion" in machine_config["settings"]["hideBuiltinServices"]
+    assert "keyringServiceName" not in machine_config["settings"]
+    assert machine_config["registeredServices"]["custom_example_com"] == {"baseApiUrl": "https://example.com/"}
+    assert "claude-ai" in machine_config["registeredServices"]
+    script = as_stub(outer).recorded[-1].command
+    assert script.index(f"/{CONFIG_FILENAME}") < script.index("auth re-encrypt")
+    assert as_stub(outer).machine_accounts == {"slack": ["a@example.com"]}
+
+
+def test_connecting_a_custom_service_this_computer_has_not_registered_is_refused(tmp_path: Path) -> None:
+    # A credential the machine's gateway could never route a request to is
+    # worse than no credential: it reads as connected and is silently unusable.
+    host_id = HostId.generate()
+    outer = stub_machine({})
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"custom_example_com": [""]})
+    _desktop_config(credentials, {})
+
+    with pytest.raises(MachineCredentialsError, match="no registration"):
+        credentials.connect_service("custom_example_com", "")
+
+    assert as_stub(outer).latchkey_commands == []

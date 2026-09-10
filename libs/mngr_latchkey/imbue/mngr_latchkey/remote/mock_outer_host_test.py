@@ -256,6 +256,12 @@ class StubOuter(MutableModel):
                 return CommandResult(
                     stdout="", stderr="Error: the machine runs under a different key\n", success=False
                 )
+        config_b64 = variable_by_name.get("_lk_config_b64")
+        if config_b64 is not None:
+            config = base64.b64decode(config_b64)
+            remote_dir = variable_by_name["_lk_remote_dir"].replace("$HOME", self.home)
+            self.remote_files[f"{remote_dir}/{CONFIG_FILENAME}"] = config
+            self.config_json = config.decode("utf-8")
         bundle_b64 = variable_by_name.get("_lk_bundle_b64")
         if bundle_b64 is not None:
             self._merge_uploaded_bundle(

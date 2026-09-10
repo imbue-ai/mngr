@@ -14,9 +14,13 @@ from pydantic import SecretStr
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.core import merge_minds_latchkey_config
+from imbue.mngr_latchkey.custom_services import LoginFlow
+from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR
 from imbue.mngr_latchkey.remote._mirror import latchkey_for_machine
@@ -84,12 +88,16 @@ class _FakeMachine:
     def entries(self) -> list[str]:
         return sorted(path.name for path in self.latchkey_dir.iterdir())
 
+    def config(self) -> dict[str, object] | None:
+        config_path = self.latchkey_dir / CONFIG_FILENAME
+        return dict(json.loads(config_path.read_text())) if config_path.is_file() else None
 
-def _merge(machine: _FakeMachine, bundle: bytes, account: str) -> _CredentialMerge:
+
+def _merge(machine: _FakeMachine, bundle: bytes, account: str, service_name: str = "slack") -> _CredentialMerge:
     return _CredentialMerge(
         machine_key_file=machine.key_file,
         machine_key_sha256=hashlib.sha256(MACHINE_KEY.encode("utf-8")).hexdigest(),
-        service_name="slack",
+        service_name=service_name,
         account=account,
         bundle=bundle,
         data_format_version="2",
@@ -559,3 +567,68 @@ def test_a_machine_script_embeds_no_secret_key(tmp_path: Path) -> None:
 
     assert MACHINE_KEY not in script
     assert hashlib.sha256(MACHINE_KEY.encode("utf-8")).hexdigest() in script
+
+
+_CUSTOM_CONFIG = merge_minds_latchkey_config(
+    None,
+    {
+        "custom_api_example_com": build_custom_service_registration(
+            "api.example.com",
+            "https",
+            login_url="https://api.example.com/login",
+            login_flow=LoginFlow.COOKIE_CAPTURE,
+            login_flow_params={"cookieKeys": ["session", "csrf"], "cookieUrl": "https://api.example.com/"},
+        )
+    },
+)
+
+
+def test_the_grant_script_installs_the_config_ahead_of_the_credential(tmp_path: Path) -> None:
+    """The config travels like the policy -- a whole snapshot, installed atomically -- and lands first.
+
+    A gateway with no entry for a service cannot route a request to it, so a
+    credential the machine held for a service its config does not name would
+    be one it could never use.
+    """
+    machine = _FakeMachine(tmp_path)
+    machine.key_file.write_text(MACHINE_KEY)
+    machine.hold({})
+    script = build_machine_script(
+        _MachineScriptInputs(
+            config_json=_CUSTOM_CONFIG,
+            credential_change=_merge(
+                machine,
+                store_document({"custom_api_example_com": ["me@example.com"]}),
+                "me@example.com",
+                service_name="custom_api_example_com",
+            ),
+            permissions_json=None,
+        )
+    )
+
+    completed = machine.run(script)
+
+    assert completed.returncode == 0, completed.stderr
+    assert machine.config() == json.loads(_CUSTOM_CONFIG)
+    assert (machine.latchkey_dir / CONFIG_FILENAME).stat().st_mode & 0o777 == 0o600
+    assert machine.store_accounts() == {"custom_api_example_com": ["me@example.com"]}
+    lines = script.splitlines()
+    assert next(i for i, line in enumerate(lines) if f"/{CONFIG_FILENAME}" in line and "mv -f" in line) < next(
+        i for i, line in enumerate(lines) if "auth re-encrypt" in line
+    )
+
+
+def test_a_script_without_a_config_leaves_the_machines_alone(tmp_path: Path) -> None:
+    machine = _FakeMachine(tmp_path)
+    machine.key_file.write_text(MACHINE_KEY)
+    machine.hold({})
+    script = build_machine_script(
+        _MachineScriptInputs(
+            credential_change=_merge(machine, store_document({"slack": ["a@example.com"]}), "a@example.com"),
+            permissions_json=None,
+        )
+    )
+
+    assert CONFIG_FILENAME not in script
+    assert machine.run(script).returncode == 0
+    assert machine.config() is None

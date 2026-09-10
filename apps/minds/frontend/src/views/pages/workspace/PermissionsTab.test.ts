@@ -854,7 +854,9 @@ describe("PermissionsTab service marks", () => {
     const nav = withAttr(rerender(), "data-perm-nav")[0];
 
     expect(marks(nav)).toHaveLength(0);
-    expect(collectVnodes(nav).some((node) => attrsOf(node).name === "box")).toBe(true);
+    // A globe, not the box "Local files" draws further down the same nav: a
+    // service with no usable mark should not read as the same kind of entry.
+    expect(collectVnodes(nav).some((node) => attrsOf(node).name === "globe")).toBe(true);
   });
 });
 

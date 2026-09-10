@@ -38,6 +38,7 @@ from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import Self
 
 import httpx
 from loguru import logger
@@ -50,6 +51,9 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.custom_services import LoginFlow
+from imbue.mngr_latchkey.custom_services import Scheme
+from imbue.mngr_latchkey.custom_services import validate_login_flow
 from imbue.mngr_latchkey.forward_supervisor import is_forward_owned_by
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
@@ -176,6 +180,57 @@ class AccountsRequestPayload(FrozenModel):
     """
 
 
+class CustomServiceLogin(FrozenModel):
+    """The browser sign-in a ``custom-service`` request asks for, as ``latchkey services register`` takes it.
+
+    ``url``, ``flow`` and ``flow_params`` are the CLI's ``--login-url``,
+    ``--login-flow`` and ``--login-flow-params``: one schema for the
+    agent-facing API and the CLI. The parameters are validated against the
+    flow's schema (see :func:`validate_login_flow`) and registered verbatim.
+    """
+
+    url: str = Field(description="Page the browser opens for the user to sign in.")
+    flow: LoginFlow = Field(description="Which generic browser sign-in runs at that page.")
+    flow_params: dict[str, JsonValue] = Field(description="The flow's parameters, keyed as latchkey keys them.")
+
+
+class CustomServiceRequestPayload(FrozenModel):
+    """Payload for ``type == "custom-service"`` permission requests.
+
+    A request to create a latchkey service for a domain latchkey has no entry
+    for, *and* to grant the asking workspace access to it, in one decision.
+
+    There is deliberately no display-name field. A custom service is labelled by
+    its domain everywhere it is named, because that is the one string that cannot
+    misdescribe what the connection reaches -- an agent able to name it could
+    present a tracker as a familiar product. The gateway rejects a smuggled label
+    rather than ignoring it, so this model simply has nowhere to put one.
+    """
+
+    domain: str = Field(description="Hostname the service covers; also its label everywhere it is named.")
+    scheme: Scheme = Field(
+        description=(
+            "Scheme the service is reached over. The dialog shows the resulting origin, and says so when it is "
+            "plain http."
+        ),
+    )
+    login: CustomServiceLogin | None = Field(
+        default=None,
+        description=(
+            "The browser sign-in, or None when the service has none -- which means the user supplies a "
+            "token through the dialog's credential form, not that the service needs no credentials."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _login_describes_one_flow(self) -> Self:
+        # CustomServiceError is a ValueError, which is what pydantic turns into
+        # a validation error, so it propagates as-is.
+        if self.login is not None:
+            validate_login_flow(self.domain, self.login.url, self.login.flow, self.login.flow_params)
+        return self
+
+
 class PermissionEffect(FrozenModel):
     """Pre-computed patch the gateway will splice into ``target`` when a request is approved.
 
@@ -210,6 +265,7 @@ REQUEST_TYPE_PREDEFINED: Final[str] = "predefined"
 REQUEST_TYPE_FILE_SHARING: Final[str] = "file-sharing"
 REQUEST_TYPE_WORKSPACE: Final[str] = "workspace"
 REQUEST_TYPE_ACCOUNTS: Final[str] = "accounts"
+REQUEST_TYPE_CUSTOM_SERVICE: Final[str] = "custom-service"
 
 # Maps the wire ``request_type`` to its payload model, so
 # ``StreamedPermissionRequest`` selects the variant deterministically instead of
@@ -220,6 +276,7 @@ _PAYLOAD_CLASS_BY_REQUEST_TYPE: Final[Mapping[str, type[FrozenModel]]] = {
     REQUEST_TYPE_FILE_SHARING: FileSharingRequestPayload,
     REQUEST_TYPE_WORKSPACE: WorkspaceRequestPayload,
     REQUEST_TYPE_ACCOUNTS: AccountsRequestPayload,
+    REQUEST_TYPE_CUSTOM_SERVICE: CustomServiceRequestPayload,
 }
 
 
@@ -227,7 +284,7 @@ class StreamedPermissionRequest(FrozenModel):
     """Single JSONL record produced by ``GET /permission-requests``.
 
     The on-disk schema is versioned (``permission_requests/v3``). The ``payload``
-    field is one of four type-specific variants. They are *not* all
+    field is one of five type-specific variants. They are *not* all
     shape-disjoint -- ``workspace`` and ``accounts`` payloads both validate
     against an empty object (every field defaulted / no fields) -- so the variant
     is selected up front from the sibling ``request_type`` by
@@ -241,12 +298,16 @@ class StreamedPermissionRequest(FrozenModel):
     request_type: str = Field(
         description=(
             "Wire kind of the request (``predefined`` / ``file-sharing`` / ``workspace`` / "
-            "``accounts``). This is the authoritative discriminator: the matching ``payload`` "
+            "``accounts`` / ``custom-service``). This is the authoritative discriminator: the matching ``payload`` "
             "variant is selected from it before validation."
         ),
     )
     payload: (
-        PredefinedRequestPayload | FileSharingRequestPayload | WorkspaceRequestPayload | AccountsRequestPayload
+        PredefinedRequestPayload
+        | FileSharingRequestPayload
+        | WorkspaceRequestPayload
+        | AccountsRequestPayload
+        | CustomServiceRequestPayload
     ) = Field(description="Type-specific payload; selected by ``request_type`` then dispatched with ``isinstance``.")
 
     @model_validator(mode="before")

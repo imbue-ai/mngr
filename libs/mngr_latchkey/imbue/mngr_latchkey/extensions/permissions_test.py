@@ -233,6 +233,19 @@ def test_available_for_unknown_service_returns_404(node_extension: str) -> None:
     assert status == 404
 
 
+def test_available_accepts_a_custom_service_name(node_extension: str) -> None:
+    """A ``custom_``-prefixed name is a legal service name, not a malformed one.
+
+    Custom services are exactly the ones an agent cannot know the scopes of in
+    advance, so this endpoint has to be able to describe them. 404 (no such
+    service in this catalog) rather than 400 (that is not a service name) is
+    what proves the underscore is accepted.
+    """
+    status, _ = _get_json(f"{node_extension}/permissions/available/custom_api_example_com")
+
+    assert status == 404
+
+
 def _post_json(url: str, body: object) -> tuple[int, object]:
     data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})

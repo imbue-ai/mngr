@@ -1216,12 +1216,19 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         we hand all three over so the grant applies to ``account`` and to no
         other account of the service.
 
+        A custom service's scope is not a detent builtin, so the grant also has
+        to carry the scope's own definition or the rule would reference a
+        ``$def`` this file need not have -- the catalog entry supplies it.
+
         Writes this computer's canonical copy only; ``carry_grant_to_machine``
         is what pushes the result (with the credential it rides on) to a remote
         workspace's own machine.
         """
         path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-        rule_key, permissions, schemas = build_account_grant(scope, account, granted_permissions)
+        info = self.services_catalog.get_by_scope(scope)
+        rule_key, permissions, schemas = build_account_grant(
+            scope, account, granted_permissions, info.scope_schema if info is not None else None
+        )
         self.gateway_client.set_permission_rule(
             permissions_file_path=path,
             rule_key=rule_key,
