@@ -188,6 +188,13 @@ class LimaSliceVpsClient(VpsClientInterface):
             )
         return result.returncode, result.stdout, result.stderr
 
+    def run_in_vm_as_root(
+        self, vm_name: str, command: str, *, timeout: float, label: str, is_streaming: bool = False
+    ) -> tuple[int | None, str, str]:
+        """Run a root shell command inside a slice VM through the box's lima user; return (returncode, stdout, stderr)."""
+        remote_command = f"limactl shell --workdir / {shlex.quote(vm_name)} sudo bash -c {shlex.quote(command)}"
+        return self.run_on_box(remote_command, timeout=timeout, label=label, is_streaming=is_streaming)
+
     def _best_effort_destroy(self, instance_name: str) -> None:
         """Tear down a half-reserved instance + its disk after a failed reserve/start.
 
