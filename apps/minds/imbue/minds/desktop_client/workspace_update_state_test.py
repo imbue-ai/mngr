@@ -519,6 +519,79 @@ def test_a_machine_that_just_started_is_re_read(tmp_path: Path, root_concurrency
     assert detector.store.get(agent_id).availability is UpdateAvailability.UP_TO_DATE
 
 
+@pytest.mark.witnesses("workspace-updates.read-held-while-unreadable")
+def test_a_machine_that_became_unreadable_keeps_the_version_it_was_read_at(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Its git cannot move while nothing runs in it, and the label is only its birth version.
+
+    Pressing Update on a running machine announces it as STARTING before the
+    no-op start returns; the badge must not drop to the create-time version for
+    the length of that announcement.
+    """
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(
+        url_by_agent_and_service={},
+        host_state_by_agent={agent_id: HostState.RUNNING},
+        label_by_agent={str(agent_id): "minds-v0.3.10"},
+    )
+    caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.4.1"})
+    detector = _detector(tmp_path, resolver, caller, root_concurrency_group)
+    detector.run_pass()
+
+    resolver.host_state_by_agent = {agent_id: HostState.STARTING}
+    detector.run_pass()
+
+    state = detector.store.get(agent_id)
+    assert state.current_version == "minds-v0.4.1"
+    assert state.is_version_from_label is False
+    assert caller.read_agent_ids == [str(agent_id)]
+
+
+def test_a_machine_readable_again_is_re_read_whatever_the_cache_s_age(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A version it was read at before going away is served meanwhile, not trusted afterwards."""
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(url_by_agent_and_service={}, host_state_by_agent={agent_id: HostState.RUNNING})
+    caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.3.12"})
+    detector = _detector(tmp_path, resolver, caller, root_concurrency_group)
+    detector.run_pass()
+    resolver.host_state_by_agent = {agent_id: HostState.STOPPED}
+    detector.run_pass()
+
+    resolver.host_state_by_agent = {agent_id: HostState.RUNNING}
+    caller.version_by_agent = {str(agent_id): "minds-v0.4.1"}
+    detector.run_pass()
+
+    assert caller.read_agent_ids == [str(agent_id), str(agent_id)]
+    assert detector.store.get(agent_id).current_version == "minds-v0.4.1"
+
+
+@pytest.mark.witnesses("workspace-updates.read-held-past-a-failed-read")
+def test_a_read_that_failed_keeps_the_version_already_read(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """An exec that timed out under slow discovery says nothing about the version; the label would say less."""
+    agent_id = AgentId.generate()
+    resolver = _WorkspacesResolver(
+        url_by_agent_and_service={},
+        host_state_by_agent={agent_id: HostState.RUNNING},
+        label_by_agent={str(agent_id): "minds-v0.3.10"},
+    )
+    caller = _VersionReadingMngrCaller(version_by_agent={str(agent_id): "minds-v0.4.1"})
+    detector = _detector(tmp_path, resolver, caller, root_concurrency_group, interval_seconds=0.0)
+    detector.run_pass()
+
+    caller.version_by_agent = {}
+    detector.run_pass()
+
+    state = detector.store.get(agent_id)
+    assert caller.read_agent_ids == [str(agent_id), str(agent_id)]
+    assert state.current_version == "minds-v0.4.1"
+    assert state.is_version_from_label is False
+
+
 def test_a_landed_update_invalidates_the_cached_version(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:

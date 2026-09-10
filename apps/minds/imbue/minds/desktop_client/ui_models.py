@@ -307,7 +307,7 @@ class UiWorkspaceUpdate(FrozenModel):
     )
     is_version_from_label: bool = Field(
         description="Whether the version came from the create-time label because the machine's own git "
-        "could not be read"
+        "has not been read this session (it has been unreachable throughout, or every read so far failed)"
     )
     activity: UpdateActivity = Field(description="What an update run is doing right now")
     run_started_at: datetime | None = Field(

@@ -486,12 +486,17 @@ class _CachedVersionRead(FrozenModel):
 
     version_ref: str = Field(description="The ``minds-v*`` tag that was read")
     read_at_monotonic: float = Field(description="``time.monotonic()`` when the read landed")
+    is_reread_due: bool = Field(
+        default=False,
+        description="Set once the machine has been unreadable since the read; the next readable sweep re-reads "
+        "whatever the interval says",
+    )
 
 
 class WorkspaceUpdateDetector(MutableModel):
     """Background sweep that keeps every workspace's detection slice current.
 
-    One pass per interval plus on-demand passes; an unreachable workspace falls back to its create-time label.
+    One pass per interval plus on-demand passes; a workspace never read this session falls back to its create-time label.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -643,27 +648,39 @@ class WorkspaceUpdateDetector(MutableModel):
     def _read_git_version(self, agent_id: AgentId, host_state: HostState | None) -> str | None:
         """The workspace's own ``minds-v*`` tag, from the cache or a fresh exec.
 
-        Only a successful read is cached: an empty read may be transient, and
-        caching it would pin a machine that just came up at "unknown" for a whole
-        interval. ``read_workspace_git_version`` would answer too, but runs a
-        further exec for the upgrade-merge history that detection has no use for.
+        A read this session outranks the create-time label for as long as the
+        machine is known: its version moves only when an update lands inside it,
+        which invalidates the cache, so neither a stretch of unreadability (a
+        stop, a start the app itself announced, a discovery gap) nor a read that
+        failed (an exec timeout under slow discovery) is evidence that the last
+        read is wrong. The label answers only for a machine never read at all.
+
+        A machine that was unreadable is re-read as soon as it is readable again,
+        whatever the cache's age. Only a successful read is cached: an empty read
+        may be transient, and caching it would pin a machine that just came up at
+        "unknown" for a whole interval. ``read_workspace_git_version`` would
+        answer too, but runs a further exec for the upgrade-merge history that
+        detection has no use for.
         """
         aid_str = str(agent_id)
-        if not is_workspace_readable(host_state):
-            # A read from when the machine was up says nothing about one that has since stopped.
-            with self._cache_lock:
-                self._cached_read_by_agent.pop(aid_str, None)
-            return None
         with self._cache_lock:
             cached = self._cached_read_by_agent.get(aid_str)
-            if cached is not None and time.monotonic() - cached.read_at_monotonic < self.interval_seconds:
+            if not is_workspace_readable(host_state):
+                if cached is not None:
+                    self._cached_read_by_agent[aid_str] = cached.model_copy_update(
+                        to_update(cached.field_ref().is_reread_due, True)
+                    )
+                return cached.version_ref if cached is not None else None
+            is_fresh = cached is not None and time.monotonic() - cached.read_at_monotonic < self.interval_seconds
+            if cached is not None and is_fresh and not cached.is_reread_due:
                 return cached.version_ref
         version = read_workspace_current_version(agent_id=agent_id, mngr_caller=self.mngr_caller)
-        if version is not None:
-            with self._cache_lock:
-                self._cached_read_by_agent[aid_str] = _CachedVersionRead(
-                    version_ref=version, read_at_monotonic=time.monotonic()
-                )
+        if version is None:
+            return cached.version_ref if cached is not None else None
+        with self._cache_lock:
+            self._cached_read_by_agent[aid_str] = _CachedVersionRead(
+                version_ref=version, read_at_monotonic=time.monotonic()
+            )
         return version
 
     def _is_stopping(self) -> bool:
