@@ -152,7 +152,7 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # the first to report the account whose credentials it injects to detent as
 # ``customMetadata.account`` -- what the per-account permission grants
 # (:mod:`imbue.mngr_latchkey.account_scopes`) read.
-LATCHKEY_MIN_VERSION: Final[str] = "3.11.0"
+LATCHKEY_MIN_VERSION: Final[str] = "3.11.1"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
