@@ -14,8 +14,8 @@ from pathlib import Path
 
 from loguru import logger
 
-from imbue.mngr.utils.modal_cli import parse_modal_app_listings
 from imbue.mngr.utils.testing import generate_test_environment_name
+from imbue.mngr_modal.modal_cli import parse_modal_app_listings
 
 # Read the real home directory at import time, BEFORE any autouse fixture
 # overrides HOME. We do NOT pass real HOME to subprocesses: they run under the

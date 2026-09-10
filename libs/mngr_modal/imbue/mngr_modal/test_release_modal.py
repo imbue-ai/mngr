@@ -55,9 +55,6 @@ from imbue.mngr.providers.provider_release_testing import run_provider_release_t
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip2
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
-from imbue.mngr.utils.testing import delete_modal_apps_in_environment
-from imbue.mngr.utils.testing import delete_modal_environment
-from imbue.mngr.utils.testing import delete_modal_volumes_in_environment
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -66,6 +63,9 @@ from imbue.mngr.utils.testing import register_modal_test_environment
 from imbue.mngr.utils.testing import register_modal_test_volume
 from imbue.mngr_modal.backend import ModalProviderBackend
 from imbue.mngr_modal.backend import STATE_VOLUME_SUFFIX
+from imbue.mngr_modal.cleanup import delete_modal_apps_in_environment
+from imbue.mngr_modal.cleanup import delete_modal_environment
+from imbue.mngr_modal.cleanup import delete_modal_volumes_in_environment
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.instance import ModalProviderInstance

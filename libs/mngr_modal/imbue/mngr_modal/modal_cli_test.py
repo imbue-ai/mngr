@@ -3,9 +3,9 @@ from typing import Final
 
 import pytest
 
-from imbue.mngr.errors import ModalCliOutputError
-from imbue.mngr.utils.modal_cli import parse_modal_app_listings
-from imbue.mngr.utils.modal_cli import parse_modal_volume_listings
+from imbue.mngr_modal.errors import ModalCliOutputError
+from imbue.mngr_modal.modal_cli import parse_modal_app_listings
+from imbue.mngr_modal.modal_cli import parse_modal_volume_listings
 
 # Captured verbatim from `uv run modal app list --json` on modal client 1.5.4.
 REAL_APP_LIST_OUTPUT: Final[str] = """[

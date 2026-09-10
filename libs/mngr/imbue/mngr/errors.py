@@ -774,21 +774,6 @@ class ModalAuthError(ProviderNotAuthorizedError):
         self.user_help_text = None
 
 
-class ModalCliOutputError(MngrError, ValueError):
-    """Raised when a `modal ... list --json` payload does not carry the keys we read.
-
-    Loud on purpose. These listings are read to find Modal resources to reap,
-    so a key we cannot find yields an empty result that looks exactly like
-    "nothing to clean up" and leaks apps, volumes and environments silently.
-    """
-
-    user_help_text = "The Modal CLI's JSON output shape may have changed; check `modal --version`."
-
-    def __init__(self, command: str, reason: str) -> None:
-        self.command = command
-        super().__init__(f"Unexpected output from `{command} --json`: {reason}")
-
-
 class ConfigError(MngrError):
     """Base class for config errors."""
 

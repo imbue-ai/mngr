@@ -19,7 +19,7 @@ from pydantic import TypeAdapter
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.errors import ModalCliOutputError
+from imbue.mngr_modal.errors import ModalCliOutputError
 
 
 class ModalAppListing(FrozenModel):
