@@ -503,13 +503,13 @@ def _configure_backups_via_app(
 ) -> None:
     """Configure backups through the app's backup-service API and wait for provisioning.
 
-    The SPA's Machine settings Backup group is still the placeholder from the
-    frontend port (BackupGroupSlot.ts: "The backups section is being rebuilt"),
-    so there is no in-app configure form to drive yet. Until that tranche
-    lands, this posts the same ``/api/v1/.../backup-service/configure`` request
-    the form will send -- from the app's own page, on its real session cookies
-    -- and then polls the dispatched ``backup_configure`` operation the same
-    way the backups page's operation strip does.
+    Backups are setup for the sync tests, not their subject, so this drives the
+    ``/api/v1/.../backup-service/configure`` request Machine settings' storage
+    form posts rather than the form itself -- from the app's own page, on its
+    real session cookies -- and then polls the dispatched ``backup_configure``
+    operation the same way the backups page's operation strip does. Every phase
+    these tests are actually about stays reachable when that form's markup
+    moves.
     """
     page.goto(f"{origin}/", wait_until="domcontentloaded")
     body: dict[str, str] = {"backup_provider": provider}

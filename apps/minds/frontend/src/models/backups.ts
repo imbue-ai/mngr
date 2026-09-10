@@ -196,6 +196,43 @@ export class BackupOperationController {
     );
   }
 
+  /** The idempotent "Update backup software" converge. */
+  startUpdate(options: { stopChats?: boolean } = {}): void {
+    this.dispatch(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-service/update`,
+      { stop_chats: options.stopChats === true },
+      {
+        isCancellable: true,
+        label: OPERATION_RUNNING_LABELS.backup_update,
+        successMessage: OPERATION_SUCCESS_MESSAGES.backup_update,
+        retryWithStopChats: () => this.startUpdate({ stopChats: true }),
+      },
+    );
+  }
+
+  /** Enable backups, move where they go, or (provider "NONE") turn them off. */
+  startStorageChange(provider: string, apiKeyEnv: string): void {
+    if (provider === "NONE") {
+      this.dispatch(
+        `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-service/disable`,
+        {},
+        {
+          label: "Turning backups off...",
+          successMessage: "Backups are now turned off for this machine.",
+        },
+      );
+      return;
+    }
+    this.dispatch(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-service/configure`,
+      { backup_provider: provider, api_key_env: apiKeyEnv },
+      {
+        label: OPERATION_RUNNING_LABELS.backup_configure,
+        successMessage: OPERATION_SUCCESS_MESSAGES.backup_configure,
+      },
+    );
+  }
+
   runStopChatsRetry(): void {
     this.isStopChatsRetryOffered = false;
     this.retryWithStopChats?.();
@@ -407,6 +444,7 @@ export class BackupOperationController {
 
 interface BackupsListingPayload {
   is_configured?: boolean;
+  is_backing_up?: boolean;
   snapshots?: BackupSnapshot[];
   snapshots_total?: number;
   snapshots_error?: string | null;
@@ -500,6 +538,216 @@ export class BackupHistoryModel {
   goOlder(): void {
     this.offset += BACKUP_HISTORY_PAGE_SIZE;
     void this.loadPage();
+  }
+}
+
+/** How many recent backups the settings group lists before linking to the full history. */
+export const BACKUP_SETTINGS_RECENT_LIMIT = 5;
+
+/** Each backup-service problem in the words the person reading it needs.
+ *
+ * Every one of these points at the same idempotent converge, which is the only
+ * action available for any of them -- so the label's job is to say what is
+ * wrong, and that the one button fixes it.
+ */
+const BACKUP_PROBLEM_LABELS: Record<string, string> = {
+  NOT_CONFIGURED: 'Backups are turned off for this machine. Use "Change storage location" to turn them on.',
+  CODE_OUTDATED: 'The backup software in this machine is out of date. Click "Update backup software" to fix this.',
+  ENV_MISSING: 'This machine has lost its backup storage settings. Click "Update backup software" to restore them.',
+  ENV_MISMATCH:
+    'This machine is set up to back up somewhere different than expected. Click "Update backup software" to fix this.',
+  SERVICE_NOT_RUNNING:
+    'The backup software in this machine is not running. Click "Update backup software" to restart it.',
+  UNVERIFIABLE: 'Minds could not check on this machine\'s backups. Click "Update backup software" to reset them.',
+  BACKUPS_STALE:
+    'This machine has not backed up recently even though it is running. Click "Update backup software" to fix this.',
+};
+
+interface BackupCheckPayload {
+  check_state?: string;
+  problems?: string[];
+  installed_version?: string | null;
+  minimum_version?: string | null;
+  update_target_version?: string | null;
+  check_detail?: string;
+  is_verification_enabled?: boolean;
+}
+
+/**
+ * The Backup group in Machine settings: the snapshot summary and the recent
+ * rows (fast, restic runs on this machine) plus the backup-service verdict
+ * (slow, it execs into the machine), loaded independently so the slow half
+ * never gates the fast one.
+ */
+export class BackupSettingsModel {
+  readonly agentId: string;
+  isConfigured = false;
+  isBackingUp = false;
+  snapshots: BackupSnapshot[] = [];
+  snapshotsTotal = 0;
+  /** Whether the listing failed, which reads as "unknown" rather than "none". */
+  isSnapshotsErrored = false;
+  isSnapshotsLoaded = false;
+  check: BackupCheckPayload | null = null;
+  isCheckLoading = true;
+  isVerificationPending = false;
+  /** A failed verification write, which has no operation strip of its own. */
+  verificationError: string | null = null;
+
+  private readonly deps: LifecycleDeps;
+  private isStopped = false;
+
+  constructor(agentId: string, deps: LifecycleDeps) {
+    this.agentId = agentId;
+    this.deps = deps;
+  }
+
+  /** Stop adopting responses; the group was closed while reads were in flight. */
+  stop(): void {
+    this.isStopped = true;
+  }
+
+  async load(): Promise<void> {
+    await Promise.all([this.loadSnapshots(), this.loadCheck()]);
+  }
+
+  async loadSnapshots(): Promise<void> {
+    const payload = (await this.deps.getJson(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backups?limit=${BACKUP_SETTINGS_RECENT_LIMIT}`,
+    )) as BackupsListingPayload | null;
+    if (this.isStopped) return;
+    this.isSnapshotsLoaded = true;
+    if (payload === null) {
+      // The route itself did not answer, which says nothing about the backups.
+      this.isSnapshotsErrored = true;
+      this.deps.redraw();
+      return;
+    }
+    this.isConfigured = payload.is_configured === true;
+    this.isBackingUp = payload.is_backing_up === true;
+    this.isSnapshotsErrored = Boolean(payload.snapshots_error);
+    this.snapshots = payload.snapshots ?? [];
+    this.snapshotsTotal =
+      typeof payload.snapshots_total === "number" ? payload.snapshots_total : this.snapshots.length;
+    this.deps.redraw();
+  }
+
+  async loadCheck(): Promise<void> {
+    this.isCheckLoading = true;
+    const payload = (await this.deps.getJson(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-check`,
+    )) as BackupCheckPayload | null;
+    if (this.isStopped) return;
+    this.isCheckLoading = false;
+    // A verdict that did not arrive leaves `check` null, which the group reads
+    // as "no verdict" -- never as a clean bill of health.
+    this.check = payload;
+    this.deps.redraw();
+  }
+
+  get statusLine(): string {
+    if (!this.isSnapshotsLoaded) return "Loading backup status...";
+    if (this.isBackingUp) return "Backing up now...";
+    const newest = this.snapshots.length > 0 ? this.snapshots[0].time : null;
+    if (newest !== null) return `Last backup: ${new Date(newest).toLocaleString()}`;
+    if (this.isSnapshotsErrored) return "Backup status unknown.";
+    if (!this.isConfigured) return "Backups are turned off for this machine.";
+    return "No successful backup yet.";
+  }
+
+  /** What the service check concluded, or "" when it reached no verdict. */
+  get checkLine(): string {
+    const state = this.check?.check_state;
+    if (state === "DISABLED") return "Backup service verification is disabled for this machine.";
+    if (state === "OFFLINE") return "This machine is offline; its backups will be checked when it is back online.";
+    if (state === "OK") return "The backup service is up to date.";
+    return "";
+  }
+
+  /** Why the recent-backups table is empty, or null when there are rows to show. */
+  get emptyHistoryMessage(): string | null {
+    if (!this.isSnapshotsLoaded) return "Loading backup history...";
+    // Before the configured check, and in the order `statusLine` uses: a route
+    // that did not answer leaves `isConfigured` at its default, which is not a
+    // reading of anything.
+    if (this.isSnapshotsErrored) return "Couldn't load your backup history right now.";
+    if (!this.isConfigured) return BACKUP_PROBLEM_LABELS.NOT_CONFIGURED;
+    if (this.snapshots.length > 0) return null;
+    return this.isBackingUp
+      ? "Backing up now... the first backup will appear shortly."
+      : "No backups yet. The first backup runs within the hour.";
+  }
+
+  get isViewAllShown(): boolean {
+    return this.snapshotsTotal > BACKUP_SETTINGS_RECENT_LIMIT;
+  }
+
+  /** The installed / required / would-install versions, or "" when none are known. */
+  get versionLine(): string {
+    const check = this.check;
+    if (check === null) return "";
+    const parts: string[] = [];
+    if (check.installed_version) parts.push(`Installed backup service: ${check.installed_version}`);
+    if (check.minimum_version) parts.push(`minimum required: ${check.minimum_version}`);
+    if (check.update_target_version && check.update_target_version !== check.minimum_version) {
+      parts.push(`update installs: ${check.update_target_version}`);
+    }
+    return parts.join(" / ");
+  }
+
+  /** Every problem the check found, in plain words, plus its own detail line. */
+  get problemLines(): string[] {
+    const check = this.check;
+    if (check === null || check.check_state !== "PROBLEMS") return [];
+    const lines = (check.problems ?? []).map((problem) => BACKUP_PROBLEM_LABELS[problem] ?? problem);
+    if (check.check_detail) lines.push(check.check_detail);
+    return lines;
+  }
+
+  /** Whether the update is offered at all.
+   *
+   * It is an idempotent converge, so it stays on offer even for a machine that
+   * reports no problems -- resetting a wedged backup service is exactly what it
+   * is for. The two exceptions are a machine that cannot be reached to run it,
+   * and one the server would refuse anyway for being too old.
+   */
+  isUpdateOffered(isRecreationRequired: boolean): boolean {
+    if (isRecreationRequired) return false;
+    return this.check?.check_state !== "OFFLINE";
+  }
+
+  get isRestoreDisabledByCheck(): boolean {
+    return this.check?.check_state === "OFFLINE";
+  }
+
+  /** Verification defaults to on, so an unread verdict must not read as off. */
+  get isVerificationEnabled(): boolean {
+    return this.check?.is_verification_enabled !== false;
+  }
+
+  async toggleVerification(): Promise<void> {
+    const target = !this.isVerificationEnabled;
+    this.isVerificationPending = true;
+    this.verificationError = null;
+    this.deps.redraw();
+    const result = await this.deps.postJson(
+      `/api/v1/workspaces/${encodeURIComponent(this.agentId)}/backup-service/verification`,
+      { enabled: target },
+    );
+    if (this.isStopped) return;
+    if (result.status >= 400 || result.status === 0) {
+      this.isVerificationPending = false;
+      this.verificationError = "Could not change the verification setting. Try again.";
+      this.deps.redraw();
+      return;
+    }
+    // Re-reading also re-runs the (slow) service check, so the pending flag
+    // stays up until the fresh verdict lands rather than snapping back to a
+    // stale one.
+    await this.loadCheck();
+    if (this.isStopped) return;
+    this.isVerificationPending = false;
+    this.deps.redraw();
   }
 }
 

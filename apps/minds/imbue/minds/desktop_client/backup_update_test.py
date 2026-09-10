@@ -16,10 +16,14 @@ from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
+from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
+from imbue.minds.desktop_client.backup_update import _apply_update_and_verify
+from imbue.minds.desktop_client.backup_update import _chained_update_warning
 from imbue.minds.desktop_client.backup_update import _resolve_restore_snapshot
 from imbue.minds.desktop_client.backup_update import _resolve_restore_subpath
 from imbue.minds.desktop_client.backup_update import _restore_completion_warnings
 from imbue.minds.desktop_client.backup_update import run_backup_restore_sequence
+from imbue.minds.desktop_client.backup_update import run_backup_update_sequence
 from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
@@ -59,6 +63,7 @@ def test_restore_fails_for_an_unknown_snapshot_without_dispatching_a_worker(tmp_
         is_update_after=True,
         is_skip_safety_snapshot=False,
         is_skip_chat_gate=False,
+        workspace_version_ref="minds-v0.5.2",
     )
 
     record = registry.get(agent_id)
@@ -186,3 +191,81 @@ def test_restore_completion_warnings_name_the_services_down() -> None:
     assert "browser, xvfb" in warnings[0]
     assert _restore_completion_warnings({}) == []
     assert _restore_completion_warnings({"services_down": []}) == []
+
+
+@pytest.mark.parametrize("workspace_version_ref", ["minds-v0.3.9", "minds-v0.2.0"])
+def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
+    tmp_path: Path, workspace_version_ref: str
+) -> None:
+    """A machine too old for the running release's backup service is refused, untouched.
+
+    Its volume layout predates the one that service reads the backup root out
+    of, so installing it would leave every backup failing. Nothing here can
+    reach a machine, so a run that got as far as probing one would fail with a
+    different error rather than pass.
+    """
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    registry = InMemoryWorkspaceOperationRegistry()
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc), None)
+
+    run_backup_update_sequence(
+        agent_id=agent_id,
+        paths=paths,
+        resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        registry=registry,
+        parent_cg=None,
+        is_stop_chats=False,
+        workspace_version_ref=workspace_version_ref,
+    )
+
+    record = registry.get(agent_id)
+    assert record is not None
+    assert record.status == WorkspaceOperationStatus.FAILED
+    assert record.error == BELOW_UPDATE_FLOOR_MESSAGE
+    # Refused before the gate probe, so nothing about the machine was read.
+    assert record.is_mutating is False
+
+
+def test_the_mutating_apply_step_refuses_a_machine_below_the_in_place_floor(tmp_path: Path) -> None:
+    """The floor is enforced where the mutation happens, so the restore's chained update honours it.
+
+    That chained update does not go through the phase runner the test above
+    drives, so this guard is the only thing standing between a restore and a
+    backup service the machine cannot run.
+    """
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    registry = InMemoryWorkspaceOperationRegistry()
+    assert registry.start_if_idle(agent_id, WorkspaceOperationKind.BACKUP_UPDATE, datetime.now(timezone.utc), None)
+
+    refusal = _apply_update_and_verify(
+        agent_id=agent_id,
+        paths=paths,
+        resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        registry=registry,
+        parent_cg=None,
+        is_stop_chats=False,
+        workspace_version_ref="minds-v0.3.9",
+    )
+
+    # The exact message, not merely "some error": nothing here can reach a
+    # machine, so a run that got as far as the apply script would also return
+    # non-None -- with restic's or mngr's words rather than the refusal.
+    assert refusal == BELOW_UPDATE_FLOOR_MESSAGE
+    assert registry.log_lines_by_agent_id[agent_id] == []
+
+
+def test_the_restore_does_not_offer_a_retry_for_an_update_it_will_always_refuse() -> None:
+    """The below-floor refusal is not a failure to retry, and Settings hides the button for it.
+
+    A restore of such a machine still restores the data and reports the skipped
+    update, so this warning is what its user actually reads.
+    """
+    refused = _chained_update_warning(BELOW_UPDATE_FLOOR_MESSAGE)
+    assert BELOW_UPDATE_FLOOR_MESSAGE in refused
+    assert "Update backup software" not in refused
+
+    failed = _chained_update_warning("restic snapshots timed out after 90s")
+    assert "restic snapshots timed out after 90s" in failed
+    assert "Update backup software" in failed

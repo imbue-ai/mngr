@@ -4,6 +4,7 @@ import {
   BACKUP_HISTORY_PAGE_SIZE,
   BackupHistoryModel,
   BackupOperationController,
+  BackupSettingsModel,
   DestroyingModel,
   MAX_CONSECUTIVE_POLL_FAILURES,
   RecoveryModel,
@@ -41,6 +42,12 @@ class FakeDeps implements LifecycleDeps {
    * exactly the transient-failure case the model already handles.
    */
   recoveryInfoResponses: Array<unknown | null> = [];
+  /**
+   * Answers for the backup-check route, likewise kept out of the positional
+   * queue: the settings model starts its snapshot read and its check read
+   * together, so whichever resolved first would take the other's answer.
+   */
+  checkResponses: Array<unknown | null> = [];
   /** While true, recovery-info reads hang until `resolveRecoveryInfo` answers
    * them -- the only way to hold one in flight while something else moves. */
   isRecoveryInfoHeld = false;
@@ -56,6 +63,9 @@ class FakeDeps implements LifecycleDeps {
 
   async getJson(url: string): Promise<unknown | null> {
     this.getUrls.push(url);
+    if (url.includes("/backup-check")) {
+      return this.checkResponses.length > 0 ? this.checkResponses.shift()! : null;
+    }
     if (url.includes("/recovery-info")) {
       if (this.isRecoveryInfoHeld) {
         return new Promise((resolve) => {
@@ -176,7 +186,7 @@ describe("BackupHistoryModel", () => {
     expect(model.offset).toBe(BACKUP_HISTORY_PAGE_SIZE);
     expect(deps.getUrls[0]).toContain(`offset=${BACKUP_HISTORY_PAGE_SIZE}`);
 
-    deps.getResponses.push({ check_state: "OFFLINE" });
+    deps.checkResponses.push({ check_state: "OFFLINE" });
     await model.fetchCheckState();
     expect(model.isRestoreDisabledByCheck()).toBe(true);
   });
@@ -739,5 +749,191 @@ describe("RecoveryModel", () => {
     deps.postResponses.push({ status: 202, json: null });
     await model.dispatchRecovery();
     expect(deps.postCalls.at(-1)?.body).toEqual({ scope: "host", start_only: false });
+  });
+});
+
+
+describe("BackupSettingsModel", () => {
+  it("keeps the fast snapshot half readable when the slow check half never answers", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [{ snapshot_id: "s1", time: "2026-01-01T00:00:00Z" }],
+      snapshots_total: 12,
+    });
+    // No check answer queued: FakeDeps returns null, which is what an
+    // unreachable machine's (slow, exec-based) check looks like.
+    await model.load();
+
+    expect(model.isConfigured).toBe(true);
+    expect(model.snapshotsTotal).toBe(12);
+    expect(model.statusLine).toContain("Last backup:");
+    // No verdict is not a clean bill of health, and not a reason to hide the
+    // one action that fixes things.
+    expect(model.checkLine).toBe("");
+    expect(model.problemLines).toEqual([]);
+    expect(model.isUpdateOffered(false)).toBe(true);
+    expect(model.isViewAllShown).toBe(true);
+  });
+
+  it("says what the machine's backups are doing across the states the summary can be in", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+    expect(model.statusLine).toBe("Loading backup status...");
+
+    deps.getResponses.push({ is_configured: false, snapshots: [] });
+    await model.loadSnapshots();
+    expect(model.statusLine).toBe("Backups are turned off for this machine.");
+    expect(model.emptyHistoryMessage).toContain("Backups are turned off");
+
+    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_error: "restic snapshots timed out" });
+    await model.loadSnapshots();
+    expect(model.statusLine).toBe("Backup status unknown.");
+    expect(model.emptyHistoryMessage).toBe("Couldn't load your backup history right now.");
+
+    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 0, is_backing_up: true });
+    await model.loadSnapshots();
+    expect(model.statusLine).toBe("Backing up now...");
+    expect(model.emptyHistoryMessage).toContain("first backup will appear shortly");
+
+    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 0 });
+    await model.loadSnapshots();
+    expect(model.statusLine).toBe("No successful backup yet.");
+    expect(model.emptyHistoryMessage).toBe("No backups yet. The first backup runs within the hour.");
+  });
+
+  it("does not read a listing route that never answered as backups being turned off", async () => {
+    // A fresh model, because the wrong answer comes from `isConfigured` still
+    // being its default: nothing queued, so the route does not answer, and that
+    // is no evidence either way about whether this machine backs up.
+    const model = new BackupSettingsModel("agent-11", new FakeDeps());
+
+    await model.loadSnapshots();
+
+    expect(model.statusLine).toBe("Backup status unknown.");
+    expect(model.emptyHistoryMessage).toBe("Couldn't load your backup history right now.");
+  });
+
+  it("turns each reported problem into guidance, and keeps the check's own detail", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+    deps.checkResponses.push({
+      check_state: "PROBLEMS",
+      problems: ["CODE_OUTDATED", "SERVICE_NOT_RUNNING", "SOMETHING_NEW"],
+      check_detail: "installed minds-v0.4.1, minimum minds-v0.5.0",
+      installed_version: "minds-v0.4.1",
+      minimum_version: "minds-v0.5.0",
+      update_target_version: "minds-v0.5.2",
+    });
+    await model.loadCheck();
+
+    expect(model.problemLines[0]).toContain("out of date");
+    expect(model.problemLines[1]).toContain("is not running");
+    // A problem code this build has no words for still reaches the reader.
+    expect(model.problemLines[2]).toBe("SOMETHING_NEW");
+    expect(model.problemLines[3]).toBe("installed minds-v0.4.1, minimum minds-v0.5.0");
+    expect(model.versionLine).toBe(
+      "Installed backup service: minds-v0.4.1 / minimum required: minds-v0.5.0 / update installs: minds-v0.5.2",
+    );
+  });
+
+  it("offers the converge on a healthy machine but not on one that cannot run it", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+
+    deps.checkResponses.push({ check_state: "OK", is_verification_enabled: true });
+    await model.loadCheck();
+    // Idempotent: resetting a wedged service is what it is for, so a machine
+    // with nothing wrong still gets the button.
+    expect(model.isUpdateOffered(false)).toBe(true);
+    expect(model.checkLine).toBe("The backup service is up to date.");
+    expect(model.isRestoreDisabledByCheck).toBe(false);
+    // A machine below the in-place floor: the server refuses this update, so
+    // the button must not be offered.
+    expect(model.isUpdateOffered(true)).toBe(false);
+
+    deps.checkResponses.push({ check_state: "OFFLINE" });
+    await model.loadCheck();
+    expect(model.isUpdateOffered(false)).toBe(false);
+    expect(model.isRestoreDisabledByCheck).toBe(true);
+  });
+
+  it("re-reads the verdict after a verification write, and reports a write that failed", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+    deps.checkResponses.push({ check_state: "OK", is_verification_enabled: true });
+    await model.loadCheck();
+    expect(model.isVerificationEnabled).toBe(true);
+
+    deps.postResponses.push({ status: 200, json: null });
+    deps.checkResponses.push({ check_state: "DISABLED", is_verification_enabled: false });
+    await model.toggleVerification();
+
+    expect(deps.postCalls[0].url).toContain("/backup-service/verification");
+    expect(deps.postCalls[0].body).toEqual({ enabled: false });
+    // The fresh verdict, not an optimistic flip: the re-check is what decides.
+    expect(model.isVerificationEnabled).toBe(false);
+    expect(model.checkLine).toBe("Backup service verification is disabled for this machine.");
+    expect(model.isVerificationPending).toBe(false);
+    expect(model.verificationError).toBeNull();
+
+    deps.postResponses.push({ status: 500, json: null });
+    await model.toggleVerification();
+    expect(model.verificationError).toBe("Could not change the verification setting. Try again.");
+    expect(model.isVerificationPending).toBe(false);
+  });
+
+  it("does not adopt a read that lands after the group was closed", async () => {
+    const deps = new FakeDeps();
+    const model = new BackupSettingsModel("agent-11", deps);
+    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 3 });
+    const inFlight = model.loadSnapshots();
+    model.stop();
+    await inFlight;
+    expect(model.isSnapshotsLoaded).toBe(false);
+    expect(model.snapshotsTotal).toBe(0);
+  });
+});
+
+describe("the backup settings actions", () => {
+  it("dispatches the update, and retries it with the stop-chats flag when chats block it", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+    deps.postResponses.push({ status: 202, json: null });
+    controller.startUpdate();
+    await settle();
+
+    expect(deps.postCalls[0].url).toBe("/api/v1/workspaces/agent-11/backup-service/update");
+    expect(deps.postCalls[0].body).toEqual({ stop_chats: false });
+
+    deps.getResponses.push({ status: "FAILED", kind: "backup_update", blocked_chats: ["review"] });
+    await controller.pollOnce();
+    expect(controller.isStopChatsRetryOffered).toBe(true);
+
+    deps.postResponses.push({ status: 202, json: null });
+    controller.runStopChatsRetry();
+    await settle();
+    expect(deps.postCalls[1].body).toEqual({ stop_chats: true });
+  });
+
+  it("routes a storage change to configure, and turning backups off to disable", async () => {
+    const deps = new FakeDeps();
+    const controller = new BackupOperationController("agent-11", deps);
+
+    deps.postResponses.push({ status: 202, json: null });
+    controller.startStorageChange("API_KEY", "RESTIC_REPOSITORY=s3:example\n");
+    await settle();
+    expect(deps.postCalls[0].url).toBe("/api/v1/workspaces/agent-11/backup-service/configure");
+    expect(deps.postCalls[0].body).toEqual({
+      backup_provider: "API_KEY",
+      api_key_env: "RESTIC_REPOSITORY=s3:example\n",
+    });
+
+    deps.postResponses.push({ status: 202, json: null });
+    controller.startStorageChange("NONE", "");
+    await settle();
+    expect(deps.postCalls[1].url).toBe("/api/v1/workspaces/agent-11/backup-service/disable");
+    expect(deps.postCalls[1].body).toEqual({});
   });
 });

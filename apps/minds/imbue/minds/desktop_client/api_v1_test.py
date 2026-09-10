@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
+from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
 from imbue.minds.desktop_client.backup_update import BLOCKED_BY_RUNNING_CHATS_PREFIX
 from imbue.minds.desktop_client.backup_verification_store import is_backup_verification_enabled
 from imbue.minds.desktop_client.backup_verification_store import set_backup_verification_enabled
@@ -72,6 +73,8 @@ from imbue.minds.desktop_client.workspace_defaults import default_workspace_temp
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
 from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MESSAGE
+from imbue.minds.desktop_client.workspace_update_state import UpdateAvailability
+from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.errors import WorkspaceNameInUseError
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import DockerRuntime
@@ -2804,6 +2807,42 @@ def test_backup_service_update_conflicts_with_a_running_operation(
     record = registry.get(agent_id)
     assert record is not None
     assert record.kind == WorkspaceOperationKind.RECOVERY
+
+
+def test_backup_service_update_refuses_a_machine_below_the_in_place_floor(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A machine too old for today's backup service is refused at the route, before any worker.
+
+    The worker refuses it too, but only after the button has started a spinner
+    the machine can never end.
+    """
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id))
+    client = _build_client(
+        tmp_path,
+        resolver,
+        root_concurrency_group=root_concurrency_group,
+        # Without a health tracker the update machinery is not assembled at all,
+        # and the route would read no version and dispatch regardless.
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
+    )
+    update_service = get_state(client.application).workspace_update_service
+    assert update_service is not None
+    update_service.state_store.record_detection(
+        agent_id,
+        detection=UpdateDetection(availability=UpdateAvailability.NEEDS_RECREATION),
+        current_version="minds-v0.3.9",
+        supported_version="",
+        is_version_from_label=False,
+    )
+
+    response = client.post(f"/api/v1/workspaces/{agent_id}/backup-service/update", headers=_auth_header(), json={})
+
+    assert response.status_code == 409
+    assert json.loads(response.data)["error"] == BELOW_UPDATE_FLOOR_MESSAGE
+    # Refused outright: no operation was claimed, so the workspace is still free.
+    assert get_state(client.application).workspace_operation_registry.get(agent_id) is None
 
 
 def test_workspace_restart_conflicts_with_a_running_backup_operation(

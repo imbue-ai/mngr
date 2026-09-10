@@ -63,6 +63,21 @@ class UpdateDetection(FrozenModel):
     )
 
 
+def is_below_in_place_update_floor(workspace_ref: str | None) -> bool:
+    """Whether a workspace's own version predates everything an in-place update supports.
+
+    A fact about the workspace alone, not about this build, so it is answerable
+    without a ceiling -- and it gates every mutation that checks the running
+    release's template code out onto the workspace, not only the full update.
+    An unreadable version is never below the floor: refusing on a version nobody
+    could read would strand ordinary workspaces.
+    """
+    workspace_version = parse_minds_version(workspace_ref)
+    cutoff_version = parse_minds_version(OLDEST_IN_PLACE_UPDATABLE_VERSION)
+    assert cutoff_version is not None
+    return workspace_version is not None and workspace_version < cutoff_version
+
+
 def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) -> UpdateDetection:
     """Classify one workspace against the in-place cutoff and the app's template ceiling.
 
@@ -74,9 +89,7 @@ def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) 
     """
     workspace_version = parse_minds_version(workspace_ref)
     ceiling_version = parse_minds_version(ceiling_ref)
-    cutoff_version = parse_minds_version(OLDEST_IN_PLACE_UPDATABLE_VERSION)
-    assert cutoff_version is not None
-    if workspace_version is not None and workspace_version < cutoff_version:
+    if is_below_in_place_update_floor(workspace_ref):
         return UpdateDetection(availability=UpdateAvailability.NEEDS_RECREATION)
     if ceiling_version is None:
         return UpdateDetection(

@@ -98,6 +98,10 @@ class ResticTransientAuthError(BackupProvisioningError):
     """
 
 
+class ResticTimeoutError(BackupProvisioningError, TimeoutError):
+    """Raised when a restic invocation outlived its budget and was killed."""
+
+
 def ensure_restic_available() -> None:
     """Raise ``ResticNotInstalledError`` if ``restic`` cannot be located.
 
@@ -166,16 +170,23 @@ def _looks_like_transient_auth_failure(stderr: str) -> bool:
     return any(signal in lowered for signal in _TRANSIENT_AUTH_SIGNALS)
 
 
-def _raise_restic_failure(operation_label: str, returncode: int | None, stderr: str) -> NoReturn:
+def _raise_restic_failure(operation_label: str, result: FinishedProcess, *, timeout_seconds: float) -> NoReturn:
     """Raise the right error for a failed restic invocation.
+
+    A restic that outlived its budget was killed, so all it reports is the
+    signal that killed it (exit 130) and usually no stderr at all -- which
+    reads as an unexplained crash wherever the message lands. The budget it
+    blew is the only thing that actually happened, so say that instead.
 
     Auth failures that look like a freshly-minted credential still propagating
     raise the retryable ``ResticTransientAuthError``; everything else is fatal.
     """
-    detail = stderr.strip()
-    if _looks_like_transient_auth_failure(stderr):
-        raise ResticTransientAuthError(f"{operation_label} auth not ready (exit {returncode}): {detail}")
-    raise BackupProvisioningError(f"{operation_label} failed (exit {returncode}): {detail}")
+    detail = f": {result.stderr.strip()}" if result.stderr.strip() else ""
+    if result.is_timed_out:
+        raise ResticTimeoutError(f"{operation_label} timed out after {timeout_seconds:g}s{detail}")
+    if _looks_like_transient_auth_failure(result.stderr):
+        raise ResticTransientAuthError(f"{operation_label} auth not ready (exit {result.returncode}){detail}")
+    raise BackupProvisioningError(f"{operation_label} failed (exit {result.returncode}){detail}")
 
 
 def _log_auth_retry(retry_state: RetryCallState) -> None:
@@ -219,7 +230,7 @@ def _init_repo_once(
     if _looks_already_initialized(result.stderr):
         logger.debug("restic repo already initialized; reusing it")
         return
-    _raise_restic_failure("restic init", result.returncode, result.stderr)
+    _raise_restic_failure("restic init", result, timeout_seconds=_INIT_TIMEOUT_SECONDS)
 
 
 def init_repo(
@@ -275,7 +286,7 @@ def restore_snapshot(
     if result.returncode == 0:
         return
     if not _looks_like_lock_write_failure(result.stderr):
-        raise BackupProvisioningError(f"restic restore failed (exit {result.returncode}): {result.stderr.strip()}")
+        _raise_restic_failure("restic restore", result, timeout_seconds=timeout_seconds)
     logger.debug("restic restore could not write its repository lock (read-only key?); retrying with --no-lock")
     retried = _run_restic(
         [*flags, "--no-lock", "restore", snapshot, "--target", str(target_dir)],
@@ -284,7 +295,7 @@ def restore_snapshot(
         timeout_seconds=timeout_seconds,
     )
     if retried.returncode != 0:
-        raise BackupProvisioningError(f"restic restore failed (exit {retried.returncode}): {retried.stderr.strip()}")
+        _raise_restic_failure("restic restore", retried, timeout_seconds=timeout_seconds)
 
 
 def forget_snapshots(
@@ -313,7 +324,7 @@ def forget_snapshots(
         args.append("--prune")
     result = _run_restic(args, env_overrides=env, parent_cg=parent_cg, timeout_seconds=timeout_seconds)
     if result.returncode != 0:
-        raise BackupProvisioningError(f"restic forget failed (exit {result.returncode}): {result.stderr.strip()}")
+        _raise_restic_failure("restic forget", result, timeout_seconds=timeout_seconds)
 
 
 class ResticSnapshot(FrozenModel):
@@ -391,7 +402,7 @@ def list_snapshots(
         timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
-        raise BackupProvisioningError(f"restic snapshots failed (exit {result.returncode}): {result.stderr.strip()}")
+        _raise_restic_failure("restic snapshots", result, timeout_seconds=timeout_seconds)
     return parse_restic_snapshots(result.stdout or "[]")
 
 
@@ -419,7 +430,7 @@ def list_snapshot_directory(
         timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
-        raise BackupProvisioningError(f"restic ls failed (exit {result.returncode}): {result.stderr.strip()}")
+        _raise_restic_failure("restic ls", result, timeout_seconds=timeout_seconds)
     paths: list[str] = []
     for line in result.stdout.splitlines():
         stripped = line.strip()
@@ -466,7 +477,7 @@ def is_backup_in_progress(
         timeout_seconds=timeout_seconds,
     )
     if listed.returncode != 0:
-        raise BackupProvisioningError(f"restic list locks failed (exit {listed.returncode}): {listed.stderr.strip()}")
+        _raise_restic_failure("restic list locks", listed, timeout_seconds=timeout_seconds)
     lock_ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
     for lock_id in lock_ids:
         shown = _run_restic(

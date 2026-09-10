@@ -175,6 +175,7 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_TOO_NEW_MES
 from imbue.minds.desktop_client.workspace_record_store import is_record_too_new
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import dispatch_host_recovery
+from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MngrCommandError
@@ -450,6 +451,10 @@ def _list_workspace_snapshots_safely(
     *,
     limit: int | None,
     offset: int,
+    # How long the snapshot listing itself may take. The in-progress probe that
+    # follows keeps the status budget either way: it reads only the repository
+    # lock, so its cost does not grow with the repository.
+    listing_timeout_seconds: float,
     # Passed explicitly (not read from ``get_state``) so this can run on a
     # concurrency-group worker thread, where the Flask app-context proxy is
     # unavailable -- e.g. the streaming batch backups endpoint's fan-out.
@@ -468,7 +473,9 @@ def _list_workspace_snapshots_safely(
     if not has_canonical_env(paths, parsed_id):
         return _WorkspaceSnapshotListing(snapshots=(), total=0, is_backing_up=False)
     try:
-        snapshots = backup_status.list_workspace_snapshots(paths, parsed_id, parent_cg=parent_cg)
+        snapshots = backup_status.list_workspace_snapshots(
+            paths, parsed_id, parent_cg=parent_cg, timeout_seconds=listing_timeout_seconds
+        )
     except BackupProvisioningError as e:
         logger.warning("Backup snapshot listing failed for {}: {}", parsed_id, e)
         return _WorkspaceSnapshotListing(snapshots=(), total=0, is_backing_up=False, error=str(e))
@@ -580,7 +587,12 @@ def _handle_workspace_backups(agent_id: str) -> WorkspaceBackupsResponse | Respo
         return _json_error("Backups are not configured", 501)
     _materialize_env_from_record_if_missing(paths, parsed_id)
     listing = _list_workspace_snapshots_safely(
-        paths, parsed_id, limit=limit, offset=offset, parent_cg=state.root_concurrency_group
+        paths,
+        parsed_id,
+        limit=limit,
+        offset=offset,
+        listing_timeout_seconds=backup_status.HISTORY_RESTIC_TIMEOUT_SECONDS,
+        parent_cg=state.root_concurrency_group,
     )
     return WorkspaceBackupsResponse(
         agent_id=str(parsed_id),
@@ -626,7 +638,14 @@ def _handle_workspace_backup_check(agent_id: str) -> WorkspaceBackupCheckRespons
         cg.start_new_thread(target=_run_check_into_results, name=f"backup-check-{parsed_id}")
         # Only the newest snapshot's age matters for staleness; errors degrade
         # into the listing so a broken repo never fails the whole check.
-        listing = _list_workspace_snapshots_safely(paths, parsed_id, limit=1, offset=0, parent_cg=parent_cg)
+        listing = _list_workspace_snapshots_safely(
+            paths,
+            parsed_id,
+            limit=1,
+            offset=0,
+            listing_timeout_seconds=backup_status.STATUS_RESTIC_TIMEOUT_SECONDS,
+            parent_cg=parent_cg,
+        )
     check = (
         check_results[0]
         if check_results
@@ -686,7 +705,14 @@ def _build_backup_summary(
     into an empty listing (with ``error`` set, so the badge can say "unknown"
     instead of a false "No backups").
     """
-    listing = _list_workspace_snapshots_safely(paths, parsed_id, limit=1, offset=0, parent_cg=parent_cg)
+    listing = _list_workspace_snapshots_safely(
+        paths,
+        parsed_id,
+        limit=1,
+        offset=0,
+        listing_timeout_seconds=backup_status.STATUS_RESTIC_TIMEOUT_SECONDS,
+        parent_cg=parent_cg,
+    )
     return {
         "agent_id": str(parsed_id),
         "snapshots": [{"time": snapshot.time} for snapshot in listing.snapshots],
@@ -1606,6 +1632,20 @@ def _resolve_backup_route_context(agent_id: str) -> "tuple[AgentId, Installation
     return parsed_id, paths, parent_cg
 
 
+def _resolve_workspace_version_ref(parsed_id: AgentId) -> str | None:
+    """The workspace's own template version as the update detector last resolved it.
+
+    ``None`` when nothing has read one yet -- a fresh app that has not swept, or
+    a machine whose version neither its git nor its create-time label names. The
+    backup-service update treats that as "not below the floor": refusing on a
+    version nobody could read would strand ordinary machines.
+    """
+    service = get_state().workspace_update_service
+    if service is None:
+        return None
+    return service.state_store.get(parsed_id).current_version or None
+
+
 def _dispatch_backup_worker(
     *,
     parsed_id: AgentId,
@@ -1678,6 +1718,12 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
         return context
     parsed_id, paths, parent_cg = context
     state = get_state()
+    version_ref = _resolve_workspace_version_ref(parsed_id)
+    # The worker refuses this too (the restore chains the same update, and that
+    # dispatch is legitimate); refusing here as well means a machine that cannot
+    # be updated says so immediately instead of after a spinner and a failure.
+    if is_below_in_place_update_floor(version_ref):
+        return _json_error(backup_update_module.BELOW_UPDATE_FLOOR_MESSAGE, 409)
     return _dispatch_backup_worker(
         parsed_id=parsed_id,
         parent_cg=parent_cg,
@@ -1688,6 +1734,7 @@ def _handle_backup_service_update(agent_id: str) -> tuple[OperationHandleRespons
             "paths": paths,
             "resolver": state.backend_resolver,
             "is_stop_chats": _is_stop_chats_requested(),
+            "workspace_version_ref": version_ref,
         },
         operation_target=None,
     )
@@ -1757,6 +1804,7 @@ def _handle_workspace_backup_restore(
             "is_update_after": bool(body.get("update_after", True)),
             "is_skip_safety_snapshot": bool(body.get("skip_safety_snapshot", False)),
             "is_skip_chat_gate": bool(body.get("skip_chat_gate", False)),
+            "workspace_version_ref": _resolve_workspace_version_ref(parsed_id),
         },
         operation_target=snapshot_id,
     )

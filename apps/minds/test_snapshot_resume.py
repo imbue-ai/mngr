@@ -1321,6 +1321,9 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
         is_update_after=False,
         is_skip_safety_snapshot=False,
         is_skip_chat_gate=False,
+        # No update detector runs in this test, so nothing has resolved a
+        # version for this workspace -- the same None the route passes then.
+        workspace_version_ref=None,
     )
 
     record = registry.get(agent_id)

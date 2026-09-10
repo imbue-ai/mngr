@@ -29,6 +29,7 @@ from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.desktop_client.workspace_update_state import derive_update_detection
+from imbue.minds.desktop_client.workspace_update_state import is_below_in_place_update_floor
 from imbue.minds.desktop_client.workspace_update_state import resolve_workspace_version
 from imbue.minds.desktop_client.workspace_update_state import topology_signature
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -75,6 +76,18 @@ def test_a_workspace_below_the_in_place_cutoff_needs_recreation_whatever_the_app
     assert derive_update_detection("minds-v0.3.9", "minds-v0.4.1").availability is UpdateAvailability.NEEDS_RECREATION
     assert derive_update_detection("minds-v0.3.9", "main").availability is UpdateAvailability.NEEDS_RECREATION
     assert derive_update_detection("minds-v0.2.0", None).availability is UpdateAvailability.NEEDS_RECREATION
+
+
+@pytest.mark.parametrize("workspace_ref", [None, "", "main", "gabriel/some-branch", "my-own-template"])
+def test_a_version_nobody_could_read_is_never_below_the_in_place_floor(workspace_ref: str | None) -> None:
+    """The floor refuses mutations, so an unreadable version must not trip it.
+
+    The backup-service update refuses a machine below the floor outright; if an
+    unparseable ref counted as below it, every machine on a branch template --
+    and every machine the detector has not resolved yet -- would lose that
+    update.
+    """
+    assert is_below_in_place_update_floor(workspace_ref) is False
 
 
 def test_the_in_place_cutoff_is_inclusive() -> None:

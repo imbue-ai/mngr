@@ -25,7 +25,7 @@ import {
   updateActivityNotice,
 } from "../../../models/updates";
 import { noBackupConfirmPrompt, scheduledLine, updateVersionRow } from "../../components/UpdateModal";
-import { BackupGroupSlot } from "./BackupGroupSlot";
+import { BackupGroup } from "./BackupGroup";
 import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import { workspacePageNoticeFor } from "../../shell/notice-band";
@@ -125,7 +125,7 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
           content: [
             selectedGroup === "general" ? renderGeneralGroup(model, local) : null,
             selectedGroup === "account" ? renderAccountGroup(model, local) : null,
-            selectedGroup === "backup" ? m(BackupGroupSlot, { agentId: data.agent_id }) : null,
+            selectedGroup === "backup" ? m(BackupGroup, { agentId: data.agent_id }) : null,
             selectedGroup === "updates" ? renderUpdatesGroup(data.agent_id, local) : null,
           ],
           extra: "mt-8",

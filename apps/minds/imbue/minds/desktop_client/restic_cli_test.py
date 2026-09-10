@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.minds.desktop_client import restic_cli
 from imbue.minds.desktop_client.restic_cli import _env_and_flags
 from imbue.minds.desktop_client.restic_cli import _looks_already_initialized
@@ -75,16 +76,46 @@ def test_looks_like_lock_write_failure_matches_signal() -> None:
     assert restic_cli._looks_like_lock_write_failure("") is False
 
 
+def _finished_restic(*, returncode: int, stderr: str, is_timed_out: bool = False) -> FinishedProcess:
+    return FinishedProcess(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        command=("restic", "snapshots"),
+        is_timed_out=is_timed_out,
+        is_output_already_logged=False,
+    )
+
+
 def test_raise_restic_failure_raises_transient_for_auth_errors() -> None:
     with pytest.raises(restic_cli.ResticTransientAuthError):
-        restic_cli._raise_restic_failure("restic init", 1, "Fatal: create repository failed: Unauthorized")
+        restic_cli._raise_restic_failure(
+            "restic init",
+            _finished_restic(returncode=1, stderr="Fatal: create repository failed: Unauthorized"),
+            timeout_seconds=120.0,
+        )
 
 
 def test_raise_restic_failure_raises_fatal_for_other_errors() -> None:
     with pytest.raises(BackupProvisioningError) as exc_info:
-        restic_cli._raise_restic_failure("restic init", 1, "Fatal: host unreachable")
+        restic_cli._raise_restic_failure(
+            "restic init", _finished_restic(returncode=1, stderr="Fatal: host unreachable"), timeout_seconds=120.0
+        )
     # A non-auth failure must be the plain (non-retryable) error, not the transient subclass.
     assert not isinstance(exc_info.value, restic_cli.ResticTransientAuthError)
+
+
+def test_raise_restic_failure_reports_the_budget_a_killed_restic_blew() -> None:
+    """A timed-out restic reports only the signal that killed it, so say the budget instead."""
+    with pytest.raises(restic_cli.ResticTimeoutError) as exc_info:
+        restic_cli._raise_restic_failure(
+            "restic snapshots",
+            # What a killed restic actually leaves behind: SIGINT's 130 and no stderr.
+            _finished_restic(returncode=130, stderr="", is_timed_out=True),
+            timeout_seconds=12.0,
+        )
+    assert "timed out after 12s" in str(exc_info.value)
+    assert "130" not in str(exc_info.value)
 
 
 def test_retry_on_transient_auth_retries_until_success() -> None:
