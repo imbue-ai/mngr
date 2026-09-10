@@ -27,6 +27,9 @@ existing tunnel and exit.
 """
 
 import threading
+from collections.abc import Iterator
+from enum import auto
+from typing import Final
 
 import paramiko
 from loguru import logger
@@ -36,15 +39,20 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.loader import load_config
+from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
@@ -54,6 +62,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -64,6 +73,13 @@ from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
 from imbue.mngr_latchkey.remote.provisioning import sync_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
+# How many consecutive discovery cycles a wiring step may fail with transient SSH errors
+# before the streak is reported as an error. Every cycle (30s by default) is one attempt,
+# so this is about five minutes of a host that reports as running yet cannot be reached:
+# long enough that a blip never reports, short enough that a real misconfiguration (a
+# rotated key, a firewall) is not hidden by the retry.
+TRANSIENT_FAILURE_REPORT_THRESHOLD: Final[int] = 10
+
 
 class _GatewayRoute(FrozenModel):
     """Successfully-resolved gateway route for one host."""
@@ -71,6 +87,54 @@ class _GatewayRoute(FrozenModel):
     outer_ssh_info: RemoteSSHInfo | None = Field(
         description="Remote outer-host SSH endpoint, or None when the workspace uses the desktop gateway directly"
     )
+
+
+class _RemoteWiringStep(UpperCaseStrEnum):
+    """One of the per-host SSH steps discovery re-runs every cycle until it succeeds."""
+
+    DESKTOP_GATEWAY_TUNNEL = auto()
+    DESKTOP_TO_VPS_TUNNEL = auto()
+    VPS_GATEWAY_PROVISIONING = auto()
+
+
+class _TransientFailureStreakKey(FrozenModel):
+    """Identifies which host's wiring step a run of consecutive transient failures belongs to."""
+
+    host_id: HostId = Field(description="Host whose wiring step keeps failing")
+    step: _RemoteWiringStep = Field(description="The wiring step that keeps failing")
+
+
+def _exception_chain(error: BaseException) -> Iterator[BaseException]:
+    """Yield the error and every error it was explicitly raised from, outermost first."""
+    yield error
+    if error.__cause__ is not None:
+        yield from _exception_chain(error.__cause__)
+
+
+@pure
+def is_transient_remote_wiring_error(error: BaseException) -> bool:
+    """Whether a wiring-step failure is one the next discovery cycle is expected to clear on its own.
+
+    True for the transient SSH shapes ``is_transient_ssh_error`` names (a
+    reset or closed socket, a dead transport, a paramiko exception, a read
+    timeout) anywhere in the error's cause chain, since the outer host and the
+    provisioning code both wrap them before they get here; for a
+    ``HostConnectionError``, which is what those become after the outer host's
+    own retries give up; and for a tunnel failure the tunnel layer attributes
+    to the host rather than to this device. Everything else -- trust material
+    missing on this device, a rejected key, a malformed file -- is a failure no
+    amount of retrying fixes, and is reported at once.
+    """
+    for link in _exception_chain(error):
+        if isinstance(link, HostAuthenticationError):
+            return False
+        if isinstance(link, HostConnectionError):
+            return True
+        if isinstance(link, SSHTunnelError):
+            return link.phase is SSHTunnelPhase.HOST_CONNECT
+        if is_transient_ssh_error(link):
+            return True
+    return False
 
 
 class LatchkeyDiscoveryHandler(MutableModel):
@@ -138,6 +202,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
     _unresolved_route_hosts: set[str] = PrivateAttr(default_factory=set)
     # Same, for hosts whose outer sshd rejected this machine's key.
     _unauthenticated_hosts: set[str] = PrivateAttr(default_factory=set)
+    # How many discovery cycles in a row each host's wiring step has failed with a
+    # transient SSH error. A success deletes the entry. Guarded by
+    # ``_remote_hosts_lock``.
+    _transient_failure_streak_by_key: dict[_TransientFailureStreakKey, int] = PrivateAttr(default_factory=dict)
 
     def __call__(
         self,
@@ -285,7 +353,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
         health-check loop from indefinitely re-dialing a dead endpoint.
         Forgetting the host's ``_provisioned_hosts`` marker means a later restart
         re-runs the idempotent VPS-resident gateway provisioning, since a stopped
-        container may be recreated before it comes back.
+        container may be recreated before it comes back. The host's
+        transient-failure streaks are forgotten too: they count consecutive
+        cycles while the host reports as running, and a stop ends that run.
         """
         removed_tunnel_count = self.tunnel_manager.remove_reverse_tunnels_for_agent(
             AgentInstanceKey.build(agent_id, host_id)
@@ -294,6 +364,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
             logger.debug("Removed {} reverse tunnel(s) for stopped agent {}", removed_tunnel_count, agent_id)
         with self._remote_hosts_lock:
             self._provisioned_hosts.discard(str(host_id))
+            for key in [key for key in self._transient_failure_streak_by_key if key.host_id == host_id]:
+                del self._transient_failure_streak_by_key[key]
 
     def _setup_desktop_gateway_reachability(
         self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo, host_side_port: int
@@ -316,12 +388,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 agent_id=AgentInstanceKey.build(agent_id, host_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
-            logger.opt(exception=e).error(
-                "Failed to set up desktop-side Latchkey reachability for agent {} (host-side port {}): {}",
-                agent_id,
-                host_side_port,
+            self._record_wiring_step_failure(
+                host_id,
+                _RemoteWiringStep.DESKTOP_GATEWAY_TUNNEL,
                 e,
+                f"set up desktop-side Latchkey reachability for agent {agent_id} (host-side port {host_side_port})",
             )
+            return
+        self._record_wiring_step_success(host_id, _RemoteWiringStep.DESKTOP_GATEWAY_TUNNEL)
 
     def _setup_desktop_gateway_reachability_on_vps(
         self,
@@ -345,11 +419,65 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 agent_id=AgentInstanceKey.build(agent_id, host_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
-            logger.opt(exception=e).error(
-                "Failed to expose the desktop Latchkey gateway on VPS port {} for host {}: {}",
-                DESKTOP_GATEWAY_VPS_PORT,
+            self._record_wiring_step_failure(
                 host_id,
+                _RemoteWiringStep.DESKTOP_TO_VPS_TUNNEL,
                 e,
+                f"expose the desktop Latchkey gateway on VPS port {DESKTOP_GATEWAY_VPS_PORT} for host {host_id}",
+            )
+            return
+        self._record_wiring_step_success(host_id, _RemoteWiringStep.DESKTOP_TO_VPS_TUNNEL)
+
+    def _record_wiring_step_success(self, host_id: HostId, step: _RemoteWiringStep) -> None:
+        """Forget a host's transient-failure streak for a step that just succeeded."""
+        key = _TransientFailureStreakKey(host_id=host_id, step=step)
+        with self._remote_hosts_lock:
+            self._transient_failure_streak_by_key.pop(key, None)
+
+    def _record_wiring_step_failure(
+        self,
+        host_id: HostId,
+        step: _RemoteWiringStep,
+        error: BaseException,
+        # What was being attempted, phrased to follow "Failed to"
+        attempt_description: str,
+    ) -> None:
+        """Log a wiring-step failure at a level that reflects whether retrying is expected to fix it.
+
+        A failure that is not transient is an error right away. A transient one
+        is expected to clear on the next discovery cycle, so it is only noted
+        (once per streak at info, then at debug) until the streak reaches
+        ``TRANSIENT_FAILURE_REPORT_THRESHOLD``, when it is reported as an error
+        exactly once, traceback included. Retrying continues either way, and a
+        later success resets the streak so a new outage reports afresh.
+        """
+        if not is_transient_remote_wiring_error(error):
+            logger.opt(exception=error).error("Failed to {}: {}", attempt_description, error)
+            return
+        key = _TransientFailureStreakKey(host_id=host_id, step=step)
+        with self._remote_hosts_lock:
+            streak_length = self._transient_failure_streak_by_key.get(key, 0) + 1
+            self._transient_failure_streak_by_key[key] = streak_length
+        if streak_length == TRANSIENT_FAILURE_REPORT_THRESHOLD:
+            logger.opt(exception=error).error(
+                "Failed to {} on {} consecutive discovery cycles with transient SSH errors while the host "
+                "reports as running; still retrying every cycle. Latest: {}",
+                attempt_description,
+                streak_length,
+                error,
+            )
+        elif streak_length == 1:
+            logger.info(
+                "Failed to {} ({}); retrying on the next discovery cycle",
+                attempt_description,
+                error,
+            )
+        else:
+            logger.debug(
+                "Failed to {} ({}); retrying on the next discovery cycle (attempt {} of the current streak)",
+                attempt_description,
+                error,
+                streak_length,
             )
 
     def _maybe_dispatch_remote_gateway_provisioning(
@@ -638,72 +766,24 @@ class LatchkeyDiscoveryHandler(MutableModel):
         """Fire-and-forget worker: stand up the VPS-resident gateway for a remote agent.
 
         Opens the agent's outer host and runs the full provisioning sequence on
-        it. Exceptions are intentionally *not* swallowed: they propagate out of
-        the thread target so the CG's ObservableThread logs them at error level
+        it. A transient SSH failure is logged via
+        ``_record_wiring_step_failure`` (the next discovery cycle retries, and a
+        long streak is escalated there); any other exception propagates out of
+        the thread target so the CG's ObservableThread logs it at error level
         (we never silently miss a provisioning failure). The pending flag is
         always cleared in ``finally`` so a later discovery fire retries.
         """
         try:
-            provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
-            with provider.outer_host_for(host_id) as outer:
-                if outer is None:
-                    # Raced: the outer host vanished between the cheap check and now.
-                    logger.info(
-                        "Outer host for agent {} (host {}) vanished before provisioning; skipping",
-                        agent_id,
-                        host_id,
-                    )
-                    return
-                if outer.is_local:
-                    # The outer is this very machine (e.g. a local docker daemon),
-                    # not a remote VPS -- nothing to provision and nothing to sync.
-                    logger.trace(
-                        "Outer host for agent {} (host {}) is local; skipping VPS gateway provisioning",
-                        agent_id,
-                        host_id,
-                    )
-                    return
-                # The reverse tunnel runs *on the outer host*, so it needs the
-                # port the container's sshd is published on from the outer host's
-                # own loopback -- not ``ssh_info.port``, which is how a remote
-                # client reaches the container (a box-forwarded port for slices).
-                # Providers whose topology splits publish from connect surface the
-                # loopback port here; otherwise the two coincide and we fall back.
-                loopback_ssh_port = provider.get_container_loopback_ssh_port(host_id)
-                container_ssh_port = loopback_ssh_port if loopback_ssh_port is not None else ssh_info.port
-                # This computer's own gateway secrets: the machine's forwarding
-                # extension presents them on the hop back here, replacing
-                # whatever the computer that provisioned it last left behind.
-                desktop_secrets = DesktopGatewaySecrets(
-                    gateway_password=self.latchkey.derive_gateway_password(),
-                    permissions_override=self.latchkey.create_permissions_override_jwt(
-                        permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-                    ),
-                )
-                provision_remote_gateway(
-                    outer,
-                    host_id=host_id,
-                    container_ssh_user=ssh_info.user,
-                    container_ssh_port=container_ssh_port,
-                    latchkey_directory=self.latchkey.latchkey_directory,
-                    desktop_secrets=desktop_secrets,
-                )
-                # Seed (or adopt) the machine's policy while its outer host is
-                # still open. A gateway with no permissions file at all is an
-                # allow-all gateway, so this is the one thing that cannot wait
-                # for a user to open the workspace's Permissions tab.
-                sync_permissions(
-                    outer,
-                    self.latchkey.latchkey_directory,
-                    host_id,
-                    RemoteLatchkeyDirectory(host=outer).resolve(),
-                )
-            logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
-            # Record success so later discovery cycles skip the expensive re-run.
-            # Only reached when provisioning completed without raising (a failure
-            # propagates past here, leaving the host eligible for retry).
-            with self._remote_hosts_lock:
-                self._provisioned_hosts.add(str(host_id))
+            self._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name)
+        except (MngrError, LatchkeyError, OSError, paramiko.SSHException, EOFError) as e:
+            if not is_transient_remote_wiring_error(e):
+                raise
+            self._record_wiring_step_failure(
+                host_id,
+                _RemoteWiringStep.VPS_GATEWAY_PROVISIONING,
+                e,
+                f"provision the VPS-resident Latchkey gateway for agent {agent_id} on host {host_id}",
+            )
         finally:
             # Release the per-host in-flight guard, and clear the per-agent
             # pending flag. (A failed pass leaves the host out of
@@ -712,6 +792,76 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 self._provisioning_hosts.discard(str(host_id))
             with self._pending_lock:
                 self._pending_remote_agents.discard(str(AgentInstanceKey.build(agent_id, host_id)))
+
+    def _provision_remote_gateway_for_agent(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> None:
+        """Open the agent's outer host, provision its gateway, and record the host as provisioned."""
+        provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
+        with provider.outer_host_for(host_id) as outer:
+            if outer is None:
+                # Raced: the outer host vanished between the cheap check and now.
+                logger.info(
+                    "Outer host for agent {} (host {}) vanished before provisioning; skipping",
+                    agent_id,
+                    host_id,
+                )
+                return
+            if outer.is_local:
+                # The outer is this very machine (e.g. a local docker daemon),
+                # not a remote VPS -- nothing to provision and nothing to sync.
+                logger.trace(
+                    "Outer host for agent {} (host {}) is local; skipping VPS gateway provisioning",
+                    agent_id,
+                    host_id,
+                )
+                return
+            # The reverse tunnel runs *on the outer host*, so it needs the
+            # port the container's sshd is published on from the outer host's
+            # own loopback -- not ``ssh_info.port``, which is how a remote
+            # client reaches the container (a box-forwarded port for slices).
+            # Providers whose topology splits publish from connect surface the
+            # loopback port here; otherwise the two coincide and we fall back.
+            loopback_ssh_port = provider.get_container_loopback_ssh_port(host_id)
+            container_ssh_port = loopback_ssh_port if loopback_ssh_port is not None else ssh_info.port
+            # This computer's own gateway secrets: the machine's forwarding
+            # extension presents them on the hop back here, replacing
+            # whatever the computer that provisioned it last left behind.
+            desktop_secrets = DesktopGatewaySecrets(
+                gateway_password=self.latchkey.derive_gateway_password(),
+                permissions_override=self.latchkey.create_permissions_override_jwt(
+                    permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+                ),
+            )
+            provision_remote_gateway(
+                outer,
+                host_id=host_id,
+                container_ssh_user=ssh_info.user,
+                container_ssh_port=container_ssh_port,
+                latchkey_directory=self.latchkey.latchkey_directory,
+                desktop_secrets=desktop_secrets,
+            )
+            # Seed (or adopt) the machine's policy while its outer host is
+            # still open. A gateway with no permissions file at all is an
+            # allow-all gateway, so this is the one thing that cannot wait
+            # for a user to open the workspace's Permissions tab.
+            sync_permissions(
+                outer,
+                self.latchkey.latchkey_directory,
+                host_id,
+                RemoteLatchkeyDirectory(host=outer).resolve(),
+            )
+        logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
+        # Record success so later discovery cycles skip the expensive re-run.
+        # Only reached when provisioning completed without raising (a failure
+        # propagates past here, leaving the host eligible for retry).
+        with self._remote_hosts_lock:
+            self._provisioned_hosts.add(str(host_id))
+        self._record_wiring_step_success(host_id, _RemoteWiringStep.VPS_GATEWAY_PROVISIONING)
 
 
 class LatchkeyDestructionHandler(FrozenModel):

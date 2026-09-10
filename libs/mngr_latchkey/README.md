@@ -137,6 +137,23 @@ kill <stray-pid>
 its reverse tunnels and the shared gateway subprocess, so killing the
 supervisor leaves nothing behind to clean up by hand.
 
+### A remote host's gateway keeps failing to wire
+
+Every discovery cycle (30s by default) re-runs each remote host's SSH wiring
+steps -- the desktop-to-VPS tunnel, the desktop-gateway reverse tunnel, and VPS
+gateway provisioning -- until they succeed, so a transient SSH failure (a
+connection reset, a dead transport, a handshake blip, an authentication
+timeout) heals by itself and is only logged at `INFO` the first time and
+`DEBUG` on later cycles. A host that keeps failing that way for
+`TRANSIENT_FAILURE_REPORT_THRESHOLD` (10) consecutive cycles while reporting as
+running is logged once at `ERROR` with a traceback (which is what reaches
+Sentry), then retried quietly until it succeeds, at which point a new outage
+would report afresh. The host stopping (or reporting `UNAUTHENTICATED`) also
+ends the streak, so failures before and after a restart are two separate
+outages. Failures that retrying cannot fix -- trust material missing
+on this computer, a rejected key, a malformed file -- are logged at `ERROR`
+immediately.
+
 ## Error reporting (Sentry)
 
 `mngr latchkey forward` can report errors to Sentry. It is **off by default** and

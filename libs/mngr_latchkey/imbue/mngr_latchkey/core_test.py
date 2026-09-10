@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
+import paramiko
 import psutil
 import pytest
 from loguru import logger
@@ -19,6 +20,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
@@ -53,8 +56,12 @@ from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
+from imbue.mngr_latchkey.discovery import TRANSIENT_FAILURE_REPORT_THRESHOLD
 from imbue.mngr_latchkey.discovery import _GatewayRoute
+from imbue.mngr_latchkey.discovery import _RemoteWiringStep
+from imbue.mngr_latchkey.discovery import is_transient_remote_wiring_error
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.provisioning import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
@@ -63,23 +70,25 @@ from imbue.mngr_latchkey.store import ensure_browser_log_path
 _POLL_INTERVAL_SECONDS = 0.05
 
 
+@contextmanager
+def _captured_log_records() -> Iterator[list[tuple[str, str]]]:
+    """Collect every loguru record emitted inside the block as ``(level name, message)``."""
+    captured: list[tuple[str, str]] = []
+    sink_id = logger.add(lambda m: captured.append((m.record["level"].name, m.record["message"])), level=0)
+    try:
+        yield captured
+    finally:
+        logger.remove(sink_id)
+
+
 def test_gateway_output_is_routed_through_loguru() -> None:
     """Gateway output lines are emitted as structured loguru events (not a raw file).
 
     This is what folds the gateway's otherwise-unstructured output into the
     supervisor's standard rotating, timestamped JSONL log.
     """
-    captured: list[tuple[str, str]] = []
-
-    def _sink(message: object) -> None:
-        record = message.record  # ty: ignore[unresolved-attribute]
-        captured.append((record["level"].name, record["message"]))
-
-    handler_id = logger.add(_sink, level="DEBUG", format="{message}")
-    try:
+    with _captured_log_records() as captured:
         _log_gateway_output_line("hello from the gateway\n", is_stdout=True)
-    finally:
-        logger.remove(handler_id)
 
     assert ("DEBUG", "[latchkey gateway] hello from the gateway") in captured
 
@@ -1140,8 +1149,11 @@ class _RecordingTunnelManager(SSHTunnelManager):
         return False
 
 
-class _RaisingTunnelManager(SSHTunnelManager):
-    """SSHTunnelManager whose reverse-tunnel setup always fails (no SSH)."""
+class _ConfigurableFailureTunnelManager(SSHTunnelManager):
+    """SSHTunnelManager that raises whatever error the test sets, and succeeds silently otherwise."""
+
+    _error_to_raise: BaseException | None = PrivateAttr(default=None)
+    _success_count: int = PrivateAttr(default=0)
 
     def setup_reverse_tunnel(
         self,
@@ -1150,10 +1162,10 @@ class _RaisingTunnelManager(SSHTunnelManager):
         remote_port: int = 0,
         agent_id: str | None = None,
     ) -> int:
-        raise SSHTunnelError("simulated reverse-tunnel failure", SSHTunnelPhase.HOST_CONNECT)
-
-    def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
-        return 0
+        if self._error_to_raise is not None:
+            raise self._error_to_raise
+        self._success_count += 1
+        return remote_port
 
 
 def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
@@ -1269,22 +1281,18 @@ class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
         del host_id, provider_name
         return _GatewayRoute(outer_ssh_info=_VPS_OUTER_SSH_INFO)
 
-    def _run_remote_gateway_provisioning(
+    def _provision_remote_gateway_for_agent(
         self,
         agent_id: AgentId,
         host_id: HostId,
         ssh_info: RemoteSSHInfo,
         provider_name: str,
     ) -> None:
-        try:
-            self._provisioned.append((agent_id, host_id))
-            with self._remote_hosts_lock:
-                self._provisioned_hosts.add(str(host_id))
-        finally:
-            with self._remote_hosts_lock:
-                self._provisioning_hosts.discard(str(host_id))
-            with self._pending_lock:
-                self._pending_remote_agents.discard(_instance_tag(agent_id, host_id))
+        del ssh_info, provider_name
+        self._provisioned.append((agent_id, host_id))
+        with self._remote_hosts_lock:
+            self._provisioned_hosts.add(str(host_id))
+        self._record_wiring_step_success(host_id, _RemoteWiringStep.VPS_GATEWAY_PROVISIONING)
 
 
 def test_discovery_does_not_cache_an_unresolvable_gateway_route(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1600,7 +1608,8 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_to_vps_tunne
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
-    tunnel_manager = _RaisingTunnelManager()
+    tunnel_manager = _ConfigurableFailureTunnelManager()
+    tunnel_manager._error_to_raise = SSHTunnelError("simulated reverse-tunnel failure", SSHTunnelPhase.HOST_CONNECT)
     agent_id = AgentId()
     host_id = HostId()
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
@@ -1707,12 +1716,6 @@ def test_unauthenticated_host_warns_once_instead_of_skipping_silently(
     key and a slice VM carved before the lima fix wiped it again on its next
     restart).
     """
-    captured: list[tuple[str, str]] = []
-
-    def _sink(message: object) -> None:
-        record = message.record  # ty: ignore[unresolved-attribute]
-        captured.append((record["level"].name, record["message"]))
-
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
@@ -1730,8 +1733,7 @@ def test_unauthenticated_host_warns_once_instead_of_skipping_silently(
         with handler._remote_hosts_lock:
             handler._provisioned_hosts.add(str(host_id))
 
-        handler_id = logger.add(_sink, level="DEBUG", format="{message}")
-        try:
+        with _captured_log_records() as captured:
             handler(AgentId(), host_id, ssh_info, "imbue_cloud", HostState.UNAUTHENTICATED)
             handler(AgentId(), host_id, ssh_info, "imbue_cloud", HostState.UNAUTHENTICATED)
             repeat_warnings = [
@@ -1741,8 +1743,6 @@ def test_unauthenticated_host_warns_once_instead_of_skipping_silently(
             # imbue_cloud), then the next VM restart wipes it again.
             handler(AgentId(), host_id, None, "imbue_cloud", HostState.RUNNING)
             handler(AgentId(), host_id, ssh_info, "imbue_cloud", HostState.UNAUTHENTICATED)
-        finally:
-            logger.remove(handler_id)
 
         assert len(repeat_warnings) == 1, f"expected exactly one warning for {host_id}, got {repeat_warnings}"
         assert "UNAUTHENTICATED" in repeat_warnings[0]
@@ -1828,6 +1828,304 @@ def test_provisioning_skips_host_already_provisioned_this_session(tmp_path: Path
         assert handler._provisioned == []
         with handler._remote_hosts_lock:
             assert handler._provisioning_hosts == set()
+
+
+# -- Transient-failure reporting for the per-host wiring steps --
+
+
+def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
+    """Return ``error`` chained as if it had been ``raise``d ``from cause``."""
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    ("error", "is_transient"),
+    [
+        pytest.param(ConnectionResetError(54, "Connection reset by peer"), True, id="connection-reset"),
+        pytest.param(paramiko.SSHException("No existing session"), True, id="no-existing-session"),
+        pytest.param(paramiko.AuthenticationException("Authentication timeout."), True, id="auth-timeout"),
+        pytest.param(EOFError(), True, id="eof"),
+        pytest.param(TimeoutError("timed out"), True, id="timeout"),
+        pytest.param(HostConnectionError("Failed to connect to host"), True, id="host-connection-error"),
+        pytest.param(
+            _raised_from(RemoteGatewayError("Failed to read the permissions"), HostConnectionError("closed")),
+            True,
+            id="wrapped-host-connection-error",
+        ),
+        pytest.param(
+            _raised_from(RemoteGatewayError("Failed to push"), ConnectionResetError(54, "Connection reset by peer")),
+            True,
+            id="wrapped-connection-reset",
+        ),
+        pytest.param(
+            SSHTunnelError("SSH transport is not active", SSHTunnelPhase.HOST_CONNECT), True, id="tunnel-host-connect"
+        ),
+        pytest.param(HostAuthenticationError("Authentication failed"), False, id="host-authentication-error"),
+        pytest.param(SSHTunnelError("No SSH key file", SSHTunnelPhase.LOCAL_SETUP), False, id="tunnel-local-setup"),
+        pytest.param(ConnectionRefusedError(61, "Connection refused"), False, id="connection-refused"),
+        pytest.param(RemoteGatewayError("Malformed permissions file"), False, id="remote-gateway-error-alone"),
+        pytest.param(HostNotFoundError(ProviderInstanceName("p"), HostId()), False, id="host-not-found"),
+    ],
+)
+def test_is_transient_remote_wiring_error_classifies_by_error_and_cause_chain(
+    error: BaseException, is_transient: bool
+) -> None:
+    """Transient SSH shapes are recognized wherever they sit in the chain; misconfiguration is not."""
+    assert is_transient_remote_wiring_error(error) is is_transient
+
+
+def _error_messages_mentioning(captured: list[tuple[str, str]], host_id: HostId) -> list[str]:
+    return [message for level, message in captured if level == "ERROR" and str(host_id) in message]
+
+
+def test_transient_tunnel_failures_report_an_error_only_once_the_streak_reaches_the_threshold(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A transient tunnel failure is noted at info, then debug, and escalated to one error at the threshold.
+
+    Every discovery cycle retries the desktop-to-VPS tunnel, so a blip heals by
+    itself and must not be reported as an error. A host that keeps failing while
+    it reports as running is a misconfiguration we still want to learn about, so
+    the streak is reported exactly once when it reaches the threshold. A success
+    forgets the streak, so a later outage reports afresh.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    tunnel_manager = _ConfigurableFailureTunnelManager()
+    tunnel_manager._error_to_raise = paramiko.SSHException("No existing session")
+    agent_id = AgentId()
+    host_id = HostId()
+    host_side_port = 41989
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        with _captured_log_records() as captured:
+            for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
+                handler._setup_desktop_gateway_reachability_on_vps(
+                    agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port
+                )
+            levels_before_threshold = [level for level, message in captured if str(host_id) in message]
+            handler._setup_desktop_gateway_reachability_on_vps(agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port)
+            errors_at_threshold = _error_messages_mentioning(captured, host_id)
+            handler._setup_desktop_gateway_reachability_on_vps(agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port)
+            errors_past_threshold = _error_messages_mentioning(captured, host_id)
+
+            tunnel_manager._error_to_raise = None
+            handler._setup_desktop_gateway_reachability_on_vps(agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port)
+            with handler._remote_hosts_lock:
+                streaks_after_success = dict(handler._transient_failure_streak_by_key)
+
+            tunnel_manager._error_to_raise = paramiko.SSHException("No existing session")
+            handler._setup_desktop_gateway_reachability_on_vps(agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port)
+
+    # Below the threshold: the first failure of the streak is noted at info and
+    # the rest at debug, and nothing is reported as an error.
+    assert levels_before_threshold.count("INFO") == 1
+    assert levels_before_threshold.count("DEBUG") == TRANSIENT_FAILURE_REPORT_THRESHOLD - 2
+    assert "ERROR" not in levels_before_threshold
+    assert "WARNING" not in levels_before_threshold
+    # At the threshold: exactly one error, naming the streak length; past it: no more.
+    assert len(errors_at_threshold) == 1, errors_at_threshold
+    assert f"{TRANSIENT_FAILURE_REPORT_THRESHOLD} consecutive discovery cycles" in errors_at_threshold[0]
+    assert errors_past_threshold == errors_at_threshold
+    # A success forgets the streak, and the next failure starts a new one at info.
+    assert tunnel_manager._success_count == 1
+    assert streaks_after_success == {}
+    info_messages = [message for level, message in captured if level == "INFO" and str(host_id) in message]
+    assert len(info_messages) == 2, info_messages
+    assert _error_messages_mentioning(captured, host_id) == errors_at_threshold
+
+
+def test_non_transient_tunnel_failure_is_reported_as_an_error_at_once(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Trust material missing on this device cannot be fixed by retrying, so it is an error immediately."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    tunnel_manager = _ConfigurableFailureTunnelManager()
+    tunnel_manager._error_to_raise = SSHTunnelError("No SSH key file at /nowhere", SSHTunnelPhase.LOCAL_SETUP)
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        with _captured_log_records() as captured:
+            handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
+        with handler._remote_hosts_lock:
+            streaks = dict(handler._transient_failure_streak_by_key)
+
+    error_messages = [message for level, message in captured if level == "ERROR" and str(agent_id) in message]
+    assert len(error_messages) == 1, captured
+    assert "No SSH key file at /nowhere" in error_messages[0]
+    assert streaks == {}
+
+
+def test_stopping_a_host_forgets_its_transient_failure_streaks(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A streak counts consecutive cycles while the host runs, so a stop ends it and a restart starts afresh.
+
+    Only the stopped host's streaks are forgotten; another host mid-streak keeps
+    counting.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    tunnel_manager = _ConfigurableFailureTunnelManager()
+    tunnel_manager._error_to_raise = paramiko.SSHException("No existing session")
+    agent_id = AgentId()
+    host_id = HostId()
+    other_agent_id = AgentId()
+    other_host_id = HostId()
+    host_side_port = 41989
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
+            handler._setup_desktop_gateway_reachability_on_vps(agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port)
+        handler._setup_desktop_gateway_reachability_on_vps(
+            other_agent_id, other_host_id, _VPS_OUTER_SSH_INFO, host_side_port
+        )
+        handler._tear_down_stopped_agent(agent_id, host_id)
+        with handler._remote_hosts_lock:
+            streaks_after_stop = dict(handler._transient_failure_streak_by_key)
+        with _captured_log_records() as captured:
+            handler._setup_desktop_gateway_reachability_on_vps(agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port)
+
+    assert {key.host_id for key in streaks_after_stop} == {other_host_id}
+    levels_after_restart = [level for level, message in captured if str(host_id) in message]
+    assert levels_after_restart == ["INFO"], captured
+
+
+class _ProvisionFailureHandler(_ProvisionRecordingHandler):
+    """Recording handler whose provisioning pass raises whatever error the test sets, and succeeds otherwise."""
+
+    _error_to_raise: BaseException | None = PrivateAttr(default=None)
+
+    def _provision_remote_gateway_for_agent(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> None:
+        if self._error_to_raise is not None:
+            raise self._error_to_raise
+        super()._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name)
+
+
+def _mark_provisioning_in_flight(handler: LatchkeyDiscoveryHandler, agent_id: AgentId, host_id: HostId) -> None:
+    """Set the flags ``_maybe_dispatch_remote_gateway_provisioning`` sets before handing off to the worker."""
+    with handler._remote_hosts_lock:
+        handler._provisioning_hosts.add(str(host_id))
+    with handler._pending_lock:
+        handler._pending_remote_agents.add(_instance_tag(agent_id, host_id))
+
+
+def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reported_at_the_threshold(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A transient provisioning failure does not escape the worker, leaves the host retryable, and escalates late.
+
+    An exception escaping the unchecked worker is logged by the concurrency
+    group at error level. A transient failure is instead noted and the pass
+    left for the next discovery cycle: the in-flight and pending flags are
+    cleared, and the host is not recorded as provisioned. Only a streak as long
+    as the threshold is reported as an error.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionFailureHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler._error_to_raise = _raised_from(
+            RemoteGatewayError("Failed to hand the machine its permissions"),
+            HostConnectionError("Connection was closed while running command"),
+        )
+        with _captured_log_records() as captured:
+            _mark_provisioning_in_flight(handler, agent_id, host_id)
+            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+            with handler._remote_hosts_lock:
+                provisioning_hosts_after_failure = set(handler._provisioning_hosts)
+                provisioned_hosts_after_failure = set(handler._provisioned_hosts)
+            with handler._pending_lock:
+                pending_after_failure = set(handler._pending_remote_agents)
+            errors_after_first_failure = _error_messages_mentioning(captured, host_id)
+
+            for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
+                _mark_provisioning_in_flight(handler, agent_id, host_id)
+                handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+            errors_at_threshold = _error_messages_mentioning(captured, host_id)
+
+            handler._error_to_raise = None
+            _mark_provisioning_in_flight(handler, agent_id, host_id)
+            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+            with handler._remote_hosts_lock:
+                streaks_after_success = dict(handler._transient_failure_streak_by_key)
+                provisioned_hosts_after_success = set(handler._provisioned_hosts)
+
+    # The first failure is noted at info, not error, and leaves the host retryable.
+    assert errors_after_first_failure == []
+    assert any(level == "INFO" and str(host_id) in message for level, message in captured)
+    assert provisioning_hosts_after_failure == set()
+    assert pending_after_failure == set()
+    assert provisioned_hosts_after_failure == set()
+    # The streak is reported exactly once, at the threshold, with the wrapped error's text.
+    assert len(errors_at_threshold) == 1, errors_at_threshold
+    assert "Failed to hand the machine its permissions" in errors_at_threshold[0]
+    # A later success provisions normally and forgets the streak.
+    assert handler._provisioned == [(agent_id, host_id)]
+    assert provisioned_hosts_after_success == {str(host_id)}
+    assert streaks_after_success == {}
+
+
+def test_non_transient_provisioning_failure_still_escapes_the_worker(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A failure retrying cannot fix propagates out of the worker (so the CG reports it), flags still cleared."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionFailureHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler._error_to_raise = RemoteGatewayError("Malformed permissions file")
+        _mark_provisioning_in_flight(handler, agent_id, host_id)
+        with pytest.raises(RemoteGatewayError, match="Malformed permissions file"):
+            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+        with handler._remote_hosts_lock:
+            provisioning_hosts = set(handler._provisioning_hosts)
+            streaks = dict(handler._transient_failure_streak_by_key)
+        with handler._pending_lock:
+            pending = set(handler._pending_remote_agents)
+
+    assert provisioning_hosts == set()
+    assert pending == set()
+    assert streaks == {}
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
