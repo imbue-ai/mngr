@@ -1,17 +1,25 @@
 """Unit tests for the mngr_ttyd plugin."""
 
+import importlib.resources
+import re
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from typing import cast
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr_ttyd.plugin import TTYD_COMMAND
+from imbue.mngr_ttyd.plugin import TTYD_ENSURE_INSTALLED_COMMAND
 from imbue.mngr_ttyd.plugin import TTYD_INDEX_FILENAME
-from imbue.mngr_ttyd.plugin import TTYD_INSTALL_COMMAND
+from imbue.mngr_ttyd.plugin import TTYD_INSTALL_DIR
 from imbue.mngr_ttyd.plugin import TTYD_SERVICE_NAME
 from imbue.mngr_ttyd.plugin import TTYD_VERSION
 from imbue.mngr_ttyd.plugin import TTYD_WINDOW_NAME
+from imbue.mngr_ttyd.plugin import build_ttyd_ensure_installed_command
 from imbue.mngr_ttyd.plugin import on_after_provisioning
 from imbue.mngr_ttyd.plugin import override_command_options
 
@@ -27,16 +35,17 @@ class _FakeTtydHost:
     Set ttyd_installed=False to simulate ttyd not being installed on the host.
     """
 
-    def __init__(self, host_dir: Path, *, ttyd_installed: bool = True) -> None:
+    def __init__(self, host_dir: Path, *, ttyd_installed: bool = True, ttyd_failure_reason: str = "") -> None:
         self.host_dir = host_dir
         self._ttyd_installed = ttyd_installed
+        self._ttyd_failure_reason = ttyd_failure_reason
         self.executed_cmds: list[str] = []
         self.written_files: list[tuple[Path, bytes, str]] = []
 
     def _execute_command(self, cmd: str, **kwargs: Any) -> SimpleNamespace:
         self.executed_cmds.append(cmd)
         if "command -v ttyd" in cmd and not self._ttyd_installed:
-            return SimpleNamespace(returncode=1, success=False, stdout="", stderr="")
+            return SimpleNamespace(returncode=1, success=False, stdout="", stderr=self._ttyd_failure_reason)
         return SimpleNamespace(returncode=0, success=True, stdout="", stderr="")
 
     def execute_idempotent_command(self, cmd: str, **kwargs: Any) -> SimpleNamespace:
@@ -285,8 +294,175 @@ def test_on_after_provisioning_creates_ttyd_directory(tmp_path: Path) -> None:
     assert any("mkdir -p" in cmd and "commands/ttyd" in cmd for cmd in host.executed_cmds)
 
 
-def test_on_after_provisioning_installs_ttyd_when_missing(tmp_path: Path) -> None:
-    """Verify that on_after_provisioning downloads ttyd binary when it is not already present."""
+# -- ttyd install tests --
+#
+# The install command is a shell script, so the tests that matter run it for real under `sh`
+# against a stubbed PATH: the stand-ins record what was invoked, which is how each host shape
+# gets simulated without touching the real /usr/local/bin or the network.
+
+_STUB_DIR_NAME = "stubs"
+_INSTALL_DIR_NAME = "bin"
+_TMP_DIR_NAME = "tmp"
+_MARKER_DIR_NAME = "markers"
+
+# Records that it ran, then honors `-o <path>` so the download lands where the real curl would.
+_CURL_STUB = """: > "$TTYD_TEST_MARKER_DIR/curl"
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then echo fake-ttyd-binary > "$2"; fi
+  shift
+done"""
+
+# Stands in for a host where sudo demands a password, so `sudo -n` fails as it does on a
+# stock macOS or a locked-down VM.
+_SUDO_STUB = """: > "$TTYD_TEST_MARKER_DIR/sudo"
+echo "sudo: a password is required" >&2
+exit 1"""
+
+_DARWIN_UNAME_STUB = 'if [ "$1" = "-s" ]; then echo Darwin; else echo arm64; fi'
+_LINUX_UNAME_STUB = 'if [ "$1" = "-s" ]; then echo Linux; else echo x86_64; fi'
+
+
+def _run_ensure_ttyd_command(
+    cg: ConcurrencyGroup,
+    tmp_path: Path,
+    # Shell body for each binary to stub out, keyed by binary name and placed first on PATH.
+    stubs: Mapping[str, str],
+    # When False the install dir is never created, which is unwritable even for root (unlike
+    # a chmod-ed directory, which root would still be allowed to write).
+    is_install_dir_present: bool = True,
+) -> FinishedProcess:
+    """Run the ensure-installed command under `sh` against a stubbed PATH and install dir."""
+    stub_dir = tmp_path / _STUB_DIR_NAME
+    marker_dir = tmp_path / _MARKER_DIR_NAME
+    tmp_dir = tmp_path / _TMP_DIR_NAME
+    for directory in (stub_dir, marker_dir, tmp_dir):
+        directory.mkdir(exist_ok=True)
+    install_dir = tmp_path / _INSTALL_DIR_NAME
+    if is_install_dir_present:
+        install_dir.mkdir(exist_ok=True)
+
+    for name, body in stubs.items():
+        stub_path = stub_dir / name
+        stub_path.write_text(f"#!/bin/sh\n{body}\n")
+        stub_path.chmod(0o755)
+
+    return cg.run_process_to_completion(
+        ["sh", "-c", build_ttyd_ensure_installed_command(str(install_dir))],
+        is_checked_after=False,
+        # A minimal PATH keeps the real ttyd out of the way: the offload image preinstalls it
+        # into /usr/local/bin, which is deliberately excluded here.
+        env={
+            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "TMPDIR": str(tmp_dir),
+            "TTYD_TEST_MARKER_DIR": str(marker_dir),
+        },
+    )
+
+
+def _was_invoked(tmp_path: Path, binary: str) -> bool:
+    return (tmp_path / _MARKER_DIR_NAME / binary).exists()
+
+
+def test_ensure_command_does_nothing_when_ttyd_is_already_on_path(cg: ConcurrencyGroup, tmp_path: Path) -> None:
+    """An already-installed ttyd must short-circuit before any download."""
+    result = _run_ensure_ttyd_command(
+        cg, tmp_path, stubs={"ttyd": "exit 0", "curl": _CURL_STUB, "sudo": _SUDO_STUB, "uname": _LINUX_UNAME_STUB}
+    )
+
+    assert result.returncode == 0
+    assert not _was_invoked(tmp_path, "curl")
+
+
+def test_ensure_command_skips_the_download_when_the_platform_has_no_prebuilt_binary(
+    cg: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The ttyd release ships Linux binaries only, so macOS must not fetch one it cannot run."""
+    result = _run_ensure_ttyd_command(
+        cg, tmp_path, stubs={"uname": _DARWIN_UNAME_STUB, "curl": _CURL_STUB, "sudo": _SUDO_STUB}
+    )
+
+    assert result.returncode != 0
+    assert not _was_invoked(tmp_path, "curl")
+    assert "brew install ttyd" in result.stderr
+
+
+def test_ensure_command_skips_the_download_when_the_install_dir_cannot_be_written(
+    cg: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """With nowhere to put the binary and no passwordless sudo, the download must not happen."""
+    result = _run_ensure_ttyd_command(
+        cg,
+        tmp_path,
+        stubs={"uname": _LINUX_UNAME_STUB, "curl": _CURL_STUB, "sudo": _SUDO_STUB},
+        is_install_dir_present=False,
+    )
+
+    assert result.returncode != 0
+    assert not _was_invoked(tmp_path, "curl")
+    assert "ttyd" in result.stderr
+
+
+def test_ensure_command_installs_without_sudo_when_the_install_dir_is_writable(
+    cg: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """A writable install dir needs no sudo, which is the case where reaching for it fails."""
+    result = _run_ensure_ttyd_command(
+        cg, tmp_path, stubs={"uname": _LINUX_UNAME_STUB, "curl": _CURL_STUB, "sudo": _SUDO_STUB}
+    )
+
+    assert result.returncode == 0
+    assert not _was_invoked(tmp_path, "sudo")
+    installed = tmp_path / _INSTALL_DIR_NAME / "ttyd"
+    assert installed.read_text().strip() == "fake-ttyd-binary"
+    assert installed.stat().st_mode & 0o111
+
+
+def test_ensure_command_leaves_no_download_behind_when_the_install_fails(cg: ConcurrencyGroup, tmp_path: Path) -> None:
+    """A failed install must not leave its download behind."""
+    result = _run_ensure_ttyd_command(
+        cg,
+        tmp_path,
+        stubs={
+            "uname": _LINUX_UNAME_STUB,
+            "curl": _CURL_STUB,
+            "sudo": _SUDO_STUB,
+            "mv": 'echo "mv: permission denied" >&2; exit 1',
+        },
+    )
+
+    assert result.returncode != 0
+    assert _was_invoked(tmp_path, "curl")
+    assert list((tmp_path / _TMP_DIR_NAME).iterdir()) == []
+
+
+def test_ensure_command_downloads_the_pinned_version_from_github() -> None:
+    """Verify that the command downloads the pinned ttyd version from GitHub releases."""
+    assert f"github.com/tsl0922/ttyd/releases/download/{TTYD_VERSION}/" in TTYD_ENSURE_INSTALLED_COMMAND
+    assert f"_DEST_DIR={TTYD_INSTALL_DIR};" in TTYD_ENSURE_INSTALLED_COMMAND
+    assert "uname -m" in TTYD_ENSURE_INSTALLED_COMMAND
+    assert "chmod 0755" in TTYD_ENSURE_INSTALLED_COMMAND
+
+
+def test_dockerfile_pins_the_same_ttyd_version_as_the_plugin() -> None:
+    """mngr's image preinstalls ttyd, and its pin must not drift from the one installed here.
+
+    The Dockerfile cannot read TTYD_VERSION. mngr_modal ships each instruction to Modal as its
+    own dockerfile_commands call, so a build ARG expands to empty in the RUN that would use it
+    -- which is why the restic and offload pins next to it are inline literals too. Asserting
+    the two agree is the sync mechanism, as it is for CLAUDE_CODE_VERSION in
+    apps/minds/imbue/minds/test_claude_version_alignment.py.
+    """
+    dockerfile = importlib.resources.files(mngr_resources).joinpath("Dockerfile").read_text()
+
+    pinned = re.search(r"tsl0922/ttyd/releases/download/([^/]+)/ttyd\.", dockerfile)
+    assert pinned is not None, "the Dockerfile no longer installs ttyd from a pinned release URL"
+    assert pinned.group(1) == TTYD_VERSION, (
+        f"the Dockerfile pins ttyd {pinned.group(1)} but the plugin installs {TTYD_VERSION}; bump both together"
+    )
+
+
+def test_on_after_provisioning_ensures_ttyd_in_a_single_host_call(tmp_path: Path) -> None:
+    """A single host round trip both decides on and performs the install."""
     host_dir = tmp_path / "host"
     host_dir.mkdir()
 
@@ -296,11 +472,29 @@ def test_on_after_provisioning_installs_ttyd_when_missing(tmp_path: Path) -> Non
         agent=cast(Any, SimpleNamespace(id="a1")), host=cast(Any, host), mngr_ctx=cast(Any, SimpleNamespace())
     )
 
-    assert any(cmd == TTYD_INSTALL_COMMAND for cmd in host.executed_cmds)
+    assert [cmd for cmd in host.executed_cmds if cmd == TTYD_ENSURE_INSTALLED_COMMAND] == [
+        TTYD_ENSURE_INSTALLED_COMMAND
+    ]
 
 
-def test_on_after_provisioning_skips_install_when_ttyd_present(tmp_path: Path) -> None:
-    """Verify that on_after_provisioning skips ttyd install when it is already present."""
+def test_on_after_provisioning_warns_with_the_hosts_reason_when_ttyd_is_unavailable(
+    tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """The host's explanation must reach the user rather than being swallowed."""
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+
+    host = _FakeTtydHost(host_dir, ttyd_installed=False, ttyd_failure_reason="no prebuilt ttyd binary for Darwin")
+
+    on_after_provisioning(
+        agent=cast(Any, SimpleNamespace(id="a1")), host=cast(Any, host), mngr_ctx=cast(Any, SimpleNamespace())
+    )
+
+    assert any("no prebuilt ttyd binary for Darwin" in message for message in log_warnings)
+
+
+def test_on_after_provisioning_is_quiet_when_ttyd_is_available(tmp_path: Path, log_warnings: list[str]) -> None:
+    """Verify that a host that already has ttyd produces no warning."""
     host_dir = tmp_path / "host"
     host_dir.mkdir()
 
@@ -310,13 +504,4 @@ def test_on_after_provisioning_skips_install_when_ttyd_present(tmp_path: Path) -
         agent=cast(Any, SimpleNamespace(id="a1")), host=cast(Any, host), mngr_ctx=cast(Any, SimpleNamespace())
     )
 
-    assert not any(cmd == TTYD_INSTALL_COMMAND for cmd in host.executed_cmds)
-
-
-def test_ttyd_install_command_downloads_from_github() -> None:
-    """Verify that the install command downloads the correct ttyd version from GitHub releases."""
-    assert "github.com/tsl0922/ttyd/releases/download" in TTYD_INSTALL_COMMAND
-    assert TTYD_VERSION in TTYD_INSTALL_COMMAND
-    assert "/usr/local/bin/ttyd" in TTYD_INSTALL_COMMAND
-    assert "uname -m" in TTYD_INSTALL_COMMAND
-    assert "chmod +x" in TTYD_INSTALL_COMMAND
+    assert log_warnings == []

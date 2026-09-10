@@ -17,6 +17,7 @@ from imbue.mngr_ttyd import resources as ttyd_resources
 TTYD_WINDOW_NAME = "terminal"
 TTYD_SERVICE_NAME = "terminal"
 TTYD_VERSION = "1.7.7"
+TTYD_INSTALL_DIR = "/usr/local/bin"
 
 # Filename of the custom web client (a self-contained index.html) installed into
 # each agent's commands/ttyd/ dir and served to the stock ttyd binary via -I. The
@@ -111,43 +112,45 @@ def override_command_options(
     params["extra_window"] = (*existing, f'{TTYD_WINDOW_NAME}="{TTYD_COMMAND}"')
 
 
-def _build_ttyd_install_command() -> str:
-    """Build a shell command that downloads the ttyd binary for the current architecture.
+def build_ttyd_ensure_installed_command(install_dir: str) -> str:
+    """Build a POSIX-shell command that puts ttyd on the host's PATH, if the host permits it.
 
-    Uses sudo when not running as root (e.g. Lima VMs) since the install
-    target /usr/local/bin/ requires elevated permissions.
+    Everything that decides whether the install can succeed runs *before* the download, so a
+    host it can never succeed on pays a few shell builtins per agent rather than a 1.36 MB
+    fetch it will throw away. Keep that order: the upstream release ships Linux binaries only,
+    and the install dir is often unwritable, so both are common.
     """
+    asset_url = f"https://github.com/tsl0922/ttyd/releases/download/{TTYD_VERSION}/ttyd.$(uname -m)"
     return (
-        "ARCH=$(uname -m) && "
-        '_SUDO=""; [ "$(id -u)" != "0" ] && _SUDO=sudo && '
-        f'curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/{TTYD_VERSION}/ttyd.${{ARCH}}" '
-        "-o /tmp/ttyd.$$ && $_SUDO mv /tmp/ttyd.$$ /usr/local/bin/ttyd && "
-        "$_SUDO chmod +x /usr/local/bin/ttyd"
+        "if command -v ttyd >/dev/null 2>&1; then exit 0; fi; "
+        "_OS=$(uname -s); "
+        'if [ "$_OS" != "Linux" ]; then '
+        f'echo "no prebuilt ttyd {TTYD_VERSION} binary exists for $_OS; '
+        'install it yourself (on macOS: brew install ttyd)" >&2; exit 1; fi; '
+        f"_DEST_DIR={shlex.quote(install_dir)}; "
+        'if [ -w "$_DEST_DIR" ]; then _SUDO=; '
+        'elif sudo -n true >/dev/null 2>&1; then _SUDO="sudo -n"; '
+        f'else echo "cannot write $_DEST_DIR and sudo needs a password, so ttyd {TTYD_VERSION} '
+        'cannot be installed" >&2; exit 1; fi; '
+        '_TMP=$(mktemp "${TMPDIR:-/tmp}/ttyd.XXXXXX") || exit 1; '
+        # Discards the download if any step below it fails, rather than orphaning it in TMPDIR.
+        "trap 'rm -f \"$_TMP\"' EXIT INT TERM; "
+        f'curl -fsSL "{asset_url}" -o "$_TMP" || exit 1; '
+        # An explicit mode, since mktemp creates the file 0600 and `chmod +x` would leave it
+        # readable only by whoever installed it.
+        'chmod 0755 "$_TMP" || exit 1; '
+        '$_SUDO mv "$_TMP" "$_DEST_DIR/ttyd"'
     )
 
 
-TTYD_INSTALL_COMMAND = _build_ttyd_install_command()
+TTYD_ENSURE_INSTALLED_COMMAND = build_ttyd_ensure_installed_command(TTYD_INSTALL_DIR)
 
 
 def _ensure_ttyd_installed(host: OnlineHostInterface) -> None:
-    """Check if ttyd is installed on the host and install it if missing.
-
-    Downloads the ttyd binary from GitHub releases for the host's architecture.
-    """
-    check_result = host.execute_idempotent_command("command -v ttyd >/dev/null 2>&1", timeout_seconds=10.0)
-    if check_result.success:
-        logger.debug("ttyd is already installed on the host")
-        return
-
-    logger.info("ttyd is not installed on the host, installing...")
-    install_result = host.execute_idempotent_command(
-        TTYD_INSTALL_COMMAND,
-        timeout_seconds=120.0,
-    )
-    if not install_result.success:
-        logger.warning("Failed to install ttyd: {}", install_result.stderr)
-    else:
-        logger.info("ttyd installed successfully")
+    """Make sure ttyd is on the host's PATH, installing it when the host allows that."""
+    result = host.execute_idempotent_command(TTYD_ENSURE_INSTALLED_COMMAND, timeout_seconds=120.0)
+    if not result.success:
+        logger.warning("The agent's web terminal will not start: {}", result.stderr.strip())
 
 
 @hookimpl

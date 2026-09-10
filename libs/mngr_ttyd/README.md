@@ -6,7 +6,18 @@ A plugin for [mngr](https://github.com/imbue-ai/mngr) that automatically launche
 
 ## Requirements
 
-- `ttyd` must be installed on the host machine (the plugin installs `ttyd` 1.7.7 automatically if missing)
+`ttyd` must be on the host's PATH. When it is missing, the plugin installs 1.7.7 from the
+upstream GitHub release, but only onto a host where that can actually work:
+
+- **Linux** with a writable `/usr/local/bin`, or with passwordless `sudo`: installed automatically.
+- **macOS**: not installed. The upstream release ships Linux binaries only, so there is nothing
+  to fetch. Run `brew install ttyd` yourself.
+- **Anywhere `/usr/local/bin` is unwritable and `sudo` wants a password**: not installed.
+
+When the plugin cannot install `ttyd`, it says so and the agent comes up without its web
+terminal; everything else about the agent is unaffected. The check costs a few milliseconds,
+so an agent on a host that will never be installable does not pay for a download on every
+`mngr create`.
 
 ## Clipboard support
 
