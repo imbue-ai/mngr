@@ -7,13 +7,7 @@ from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.mngr_settings.errors import MindsSettingsError
 from imbue.minds.mngr_settings.file_store import settings_store_for
 from imbue.minds.mngr_settings.profile_paths import imbue_cloud_accounts_path
-from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_BACKEND_NAME
-from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_DEFAULT_START_ARGS
-from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_DOCKER_RUNTIME
-from imbue.minds.mngr_settings.provider_blocks import IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
-from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_DIR
-from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_LOG_DIR
-from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_VOLUME_HOME_PATH
+from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_account_provider_block
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.minds.mngr_settings.provider_blocks import remove_provider_block
 from imbue.minds.mngr_settings.reconcile import ensure_mngr_settings
@@ -152,33 +146,17 @@ def _register_account_block(doc: tomlkit.TOMLDocument, *, email: str, connector_
     existing = providers.get(provider_name)
     existing_is_enabled = existing.get("is_enabled") if isinstance(existing, dict) else None
     desired_is_enabled = True if force_enable else existing_is_enabled
+    block = imbue_cloud_account_provider_block(email=email, connector_url=connector_url)
     if (
         isinstance(existing, dict)
-        and existing.get("backend") == IMBUE_CLOUD_BACKEND_NAME
-        and existing.get("account") == email
-        and existing.get("connector_url") == connector_url
         and existing_is_enabled == desired_is_enabled
-        and existing.get("docker_runtime") == IMBUE_CLOUD_DOCKER_RUNTIME
-        and existing.get("install_gvisor_runtime") == IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
-        and existing.get("default_start_args") == list(IMBUE_CLOUD_DEFAULT_START_ARGS)
-        and existing.get("host_dir") == WORKSPACE_HOST_DIR
-        and existing.get("volume_home_path") == WORKSPACE_VOLUME_HOME_PATH
-        and existing.get("host_log_dir") == WORKSPACE_HOST_LOG_DIR
+        and all(existing.get(key) == value for key, value in block.items())
     ):
         return False
     new_block = tomlkit.table()
-    new_block["backend"] = IMBUE_CLOUD_BACKEND_NAME
-    new_block["account"] = email
-    new_block["connector_url"] = connector_url
+    for key, value in block.items():
+        new_block[key] = value
     if desired_is_enabled is not None:
         new_block["is_enabled"] = desired_is_enabled
-    # Run the rebuilt agent container under gVisor with the runsc hardening args (see provider_blocks).
-    new_block["docker_runtime"] = IMBUE_CLOUD_DOCKER_RUNTIME
-    new_block["install_gvisor_runtime"] = IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
-    new_block["default_start_args"] = list(IMBUE_CLOUD_DEFAULT_START_ARGS)
-    # The user-data layout knobs (see provider_blocks).
-    new_block["host_dir"] = WORKSPACE_HOST_DIR
-    new_block["volume_home_path"] = WORKSPACE_VOLUME_HOME_PATH
-    new_block["host_log_dir"] = WORKSPACE_HOST_LOG_DIR
     providers[provider_name] = new_block
     return True

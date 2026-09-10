@@ -78,6 +78,32 @@ def imbue_cloud_provider_name_for_account(email: str) -> str:
     return f"imbue_cloud_{_slugify_imbue_cloud_account(email)}"
 
 
+def imbue_cloud_account_provider_block(*, email: str, connector_url: str) -> dict[str, object]:
+    """Return the ``[providers.imbue_cloud_<slug>]`` block minds writes for a signed-in account.
+
+    The single definition of that field set: the imbue_cloud slow (rebuild)
+    create path carves and runs the container off these knobs, so a second copy
+    that falls behind rebuilds onto a different layout than minds configures.
+
+    Excludes ``is_enabled``, whose value is not fixed: it depends on the caller's
+    ``force_enable`` and on what is already on disk.
+    """
+    return {
+        "backend": IMBUE_CLOUD_BACKEND_NAME,
+        "account": email,
+        "connector_url": connector_url,
+        # Run the rebuilt agent container under gVisor with the runsc hardening args (see above).
+        "docker_runtime": IMBUE_CLOUD_DOCKER_RUNTIME,
+        "install_gvisor_runtime": IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME,
+        # A list, not a tuple: it is compared against a parsed TOML array.
+        "default_start_args": list(IMBUE_CLOUD_DEFAULT_START_ARGS),
+        # The user-data layout knobs (see above).
+        "host_dir": WORKSPACE_HOST_DIR,
+        "volume_home_path": WORKSPACE_VOLUME_HOME_PATH,
+        "host_log_dir": WORKSPACE_HOST_LOG_DIR,
+    }
+
+
 def _slugify_cloud_account_alias(alias: str) -> str:
     """Slugify an alias for use in the provider block name; raises on an empty result."""
     slug = re.sub(r"[^a-z0-9]+", "-", alias.strip().lower()).strip("-")

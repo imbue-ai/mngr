@@ -30,12 +30,13 @@ class MissingConnectorUrlError(ImbueCloudError):
 class ImbueCloudProviderConfig(VpsProviderConfig):
     """Configuration for an imbue_cloud provider instance.
 
-    Extends ``VpsProviderConfig`` so it carries the runtime knobs
-    (``docker_runtime`` / ``install_gvisor_runtime`` / ``default_start_args``)
-    that the slow (rebuild) path forwards onto the delegated ``vps_docker``
-    provider in ``ImbueCloudProvider._build_delegated_vps_provider``. Minds
-    bootstrap writes runsc + hardening values into the per-account block (see
-    ``minds.bootstrap.set_imbue_cloud_provider_for_account``).
+    Extends ``VpsProviderConfig`` so it carries every knob the slow (rebuild)
+    path forwards onto the delegated ``vps_docker`` / slice provider (see
+    ``providers.rebuild``): the runtime knobs (``docker_runtime`` /
+    ``install_gvisor_runtime`` / ``default_start_args``) and the user-data
+    layout knobs (``host_dir`` / ``volume_home_path`` / ``host_log_dir``).
+    Minds writes runsc + hardening values and the ``/home/user`` layout into
+    the per-account block (see ``minds.mngr_settings.imbue_cloud_accounts``).
 
     Two recognized usages:
 
@@ -47,8 +48,8 @@ class ImbueCloudProviderConfig(VpsProviderConfig):
     - Per-account instance ``[providers.imbue_cloud_<slug>]``: ``account``
       is bound at config time. Minds writes one of these per signed-in
       account into its mngr settings.toml (see
-      ``minds.bootstrap.set_imbue_cloud_provider_for_account`` /
-      ``unset_imbue_cloud_provider_for_account``) so per-account
+      ``minds.mngr_settings.imbue_cloud_accounts.set_imbue_cloud_provider_for_account``
+      / ``unset_imbue_cloud_provider_for_account``) so per-account
       ``discover_hosts`` works without consulting the active-account file.
     """
 
