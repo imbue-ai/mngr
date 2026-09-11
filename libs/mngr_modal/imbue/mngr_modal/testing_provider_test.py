@@ -93,6 +93,7 @@ from imbue.modal_proxy.interface import FunctionInterface
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.testing import FakeModalInterface
+from imbue.modal_proxy.testing import FakeVolume
 
 
 class _RateLimitingVolumeStub(VolumeInterface):
@@ -100,6 +101,9 @@ class _RateLimitingVolumeStub(VolumeInterface):
 
     def get_name(self) -> str | None:
         return None
+
+    def get_object_id(self) -> str:
+        raise ModalProxyRateLimitError("rate limit exceeded")
 
     def listdir(self, path: str) -> list[FileEntry]:
         raise ModalProxyRateLimitError("rate limit exceeded")
@@ -348,6 +352,100 @@ def test_get_volume_for_host_returns_none_when_not_found(
     # Don't create the host volume -- volume_from_name with create_if_missing=False
     result = testing_provider.get_volume_for_host(host_id)
     assert result is None
+
+
+class _ListingRateLimitedVolume(FakeVolume):
+    """A volume that exists but whose file-listing API is rate limited.
+
+    Mirrors Modal's per-workspace ``VolumeListFiles`` limit, which is shared
+    across every concurrent client and so says nothing about whether this
+    volume exists.
+    """
+
+    def listdir(self, path: str) -> list[FileEntry]:
+        raise ModalProxyRateLimitError("VolumeListFiles rate limit exceeded. Please wait and retry.")
+
+
+class _UnresolvableVolume(FakeVolume):
+    """A volume whose id cannot be resolved because Modal is rate limiting."""
+
+    def get_object_id(self) -> str:
+        raise ModalProxyRateLimitError("VolumeGetOrCreate rate limit exceeded. Please wait and retry.")
+
+
+class _CustomVolumeModalInterface(FakeModalInterface):
+    """Fake Modal that hands out volumes of a caller-chosen FakeVolume subclass."""
+
+    volume_class: type[FakeVolume] = Field(description="Subclass to build each volume as")
+
+    def volume_from_name(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+        version: int | None = None,
+    ) -> VolumeInterface:
+        volume = super().volume_from_name(
+            name,
+            create_if_missing=create_if_missing,
+            environment_name=environment_name,
+            version=version,
+        )
+        assert isinstance(volume, FakeVolume)
+        return self.volume_class(root_dir=volume.root_dir, volume_name=volume.get_name())
+
+
+def _make_provider_with_volume_class(
+    mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+    volume_class: type[FakeVolume],
+) -> ModalProviderInstance:
+    """Build a fake-backed provider whose host volumes are of ``volume_class``."""
+    root = tmp_path / "modal_testing"
+    root.mkdir(parents=True, exist_ok=True)
+    modal_interface = _CustomVolumeModalInterface(root_dir=root, concurrency_group=cg, volume_class=volume_class)
+    return make_testing_provider(mngr_ctx, modal_interface)
+
+
+def test_get_volume_for_host_reports_an_unresolvable_volume_as_a_mngr_error(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """A rate limit on the existence probe must surface as ModalMngrError, not a raw proxy error.
+
+    Callers guard this method with ``except (MngrError, OSError)`` to degrade to
+    "no volume available", so a proxy error leaking through the boundary would
+    crash them instead.
+    """
+    provider = _make_provider_with_volume_class(temp_mngr_ctx, tmp_path, cg, _UnresolvableVolume)
+    host_id = HostId.generate()
+    provider._build_host_volume(host_id)
+
+    with pytest.raises(ModalMngrError):
+        provider.get_volume_for_host(host_id)
+
+
+def test_get_volume_for_host_resolves_while_file_listing_is_rate_limited(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """A volume that exists must resolve even when Modal is rate-limiting file listing.
+
+    Existence is a question about the volume object, not about its contents, so
+    it must be answered by resolving the volume's id rather than by listing its
+    files.
+    """
+    provider = _make_provider_with_volume_class(temp_mngr_ctx, tmp_path, cg, _ListingRateLimitedVolume)
+    host_id = HostId.generate()
+    provider._build_host_volume(host_id)
+
+    host_volume = provider.get_volume_for_host(host_id)
+
+    assert host_volume is not None
 
 
 def test_delete_host_volume(

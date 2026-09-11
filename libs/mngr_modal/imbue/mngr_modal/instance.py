@@ -560,39 +560,13 @@ class ModalProviderInstance(BaseProviderInstance):
             return {"vm_runtime": True}
         return None
 
-    @handle_modal_auth_error
-    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Get the host volume for reading data written by the sandbox.
+    def _get_host_volume(self, host: HostInterface | HostId) -> ModalVolume | None:
+        """Build a fresh, lazy reference to a host's persistent volume.
 
-        Returns a HostVolume wrapping the persistent volume mounted inside
-        the sandbox. Returns None if the volume does not exist or if
-        host volume creation is disabled.
-
-        Probes the volume with a ``listdir`` to verify it actually exists, since
-        ``volume_from_name`` returns a lazy reference that doesn't fail for a
-        deleted volume. Callers that only need a reference and want to skip that
-        network probe should use :meth:`get_volume_reference_for_host`.
-        """
-        host_volume = self.get_volume_reference_for_host(host)
-        if host_volume is None:
-            return None
-        try:
-            # Probe the volume to verify it exists (from_name returns lazy references).
-            host_volume.volume.listdir("/")
-        except (ModalProxyNotFoundError, ModalProxyInvalidError):
-            return None
-        return host_volume
-
-    @handle_modal_auth_error
-    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
-        """Return a host-volume *reference* without verifying it exists.
-
-        Cheap: constructs the lazy ``volume_from_name`` reference and skips the
-        ``listdir`` existence probe that :meth:`get_volume_for_host` performs, so
-        this does no network round-trip beyond resolving the reference. Returns
-        None only when host volumes are disabled for this provider. A reference
-        to a since-deleted volume is still returned; operations on it fail at
-        access time.
+        Returns None when host volumes are disabled for this provider or when
+        the name cannot be resolved to a volume at all. The reference is
+        unresolved, so callers that need to know the volume exists must ask it
+        to resolve.
         """
         if not self.config.is_host_volume_created:
             return None
@@ -604,7 +578,45 @@ class ModalProviderInstance(BaseProviderInstance):
             )
         except (ModalProxyNotFoundError, ModalProxyInvalidError):
             return None
-        return HostVolume.model_construct(volume=ModalVolume.model_construct(modal_volume=vol_iface))
+        return ModalVolume.model_construct(modal_volume=vol_iface)
+
+    @handle_modal_auth_error
+    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Get the host volume for reading data written by the sandbox.
+
+        Returns a HostVolume wrapping the persistent volume mounted inside
+        the sandbox. Returns None if the volume does not exist or if
+        host volume creation is disabled.
+
+        Confirms existence by resolving the volume's id, since ``volume_from_name``
+        returns a lazy reference that doesn't fail for a deleted volume. Callers
+        that only need a reference and want to skip that network probe should use
+        :meth:`get_volume_reference_for_host`.
+        """
+        volume = self._get_host_volume(host)
+        if volume is None:
+            return None
+        try:
+            volume.resolve_id()
+        except (ModalProxyNotFoundError, ModalProxyInvalidError):
+            return None
+        return HostVolume.model_construct(volume=volume)
+
+    @handle_modal_auth_error
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return a host-volume *reference* without verifying it exists.
+
+        Cheap: constructs the lazy ``volume_from_name`` reference and skips the
+        existence probe that :meth:`get_volume_for_host` performs, so this does no
+        network round-trip beyond resolving the reference. Returns None only when
+        host volumes are disabled for this provider. A reference to a
+        since-deleted volume is still returned; operations on it fail at access
+        time.
+        """
+        volume = self._get_host_volume(host)
+        if volume is None:
+            return None
+        return HostVolume.model_construct(volume=volume)
 
     # =========================================================================
     # Volume-based Host Record Methods

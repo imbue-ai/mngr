@@ -354,6 +354,14 @@ class DirectVolume(VolumeInterface):
 
     @_translate_exceptions
     @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
+    def get_object_id(self) -> str:
+        # from_name hands back an unhydrated handle, so hydrating is what actually
+        # asks the server to resolve the name -- and raises NotFoundError if it cannot.
+        self.volume.hydrate()
+        return self.volume.object_id
+
+    @_translate_exceptions
+    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
     def listdir(self, path: str) -> list[FileEntry]:
         entries = self.volume.listdir(path)
         return [

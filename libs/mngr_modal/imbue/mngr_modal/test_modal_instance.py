@@ -9,7 +9,6 @@ from imbue.mngr.api.testing import created_host
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -17,7 +16,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.utils.polling import wait_for
-from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.volume import ModalVolume
@@ -665,24 +663,8 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
 # =============================================================================
 
 
-def _volume_is_visible(provider: ModalProviderInstance, host: OnlineHostInterface) -> bool:
-    """Whether the host's volume resolves via Modal's control plane.
-
-    Treats ``ModalMngrError`` (e.g. control-plane rate limits) as "not yet visible":
-    the probe runs inside ``wait_for``, which lets probe exceptions propagate, so one
-    transient blip would otherwise fail the test immediately instead of polling until
-    the timeout.
-    """
-    try:
-        return provider.get_volume_for_host(host) is not None
-    except ModalMngrError:
-        return False
-
-
-# Flaky: the volume probes (get_volume_for_host / read_file) go through Modal's
-# VolumeListFiles API, whose per-workspace rate limit can stay exceeded for
-# longer than the volume layer's in-process retry budget when the parallel
-# acceptance fan-out hammers the same workspace.
+# Flaky: a fresh sandbox can fail to come online inside the provider's bring-up
+# budget under CI's parallel fan-out (MIND-234).
 @pytest.mark.acceptance
 @pytest.mark.flaky
 @pytest.mark.timeout(180)
@@ -706,20 +688,12 @@ def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalPr
         assert result.success
         assert "exists" in result.stdout
 
-        # Verify get_volume_for_host returns a volume. The volume name can take a
-        # moment to become resolvable via Modal's control plane after the sandbox is
-        # created (eventual consistency), so the name-lookup probe inside
-        # get_volume_for_host may transiently return None right after creation. Poll
-        # rather than asserting once.
-        wait_for(
-            lambda: _volume_is_visible(real_modal_provider, host),
-            timeout=30.0,
-            error_message="Host volume not visible after 30s",
-        )
+        # Creating the sandbox resolves every volume it mounts, so the host volume
+        # exists on Modal's control plane by the time create_host returns.
+        assert real_modal_provider.get_volume_for_host(host) is not None
 
 
-# Flaky for the same VolumeListFiles rate-limit reason as
-# test_host_volume_is_symlinked_and_persists_data above.
+# Flaky: fresh-sandbox bring-up (MIND-234).
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
@@ -734,16 +708,11 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
         host = real_modal_provider.create_host(HostName("test-vol-read"))
 
         # Write a known file and explicitly sync the volume
-        host.execute_idempotent_command("echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume")
-
-        # The volume name can take a moment to become resolvable via Modal's control
-        # plane after the sandbox is created (eventual consistency), so poll rather
-        # than asserting once.
-        wait_for(
-            lambda: _volume_is_visible(real_modal_provider, host),
-            timeout=30.0,
-            error_message="Host volume not visible after 30s",
+        write_result = host.execute_idempotent_command(
+            "echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume"
         )
+        assert write_result.success, write_result.stderr
+
         host_volume = real_modal_provider.get_volume_for_host(host)
         assert host_volume is not None
         assert isinstance(host_volume, HostVolume)

@@ -106,6 +106,9 @@ class _FakeVolume(VolumeInterface):
     def get_name(self) -> str | None:
         return None
 
+    def get_object_id(self) -> str:
+        raise NotImplementedError
+
     def listdir(self, path: str) -> list[FileEntry]:
         raise NotImplementedError
 

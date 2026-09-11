@@ -1394,33 +1394,38 @@ def test_get_volume_reference_for_host_converts_auth_error(
 def test_get_volume_reference_for_host_does_not_probe(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """The reference method must NOT call listdir -- skipping that existence probe
-    is its entire reason to exist (it keeps make_readable_offline_host cheap during
-    host discovery)."""
+    """The reference method must NOT resolve the volume id -- skipping that existence
+    probe is its entire reason to exist (it keeps make_readable_offline_host cheap
+    during host discovery)."""
     mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
     vol_iface = mock_interface.volume_from_name.return_value
-    vol_iface.listdir.reset_mock()
+    vol_iface.get_object_id.reset_mock()
 
     ref = modal_provider.get_volume_reference_for_host(HostId.generate())
 
     assert ref is not None
-    vol_iface.listdir.assert_not_called()
+    vol_iface.get_object_id.assert_not_called()
 
 
-def test_get_volume_for_host_probes_with_listdir(
+def test_get_volume_for_host_probes_by_resolving_the_volume_id(
     modal_provider: ModalProviderInstance,
 ) -> None:
-    """By contrast, get_volume_for_host confirms the volume exists with a listdir('/')
-    probe (volume_from_name returns a lazy reference that does not fail for a deleted
-    volume)."""
+    """By contrast, get_volume_for_host confirms the volume exists by resolving its id
+    (volume_from_name returns a lazy reference that does not fail for a deleted volume).
+
+    It must not answer that question by listing files, which is subject to Modal's
+    separate per-workspace listing rate limit.
+    """
     mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
     vol_iface = mock_interface.volume_from_name.return_value
+    vol_iface.get_object_id.reset_mock()
     vol_iface.listdir.reset_mock()
 
     result = modal_provider.get_volume_for_host(HostId.generate())
 
     assert result is not None
-    vol_iface.listdir.assert_called_once_with("/")
+    vol_iface.get_object_id.assert_called_once_with()
+    vol_iface.listdir.assert_not_called()
 
 
 def test_shutdown_script_omits_volume_sync_when_host_volume_disabled(

@@ -124,6 +124,13 @@ class FakeVolume(VolumeInterface):
     def get_name(self) -> str | None:
         return self.volume_name
 
+    def get_object_id(self) -> str:
+        # The backing directory is this volume's identity: deleting it is how the
+        # fake expresses a volume that no longer exists.
+        if not self.root_dir.is_dir():
+            raise ModalProxyNotFoundError(f"Volume not found: {self.volume_name}")
+        return f"vo-{self.root_dir.name}"
+
     def _resolve(self, path: str) -> Path:
         """Resolve a volume path to a local filesystem path."""
         # Strip leading slash and resolve relative to root

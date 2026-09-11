@@ -107,6 +107,22 @@ class VolumeInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
+    def get_object_id(self) -> str:
+        """Resolve this volume against the server and return its unique identifier.
+
+        Raises ModalProxyNotFoundError when the volume does not exist, so on a
+        freshly-resolved reference this answers "does this volume exist?".
+        Deliberately not a file-listing call: existence is a question about the
+        volume object, and Modal's listing API carries a separate per-workspace
+        rate limit that says nothing about whether the volume is there.
+
+        Resolution is cached per reference, so this is not a liveness check: a
+        reference that resolved once keeps reporting its id even after the volume
+        is deleted. Callers asking about existence must resolve a fresh reference.
+        """
+        ...
+
+    @abstractmethod
     def listdir(self, path: str) -> list[FileEntry]:
         """List entries in a directory on the volume."""
         ...

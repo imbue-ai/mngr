@@ -70,6 +70,14 @@ class ModalVolume(BaseVolume):
     modal_volume: VolumeInterface = Field(frozen=True, description="The underlying volume interface")
 
     @_translate_transient_proxy_errors
+    def resolve_id(self) -> str:
+        """Resolve this volume against Modal, confirming that it exists.
+
+        Raises ModalProxyNotFoundError when the volume does not exist.
+        """
+        return self.modal_volume.get_object_id()
+
+    @_translate_transient_proxy_errors
     def listdir(self, path: str) -> list[VolumeFile]:
         entries = self.modal_volume.listdir(path)
         return [_proxy_file_entry_to_volume_file(e) for e in entries]
