@@ -5846,6 +5846,8 @@ def test_build_settings_json_unattended_defaults() -> None:
     assert data["skipDangerousModePermissionPrompt"] is True
     assert "model" not in data
     assert data["fastMode"] is False
+    assert data["feedbackDrafts"] == "off"
+    assert data["feedbackSurveyRate"] == 0
 
 
 def test_build_settings_json_settings_overrides_model() -> None:
@@ -5912,8 +5914,10 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert data["model"] == "opus[1m]"
     # _generate_claude_home_settings provides skipDangerousModePermissionPrompt
     assert "skipDangerousModePermissionPrompt" in data
-    # Local (attended) context does not force fastMode
+    # Local (attended) context does not force fastMode or the feedback-suppression flags
     assert "fastMode" not in data
+    assert "feedbackDrafts" not in data
+    assert "feedbackSurveyRate" not in data
 
 
 def test_build_settings_json_includes_readiness_hooks() -> None:
@@ -6237,9 +6241,10 @@ def test_compute_claude_json_flags_unattended_also_accepts_permission_mode() -> 
     assert flags["hasCompletedOnboarding"] is True
 
 
-def test_compute_claude_json_flags_attended_no_auto_approve_only_cost() -> None:
+def test_compute_claude_json_flags_attended_no_auto_approve_only_always_on_flags() -> None:
+    """An attended agent without --yes gets only the always-on flags: no dialog dismissals, no permission mode."""
     flags = compute_claude_json_flags(ProvisioningContext(is_unattended=False, is_auto_approve=False))
-    assert flags == {"hasAcknowledgedCostThreshold": True}
+    assert flags == {"hasAcknowledgedCostThreshold": True, "diffSidebarOpen": False}
 
 
 def test_compute_settings_json_flags_auto_approve_does_not_change_permissions() -> None:

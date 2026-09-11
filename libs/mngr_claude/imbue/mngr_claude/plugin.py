@@ -547,7 +547,9 @@ class ProvisioningContext(FrozenModel):
     )
 
 
-_ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True}
+# Claude Code auto-opens the diff sidebar in wide terminals inside a git repo; a persisted
+# diffSidebarOpen=false is the opt-out, so every agent keeps the transcript at full width.
+_ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True, "diffSidebarOpen": False}
 # First-run *dialog* dismissals (cosmetic startup prompts). Dismissed for an unattended agent
 # OR when the human auto-approved mngr's prompts (--yes) -- neither changes tool permissions.
 _DIALOG_DISMISS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
@@ -561,6 +563,10 @@ _UNATTENDED_SETTINGS_FLAGS: Final[Mapping[str, Any]] = {
     "skipDangerousModePermissionPrompt": True,
     # fastMode off by default in unattended mode (API limitation)
     "fastMode": False,
+    # Feedback surveys and drafts prompt a human mid-session, which garbles an
+    # unattended agent's automated input and output.
+    "feedbackSurveyRate": 0,
+    "feedbackDrafts": "off",
 }
 
 
@@ -583,9 +589,10 @@ def compute_claude_json_flags(ctx: ProvisioningContext) -> Mapping[str, bool]:
 def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
     """Compute settings.json flags based on provisioning context.
 
-    These govern tool-permission behavior (skip the dangerous-mode prompt), so they apply only
-    to an unattended agent -- not on a bare --yes, which auto-approves prompts but must not
-    silently change tool permissions.
+    The unattended set skips the dangerous-mode permission prompt, turns off fast mode (an
+    API limitation), and silences the feedback survey and drafts, which only make sense with
+    a human present. It applies only to an unattended agent -- not on a bare --yes, which
+    auto-approves prompts but must not silently change tool permissions.
     """
     if ctx.is_unattended:
         return dict(_UNATTENDED_SETTINGS_FLAGS)

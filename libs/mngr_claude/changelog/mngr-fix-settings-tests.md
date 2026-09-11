@@ -1,0 +1,3 @@
+Claude agents no longer open Claude Code's diff sidebar: `diffSidebarOpen` is now written as `false` into the per-agent `.claude.json` that mngr provisions for every agent with an isolated config dir (remote, deploy, and local agents with `isolate_local_config_dir=true`, the default). Shared-mode local agents (`isolate_local_config_dir=false`) use the user's own Claude config and are unchanged.
+
+Unattended (remote/deploy) Claude agents also get two more `settings.json` flags that stop Claude Code from interrupting automated input and output: `feedbackDrafts` is set to `"off"` and `feedbackSurveyRate` is set to `0`, which disables the session quality survey. Attended local agents are unchanged.
