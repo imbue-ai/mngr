@@ -57,7 +57,7 @@ class PerTokenPrices(FrozenModel):
     # the difference means splitting that bucket in every writer that fills it, not
     # just adding a rate here.
     cache_creation_input_token_cost: float = Field(
-        description="USD per input token written to the prompt cache; 0 for providers with no cache-write surcharge."
+        description="USD per input token written to the prompt cache; 0 when a model bills no cache-write surcharge."
     )
 
 
@@ -69,6 +69,13 @@ _FABLE_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     output_cost_per_token=0.00005,
     cache_creation_input_token_cost=0.0000125,
     cache_read_input_token_cost=0.000001,
+)
+# Fable 5.1 shares Fable 5's rates except for cache reads, so it needs its own entry.
+_FABLE_5_1_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.00001,
+    output_cost_per_token=0.00005,
+    cache_creation_input_token_cost=0.0000125,
+    cache_read_input_token_cost=0.00000025,
 )
 _OPUS_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.000005,
@@ -97,11 +104,12 @@ _HAIKU_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 )
 
 # OpenAI per-token pricing, mirrored verbatim from litellm's
-# model_prices_and_context_window map (the ultimate source). OpenAI has no
-# cache-*write* surcharge -- caching is automatic, only reads are discounted --
-# so cache_creation_input_token_cost is 0 for every entry. Codex reports tokens
-# (not dollars), so these drive its estimated cost; mngr_usage's
-# litellm_pricing_test enforces that they stay in sync with litellm.
+# model_prices_and_context_window map (the ultimate source). OpenAI caching is
+# automatic and normally carries no cache-*write* surcharge (only reads are
+# discounted), so cache_creation_input_token_cost is 0 unless the map bills
+# one for that model. Codex reports tokens (not dollars), so these drive its
+# estimated cost; mngr_usage's litellm_pricing_test enforces that they stay
+# in sync with litellm.
 _GPT5_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.00000125,
     output_cost_per_token=0.00001,
@@ -126,6 +134,12 @@ _CODEX_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     cache_read_input_token_cost=0.000000375,
     cache_creation_input_token_cost=0.0,
 )
+_GPT6_ASTRA_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.00001,
+    output_cost_per_token=0.00005,
+    cache_read_input_token_cost=0.000001,
+    cache_creation_input_token_cost=0.0000125,
+)
 _O3_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.000002,
     output_cost_per_token=0.000008,
@@ -143,6 +157,7 @@ _O4_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 # disambiguates multi-provider harnesses like pi). Every entry stays in sync with
 # litellm's map directly (litellm_pricing_test).
 MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
+    "anthropic/claude-fable-5-1": _FABLE_5_1_PRICES,
     "anthropic/claude-fable-5": _FABLE_PRICES,
     "anthropic/claude-opus-5": _OPUS_PRICES,
     "anthropic/claude-opus-4-8": _OPUS_PRICES,
@@ -157,6 +172,7 @@ MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
     "anthropic/claude-haiku-4-5": _HAIKU_PRICES,
     "anthropic/claude-haiku-4-5-20251001": _HAIKU_PRICES,
     # OpenAI / Codex models (codex reports model ids like "gpt-5.2-codex").
+    "openai/gpt-6-astra": _GPT6_ASTRA_PRICES,
     "openai/gpt-5": _GPT5_PRICES,
     "openai/gpt-5.1": _GPT5_PRICES,
     "openai/gpt-5-codex": _GPT5_PRICES,

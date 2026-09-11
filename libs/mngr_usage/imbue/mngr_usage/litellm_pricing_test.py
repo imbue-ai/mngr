@@ -37,8 +37,11 @@ def test_openai_prices_match_litellm() -> None:
         assert prices.cache_read_input_token_cost == litellm_entry.get("cache_read_input_token_cost"), (
             f"cache_read price drift for {key}"
         )
-        # OpenAI has no cache-write surcharge; caching is automatic (read discount only).
-        assert prices.cache_creation_input_token_cost == 0.0, f"{key} should have no cache-creation cost"
+        # litellm omits this bucket for models with no cache-write surcharge,
+        # which prices as 0.
+        assert prices.cache_creation_input_token_cost == (
+            litellm_entry.get("cache_creation_input_token_cost") or 0.0
+        ), f"cache_creation price drift for {key}"
 
 
 def test_anthropic_prices_match_litellm() -> None:
@@ -47,7 +50,7 @@ def test_anthropic_prices_match_litellm() -> None:
     mngr_usage keeps its own table because it prices token-only usage sources
     (codex, pi) on machines that never import litellm -- but the numbers must be
     litellm's, since the proxy charges from that map. All four buckets are
-    compared: unlike OpenAI, Anthropic bills a cache-write surcharge.
+    compared, cache-write included, because every Anthropic model bills one.
     """
     model_cost = litellm.model_cost
     anthropic_keys = [key for key in MODEL_PRICING if key.startswith("anthropic/")]

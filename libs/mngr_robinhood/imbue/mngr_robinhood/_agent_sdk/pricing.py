@@ -20,8 +20,9 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 
 # Anthropic public list prices, USD per million tokens. Cache-write is the 5-minute-TTL rate
-# (1.25x base input) and cache-read is the 0.1x base input rate. Keep this in sync with the
-# Anthropic pricing page (see the ``claude-api`` skill for current values).
+# (1.25x base input) and cache-read is normally 0.1x base input; an entry whose ratio differs
+# carries its own rate. Keep this in sync with the Anthropic pricing page (see the
+# ``claude-api`` skill for current values).
 _TOKENS_PER_MILLION: Final[Decimal] = Decimal(1_000_000)
 
 
@@ -58,6 +59,13 @@ _FABLE_PRICING: Final[ModelPricing] = ModelPricing(
     cache_write_usd_per_million=Decimal("12.50"),
     cache_read_usd_per_million=Decimal("1.00"),
 )
+# Fable 5.1 shares Fable 5's rates except for cache reads, so it needs its own entry.
+_FABLE_5_1_PRICING: Final[ModelPricing] = ModelPricing(
+    input_usd_per_million=Decimal("10.00"),
+    output_usd_per_million=Decimal("50.00"),
+    cache_write_usd_per_million=Decimal("12.50"),
+    cache_read_usd_per_million=Decimal("0.25"),
+)
 
 # Model-id substrings mapped to their pricing, checked in order. claude model ids look like
 # ``claude-haiku-4-5-20251001`` / ``claude-sonnet-4-6`` / ``claude-opus-4-8``, so a family
@@ -66,6 +74,8 @@ _PRICING_BY_FAMILY_SUBSTRING: Final[Sequence[tuple[str, ModelPricing]]] = (
     ("haiku", _HAIKU_PRICING),
     ("sonnet", _SONNET_PRICING),
     ("opus", _OPUS_PRICING),
+    # The point release goes before the family substring that would otherwise claim it.
+    ("fable-5-1", _FABLE_5_1_PRICING),
     ("fable", _FABLE_PRICING),
 )
 

@@ -1,7 +1,7 @@
-"""Claude Code TUI dialogs, for 2.1.227.
+"""Claude Code TUI dialogs, for 2.1.269.
 
 A SNAPSHOT OF ONE BINARY. Every pattern and option label below was read out of the
-shipped claude 2.1.227 executable. On a version bump, rewrite this file against the
+shipped claude 2.1.269 executable. On a version bump, rewrite this file against the
 new binary and change ``CLAUDE_CODE_VERSION`` -- do not annotate what moved, do not
 keep patterns "for compatibility". ``test_patterns_match_installed_binary`` asserts every
 pattern here still matches the installed claude, and that check is only meaningful if
@@ -41,7 +41,7 @@ from imbue.imbue_common.pure import pure
 # The claude build these patterns were read out of. Keep it equal to the pinned version in
 # libs/mngr/.../resources/Dockerfile: `test_patterns_match_installed_binary` checks the file
 # against whatever claude is actually installed, and that is only meaningful if the two agree.
-CLAUDE_CODE_VERSION: Final[str] = "2.1.227"
+CLAUDE_CODE_VERSION: Final[str] = "2.1.269"
 
 
 # ---------------------------------------------------------------------------
