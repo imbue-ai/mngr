@@ -1,3 +1,4 @@
+import pluggy
 from click.testing import CliRunner
 
 from imbue.mngr_file.cli.get import file_get
@@ -67,3 +68,24 @@ def test_file_list_rejects_missing_target_with_usage_error() -> None:
     assert result.exit_code == 2
     assert "Usage:" in result.output
     assert "Missing argument" in result.output
+
+
+def test_get_rejects_a_format_template(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """A template names the fields of a record, and a read's outcome is the file's own bytes.
+
+    Rendering a template in its place would replace the content the user asked
+    for rather than describe it, so ``get`` is the one subcommand that refuses
+    one. The rejection comes from ``setup_command_context``, which runs before
+    any target is resolved, so no host or agent has to exist for this to hold.
+    """
+    result = cli_runner.invoke(
+        file_get,
+        ["@localhost", "some-path", "--format", "{name}"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "Format template strings are not supported" in result.output

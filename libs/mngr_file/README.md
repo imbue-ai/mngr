@@ -34,7 +34,13 @@ mngr file get my-agent /etc/hostname
 
 ## Target
 
-TARGET can be either an agent name/ID or a host name/ID. If the identifier matches both an agent and a host, an error is raised asking you to use the full ID for disambiguation.
+TARGET is either an agent or a host, decided from the text you type rather than by looking it up:
+
+- `@NAME` (or `@NAME.PROVIDER`) always means a host.
+- A host ID (`host-<hex>`), or any name containing a dot, is read as a host.
+- Anything else is read as an agent.
+
+A host whose name is a plain word -- no `host-` prefix, no dot -- is therefore only reachable in the `@` form. Write `mngr file list @my-host`, not `mngr file list my-host`; the bare form is read as an agent name and fails to resolve.
 
 ## Path resolution
 
@@ -51,7 +57,22 @@ Paths can be absolute or relative. Relative paths are resolved against a base di
 
 ### Output format
 
-All subcommands support standard mngr output options (`--output-format`, `--format`).
+All subcommands accept the standard mngr `--format` option: `human` (the default), `json`, or `jsonl`.
+
+`list` and `put` additionally accept a format template, like the other record-emitting mngr commands, and render one line per record:
+
+```bash
+mngr file list my-agent --format '{name} {size}'
+echo hello | mngr file put my-agent greeting.txt --format '{path} {size}'
+```
+
+For `list`, a template can address any field an entry carries -- not just the displayed columns -- using the field names listed under Field selection below. For `put`, the fields are `path` and `size`. `size` renders the same way in both.
+
+`get` does not accept a template: its outcome is the file's own bytes, and a template would replace the content asked for rather than describe it.
+
+`get` streams the file's bytes to stdout in `human` format, and reports them base64-encoded as `content_base64` in `json`/`jsonl`. With `--output`, the bytes go to the named local file instead, and the report carries `output_path` and the size in place of the content.
+
+`list` on a directory that does not exist is an error. An empty listing means the directory exists and holds nothing.
 
 ### Field selection (list only)
 

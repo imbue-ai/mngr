@@ -161,6 +161,22 @@ def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
     return entries
 
 
+def _is_remote_directory(sftp: SFTPClient, path: str) -> bool:
+    """Whether ``path`` is a directory, asked of the server rather than inferred.
+
+    An SFTP server refuses to open a directory for reading with an opaque
+    failure whose message is server-specific, so the only portable way to tell
+    that case apart from a genuine read error is to ask what the path is. A
+    stat that itself fails answers False, leaving the original error to stand.
+    """
+    try:
+        attrs = sftp.stat(path)
+    except IOError as e:
+        logger.trace("stat failed while classifying {}: {}", path, e)
+        return False
+    return attrs.st_mode is not None and stat.S_ISDIR(attrs.st_mode)
+
+
 def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeFile]:
     """List a remote directory via SFTP ``listdir_attr``, optionally recursing.
 
@@ -939,6 +955,15 @@ class OuterHost(OuterHostInterface):
             error_msg = str(e)
             if "No such file" in error_msg or "not found" in error_msg.lower():
                 raise FileNotFoundError(f"File not found: {remote_filename}") from e
+            # Reading a directory fails here with a server-specific message, so
+            # classify it by asking the server; this keeps a remote read's error
+            # the same OSError subclass a local read of a directory raises. Only
+            # a failure the server actually answered is worth asking about: a
+            # timed-out or dead connection cannot answer, and must not be made
+            # slower by the attempt.
+            is_answered_by_server = not isinstance(e, TimeoutError) and not is_dead_ssh_connection_error(e)
+            if is_answered_by_server and _is_remote_directory(sftp, remote_filename):
+                raise IsADirectoryError(f"Is a directory: {remote_filename}") from e
             raise
         finally:
             sftp.close()

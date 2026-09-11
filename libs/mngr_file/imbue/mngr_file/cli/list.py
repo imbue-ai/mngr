@@ -1,5 +1,4 @@
 import json
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from typing import Any
@@ -15,12 +14,13 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import format_size
-from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
@@ -115,9 +115,14 @@ def _get_field_value(entry: FileEntry, field: str) -> str:
 
 
 @pure
-def _entry_to_field_mapping(entry: FileEntry, fields: Sequence[str]) -> dict[str, str]:
-    """Convert a FileEntry to a mapping of field name -> display value."""
-    return {field: _get_field_value(entry, field) for field in fields}
+def _entry_to_field_mapping(entry: FileEntry) -> dict[str, str]:
+    """Render every attribute an entry carries, keyed by name, for a format template.
+
+    A template addresses the whole attribute set rather than the displayed
+    columns: which columns are shown is a separate choice, and a template that
+    could only reach the shown ones would make the two options interfere.
+    """
+    return {field: _get_field_value(entry, field) for field in _ALL_FIELDS}
 
 
 @pure
@@ -200,6 +205,7 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
         ctx=ctx,
         command_name="file-list",
         command_class=_FileListCliOptions,
+        is_format_template_supported=True,
     )
 
     relative_to = PathRelativeTo(opts.relative_to.upper())
@@ -228,21 +234,20 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
                 f"Unknown field(s): {', '.join(invalid_fields)}. Valid fields: {valid_list}",
                 param_hint="--fields",
             )
-    elif output_opts.format_template is not None:
-        fields = _ALL_FIELDS
     else:
         fields = _DEFAULT_DISPLAY_FIELDS
 
     # List files through the unified readable-host interface (online or volume-backed).
     with log_span("Listing files"):
         volume_files = resolved.host.list_directory(directory, recursive=opts.recursive)
+        # list_directory answers a missing directory and an empty one identically, so
+        # tell them apart before reporting "(empty)". The probe costs a round trip, so
+        # it is only paid when the listing came back empty.
+        if not volume_files and not resolved.host.path_exists(directory):
+            raise MngrError(f"No directory at {directory}.")
     entries = [_volume_file_to_entry(vf) for vf in volume_files]
 
-    # Output
     if output_opts.format_template is not None:
-        for entry in entries:
-            field_mapping = _entry_to_field_mapping(entry, _ALL_FIELDS)
-            line = render_format_template(output_opts.format_template, field_mapping)
-            write_human_line(line)
+        emit_format_template_lines(output_opts.format_template, [_entry_to_field_mapping(e) for e in entries])
     else:
         _emit_list_result(entries, fields, output_opts)

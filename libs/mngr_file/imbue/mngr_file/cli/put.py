@@ -7,10 +7,13 @@ import click
 from click_option_group import optgroup
 
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_event
+from imbue.mngr.cli.output_helpers import emit_format_template_lines
+from imbue.mngr.cli.output_helpers import format_size
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -34,6 +37,16 @@ class _FilePutCliOptions(CommonCliOptions):
     input: str | None
     relative_to: str
     mode: str | None
+
+
+@pure
+def _put_result_to_field_mapping(file_path: Path, size: int) -> dict[str, str]:
+    """Render a completed write's fields, keyed by name, for a format template.
+
+    ``size`` is rendered the way a listing renders it, so one field name means
+    one thing across the whole command group.
+    """
+    return {"path": str(file_path), "size": format_size(size)}
 
 
 def _emit_put_result(
@@ -97,6 +110,7 @@ def file_put(ctx: click.Context, **kwargs: Any) -> None:
         ctx=ctx,
         command_name="file-put",
         command_class=_FilePutCliOptions,
+        is_format_template_supported=True,
     )
 
     relative_to = PathRelativeTo(opts.relative_to.upper())
@@ -134,4 +148,9 @@ def file_put(ctx: click.Context, **kwargs: Any) -> None:
         host.write_file(full_path, content, mode=opts.mode)
         display_path = full_path
 
-    _emit_put_result(display_path, len(content), output_opts)
+    if output_opts.format_template is not None:
+        emit_format_template_lines(
+            output_opts.format_template, [_put_result_to_field_mapping(display_path, len(content))]
+        )
+    else:
+        _emit_put_result(display_path, len(content), output_opts)

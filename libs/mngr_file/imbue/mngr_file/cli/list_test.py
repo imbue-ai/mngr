@@ -17,7 +17,6 @@ from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr_file.cli.list import _emit_list_result
-from imbue.mngr_file.cli.list import _entry_to_field_mapping
 from imbue.mngr_file.cli.list import _entry_to_json_dict
 from imbue.mngr_file.cli.list import _get_field_value
 from imbue.mngr_file.cli.list import _volume_file_to_entry
@@ -139,13 +138,7 @@ def test_get_field_value_returns_empty_for_unknown_field() -> None:
     assert _get_field_value(_make_file_entry(), "nonexistent") == ""
 
 
-# --- _entry_to_field_mapping / _entry_to_json_dict ---
-
-
-def test_entry_to_field_mapping_returns_correct_mapping() -> None:
-    entry = _make_file_entry(name="test.txt", size=1024)
-    mapping = _entry_to_field_mapping(entry, ("name", "size"))
-    assert mapping == {"name": "test.txt", "size": "1.0 KB"}
+# --- _entry_to_json_dict ---
 
 
 def test_entry_to_json_dict_includes_all_fields() -> None:

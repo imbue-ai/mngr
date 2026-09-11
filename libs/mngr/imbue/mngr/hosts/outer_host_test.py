@@ -19,6 +19,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import _connect_pyinfra_host_retrying_transient_handshake_failures
+from imbue.mngr.hosts.outer_host import _is_remote_directory
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
@@ -921,3 +922,40 @@ def test_create_sftp_client_closes_the_channel_when_setup_fails(temp_mngr_ctx: M
         outer._create_sftp_client(cast(Any, transport))
 
     assert channel.is_closed is True
+
+
+class _FakeStatSftp:
+    """A fake SFTP client whose ``stat`` serves a fixed mode per path.
+
+    Lets the directory classification behind a failed read be tested without a
+    network: a path not present in the map raises ``IOError``, as paramiko does.
+    """
+
+    def __init__(self, mode_by_path: dict[str, int | None]) -> None:
+        self._mode_by_path = mode_by_path
+
+    def stat(self, path: str) -> _FakeSftpAttr:
+        if path not in self._mode_by_path:
+            raise IOError(f"No such file: {path}")
+        return _FakeSftpAttr(path.rsplit("/", 1)[-1], self._mode_by_path[path])
+
+
+def test_is_remote_directory_true_for_a_directory() -> None:
+    sftp = _FakeStatSftp({"/base/sub": stat.S_IFDIR | 0o755})
+    assert _is_remote_directory(cast(Any, sftp), "/base/sub") is True
+
+
+def test_is_remote_directory_false_for_a_regular_file() -> None:
+    sftp = _FakeStatSftp({"/base/f.txt": stat.S_IFREG | 0o644})
+    assert _is_remote_directory(cast(Any, sftp), "/base/f.txt") is False
+
+
+def test_is_remote_directory_false_when_the_path_cannot_be_stat_ed() -> None:
+    """A stat that fails must not be reported as a directory; the original error stands."""
+    assert _is_remote_directory(cast(Any, _FakeStatSftp({})), "/gone") is False
+
+
+def test_is_remote_directory_false_without_st_mode() -> None:
+    """SFTP may omit st_mode; without it the path cannot be classified as a directory."""
+    sftp = _FakeStatSftp({"/base/x": None})
+    assert _is_remote_directory(cast(Any, sftp), "/base/x") is False

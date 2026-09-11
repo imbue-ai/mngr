@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shlex
+import stat as stat_module
 import subprocess
 import tempfile
 import threading
@@ -1855,6 +1856,15 @@ class _BaseFakeSFTP:
 
     def close(self) -> None:
         pass
+
+    def stat(self, path: str) -> object:
+        """Answer as a server does for a path it cannot describe.
+
+        A read failure is classified by asking the server what the path is, so a
+        fake standing in for one has to answer that question too; raising is the
+        answer that leaves the original read error in place.
+        """
+        raise IOError(f"No such file: {path}")
 
 
 class _FakeSSHClient:
@@ -4720,3 +4730,40 @@ def test_get_directory_size_is_zero_for_a_non_directory(
     a_file.write_text("x")
     assert host.get_directory_size(a_file) == 0
     assert host.get_directory_size(tmp_path / "does_not_exist") == 0
+
+
+def test_get_file_does_not_reclassify_a_dead_connection_as_a_directory(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A read that died with the connection keeps its own error, whatever the path turns out to be.
+
+    Classifying a directory means asking the server what the path is, and a
+    connection this side already knows is dead cannot answer. Asking anyway
+    would trade a retryable connection error for a wrong, terminal one -- and
+    would spend a round trip on a socket that is gone. The stat here would say
+    "directory" if it were consulted, so this fails loudly if the guard goes.
+    """
+    call_count = 0
+
+    class _DeadConnectionOverADirectorySFTP(_BaseFakeSFTP):
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("Socket is closed")
+
+        def stat(self, path: str) -> object:
+            return _FakeSftpAttrForStat(stat_module.S_IFDIR | 0o755)
+
+    host = _create_host_with_custom_sftp(local_provider, _DeadConnectionOverADirectorySFTP)
+
+    # The dead connection is retried and succeeds, rather than surfacing as IsADirectoryError.
+    assert host._get_file("/remote/file.txt", io.BytesIO()) is True
+    assert call_count == 2
+
+
+class _FakeSftpAttrForStat:
+    """Minimal stand-in for the attributes paramiko's ``stat`` returns."""
+
+    def __init__(self, st_mode: int | None) -> None:
+        self.st_mode = st_mode
