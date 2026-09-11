@@ -111,6 +111,29 @@ class PositiveFloat(float):
         )
 
 
+class UnitFloat(float):
+    """A float in the closed unit interval [0.0, 1.0].
+
+    For fractions and ratios that are not chances; see ``Probability`` for those.
+    """
+
+    def __new__(cls, value: float) -> Self:
+        if not 0.0 <= value <= 1.0:
+            raise InvalidPrimitiveValueError(f"{cls.__name__} must be between 0.0 and 1.0, got {value}")
+        return super().__new__(cls, value)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls,
+            core_schema.float_schema(ge=0, le=1),
+        )
+
+
 class InvalidProbabilityError(ValueError):
     """Raised when a probability value is out of range."""
 

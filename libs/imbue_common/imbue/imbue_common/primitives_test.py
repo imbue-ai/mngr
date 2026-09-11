@@ -3,6 +3,7 @@
 import pytest
 from pydantic import BaseModel
 
+from imbue.imbue_common.primitives import InvalidPrimitiveValueError
 from imbue.imbue_common.primitives import InvalidProbabilityError
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
@@ -10,6 +11,7 @@ from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveFloat
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.primitives import Probability
+from imbue.imbue_common.primitives import UnitFloat
 
 # =============================================================================
 # Tests for NonEmptyStr
@@ -203,3 +205,29 @@ def test_probability_pydantic_schema() -> None:
     model = TestModel.model_validate({"value": 0.75})
     assert model.value == 0.75
     assert isinstance(model.value, Probability)
+
+
+# Tests for UnitFloat
+
+
+def test_unit_float_accepts_the_closed_interval_endpoints() -> None:
+    """UnitFloat should accept both 0.0 and 1.0."""
+    assert UnitFloat(0.0) == 0.0
+    assert UnitFloat(1.0) == 1.0
+
+
+def test_unit_float_accepts_a_value_inside_the_interval() -> None:
+    """UnitFloat should accept a fraction between the endpoints."""
+    assert UnitFloat(0.9) == 0.9
+
+
+def test_unit_float_rejects_a_value_below_zero() -> None:
+    """UnitFloat should raise InvalidPrimitiveValueError below 0.0."""
+    with pytest.raises(InvalidPrimitiveValueError, match="must be between 0.0 and 1.0, got -0.1"):
+        UnitFloat(-0.1)
+
+
+def test_unit_float_rejects_a_value_above_one() -> None:
+    """UnitFloat should raise InvalidPrimitiveValueError above 1.0."""
+    with pytest.raises(InvalidPrimitiveValueError, match="must be between 0.0 and 1.0, got 1.5"):
+        UnitFloat(1.5)
