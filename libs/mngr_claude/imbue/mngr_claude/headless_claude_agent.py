@@ -25,6 +25,7 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import ClaudeCoreAgent
+from imbue.mngr_claude.plugin import STDERR_LOG_NAME
 from imbue.mngr_claude.stream_json import assistant_message_id
 from imbue.mngr_claude.stream_json import assistant_text
 from imbue.mngr_claude.stream_json import classify_stream_event
@@ -368,7 +369,9 @@ class HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
             parts.append(_MNGR_PROMPT_CAT_ARG)
 
         cmd_str = " ".join(parts)
-        return CommandString(f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
+        return CommandString(
+            f'{cmd_str} > "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/{STDERR_LOG_NAME}"'
+        )
 
     def _get_stdout_path(self) -> Path:
         """Return the path to the stdout.jsonl file for this agent."""
@@ -376,7 +379,7 @@ class HeadlessClaude(ClaudeCoreAgent, BaseHeadlessAgent[ClaudeAgentConfig]):
 
     def _get_stderr_path(self) -> Path:
         """Return the path to the stderr.log file for this agent."""
-        return self._get_agent_dir() / "stderr.log"
+        return self._get_agent_dir() / STDERR_LOG_NAME
 
     def _get_extra_error_sources(self) -> list[str]:
         """Return the stream-json stdout error (if any) and the work-dir diagnostic.

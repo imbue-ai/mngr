@@ -325,6 +325,14 @@ DEVELOPER_INSTRUCTIONS_SEPARATOR: str = "\n\n"
 # RUST_LOG for the codex process: the default tracing targets PLUS ``codex_otel=info``,
 # which is what makes codex emit ``codex.sse_event`` delta lines into the TUI log.
 # Setting RUST_LOG replaces codex's fallback wholesale, so the defaults are re-listed.
+#
+# Deliberately does NOT enable ``codex_app_server``. The app-server's stderr layer is built
+# with ``FmtSpan::FULL``, so enabling one of its spans also synthesizes an ``enter``/``exit``
+# record on every poll of the underlying future -- measured at 10,660 of each from 82 actual
+# requests, 99% of the log's bytes. RUST_LOG cannot separate the two: EnvFilter decides only
+# whether a span is enabled, and disabling it is what drops the RPC context. The same
+# request/connection attribution is already recorded, without the lifecycle records, in the
+# app-server's own SQLite log db, which the bug-report collector reads instead.
 RUST_LOG_VALUE: str = "codex_core=info,codex_tui=info,codex_rmcp_client=info,codex_otel=info"
 
 

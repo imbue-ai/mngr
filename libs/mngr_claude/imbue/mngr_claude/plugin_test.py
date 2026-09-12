@@ -102,6 +102,7 @@ from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import DialogDetectedError
 from imbue.mngr_claude.plugin import MANAGED_SETTINGS_LAUNCH_ARG
 from imbue.mngr_claude.plugin import ProvisioningContext
+from imbue.mngr_claude.plugin import STDERR_LOG_NAME
 from imbue.mngr_claude.plugin import _build_claude_install_command
 from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
@@ -732,10 +733,11 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     assert command == CommandString(
         f"{background_cmd} export IS_SANDBOX=1 && {sid_export}"
         f" && rm -rf $MNGR_AGENT_STATE_DIR/session_started $MNGR_AGENT_STATE_DIR/claude_main_pid"
-        f' && {{ {marker_gate} && claude --resume "$MAIN_CLAUDE_SESSION_ID" ; }}'
+        f' && {{ {{ {marker_gate} && claude --resume "$MAIN_CLAUDE_SESSION_ID" ; }}'
         f' || {{ [ "$MAIN_CLAUDE_SESSION_ID" != "{uuid}" ] && {uuid_gate}'
         f" && export MAIN_CLAUDE_SESSION_ID={uuid} && claude --resume {uuid} ; }}"
-        f" || {{ export MAIN_CLAUDE_SESSION_ID={uuid} && claude --session-id {uuid} ; }}"
+        f" || {{ export MAIN_CLAUDE_SESSION_ID={uuid} && claude --session-id {uuid} ; }} ; }}"
+        f' 2> "$MNGR_AGENT_STATE_DIR/stderr.log"'
     )
 
 
@@ -923,12 +925,21 @@ def test_claude_agent_assemble_command_falls_back_to_agent_uuid_when_marker_sess
     command = agent.assemble_command(host=host, agent_args=(), command_override=None)
     result = subprocess.run(["bash", "-c", str(command)], env=env, capture_output=True, text=True, timeout=30)
 
+    # result.stderr, not the captured file: the redirect covers the launch chain
+    # only, so a failure in the prefix ahead of it leaves no file to read.
     assert result.returncode == 0, f"pipeline failed: stdout={result.stdout!r} stderr={result.stderr!r}"
     invocations = invocation_log.read_text().splitlines()
     assert invocations == [
         f"--resume {foreign_sid} ",
         f"--resume {agent_uuid} ",
-    ], f"Expected foreign resume to fail then the UUID fallback to fire, got {invocations!r}"
+    ], f"Expected foreign resume to fire and fail, then the UUID fallback, got {invocations!r}"
+    # The failing branch's own stderr is what says why the fallback happened, and
+    # it is still there after the branch that followed it ran. A redirect on each
+    # branch instead of on the whole chain would have truncated it away.
+    captured_stderr = (state_dir / STDERR_LOG_NAME).read_text()
+    assert f"No conversation found with session ID: {foreign_sid}" in captured_stderr, (
+        f"The failed resume's diagnostic did not survive into stderr.log: {captured_stderr!r}"
+    )
 
 
 def test_claude_agent_assemble_command_skips_blank_marker_session_without_launching_it(

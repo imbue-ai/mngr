@@ -166,6 +166,11 @@ _ACTIVE_MARKER_NAME: str = "active"
 # HarnessActivityTracker.marker_filename on the system-interface side.
 _PROCESS_STARTED_MARKER_NAME: str = "pi_process_started"
 
+# Where the harness's own stderr is captured, in the agent's state dir alongside the
+# markers above. The bug-report collector picks up any ``*.log`` there, so the name only
+# has to end in ``.log``; ``stderr.log`` matches what the headless agents already write.
+_STDERR_LOG_NAME: str = "stderr.log"
+
 # After inboxing a message, wait up to this long for the turn to start (the
 # ``active`` marker to appear) as delivery confirmation. Covers the extension's
 # poll interval plus pi accepting the injected message.
@@ -678,14 +683,19 @@ class PiCodingAgent(
         marker_prelude = (
             f"rm -f {active_marker} 2>/dev/null || true; touch {process_started_marker} 2>/dev/null || true"
         )
+        # pi renders its TUI on stdout, so stderr carries only the startup errors and
+        # crash output a bug report has no other way to reach: the agent runs under tmux,
+        # not supervisord, so nothing about it lands in the workspace's service logs. The
+        # file is truncated per launch, which bounds it without needing rotation.
+        stderr_redirect = f"2> {shlex.quote(str(self._get_agent_dir() / _STDERR_LOG_NAME))}"
         if not self.agent_config.resume_session:
-            return CommandString(f"{marker_prelude}; {invocation}")
+            return CommandString(f"{marker_prelude}; {invocation} {stderr_redirect}")
         quoted_session_file = shlex.quote(str(self._get_agent_dir() / _SESSION_FILE_NAME))
         resume_prelude = (
             f"__mngr_pi_sess=$(cat {quoted_session_file} 2>/dev/null || true); set --; "
             'if [ -n "$__mngr_pi_sess" ] && [ -f "$__mngr_pi_sess" ]; then set -- --session "$__mngr_pi_sess"; fi'
         )
-        return CommandString(f'{marker_prelude}; {resume_prelude}; {invocation} "$@"')
+        return CommandString(f'{marker_prelude}; {resume_prelude}; {invocation} "$@" {stderr_redirect}')
 
     def wait_for_ready_signal(
         self, is_readiness_awaited: bool, start_action: Callable[[], None], timeout: float | None = None
