@@ -646,7 +646,9 @@ def test_assemble_command_loads_extension_and_resumes(pi_agent: PiCodingAgent, t
     assert "--session" in command
     # The forwarded args stay last on the invocation itself; only the stderr capture
     # follows them.
-    assert command.rstrip().endswith('"$@" 2> ' + shlex.quote(str(pi_agent._get_agent_dir() / "stderr.log")))
+    assert command.rstrip().endswith(
+        '"$@" 2> >(tee -i ' + shlex.quote(str(pi_agent._get_agent_dir() / "stderr.log")) + " >&2)"
+    )
     # No backgrounded helper: the lifecycle-detected process is plain pi.
     assert pi_agent.get_expected_process_name() == "pi"
 
@@ -671,7 +673,9 @@ def test_assemble_command_omits_resume_when_disabled(pi_agent: PiCodingAgent, tm
     assert str(pi_agent._get_lifecycle_extension_path()) in command
     # A fresh agent needs the stderr capture as much as a resuming one: this branch
     # returns its own command, so it can lose the redirect on its own.
-    assert command.rstrip().endswith("2> " + shlex.quote(str(pi_agent._get_agent_dir() / "stderr.log")))
+    assert command.rstrip().endswith(
+        "2> >(tee -i " + shlex.quote(str(pi_agent._get_agent_dir() / "stderr.log")) + " >&2)"
+    )
 
 
 def test_assemble_command_preserves_cli_and_agent_args(pi_agent: PiCodingAgent, tmp_path: Path) -> None:

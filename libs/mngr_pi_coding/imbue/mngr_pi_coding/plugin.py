@@ -16,6 +16,7 @@ from pydantic import field_validator
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.installation import ensure_cli_installed
 from imbue.mngr.agents.installation import verify_pinned_cli_version
 from imbue.mngr.agents.output_styles import read_output_style_files
@@ -685,9 +686,9 @@ class PiCodingAgent(
         )
         # pi renders its TUI on stdout, so stderr carries only the startup errors and
         # crash output a bug report has no other way to reach: the agent runs under tmux,
-        # not supervisord, so nothing about it lands in the workspace's service logs. The
-        # file is truncated per launch, which bounds it without needing rotation.
-        stderr_redirect = f"2> {shlex.quote(str(self._get_agent_dir() / _STDERR_LOG_NAME))}"
+        # not supervisord, so nothing about it lands in the workspace's service logs. It
+        # stays on the pane too, where someone looking at a dead agent expects it.
+        stderr_redirect = build_stderr_tee_redirect(shlex.quote(str(self._get_agent_dir() / _STDERR_LOG_NAME)))
         if not self.agent_config.resume_session:
             return CommandString(f"{marker_prelude}; {invocation} {stderr_redirect}")
         quoted_session_file = shlex.quote(str(self._get_agent_dir() / _SESSION_FILE_NAME))

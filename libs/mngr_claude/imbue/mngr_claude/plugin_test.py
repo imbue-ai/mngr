@@ -81,6 +81,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
+from imbue.mngr.utils.testing import poll_until_file_contains
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
 from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import MAIN_SESSION_ONLY_GUARD
@@ -737,7 +738,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
         f' || {{ [ "$MAIN_CLAUDE_SESSION_ID" != "{uuid}" ] && {uuid_gate}'
         f" && export MAIN_CLAUDE_SESSION_ID={uuid} && claude --resume {uuid} ; }}"
         f" || {{ export MAIN_CLAUDE_SESSION_ID={uuid} && claude --session-id {uuid} ; }} ; }}"
-        f' 2> "$MNGR_AGENT_STATE_DIR/stderr.log"'
+        f' 2> >(tee -i "$MNGR_AGENT_STATE_DIR/stderr.log" >&2)'
     )
 
 
@@ -925,20 +926,24 @@ def test_claude_agent_assemble_command_falls_back_to_agent_uuid_when_marker_sess
     command = agent.assemble_command(host=host, agent_args=(), command_override=None)
     result = subprocess.run(["bash", "-c", str(command)], env=env, capture_output=True, text=True, timeout=30)
 
-    # result.stderr, not the captured file: the redirect covers the launch chain
-    # only, so a failure in the prefix ahead of it leaves no file to read.
     assert result.returncode == 0, f"pipeline failed: stdout={result.stdout!r} stderr={result.stderr!r}"
     invocations = invocation_log.read_text().splitlines()
     assert invocations == [
         f"--resume {foreign_sid} ",
         f"--resume {agent_uuid} ",
     ], f"Expected foreign resume to fire and fail, then the UUID fallback, got {invocations!r}"
-    # The failing branch's own stderr is what says why the fallback happened, and
-    # it is still there after the branch that followed it ran. A redirect on each
-    # branch instead of on the whole chain would have truncated it away.
-    captured_stderr = (state_dir / STDERR_LOG_NAME).read_text()
-    assert f"No conversation found with session ID: {foreign_sid}" in captured_stderr, (
-        f"The failed resume's diagnostic did not survive into stderr.log: {captured_stderr!r}"
+    # The failing branch's own stderr is what says why the fallback happened. It must
+    # reach the pane (the process's stderr here), and it must still be in the file after
+    # the branch that followed it ran -- a redirect on each branch instead of on the whole
+    # chain would have truncated it away.
+    diagnostic = f"No conversation found with session ID: {foreign_sid}"
+    assert diagnostic in result.stderr, f"The failed resume's diagnostic did not reach the pane: {result.stderr!r}"
+    # The shell does not wait for the tee behind the redirect, so the file can trail the
+    # process's exit by a moment.
+    stderr_log = state_dir / STDERR_LOG_NAME
+    assert poll_until_file_contains(stderr_log, diagnostic), (
+        "The failed resume's diagnostic did not survive into stderr.log: "
+        f"{stderr_log.read_text() if stderr_log.exists() else None!r}"
     )
 
 

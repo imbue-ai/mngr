@@ -3948,11 +3948,14 @@ def _build_agent_launch_steps(
     on disk exactly what ran.
 
     This makes the POSIX ``.`` a requirement on the agent window's shell (the user's login shell).
-    That is not a new constraint in practice: mngr's generated launch chains are already POSIX
-    shell -- they use ``$(...)``, ``export``, and ``{ ... } || { ... }`` -- so a shell that cannot
-    handle ``.`` could not have run them typed either. Commands for *additional* windows are still
-    typed directly, because those windows inherit the user's tmux ``default-command``, which need
-    not be a POSIX shell at all.
+    That is not a new constraint in practice: mngr's generated launch chains already use
+    ``$(...)``, ``export``, and ``{ ... } || { ... }``, so a shell that cannot handle ``.`` could
+    not have run them typed either. The interactive harness plugins go one step further and use
+    process substitution (``2> >(tee ...)``, see ``build_stderr_tee_redirect``), which is a
+    bash/zsh/ksh feature rather than POSIX -- so the agent window's shell must be one of those,
+    which covers macOS (zsh), Linux desktops (bash), and every container image mngr ships.
+    Commands for *additional* windows are still typed directly, because those windows inherit
+    the user's tmux ``default-command``, which need not be a POSIX shell at all.
     """
     quoted_script_path = shlex.quote(str(launch_script_path))
     # printf '%s' rather than a heredoc so each step stays a single && chain link, and

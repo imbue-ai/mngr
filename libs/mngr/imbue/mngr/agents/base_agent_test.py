@@ -1,6 +1,8 @@
 """Tests for BaseAgent lifecycle state detection and data methods."""
 
 import json
+import shlex
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -11,6 +13,7 @@ import pytest
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.base_agent import SendKeysAgent
+from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -33,6 +36,7 @@ from imbue.mngr.primitives import InvalidName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import cleanup_tmux_session
+from imbue.mngr.utils.testing import poll_until_file_contains
 
 
 @pytest.fixture
@@ -615,6 +619,23 @@ def test_quote_agent_args_quotes_special_chars_and_leaves_plain_args() -> None:
         "--model",
         "'Gemini 3.5 Flash (Medium)'",
     )
+
+
+def test_build_stderr_tee_redirect_copies_stderr_to_file_and_pane_and_keeps_exit_status(tmp_path: Path) -> None:
+    """The redirect must leave stdout alone, land stderr in both places, and not mask the exit status."""
+    log_path = tmp_path / "stderr.log"
+    log_path.write_text("stale line from a previous launch\n")
+    redirect = build_stderr_tee_redirect(shlex.quote(str(log_path)))
+    command = f"{{ echo on-stdout-51937; echo on-stderr-51937 >&2; exit 37; }} {redirect}"
+
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 37
+    assert result.stdout == "on-stdout-51937\n"
+    assert poll_until_file_contains(log_path, "on-stderr-51937"), f"stderr never reached the file: {result!r}"
+    assert log_path.read_text() == "on-stderr-51937\n"
+    assert "on-stderr-51937" in result.stderr
+    assert "on-stdout-51937" not in result.stderr
 
 
 def test_assemble_command_shell_quotes_agent_args_with_special_chars(

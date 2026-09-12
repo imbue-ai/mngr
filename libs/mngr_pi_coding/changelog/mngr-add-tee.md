@@ -1,0 +1,3 @@
+The interactive pi-coding agent's stderr now reaches both the pane and the agent's `stderr.log`, instead of only the file. The previous change captured stderr for bug reports but took it off the pane, so a crash message was no longer visible where someone looking at a dead agent expects it. The launch command now redirects stderr through `tee -i` via shell process substitution, which keeps stdout and the TUI untouched, keeps pi's own exit status, truncates the file per launch as before, and survives a Ctrl-C that pi handles itself.
+
+This makes the agent pane's shell a bash/zsh/ksh requirement (process substitution is not POSIX), which every shipped image and both desktop platforms already satisfy.

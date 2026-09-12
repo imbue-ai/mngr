@@ -68,6 +68,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 
 # =============================================================================
@@ -1492,3 +1493,12 @@ def assert_init_first_param_is_provider_name(subclass: type) -> None:
         f"{subclass.__name__}.__init__ provider_name annotation is {provider_name_hint!r}, "
         f"expected ProviderInstanceName"
     )
+
+
+def poll_until_file_contains(path: Path, text: str, timeout: float = 5.0) -> bool:
+    """Poll until ``path`` exists and contains ``text``, returning False on timeout.
+
+    For files written behind a shell process substitution (``2> >(tee ...)``): the shell
+    does not wait for the substitution, so the file can trail the command's exit.
+    """
+    return poll_until(lambda: path.exists() and text in path.read_text(), timeout=timeout)

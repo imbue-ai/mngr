@@ -30,6 +30,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
@@ -2960,22 +2961,22 @@ class ClaudeAgent(
         # shell itself, so the branch's own command (claude, or a custom base
         # like a command agent's `sleep infinity`) stays the
         # foreground command, exactly like the pre-chain launch command.
-        # Capture the harness's stderr next to the agent's other state: claude runs under
-        # tmux rather than supervisord, so a startup error or crash reaches none of the
-        # workspace's service logs and a bug report has no other way to see it. Claude
-        # renders its TUI on stdout, which stays on the pane.
+        # Copy the harness's stderr into the agent's state dir (while keeping it on the
+        # pane): claude runs under tmux rather than supervisord, so a startup error or
+        # crash reaches none of the workspace's service logs and a bug report has no other
+        # way to see it. Claude renders its TUI on stdout, which is untouched.
         #
         # The redirect wraps the whole fallback chain rather than each branch, so a branch
         # that fails does not have its own stderr truncated by the branch that follows it
         # -- that output is exactly why the fallback happened. An outer brace group (not a
         # subshell) for the same reason the inner ones are braces: it does not fork, so the
         # launched claude stays the pane's foreground command.
-        stderr_log = f'"$MNGR_AGENT_STATE_DIR/{STDERR_LOG_NAME}"'
+        stderr_redirect = build_stderr_tee_redirect(f'"$MNGR_AGENT_STATE_DIR/{STDERR_LOG_NAME}"')
         return CommandString(
             f"{background_cmd} {env_exports}"
             f" && rm -rf $MNGR_AGENT_STATE_DIR/session_started $MNGR_AGENT_STATE_DIR/claude_main_pid"
             f" && {{ {{ {resume_cmd} ; }} || {{ {resume_uuid_cmd} ; }} || {{ {create_cmd} ; }} ; }}"
-            f" 2> {stderr_log}"
+            f" {stderr_redirect}"
         )
 
     def on_before_provisioning(

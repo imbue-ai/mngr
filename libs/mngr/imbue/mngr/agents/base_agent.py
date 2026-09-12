@@ -67,6 +67,32 @@ def quote_agent_args(agent_args: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(shlex.quote(arg) for arg in agent_args)
 
 
+def build_stderr_tee_redirect(quoted_log_path: str) -> str:
+    """A ``2> ...`` redirection that copies a command's stderr to a log file AND the pane.
+
+    ``quoted_log_path`` is spliced into the shell command verbatim, so it must already be
+    shell-safe (``shlex.quote``d, or a double-quoted ``$VAR``-based expression).
+
+    An interactive harness renders its TUI on stdout and reports startup errors and
+    crashes on stderr: the file makes those collectable after the fact, and the pane copy
+    (``tee``'s ``>&2`` is the pane's stderr, inherited before the redirect applies) is
+    where someone looking at a dead agent expects them. Process substitution, rather than
+    a pipeline, leaves stdout alone and keeps the command's own exit status, which the
+    ``||`` fallback chains depend on.
+
+    ``tee -i`` ignores SIGINT: whether a tty Ctrl-C reaches ``tee`` depends on the pane
+    shell's job-control setup, and where it does, a Ctrl-C the harness itself handles
+    would otherwise kill ``tee`` and turn the harness's stderr into a broken pipe. The
+    log is truncated per launch (no ``-a``), which bounds it without rotation.
+
+    Process substitution is a bash/zsh/ksh feature, not POSIX, so the agent pane's shell
+    must be one of those (see ``_build_agent_launch_steps``). The shell does not wait for
+    the substitution to finish, so the last lines can reach the file a moment after the
+    command exits; readers that need them promptly should poll.
+    """
+    return f"2> >(tee -i {quoted_log_path} >&2)"
+
+
 class BaseAgent(AgentInterface[AgentConfigT]):
     """Concrete agent implementation that stores data on the host filesystem."""
 
