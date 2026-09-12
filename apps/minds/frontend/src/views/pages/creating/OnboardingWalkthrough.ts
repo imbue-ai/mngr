@@ -52,6 +52,8 @@ export interface OnboardingWalkthroughAttrs {
   onboardingServices: OnboardingCloudApp[];
   /** True once the create attempt is done and a redirect is ready. */
   isReady: boolean;
+  /** Freeze the current scene (used when create failed and the card sits on top). */
+  isPaused?: boolean;
   /** Called exactly once, when the walkthrough decides it is time to enter the workspace. */
   onEnter: () => void;
 }
@@ -225,10 +227,18 @@ export const OnboardingWalkthrough: m.ClosureComponent<OnboardingWalkthroughAttr
   return {
     oninit(vnode) {
       syncStepTimers();
-      stepper.start();
+      if (!vnode.attrs.isPaused) stepper.start();
       syncReadiness(vnode.attrs);
     },
     onupdate(vnode) {
+      if (vnode.attrs.isPaused) {
+        stepper.stop();
+        chat.stop();
+        tips.stop();
+        appsWheel.stop();
+        connectWheel.stop();
+        return;
+      }
       syncStepTimers();
       syncReadiness(vnode.attrs);
     },

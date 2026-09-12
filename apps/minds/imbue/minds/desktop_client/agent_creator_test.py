@@ -54,9 +54,11 @@ from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plu
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
+from imbue.minds.desktop_client.agent_creator import user_facing_create_error
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
@@ -214,6 +216,59 @@ def test_classify_create_attempt_error_ignores_non_clone_errors() -> None:
     echo an auth-shaped string must not trigger the clone guidance."""
     error = MngrCommandError("mngr create failed:\nfatal: could not read Username for 'https://github.com'")
     assert classify_create_attempt_error("https://github.com/acme/repo.git", error) is None
+
+
+def test_classify_create_attempt_error_flags_quota_from_error_class() -> None:
+    """A structured JSONL ``error_class`` is enough -- no matching of the dump."""
+    error = MngrCommandError(
+        "mngr create failed (exit code 1): FAST PATH: leasing exact-attribute pool host",
+        error_class="ImbueCloudQuotaExceededError",
+    )
+    assert (
+        classify_create_attempt_error("https://github.com/acme/repo.git", error)
+        is CreateAttemptErrorKind.QUOTA_EXCEEDED
+    )
+
+
+def test_classify_create_attempt_error_flags_quota_from_typed_cli_error() -> None:
+    error = ImbueCloudQuotaExceededCliError(
+        "bucket create: Quota exceeded: this account allows 5 buckets and 5 are already in use."
+    )
+    assert classify_create_attempt_error("", error) is CreateAttemptErrorKind.QUOTA_EXCEEDED
+
+
+def test_classify_create_attempt_error_flags_quota_from_connector_sentence() -> None:
+    """When JSONL ``error_class`` is missing, the connector's own sentence still classifies."""
+    error = MngrCommandError(
+        "mngr create failed (exit code 1): imbue_cloud[x] FAST PATH: leasing exact-attribute "
+        "pool host for 'workspace-3' Error: Quota exceeded: this account allows 2 remote "
+        "workspaces and 2 are already in use. Free some up, or ask for a higher limit."
+    )
+    assert classify_create_attempt_error("", error) is CreateAttemptErrorKind.QUOTA_EXCEEDED
+
+
+def test_user_facing_create_error_rewrites_hosted_machine_quota() -> None:
+    raw = MngrCommandError(
+        "mngr create failed (exit code 1): imbue_cloud[x] FAST PATH: leasing exact-attribute "
+        "pool host for 'workspace-3' Error: Quota exceeded: this account allows 2 remote "
+        "workspaces and 2 are already in use. Free some up, or ask for a higher limit.",
+        error_class="ImbueCloudQuotaExceededError",
+    )
+    kind = classify_create_attempt_error("", raw)
+    assert user_facing_create_error(raw, kind) == ("Your plan allows 2 hosted machines, and 2 are already in use.")
+
+
+def test_user_facing_create_error_falls_back_without_counts() -> None:
+    raw = MngrCommandError("quota", error_class="ImbueCloudQuotaExceededError")
+    assert (
+        user_facing_create_error(raw, CreateAttemptErrorKind.QUOTA_EXCEEDED)
+        == "Your plan's hosted-machine limit is already in use."
+    )
+
+
+def test_user_facing_create_error_leaves_unclassified_errors_alone() -> None:
+    raw = MngrCommandError("mngr create failed (exit code 1): something else")
+    assert user_facing_create_error(raw, None) == str(raw)
 
 
 def test_redact_url_credentials_strips_userinfo_for_schemed_urls() -> None:
